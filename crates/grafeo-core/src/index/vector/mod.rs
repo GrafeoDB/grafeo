@@ -113,6 +113,8 @@ pub use zone_map::VectorZoneMap;
 #[cfg(feature = "vector-index")]
 pub use config::HnswConfig;
 #[cfg(feature = "vector-index")]
+pub(crate) use hnsw::BrokenLink;
+#[cfg(feature = "vector-index")]
 pub use hnsw::HnswIndex;
 #[cfg(feature = "vector-index")]
 pub use quantized_hnsw::QuantizedHnswIndex;
@@ -377,8 +379,10 @@ impl VectorIndexKind {
     /// The index's read locks (nodes, entry point and level) are held for the
     /// whole visit: while a checkpoint writes the topology, inserts into this
     /// index wait, and so do searches that arrive after a waiting insert
-    /// (`parking_lot`'s locks are fair). Memory stays bounded meanwhile: one
-    /// piece and one node's bytes.
+    /// (`parking_lot`'s locks are fair). Memory meanwhile: the checkpoint
+    /// holds one piece and one node's bytes, and a heap-backed index first
+    /// sorts a reference to each of its nodes (16 bytes per node, O(node
+    /// count)); an mmap-backed one reuses one node's lists from node to node.
     ///
     /// # Errors
     ///
@@ -406,6 +410,15 @@ impl VectorIndexKind {
         match self {
             Self::Hnsw(idx) => idx.restore_node(id, layers),
             Self::Quantized(idx) => idx.restore_node(id, layers),
+        }
+    }
+
+    /// The first neighbor reference that breaks the rules of the topology
+    /// (see [`HnswIndex::first_broken_link`]).
+    pub(crate) fn first_broken_link(&self) -> Option<BrokenLink> {
+        match self {
+            Self::Hnsw(idx) => idx.first_broken_link(),
+            Self::Quantized(idx) => idx.first_broken_link(),
         }
     }
 

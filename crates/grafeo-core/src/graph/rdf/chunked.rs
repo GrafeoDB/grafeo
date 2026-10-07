@@ -30,10 +30,11 @@
 //!
 //! The reader refuses, naming the graph and rows: a first chunk other than
 //! the metadata chunk, or a second one; metadata of another layout, with
-//! caps of zero, a named default graph, named graphs out of name order, or a
-//! count or name length past the bytes left; a chunk of another kind than
-//! `Column`; a graph the metadata does not list, or whose chunks come after
-//! those of a later graph; a range that does not start where the graph's
+//! caps of zero or of more rows than the format's row cap (65,536), a named
+//! default graph, named graphs out of name order, or a count or name length
+//! past the bytes left; a chunk of another kind than `Column`; a graph the
+//! metadata does not list, or whose chunks come after those of a later
+//! graph; a range that does not start where the graph's
 //! rows before it end (from 0), holds more than `max_rows` rows, crosses a
 //! row group or reaches past the graph's triple count; a subject chunk not
 //! followed by the predicate and object chunks of its range; a chunk with
@@ -100,9 +101,9 @@ pub(crate) struct GraphMeta {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidValue`] for caps of zero; [`Error::Serialization`]
-/// for more graphs or a longer name than the metadata chunk holds; the row
-/// chunker's and the sink's errors.
+/// Returns [`Error::InvalidValue`] for caps [`ChunkCaps::validate`]
+/// refuses; [`Error::Serialization`] for more graphs or a longer name than
+/// the metadata chunk holds; the row chunker's and the sink's errors.
 pub(crate) fn write_rdf_chunks(
     store: &RdfStore,
     caps: ChunkCaps,
@@ -229,8 +230,8 @@ pub(crate) fn encode_rdf_meta(meta: &RdfMeta) -> Result<Vec<u8>> {
 /// Returns [`Error::Serialization`] for another layout than
 /// [`RDF_META_LAYOUT`], a count or name length past the bytes left (naming
 /// the byte offset), a name that is not UTF-8, bytes after the metadata,
-/// caps of zero, no graph, a named graph 0, or named graphs that are not in
-/// strictly increasing name order.
+/// caps of zero or of more rows than the format's row cap, no graph, a named
+/// graph 0, or named graphs that are not in strictly increasing name order.
 pub(crate) fn decode_rdf_meta(bytes: &[u8]) -> Result<RdfMeta> {
     let mut reader = MetaReader { bytes, pos: 0 };
     let layout = reader.u8("layout")?;
@@ -1145,6 +1146,10 @@ mod tests {
             Ok(self.1[index].clone())
         }
 
+        fn stored_length(&self, index: usize) -> Result<u64> {
+            Ok(self.1[index].len() as u64)
+        }
+
         fn section_version(&self) -> u8 {
             self.2
         }
@@ -1533,6 +1538,15 @@ mod tests {
                     ..crafted_meta()
                 })],
                 &["caps"],
+            ),
+            (
+                // Without triples, so nothing but the caps is wrong.
+                "caps above the format's row cap",
+                vec![with_meta(RdfMeta {
+                    max_rows: ChunkCaps::DEFAULT.max_rows + 1,
+                    ..crafted_meta_counts(0, 0)
+                })],
+                &["caps of 65537 rows", "65536"],
             ),
             (
                 "a named default graph",

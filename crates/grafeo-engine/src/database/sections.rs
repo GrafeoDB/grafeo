@@ -476,6 +476,10 @@ impl SectionSource for FetchWatch<'_> {
         fetched
     }
 
+    fn stored_length(&self, index: usize) -> Result<u64> {
+        self.source.stored_length(index)
+    }
+
     fn section_version(&self) -> u8 {
         self.source.section_version()
     }
@@ -1641,6 +1645,10 @@ mod tests {
                 "chunk of section {:?} at offset 16384 fails its checksum",
                 self.0
             )))
+        }
+
+        fn stored_length(&self, index: usize) -> Result<u64> {
+            self.1.stored_length(index)
         }
 
         fn section_version(&self) -> u8 {

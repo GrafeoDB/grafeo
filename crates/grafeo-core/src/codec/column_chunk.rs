@@ -13,7 +13,7 @@
 //! | codec | u8 | the [`ChunkCodec`], equal to the directory entry's |
 //! | flags | u8 | bit 0: presence bitmap, bit 1: zone map, bit 2: epochs; other bits are refused |
 //! | reserved | u16 | written 0, ignored |
-//! | row count | u32 | equal to the directory entry's |
+//! | row count | u32 | equal to the directory entry's, at most 65,536 (the format's row cap) |
 //! | value count | u32 | at least 1, at most the row count |
 //! | presence bitmap | `ceil(rows / 64)` u64 words | only when the value count is below the row count: bit `r` is set when row `r` has a value, bits past the rows are 0 |
 //! | zone map | two values | minimum and maximum, in the value codec |
@@ -49,6 +49,7 @@ use std::sync::Arc;
 
 use arcstr::ArcStr;
 use bytes::Bytes;
+use grafeo_common::storage::ChunkCaps;
 use grafeo_common::storage::value_codec::{decode_value, encode_value, encoded_len};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, Result};
@@ -58,6 +59,11 @@ use super::{BitPackedInts, BitVector, DictionaryBuilder, DictionaryEncoding};
 
 /// Strings longer than this get no zone map.
 pub const ZONE_MAP_STRING_LIMIT: usize = 64;
+
+/// The most rows a chunk holds: the format's row cap, which no writer
+/// passes ([`ChunkCaps::validate`]). A chunk decodes into one value per row,
+/// so this bounds what any chunk decodes into.
+const MAX_ROWS: u32 = ChunkCaps::DEFAULT.max_rows;
 
 /// Bytes of the chunk header: codec, flags, reserved, row count, value count.
 const HEADER_LEN: usize = 12;
@@ -174,10 +180,11 @@ pub fn choose_codec<'v>(values: impl Iterator<Item = &'v Value> + Clone) -> Chun
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] when there is no value, a row is not
-/// below `row_count` or not above the row before it, `epochs` does not hold
-/// one epoch per value, or a value does not fit the format (a string, list or
-/// other length past a u32, or nesting past the value codec's limit).
+/// Returns [`Error::Serialization`] when `row_count` is above the format's
+/// row cap (65,536), there is no value, a row is not below `row_count` or
+/// not above the row before it, `epochs` does not hold one epoch per value,
+/// or a value does not fit the format (a string, list or other length past
+/// a u32, or nesting past the value codec's limit).
 pub fn encode_column_chunk(
     row_count: u32,
     values: &[(u32, Value)],
@@ -243,9 +250,10 @@ pub fn encode_column_chunk(
 /// # Errors
 ///
 /// Returns [`Error::Serialization`] naming the byte offset in the chunk of
-/// what is wrong: a codec or row count other than the entry's, an unknown
-/// flag bit, no value or more values than rows, a presence bitmap that is
-/// missing, needless or does not mark exactly as many rows as there are
+/// what is wrong: a codec or row count other than the entry's, more rows
+/// than the format's row cap (65,536), an unknown flag bit, no value or more
+/// values than rows, a presence bitmap that is missing, needless or does not
+/// mark exactly as many rows as there are
 /// values (or marks a row past the chunk), a zone map other than the values'
 /// minimum and maximum, epochs that are all 0 or not one per value, a body
 /// that does not hold the header's number of values of the codec's kind,
@@ -298,6 +306,12 @@ pub fn decode_column_chunk_bytes(data: &Bytes, codec: u8, row_count: u32) -> Res
         return Err(corrupt(
             4,
             format!("row count {stored_rows} differs from the directory entry's {row_count}"),
+        ));
+    }
+    if row_count > MAX_ROWS {
+        return Err(corrupt(
+            4,
+            format!("{row_count} rows, where a chunk holds at most {MAX_ROWS}"),
         ));
     }
     let value_count = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
@@ -580,6 +594,11 @@ fn presence_words(row_count: u32) -> usize {
 }
 
 fn check_rows(row_count: u32, values: &[(u32, Value)]) -> Result<()> {
+    if row_count > MAX_ROWS {
+        return Err(Error::Serialization(format!(
+            "cannot write a column chunk of {row_count} rows: a chunk holds at most {MAX_ROWS}"
+        )));
+    }
     if values.is_empty() {
         return Err(Error::Serialization(
             "cannot write a column chunk with no value".to_string(),
@@ -952,6 +971,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
+    use grafeo_common::storage::ChunkCaps;
     use grafeo_common::types::{
         Date, Duration, PropertyKey, Time, Timestamp, Value, ZonedDatetime,
     };
@@ -1723,6 +1743,56 @@ mod tests {
         assert!(
             decode_column_chunk(&sparse, 7, max).is_err(),
             "a bitmap past the bytes"
+        );
+    }
+
+    /// A dense `BitPacked` chunk of `rows` rows, each the value 3, built by
+    /// hand: a bounded body that decodes into `rows` values.
+    fn threes(rows: u32) -> Vec<u8> {
+        let mut rest = encoded(&Value::Int64(3));
+        rest.extend(encoded(&Value::Int64(3)));
+        rest.push(2);
+        rest.extend_from_slice(&rows.to_le_bytes());
+        let words = rows.div_ceil(32);
+        rest.extend_from_slice(&words.to_le_bytes());
+        for word in 0..words {
+            // 32 values of 2 bits per word; the last word holds the rest.
+            let held = if word + 1 < words {
+                32
+            } else {
+                rows - 32 * word
+            };
+            let bits = if held == 32 {
+                u64::MAX
+            } else {
+                (1u64 << (2 * held)) - 1
+            };
+            rest.extend_from_slice(&bits.to_le_bytes());
+        }
+        crafted(ChunkCodec::BitPacked, FLAG_ZONE_MAP, rows, rows, &rest)
+    }
+
+    /// A chunk decodes into one value per row, so a row count the writer
+    /// never uses would let a small body expand into gigabytes: a chunk of
+    /// more rows than the format's cap is refused, however well formed.
+    #[test]
+    fn a_chunk_of_more_rows_than_the_row_cap_is_refused() {
+        let cap = ChunkCaps::DEFAULT.max_rows;
+        let decoded = decode_column_chunk(&threes(cap), 1, cap).unwrap();
+        assert_eq!(decoded.values.len(), 65_536, "the cap itself is read");
+        assert_eq!(decoded.values[65_535], (65_535, Value::Int64(3)));
+        let error = error_of(&threes(cap + 1), ChunkCodec::BitPacked, cap + 1);
+        assert!(
+            error.contains("byte 4") && error.contains("65537 rows") && error.contains("65536"),
+            "{error}"
+        );
+        let values = [(cap, Value::Int64(3))];
+        let error = encode_column_chunk(cap + 1, &values, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("65537 rows") && error.contains("65536"),
+            "the writer refuses what the reader refuses: {error}"
         );
     }
 

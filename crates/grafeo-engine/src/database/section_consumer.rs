@@ -42,9 +42,14 @@ use grafeo_common::types::{PropertyKey, Value};
 /// without a full checkpoint + mmap cycle. The [`can_spill`](MemoryConsumer::can_spill)
 /// method returns `true` for mmap-able index sections, signaling that future
 /// tiered storage support will enable actual spilling.
-pub struct SectionConsumer {
+///
+/// The consumer is generic over the section's type: a `dyn Section` keeps
+/// every method of the trait linked through its vtable, so a build that never
+/// serializes a section (no `wal`, such as the WASM `edge` profile) would
+/// carry the section's whole encoder and decoder.
+pub struct SectionConsumer<S: Section + ?Sized = dyn Section> {
     name: String,
-    section: Arc<dyn Section>,
+    section: Arc<S>,
     priority: u8,
     region: MemoryRegion,
     mmap_able: bool,
@@ -59,7 +64,7 @@ pub struct SectionConsumer {
     is_spilled: std::sync::atomic::AtomicBool,
 }
 
-impl SectionConsumer {
+impl<S: Section + ?Sized> SectionConsumer<S> {
     /// Creates a consumer for the given section without spill support.
     ///
     /// Priority and region are assigned based on the section type:
@@ -69,7 +74,7 @@ impl SectionConsumer {
     /// Calling `spill()` on a consumer constructed via `new` returns
     /// [`SpillError::NoSpillDirectory`]. Use [`with_spill`](Self::with_spill)
     /// to enable disk-backed eviction.
-    pub fn new(section: Arc<dyn Section>) -> Self {
+    pub fn new(section: Arc<S>) -> Self {
         Self::build(section, None)
     }
 
@@ -85,11 +90,11 @@ impl SectionConsumer {
     // VectorIndex, TextIndex). Allow dead_code under feature combinations
     // that don't include ring-index.
     #[cfg_attr(not(feature = "ring-index"), allow(dead_code))]
-    pub fn with_spill(section: Arc<dyn Section>, spill_path: PathBuf) -> Self {
+    pub fn with_spill(section: Arc<S>, spill_path: PathBuf) -> Self {
         Self::build(section, Some(spill_path))
     }
 
-    fn build(section: Arc<dyn Section>, spill_path: Option<PathBuf>) -> Self {
+    fn build(section: Arc<S>, spill_path: Option<PathBuf>) -> Self {
         let section_type = section.section_type();
         let is_data = section_type.is_data_section();
         let flags = section_type.default_flags();
@@ -168,7 +173,7 @@ impl SectionConsumer {
     }
 }
 
-impl MemoryConsumer for SectionConsumer {
+impl<S: Section + ?Sized> MemoryConsumer for SectionConsumer<S> {
     fn name(&self) -> &str {
         &self.name
     }

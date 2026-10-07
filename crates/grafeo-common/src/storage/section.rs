@@ -449,6 +449,17 @@ pub trait SectionSource {
     /// Returns an error if `index` is out of range or the bytes cannot be read.
     fn fetch(&self, index: usize) -> Result<bytes::Bytes>;
 
+    /// The bytes the chunk at `index` is stored in, known without fetching
+    /// it: [`fetch`](Self::fetch) returns at most this many (an encrypted
+    /// chunk is stored with its nonce and tag). In a file it is the length
+    /// the directory gives, which the container checked lies inside the
+    /// file, so a reader can bound what it allocates by it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `index` is out of range.
+    fn stored_length(&self, index: usize) -> Result<u64>;
+
     /// The section version every chunk of the section was written with (0
     /// for 0.5.x bytes).
     fn section_version(&self) -> u8;
@@ -1122,6 +1133,9 @@ mod tests {
         }
         fn fetch(&self, index: usize) -> Result<bytes::Bytes> {
             Ok(bytes::Bytes::copy_from_slice(&self.1[index]))
+        }
+        fn stored_length(&self, index: usize) -> Result<u64> {
+            Ok(self.1[index].len() as u64)
         }
         fn section_version(&self) -> u8 {
             self.2

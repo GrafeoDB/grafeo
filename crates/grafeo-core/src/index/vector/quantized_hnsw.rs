@@ -35,7 +35,7 @@
 //! ```
 
 use super::quantization::{BinaryQuantizer, ProductQuantizer, QuantizationType, ScalarQuantizer};
-use super::{HnswConfig, HnswIndex, compute_distance};
+use super::{BrokenLink, HnswConfig, HnswIndex, compute_distance};
 use super::{TopologyVisitor, VectorAccessor};
 use grafeo_common::types::NodeId;
 use grafeo_common::utils::error::Result;
@@ -768,6 +768,12 @@ impl QuantizedHnswIndex {
     /// [`HnswIndex::restore_node`]).
     pub fn restore_node(&self, id: NodeId, layers: Vec<Vec<NodeId>>) {
         self.hnsw.restore_node(id, layers);
+    }
+
+    /// The first neighbor reference that breaks the rules of the topology
+    /// (see [`HnswIndex::first_broken_link`]).
+    pub(crate) fn first_broken_link(&self) -> Option<BrokenLink> {
+        self.hnsw.first_broken_link()
     }
 
     /// Returns estimated heap memory in bytes.

@@ -201,17 +201,34 @@ impl SectionSource for MemorySection {
     }
 
     fn fetch(&self, index: usize) -> Result<Bytes> {
-        self.chunks.get(index).cloned().ok_or_else(|| {
-            Error::Internal(format!(
-                "chunk {index} out of range: section {:?} has {} chunks",
-                self.section_type,
-                self.chunks.len()
-            ))
-        })
+        self.chunks
+            .get(index)
+            .cloned()
+            .ok_or_else(|| self.out_of_range(index))
+    }
+
+    /// The length of the chunk's bytes: a memory image stores them as they
+    /// were written.
+    fn stored_length(&self, index: usize) -> Result<u64> {
+        self.chunks
+            .get(index)
+            .map(|bytes| bytes.len() as u64)
+            .ok_or_else(|| self.out_of_range(index))
     }
 
     fn section_version(&self) -> u8 {
         self.version
+    }
+}
+
+impl MemorySection {
+    /// The error for a chunk index past the section's chunks.
+    fn out_of_range(&self, index: usize) -> Error {
+        Error::Internal(format!(
+            "chunk {index} out of range: section {:?} has {} chunks",
+            self.section_type,
+            self.chunks.len()
+        ))
     }
 }
 
@@ -264,6 +281,10 @@ impl SectionSource for BorrowedSection<'_> {
 
     fn fetch(&self, index: usize) -> Result<Bytes> {
         self.0.fetch(index)
+    }
+
+    fn stored_length(&self, index: usize) -> Result<u64> {
+        self.0.stored_length(index)
     }
 
     fn section_version(&self) -> u8 {

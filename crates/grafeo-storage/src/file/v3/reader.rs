@@ -384,6 +384,20 @@ impl SectionSource for SectionChunks<'_> {
         Ok(Bytes::from(stored))
     }
 
+    /// The length the directory entry gives, which [`ImageReader::open`]
+    /// checked lies inside the file.
+    fn stored_length(&self, index: usize) -> Result<u64> {
+        self.entries
+            .get(index)
+            .map(|entry| entry.length)
+            .ok_or_else(|| {
+                Error::Internal(format!(
+                    "chunk {index} out of range: section has {} chunks",
+                    self.entries.len()
+                ))
+            })
+    }
+
     fn section_version(&self) -> u8 {
         self.version
     }

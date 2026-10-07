@@ -8,6 +8,7 @@
 use grafeo_common::storage::{ChunkCaps, ChunkKind, ChunkMeta, SectionSink};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::hash::FxHashSet;
 
 use crate::codec::column_chunk::{chunk_overhead, encode_column_chunk, value_bound};
 
@@ -66,6 +67,9 @@ impl OpenCells {
 pub struct RowsChunker {
     graph_id: u32,
     columns: Vec<ChunkColumn>,
+    /// The first column of `columns` listed a second time, which
+    /// [`push`](Self::push) refuses: its chunks would share an identity.
+    repeated: Option<ChunkColumn>,
     caps: ChunkCaps,
     group_start: u64,
     /// The first row of the open chunk, once a row was pushed.
@@ -79,6 +83,9 @@ pub struct RowsChunker {
 impl RowsChunker {
     /// A chunker of the row group starting at `group_start` of graph
     /// `graph_id`, writing `columns`.
+    ///
+    /// A column listed twice (one kind and column id) is refused by the
+    /// first [`push`](Self::push): its chunks would share an identity.
     pub fn new(
         graph_id: u32,
         columns: Vec<ChunkColumn>,
@@ -86,9 +93,15 @@ impl RowsChunker {
         caps: ChunkCaps,
     ) -> Self {
         let cells = columns.iter().map(|_| OpenCells::default()).collect();
+        let mut seen = FxHashSet::default();
+        let repeated = columns
+            .iter()
+            .find(|column| !seen.insert((column.kind.to_byte(), column.column_id)))
+            .copied();
         Self {
             graph_id,
             columns,
+            repeated,
             caps,
             group_start,
             chunk_start: group_start,
@@ -107,11 +120,11 @@ impl RowsChunker {
     ///
     /// Returns [`Error::InvalidValue`] for caps that [`ChunkCaps::validate`]
     /// refuses, and [`Error::Internal`] naming the graph, column and row for
-    /// a row outside the group or not after the last one, a cell count other
-    /// than the column count, a column of another kind than `Column` or
-    /// `History`, or a `History` cell with an epoch; a refused row changes
-    /// nothing. Returns the encoder's or the sink's error when the row cuts
-    /// the open chunk.
+    /// a column listed twice, a row outside the group or not after the last
+    /// one, a cell count other than the column count, a column of another
+    /// kind than `Column` or `History`, or a `History` cell with an epoch; a
+    /// refused row changes nothing. Returns the encoder's or the sink's error
+    /// when the row cuts the open chunk.
     pub fn push(
         &mut self,
         sink: &mut dyn SectionSink,
@@ -158,6 +171,13 @@ impl RowsChunker {
     fn check_row(&self, row: u64, cells: &[Option<(Value, u64)>]) -> Result<()> {
         self.caps.validate()?;
         let graph = self.graph_id;
+        if let Some(column) = self.repeated {
+            return Err(Error::Internal(format!(
+                "graph {graph}: {:?} column {} is listed twice, so two of its chunks would \
+                 share an identity",
+                column.kind, column.column_id
+            )));
+        }
         if cells.len() != self.columns.len() {
             return Err(Error::Internal(format!(
                 "graph {graph}, row {row}: expected one cell per column ({}), got {}",
@@ -856,6 +876,52 @@ mod tests {
             matches!(&error, Error::Internal(text)
                 if text.contains("graph 3") && text.contains("row 7")),
             "{error}"
+        );
+    }
+
+    /// A (kind, column) listed twice would write two chunks with one
+    /// identity: the chunker refuses it before writing anything. A column's
+    /// `Column` and `History` chunks are two identities.
+    #[test]
+    fn a_column_listed_twice_is_refused() {
+        let caps = ChunkCaps::DEFAULT;
+        for (case, columns, cells) in [
+            (
+                "a Column column twice",
+                vec![column(16), column(19), column(16)],
+                vec![int(3), int(19), int(88)],
+            ),
+            (
+                "a History column twice",
+                vec![history(16), column(16), history(16)],
+                vec![None, int(3), None],
+            ),
+        ] {
+            let mut sink = Recorder::default();
+            let mut chunker = RowsChunker::new(3, columns, 0, caps);
+            let error = chunker.push(&mut sink, 0, cells).unwrap_err();
+            assert!(
+                matches!(&error, Error::Internal(text)
+                    if text.contains("graph 3")
+                        && text.contains("column 16")
+                        && text.contains("listed twice")),
+                "{case}: {error}"
+            );
+            chunker.finish(&mut sink).unwrap();
+            assert!(sink.0.is_empty(), "{case}: {:?}", written(&sink));
+        }
+        let mut sink = Recorder::default();
+        let mut chunker = RowsChunker::new(3, vec![history(16), column(16)], 0, caps);
+        chunker
+            .push(&mut sink, 0, vec![Some((Value::from("Mia"), 0)), int(3)])
+            .unwrap();
+        chunker.finish(&mut sink).unwrap();
+        assert_eq!(
+            written(&sink),
+            [
+                (ChunkKind::History, 16, 0, 1),
+                (ChunkKind::Column, 16, 0, 1)
+            ]
         );
     }
 

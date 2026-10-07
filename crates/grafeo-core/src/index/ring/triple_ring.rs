@@ -98,7 +98,7 @@ impl std::fmt::Display for TripleRingInvariantError {
                 terms,
             } => write!(
                 f,
-                "triple ring {component} hold term id {symbol}, the dictionary has {terms}                  terms"
+                "triple ring {component} holds term id {symbol}, the dictionary has {terms} terms"
             ),
         }
     }
@@ -1686,18 +1686,26 @@ mod tests {
             let terms = ring.num_terms();
             for symbol in [terms as u64, terms as u64 + 5, 1u64 << 32] {
                 ids[last] = symbol;
+                let error = assemble(
+                    &ring,
+                    PackedTermDictionary::from_term_dict(ring.dictionary()),
+                    WaveletTree::new(&ids),
+                )
+                .unwrap_err();
                 assert_eq!(
-                    assemble(
-                        &ring,
-                        PackedTermDictionary::from_term_dict(ring.dictionary()),
-                        WaveletTree::new(&ids)
-                    )
-                    .unwrap_err(),
+                    error,
                     TripleRingInvariantError::SymbolOutsideDictionary {
                         component: "subjects",
                         symbol,
                         terms
                     }
+                );
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "triple ring subjects holds term id {symbol}, the dictionary has {terms} \
+                         terms"
+                    )
                 );
             }
         }

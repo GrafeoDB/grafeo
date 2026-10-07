@@ -129,6 +129,21 @@ fn snapshot_mmap_topology(topo: &MmapTopology) -> Vec<(NodeId, Vec<Vec<NodeId>>)
 /// front; a restore of more grows the map as nodes arrive.
 const MAX_RESTORE_CAPACITY: usize = 1 << 16;
 
+/// A neighbor reference that breaks the rules of a topology, as
+/// [`HnswIndex::first_broken_link`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BrokenLink {
+    /// The node whose list holds the reference.
+    pub node: NodeId,
+    /// The level of that list.
+    pub level: usize,
+    /// The node listed.
+    pub neighbor: NodeId,
+    /// The levels the node listed has, `None` when it is not a node of the
+    /// topology.
+    pub neighbor_levels: Option<usize>,
+}
+
 /// Node data stored in the HNSW index (topology only, no vector data).
 #[derive(Debug, Clone)]
 struct HnswNode {
@@ -194,6 +209,20 @@ impl TopologyBackend {
                 }
             }),
             Self::Mmap(topo) => topo.neighbors_at(id, layer).map(HnswNeighborsIter::Mmap),
+        }
+    }
+
+    /// How many levels node `id` has, `None` when it is not a node.
+    fn level_count(&self, id: NodeId) -> Option<usize> {
+        match self {
+            Self::Heap(map) => map.get(&id).map(|node| node.neighbors.len()),
+            Self::Mmap(topo) => topo.contains(id).then(|| {
+                let mut levels = 0;
+                while topo.neighbors_at(id, levels).is_some() {
+                    levels += 1;
+                }
+                levels
+            }),
         }
     }
 
@@ -404,8 +433,9 @@ impl HnswIndex {
     /// checkpoint writes the topology from inside the visit, so for as long
     /// as that write takes, inserts into this index wait, and so do searches
     /// that arrive after a waiting insert (`parking_lot`'s locks are fair:
-    /// a waiting writer queues the readers behind it). Memory stays bounded
-    /// meanwhile: the checkpoint holds one piece and one node's bytes.
+    /// a waiting writer queues the readers behind it). Memory meanwhile: the
+    /// checkpoint holds one piece and one node's bytes, besides the sorted
+    /// references of a heap topology (16 bytes per node, O(node count)).
     ///
     /// # Errors
     ///
@@ -470,6 +500,58 @@ impl HnswIndex {
             .write()
             .as_heap_mut()
             .insert(id, HnswNode { neighbors: layers });
+    }
+
+    /// The first neighbor reference, by node id and then level (and in list
+    /// order within a list), that breaks the rules [`insert`](Self::insert)
+    /// and [`remove`](Self::remove) keep: every node listed at a level is a
+    /// node of the topology with a list at that level, and no node lists
+    /// itself. `None` when every reference keeps them.
+    ///
+    /// Reads the topology in place under its read lock and allocates
+    /// nothing: one pass over every list, and a lookup of each node listed
+    /// (in an mmap topology, a search of its page index per level).
+    pub(crate) fn first_broken_link(&self) -> Option<BrokenLink> {
+        let nodes = self.nodes.read();
+        let backend = &*nodes;
+        let mut first: Option<BrokenLink> = None;
+        let mut check =
+            |node: NodeId, level: usize, neighbors: &mut dyn Iterator<Item = NodeId>| {
+                if first.is_some_and(|found| (found.node, found.level) <= (node, level)) {
+                    return;
+                }
+                for neighbor in neighbors {
+                    let neighbor_levels = backend.level_count(neighbor);
+                    if neighbor == node || neighbor_levels.is_none_or(|levels| levels <= level) {
+                        first = Some(BrokenLink {
+                            node,
+                            level,
+                            neighbor,
+                            neighbor_levels,
+                        });
+                        return;
+                    }
+                }
+            };
+        match backend {
+            TopologyBackend::Heap(map) => {
+                for (&id, node) in map {
+                    for (level, layer) in node.neighbors.iter().enumerate() {
+                        check(id, level, &mut layer.iter().copied());
+                    }
+                }
+            }
+            TopologyBackend::Mmap(topo) => {
+                for id in topo.iter_node_ids() {
+                    let mut level = 0;
+                    while let Some(mut neighbors) = topo.neighbors_at(id, level) {
+                        check(id, level, &mut neighbors);
+                        level += 1;
+                    }
+                }
+            }
+        }
+        first
     }
 
     /// Adopt a [`MmapTopology`] as the topology backend (Phase 7c).
@@ -3275,5 +3357,78 @@ mod tests {
             "{} bytes held for one node",
             index.heap_memory_bytes()
         );
+    }
+
+    /// Every neighbor of a topology an index built is a node with a list at
+    /// that level; a restored topology that lists anything else is reported,
+    /// the lowest node id (then level) first, on a heap or mmap topology.
+    #[test]
+    fn a_broken_neighbor_reference_is_reported_lowest_node_first() {
+        let id = NodeId::new;
+        let built = layered_index();
+        assert_eq!(built.first_broken_link(), None, "an index built by inserts");
+        for removed in [15, 30, 45] {
+            assert!(built.remove(id(removed)));
+        }
+        assert_eq!(built.first_broken_link(), None, "and after removals");
+        let index = HnswIndex::new(HnswConfig::new(3, DistanceMetric::Cosine));
+        let cases: Vec<(&str, Vec<(NodeId, Vec<Vec<NodeId>>)>, Option<BrokenLink>)> = vec![
+            (
+                "every neighbor a node with the level",
+                vec![
+                    (id(3), vec![vec![id(19)], vec![id(19)]]),
+                    (id(19), vec![vec![id(3), id(88)], vec![id(3)]]),
+                    (id(88), vec![vec![id(19)]]),
+                ],
+                None,
+            ),
+            (
+                "a neighbor that is not a node, after one that is",
+                vec![
+                    (id(3), vec![vec![id(19)]]),
+                    (id(19), vec![vec![id(3), id(7), id(88)]]),
+                ],
+                Some(BrokenLink {
+                    node: id(19),
+                    level: 0,
+                    neighbor: id(7),
+                    neighbor_levels: None,
+                }),
+            ),
+            (
+                "a neighbor without the level, and a later node listing itself",
+                vec![
+                    (id(3), vec![vec![id(19)]]),
+                    (id(19), vec![vec![id(3)], vec![id(3)]]),
+                    (id(88), vec![vec![id(88)]]),
+                ],
+                Some(BrokenLink {
+                    node: id(19),
+                    level: 1,
+                    neighbor: id(3),
+                    neighbor_levels: Some(1),
+                }),
+            ),
+            (
+                "a node listing itself before a later dangling neighbor",
+                vec![
+                    (id(3), vec![vec![id(19)], vec![id(3)]]),
+                    (id(19), vec![vec![id(7)]]),
+                ],
+                Some(BrokenLink {
+                    node: id(3),
+                    level: 1,
+                    neighbor: id(3),
+                    neighbor_levels: Some(2),
+                }),
+            ),
+        ];
+        for (case, nodes, expected) in cases {
+            index.restore_topology(Some(id(3)), 1, nodes.clone());
+            assert_eq!(index.first_broken_link(), expected, "heap: {case}");
+            let bytes = serialize_topology(Some(id(3)), 1, &nodes);
+            index.adopt_mmap_topology(MmapTopology::from_bytes(Bytes::from(bytes)).unwrap());
+            assert_eq!(index.first_broken_link(), expected, "mmap: {case}");
+        }
     }
 }

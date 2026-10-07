@@ -1934,6 +1934,9 @@ fn read_block_words(
 /// Reads the BitPacked blocks of a v2 or v3 column into one packed column.
 /// A 0-bit column holds only zeros and no words: its rows are counted, and
 /// nothing is materialized.
+///
+/// The bodies must lie inside `bytes` whatever the width, as the caller
+/// moves past them.
 fn read_bitpacked_blocks(
     bytes: &[u8],
     bits: u8,
@@ -1941,6 +1944,12 @@ fn read_bitpacked_blocks(
     bodies_start: usize,
 ) -> Result<BitPackedInts, &'static str> {
     check_bits(bits)?;
+    if bodies_start
+        .checked_add(total_bodies_len(metas))
+        .is_none_or(|end| end > bytes.len())
+    {
+        return Err("BitPacked block body out of bounds");
+    }
     if bits == 0 {
         let mut rows = 0usize;
         for meta in metas {
@@ -4355,6 +4364,50 @@ mod tests {
                 .unwrap();
             assert_eq!(column.len(), usize::try_from(u32::MAX).unwrap(), "v3 {v3}");
             assert_eq!(column.get(88), Some(Value::Int64(0)), "v3 {v3}");
+        }
+    }
+
+    /// A 0-bit column whose block bodies end past the bytes is refused like
+    /// any other width, before the reader moves past them: it must not read
+    /// as a column and leave the position beyond the input.
+    #[test]
+    fn a_truncated_zero_bit_column_is_refused() {
+        for v3 in [false, true] {
+            let whole = Body::default()
+                .byte(0)
+                .byte(0)
+                .u32(1)
+                .block(v3, 0, 4, 3)
+                .u32(0)
+                .0;
+            let data = Bytes::from(whole.clone());
+            let mut pos = 0;
+            let read = if v3 {
+                ColumnCodec::read_from_v3(&data, &mut pos).map(|(codec, _)| codec)
+            } else {
+                ColumnCodec::read_from_v2(&data, &mut pos)
+            };
+            assert_eq!(read.unwrap().len(), 3, "v3 {v3}: the whole column");
+            assert_eq!(pos, whole.len(), "v3 {v3}: read to its last byte");
+            for cut in 1..=4 {
+                let data = Bytes::from(whole[..whole.len() - cut].to_vec());
+                let mut pos = 0;
+                let read = if v3 {
+                    ColumnCodec::read_from_v3(&data, &mut pos).map(|(codec, _)| codec)
+                } else {
+                    ColumnCodec::read_from_v2(&data, &mut pos)
+                };
+                let error = read.err().unwrap_or_else(|| {
+                    panic!(
+                        "v3 {v3}, {cut} bytes cut: read, position {pos} of {}",
+                        data.len()
+                    )
+                });
+                assert!(
+                    error.contains("out of bounds"),
+                    "v3 {v3}, {cut} cut: {error}"
+                );
+            }
         }
     }
 

@@ -26,6 +26,8 @@
 //!   little-endian, ids strictly increasing. There is an entry point
 //!   exactly when there are nodes; the entry point is a node with exactly
 //!   `max_level + 1` levels, and every node has 1 to `max_level + 1` levels.
+//!   Every neighbor listed at a level is a node of the stream with that
+//!   level, and no node lists itself.
 //!
 //! Quantized indexes are not written: a load builds them from the data,
 //! because the section holds no quantized codes.
@@ -706,7 +708,9 @@ impl TopologyReader<'_> {
     /// Reads the topology into `index`, node by node, checking what the
     /// writer keeps: an entry point exactly when there are nodes, the entry
     /// point a node with exactly `max_level + 1` levels, and every node with
-    /// 1 to `max_level + 1` levels (each check O(1) per node).
+    /// 1 to `max_level + 1` levels (each check O(1) per node). Once every node
+    /// is in, every neighbor must be a node with a list at the level it is
+    /// listed at, and no node may list itself (one lookup per neighbor).
     fn restore(&mut self, index: &VectorIndexKind) -> Result<()> {
         let flag = self.bytes::<1>()?[0];
         let entry_value = self.u64()?;
@@ -800,8 +804,35 @@ impl TopologyReader<'_> {
                 Some(_) => {}
             }
         }
-        self.expect_end()
+        self.expect_end()?;
+        check_links(index)
     }
+}
+
+/// Refuses a restored topology with a neighbor reference that breaks the
+/// rules the index keeps (see [`VectorIndexKind::first_broken_link`]): a
+/// search would meet a dead end there. Checked once every node is in, in
+/// place: no memory beyond what the index holds.
+fn check_links(index: &VectorIndexKind) -> Result<()> {
+    let Some(link) = index.first_broken_link() else {
+        return Ok(());
+    };
+    let (node, level, neighbor) = (link.node.as_u64(), link.level, link.neighbor.as_u64());
+    let what = if neighbor == node {
+        format!("node {node} lists itself at level {level}, but no node is its own neighbor")
+    } else {
+        match link.neighbor_levels {
+            None => format!(
+                "node {node} lists node {neighbor} at level {level}, but node {neighbor} is \
+                 not a node of the stream"
+            ),
+            Some(levels) => format!(
+                "node {node} lists node {neighbor} at level {level}, but node {neighbor} has \
+                 {levels} levels"
+            ),
+        }
+    };
+    Err(Error::Serialization(format!("section VectorStore: {what}")))
 }
 
 /// Restores `index` from stream `stream`; on an error, leaves it empty.
@@ -838,8 +869,9 @@ impl Section for VectorStoreSection {
     /// its topology is written to `sink` (see
     /// [`VectorIndexKind::visit_topology`]): inserts into that index wait
     /// until its stream is written, and so do searches that arrive after a
-    /// waiting insert (`parking_lot`'s locks are fair). Memory stays bounded:
-    /// one piece and one node's bytes.
+    /// waiting insert (`parking_lot`'s locks are fair). Memory: one piece and
+    /// one node's bytes, and for a heap-backed index a sorted reference to
+    /// each of its nodes (16 bytes per node, O(node count)).
     ///
     /// # Errors
     ///
@@ -1261,6 +1293,13 @@ mod tests {
             self.chunks
                 .get(index)
                 .cloned()
+                .ok_or_else(|| Error::Internal(format!("no chunk {index}")))
+        }
+
+        fn stored_length(&self, index: usize) -> Result<u64> {
+            self.chunks
+                .get(index)
+                .map(|bytes| bytes.len() as u64)
                 .ok_or_else(|| Error::Internal(format!("no chunk {index}")))
         }
 
@@ -1852,6 +1891,26 @@ mod tests {
                 ),
                 "node 19 has 2 levels",
             ),
+            (
+                "a neighbor that is not a node",
+                hand_built(1, 3, 0, &[(3, vec![vec![19]]), (19, vec![vec![3, 7]])]),
+                "node 19 lists node 7 at level 0, but node 7 is not a node of the stream",
+            ),
+            (
+                "a neighbor listed at a level it does not have",
+                hand_built(
+                    1,
+                    19,
+                    1,
+                    &[(3, vec![vec![19]]), (19, vec![vec![3], vec![3]])],
+                ),
+                "node 19 lists node 3 at level 1, but node 3 has 1 levels",
+            ),
+            (
+                "a node listing itself",
+                hand_built(1, 3, 0, &[(3, vec![vec![19, 3]]), (19, vec![vec![3]])]),
+                "node 3 lists itself at level 0",
+            ),
         ] {
             let target = doc_shell();
             let error = read_into(&target, &source).unwrap_err();
@@ -1948,6 +2007,10 @@ mod tests {
                     io::ErrorKind::InvalidData,
                     format!("chunk {index} fails its checksum"),
                 )))
+            }
+
+            fn stored_length(&self, index: usize) -> Result<u64> {
+                self.0.stored_length(index)
             }
 
             fn section_version(&self) -> u8 {

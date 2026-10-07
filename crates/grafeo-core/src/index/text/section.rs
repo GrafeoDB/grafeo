@@ -29,24 +29,28 @@
 //!   posting list, and terms (UTF-8) strictly increase;
 //! - every length, posting count and term frequency is at least 1, and
 //!   every posting's node has a document length (read before the lists);
-//! - the document lengths and the term frequencies each add up to
-//!   `total_length`;
+//! - the document lengths add up to `total_length`, and each document's
+//!   term frequencies add up to its length (the index counts every token of
+//!   a document once, stop words left out by the tokenizer before);
 //! - the stream ends right after its last posting list.
 //!
 //! [`Section::read_from`] restores each index it was given from the stream
 //! with its key, one posting list at a time, and skips the streams of indexes
 //! it was not given. A refused stream names the index, which is then left
 //! empty with the configuration it had: the engine builds it from the data.
+//! Besides the index it restores, a read holds each document's length and
+//! the part its term frequencies have not covered yet (16 bytes per
+//! document).
 //!
 //! ## Memory and locks while writing
 //!
-//! A checkpoint holds one piece and a few KiB of gathered bytes per stream,
-//! never a whole posting list's or index's bytes. The text section's
-//! exception to bounded memory: to write in a defined order it gathers
-//! references to the index's terms (16 bytes per term) and a copy of its
-//! document lengths (16 bytes per document), plus a sorted copy of one
-//! posting list at a time when the index does not hold that list in node
-//! order (16 bytes per posting).
+//! A checkpoint holds one piece and a few KiB of gathered bytes per stream
+//! (a batch of 4 KiB and one record), never a whole term's, posting list's
+//! or index's bytes. The text section's exception to bounded memory: to
+//! write in a defined order it gathers references to the index's terms (16
+//! bytes per term) and a copy of its document lengths (16 bytes per
+//! document), plus a sorted copy of one posting list at a time when the
+//! index does not hold that list in node order (16 bytes per posting).
 //!
 //! The checkpoint holds the index's read lock while it writes the index's
 //! stream to the sink, so a writer of that index (and, as `parking_lot` is
@@ -108,6 +112,11 @@ const TERM_READ_STEP: usize = 4096;
 /// hands them to the stream: a long posting list goes out in a few writes,
 /// without a copy of the list.
 const WRITE_BATCH_BYTES: usize = 4096;
+
+/// The most bytes the writer gathers past a batch: one record of a node and a
+/// `u32` (a posting or a document length), which goes in whole before the
+/// batch is written. The writer's buffer holds at most a batch and this.
+const RECORD_BYTES: usize = 12;
 
 // ── Snapshot types (0.5.x) ──────────────────────────────────────────
 
@@ -227,7 +236,8 @@ impl<'s> PostingsWriter<'s> {
     fn new(sink: &'s mut dyn SectionSink, stream: u32, caps: ChunkCaps) -> Self {
         Self {
             stream: ChunkStreamWriter::new(sink, 0, stream, caps),
-            scratch: Vec::new(),
+            // Never grown: every append leaves at most a batch and a record.
+            scratch: Vec::with_capacity(WRITE_BATCH_BYTES + RECORD_BYTES),
             write_failed: false,
         }
     }
@@ -249,6 +259,20 @@ impl<'s> PostingsWriter<'s> {
         } else {
             Ok(())
         }
+    }
+
+    /// Appends `bytes` (a term) a batch at a time, writing each batch as it
+    /// fills, so the buffer never holds more than a batch of them.
+    fn append_in_batches(&mut self, mut bytes: &[u8]) -> Result<()> {
+        while !bytes.is_empty() {
+            // `write_batch` leaves less than a batch gathered: room is at least 1.
+            let room = WRITE_BATCH_BYTES.saturating_sub(self.scratch.len()).max(1);
+            let (piece, rest) = bytes.split_at(room.min(bytes.len()));
+            self.scratch.extend_from_slice(piece);
+            self.write_batch()?;
+            bytes = rest;
+        }
+        Ok(())
     }
 
     /// Writes what is still gathered and the stream's last piece.
@@ -287,9 +311,11 @@ impl PostingsVisitor for PostingsWriter<'_> {
     ) -> Result<()> {
         let term_length = count_u32(term.len(), "a term of length")?;
         self.scratch.extend_from_slice(&term_length.to_le_bytes());
-        self.scratch.extend_from_slice(term.as_bytes());
+        self.write_batch()?;
+        self.append_in_batches(term.as_bytes())?;
         self.scratch
             .extend_from_slice(&(count as u64).to_le_bytes());
+        self.write_batch()?;
         let mut written = 0usize;
         for (node, frequency) in postings {
             self.scratch.extend_from_slice(&node.as_u64().to_le_bytes());
@@ -485,18 +511,22 @@ impl PostingsReader<'_> {
         let doc_count = self.u64()?;
         let term_count = self.u64()?;
         index.begin_restore(BM25Config { k1, b }, total_length);
-        self.restore_doc_lengths(index, doc_count, total_length)?;
-        self.restore_posting_lists(index, term_count, total_length)?;
+        let mut documents = self.restore_doc_lengths(index, doc_count, total_length)?;
+        self.restore_posting_lists(index, term_count, &mut documents)?;
         self.expect_end()
     }
 
-    /// Reads `doc_count` document lengths into `index`.
+    /// Reads `doc_count` document lengths into `index`; returns them in node
+    /// order, each with all of its length left to cover.
     fn restore_doc_lengths(
         &mut self,
         index: &mut InvertedIndex,
         doc_count: u64,
         total_length: u64,
-    ) -> Result<()> {
+    ) -> Result<Vec<Uncovered>> {
+        // Grows as documents arrive: the count is not trusted with an
+        // allocation.
+        let mut documents = Vec::with_capacity(PREALLOCATE_AT_MOST);
         let mut previous: Option<NodeId> = None;
         // Saturates instead of overflowing; it never reaches the total then.
         let mut sum: u128 = 0;
@@ -522,6 +552,11 @@ impl PostingsReader<'_> {
             }
             sum = sum.saturating_add(u128::from(length));
             index.restore_doc_length(node, length);
+            documents.push(Uncovered {
+                node,
+                length,
+                left: length,
+            });
             previous = Some(node);
         }
         if sum != u128::from(total_length) {
@@ -530,20 +565,20 @@ impl PostingsReader<'_> {
                  total length {total_length}"
             )));
         }
-        Ok(())
+        Ok(documents)
     }
 
     /// Reads `term_count` posting lists into `index`, whose document lengths
-    /// are restored already.
+    /// are restored already and listed in `documents` (in node order): each
+    /// posting's node must be one of them, and each document's term
+    /// frequencies must add up to its length.
     fn restore_posting_lists(
         &mut self,
         index: &mut InvertedIndex,
         term_count: u64,
-        total_length: u64,
+        documents: &mut [Uncovered],
     ) -> Result<()> {
         let mut previous: Option<String> = None;
-        // Saturates instead of overflowing; it never reaches the total then.
-        let mut sum: u128 = 0;
         for _ in 0..term_count {
             let term = self.term()?;
             if let Some(previous) = &previous
@@ -575,13 +610,14 @@ impl PostingsReader<'_> {
                         previous_node.as_u64()
                     )));
                 }
-                if !index.contains(node) {
+                let Ok(position) = documents.binary_search_by_key(&node, |document| document.node)
+                else {
                     return Err(Error::Serialization(format!(
                         "section TextIndex: the posting list of term '{term}' holds node {}, \
                          which has no document length",
                         node.as_u64()
                     )));
-                }
+                };
                 if frequency == 0 {
                     return Err(Error::Serialization(format!(
                         "section TextIndex: the posting list of term '{term}' gives node {} a \
@@ -589,21 +625,43 @@ impl PostingsReader<'_> {
                         node.as_u64()
                     )));
                 }
-                sum = sum.saturating_add(u128::from(frequency));
+                let document = &mut documents[position];
+                if frequency > document.left {
+                    let reached = u64::from(document.length - document.left) + u64::from(frequency);
+                    return Err(Error::Serialization(format!(
+                        "section TextIndex: the posting list of term '{term}' brings the term \
+                         frequencies of document {} to {reached}, above its length {}",
+                        node.as_u64(),
+                        document.length
+                    )));
+                }
+                document.left -= frequency;
                 postings.push((node, frequency));
                 previous_node = Some(node);
             }
             index.restore_posting_list(term.clone(), postings);
             previous = Some(term);
         }
-        if sum != u128::from(total_length) {
+        if let Some(document) = documents.iter().find(|document| document.left != 0) {
             return Err(Error::Serialization(format!(
-                "section TextIndex: the term frequencies add up to {sum}, the stream gives a \
-                 total length {total_length}"
+                "section TextIndex: document {} has length {}, but its term frequencies add up \
+                 to {}",
+                document.node.as_u64(),
+                document.length,
+                document.length - document.left
             )));
         }
         Ok(())
     }
+}
+
+/// A document's length and the part of it the term frequencies read so far
+/// leave uncovered (16 bytes per document): every document's frequencies add
+/// up to its length, as the index counts each token of a document once.
+struct Uncovered {
+    node: NodeId,
+    length: u32,
+    left: u32,
 }
 
 /// Restores `index` from stream `stream`; on an error, leaves it empty with
@@ -1082,6 +1140,47 @@ mod tests {
                 assert_eq!(ranking(&restored, query), expected, "{key}: '{query}'");
             }
         }
+    }
+
+    /// A term goes to the stream a batch at a time, like postings: a term
+    /// several batches long never sits in the writer's buffer whole, which
+    /// holds at most a batch and one record, and the term reads back.
+    #[test]
+    fn a_term_longer_than_a_batch_is_written_a_batch_at_a_time() {
+        let word = "amsterdam".repeat(WRITE_BATCH_BYTES * 3 / 9 + 19);
+        assert!(word.len() > 3 * WRITE_BATCH_BYTES);
+        let index = index_of(
+            BM25Config::default(),
+            [
+                (3, format!("{word} gus {word}")),
+                (19, "mia".to_string()),
+                (88, format!("vincent {word}")),
+            ],
+        );
+        let mut image = MemoryImage::new();
+        image
+            .begin_section(SectionType::TextIndex, TEXT_SECTION_VERSION)
+            .unwrap();
+        let mut writer = PostingsWriter::new(&mut image, 0, TINY);
+        index.read().visit(&mut writer).unwrap();
+        assert!(
+            writer.scratch.capacity() <= WRITE_BATCH_BYTES + RECORD_BYTES,
+            "a term of {} bytes grew the buffer to {} bytes",
+            word.len(),
+            writer.scratch.capacity()
+        );
+        writer.finish().unwrap();
+        let mut back = InvertedIndex::new(BM25Config::default());
+        let source = image.section_source(SectionType::TextIndex).unwrap();
+        read_index(&*source, 0, &mut back).unwrap();
+        assert_eq!(in_node_order(&back), in_node_order(&index.read()));
+        let (postings, _, _) = back.snapshot();
+        assert!(
+            postings
+                .iter()
+                .any(|(term, list)| *term == word && list.len() == 2),
+            "the long term reads back with its two documents"
+        );
     }
 
     #[test]
@@ -1571,6 +1670,32 @@ mod tests {
                     .document(3, 88)
                     .term(b"paris", &[(3, 1)]),
                 "term frequencies add up to 1",
+            ),
+            (
+                // The totals agree (4 and 4); the documents do not.
+                "frequencies of 1 and 3 for documents of lengths 3 and 1",
+                Spelled::header(parameters, 4, 2, 1)
+                    .document(3, 3)
+                    .document(19, 1)
+                    .term(b"paris", &[(3, 1), (19, 3)]),
+                "brings the term frequencies of document 19 to 3, above its length 1",
+            ),
+            (
+                "a document's frequencies passing its length in a later list",
+                Spelled::header(parameters, 4, 2, 2)
+                    .document(3, 3)
+                    .document(19, 1)
+                    .term(b"berlin", &[(3, 1), (19, 1)])
+                    .term(b"paris", &[(19, 2)]),
+                "term 'paris' brings the term frequencies of document 19 to 3",
+            ),
+            (
+                "a document's frequencies falling short of its length",
+                Spelled::header(parameters, 4, 2, 1)
+                    .document(3, 3)
+                    .document(19, 1)
+                    .term(b"paris", &[(3, 2), (19, 1)]),
+                "document 3 has length 3, but its term frequencies add up to 2",
             ),
             (
                 "k1 NaN",

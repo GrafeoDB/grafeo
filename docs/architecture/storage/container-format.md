@@ -225,7 +225,9 @@ that breaks either rule.
 A chunk holds at most **65,536 rows and 1 MiB** (the caps). A row whose values
 pass the byte cap gets a chunk of its own, and every piece of a stream but the
 last holds exactly 1 MiB. A section's metadata chunk records the caps it was
-written with, and its reader checks the chunks against those. The metadata
+written with, and its reader checks the chunks against those. The row cap is
+also the format's: a reader refuses caps of more than 65,536 rows and a column
+chunk of more rows, so what a chunk decodes into stays bounded. The metadata
 chunks and the raw `CATALOG` chunk are not cut: they hold as many names,
 graphs and definitions as the database has.
 
@@ -257,7 +259,7 @@ Layout, little-endian:
 | `codec` | `u8` | The codec, equal to the directory entry's |
 | `flags` | `u8` | Bit 0: presence bitmap; bit 1: zone map; bit 2: epochs. A reader refuses other bits |
 | (reserved) | `u16` | Zero, ignored by readers |
-| `row_count` | `u32` | Equal to the directory entry's |
+| `row_count` | `u32` | Equal to the directory entry's, at most 65,536 |
 | `value_count` | `u32` | At least 1, at most `row_count` |
 | presence bitmap | `ceil(row_count / 64)` `u64` words | Only when `value_count` is below `row_count`: bit `r` is set when row `r` has a value; bits past the rows are 0 |
 | zone map | two values | The minimum and the maximum of the values, in the [value encoding](#value-encoding) |
@@ -457,7 +459,11 @@ metadata chunk, then the pieces of its streams, stream after stream:
 - A reader refuses a section whose first chunk is not its metadata chunk, a
   chunk of another kind or graph after it, a piece of a stream the metadata
   does not list, a piece that does not start where the pieces before it end,
-  a stream that ends before its contents do, and bytes after them.
+  a stream that ends before its contents do, and bytes after them. A reader
+  that joins a stream into one buffer first checks, from the directory alone,
+  that each piece starts after the one before it, by at most the first
+  piece's length and the bytes the piece before it is stored in, so the
+  buffer it allocates is bounded by the file.
 
 All numbers inside the streams are little-endian.
 
@@ -469,7 +475,9 @@ increasing key order (`Label:property`), each with its dimensions, its metric
 `node_count` records `[id u64][level_count u32]`, each level followed by
 `[neighbor_count u32]` and that many `[neighbor u64]`, ids strictly
 increasing. There is an entry point exactly when there are nodes; it has
-`max_level + 1` levels, and every node has 1 to `max_level + 1`. Quantized
+`max_level + 1` levels, and every node has 1 to `max_level + 1`. Every
+neighbor listed at a level is a node of the stream with that level, and no
+node lists itself. Quantized
 indexes are not written: an open builds them from the data. A topology is
 restored only into an index with the same dimensions and metric.
 
@@ -481,8 +489,8 @@ lists `[term_length u32][term][count u64]`, each followed by `count` postings
 `[node u64][term_frequency u32]`. The stream is canonical: node ids strictly
 increase among the document lengths and within each list, terms (UTF-8)
 strictly increase, every length, count and term frequency is at least 1, every
-posting's node has a document length, and the document lengths and the term
-frequencies each add up to `total_length`.
+posting's node has a document length, the document lengths add up to
+`total_length`, and each document's term frequencies add up to its length.
 
 **`RDF_RING` (version 3).** The metadata holds the number of triples. Streams
 0 to 5 hold the six parts of the ring, each in its packed format: the term
@@ -519,8 +527,8 @@ proportion to their data:
 |---------|---------|---------|
 | `LPG_STORE` | The sorted ids of the table being written (8 bytes per node or edge) and, without `temporal`, of each of its property columns (8 bytes per value) | |
 | `RDF_STORE` | A reference to every triple, sorted (8 bytes per triple) | |
-| `VECTOR_STORE` | A reference to every node of an in-memory topology, sorted by id | |
-| `TEXT_INDEX` | References to the terms (16 bytes per term), a copy of the document lengths (16 bytes per document) and, for a posting list not held in node order, a sorted copy of it (16 bytes per posting) | |
+| `VECTOR_STORE` | A reference to every node of an in-memory topology, sorted by id (16 bytes per node) | |
+| `TEXT_INDEX` | References to the terms (16 bytes per term), a copy of the document lengths (16 bytes per document) and, for a posting list not held in node order, a sorted copy of it (16 bytes per posting) | Each document's length and the part of it the term frequencies read so far leave uncovered (16 bytes per document) |
 | `RDF_RING` | The packed term dictionary, built whole before it is written | Each of the six streams in one buffer, which becomes that part of the ring |
 | `COMPACT_STORE` | Each column and each adjacency, encoded whole before it is written | The stream in one buffer, which becomes the store's column storage |
 

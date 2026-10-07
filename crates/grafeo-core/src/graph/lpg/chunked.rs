@@ -1202,11 +1202,12 @@ impl MetaReader<'_> {
 /// Rules (every failure an [`Error::Serialization`] naming the graph, the
 /// column and the rows):
 ///
-/// 1. The last chunk is the metadata chunk, the only one: layout 1, caps of at
-///    least one row and byte, an epoch of at most `i64::MAX`, graph 0 without
-///    a name, the named graphs in strictly ascending name order, each label,
-///    edge type and `(table, key)` listed once, property column ids unique and
-///    at least [`FIRST_PROPERTY_COLUMN`].
+/// 1. The last chunk is the metadata chunk, the only one: layout 1, caps of 1
+///    to 65,536 rows (the format's row cap) and at least one byte, an epoch
+///    of at most `i64::MAX`, graph 0 without a name, the named graphs in
+///    strictly ascending name order, each label, edge type and
+///    `(table, key)` listed once, property column ids unique and at least
+///    [`FIRST_PROPERTY_COLUMN`].
 /// 2. Every other chunk is a `Column` or `History` chunk (`History` only for
 ///    property columns) of a known graph and column, with `1 <= row_count <=
 ///    max_rows`, inside one row group, ending below its table's next id.
@@ -1372,9 +1373,13 @@ impl<'m> Layout<'m> {
     fn new(meta: &'m LpgMeta) -> Result<Self> {
         let refuse =
             |what: String| Err(Error::Serialization(format!("LPG metadata chunk: {what}")));
-        if meta.max_rows == 0 || meta.max_bytes == 0 {
+        let caps = ChunkCaps {
+            max_rows: meta.max_rows,
+            max_bytes: meta.max_bytes,
+        };
+        if let Err(error) = caps.validate() {
             return refuse(format!(
-                "max_rows {} and max_bytes {}: both must be at least 1",
+                "max_rows {} and max_bytes {}: {error}",
                 meta.max_rows, meta.max_bytes
             ));
         }
@@ -3778,6 +3783,10 @@ mod tests {
             self.inner.fetch(index)
         }
 
+        fn stored_length(&self, index: usize) -> Result<u64> {
+            self.inner.stored_length(index)
+        }
+
         fn section_version(&self) -> u8 {
             self.inner.section_version()
         }
@@ -4527,6 +4536,11 @@ mod tests {
                 "rows of zero",
                 vec![with(|meta| meta.max_rows = 0)],
                 "max_rows",
+            ),
+            (
+                "rows above the format's row cap",
+                vec![with(|meta| meta.max_rows = ChunkCaps::DEFAULT.max_rows + 1)],
+                "max_rows 65537",
             ),
         ];
         cases.push((

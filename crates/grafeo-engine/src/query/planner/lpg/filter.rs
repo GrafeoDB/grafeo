@@ -1237,10 +1237,11 @@ fn in_list_values(list: &LogicalExpression) -> Option<Vec<Value>> {
 /// as in `reads_the_current_store`. These paths read a scan without input,
 /// in the order the planner tries them: the index lookup of equalities with
 /// constants or the label-first scan of their label, the index lookup of an
-/// `IN` list of constants, the range scan of a range of constants (with or
-/// without an index), a vector or text index search (no hint), and
-/// otherwise the scan of the label with the filter above it. A scan per input
-/// row takes none of them.
+/// `IN` list of constants (no hint for a list without a value that is not
+/// NULL: it finds no node, and the planner reads neither index nor label),
+/// the range scan of a range of constants (with or without an index), a
+/// vector or text index search (no hint), and otherwise the scan of the label
+/// with the filter above it. A scan per input row takes none of them.
 ///
 /// [pf]: super::Planner::plan_filter
 pub(crate) fn scan_hint(
@@ -1277,9 +1278,9 @@ pub(crate) fn scan_hint(
         } = left.as_ref()
         && read == variable
         && has_index(property)
-        && in_list_values(right).is_some()
+        && let Some(values) = in_list_values(right)
     {
-        return Some(PushdownHint::IndexLookup {
+        return (!values.is_empty()).then(|| PushdownHint::IndexLookup {
             property: property.clone(),
         });
     }

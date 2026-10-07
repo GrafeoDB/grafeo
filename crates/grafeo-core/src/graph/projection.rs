@@ -513,10 +513,13 @@ impl GraphStore for GraphProjection {
     }
 
     fn estimate_label_cardinality(&self, label: &str) -> f64 {
-        if self.spec.filters_labels() && !self.spec.node_labels.contains(label) {
-            return 0.0;
+        if self.label_is_projected(label) {
+            return self.inner.estimate_label_cardinality(label);
         }
-        self.inner.estimate_label_cardinality(label)
+        // The projection's nodes with the label, as its scan finds them; an
+        // estimate, so a count beyond `u32::MAX` saturates.
+        let count = u32::try_from(self.nodes_by_label_count(label)).unwrap_or(u32::MAX);
+        f64::from(count)
     }
 
     fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
@@ -640,6 +643,10 @@ mod tests {
                 "{label}"
             );
         }
+        // The estimate of a label outside the spec counts the projection's
+        // nodes with it, as the scan finds them.
+        assert!((proj.estimate_label_cardinality("Admin") - 3.0).abs() < f64::EPSILON);
+        assert!(proj.estimate_label_cardinality("Missing").abs() < f64::EPSILON);
     }
 
     #[test]

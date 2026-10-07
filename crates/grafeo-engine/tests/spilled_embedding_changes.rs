@@ -312,9 +312,11 @@ fn check(db: &GrafeoDB, ids: &[NodeId], expected: &[Expected], search: Search, p
         return;
     }
 
+    // An `ef` above the index size: the search visits every node it can
+    // reach, so a miss means an unreachable node, not the approximation.
     for &(id, embedding) in &live {
         let nearest = db
-            .vector_search("Item", "embedding", embedding, 2, None, None)
+            .vector_search("Item", "embedding", embedding, 2, Some(4 * ids.len()), None)
             .unwrap();
         assert_eq!(
             nearest.first().map(|&(n, _)| n),
@@ -365,6 +367,7 @@ fn verify(count: u8, change: impl Fn(&GrafeoDB, &[NodeId]), expected: &[Expected
     change(&db, &ids);
     assert_spilled(&db, true, "after the change");
     check(&db, &ids, expected, search, "while spilled");
+    assert_spilled(&db, true, "after the checks while spilled");
     assert!(db.reload_eligible(1.0) > 0, "nothing was reloaded");
     assert_spilled(&db, false, "after the reload");
     check(&db, &ids, expected, search, "after the reload");
@@ -395,6 +398,11 @@ fn verify(count: u8, change: impl Fn(&GrafeoDB, &[NodeId]), expected: &[Expected
     db.buffer_manager().spill_all();
     assert_spilled(&db, true, "reopened with the vector section on disk");
     check(&db, &ids, expected, search, "reopened and spilled");
+    assert_spilled(
+        &db,
+        true,
+        "after the checks of the reopened, spilled database",
+    );
     assert!(db.reload_eligible(1.0) > 0, "nothing was reloaded");
     check(
         &db,
@@ -672,6 +680,7 @@ fn crash_child() {
         db.wal_checkpoint().unwrap();
     }
     if case == "checkpointed_and_reloaded" {
+        assert_spilled(&db, true, "after the checkpoint in the crash child");
         assert!(db.reload_eligible(1.0) > 0);
     }
     let ids: Vec<String> = ids.iter().map(|id| id.as_u64().to_string()).collect();

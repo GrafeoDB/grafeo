@@ -580,60 +580,66 @@ impl QueryProcessor {
 ///
 /// Walks the whole plan tree looking for `Filter -> NodeScan` patterns and
 /// checks whether a property index exists for equality predicates. With
-/// `choose_labels` (see
+/// `current`, a read of the store as it is now (see
 /// [`may_choose_scan_label`](crate::query::planner::lpg::scan::may_choose_scan_label)),
 /// a node scan below filters that require more of its labels shows the label
 /// the planner scans, below any operator, as the planner chooses it for every
 /// filter it plans (see
 /// [`with_smallest_scan_label`](crate::query::planner::lpg::scan::with_smallest_scan_label)).
+/// Without it, the planner uses no property index, and the plan shows none.
 pub(crate) fn annotate_pushdown_hints(
     op: &mut LogicalOperator,
     store: &dyn grafeo_core::graph::GraphStoreSearch,
-    choose_labels: bool,
+    current: bool,
 ) {
     if let LogicalOperator::Filter(filter) = op {
         // The label the planner scans, chosen at the top of a chain of filters
-        if choose_labels
+        if current
             && let Some(reordered) =
                 crate::query::planner::lpg::scan::with_smallest_scan_label(filter, store)
         {
             *filter = reordered;
         }
         // Recurse into children first
-        annotate_pushdown_hints(&mut filter.input, store, choose_labels);
+        annotate_pushdown_hints(&mut filter.input, store, current);
 
         // Annotate this filter if it sits on top of a NodeScan
         if let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
-            filter.pushdown_hint = infer_pushdown(&filter.predicate, scan, store);
+            filter.pushdown_hint = infer_pushdown(&filter.predicate, scan, store, current);
+        } else if let Some(hint) = crate::query::planner::lpg::seek::checked_scan(filter)
+            .and_then(|below| seek_hint(&filter.predicate, below.scan, store, current))
+        {
+            // The seek takes over the checks between it and the scan: they
+            // run in its filter, not on a scan of their own.
+            filter.pushdown_hint = Some(hint);
+            let mut below = filter.input.as_mut();
+            while let LogicalOperator::Filter(check) = below {
+                check.pushdown_hint = None;
+                below = check.input.as_mut();
+            }
         }
         return;
     }
     let taken = std::mem::replace(op, LogicalOperator::Empty);
     *op = taken.map_children(|mut child| {
-        annotate_pushdown_hints(&mut child, store, choose_labels);
+        annotate_pushdown_hints(&mut child, store, current);
         child
     });
 }
 
-/// Infers the pushdown strategy for a filter predicate over a node scan.
+/// Infers the pushdown strategy for a filter predicate over a node scan;
+/// an index only with `current` (see [`annotate_pushdown_hints`]).
 fn infer_pushdown(
     predicate: &LogicalExpression,
     scan: &crate::query::plan::NodeScanOp,
     store: &dyn grafeo_core::graph::GraphStore,
+    current: bool,
 ) -> Option<crate::query::plan::PushdownHint> {
     #[allow(clippy::wildcard_imports)]
     use crate::query::plan::*;
 
-    // The seek the planner makes: an ID, or an indexed property per input row
-    if let Some(seek) = crate::query::planner::lpg::seek::choose_seek(predicate, scan, |p| {
-        store.has_property_index(p)
-    }) {
-        return Some(match seek.key {
-            grafeo_core::execution::operators::SeekKey::Id => PushdownHint::IdSeek,
-            grafeo_core::execution::operators::SeekKey::Property(property) => {
-                PushdownHint::IndexLookup { property }
-            }
-        });
+    if let Some(hint) = seek_hint(predicate, scan, store, current) {
+        return Some(hint);
     }
 
     match predicate {
@@ -644,7 +650,7 @@ fn infer_pushdown(
             {
                 let constant = matches!(left.as_ref(), LogicalExpression::Literal(_))
                     || matches!(right.as_ref(), LogicalExpression::Literal(_));
-                if scan.input.is_none() && constant && store.has_property_index(&prop) {
+                if current && scan.input.is_none() && constant && store.has_property_index(&prop) {
                     return Some(PushdownHint::IndexLookup { property: prop });
                 }
                 if scan.label.is_some() {
@@ -662,7 +668,7 @@ fn infer_pushdown(
             if let Some(prop) = extract_property_name(left, &scan.variable)
                 .or_else(|| extract_property_name(right, &scan.variable))
             {
-                if store.has_property_index(&prop) {
+                if current && store.has_property_index(&prop) {
                     return Some(PushdownHint::RangeScan { property: prop });
                 }
                 if scan.label.is_some() {
@@ -676,7 +682,7 @@ fn infer_pushdown(
             left,
             op: BinaryOp::And,
             ..
-        } => infer_pushdown(left, scan, store),
+        } => infer_pushdown(left, scan, store, current),
         _ => {
             // Any other predicate on a labeled scan gets label-first
             if scan.label.is_some() {
@@ -686,6 +692,34 @@ fn infer_pushdown(
             }
         }
     }
+}
+
+/// The seek the planner makes of a filter over `scan`: an ID, or an indexed
+/// property per input row (only with `current`). None after a write in the
+/// scan's input, which the scan reads whole first.
+fn seek_hint(
+    predicate: &LogicalExpression,
+    scan: &crate::query::plan::NodeScanOp,
+    store: &dyn grafeo_core::graph::GraphStore,
+    current: bool,
+) -> Option<crate::query::plan::PushdownHint> {
+    use crate::query::plan::PushdownHint;
+    use grafeo_core::execution::operators::SeekKey;
+
+    if scan
+        .input
+        .as_deref()
+        .is_some_and(LogicalOperator::has_mutations)
+    {
+        return None;
+    }
+    let seek = crate::query::planner::lpg::seek::choose_seek(predicate, scan, |p| {
+        current && store.has_property_index(p)
+    })?;
+    Some(match seek.key {
+        SeekKey::Id => PushdownHint::IdSeek,
+        SeekKey::Property(property) => PushdownHint::IndexLookup { property },
+    })
 }
 
 /// Extracts the property name if the expression is `Property { variable, property }`

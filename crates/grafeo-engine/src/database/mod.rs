@@ -5014,16 +5014,21 @@ mod normalize_path_tests {
         let target = dir.path().join("amsterdam").join("berlin");
         std::fs::create_dir_all(&target).unwrap();
         let junction = dir.path().join("junction");
-        let created = std::process::Command::new("cmd")
+        // A junction needs no elevation, so a failure here is a broken setup,
+        // never a reason to pass without the check.
+        let output = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J"])
             .arg(&junction)
             .arg(&target)
             .output()
-            .is_ok_and(|output| output.status.success());
-        if !created {
-            eprintln!("skipped: this system cannot create a junction with mklink /J");
-            return;
-        }
+            .expect("cmd runs mklink /J");
+        assert!(
+            output.status.success(),
+            "mklink /J could not create the junction ({}): {}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         let resolved =
             super::normalize_path(&junction.join("..").join("paris").join("..")).unwrap();

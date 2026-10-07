@@ -59,6 +59,28 @@ impl super::Planner {
         node.is_some_and(|node| label.is_none_or(|label| node.has_label(label)))
     }
 
+    /// Plans the input of a filter. `Empty` is the one empty row a query
+    /// starts from, as for `RETURN`, `WITH` and `CALL` (a condition that reads
+    /// no variable can be moved down to it): a single row without columns.
+    fn plan_filter_input(
+        &self,
+        input: &LogicalOperator,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        if !matches!(input, LogicalOperator::Empty) {
+            return self.plan_operator(input);
+        }
+        // PROFILE walks the logical tree, `Empty` included (see `plan_unwind`).
+        if self.profiling.get() {
+            let (entry, _stats) =
+                crate::query::profile::ProfileEntry::new("Empty", input.display_label());
+            self.profile_entries.borrow_mut().push(entry);
+        }
+        Ok((
+            Box::new(grafeo_core::execution::operators::single_row::SingleRowOperator::new()),
+            Vec::new(),
+        ))
+    }
+
     /// Plans a filter operator.
     ///
     /// Uses zone map pre-filtering to potentially skip scans when predicates
@@ -99,7 +121,7 @@ impl super::Planner {
             && let Some(false) = self.check_zone_map_for_predicate(&filter.predicate, &filter.input)
         {
             // Zone map says no matches possible - return empty result
-            let (_, columns) = self.plan_operator(&filter.input)?;
+            let (_, columns) = self.plan_filter_input(&filter.input)?;
             let schema = self.derive_schema_from_columns(&columns);
             let empty_op = Box::new(EmptyOperator::new(schema));
             return Ok((empty_op, columns));
@@ -148,7 +170,7 @@ impl super::Planner {
         }
 
         // Plan the input operator first
-        let (input_op, columns) = self.plan_operator(&filter.input)?;
+        let (input_op, columns) = self.plan_filter_input(&filter.input)?;
 
         // Build variable to column index mapping
         let variable_columns: HashMap<String, usize> = columns
@@ -198,7 +220,7 @@ impl super::Planner {
                 input: filter.input.clone(),
                 pushdown_hint: filter.pushdown_hint.clone(),
             })?,
-            None => self.plan_operator(&filter.input)?,
+            None => self.plan_filter_input(&filter.input)?,
         };
         let predicate = join_conjuncts(with_subqueries)
             .ok_or_else(|| Error::Internal("filter without a subquery to lift".to_string()))?;
@@ -653,10 +675,12 @@ impl super::Planner {
             return Ok(None);
         }
 
-        // Check if at least one condition has an index
-        let has_indexed_condition = conditions
-            .iter()
-            .any(|(prop, _)| self.store.has_property_index(prop));
+        // Check if at least one condition has an index (one that holds the
+        // values the query reads, see `reads_the_current_store`)
+        let has_indexed_condition = self.reads_the_current_store()
+            && conditions
+                .iter()
+                .any(|(prop, _)| self.store.has_property_index(prop));
 
         // Without an index we can still optimize when there's a label constraint:
         // label-first scan + property check avoids DataChunk/expression overhead.
@@ -770,7 +794,7 @@ impl super::Planner {
         if variable != &scan_variable {
             return Ok(None);
         }
-        if !self.store.has_property_index(property) {
+        if !self.reads_the_current_store() || !self.store.has_property_index(property) {
             return Ok(None);
         }
 
@@ -961,7 +985,9 @@ impl super::Planner {
     /// the absorbed scan in PROFILE output.
     ///
     /// Pass the source operator's `name()` (e.g. `"NodeScan"`, `"EdgeScan"`)
-    /// so future absorbers don't get mislabeled.
+    /// so future absorbers don't get mislabeled. A seek also absorbs the
+    /// filters between it and the scan (see `seek.rs`): each gets an entry
+    /// named `"Filter"`.
     pub(super) fn record_absorbed_scan_entry(&self, op_name: &str, absorbed: &LogicalOperator) {
         if !self.profiling.get() {
             return;
@@ -986,9 +1012,12 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        // Only optimize if input is a simple NodeScan (not nested)
+        // Only optimize if input is a simple NodeScan (not nested). The range
+        // lookup reads the values of now (see `reads_the_current_store`).
         let (scan_variable, scan_label) = match filter.input.as_ref() {
-            LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
+            LogicalOperator::NodeScan(scan)
+                if scan.input.is_none() && self.reads_the_current_store() =>
+            {
                 (scan.variable.clone(), scan.label.clone())
             }
             _ => return Ok(None),

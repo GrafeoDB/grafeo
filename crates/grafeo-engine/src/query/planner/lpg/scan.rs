@@ -86,7 +86,9 @@ pub(crate) fn with_smallest_scan_label(
 /// ([`with_smallest_scan_label`]). Not at a past epoch outside a transaction
 /// (`current_epoch` is the transaction manager's, `None` without one): a label
 /// scan finds the nodes that have the label now, while the check per row
-/// reads the labels a node had at the epoch.
+/// reads the labels a node had at the epoch. The same rule decides whether a
+/// query may look values up in a property index, which holds the values of
+/// now.
 pub(crate) fn may_choose_scan_label(
     viewing_epoch: EpochId,
     transaction_id: Option<TransactionId>,
@@ -231,14 +233,22 @@ impl super::Planner {
     /// nodes (see [`with_smallest_scan_label`]), when this query may choose
     /// (see [`may_choose_scan_label`]).
     pub(super) fn scan_smallest_label(&self, filter: &FilterOp) -> Option<FilterOp> {
+        if !self.reads_the_current_store() {
+            return None;
+        }
+        with_smallest_scan_label(filter, self.store.as_ref())
+    }
+
+    /// Whether this query reads the store as it is now (see
+    /// [`may_choose_scan_label`]): label counts and property indexes describe
+    /// that state, so a read of a past epoch outside a transaction uses
+    /// neither.
+    pub(super) fn reads_the_current_store(&self) -> bool {
         let current_epoch = self
             .transaction_manager
             .as_ref()
             .map(|manager| manager.current_epoch());
-        if !may_choose_scan_label(self.viewing_epoch, self.transaction_id, current_epoch) {
-            return None;
-        }
-        with_smallest_scan_label(filter, self.store.as_ref())
+        may_choose_scan_label(self.viewing_epoch, self.transaction_id, current_epoch)
     }
 
     /// Plans a node scan operator.

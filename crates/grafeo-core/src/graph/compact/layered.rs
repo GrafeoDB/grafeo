@@ -80,12 +80,27 @@ pub struct LayeredStore {
     /// A test hook that a read runs once, between its loads of the layers,
     /// so a test can merge where a concurrent merge could land.
     #[cfg(test)]
-    read_hook: parking_lot::Mutex<Option<ReadHook>>,
+    read_hook: parking_lot::Mutex<Option<TestHook>>,
+    /// A test hook that a publish runs once at a step of its writes, so a
+    /// test can read or panic inside a publish.
+    #[cfg(test)]
+    publish_hook: parking_lot::Mutex<Option<(PublishStep, TestHook)>>,
 }
 
-/// See [`LayeredStore::read_hook`].
+/// See [`LayeredStore::read_hook`] and [`LayeredStore::publish_hook`].
 #[cfg(test)]
-type ReadHook = Box<dyn FnOnce(&LayeredStore) + Send>;
+type TestHook = Box<dyn FnOnce(&LayeredStore) + Send>;
+
+/// The step of a publish at which [`LayeredStore::publish_hook`] runs.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishStep {
+    /// The generation is odd, and nothing is written yet.
+    Began,
+    /// The base and the overlay are swapped, and the dirty and deleted sets
+    /// are not cleared yet.
+    LayersSwapped,
+}
 
 #[cfg(test)]
 thread_local! {
@@ -181,6 +196,8 @@ impl LayeredStore {
             publish_generation: AtomicU64::new(0),
             #[cfg(test)]
             read_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            publish_hook: parking_lot::Mutex::new(None),
         }
     }
 
@@ -197,6 +214,8 @@ impl LayeredStore {
             publish_generation: AtomicU64::new(0),
             #[cfg(test)]
             read_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            publish_hook: parking_lot::Mutex::new(None),
         }
     }
 
@@ -212,6 +231,26 @@ impl LayeredStore {
     fn run_read_hook(&self) {
         let hook = self.read_hook.lock().take();
         if let Some(hook) = hook {
+            hook(self);
+        }
+    }
+
+    /// Sets the hook the next publish runs once at `step` (see
+    /// `publish_hook`).
+    #[cfg(test)]
+    fn set_publish_hook(
+        &self,
+        step: PublishStep,
+        hook: impl FnOnce(&LayeredStore) + Send + 'static,
+    ) {
+        *self.publish_hook.lock() = Some((step, Box::new(hook)));
+    }
+
+    /// Runs the publish hook, if one is set for `step`, once.
+    #[cfg(test)]
+    fn run_publish_hook(&self, step: PublishStep) {
+        let hook = self.publish_hook.lock().take_if(|(at, _)| *at == step);
+        if let Some((_, hook)) = hook {
             hook(self);
         }
     }
@@ -341,8 +380,14 @@ impl LayeredStore {
         // increment runs when `publishing` drops, also when a write panics,
         // so the generation never stays odd.
         let publishing = PublishInProgress::begin(&self.publish_generation);
+        #[cfg(test)]
+        self.run_publish_hook(PublishStep::Began);
         let retired_base = base.map(|base| self.base.swap(base));
+        // The overlay before the deleted sets: the search reads, which run
+        // outside `read_consistent`, rest on this order (see `text_search`).
         let retired_overlay = self.overlay.swap(fresh);
+        #[cfg(test)]
+        self.run_publish_hook(PublishStep::LayersSwapped);
         self.dirty_node_ids.write().clear();
         self.dirty_edge_ids.write().clear();
         self.deleted_from_base_nodes.write().clear();
@@ -488,8 +533,6 @@ impl LayeredStore {
         Ok(())
     }
 
-    /// The overlay layer, for a read. In tests it first runs the read hook,
-    /// so a test can merge between a read's loads of the layers.
     /// [`GraphStore::nodes_by_label_count`] within one state (see
     /// `read_consistent`).
     fn nodes_by_label_count_in_one_state(&self, label: &str) -> usize {
@@ -533,6 +576,8 @@ impl LayeredStore {
         base_visible + overlay_visible
     }
 
+    /// The overlay layer, for a read. In tests it first runs the read hook,
+    /// so a test can merge between a read's loads of the layers.
     fn overlay_layer(&self) -> arc_swap::Guard<Arc<LpgStore>> {
         #[cfg(test)]
         self.run_read_hook();
@@ -1432,6 +1477,7 @@ impl GraphStoreSearch for LayeredStore {
         self.overlay_layer().has_text_index(label, property)
     }
 
+    // Not under `read_consistent`: see `text_search`.
     #[cfg(feature = "text-index")]
     fn score_text(&self, node_id: NodeId, label: &str, property: &str, query: &str) -> Option<f64> {
         if self.is_node_deleted_from_base(node_id) {
@@ -1441,6 +1487,14 @@ impl GraphStoreSearch for LayeredStore {
             .score_text(node_id, label, property, query)
     }
 
+    // The search reads (this one, `text_search_with_threshold`, `score_text`,
+    // `vector_search` and `vector_search_with_threshold`) are not under
+    // `read_consistent`: they read the overlay's index and drop the base
+    // nodes deleted since the last merge, and a publish swaps the overlay
+    // before it clears the deleted sets. A read that sees the sets cleared
+    // reads the new overlay, and one that sees them with the new overlay
+    // drops ids the merge removed. The other order would pair the old
+    // overlay's index with the cleared sets and find a deleted base node.
     #[cfg(feature = "text-index")]
     fn text_search(
         &self,
@@ -1458,6 +1512,7 @@ impl GraphStoreSearch for LayeredStore {
         results
     }
 
+    // Not under `read_consistent`: see `text_search`.
     #[cfg(feature = "text-index")]
     fn text_search_with_threshold(
         &self,
@@ -1488,6 +1543,7 @@ impl GraphStoreSearch for LayeredStore {
         self.overlay_layer().vector_index_config(label, property)
     }
 
+    // Not under `read_consistent`: see `text_search`.
     #[cfg(feature = "vector-index")]
     fn vector_search(
         &self,
@@ -1508,6 +1564,7 @@ impl GraphStoreSearch for LayeredStore {
         results
     }
 
+    // Not under `read_consistent`: see `text_search`.
     #[cfg(feature = "vector-index")]
     fn vector_search_with_threshold(
         &self,
@@ -4372,7 +4429,9 @@ mod tests {
     /// and the dirty or deleted sets, each reading values that live in the
     /// overlay until a merge. `edge_property_might_match` is not here: the
     /// base answers `true` for every edge property (it has no edge zone
-    /// maps), so the overlay is never read and no merge can split it.
+    /// maps), so the overlay is never read and no merge can split it. Nor
+    /// are the search and history reads, which run outside `read_consistent`
+    /// (see `text_search` and `get_node_history`, and the search test below).
     const RACE_CASES: &[RaceCase] = &[
         RaceCase {
             name: "get_node",
@@ -4545,8 +4604,20 @@ mod tests {
             after_merge: None,
         },
         RaceCase {
+            name: "in_degree",
+            read: |s, i| s.in_degree(i.amsterdam).to_string(),
+            kept_by_a_merge: true,
+            after_merge: None,
+        },
+        RaceCase {
             name: "node_ids",
             read: |s, _| sorted(s.node_ids()),
+            kept_by_a_merge: true,
+            after_merge: None,
+        },
+        RaceCase {
+            name: "all_node_ids",
+            read: |s, _| sorted(s.all_node_ids()),
             kept_by_a_merge: true,
             after_merge: None,
         },
@@ -4613,6 +4684,18 @@ mod tests {
                     true,
                     true,
                 ))
+            },
+            kept_by_a_merge: true,
+            after_merge: None,
+        },
+        RaceCase {
+            name: "find_nodes_in_range_iter",
+            read: |s, _| {
+                let (min, max) = (Value::Int64(31), Value::Int64(40));
+                sorted(
+                    s.find_nodes_in_range_iter("age", Some(&min), Some(&max), true, true)
+                        .collect(),
+                )
             },
             kept_by_a_merge: true,
             after_merge: None,
@@ -4710,6 +4793,18 @@ mod tests {
             kept_by_a_merge: true,
             after_merge: None,
         },
+        RaceCase {
+            name: "filter_visible_node_ids_versioned",
+            read: |s, i| {
+                sorted(s.filter_visible_node_ids_versioned(
+                    &[i.vincent, i.jules],
+                    i.epoch,
+                    TransactionId::SYSTEM,
+                ))
+            },
+            kept_by_a_merge: true,
+            after_merge: None,
+        },
     ];
 
     /// Runs `read` on `store` with a merge on another thread that publishes
@@ -4799,6 +4894,157 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A publish that panics once it began still ends its generation: later
+    /// reads do not wait for it and give the values from before (it wrote
+    /// nothing), and the next merge publishes.
+    #[test]
+    fn a_panic_inside_a_publish_ends_its_generation() {
+        let (store, ids) = layered_for_merge_races();
+        let read_all = |store: &LayeredStore| -> Vec<String> {
+            RACE_CASES
+                .iter()
+                .map(|case| (case.read)(store, &ids))
+                .collect()
+        };
+        let before = read_all(&store);
+        let generation = store.publish_generation.load(Ordering::SeqCst);
+        store.set_publish_hook(PublishStep::Began, |_| {
+            panic!("a write of the publish failed");
+        });
+        let merged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.merge_overlay_in_place()
+        }));
+        assert!(merged.is_err(), "the publish panicked");
+        assert_eq!(
+            store.publish_generation.load(Ordering::SeqCst),
+            generation + 2,
+            "the generation ends even"
+        );
+        assert_eq!(read_all(&store), before, "the publish wrote nothing");
+
+        store.merge_overlay_in_place().unwrap();
+        assert_eq!(
+            store.publish_generation.load(Ordering::SeqCst),
+            generation + 4,
+            "the next merge publishes"
+        );
+        for (case, value) in RACE_CASES.iter().zip(&before) {
+            if case.kept_by_a_merge {
+                assert_eq!(
+                    &(case.read)(&store, &ids),
+                    value,
+                    "{}: after the next merge",
+                    case.name
+                );
+            }
+        }
+    }
+
+    /// The ids each search read of `store` finds, and Gus if his text score
+    /// is given.
+    #[cfg(any(feature = "text-index", feature = "vector-index"))]
+    fn search_hits(store: &dyn GraphStoreSearch, gus: NodeId) -> Vec<(&'static str, Vec<NodeId>)> {
+        let ids = |hits: Vec<(NodeId, f64)>| -> Vec<NodeId> {
+            let mut ids: Vec<NodeId> = hits.into_iter().map(|(id, _)| id).collect();
+            ids.sort_unstable();
+            ids
+        };
+        let mut hits = Vec::new();
+        #[cfg(feature = "text-index")]
+        {
+            let scored = store.score_text(gus, "Person", "bio", "graph");
+            hits.push(("score_text", scored.map(|_| gus).into_iter().collect()));
+            hits.push((
+                "text_search",
+                ids(store.text_search("Person", "bio", "graph", 10)),
+            ));
+            hits.push((
+                "text_search_with_threshold",
+                ids(store.text_search_with_threshold("Person", "bio", "graph", 0.0)),
+            ));
+        }
+        #[cfg(feature = "vector-index")]
+        {
+            let (query, metric) = ([1.0, 0.0], DistanceMetric::Euclidean);
+            hits.push((
+                "vector_search",
+                ids(store.vector_search(Some("Person"), "embedding", &query, 10, metric)),
+            ));
+            hits.push((
+                "vector_search_with_threshold",
+                ids(store.vector_search_with_threshold(
+                    Some("Person"),
+                    "embedding",
+                    &query,
+                    1.0,
+                    metric,
+                )),
+            ));
+        }
+        hits
+    }
+
+    /// The search reads run outside `read_consistent` and drop the overlay
+    /// index's hits for base nodes deleted since the last merge. A publish
+    /// swaps the overlay before it clears the deleted sets, so a search in
+    /// its middle never pairs the old overlay's index with the cleared sets:
+    /// Gus, deleted from the base, is never found, before the merge, inside
+    /// its publish or after it. The text index holds him as the engine builds
+    /// one over the base, and his embedding copies him into the overlay,
+    /// where he stays deleted, for the vector search to find.
+    #[cfg(any(feature = "text-index", feature = "vector-index"))]
+    #[test]
+    fn a_search_inside_a_publish_never_finds_a_deleted_base_node() {
+        let layered = build_test_layered();
+        let persons = layered.nodes_by_label("Person");
+        let (alix, gus) = (persons[0], persons[1]);
+        #[cfg(feature = "text-index")]
+        {
+            use crate::index::text::{BM25Config, InvertedIndex};
+            let mut index = InvertedIndex::new(BM25Config::default());
+            index.insert(alix, "graph notes");
+            index.insert(gus, "graph notes");
+            layered
+                .overlay_store()
+                .add_text_index("Person", "bio", Arc::new(RwLock::new(index)));
+        }
+        assert!(layered.delete_node(gus));
+        for id in [alix, gus] {
+            layered.set_node_property(id, "embedding", Value::Vector(vec![1.0, 0.0].into()));
+        }
+        let overlay = search_hits(&*layered.overlay_store(), gus);
+        assert!(
+            overlay.iter().all(|(_, ids)| ids.contains(&gus)),
+            "the overlay's own searches find Gus: {overlay:?}"
+        );
+        let before = search_hits(&layered, gus);
+        assert!(
+            before.iter().all(|(_, ids)| !ids.contains(&gus)),
+            "before the merge: {before:?}"
+        );
+
+        let inside: Arc<parking_lot::Mutex<Option<Vec<(&'static str, Vec<NodeId>)>>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let found = Arc::clone(&inside);
+        layered.set_publish_hook(PublishStep::LayersSwapped, move |publishing| {
+            *found.lock() = Some(search_hits(publishing, gus));
+        });
+        layered.merge_overlay_in_place().unwrap();
+        let inside = inside
+            .lock()
+            .take()
+            .expect("the hook ran inside the publish");
+        let after = search_hits(&layered, gus);
+        assert!(
+            inside.iter().all(|(_, ids)| !ids.contains(&gus)),
+            "inside the publish: {inside:?}"
+        );
+        assert_eq!(
+            inside, after,
+            "a search inside the publish finds what one after it does"
+        );
     }
 
     /// A layered store with a base node renamed in the overlay (Alix to

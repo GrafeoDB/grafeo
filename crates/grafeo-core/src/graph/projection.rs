@@ -107,6 +107,12 @@ impl GraphProjection {
             .is_some_and(|n| self.node_matches(&n))
     }
 
+    /// Returns true if every node with `label` is in the projection: no
+    /// label filter, or a label of the spec.
+    fn label_is_projected(&self, label: &str) -> bool {
+        !self.spec.filters_labels() || self.spec.node_labels.contains(label)
+    }
+
     /// Returns true if an edge type passes the type filter.
     fn edge_type_matches(&self, edge_type: &str) -> bool {
         if !self.spec.filters_edge_types() {
@@ -361,18 +367,30 @@ impl GraphStore for GraphProjection {
             .collect()
     }
 
+    // A node with a label outside the spec is in the projection when it has
+    // a label of the spec too, and `get_node` shows it with both: the inner
+    // store's nodes with the label are filtered, in their order.
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
-        if self.spec.filters_labels() && !self.spec.node_labels.contains(label) {
-            return Vec::new();
+        let ids = self.inner.nodes_by_label(label);
+        if self.label_is_projected(label) {
+            return ids;
         }
-        self.inner.nodes_by_label(label)
+        ids.into_iter()
+            .filter(|&id| self.node_id_matches(id))
+            .collect()
     }
 
+    // Exact for a label outside the spec as well: `count(n)` reads it, not
+    // only the planner.
     fn nodes_by_label_count(&self, label: &str) -> usize {
-        if self.spec.filters_labels() && !self.spec.node_labels.contains(label) {
-            return 0;
+        if self.label_is_projected(label) {
+            return self.inner.nodes_by_label_count(label);
         }
-        self.inner.nodes_by_label_count(label)
+        self.inner
+            .nodes_by_label(label)
+            .into_iter()
+            .filter(|&id| self.node_id_matches(id))
+            .count()
     }
 
     fn node_count(&self) -> usize {
@@ -583,6 +601,45 @@ mod tests {
         assert_eq!(proj.nodes_by_label("Person").len(), 2);
         assert!(proj.nodes_by_label("City").is_empty(), "expected empty");
         assert!(proj.nodes_by_label("Software").is_empty(), "expected empty");
+    }
+
+    /// A label scan of a projection holds every node in it that has the
+    /// label, as `get_node` reports its labels, in ID order, and the count is
+    /// its length: for a label of the spec and for one outside it (`Admin`).
+    /// Vincent is an `Admin` only, outside the projection of `Person`.
+    #[test]
+    fn nodes_by_label_holds_the_projected_nodes_with_any_label() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Person", "Admin"]);
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Admin"]);
+        let mia = store.create_node(&["Admin", "Person"]);
+        let jules = store.create_node(&["City", "Admin"]);
+        let spec = ProjectionSpec::new().with_node_labels(["Person", "City"]);
+        let proj = GraphProjection::new(store, spec);
+
+        assert_eq!(proj.nodes_by_label("Admin"), [alix, mia, jules]);
+        assert_eq!(proj.nodes_by_label_count("Admin"), 3);
+        assert_eq!(proj.nodes_by_label("Person"), [alix, gus, mia]);
+        assert_eq!(proj.nodes_by_label("Missing"), []);
+        assert_eq!(proj.nodes_by_label_count("Missing"), 0);
+        assert!(proj.get_node(vincent).is_none(), "Vincent is outside");
+        for label in ["Admin", "Person", "City", "Missing"] {
+            let with_label: Vec<NodeId> = proj
+                .node_ids()
+                .into_iter()
+                .filter(|&id| {
+                    proj.get_node(id)
+                        .is_some_and(|node| node.labels.iter().any(|l| l.as_str() == label))
+                })
+                .collect();
+            assert_eq!(proj.nodes_by_label(label), with_label, "{label}");
+            assert_eq!(
+                proj.nodes_by_label_count(label),
+                with_label.len(),
+                "{label}"
+            );
+        }
     }
 
     #[test]

@@ -666,4 +666,39 @@ for fixture, offset in [("labels", 0), ("labels_indexed", 100)]:
     ]:
         case(f"AG{offset + number}", query, BOTH, fixture, is_ordered)
 
+# AH: a WHERE conjunct moves only where every variable it reads is bound (#455): a later
+#     MATCH's scan, one side of a join, the input of a CALL subquery; a filter on
+#     length(p) stays above the expand that binds p. AH9 and AH10 are the shape of #455.
+#     AH14 to AH16: a filter on a variable a WITH drops or renames is not copied onto the
+#     OPTIONAL MATCH variable of that name. AH17 to AH19: a condition without variables
+#     filters the one row a query starts from.
+#     AH111 to AH113: a key from the row looked up through the checks of the other labels
+#     (AH211 to AH213: the same with an index on `id`)
+for case_id, query, languages in [
+    ("AH1", "MATCH p = (a:Person)-[:KNOWS]->(b) WHERE length(p) >= 1 RETURN a.name AS a, b.name AS b", BOTH),
+    ("AH2", "MATCH p = (a:Person)-[:KNOWS*1..2]->(b) WHERE length(p) = 2 RETURN a.name AS a, b.name AS b", BOTH),
+    ("AH3", "MATCH (x:City), (a:Person), p = (a)-[:KNOWS]->(b) WHERE length(p) * 104 >= x.w RETURN x.name AS x, a.name AS a, b.name AS b", BOTH),
+    ("AH4", "UNWIND ['Paris'] AS u MATCH (x:City), (a:Person), (a)-[:LIVES_IN]->(c) WHERE c.name = u RETURN x.name AS x, a.name AS a", BOTH),
+    ("AH5", "MATCH (a:Person) CALL { WITH a RETURN a.age AS g } WITH * WHERE a.age = g RETURN a.name AS a, g", CYPHER),
+    ("AH6", "MATCH (a:Person) MATCH (c:City) CALL { WITH c RETURN c.w AS w } WITH * WHERE a.w + 4 = w RETURN a.name AS a, c.name AS c", CYPHER),
+    ("AH7", "MATCH (a:Person) CALL { MATCH (x:City), (y:City) RETURN x, y } WITH * WHERE a.w + 4 = x.w RETURN a.name AS a, x.name AS x, y.name AS y", CYPHER),
+    ("AH8", "MATCH (a:Person) OPTIONAL MATCH (a)-[:LIVES_IN]->(c), (x:City) WITH * WHERE c.w = a.w + 4 RETURN a.name AS a, c.name AS c, x.name AS x", CYPHER),
+    ("AH9", "MATCH (a:Person)-[:KNOWS]->(b) WHERE a.age > 25 MATCH (x:City), (y:City) WHERE x.w = a.w + 4 AND y.w = b.w + 4 RETURN a.name AS a, b.name AS b, x.name AS x, y.name AS y", CYPHER),
+    ("AH10", "MATCH (a:Person)-[:KNOWS]->(b) MATCH (x:City), (y:City) WHERE a.age > 25 AND x.w = a.w + 4 AND y.w = b.w + 4 RETURN a.name AS a, b.name AS b, x.name AS x, y.name AS y", BOTH),
+    ("AH14", "MATCH (a:Person) WHERE a.age = 30 WITH a AS x OPTIONAL MATCH (a:City)<-[:LIVES_IN]-(y) RETURN x.name AS x, a.name AS a, y.name AS y", CYPHER),
+    ("AH15", "MATCH (a:Person), (c:City) WHERE a.age = 30 WITH c AS a OPTIONAL MATCH (a)<-[:LIVES_IN]-(y) RETURN a.name AS a, y.name AS y", CYPHER),
+    ("AH16", "MATCH (a:Person) MATCH (b:Person) WHERE a.age = 30 WITH b OPTIONAL MATCH (a:City)<-[:LIVES_IN]-(y) RETURN b.name AS b, a.name AS a, y.name AS y", BOTH),
+    ("AH17", "WITH 1 AS x WHERE 1 = 1 RETURN x", CYPHER),
+    ("AH18", "CALL { RETURN 1 AS x } WITH * WHERE 1 = 1 RETURN x", BOTH),
+    ("AH19", "OPTIONAL MATCH (a:Person) WITH * WHERE 1 = 1 RETURN a.name AS a", BOTH),
+]:
+    case(case_id, query, languages)
+for fixture, offset in [("labels", 100), ("labels_indexed", 200)]:
+    for number, query in [
+        (11, "UNWIND ['r0', 'g3', 'p1', 'r2'] AS k MATCH (n:Graph:Repository {id: k}) RETURN k, n.n AS n"),
+        (12, "UNWIND ['r0', 'g3', 'p1', 'r2'] AS k MATCH (n:Repository:Graph {id: k}) RETURN k, n.n AS n"),
+        (13, "MATCH (a:Repository {id: 'r1'}) CALL (a) { MATCH (n:Graph:Repository {id: a.id}) RETURN n.n AS n } RETURN a.id AS a, n"),
+    ]:
+        case(f"AH{offset + number}", query, GQL if number == 13 else BOTH, fixture)
+
 # fmt: on

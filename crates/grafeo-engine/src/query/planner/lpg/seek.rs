@@ -9,6 +9,7 @@ use grafeo_core::execution::operators::{
 use grafeo_core::graph::GraphStoreSearch;
 
 use super::{Arc, HashMap, Result};
+use crate::query::optimizer::movable_variables;
 use crate::query::plan::{BinaryOp, FilterOp, LogicalExpression, LogicalOperator, NodeScanOp};
 
 /// The seek the planner makes of a filter over a node scan.
@@ -57,6 +58,51 @@ pub(crate) fn choose_seek<'a>(
         }
     }
     by_property
+}
+
+/// The node scan a filter's seek replaces, with the filters between them.
+pub(crate) struct CheckedScan<'a> {
+    /// The scan below the filter.
+    pub scan: &'a NodeScanOp,
+    /// The scan, as the operator it is in the plan.
+    pub operator: &'a LogicalOperator,
+    /// The filters between the filter and the scan, from the bottom up (the
+    /// order they run in): each as the operator it is in the plan, and its
+    /// predicate.
+    pub checks: Vec<(&'a LogicalOperator, &'a LogicalExpression)>,
+}
+
+/// The node scan below `filter`, directly or below filters that check the
+/// scanned node alone: each reads no other variable and may move (see
+/// [`movable_variables`]), like the checks of the other labels of a pattern
+/// such as `(t:Graph:TypeDefinition)` (see `scan.rs`). A seek for `filter`
+/// replaces the scan, and checks these predicates on the nodes it finds.
+pub(crate) fn checked_scan(filter: &FilterOp) -> Option<CheckedScan<'_>> {
+    let mut checks = Vec::new();
+    let mut below = filter.input.as_ref();
+    while let LogicalOperator::Filter(check) = below {
+        checks.push((below, &check.predicate));
+        below = &check.input;
+    }
+    let LogicalOperator::NodeScan(scan) = below else {
+        return None;
+    };
+    let checks_the_scan = |predicate: &LogicalExpression| {
+        movable_variables(predicate)
+            .is_some_and(|variables| variables.iter().all(|v| *v == scan.variable))
+    };
+    if !checks
+        .iter()
+        .all(|(_, predicate)| checks_the_scan(predicate))
+    {
+        return None;
+    }
+    checks.reverse();
+    Some(CheckedScan {
+        scan,
+        operator: below,
+        checks,
+    })
 }
 
 fn split_conjuncts<'a>(expr: &'a LogicalExpression, out: &mut Vec<&'a LogicalExpression>) {
@@ -231,18 +277,38 @@ fn collect_value_variables(expr: &LogicalExpression, out: &mut HashSet<String>) 
 }
 
 impl super::Planner {
-    /// Plans a filter over a node scan as a seek when [`choose_seek`] finds
-    /// one: the scan's input rows, each joined with the nodes its key
-    /// selects, and the filter on top, which still decides every row.
+    /// Plans a filter over a node scan (see [`checked_scan`]) as a seek when
+    /// [`choose_seek`] finds one: the scan's input rows, each joined with the
+    /// nodes its key selects, and a filter on top, which still decides every
+    /// row with the checks between the filter and the scan, then the filter's
+    /// own predicate.
     pub(super) fn try_plan_filter_with_node_seek(
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
+        let Some(CheckedScan {
+            scan,
+            operator,
+            checks,
+        }) = checked_scan(filter)
+        else {
             return Ok(None);
         };
+        // A seek looks a key up when its input row arrives: after a write in
+        // the input it would miss what the input writes for later rows (the
+        // scan reads its whole input first, see `plan_node_scan`).
+        if scan
+            .input
+            .as_deref()
+            .is_some_and(LogicalOperator::has_mutations)
+        {
+            return Ok(None);
+        }
+        // A property index holds the values of now (see
+        // `reads_the_current_store`); an ID is no index.
+        let current = self.reads_the_current_store();
         let Some(seek) = choose_seek(&filter.predicate, scan, |property| {
-            self.store.has_property_index(property)
+            current && self.store.has_property_index(property)
         }) else {
             return Ok(None);
         };
@@ -254,7 +320,27 @@ impl super::Planner {
                 Vec::new(),
             ),
         };
-        self.record_absorbed_scan_entry("NodeSeek", &filter.input);
+        // PROFILE entries for the scan and the checks the seek absorbs, in
+        // the order the plan's tree lists them (children first).
+        self.record_absorbed_scan_entry("NodeSeek", operator);
+        for (check, _) in &checks {
+            self.record_absorbed_scan_entry("Filter", check);
+        }
+        // `first`, the checks, then the filter's predicate: the order the
+        // chain of filters runs them in.
+        let checked = |first: Option<LogicalExpression>| {
+            first
+                .into_iter()
+                .chain(checks.iter().map(|(_, predicate)| (*predicate).clone()))
+                .rev()
+                .fold(filter.predicate.clone(), |rest, check| {
+                    LogicalExpression::Binary {
+                        left: Box::new(check),
+                        op: BinaryOp::And,
+                        right: Box::new(rest),
+                    }
+                })
+        };
         let store = Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>;
         let expression =
             |expr: &LogicalExpression, columns: &[String]| -> Result<ExpressionPredicate> {
@@ -274,23 +360,19 @@ impl super::Planner {
 
         if columns.contains(&scan.variable) {
             // The input binds the variable already (a correlated subquery):
-            // no lookup, the filter checks the bound node, label included.
-            let predicate = match &scan.label {
-                Some(label) => LogicalExpression::Binary {
-                    left: Box::new(filter.predicate.clone()),
-                    op: BinaryOp::And,
-                    right: Box::new(LogicalExpression::FunctionCall {
-                        name: "hasLabel".to_string(),
-                        args: vec![
-                            LogicalExpression::Variable(scan.variable.clone()),
-                            LogicalExpression::Literal(label.as_str().into()),
-                        ],
-                        distinct: false,
-                    }),
-                },
-                None => filter.predicate.clone(),
-            };
-            let predicate = expression(&predicate, &columns)?;
+            // no lookup, the filter checks the bound node, labels included.
+            let label = scan
+                .label
+                .as_ref()
+                .map(|label| LogicalExpression::FunctionCall {
+                    name: "hasLabel".to_string(),
+                    args: vec![
+                        LogicalExpression::Variable(scan.variable.clone()),
+                        LogicalExpression::Literal(label.as_str().into()),
+                    ],
+                    distinct: false,
+                });
+            let predicate = expression(&checked(label), &columns)?;
             return Ok(Some((
                 Box::new(FilterOperator::new(input, Box::new(predicate))),
                 columns,
@@ -305,10 +387,124 @@ impl super::Planner {
             rows = rows.with_list_key();
         }
         columns.push(scan.variable.clone());
-        let predicate = expression(&filter.predicate, &columns)?;
+        let predicate = expression(&checked(None), &columns)?;
         Ok(Some((
             Box::new(FilterOperator::new(Box::new(rows), Box::new(predicate))),
             columns,
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use grafeo_common::types::Value;
+
+    use super::*;
+
+    fn has_label(label: &str) -> LogicalExpression {
+        LogicalExpression::FunctionCall {
+            name: "hasLabel".to_string(),
+            args: vec![
+                LogicalExpression::Variable("t".to_string()),
+                LogicalExpression::Literal(Value::from(label)),
+            ],
+            distinct: false,
+        }
+    }
+
+    fn equals(left: LogicalExpression, right: LogicalExpression) -> LogicalExpression {
+        LogicalExpression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::Eq,
+            right: Box::new(right),
+        }
+    }
+
+    fn property(variable: &str, name: &str) -> LogicalExpression {
+        LogicalExpression::Property {
+            variable: variable.to_string(),
+            property: name.to_string(),
+        }
+    }
+
+    /// `t.filePath = path`, over the filters with `checks` (top down) over a
+    /// scan of `t:Graph`.
+    fn keyed_over(checks: Vec<LogicalExpression>) -> FilterOp {
+        let scan = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "t".to_string(),
+            label: Some("Graph".to_string()),
+            input: None,
+        });
+        let input = checks.into_iter().rev().fold(scan, |input, predicate| {
+            LogicalOperator::Filter(FilterOp {
+                predicate,
+                pushdown_hint: None,
+                input: Box::new(input),
+            })
+        });
+        FilterOp {
+            predicate: equals(
+                property("t", "filePath"),
+                LogicalExpression::Variable("path".to_string()),
+            ),
+            pushdown_hint: None,
+            input: Box::new(input),
+        }
+    }
+
+    #[test]
+    fn the_checks_of_the_scanned_node_are_listed_in_the_order_they_run() {
+        let kind = equals(
+            property("t", "kind"),
+            LogicalExpression::Literal(Value::from("struct")),
+        );
+        let filter = keyed_over(vec![has_label("TypeDefinition"), kind.clone()]);
+        let checked = checked_scan(&filter).expect("both filters check t alone");
+        assert_eq!(checked.scan.label.as_deref(), Some("Graph"));
+        assert!(matches!(checked.operator, LogicalOperator::NodeScan(_)));
+        let predicates: Vec<String> = checked
+            .checks
+            .iter()
+            .map(|(_, predicate)| format!("{predicate:?}"))
+            .collect();
+        assert_eq!(
+            predicates,
+            [
+                format!("{kind:?}"),
+                format!("{:?}", has_label("TypeDefinition"))
+            ]
+        );
+
+        let direct = keyed_over(Vec::new());
+        assert!(
+            checked_scan(&direct).is_some_and(|checked| checked.checks.is_empty()),
+            "a filter right on the scan has no checks"
+        );
+    }
+
+    /// A filter between that reads another variable, holds a subquery or
+    /// calls a volatile function is no check of the scanned node alone.
+    #[test]
+    fn other_filters_between_keep_the_scan() {
+        let other_variable = equals(property("t", "owner"), property("f", "name"));
+        let volatile = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::FunctionCall {
+                name: "rand".to_string(),
+                args: Vec::new(),
+                distinct: false,
+            }),
+            op: BinaryOp::Lt,
+            right: Box::new(property("t", "share")),
+        };
+        let subquery =
+            LogicalExpression::ExistsSubquery(Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "t".to_string(),
+                label: Some("TypeDefinition".to_string()),
+                input: None,
+            })));
+        for check in [other_variable, volatile, subquery] {
+            let filter = keyed_over(vec![has_label("TypeDefinition"), check.clone()]);
+            assert!(checked_scan(&filter).is_none(), "{check:?}");
+        }
     }
 }

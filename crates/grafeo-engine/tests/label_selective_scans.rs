@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use grafeo_common::types::Value;
-use grafeo_engine::{GrafeoDB, Session};
+use grafeo_engine::{Config, GrafeoDB, ProjectionSpec, Session};
 
 /// Nodes with `Graph` and not `Repository`.
 const GRAPH_ONLY: usize = 1988;
@@ -798,4 +798,81 @@ fn a_compacted_database_scans_the_label_with_the_fewest_nodes() {
             );
         }
     }
+}
+
+/// A projection finds the nodes of a label outside its spec that are in it.
+/// The projection of `Person` holds Alix (`Person` and `Admin`), Gus and Mia;
+/// Vincent, Jules and Butch are `Admin` only, outside it. In the projection
+/// `Admin` has one node and `Person` three, so a pattern with both scans
+/// `Admin`: the count of a label outside the spec is the exact number of its
+/// nodes in the projection (in the graph `Admin` has four, more than `Person`).
+#[test]
+fn a_projection_finds_the_nodes_of_a_label_outside_its_spec() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute(
+        "INSERT (:Person:Admin {name: 'Alix'}), (:Person {name: 'Gus'}), (:Person {name: 'Mia'})",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT (:Admin {name: 'Vincent'}), (:Admin {name: 'Jules'}), (:Admin {name: 'Butch'})",
+    )
+    .unwrap();
+    assert!(
+        db.create_projection("people", ProjectionSpec::new().with_node_labels(["Person"]))
+            .unwrap()
+    );
+    let view =
+        GrafeoDB::with_read_store(db.projection("people").unwrap(), Config::in_memory()).unwrap();
+    let session = view.session();
+    let alix = ids(&["Alix"]);
+    let one = vec![vec![Value::Int64(1)]];
+    for language in LANGUAGES {
+        let where_label = sorted(
+            &session,
+            language,
+            "MATCH (n:Person) WHERE n:Admin RETURN n.name",
+            &[],
+        );
+        assert_eq!(where_label, alix, "{language:?} the label checked per row");
+        for (query, expected) in [
+            ("MATCH (n:Person:Admin) RETURN n.name", &where_label),
+            ("MATCH (n:Admin:Person) RETURN n.name", &where_label),
+            ("MATCH (n:Admin) RETURN n.name", &alix),
+            ("MATCH (n:Person:Admin) RETURN count(n)", &one),
+            ("MATCH (n:Admin) RETURN count(n)", &one),
+            ("MATCH (n) WHERE 'Admin' IN labels(n) RETURN n.name", &alix),
+            (
+                "MATCH (n:Person) RETURN n.name",
+                &ids(&["Alix", "Gus", "Mia"]),
+            ),
+        ] {
+            assert_eq!(
+                &sorted(&session, language, query, &[]),
+                expected,
+                "{language:?} `{query}` on the projection"
+            );
+        }
+        for pattern in ["(n:Person:Admin)", "(n:Admin:Person)"] {
+            let plan = plan_text(
+                &session,
+                language,
+                &format!("EXPLAIN MATCH {pattern} RETURN n.name"),
+            );
+            assert_eq!(
+                scans(&plan),
+                ["NodeScan (n:Admin)"],
+                "{language:?} {pattern} scans the label with the fewest nodes in the projection:\n{plan}"
+            );
+        }
+    }
+    assert_eq!(
+        sorted(
+            &db.session(),
+            Language::Gql,
+            "MATCH (n:Admin) RETURN count(n)",
+            &[]
+        ),
+        vec![vec![Value::Int64(4)]],
+        "the graph itself has four Admin nodes"
+    );
 }

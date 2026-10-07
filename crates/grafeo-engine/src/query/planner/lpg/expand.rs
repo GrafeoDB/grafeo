@@ -1,5 +1,6 @@
 //! Relationship expansion and factorized chain planning.
 
+use super::reachability::ReachabilityMode;
 use super::{
     Arc, Direction, Error, ExecutionPathMode, ExpandDirection, ExpandOp, ExpandOperator,
     ExpandStep, GraphStoreSearch, LazyFactorizedChainOperator, LogicalOperator, Operator, PathMode,
@@ -33,11 +34,7 @@ impl super::Planner {
             ExpandDirection::Both => Direction::Both,
         };
 
-        // Check if this is a variable-length path. The GQL, Cypher and SQL/PGQ
-        // translators set `quantified` for one; other plans (Gremlin, built
-        // in code) only set hop bounds, so those count too.
-        let is_variable_length =
-            expand.quantified || expand.min_hops != 1 || expand.max_hops != Some(1);
+        let is_variable_length = expand.is_variable_length();
 
         // Use VariableLengthExpandOperator when multi-hop OR when a named path
         // needs path detail columns (length, nodes, edges)
@@ -88,6 +85,15 @@ impl super::Planner {
             }
             if binds_edge_list {
                 expand_op = expand_op.with_edge_list_output();
+            }
+            match self.reachability_mode(expand) {
+                Some(ReachabilityMode::PerInputRow) => {
+                    expand_op = expand_op.with_reachability();
+                }
+                Some(ReachabilityMode::AcrossInputRows) => {
+                    expand_op = expand_op.with_reachability_across_rows();
+                }
+                None => {}
             }
 
             Box::new(expand_op)

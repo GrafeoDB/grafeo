@@ -182,8 +182,9 @@ fn value_variables(expr: &LogicalExpression) -> Option<HashSet<String>> {
 /// An allowlist on purpose: a function not listed (every clock and random
 /// function among them) keeps the scan and its filter, so a missing name costs
 /// speed, never rows. The evaluator dispatches functions by name, so this list
-/// cannot come from it yet (#540).
-fn deterministic(name: &str, arity: usize) -> bool {
+/// cannot come from it yet (#540). The reachability search of variable-length
+/// expands uses it too (see `reachability.rs`).
+pub(super) fn deterministic(name: &str, arity: usize) -> bool {
     const PURE: [&str; 39] = [
         "tostring",
         "tostringornull",

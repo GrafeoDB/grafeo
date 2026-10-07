@@ -101,6 +101,7 @@ mod filter_hybrid;
 mod join;
 mod mutation;
 mod project;
+pub(crate) mod reachability;
 pub(crate) mod scan;
 pub(crate) mod seek;
 mod subquery;
@@ -270,6 +271,10 @@ pub struct Planner {
     /// `Cell::replace`, recurse, then restore. This handles nested
     /// LIMITs (e.g. subqueries) without state leaking across scopes.
     pub(super) limit_hint: std::cell::Cell<Option<usize>>,
+    /// The addresses of the expands of the plan being planned that run as a
+    /// reachability search (see [`reachability`]), with their mode, found when
+    /// planning starts; `None` with the search turned off, which only tests do.
+    reachability_expands: std::cell::RefCell<Option<Vec<(usize, reachability::ReachabilityMode)>>>,
 }
 
 impl Planner {
@@ -309,6 +314,7 @@ impl Planner {
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
+            reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
         }
     }
 
@@ -379,6 +385,7 @@ impl Planner {
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
+            reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
         }
     }
 
@@ -455,6 +462,15 @@ impl Planner {
     #[must_use]
     pub fn with_factorized_execution(mut self, enabled: bool) -> Self {
         self.factorized_execution = enabled;
+        self
+    }
+
+    /// Lets variable-length expands run as a reachability search where
+    /// [`reachability`] allows it (the default); off, every walk is
+    /// enumerated, which tests compare with.
+    #[must_use]
+    pub(crate) fn with_reachability(mut self, enabled: bool) -> Self {
+        self.reachability_expands = std::cell::RefCell::new(enabled.then(Vec::new));
         self
     }
 
@@ -683,6 +699,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
+        self.find_reachability_expands(&logical_plan.root);
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
         let operator = self.shuffled_root(logical_plan, operator);
         Ok(PhysicalPlan {
@@ -708,6 +725,7 @@ impl Planner {
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
+        self.find_reachability_expands(&logical_plan.root);
 
         let result = self.plan_operator(&logical_plan.root);
 
@@ -732,6 +750,7 @@ impl Planner {
     /// Returns an error if the logical plan contains unsupported operators
     /// or invalid expressions.
     pub fn plan_adaptive(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
+        self.find_reachability_expands(&logical_plan.root);
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
         let operator = self.shuffled_root(logical_plan, operator);
 
@@ -743,6 +762,30 @@ impl Planner {
             columns,
             adaptive_context: Some(adaptive_context),
         })
+    }
+
+    /// Finds the variable-length expands of `root` that run as a
+    /// reachability search, for [`Self::reachability_mode`].
+    fn find_reachability_expands(&self, root: &LogicalOperator) {
+        if let Some(found) = self.reachability_expands.borrow_mut().as_mut() {
+            *found = reachability::reachability_expands(root)
+                .into_iter()
+                .map(|(expand, mode)| (std::ptr::from_ref(expand).addr(), mode))
+                .collect();
+        }
+    }
+
+    /// How `expand` runs as a reachability search, if it does. A copy of the
+    /// plan made while planning has other addresses, so its expands enumerate
+    /// their walks: slower, never wrong.
+    fn reachability_mode(&self, expand: &ExpandOp) -> Option<reachability::ReachabilityMode> {
+        let address = std::ptr::from_ref(expand).addr();
+        self.reachability_expands
+            .borrow()
+            .as_ref()?
+            .iter()
+            .find(|(found, _)| *found == address)
+            .map(|(_, mode)| *mode)
     }
 
     /// Collects cardinality estimates from the logical plan into an adaptive context.
@@ -941,8 +984,14 @@ impl Planner {
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         if self.profiling.get() {
             let (physical, columns) = result?;
-            let (entry, stats) =
-                crate::query::profile::ProfileEntry::new(physical.name(), op.display_label());
+            let mut label = op.display_label();
+            if let LogicalOperator::Expand(expand) = op
+                && let Some(mode) = self.reachability_mode(expand)
+            {
+                label.push(' ');
+                label.push_str(mode.marker());
+            }
+            let (entry, stats) = crate::query::profile::ProfileEntry::new(physical.name(), label);
             let profiled = grafeo_core::execution::ProfiledOperator::new(physical, stats);
             self.profile_entries.borrow_mut().push(entry);
             Ok((Box::new(profiled), columns))

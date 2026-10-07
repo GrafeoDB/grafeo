@@ -701,4 +701,23 @@ for fixture, offset in [("labels", 100), ("labels_indexed", 200)]:
     ]:
         case(f"AH{offset + number}", query, GQL if number == 13 else BOTH, fixture)
 
+# AI: the distinct nodes (#463) a variable-length pattern reaches (DISTINCT, count(DISTINCT), min,
+#     max): each node once per source instead of once per walk, round the KNOWS triangle,
+#     back along the first edge and across edge types; once over all sources when only the
+#     end nodes are read (AI9 and AI11), once per source when the source is read (AI10)
+for case_id, query in [
+    ("AI1", "MATCH (a:Person {name: 'Alix'})-[*1..2]-(b) RETURN DISTINCT b.name AS b"),
+    ("AI2", "MATCH (a:Person {name: 'Alix'})-[:KNOWS*2..3]-(b) RETURN DISTINCT b.name AS b"),
+    ("AI3", "MATCH (a:Person)-[:KNOWS*0..2]->(b) RETURN DISTINCT b.name AS b"),
+    ("AI4", "MATCH (a:Person)-[:KNOWS*1..3]-(b) RETURN a.name AS a, count(DISTINCT b) AS n"),
+    ("AI5", "MATCH (a:Person)-[*1..2]->(b) WHERE b.age > 26 RETURN min(b.age) AS lo, max(b.age) AS hi"),
+    ("AI6", "MATCH (a:Person {name: 'Gus'})<-[:KNOWS*1..3]-(b) RETURN DISTINCT b.name AS b"),
+    ("AI7", "MATCH (a:Person)-[*1..2]-(c:City) RETURN DISTINCT c.name AS c"),
+    ("AI8", "MATCH (a:Person {name: 'Jules'})-[*1..3]-(b) WITH DISTINCT b RETURN b.name AS name, b.w AS w"),
+    ("AI9", "MATCH (a:Person)-[:KNOWS*2..3]->(b) RETURN DISTINCT b.name AS b"),
+    ("AI10", "MATCH (a:Person)-[:KNOWS*1..3]-(b) RETURN DISTINCT a.name AS a, b.name AS b"),
+    ("AI11", "MATCH (a:Person)-[*1..2]-(b) WITH b.name AS name RETURN DISTINCT name"),
+]:
+    case(case_id, query)
+
 # fmt: on

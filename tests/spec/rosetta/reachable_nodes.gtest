@@ -1,0 +1,137 @@
+# Rosetta: the distinct nodes a variable-length pattern reaches
+#
+# A walk may repeat nodes and edges, so a variable-length pattern often
+# reaches a node by many walks: back along the edge it came in on, round a
+# cycle or a self-loop. When only the distinct end nodes are used (RETURN
+# DISTINCT, count(DISTINCT ...), min, max), each node a source reaches is
+# found once instead of once per walk (once over all sources when only the
+# end nodes are returned); the results are those of the walks, including the
+# source itself when a walk comes back to it.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): KNOWS
+# Alix->Gus, Gus->Vincent, Vincent->Alix, Jules->Mia and Alix->Jules; ages
+# Alix 30, Gus 25, Vincent 40, Jules 35, Mia 28. Each test adds a KNOWS
+# self-loop on Vincent.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: The distinct nodes a variable-length pattern reaches
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # Undirected, two edges: round the triangle, back along the first edge
+  # and through the self-loop all reach Vincent again
+  - name: distinct_nodes_within_two_undirected_edges
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Vincent'})-[:KNOWS]-{1,2}(b) RETURN DISTINCT b.name AS b"
+      cypher: "MATCH (a:Person {name: 'Vincent'})-[:KNOWS*1..2]-(b) RETURN DISTINCT b.name AS b"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  # Two or three edges: Gus and Jules, one edge from Alix, are reached again
+  # by longer walks; Alix by a walk there and back
+  - name: distinct_nodes_two_or_three_undirected_edges_away
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]-{2,3}(b) RETURN DISTINCT b.name AS b"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS*2..3]-(b) RETURN DISTINCT b.name AS b"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  # Exactly two edges: Jules is one or three edges from Alix, never two
+  - name: distinct_nodes_exactly_two_undirected_edges_away
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]-{2,2}(b) RETURN DISTINCT b.name AS b"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS*2..2]-(b) RETURN DISTINCT b.name AS b"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Mia]
+        - [Vincent]
+
+  - name: count_distinct_nodes_within_three_undirected_edges
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]-{1,3}(b) RETURN count(DISTINCT b) AS n"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS*1..3]-(b) RETURN count(DISTINCT b) AS n"
+    expect:
+      rows:
+        - [5]
+
+  - name: count_distinct_nodes_per_source_within_two_edges
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->{1,2}(b) RETURN a.name AS a, count(DISTINCT b) AS n"
+      cypher: "MATCH (a:Person)-[:KNOWS*1..2]->(b) RETURN a.name AS a, count(DISTINCT b) AS n"
+    expect:
+      rows:
+        - [Alix, 4]
+        - [Gus, 2]
+        - [Jules, 1]
+        - [Vincent, 4]
+
+  # Zero to two edges: Mia herself, Jules, and Alix two edges away
+  - name: min_and_max_over_nodes_within_two_undirected_edges
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Mia'})-[:KNOWS]-{0,2}(b) RETURN min(b.age) AS youngest, max(b.age) AS oldest"
+      cypher: "MATCH (a:Person {name: 'Mia'})-[:KNOWS*0..2]-(b) RETURN min(b.age) AS youngest, max(b.age) AS oldest"
+    expect:
+      rows:
+        - [28, 35]
+
+  # Every person as a source: the sources reach the same nodes, each found
+  # once over all of them, also where one source passes a node another one
+  # reached already
+  - name: distinct_nodes_from_every_person_two_or_three_edges_away
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->{2,3}(b) RETURN DISTINCT b.name AS b"
+      cypher: "MATCH (a:Person)-[:KNOWS*2..3]->(b) RETURN DISTINCT b.name AS b"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  # The source is returned too: each node once per source
+  - name: distinct_sources_and_nodes_exactly_two_edges_away
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->{2,2}(b) RETURN DISTINCT a.name AS a, b.name AS b"
+      cypher: "MATCH (a:Person)-[:KNOWS*2..2]->(b) RETURN DISTINCT a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Mia]
+        - [Alix, Vincent]
+        - [Gus, Alix]
+        - [Gus, Vincent]
+        - [Vincent, Alix]
+        - [Vincent, Gus]
+        - [Vincent, Jules]
+        - [Vincent, Vincent]

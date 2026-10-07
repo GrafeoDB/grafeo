@@ -105,6 +105,10 @@ pub(crate) struct PlanOptions {
     /// Whether queries without `ORDER BY` return their rows in random order
     /// (the `shuffle_unordered` test option).
     pub shuffle_unordered: bool,
+    /// Whether a variable-length expand whose rows only reach a consumer that
+    /// ignores duplicate rows runs as a reachability search. Always on; tests
+    /// turn it off to compare with the plan that enumerates every walk.
+    pub reachability: bool,
 }
 
 /// Runtime configuration for creating a new session.
@@ -317,6 +321,7 @@ impl Session {
             plan_options: PlanOptions {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
+                reachability: true,
             },
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
@@ -457,6 +462,7 @@ impl Session {
             plan_options: PlanOptions {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
+                reachability: true,
             },
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
@@ -5149,6 +5155,14 @@ impl Session {
         )
     }
 
+    /// Turns the reachability search of variable-length expands on (the
+    /// default) or off, when every walk is enumerated, so tests can compare
+    /// the two plans.
+    #[cfg(test)]
+    pub(crate) fn set_reachability(&mut self, enabled: bool) {
+        self.plan_options.reachability = enabled;
+    }
+
     /// Creates a planner with transaction context and constraint validator.
     ///
     /// The `store` parameter is the graph store to plan against (use
@@ -5194,6 +5208,7 @@ impl Session {
         )
         .with_factorized_execution(self.plan_options.factorized_execution)
         .with_shuffle_unordered(self.plan_options.shuffle_unordered)
+        .with_reachability(self.plan_options.reachability)
         .with_catalog(Arc::clone(&self.catalog))
         .with_session_context(session_context)
         .with_read_only(read_only);

@@ -1038,15 +1038,35 @@ impl LogicalOperator {
     }
 }
 
+/// The text of an EXPLAIN plan, and the expands the planner runs as a
+/// reachability search, which it marks.
+struct ExplainText<'a> {
+    text: String,
+    reachability: Vec<(
+        &'a ExpandOp,
+        crate::query::planner::lpg::reachability::ReachabilityMode,
+    )>,
+}
+
+impl fmt::Write for ExplainText<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.text.push_str(s);
+        Ok(())
+    }
+}
+
 impl LogicalOperator {
     /// Formats this operator tree as a human-readable plan for EXPLAIN output.
     pub fn explain_tree(&self) -> String {
-        let mut output = String::new();
+        let mut output = ExplainText {
+            text: String::new(),
+            reachability: crate::query::planner::lpg::reachability::reachability_expands(self),
+        };
         self.fmt_tree(&mut output, 0);
-        output
+        output.text
     }
 
-    fn fmt_tree(&self, out: &mut String, depth: usize) {
+    fn fmt_tree(&self, out: &mut ExplainText<'_>, depth: usize) {
         use std::fmt::Write;
 
         let indent = "  ".repeat(depth);
@@ -1083,9 +1103,14 @@ impl LogicalOperator {
                     (min, Some(max)) => format!("*{min}..{max}"),
                     (min, None) => format!("*{min}.."),
                 };
+                let mode = out
+                    .reachability
+                    .iter()
+                    .find(|(expand, _)| std::ptr::eq(*expand, op))
+                    .map_or(String::new(), |(_, mode)| format!(" {}", mode.marker()));
                 let _ = writeln!(
                     out,
-                    "{indent}Expand ({from}){dir}[:{types}{hops}]{dir}({to})",
+                    "{indent}Expand ({from}){dir}[:{types}{hops}]{dir}({to}){mode}",
                     from = op.from_variable,
                     to = op.to_variable,
                 );
@@ -1525,6 +1550,16 @@ pub struct ExpandOp {
     /// Whether the pattern has a quantifier (`*1..1`, `{1,1}`): its edge
     /// variable then binds the list of the path's edges, also for one hop.
     pub quantified: bool,
+}
+
+impl ExpandOp {
+    /// Whether this expands a variable-length path. The GQL, Cypher and
+    /// SQL/PGQ translators set `quantified` for one; other plans (Gremlin,
+    /// built in code) only set hop bounds, so those count too.
+    #[must_use]
+    pub fn is_variable_length(&self) -> bool {
+        self.quantified || self.min_hops != 1 || self.max_hops != Some(1)
+    }
 }
 
 /// Direction for edge expansion.
@@ -3068,9 +3103,7 @@ mod tests {
             threshold,
             score_column: None,
         }));
-        let mut out = String::new();
-        plan.root.fmt_tree(&mut out, 0);
-        out
+        plan.root.explain_tree()
     }
 
     #[test]

@@ -258,6 +258,8 @@ Pushdown hints in square brackets indicate optimizer decisions:
 | `[label-first]` | Label filter applied at scan level |
 | `[index: prop]` | Property index used for filtering |
 | `[inline-filter]` | Filter merged into scan operator |
+| `[reachability]` | Variable-length expand that finds each node a row reaches once, for `DISTINCT`, `count(DISTINCT ...)`, `min` or `max`, instead of once per walk |
+| `[reachability: once]` | The same, and each node once over all rows, when nothing but the reached node is read (`RETURN DISTINCT m.id`) |
 
 EXPLAIN works the same way in Rust:
 

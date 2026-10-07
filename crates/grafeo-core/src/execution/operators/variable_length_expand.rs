@@ -5,6 +5,7 @@ use crate::execution::DataChunk;
 use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
 use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, TransactionId};
+use grafeo_common::utils::hash::FxHashSet;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -69,6 +70,24 @@ pub struct VariableLengthExpandOperator {
     output_edge_list: bool,
     /// Path traversal mode (WALK, TRAIL, SIMPLE, ACYCLIC).
     path_mode: PathMode,
+    /// Whether to emit each reachable node once instead of one row per walk
+    /// (see [`Self::with_reachability`]).
+    reachability: Reachability,
+    /// The nodes emitted for earlier input rows, with
+    /// [`Self::with_reachability_across_rows`].
+    emitted_across_rows: FxHashSet<NodeId>,
+}
+
+/// Which rows a variable-length expand emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reachability {
+    /// One row per walk.
+    Off,
+    /// Each node an input row reaches once ([`VariableLengthExpandOperator::with_reachability`]).
+    PerInputRow,
+    /// Each node once over all input rows
+    /// ([`VariableLengthExpandOperator::with_reachability_across_rows`]).
+    AcrossInputRows,
 }
 
 /// A materialized input row.
@@ -203,6 +222,8 @@ impl VariableLengthExpandOperator {
             output_path_detail: false,
             output_edge_list: false,
             path_mode: PathMode::Walk,
+            reachability: Reachability::Off,
+            emitted_across_rows: FxHashSet::default(),
         }
     }
 
@@ -230,6 +251,45 @@ impl VariableLengthExpandOperator {
     pub fn with_edge_list_output(mut self) -> Self {
         self.output_edge_list = true;
         self
+    }
+
+    /// Emits every node an input row reaches within the hop range once, at
+    /// the position of its first walk, instead of one row per walk.
+    ///
+    /// For rows that only reach an operator which ignores duplicate rows
+    /// (`DISTINCT`, `count(DISTINCT ...)`, `min`): the targets and their order
+    /// are those of the walks, with each repeat of an (input row, target)
+    /// pair left out. The edge column and the path columns hold NULL, as a
+    /// target no longer stands for one walk. Only in WALK mode: the other
+    /// path modes keep their search, where a node reached once can still be
+    /// on another path.
+    pub fn with_reachability(mut self) -> Self {
+        self.reachability = Reachability::PerInputRow;
+        self
+    }
+
+    /// Like [`Self::with_reachability`], and emits each node once over all
+    /// input rows: for the first input row that reaches it, at the position
+    /// the search per input row first emits it. For rows whose consumer reads
+    /// nothing of the input row but the target (`RETURN DISTINCT m.id`): it
+    /// sees the first row of each target, in the same order as before, and
+    /// only loses copies of rows it has seen.
+    ///
+    /// Each input row still runs its own search, with its own layers and its
+    /// own emitted nodes; only its output leaves out the nodes emitted for
+    /// earlier rows. A node an earlier row emitted can be a stepping stone for
+    /// this one: reached at another depth, or below `min_hops`, it leads on
+    /// to nodes only this row reaches within `max_hops`, so the search must
+    /// expand it as if it were new.
+    pub fn with_reachability_across_rows(mut self) -> Self {
+        self.reachability = Reachability::AcrossInputRows;
+        self
+    }
+
+    /// Whether this expand runs the reachability search of
+    /// [`Self::with_reachability`].
+    fn searches_reachability(&self) -> bool {
+        self.reachability != Reachability::Off && self.path_mode == PathMode::Walk
     }
 
     /// Sets the chunk capacity.
@@ -374,6 +434,9 @@ impl VariableLengthExpandOperator {
 
     /// Process one input row, generating all reachable outputs.
     fn process_input_row(&self, input_idx: usize, source_node: NodeId) -> Vec<OutputRow> {
+        if self.searches_reachability() {
+            return self.reachable_targets(input_idx, source_node);
+        }
         let mut results = Vec::new();
         let needs_edges = self.output_path_detail || self.output_edge_list;
         let needs_tracking = needs_edges || self.path_mode != PathMode::Walk;
@@ -483,6 +546,69 @@ impl VariableLengthExpandOperator {
         results
     }
 
+    /// The targets of one input row in reachability mode, each once.
+    ///
+    /// Layer `L` is the set of nodes a walk of exactly `L` edges ends at, in
+    /// the order the walk BFS above first reaches them. That BFS emits every
+    /// walk of `L` edges before the walks of `L + 1`, which extend the walks
+    /// of `L` in order, each by the edges of `get_edges`; a repeat of a node
+    /// in layer `L` only repeats the ends its first occurrence gave. So
+    /// expanding each node of layer `L` once, in order, gives layer `L + 1`
+    /// in first-reached order, and a node emitted at the first layer in
+    /// `min_hops..=max_hops` that holds it is emitted at the position of its
+    /// first walk.
+    ///
+    /// From `min_hops` on, a layer keeps only the nodes it emits: a node
+    /// emitted at an earlier layer `j` was expanded after it, and whatever it
+    /// reaches in `m` more edges is in layer `j + m`, emitted already. So
+    /// expanding it again could give no new node and change no order. Each
+    /// node is then expanded once from `min_hops` on (twice if it was in
+    /// layer `min_hops - 1`), also for the hundred hops of an unbounded
+    /// pattern.
+    fn reachable_targets(&self, input_idx: usize, source_node: NodeId) -> Vec<OutputRow> {
+        let reached = |target_id, path_length| OutputRow {
+            input_idx,
+            edge_id: None,
+            target_id,
+            path_length,
+            path_nodes: None,
+            path_edges: None,
+        };
+        let mut results = Vec::new();
+        let mut emitted: FxHashSet<NodeId> = FxHashSet::default();
+        let mut layer = vec![source_node];
+        let mut next_layer = Vec::new();
+        // The nodes of a layer below `min_hops`, which is kept whole
+        let mut in_next_layer: FxHashSet<NodeId> = FxHashSet::default();
+
+        if self.min_hops == 0 {
+            emitted.insert(source_node);
+            results.push(reached(source_node, 0));
+        }
+        for depth in 1..=self.max_hops {
+            let emitting = depth >= self.min_hops;
+            for &node in &layer {
+                for (target, _) in self.get_edges(node) {
+                    if emitting {
+                        if emitted.insert(target) {
+                            results.push(reached(target, depth));
+                            next_layer.push(target);
+                        }
+                    } else if in_next_layer.insert(target) {
+                        next_layer.push(target);
+                    }
+                }
+            }
+            if next_layer.is_empty() {
+                break;
+            }
+            std::mem::swap(&mut layer, &mut next_layer);
+            next_layer.clear();
+            in_next_layer.clear();
+        }
+        results
+    }
+
     /// Fill the output buffer with results from the next input row.
     fn fill_output_buffer(&mut self) {
         let Some(input_rows) = &self.input_rows else {
@@ -491,7 +617,10 @@ impl VariableLengthExpandOperator {
 
         while self.output_buffer.is_empty() && self.current_input_idx < input_rows.len() {
             let source_node = input_rows[self.current_input_idx].source_node;
-            let results = self.process_input_row(self.current_input_idx, source_node);
+            let mut results = self.process_input_row(self.current_input_idx, source_node);
+            if self.searches_reachability() && self.reachability == Reachability::AcrossInputRows {
+                results.retain(|row| self.emitted_across_rows.insert(row.target_id));
+            }
             self.output_buffer.extend(results);
             self.current_input_idx += 1;
         }
@@ -579,10 +708,13 @@ impl Operator for VariableLengthExpandOperator {
             }
 
             // Add edge column: the path's edges (an empty list for a
-            // zero-length path), or its last edge (Null for zero length)
+            // zero-length path), or its last edge (Null for zero length and
+            // for a reachability search, which follows no single path)
             if let Some(col) = chunk.column_mut(num_input_cols) {
-                if self.output_edge_list {
-                    let edges = edge_id_list(out_row.path_edges.as_deref().unwrap_or(&[]))?;
+                if self.output_edge_list
+                    && let Some(path_edges) = &out_row.path_edges
+                {
+                    let edges = edge_id_list(path_edges)?;
                     col.push_value(grafeo_common::types::Value::List(edges.into()));
                 } else if let Some(edge_id) = out_row.edge_id {
                     col.push_edge_id(edge_id);
@@ -594,6 +726,16 @@ impl Operator for VariableLengthExpandOperator {
             // Add target node column
             if let Some(col) = chunk.column_mut(num_input_cols + 1) {
                 col.push_node_id(out_row.target_id);
+            }
+
+            // A reachability search has no path to describe either
+            if self.searches_reachability() {
+                for col_idx in num_input_cols + 2..schema.len() {
+                    if let Some(col) = chunk.column_mut(col_idx) {
+                        col.push_value(grafeo_common::types::Value::Null);
+                    }
+                }
+                continue;
             }
 
             // Add path length column if requested
@@ -684,6 +826,7 @@ impl Operator for VariableLengthExpandOperator {
         self.input_rows = None;
         self.current_input_idx = 0;
         self.output_buffer.clear();
+        self.emitted_across_rows.clear();
         self.exhausted = false;
     }
 
@@ -1560,5 +1703,688 @@ mod tests {
             !alix_targets.contains(&vincent),
             "LIKES edge should be filtered out"
         );
+    }
+
+    // --- Reachability mode ---
+
+    /// How a test expand emits its targets.
+    #[derive(Clone, Copy)]
+    enum Search {
+        /// One row per walk.
+        Walks,
+        /// Each node once per input row ([`VariableLengthExpandOperator::with_reachability`]).
+        PerInputRow,
+        /// Each node once over all input rows
+        /// ([`VariableLengthExpandOperator::with_reachability_across_rows`]).
+        AcrossInputRows,
+    }
+
+    /// The (source, target) pairs of a variable-length expand from the nodes
+    /// `input` returns, in output order.
+    fn expand_pairs(
+        store: &Arc<LpgStore>,
+        input: Box<dyn Operator>,
+        direction: Direction,
+        edge_types: &[&str],
+        hops: (u32, u32),
+        search: Search,
+    ) -> Vec<(NodeId, NodeId)> {
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(store) as Arc<dyn GraphStoreSearch>,
+            input,
+            0,
+            direction,
+            edge_types.iter().map(ToString::to_string).collect(),
+            hops.0,
+            hops.1,
+        );
+        expand = match search {
+            Search::Walks => expand,
+            Search::PerInputRow => expand.with_reachability(),
+            Search::AcrossInputRows => expand.with_reachability_across_rows(),
+        };
+        let mut pairs = Vec::new();
+        while let Some(chunk) = expand.next().unwrap() {
+            for i in 0..chunk.row_count() {
+                pairs.push((
+                    chunk.column(0).unwrap().get_node_id(i).unwrap(),
+                    chunk.column(2).unwrap().get_node_id(i).unwrap(),
+                ));
+            }
+        }
+        pairs
+    }
+
+    fn scan(store: &Arc<LpgStore>, label: &str) -> Box<dyn Operator> {
+        Box::new(ScanOperator::with_label(
+            Arc::clone(store) as Arc<dyn GraphStoreSearch>,
+            label,
+        ))
+    }
+
+    /// `pairs` without the repeats of a pair, each pair at its first position.
+    fn first_occurrences(pairs: &[(NodeId, NodeId)]) -> Vec<(NodeId, NodeId)> {
+        let mut seen = std::collections::HashSet::new();
+        pairs
+            .iter()
+            .copied()
+            .filter(|pair| seen.insert(*pair))
+            .collect()
+    }
+
+    /// `pairs` without the repeats of a target, each target with the source of
+    /// its first pair.
+    fn first_occurrences_of_targets(pairs: &[(NodeId, NodeId)]) -> Vec<(NodeId, NodeId)> {
+        let mut seen = std::collections::HashSet::new();
+        pairs
+            .iter()
+            .copied()
+            .filter(|(_, target)| seen.insert(*target))
+            .collect()
+    }
+
+    /// Runs the walk enumeration and both reachability searches from every
+    /// node with `label`. Asserts that the search per input row emits exactly
+    /// the first walk to each (source, target) pair, and the search across
+    /// input rows the first walk to each target, in walk order. Returns the
+    /// pairs of the search per input row.
+    fn assert_reachability_matches_walks(
+        store: &Arc<LpgStore>,
+        label: &str,
+        direction: Direction,
+        edge_types: &[&str],
+        hops: (u32, u32),
+    ) -> Vec<(NodeId, NodeId)> {
+        let pairs = |search| {
+            expand_pairs(
+                store,
+                scan(store, label),
+                direction,
+                edge_types,
+                hops,
+                search,
+            )
+        };
+        let walks = pairs(Search::Walks);
+        let reached = pairs(Search::PerInputRow);
+        let context = format!("{direction:?} {edge_types:?} *{}..{}", hops.0, hops.1);
+        assert_eq!(
+            reached,
+            first_occurrences(&walks),
+            "per input row: {context}"
+        );
+        assert_eq!(
+            pairs(Search::AcrossInputRows),
+            first_occurrences_of_targets(&walks),
+            "across input rows: {context}"
+        );
+        reached
+    }
+
+    /// The targets `pairs` has for `source`, in order.
+    fn targets_of(pairs: &[(NodeId, NodeId)], source: NodeId) -> Vec<NodeId> {
+        pairs
+            .iter()
+            .filter(|(s, _)| *s == source)
+            .map(|(_, t)| *t)
+            .collect()
+    }
+
+    #[test]
+    fn reachability_chain() {
+        // Alix -> Gus -> Vincent -> Jules
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        let vincent = store.create_node(&["Node"]);
+        let jules = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "NEXT");
+        store.create_edge(gus, vincent, "NEXT");
+        store.create_edge(vincent, jules, "NEXT");
+
+        let reached =
+            assert_reachability_matches_walks(&store, "Node", Direction::Outgoing, &[], (1, 3));
+        assert_eq!(targets_of(&reached, alix), vec![gus, vincent, jules]);
+        assert_eq!(targets_of(&reached, vincent), vec![jules]);
+        assert_eq!(targets_of(&reached, jules), Vec::<NodeId>::new());
+    }
+
+    #[test]
+    fn reachability_diamond_emits_the_meeting_node_once() {
+        // Alix -> Gus -> Jules and Alix -> Vincent -> Jules: two walks to Jules
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        let vincent = store.create_node(&["Node"]);
+        let jules = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(alix, vincent, "KNOWS");
+        store.create_edge(gus, jules, "KNOWS");
+        store.create_edge(vincent, jules, "KNOWS");
+
+        let walks = expand_pairs(
+            &store,
+            scan(&store, "Node"),
+            Direction::Outgoing,
+            &[],
+            (1, 2),
+            Search::Walks,
+        );
+        assert_eq!(targets_of(&walks, alix).len(), 4);
+        let reached =
+            assert_reachability_matches_walks(&store, "Node", Direction::Outgoing, &[], (1, 2));
+        let from_alix = targets_of(&reached, alix);
+        assert_eq!(from_alix.len(), 3);
+        assert_eq!(from_alix.last(), Some(&jules));
+    }
+
+    #[test]
+    fn reachability_triangle_returns_to_the_source_once() {
+        // Alix -> Gus -> Vincent -> Alix, walked up to five times round
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        let vincent = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+        store.create_edge(vincent, alix, "KNOWS");
+
+        let reached =
+            assert_reachability_matches_walks(&store, "Node", Direction::Outgoing, &[], (1, 5));
+        assert_eq!(targets_of(&reached, alix), vec![gus, vincent, alix]);
+        assert_eq!(targets_of(&reached, vincent), vec![alix, gus, vincent]);
+        // Many times round: still one row per node
+        let reached =
+            assert_reachability_matches_walks(&store, "Node", Direction::Outgoing, &[], (1, 100));
+        assert_eq!(reached.len(), 9);
+    }
+
+    #[test]
+    fn reachability_self_loop() {
+        // Alix -> Alix and Alix -> Gus
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        store.create_edge(alix, alix, "KNOWS");
+        store.create_edge(alix, gus, "KNOWS");
+
+        for direction in [Direction::Outgoing, Direction::Incoming, Direction::Both] {
+            let reached = assert_reachability_matches_walks(&store, "Node", direction, &[], (1, 3));
+            let from_alix = targets_of(&reached, alix);
+            assert!(
+                from_alix.contains(&alix),
+                "{direction:?}: the loop reaches Alix"
+            );
+            assert_eq!(
+                from_alix.len(),
+                if direction == Direction::Incoming {
+                    1
+                } else {
+                    2
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn reachability_comes_back_to_the_source_as_walks_do() {
+        // Alix -> Gus, walked both ways: Alix - Gus - Alix is a walk of two edges
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+
+        let reached =
+            assert_reachability_matches_walks(&store, "Node", Direction::Both, &[], (1, 2));
+        assert_eq!(targets_of(&reached, alix), vec![gus, alix]);
+        assert_eq!(targets_of(&reached, gus), vec![alix, gus]);
+    }
+
+    #[test]
+    fn reachability_min_hops() {
+        // Alix -> Gus -> Vincent, walked both ways
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        let vincent = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+
+        // *0..2: the source first, as a path of no edges
+        let reached =
+            assert_reachability_matches_walks(&store, "Node", Direction::Both, &[], (0, 2));
+        assert_eq!(targets_of(&reached, alix), vec![alix, gus, vincent]);
+
+        // *2..3: Gus, one edge from Alix, is not emitted for the walk of one
+        // edge, but is for Alix - Gus - Vincent - Gus, after the nodes two
+        // edges away
+        let reached =
+            assert_reachability_matches_walks(&store, "Node", Direction::Both, &[], (2, 3));
+        let from_alix = targets_of(&reached, alix);
+        assert_eq!(from_alix.len(), 3);
+        assert_eq!(from_alix.last(), Some(&gus));
+        assert_eq!(targets_of(&reached, gus).first(), Some(&gus));
+
+        for hops in [(0, 0), (1, 1), (2, 2), (0, 3), (1, 3), (3, 3), (2, 5)] {
+            assert_reachability_matches_walks(&store, "Node", Direction::Both, &[], hops);
+            assert_reachability_matches_walks(&store, "Node", Direction::Outgoing, &[], hops);
+        }
+    }
+
+    #[test]
+    fn reachability_expands_a_node_from_below_min_hops_again() {
+        // Alix -> Gus -> Vincent, walked both ways with *3..4. Gus is one edge
+        // from Alix: expanded below min_hops, and first emitted three edges
+        // away. Vincent is two edges away (below min_hops) and four, and his
+        // only neighbor is Gus: only expanding Gus again, after his first
+        // emission, reaches him
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        let vincent = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+
+        let reached =
+            assert_reachability_matches_walks(&store, "Node", Direction::Both, &[], (3, 4));
+        let from_alix = targets_of(&reached, alix);
+        assert_eq!(from_alix.first(), Some(&gus));
+        assert_eq!(from_alix.len(), 3);
+        assert!(from_alix.contains(&vincent));
+    }
+
+    #[test]
+    fn reachability_each_direction() {
+        // Alix -> Gus, Vincent -> Gus, Gus -> Jules, Jules -> Alix
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        let vincent = store.create_node(&["Node"]);
+        let jules = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(vincent, gus, "KNOWS");
+        store.create_edge(gus, jules, "KNOWS");
+        store.create_edge(jules, alix, "KNOWS");
+
+        let outgoing =
+            assert_reachability_matches_walks(&store, "Node", Direction::Outgoing, &[], (1, 3));
+        assert_eq!(targets_of(&outgoing, vincent), vec![gus, jules, alix]);
+        let incoming =
+            assert_reachability_matches_walks(&store, "Node", Direction::Incoming, &[], (1, 3));
+        assert_eq!(targets_of(&incoming, vincent), Vec::<NodeId>::new());
+        let into_alix = targets_of(&incoming, alix);
+        assert_eq!(into_alix[..2], [jules, gus]);
+        assert_eq!(into_alix.len(), 4, "and Alix and Vincent, three edges back");
+        let both = assert_reachability_matches_walks(&store, "Node", Direction::Both, &[], (1, 3));
+        assert_eq!(targets_of(&both, vincent).len(), 4);
+    }
+
+    #[test]
+    fn reachability_edge_type_filter() {
+        // Alix -KNOWS-> Gus -KNOWS-> Vincent, Alix -LIKES-> Vincent, Gus -LIKES-> Mia
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        let vincent = store.create_node(&["Node"]);
+        let mia = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+        store.create_edge(alix, vincent, "LIKES");
+        store.create_edge(gus, mia, "LIKES");
+
+        let knows = assert_reachability_matches_walks(
+            &store,
+            "Node",
+            Direction::Outgoing,
+            &["KNOWS"],
+            (1, 2),
+        );
+        assert_eq!(targets_of(&knows, alix), vec![gus, vincent]);
+        let likes = assert_reachability_matches_walks(
+            &store,
+            "Node",
+            Direction::Outgoing,
+            &["LIKES"],
+            (1, 2),
+        );
+        assert_eq!(targets_of(&likes, alix), vec![vincent]);
+        assert_eq!(targets_of(&likes, gus), vec![mia]);
+        // Vincent is one LIKES edge and two KNOWS edges away: emitted once
+        let both = assert_reachability_matches_walks(
+            &store,
+            "Node",
+            Direction::Outgoing,
+            &["KNOWS", "LIKES"],
+            (1, 2),
+        );
+        let from_alix = targets_of(&both, alix);
+        assert_eq!(from_alix.len(), 3);
+        assert!(from_alix.contains(&mia));
+    }
+
+    #[test]
+    fn reachability_empty_input() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+
+        let pairs = expand_pairs(
+            &store,
+            scan(&store, "Missing"),
+            Direction::Both,
+            &[],
+            (0, 3),
+            Search::PerInputRow,
+        );
+        assert_eq!(pairs, Vec::<(NodeId, NodeId)>::new());
+    }
+
+    #[test]
+    fn reachability_hub_shared_by_several_sources() {
+        // Alix, Gus and Vincent each point at a hub with 20 more neighbors
+        let store = Arc::new(LpgStore::new().unwrap());
+        let sources: Vec<NodeId> = (0..3).map(|_| store.create_node(&["Source"])).collect();
+        let hub = store.create_node(&["Node"]);
+        for &source in &sources {
+            store.create_edge(source, hub, "KNOWS");
+        }
+        for _ in 0..20 {
+            let leaf = store.create_node(&["Node"]);
+            store.create_edge(hub, leaf, "KNOWS");
+        }
+
+        // Three edges: back to the hub from each of its 23 neighbors
+        let walks = expand_pairs(
+            &store,
+            scan(&store, "Source"),
+            Direction::Both,
+            &[],
+            (1, 3),
+            Search::Walks,
+        );
+        let reached =
+            assert_reachability_matches_walks(&store, "Source", Direction::Both, &[], (1, 3));
+        for &source in &sources {
+            assert_eq!(targets_of(&walks, source).len(), 1 + 23 + 23);
+            let from_source = targets_of(&reached, source);
+            assert_eq!(
+                from_source.len(),
+                1 + 23,
+                "the hub, its leaves, the sources"
+            );
+            assert_eq!(from_source[0], hub);
+            assert!(from_source.contains(&source));
+        }
+    }
+
+    #[test]
+    fn reachability_searches_once_per_input_row() {
+        // The same sources twice: every input row gets its own targets
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        let vincent = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+        store.create_edge(vincent, alix, "KNOWS");
+
+        let once = expand_pairs(
+            &store,
+            scan(&store, "Node"),
+            Direction::Both,
+            &[],
+            (1, 2),
+            Search::PerInputRow,
+        );
+        let twice_input = Box::new(crate::execution::operators::UnionOperator::new(
+            vec![scan(&store, "Node"), scan(&store, "Node")],
+            vec![LogicalType::Node],
+        ));
+        let twice = expand_pairs(
+            &store,
+            twice_input,
+            Direction::Both,
+            &[],
+            (1, 2),
+            Search::PerInputRow,
+        );
+        assert_eq!(twice, [once.clone(), once].concat());
+    }
+
+    /// 24 nodes and 50 edges of two types from a fixed pseudo-random
+    /// sequence, plus a self-loop and two parallel edges.
+    fn mixed_graph() -> Arc<LpgStore> {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let nodes: Vec<NodeId> = (0..24).map(|_| store.create_node(&["Node"])).collect();
+        let mut state: u64 = 0x5eed;
+        let mut pick = |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(state >> 33).unwrap() % bound
+        };
+        for _ in 0..50 {
+            let (from, to) = (pick(nodes.len()), pick(nodes.len()));
+            let edge_type = if pick(3) == 0 { "LIKES" } else { "KNOWS" };
+            store.create_edge(nodes[from], nodes[to], edge_type);
+        }
+        store.create_edge(nodes[0], nodes[0], "KNOWS");
+        store.create_edge(nodes[1], nodes[2], "KNOWS");
+        store.create_edge(nodes[1], nodes[2], "KNOWS");
+        store
+    }
+
+    #[test]
+    fn reachability_matches_walks_on_a_mixed_graph() {
+        let store = mixed_graph();
+        for direction in [Direction::Outgoing, Direction::Incoming, Direction::Both] {
+            for edge_types in [&[][..], &["KNOWS"][..]] {
+                for min_hops in 0..=3 {
+                    for max_hops in min_hops..=5 {
+                        assert_reachability_matches_walks(
+                            &store,
+                            "Node",
+                            direction,
+                            edge_types,
+                            (min_hops, max_hops),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reachability_across_rows_expands_nodes_emitted_for_earlier_rows() {
+        // Alix -> Gus -> Django -> Mia, and Jules -> Vincent -> Mia -> Butch.
+        // With *2..3, Alix emits Django and Mia, and Mia (three edges away)
+        // is as far as Alix goes. Jules reaches Mia two edges away: emitted
+        // already, so not emitted again, but Butch is three edges from Jules
+        // through Mia, and from no one else
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Source"]);
+        let jules = store.create_node(&["Source"]);
+        let gus = store.create_node(&["Node"]);
+        let django = store.create_node(&["Node"]);
+        let vincent = store.create_node(&["Node"]);
+        let mia = store.create_node(&["Node"]);
+        let butch = store.create_node(&["Node"]);
+        for (from, to) in [
+            (alix, gus),
+            (gus, django),
+            (django, mia),
+            (jules, vincent),
+            (vincent, mia),
+            (mia, butch),
+        ] {
+            store.create_edge(from, to, "KNOWS");
+        }
+
+        let per_row =
+            assert_reachability_matches_walks(&store, "Source", Direction::Outgoing, &[], (2, 3));
+        assert_eq!(
+            per_row,
+            vec![(alix, django), (alix, mia), (jules, mia), (jules, butch)]
+        );
+        let across = expand_pairs(
+            &store,
+            scan(&store, "Source"),
+            Direction::Outgoing,
+            &[],
+            (2, 3),
+            Search::AcrossInputRows,
+        );
+        // Gus and Vincent, one edge from a source, stay out
+        assert_eq!(across, vec![(alix, django), (alix, mia), (jules, butch)]);
+    }
+
+    #[test]
+    fn reachability_across_rows_emits_a_source_once_too() {
+        // Alix -> Gus, both sources: with *0..1 Gus is a target of Alix
+        // before Gus is a source
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Source"]);
+        let gus = store.create_node(&["Source"]);
+        store.create_edge(alix, gus, "KNOWS");
+
+        let across = |direction| {
+            expand_pairs(
+                &store,
+                scan(&store, "Source"),
+                direction,
+                &[],
+                (0, 1),
+                Search::AcrossInputRows,
+            )
+        };
+        assert_eq!(across(Direction::Outgoing), vec![(alix, alix), (alix, gus)]);
+        assert_eq!(across(Direction::Incoming), vec![(alix, alix), (gus, gus)]);
+        assert_reachability_matches_walks(&store, "Source", Direction::Both, &[], (0, 1));
+    }
+
+    #[test]
+    fn reachability_across_rows_over_repeated_input_rows() {
+        // The same sources twice: the second copy reaches nothing new
+        let store = mixed_graph();
+        let twice_input = Box::new(crate::execution::operators::UnionOperator::new(
+            vec![scan(&store, "Node"), scan(&store, "Node")],
+            vec![LogicalType::Node],
+        ));
+        let once = expand_pairs(
+            &store,
+            scan(&store, "Node"),
+            Direction::Both,
+            &[],
+            (1, 3),
+            Search::AcrossInputRows,
+        );
+        let twice = expand_pairs(
+            &store,
+            twice_input,
+            Direction::Both,
+            &[],
+            (1, 3),
+            Search::AcrossInputRows,
+        );
+        assert!(once.len() > 1);
+        assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn reachability_across_rows_starts_over_after_reset() {
+        let store = mixed_graph();
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            scan(&store, "Node"),
+            0,
+            Direction::Both,
+            vec![],
+            1,
+            2,
+        )
+        .with_reachability_across_rows();
+        fn targets(expand: &mut VariableLengthExpandOperator) -> Vec<NodeId> {
+            let mut targets = Vec::new();
+            while let Some(chunk) = expand.next().unwrap() {
+                for i in 0..chunk.row_count() {
+                    targets.push(chunk.column(2).unwrap().get_node_id(i).unwrap());
+                }
+            }
+            targets
+        }
+        let first = targets(&mut expand);
+        assert!(first.len() > 1);
+        expand.reset();
+        assert_eq!(targets(&mut expand), first);
+    }
+
+    #[test]
+    fn reachability_leaves_edge_and_path_columns_null() {
+        // Alix -> Gus -> Vincent
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        let vincent = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            scan(&store, "Node"),
+            0,
+            Direction::Both,
+            vec![],
+            0,
+            2,
+        )
+        .with_edge_list_output()
+        .with_path_length_output()
+        .with_reachability();
+        let mut rows = 0;
+        while let Some(chunk) = expand.next().unwrap() {
+            assert_eq!(chunk.column_count(), 4, "source, edge, target, length");
+            for i in 0..chunk.row_count() {
+                assert!(chunk.column(2).unwrap().get_node_id(i).is_some());
+                assert!(chunk.column(1).unwrap().is_null(i), "edge column");
+                assert!(chunk.column(3).unwrap().is_null(i), "path length column");
+                rows += 1;
+            }
+        }
+        // Each of the three reaches all three
+        assert_eq!(rows, 9);
+    }
+
+    #[test]
+    fn reachability_applies_to_walks_only() {
+        // Alix -> Gus -> Alix: a trail stops where a walk goes on
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, alix, "KNOWS");
+
+        let pairs = |reachability: bool| {
+            let mut expand = VariableLengthExpandOperator::new(
+                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                scan(&store, "Node"),
+                0,
+                Direction::Outgoing,
+                vec![],
+                1,
+                4,
+            )
+            .with_path_mode(PathMode::Trail);
+            if reachability {
+                expand = expand.with_reachability();
+            }
+            let mut count = 0;
+            while let Some(chunk) = expand.next().unwrap() {
+                count += chunk.row_count();
+            }
+            count
+        };
+        assert_eq!(pairs(true), pairs(false));
+        assert_eq!(pairs(false), 4, "two trails from each node");
     }
 }

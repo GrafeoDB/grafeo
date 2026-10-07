@@ -285,11 +285,15 @@ impl<'s> ChunkStreamReader<'s> {
         self.position == self.current.len() && self.next == self.indices.len()
     }
 
-    /// Fetches the next piece, or `None` after the last one.
-    fn next_piece(&mut self) -> Result<Option<Bytes>> {
-        let Some(&index) = self.indices.get(self.next) else {
-            return Ok(None);
-        };
+    /// The chunk of the piece at `position` of the stream's pieces, refused
+    /// when it has a codec.
+    fn piece_meta(&self, position: usize) -> Result<(usize, ChunkMeta)> {
+        let index = *self.indices.get(position).ok_or_else(|| {
+            Error::Internal(format!(
+                "stream {} of graph {}: piece {position} is out of range",
+                self.stream, self.graph_id
+            ))
+        })?;
         let meta = self.source.chunks().get(index).copied().ok_or_else(|| {
             Error::Internal(format!(
                 "stream {} of graph {}: chunk {index} is out of range",
@@ -303,6 +307,11 @@ impl<'s> ChunkStreamReader<'s> {
                 self.stream, self.graph_id, meta.row_start, meta.codec
             )));
         }
+        Ok((index, meta))
+    }
+
+    /// Refuses a piece that does not start where the pieces read so far end.
+    fn check_offset(&self, meta: &ChunkMeta) -> Result<()> {
         if meta.row_start != self.offset {
             return Err(Error::Serialization(format!(
                 "stream {} of graph {}: a piece starts at offset {}, expected {} (the length \
@@ -310,6 +319,16 @@ impl<'s> ChunkStreamReader<'s> {
                 self.stream, self.graph_id, meta.row_start, self.offset
             )));
         }
+        Ok(())
+    }
+
+    /// Fetches the next piece, or `None` after the last one.
+    fn next_piece(&mut self) -> Result<Option<Bytes>> {
+        if self.next == self.indices.len() {
+            return Ok(None);
+        }
+        let (index, meta) = self.piece_meta(self.next)?;
+        self.check_offset(&meta)?;
         let piece = self.source.fetch(index)?;
         self.next += 1;
         self.offset += piece.len() as u64;
@@ -361,30 +380,56 @@ pub fn read_stream(source: &dyn SectionSource, graph_id: u32, stream: u32) -> Re
     let Some(first) = reader.next_piece()? else {
         return Ok(Bytes::new());
     };
-    let Some(second) = reader.next_piece()? else {
+    if reader.next == reader.indices.len() {
         return Ok(first);
-    };
-    Ok(Bytes::from(join_pieces(&mut reader, first, second)?))
+    }
+    Ok(Bytes::from(join_pieces(&mut reader, first)?))
 }
 
-/// Joins `first`, `second` and the pieces left in `reader` into one buffer
-/// without spare capacity.
+/// Joins `first` and the pieces left in `reader` (at least one) into one
+/// buffer of exactly the stream's length, allocated once.
 ///
-/// The buffer is not sized from the pieces' offsets in advance: they are
-/// checked only as each piece is fetched, and a crafted offset must not
-/// request a huge allocation.
-fn join_pieces(reader: &mut ChunkStreamReader<'_>, first: Bytes, second: Bytes) -> Result<Vec<u8>> {
-    let mut joined = Vec::with_capacity(first.len() + second.len());
+/// The length is the last piece's offset plus its bytes, so the last piece is
+/// fetched right after the first. Its offset is trusted only as far as the
+/// pieces before it can reach, each at most as long as the first (a writer
+/// cuts every piece but the last at the cap): a crafted offset must not
+/// request a huge allocation. The other pieces' offsets are checked as each
+/// is fetched, and the last piece must start where they end.
+fn join_pieces(reader: &mut ChunkStreamReader<'_>, first: Bytes) -> Result<Vec<u8>> {
+    let last_position = reader.indices.len().saturating_sub(1);
+    let (last_index, last_meta) = reader.piece_meta(last_position)?;
+    let reach = (last_position as u64).saturating_mul(first.len() as u64);
+    if last_meta.row_start > reach {
+        return Err(Error::Serialization(format!(
+            "stream {} of graph {}: the last piece starts at offset {}, expected {reach} at \
+             most (the {last_position} pieces before it hold at most {reach} bytes)",
+            reader.stream, reader.graph_id, last_meta.row_start
+        )));
+    }
+    let last = reader.source.fetch(last_index)?;
+    let length = last_meta
+        .row_start
+        .checked_add(last.len() as u64)
+        .and_then(|length| usize::try_from(length).ok())
+        .ok_or_else(|| {
+            Error::Serialization(format!(
+                "stream {} of graph {}: {} bytes do not fit this platform",
+                reader.stream, reader.graph_id, last_meta.row_start
+            ))
+        })?;
+    let mut joined = Vec::with_capacity(length);
     joined.extend_from_slice(&first);
     drop(first);
-    joined.extend_from_slice(&second);
-    drop(second);
-    while let Some(piece) = reader.next_piece()? {
+    while reader.next < last_position {
+        let Some(piece) = reader.next_piece()? else {
+            break;
+        };
         joined.extend_from_slice(&piece);
     }
-    // Growing by doubling can leave up to the stream's length unused, and
-    // `Bytes::from` keeps the whole allocation.
-    joined.shrink_to_fit();
+    reader.check_offset(&last_meta)?;
+    reader.next = reader.indices.len();
+    reader.offset += last.len() as u64;
+    joined.extend_from_slice(&last);
     Ok(joined)
 }
 
@@ -808,8 +853,7 @@ mod tests {
         let section = image.section_source(SectionType::CompactStore).unwrap();
         let mut reader = ChunkStreamReader::new(&*section, 0, 0);
         let first = reader.next_piece().unwrap().unwrap();
-        let second = reader.next_piece().unwrap().unwrap();
-        let joined = join_pieces(&mut reader, first, second).unwrap();
+        let joined = join_pieces(&mut reader, first).unwrap();
         assert_eq!(
             first_difference(&joined, &stream),
             None,
@@ -822,6 +866,118 @@ mod tests {
         );
         let read = read_stream(&*section, 0, 0).unwrap();
         assert_eq!(first_difference(&read, &stream), None, "read_stream");
+    }
+
+    /// A section source that notes which chunks were fetched, in order.
+    struct Fetches<'a> {
+        source: &'a dyn SectionSource,
+        fetched: std::cell::RefCell<Vec<usize>>,
+    }
+
+    impl SectionSource for Fetches<'_> {
+        fn chunks(&self) -> &[ChunkMeta] {
+            self.source.chunks()
+        }
+
+        fn fetch(&self, index: usize) -> Result<Bytes> {
+            self.fetched.borrow_mut().push(index);
+            self.source.fetch(index)
+        }
+
+        fn section_version(&self) -> u8 {
+            self.source.section_version()
+        }
+    }
+
+    /// The joined buffer is sized once, before the pieces are copied: the last
+    /// piece is fetched right after the first, and its offset plus its length
+    /// is the stream's length. Each piece is fetched once.
+    #[test]
+    fn a_joined_stream_is_sized_from_its_last_piece_before_it_is_copied() {
+        let caps = ChunkCaps {
+            max_rows: 3,
+            max_bytes: 16,
+        };
+        let stream: Vec<u8> = (0..=88u8).collect();
+        let mut image = MemoryImage::new();
+        image.begin_section(SectionType::CompactStore, 5).unwrap();
+        let mut writer = ChunkStreamWriter::new(&mut image, 0, 0, caps);
+        std::io::Write::write_all(&mut writer, &stream).unwrap();
+        writer.finish().unwrap();
+        let section = image.section_source(SectionType::CompactStore).unwrap();
+        assert_eq!(
+            section.chunks().len(),
+            6,
+            "five pieces of 16 bytes and one of 9"
+        );
+        let watched = Fetches {
+            source: &*section,
+            fetched: std::cell::RefCell::new(Vec::new()),
+        };
+        let read = read_stream(&watched, 0, 0).unwrap();
+        assert_eq!(first_difference(&read, &stream), None);
+        assert_eq!(*watched.fetched.borrow(), [0, 5, 1, 2, 3, 4]);
+    }
+
+    /// The last piece's offset sizes the buffer, so it is trusted only as far
+    /// as the pieces before it can reach (each at most as long as the first):
+    /// a crafted offset is refused before anything is allocated for it.
+    #[test]
+    fn a_last_piece_beyond_the_pieces_before_it_is_refused() {
+        for (case, last_offset) in [("far beyond", 1u64 << 40), ("one byte beyond", 33)] {
+            let mut image = MemoryImage::new();
+            image.begin_section(SectionType::CompactStore, 5).unwrap();
+            for (offset, bytes) in [
+                (0, &[3u8; 16][..]),
+                (16, &[19u8; 16][..]),
+                (last_offset, b"Gus"),
+            ] {
+                image
+                    .write_chunk(ChunkMeta::stream_piece(0, 0, offset), bytes)
+                    .unwrap();
+            }
+            let section = image.section_source(SectionType::CompactStore).unwrap();
+            let error = read_stream(&*section, 0, 0).unwrap_err();
+            assert!(
+                matches!(error, Error::Serialization(_)),
+                "{case}: {error:?}"
+            );
+            let text = error.to_string();
+            assert!(
+                text.contains(&format!("offset {last_offset}")) && text.contains("32 bytes"),
+                "{case}: {text}"
+            );
+        }
+        // A last piece that starts where the pieces before it end is read.
+        let mut image = MemoryImage::new();
+        image.begin_section(SectionType::CompactStore, 5).unwrap();
+        for (offset, bytes) in [(0, &[3u8; 16][..]), (16, &[19u8; 16][..]), (32, b"Gus")] {
+            image
+                .write_chunk(ChunkMeta::stream_piece(0, 0, offset), bytes)
+                .unwrap();
+        }
+        let section = image.section_source(SectionType::CompactStore).unwrap();
+        assert_eq!(read_stream(&*section, 0, 0).unwrap().len(), 35);
+    }
+
+    /// A last piece that does not start where the pieces before it end is
+    /// refused, as any misplaced piece is.
+    #[test]
+    fn a_last_piece_that_does_not_follow_the_others_is_refused() {
+        let mut image = MemoryImage::new();
+        image.begin_section(SectionType::CompactStore, 5).unwrap();
+        // The middle piece is short: the pieces before the last end at 20.
+        for (offset, bytes) in [(0, &[3u8; 16][..]), (16, &[19u8; 4][..]), (32, b"Mia")] {
+            image
+                .write_chunk(ChunkMeta::stream_piece(0, 0, offset), bytes)
+                .unwrap();
+        }
+        let section = image.section_source(SectionType::CompactStore).unwrap();
+        let text = read_stream(&*section, 0, 0).unwrap_err().to_string();
+        assert!(
+            text.contains("offset 32") && text.contains("expected 20"),
+            "{text}"
+        );
     }
 
     /// Where two byte strings first differ (a length counts), without printing

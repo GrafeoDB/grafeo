@@ -34,10 +34,11 @@
 //! let results = index.search(&query, 10);
 //! ```
 
-use super::VectorAccessor;
 use super::quantization::{BinaryQuantizer, ProductQuantizer, QuantizationType, ScalarQuantizer};
 use super::{HnswConfig, HnswIndex, compute_distance};
+use super::{TopologyVisitor, VectorAccessor};
 use grafeo_common::types::NodeId;
+use grafeo_common::utils::error::Result;
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -743,6 +744,30 @@ impl QuantizedHnswIndex {
     ) {
         self.hnsw
             .restore_topology(entry_point, max_level, node_data);
+    }
+
+    /// Hands the topology to `visitor` one node at a time (see
+    /// [`HnswIndex::visit_topology`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error `visitor` returns.
+    pub fn visit_topology(&self, visitor: &mut dyn TopologyVisitor) -> Result<()> {
+        self.hnsw.visit_topology(visitor)
+    }
+
+    /// Starts restoring a topology node by node (see
+    /// [`HnswIndex::begin_restore`]). The vectors this index keeps are not
+    /// touched.
+    pub fn begin_restore(&self, entry_point: Option<NodeId>, max_level: usize, node_count: usize) {
+        self.hnsw.begin_restore(entry_point, max_level, node_count);
+    }
+
+    /// Restores one node of a topology begun with
+    /// [`begin_restore`](Self::begin_restore) (see
+    /// [`HnswIndex::restore_node`]).
+    pub fn restore_node(&self, id: NodeId, layers: Vec<Vec<NodeId>>) {
+        self.hnsw.restore_node(id, layers);
     }
 
     /// Returns estimated heap memory in bytes.

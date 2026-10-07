@@ -10,6 +10,11 @@ use arcstr::ArcStr;
 use bytes::{Bytes, BytesMut};
 use grafeo_common::types::Value;
 
+use crate::codec::column_chunk::{
+    read_bitmap_body, read_bitpacked_body, read_dict_body, read_f32_vector_body,
+    read_le_words_body, write_bitmap_body, write_bitpacked_body, write_dict_body,
+    write_f32_vector_body, write_le_words_body,
+};
 use crate::codec::{BitPackedInts, BitVector, BlockEntry, DictionaryEncoding};
 
 // ── Phase 3a: Bytes-backed read helpers ──────────────────────────────
@@ -837,31 +842,19 @@ impl ColumnCodec {
     ///
     /// Fails if a length or count does not fit the format's `u32` fields.
     pub fn write_to(&self, buf: &mut Vec<u8>) -> grafeo_common::utils::error::Result<()> {
+        // The bodies of every codec but Int8Vector are column chunk bodies.
         match self {
             Self::BitPacked(bp) => {
                 buf.push(0); // discriminant
-                buf.push(bp.bits_per_value());
-                write_usize_as_u32(buf, bp.len())?;
-                write_usize_as_u32(buf, bp.word_count())?;
-                buf.extend_from_slice(bp.data_bytes().as_ref());
+                write_bitpacked_body(bp, buf)?;
             }
             Self::Dict(dict) => {
                 buf.push(1); // discriminant
-                let dict_entries = dict.dictionary();
-                write_usize_as_u32(buf, dict_entries.len())?;
-                for entry in dict_entries.iter() {
-                    let s = entry.as_ref().as_bytes();
-                    write_usize_as_u32(buf, s.len())?;
-                    buf.extend_from_slice(s);
-                }
-                write_usize_as_u32(buf, dict.code_count())?;
-                buf.extend_from_slice(dict.codes_bytes().as_ref());
+                write_dict_body(dict, buf)?;
             }
             Self::Bitmap(bv) => {
                 buf.push(2); // discriminant
-                write_usize_as_u32(buf, bv.len())?;
-                write_usize_as_u32(buf, bv.word_count())?;
-                buf.extend_from_slice(bv.data_bytes());
+                write_bitmap_body(bv, buf)?;
             }
             Self::Int8Vector { bytes, dimensions } => {
                 buf.push(3); // discriminant
@@ -871,25 +864,15 @@ impl ColumnCodec {
             }
             Self::Float64(store) => {
                 buf.push(4); // discriminant
-                let body = store.to_bytes();
-                write_usize_as_u32(buf, body.len() / 8)?;
-                buf.extend_from_slice(&body);
+                write_le_words_body(&store.to_bytes(), buf)?;
             }
             Self::Float32Vector { bytes, dimensions } => {
                 buf.push(5); // discriminant
-                buf.extend_from_slice(&dimensions.to_le_bytes());
-                let dims_bytes = (*dimensions as usize) * 4;
-                let total_components = bytes.len().checked_div(4).unwrap_or(0);
-                write_usize_as_u32(buf, total_components)?;
-                // Block-pad: ensure rows align to dims_bytes for read_from.
-                let _ = dims_bytes;
-                buf.extend_from_slice(bytes);
+                write_f32_vector_body(bytes, *dimensions, buf)?;
             }
             Self::RawI64(store) => {
                 buf.push(6); // discriminant
-                let body = store.to_bytes();
-                write_usize_as_u32(buf, body.len() / 8)?;
-                buf.extend_from_slice(&body);
+                write_le_words_body(&store.to_bytes(), buf)?;
             }
         }
         Ok(())
@@ -905,73 +888,28 @@ impl ColumnCodec {
     pub fn read_from(data: &Bytes, pos: &mut usize) -> Result<Self, &'static str> {
         // Phase 3c: take `&Bytes` so storage construction can be zero-copy
         // via `data.slice(range)` when `data` wraps a mmap (Phase 3c
-        // `Bytes::from_owner`). Scalar helpers below take `&[u8]`; we
-        // pass the underlying view.
+        // `Bytes::from_owner`). The body readers slice `data` the same way.
         let bytes = data.as_ref();
         let discriminant = *bytes.get(*pos).ok_or("truncated codec discriminant")?;
         *pos += 1;
 
         match discriminant {
             0 => {
-                // BitPacked: contiguous LE u64 words → zero-copy slice.
-                let bits = *bytes.get(*pos).ok_or("truncated bits_per_value")?;
-                *pos += 1;
-                let count = read_u32_le(bytes, pos)? as usize;
-                let word_count = read_u32_le(bytes, pos)? as usize;
-                let need = word_count
-                    .checked_mul(8)
-                    .ok_or("BitPacked word count overflow")?;
-                if *pos + need > bytes.len() {
-                    return Err("truncated BitPacked data");
-                }
-                let storage = data.slice(*pos..*pos + need);
-                *pos += need;
-                Ok(Self::BitPacked(BitPackedInts::from_bytes_storage(
-                    storage, bits, count,
-                )))
+                let packed = read_bitpacked_body(data, pos)?;
+                check_packed(&packed)?;
+                Ok(Self::BitPacked(packed))
             }
             1 => {
-                // Dict: dict header on heap; codes contiguous LE u32 → slice.
-                let dict_len = read_u32_le(bytes, pos)? as usize;
-                let mut entries: Vec<Arc<str>> = Vec::with_capacity(dict_len);
-                for _ in 0..dict_len {
-                    let slen = read_u32_le(bytes, pos)? as usize;
-                    if *pos + slen > bytes.len() {
-                        return Err("truncated dict string");
-                    }
-                    let s = std::str::from_utf8(&bytes[*pos..*pos + slen])
-                        .map_err(|_| "invalid UTF-8 in dict")?;
-                    entries.push(Arc::from(s));
-                    *pos += slen;
-                }
-                let codes_len = read_u32_le(bytes, pos)? as usize;
-                let need = codes_len.checked_mul(4).ok_or("Dict codes overflow")?;
-                if *pos + need > bytes.len() {
-                    return Err("truncated Dict codes");
-                }
-                let codes_bytes = data.slice(*pos..*pos + need);
-                *pos += need;
-                Ok(Self::Dict(DictionaryEncoding::from_bytes_storage(
-                    Arc::from(entries.into_boxed_slice()),
-                    codes_bytes,
-                    codes_len,
-                )))
+                let dict = read_dict_body(data, pos)?;
+                check_codes(&dict.codes_bytes(), dict.dictionary_size())?;
+                Ok(Self::Dict(dict))
             }
             2 => {
-                // Bitmap: contiguous LE u64 words → zero-copy slice.
-                let bit_len = read_u32_le(bytes, pos)? as usize;
-                let word_count = read_u32_le(bytes, pos)? as usize;
-                let need = word_count
-                    .checked_mul(8)
-                    .ok_or("Bitmap word count overflow")?;
-                if *pos + need > bytes.len() {
-                    return Err("truncated Bitmap data");
+                let bits = read_bitmap_body(data, pos)?;
+                if bits.word_count() < bits.len().div_ceil(64) {
+                    return Err("Bitmap body has too few words for its bits");
                 }
-                let storage = data.slice(*pos..*pos + need);
-                *pos += need;
-                Ok(Self::Bitmap(BitVector::from_bytes_storage(
-                    storage, bit_len,
-                )))
+                Ok(Self::Bitmap(bits))
             }
             3 => {
                 // Int8Vector
@@ -987,45 +925,19 @@ impl ColumnCodec {
                     dimensions,
                 })
             }
-            4 => {
-                // Float64: count of f64 values; storage is 8 bytes each.
-                let count = read_u32_le(bytes, pos)? as usize;
-                let byte_need = count.checked_mul(8).ok_or("Float64 length overflow")?;
-                if *pos + byte_need > bytes.len() {
-                    return Err("truncated Float64 data");
-                }
-                let storage = data.slice(*pos..*pos + byte_need);
-                *pos += byte_need;
-                Ok(Self::Float64(F64Store::Mapped(storage)))
-            }
+            4 => Ok(Self::Float64(F64Store::Mapped(read_le_words_body(
+                data, pos,
+            )?))),
             5 => {
-                // Float32Vector: total component count (rows * dims).
-                let dimensions = read_u16_le(bytes, pos)?;
-                let component_count = read_u32_le(bytes, pos)? as usize;
-                let byte_need = component_count
-                    .checked_mul(4)
-                    .ok_or("Float32Vector length overflow")?;
-                if *pos + byte_need > bytes.len() {
-                    return Err("truncated Float32Vector data");
-                }
-                let storage = data.slice(*pos..*pos + byte_need);
-                *pos += byte_need;
+                let (dimensions, components) = read_f32_vector_body(data, pos)?;
                 Ok(Self::Float32Vector {
-                    bytes: storage,
+                    bytes: components,
                     dimensions,
                 })
             }
-            6 => {
-                // RawI64: count of i64 values; storage is 8 bytes each.
-                let count = read_u32_le(bytes, pos)? as usize;
-                let byte_need = count.checked_mul(8).ok_or("RawI64 length overflow")?;
-                if *pos + byte_need > bytes.len() {
-                    return Err("truncated RawI64 data");
-                }
-                let storage = data.slice(*pos..*pos + byte_need);
-                *pos += byte_need;
-                Ok(Self::RawI64(I64Store::Mapped(storage)))
-            }
+            6 => Ok(Self::RawI64(I64Store::Mapped(read_le_words_body(
+                data, pos,
+            )?))),
             _ => Err("unknown codec discriminant"),
         }
     }
@@ -1344,40 +1256,13 @@ impl ColumnCodec {
                 let bits = *bytes.get(*pos).ok_or("truncated bits_per_value")?;
                 *pos += 1;
                 let (metas, bodies_start) = read_block_index(bytes, pos)?;
-                let mut all_values: Vec<u64> = Vec::new();
-                for meta in &metas {
-                    let body_start = bodies_start + meta.byte_offset as usize;
-                    let body_end = body_start + meta.byte_len as usize;
-                    if body_end > bytes.len() {
-                        return Err("BitPacked block body out of bounds");
-                    }
-                    let mut bp = body_start;
-                    let word_count = read_u32_le(bytes, &mut bp)? as usize;
-                    let mut words = Vec::with_capacity(word_count);
-                    for _ in 0..word_count {
-                        words.push(read_u64_le(bytes, &mut bp)?);
-                    }
-                    let block_bp = crate::codec::BitPackedInts::from_raw_parts(
-                        words,
-                        bits,
-                        meta.row_count as usize,
-                    );
-                    for j in 0..meta.row_count as usize {
-                        all_values.push(
-                            block_bp
-                                .get(j)
-                                .ok_or("BitPacked block index out of range")?,
-                        );
-                    }
-                }
+                let packed = read_bitpacked_blocks(bytes, bits, &metas, bodies_start)?;
                 *pos = bodies_start + total_bodies_len(&metas);
-                Ok(Self::BitPacked(
-                    crate::codec::BitPackedInts::pack_with_bits(&all_values, bits),
-                ))
+                Ok(Self::BitPacked(packed))
             }
             1 => {
                 // Dict: global dictionary header on heap; codes contiguous → slice.
-                let dict_len = read_u32_le(bytes, pos)? as usize;
+                let dict_len = dictionary_len(bytes, pos)?;
                 let mut entries: Vec<Arc<str>> = Vec::with_capacity(dict_len);
                 for _ in 0..dict_len {
                     let slen = read_u32_le(bytes, pos)? as usize;
@@ -1394,7 +1279,11 @@ impl ColumnCodec {
                 if bodies_start + total > bytes.len() {
                     return Err("Dict v2 bodies out of bounds");
                 }
+                if !total.is_multiple_of(4) {
+                    return Err("Dict codes are not whole u32 values");
+                }
                 let codes_bytes = data.slice(bodies_start..bodies_start + total);
+                check_codes(&codes_bytes, entries.len())?;
                 let code_count = total / 4;
                 *pos = bodies_start + total;
                 Ok(Self::Dict(DictionaryEncoding::from_bytes_storage(
@@ -1406,23 +1295,9 @@ impl ColumnCodec {
             2 => {
                 // Bitmap: per-block packing → materialize-on-load.
                 let (metas, bodies_start) = read_block_index(bytes, pos)?;
-                let mut all_bits: Vec<bool> = Vec::new();
-                for meta in &metas {
-                    let body_start = bodies_start + meta.byte_offset as usize;
-                    let mut bp = body_start;
-                    let word_count = read_u32_le(bytes, &mut bp)? as usize;
-                    let mut words = Vec::with_capacity(word_count);
-                    for _ in 0..word_count {
-                        words.push(read_u64_le(bytes, &mut bp)?);
-                    }
-                    let block_bv =
-                        crate::codec::BitVector::from_raw_parts(words, meta.row_count as usize);
-                    for j in 0..meta.row_count as usize {
-                        all_bits.push(block_bv.get(j).ok_or("Bitmap block index out of range")?);
-                    }
-                }
+                let bitmap = read_bitmap_blocks(bytes, &metas, bodies_start)?;
                 *pos = bodies_start + total_bodies_len(&metas);
-                Ok(Self::Bitmap(crate::codec::BitVector::from_bools(&all_bits)))
+                Ok(Self::Bitmap(bitmap))
             }
             3 => {
                 // Int8Vector: contiguous bytes → zero-copy slice.
@@ -1504,43 +1379,12 @@ impl ColumnCodec {
                 let bits = *bytes.get(*pos).ok_or("truncated bits_per_value")?;
                 *pos += 1;
                 let (metas, stats, bodies_start) = read_block_index_v3(bytes, pos)?;
-                let mut all_values: Vec<u64> = Vec::new();
-                for meta in &metas {
-                    let body_start = bodies_start + meta.byte_offset as usize;
-                    let body_end = body_start + meta.byte_len as usize;
-                    if body_end > bytes.len() {
-                        return Err("BitPacked block body out of bounds");
-                    }
-                    let mut bp = body_start;
-                    let word_count = read_u32_le(bytes, &mut bp)? as usize;
-                    let mut words = Vec::with_capacity(word_count);
-                    for _ in 0..word_count {
-                        words.push(read_u64_le(bytes, &mut bp)?);
-                    }
-                    let block_bp = crate::codec::BitPackedInts::from_raw_parts(
-                        words,
-                        bits,
-                        meta.row_count as usize,
-                    );
-                    for j in 0..meta.row_count as usize {
-                        all_values.push(
-                            block_bp
-                                .get(j)
-                                .ok_or("BitPacked block index out of range")?,
-                        );
-                    }
-                }
+                let packed = read_bitpacked_blocks(bytes, bits, &metas, bodies_start)?;
                 *pos = bodies_start + total_bodies_len(&metas);
-                Ok((
-                    Self::BitPacked(crate::codec::BitPackedInts::pack_with_bits(
-                        &all_values,
-                        bits,
-                    )),
-                    stats,
-                ))
+                Ok((Self::BitPacked(packed), stats))
             }
             1 => {
-                let dict_len = read_u32_le(bytes, pos)? as usize;
+                let dict_len = dictionary_len(bytes, pos)?;
                 let mut entries: Vec<Arc<str>> = Vec::with_capacity(dict_len);
                 for _ in 0..dict_len {
                     let slen = read_u32_le(bytes, pos)? as usize;
@@ -1557,7 +1401,11 @@ impl ColumnCodec {
                 if bodies_start + total > bytes.len() {
                     return Err("Dict v3 bodies out of bounds");
                 }
+                if !total.is_multiple_of(4) {
+                    return Err("Dict codes are not whole u32 values");
+                }
                 let codes_bytes = data.slice(bodies_start..bodies_start + total);
+                check_codes(&codes_bytes, entries.len())?;
                 let code_count = total / 4;
                 *pos = bodies_start + total;
                 Ok((
@@ -1571,26 +1419,9 @@ impl ColumnCodec {
             }
             2 => {
                 let (metas, stats, bodies_start) = read_block_index_v3(bytes, pos)?;
-                let mut all_bits: Vec<bool> = Vec::new();
-                for meta in &metas {
-                    let body_start = bodies_start + meta.byte_offset as usize;
-                    let mut bp = body_start;
-                    let word_count = read_u32_le(bytes, &mut bp)? as usize;
-                    let mut words = Vec::with_capacity(word_count);
-                    for _ in 0..word_count {
-                        words.push(read_u64_le(bytes, &mut bp)?);
-                    }
-                    let block_bv =
-                        crate::codec::BitVector::from_raw_parts(words, meta.row_count as usize);
-                    for j in 0..meta.row_count as usize {
-                        all_bits.push(block_bv.get(j).ok_or("Bitmap block index out of range")?);
-                    }
-                }
+                let bitmap = read_bitmap_blocks(bytes, &metas, bodies_start)?;
                 *pos = bodies_start + total_bodies_len(&metas);
-                Ok((
-                    Self::Bitmap(crate::codec::BitVector::from_bools(&all_bits)),
-                    stats,
-                ))
+                Ok((Self::Bitmap(bitmap), stats))
             }
             3 => {
                 let dimensions = read_u16_le(bytes, pos)?;
@@ -1865,6 +1696,9 @@ impl CompactColumn {
                 if *pos + need > bytes.len() {
                     return Err("truncated column presence bitmap");
                 }
+                if word_count < bit_len.div_ceil(64) {
+                    return Err("column presence has too few words for its rows");
+                }
                 let storage = data.slice(*pos..*pos + need);
                 *pos += need;
                 Ok(Some(BitVector::from_bytes_storage(storage, bit_len)))
@@ -1993,6 +1827,12 @@ fn read_block_index_v3(
     pos: &mut usize,
 ) -> Result<(Vec<BlockMeta>, Vec<super::zone_map::ZoneMap>, usize), &'static str> {
     let block_count = read_u32_le(data, pos)? as usize;
+    if block_count
+        .checked_mul(V3_BLOCK_META_MIN_BYTES)
+        .is_none_or(|needed| needed > data.len().saturating_sub(*pos))
+    {
+        return Err("v3 block count exceeds the bytes left");
+    }
     let mut metas = Vec::with_capacity(block_count);
     let mut stats = Vec::with_capacity(block_count);
     for _ in 0..block_count {
@@ -2010,6 +1850,158 @@ fn read_block_index_v3(
     validate_block_metas(&metas)?;
     let bodies_start = *pos;
     Ok((metas, stats, bodies_start))
+}
+
+/// The fewest bytes a v3 block index entry takes: offset, length and rows,
+/// then a zone map's null and row counts and two absent bounds.
+const V3_BLOCK_META_MIN_BYTES: usize = BLOCK_META_BYTES + 4 + 4 + 1 + 1;
+
+/// Refuses a BitPacked bit width over 64: reads would divide by zero.
+fn check_bits(bits: u8) -> Result<(), &'static str> {
+    if bits > 64 {
+        return Err("BitPacked bits per value over 64");
+    }
+    Ok(())
+}
+
+/// Refuses a bit-packed body whose reads would divide by zero (a width over
+/// 64 bits) or that has too few words for its values (they would read as
+/// missing).
+fn check_packed(packed: &BitPackedInts) -> Result<(), &'static str> {
+    let bits = packed.bits_per_value();
+    check_bits(bits)?;
+    if packed.word_count() < bitpacked_words(packed.len(), bits) {
+        return Err("BitPacked body has too few words for its values");
+    }
+    Ok(())
+}
+
+/// The words `count` values of `bits` bits (at most 64) are packed in.
+fn bitpacked_words(count: usize, bits: u8) -> usize {
+    if bits == 0 {
+        0
+    } else {
+        count.div_ceil(64 / usize::from(bits))
+    }
+}
+
+/// Reads a dictionary's entry count, refusing one the bytes left cannot hold
+/// (each entry takes at least its 4-byte length) before anything is
+/// allocated for it.
+fn dictionary_len(bytes: &[u8], pos: &mut usize) -> Result<usize, &'static str> {
+    let dict_len = read_u32_le(bytes, pos)? as usize;
+    if dict_len > bytes.len().saturating_sub(*pos) / 4 {
+        return Err("Dict dictionary count exceeds the bytes left");
+    }
+    Ok(dict_len)
+}
+
+/// Refuses a code past the dictionary, which would read as a missing value.
+fn check_codes(codes: &[u8], dictionary_len: usize) -> Result<(), &'static str> {
+    let past = codes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|&code| u32::from_le_bytes(code) as usize >= dictionary_len);
+    if past {
+        return Err("Dict code past the dictionary");
+    }
+    Ok(())
+}
+
+/// Reads a block body's `u32` word count and its words, refusing a count the
+/// body cannot hold before anything is allocated for it.
+fn read_block_words(
+    bytes: &[u8],
+    pos: &mut usize,
+    body_end: usize,
+    too_long: &'static str,
+) -> Result<Vec<u64>, &'static str> {
+    let word_count = read_u32_le(bytes, pos)? as usize;
+    if word_count
+        .checked_mul(8)
+        .is_none_or(|needed| needed > body_end.saturating_sub(*pos))
+    {
+        return Err(too_long);
+    }
+    let mut words = Vec::with_capacity(word_count);
+    for _ in 0..word_count {
+        words.push(read_u64_le(bytes, pos)?);
+    }
+    Ok(words)
+}
+
+/// Reads the BitPacked blocks of a v2 or v3 column into one packed column.
+/// A 0-bit column holds only zeros and no words: its rows are counted, and
+/// nothing is materialized.
+fn read_bitpacked_blocks(
+    bytes: &[u8],
+    bits: u8,
+    metas: &[BlockMeta],
+    bodies_start: usize,
+) -> Result<BitPackedInts, &'static str> {
+    check_bits(bits)?;
+    if bits == 0 {
+        let mut rows = 0usize;
+        for meta in metas {
+            rows = rows
+                .checked_add(meta.row_count as usize)
+                .ok_or("BitPacked row count overflow")?;
+        }
+        return Ok(BitPackedInts::from_raw_parts(Vec::new(), 0, rows));
+    }
+    let mut all_values: Vec<u64> = Vec::new();
+    for meta in metas {
+        let body_start = bodies_start + meta.byte_offset as usize;
+        let body_end = body_start + meta.byte_len as usize;
+        if body_end > bytes.len() {
+            return Err("BitPacked block body out of bounds");
+        }
+        let mut bp = body_start;
+        let words = read_block_words(
+            bytes,
+            &mut bp,
+            body_end,
+            "BitPacked block words exceed its body",
+        )?;
+        let block_bp = BitPackedInts::from_raw_parts(words, bits, meta.row_count as usize);
+        for j in 0..meta.row_count as usize {
+            all_values.push(
+                block_bp
+                    .get(j)
+                    .ok_or("BitPacked block index out of range")?,
+            );
+        }
+    }
+    Ok(BitPackedInts::pack_with_bits(&all_values, bits))
+}
+
+/// Reads the Bitmap blocks of a v2 or v3 column into one bit vector.
+fn read_bitmap_blocks(
+    bytes: &[u8],
+    metas: &[BlockMeta],
+    bodies_start: usize,
+) -> Result<BitVector, &'static str> {
+    let mut all_bits: Vec<bool> = Vec::new();
+    for meta in metas {
+        let body_start = bodies_start + meta.byte_offset as usize;
+        let body_end = body_start + meta.byte_len as usize;
+        if body_end > bytes.len() {
+            return Err("Bitmap block body out of bounds");
+        }
+        let mut bp = body_start;
+        let words = read_block_words(
+            bytes,
+            &mut bp,
+            body_end,
+            "Bitmap block words exceed its body",
+        )?;
+        let block_bv = BitVector::from_raw_parts(words, meta.row_count as usize);
+        for j in 0..meta.row_count as usize {
+            all_bits.push(block_bv.get(j).ok_or("Bitmap block index out of range")?);
+        }
+    }
+    Ok(BitVector::from_bools(&all_bits))
 }
 
 // ── Binary read helpers ─────────────────────────────────────────
@@ -4124,5 +4116,321 @@ mod tests {
             Some(Value::Int64(3)),
             "the missing row's 0 is not a minimum"
         );
+    }
+
+    // ── Crafted bodies (review of format step 2, G4) ──────────────
+
+    /// Bytes built from little-endian fields.
+    #[derive(Default)]
+    struct Body(Vec<u8>);
+
+    impl Body {
+        fn byte(mut self, value: u8) -> Self {
+            self.0.push(value);
+            self
+        }
+
+        fn u32(mut self, value: u32) -> Self {
+            self.0.extend_from_slice(&value.to_le_bytes());
+            self
+        }
+
+        fn u64(mut self, value: u64) -> Self {
+            self.0.extend_from_slice(&value.to_le_bytes());
+            self
+        }
+
+        fn text(mut self, value: &str) -> Self {
+            self = self.u32(u32::try_from(value.len()).unwrap());
+            self.0.extend_from_slice(value.as_bytes());
+            self
+        }
+
+        /// A block index entry; v3 adds an inline zone map without bounds.
+        fn block(self, v3: bool, offset: u32, len: u32, rows: u32) -> Self {
+            let entry = self.u32(offset).u32(len).u32(rows);
+            if v3 {
+                entry.u32(0).u32(rows).byte(0).byte(0)
+            } else {
+                entry
+            }
+        }
+
+        fn read_v1(self) -> Result<ColumnCodec, &'static str> {
+            ColumnCodec::read_from(&Bytes::from(self.0), &mut 0)
+        }
+
+        fn read_blocked(self, v3: bool) -> Result<ColumnCodec, &'static str> {
+            let data = Bytes::from(self.0);
+            if v3 {
+                ColumnCodec::read_from_v3(&data, &mut 0).map(|(codec, _)| codec)
+            } else {
+                ColumnCodec::read_from_v2(&data, &mut 0)
+            }
+        }
+    }
+
+    /// A v1 BitPacked body of `count` values of `bits` bits in `words` words.
+    fn bitpacked_v1(bits: u8, count: u32, words: u32) -> Body {
+        let mut body = Body::default().byte(0).byte(bits).u32(count).u32(words);
+        for _ in 0..words {
+            body = body.u64(0);
+        }
+        body
+    }
+
+    /// v1 bodies no writer produces are refused: a bit width over 64 (whose
+    /// reads would divide by zero), too few words for the values, a
+    /// dictionary count the bytes left cannot hold (which would ask for
+    /// gigabytes), a code past the dictionary (which would read as missing)
+    /// and a bitmap with too few words.
+    #[test]
+    fn crafted_v1_column_bodies_are_refused() {
+        let nine = bitpacked_v1(8, 9, 2).read_v1().unwrap();
+        assert_eq!((nine.len(), nine.get(8)), (9, Some(Value::Int64(0))));
+        let dictionary = Body::default()
+            .byte(1)
+            .u32(1)
+            .text("Alix")
+            .u32(2)
+            .u32(0)
+            .u32(0);
+        assert_eq!(
+            dictionary.read_v1().unwrap().get(1),
+            Some(Value::from("Alix"))
+        );
+
+        for (case, body, expected) in [
+            ("a bit width over 64", bitpacked_v1(65, 1, 2), "bits"),
+            ("too few words", bitpacked_v1(8, 9, 1), "words"),
+            (
+                // The shared body reader sizes nothing from the count: the
+                // first missing entry ends the read.
+                "a dictionary count",
+                Body::default().byte(1).u32(u32::MAX),
+                "truncated",
+            ),
+            (
+                "a code past the dictionary",
+                Body::default()
+                    .byte(1)
+                    .u32(1)
+                    .text("Alix")
+                    .u32(2)
+                    .u32(0)
+                    .u32(3),
+                "past the dictionary",
+            ),
+            (
+                "a bitmap with too few words",
+                Body::default().byte(2).u32(65).u32(1).u64(19),
+                "words",
+            ),
+        ] {
+            let error = body.read_v1().unwrap_err();
+            assert!(error.contains(expected), "{case}: {error}");
+        }
+    }
+
+    /// v2 and v3 bodies no writer produces are refused the same way, and a
+    /// count read from the file is checked against the bytes left before
+    /// anything is allocated for it.
+    #[test]
+    fn crafted_v2_and_v3_column_bodies_are_refused() {
+        for v3 in [false, true] {
+            let valid = Body::default()
+                .byte(1)
+                .u32(1)
+                .text("Gus")
+                .u32(1)
+                .block(v3, 0, 8, 2)
+                .u32(0)
+                .u32(0);
+            assert_eq!(
+                valid.read_blocked(v3).unwrap().get(1),
+                Some(Value::from("Gus"))
+            );
+
+            for (case, body, expected) in [
+                (
+                    "a bit width over 64",
+                    Body::default()
+                        .byte(0)
+                        .byte(65)
+                        .u32(1)
+                        .block(v3, 0, 12, 1)
+                        .u32(1)
+                        .u64(3),
+                    "bits",
+                ),
+                (
+                    "a word count",
+                    Body::default()
+                        .byte(0)
+                        .byte(8)
+                        .u32(1)
+                        .block(v3, 0, 4, 1)
+                        .u32(u32::MAX),
+                    "words",
+                ),
+                (
+                    "a dictionary count",
+                    Body::default().byte(1).u32(u32::MAX),
+                    "dictionary",
+                ),
+                (
+                    "a code past the dictionary",
+                    Body::default()
+                        .byte(1)
+                        .u32(1)
+                        .text("Gus")
+                        .u32(1)
+                        .block(v3, 0, 8, 2)
+                        .u32(0)
+                        .u32(7),
+                    "past the dictionary",
+                ),
+                (
+                    "codes cut short",
+                    Body::default()
+                        .byte(1)
+                        .u32(1)
+                        .text("Gus")
+                        .u32(1)
+                        .block(v3, 0, 6, 1)
+                        .u32(0)
+                        .byte(0)
+                        .byte(0),
+                    "codes",
+                ),
+                (
+                    "a bitmap word count",
+                    Body::default()
+                        .byte(2)
+                        .u32(1)
+                        .block(v3, 0, 4, 1)
+                        .u32(u32::MAX),
+                    "words",
+                ),
+                (
+                    "a block count",
+                    Body::default().byte(6).u32(u32::MAX),
+                    "block",
+                ),
+            ] {
+                let error = body.read_blocked(v3).unwrap_err();
+                assert!(error.contains(expected), "v3 {v3}, {case}: {error}");
+            }
+        }
+    }
+
+    /// A presence bitmap with fewer words than rows would read the rows past
+    /// its words as missing: it is refused.
+    #[test]
+    fn a_presence_bitmap_with_too_few_words_is_refused() {
+        let read = |rows: u32, words: u32| {
+            let mut body = Body::default().byte(1).u32(rows).u32(words);
+            for _ in 0..words {
+                body = body.u64(u64::MAX);
+            }
+            CompactColumn::read_present(&Bytes::from(body.0), &mut 0)
+        };
+        assert_eq!(read(64, 1).unwrap().map(|present| present.len()), Some(64));
+        let error = read(65, 1).unwrap_err();
+        assert!(error.contains("too few words"), "{error}");
+    }
+
+    /// A 0-bit column holds only zeros and no words: it is read without
+    /// materializing its values, so a block may claim 4 billion rows.
+    #[test]
+    fn a_zero_bit_column_is_read_without_materializing_its_values() {
+        for v3 in [false, true] {
+            let column = Body::default()
+                .byte(0)
+                .byte(0)
+                .u32(1)
+                .block(v3, 0, 4, u32::MAX)
+                .u32(0)
+                .read_blocked(v3)
+                .unwrap();
+            assert_eq!(column.len(), usize::try_from(u32::MAX).unwrap(), "v3 {v3}");
+            assert_eq!(column.get(88), Some(Value::Int64(0)), "v3 {v3}");
+        }
+    }
+
+    /// `write_to` writes the bytes released compact sections hold, whichever
+    /// module writes the codec bodies, and `read_from` reads them back to the
+    /// same bytes.
+    #[test]
+    fn compact_column_codec_bytes_are_unchanged() {
+        let mut cities = DictionaryBuilder::new();
+        for city in ["Amsterdam", "Berlin", "Amsterdam"] {
+            cities.add(city);
+        }
+        let cases: Vec<(&str, ColumnCodec, &[u8])> = vec![
+            (
+                "BitPacked",
+                ColumnCodec::BitPacked(BitPackedInts::pack(&[3, 19, 88])),
+                &[0, 7, 3, 0, 0, 0, 1, 0, 0, 0, 131, 9, 22, 0, 0, 0, 0, 0],
+            ),
+            (
+                "Dict",
+                ColumnCodec::Dict(cities.build()),
+                &[
+                    1, 2, 0, 0, 0, 9, 0, 0, 0, 65, 109, 115, 116, 101, 114, 100, 97, 109, 6, 0, 0,
+                    0, 66, 101, 114, 108, 105, 110, 3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+            (
+                "Bitmap",
+                ColumnCodec::Bitmap(BitVector::from_bools(&[true, false, true])),
+                &[2, 3, 0, 0, 0, 1, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                "Int8Vector",
+                ColumnCodec::int8_vector(vec![3, -19, 88, 0], 2),
+                &[3, 2, 0, 4, 0, 0, 0, 3, 237, 88, 0],
+            ),
+            (
+                "Float64",
+                ColumnCodec::float64(vec![1.88, -0.0]),
+                &[
+                    4, 2, 0, 0, 0, 20, 174, 71, 225, 122, 20, 254, 63, 0, 0, 0, 0, 0, 0, 0, 128,
+                ],
+            ),
+            (
+                "Float32Vector",
+                ColumnCodec::float32_vector(vec![3.0, -19.5, 88.0, 0.25], 2),
+                &[
+                    5, 2, 0, 4, 0, 0, 0, 0, 0, 64, 64, 0, 0, 156, 193, 0, 0, 176, 66, 0, 0, 128, 62,
+                ],
+            ),
+            (
+                "RawI64",
+                ColumnCodec::raw_i64(vec![-19, 88]),
+                &[
+                    6, 2, 0, 0, 0, 237, 255, 255, 255, 255, 255, 255, 255, 88, 0, 0, 0, 0, 0, 0, 0,
+                ],
+            ),
+        ];
+        let changed: Vec<String> = cases
+            .iter()
+            .filter_map(|(name, codec, expected)| {
+                let mut bytes = Vec::new();
+                codec.write_to(&mut bytes).unwrap();
+                (bytes != *expected).then(|| format!("{name} writes {bytes:?}"))
+            })
+            .collect();
+        assert!(changed.is_empty(), "{changed:#?}");
+        for (name, codec, _) in cases {
+            let mut bytes = Vec::new();
+            codec.write_to(&mut bytes).unwrap();
+            let mut pos = 0;
+            let back = ColumnCodec::read_from(&Bytes::from(bytes.clone()), &mut pos).unwrap();
+            assert_eq!(pos, bytes.len(), "{name}: read_from reads every byte");
+            let mut again = Vec::new();
+            back.write_to(&mut again).unwrap();
+            assert_eq!(again, bytes, "{name}: read back and written again");
+        }
     }
 }

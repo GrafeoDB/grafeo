@@ -5157,8 +5157,9 @@ impl Session {
 
     /// Turns the reachability search of variable-length expands on (the
     /// default) or off, when every walk is enumerated, so tests can compare
-    /// the two plans.
-    #[cfg(test)]
+    /// the two plans (the tests in `reachability.rs`, which need GQL and
+    /// Cypher).
+    #[cfg(all(test, feature = "gql", feature = "cypher"))]
     pub(crate) fn set_reachability(&mut self, enabled: bool) {
         self.plan_options.reachability = enabled;
     }

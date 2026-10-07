@@ -62,6 +62,9 @@ File format release: every database is now a single file in a new format, and 0.
 - **A condition without variables could fail with "Internal error: Empty plan"**: `WITH 1 AS x WHERE $p = 1 RETURN x` (also `WHERE 1 = 1`) failed instead of filtering the row.
 - **Rust: a query on a projection found no nodes for a label outside its spec**: on a projection of `Person` read through `GrafeoDB::with_read_store`, `MATCH (n:Admin)` returned nothing for a `Person` node that is also an `Admin`.
 - **Every GQL statement on a file database cost about 0.25 ms extra** ([#565](https://github.com/GrafeoDB/grafeo/issues/565)): with the `spill` feature (as in the packages), each statement created and removed a spill directory, about 0.27 ms against 0.01 to 0.03 ms for the same Cypher statement, and left an empty `<file>.spill` directory behind. The directory is now created only when a query spills.
+- **`compact()` gave some edge ids to another edge**: when a node's edges were created in another order than the nodes they lead to, an edge id could name another edge of the same node after `compact()`, so reading it returned the other edge's target and properties, and updating or deleting it changed the other edge. Each id now keeps its own edge. A database compacted by an earlier version keeps the ids it stored.
+- **Parallel edges reached from their target after `compact()` shared one id**: following two or more edges between the same two nodes backwards (`(b)<-[r]-(a)`) returned the first edge for each of them. Each edge now keeps its own id.
+- **A damaged database file could abort the process when it was opened**: counts in a compacted base or an index section were trusted before they were checked, so a damaged file could request terabytes of memory. Such a file is now refused with an error, and a vector, text or RDF ring index section that does not decode is rebuilt from the data (a damaged ring section used to fail the open).
 
 ### Result changes
 

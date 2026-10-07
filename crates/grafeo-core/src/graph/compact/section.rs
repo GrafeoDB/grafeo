@@ -1,16 +1,30 @@
 //! [`Section`](grafeo_common::storage::section::Section) implementation for [`CompactStore`].
 //!
-//! Serializes/deserializes a CompactStore to/from the `.grafeo` container
-//! format with versioned headers and CRC32 integrity.
+//! The section (version 5, since 0.6) is a metadata chunk (`CompactMeta`)
+//! and stream 0, which holds the version 4 encoding: a header, the node
+//! tables, the relationship tables, the id maps and a CRC32 of all of it.
+//! Writing holds one piece of the stream at a time, except that each column
+//! and each adjacency is encoded whole before it is written. The reader reads
+//! the stream into one buffer, which becomes the store's column storage, as a
+//! mapped spill file does. A 0.5.x file holds the version 1, 2 or 3 encoding
+//! as one raw chunk, which still loads.
 
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use grafeo_common::storage::section::{Section, SectionType};
+use grafeo_common::storage::{
+    ChunkCaps, ChunkKind, ChunkMeta, ChunkStreamWriter, SectionSink, SectionSource, check_version,
+    legacy_bytes, read_stream, stream_error,
+};
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey};
+use grafeo_common::utils::error::Error;
 use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::RwLock;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use super::CompactStore;
 use super::column::{ColumnCodec, CompactColumn};
@@ -22,13 +36,19 @@ use super::zone_map::ZoneMap;
 use crate::codec::limits::{checked_u16, checked_u32};
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 
-/// Magic bytes identifying a CompactStore section.
+/// Magic bytes identifying a CompactStore encoding.
 const MAGIC: [u8; 4] = *b"GCST";
 
-/// Current section format version: v3 plus, after each column body, which
+/// The encoding this build writes: v3 plus, after each column body, which
 /// rows have a value (#542). Phase 2c bumped 2 to 3 to embed per-block zone
-/// maps in the column index for skip pruning.
+/// maps in the column index for skip pruning. Spill files hold it as it is,
+/// and stream 0 of a version 5 section holds it.
 const FORMAT_VERSION: u8 = 4;
+
+/// The section version since 0.6: a metadata chunk, then stream 0 holding
+/// the [`FORMAT_VERSION`] encoding. Only directory entries carry it; the
+/// encoding in the stream keeps its own version byte.
+const FORMAT_VERSION_CHUNKED: u8 = 5;
 
 /// v3 layout: per-block index with per-block stats, every row has a value.
 /// Retained as a read-only compat path; files written by 0.5.42 to 0.5.44
@@ -44,10 +64,41 @@ const FORMAT_VERSION_V2: u8 = 2;
 /// this byte; 0.5.42+ writers always emit [`FORMAT_VERSION`].
 const FORMAT_VERSION_V1: u8 = 1;
 
+/// The encodings a raw chunk (0.5.x bytes) or a spill file may hold, and
+/// [`CompactStoreSection::write_with_version`] writes.
+const READABLE_ENCODINGS: [u8; 4] = [
+    FORMAT_VERSION_V1,
+    FORMAT_VERSION_V2,
+    FORMAT_VERSION_V3,
+    FORMAT_VERSION,
+];
+
+/// The stream holding the encoding.
+const COMPACT_STREAM: u32 = 0;
+
+/// The layout byte every metadata chunk of the compact module's sections
+/// starts with.
+pub(super) const META_LAYOUT: u8 = 1;
+
+/// Bytes of id map entries gathered before they go to the stream.
+const ID_MAP_PIECE: usize = 64 * 1024;
+
+/// The metadata chunk of a version 5 section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct CompactMeta {
+    /// [`META_LAYOUT`].
+    layout: u8,
+    /// The byte cap the stream was cut with; readers accept any.
+    max_bytes: u32,
+}
+
 /// Wraps a [`CompactStore`] as a container [`Section`].
 pub struct CompactStoreSection {
     store: RwLock<Option<Arc<CompactStore>>>,
     dirty: AtomicBool,
+    /// The caps the stream is cut with: [`ChunkCaps::current`] when the
+    /// section was built.
+    caps: ChunkCaps,
 }
 
 impl CompactStoreSection {
@@ -57,6 +108,7 @@ impl CompactStoreSection {
         Self {
             store: RwLock::new(Some(store)),
             dirty: AtomicBool::new(false),
+            caps: ChunkCaps::current(),
         }
     }
 
@@ -66,6 +118,7 @@ impl CompactStoreSection {
         Self {
             store: RwLock::new(None),
             dirty: AtomicBool::new(false),
+            caps: ChunkCaps::current(),
         }
     }
 
@@ -96,31 +149,75 @@ impl CompactStoreSection {
         &mut self,
         data: bytes::Bytes,
     ) -> grafeo_common::utils::error::Result<()> {
-        let store = deserialize_compact_store(&data).map_err(|e| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "CompactStore deserialization failed: {e}"
-            ))
-        })?;
+        let store = deserialize_compact_store(&data, &READABLE_ENCODINGS)
+            .map_err(|e| Error::Internal(format!("CompactStore deserialization failed: {e}")))?;
         *self.store.write() = Some(Arc::new(store));
         Ok(())
     }
 
-    /// Serializes at the requested format version.
+    /// Reads the store of a section from `data`, an encoding of one of the
+    /// versions `accepted`; its column storage slices `data`. An encoding
+    /// that does not decode is corrupt section data.
+    fn load_encoding(
+        &mut self,
+        data: Bytes,
+        accepted: &[u8],
+    ) -> grafeo_common::utils::error::Result<()> {
+        let store = deserialize_compact_store(&data, accepted)
+            .map_err(|e| Error::Serialization(format!("section CompactStore: {e}")))?;
+        *self.store.write() = Some(Arc::new(store));
+        Ok(())
+    }
+
+    /// Serializes at the requested format version (see
+    /// [`write_with_version`](Self::write_with_version)).
     ///
-    /// The default [`Section::serialize`] always writes [`FORMAT_VERSION`].
-    /// This entry point is kept (test-only outside this crate) so the
-    /// v1 compat reader can be exercised without keeping any externally
-    /// committed v1 fixtures.
+    /// [`Section::serialize`] writes [`FORMAT_VERSION`]. This entry point is
+    /// kept (test-only outside this crate) so the compat readers can be
+    /// exercised without keeping any externally committed fixtures.
     pub(crate) fn serialize_with_version(
         &self,
         version: u8,
     ) -> grafeo_common::utils::error::Result<Vec<u8>> {
-        let guard = self.store.read();
-        let store = guard.as_ref().ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal("no CompactStore to serialize".into())
-        })?;
+        let mut bytes = Vec::with_capacity(self.memory_usage());
+        self.write_with_version(version, &mut bytes)?;
+        Ok(bytes)
+    }
 
-        let mut buf = Vec::with_capacity(store.memory_bytes());
+    /// The encoding of `version` written piece by piece to `out`: each
+    /// column and each adjacency is encoded whole and then written, the id
+    /// maps in pieces of at most 64 KiB, and last the CRC32 of every byte
+    /// before it.
+    ///
+    /// The bytes depend on what the store holds, not on the order its hash
+    /// maps iterate in: columns are written in key order, and id map entries
+    /// in table order and then row order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`] when the section holds no store, `version`
+    /// is not an encoding the reader reads, or the id maps of the store do
+    /// not agree with their reverse; [`Error::Serialization`] when a name, a
+    /// length or a column does not fit the encoding; [`Error::Io`] when `out`
+    /// fails.
+    pub(crate) fn write_with_version(
+        &self,
+        version: u8,
+        out: &mut dyn io::Write,
+    ) -> grafeo_common::utils::error::Result<()> {
+        if !READABLE_ENCODINGS.contains(&version) {
+            return Err(Error::Internal(format!(
+                "CompactStore has no encoding of version {version}"
+            )));
+        }
+        let guard = self.store.read();
+        let store = guard
+            .as_ref()
+            .ok_or_else(|| Error::Internal("no CompactStore to serialize".into()))?;
+        let mut out = CrcWriter::new(out);
+        // The piece being encoded: at most one column or adjacency, or
+        // 64 KiB of id map entries, besides a few names and lengths.
+        let mut buf = Vec::new();
 
         // Header.
         buf.extend_from_slice(&MAGIC);
@@ -136,7 +233,7 @@ impl CompactStoreSection {
             let columns = nt.columns();
             let zone_maps = nt.zone_maps();
             write_len(&mut buf, columns.len())?;
-            for (key, codec) in columns {
+            for (key, codec) in in_key_order(columns) {
                 write_str(&mut buf, key.as_str())?;
                 // Zone map for this column.
                 if let Some(zm) = zone_maps.get(key) {
@@ -151,6 +248,7 @@ impl CompactStoreSection {
                     version,
                     nt.block_zone_maps().get(key).map(Vec::as_slice),
                 )?;
+                out.drain(&mut buf)?;
             }
         }
 
@@ -161,15 +259,17 @@ impl CompactStoreSection {
             write_u16(&mut buf, rt.src_table_id());
             write_u16(&mut buf, rt.dst_table_id());
             rt.fwd().write_to(&mut buf)?;
+            out.drain(&mut buf)?;
             if let Some(bwd) = rt.bwd() {
                 buf.push(1);
                 bwd.write_to(&mut buf)?;
+                out.drain(&mut buf)?;
             } else {
                 buf.push(0);
             }
             let properties = rt.properties();
             write_len(&mut buf, properties.len())?;
-            for (key, codec) in properties {
+            for (key, codec) in in_key_order(properties) {
                 write_str(&mut buf, key.as_str())?;
                 // Edge property columns don't keep per-block zone maps; v3+
                 // computes them during write, from the column when some rows
@@ -179,44 +279,195 @@ impl CompactStoreSection {
                     .present()
                     .map(|_| super::zone_map::compute_block_zone_maps(codec));
                 write_column(codec, &mut buf, version, block_stats.as_deref())?;
+                out.drain(&mut buf)?;
             }
         }
-        // Continue building buf in `serialize()` epilogue.
-        self.append_id_maps_and_crc(buf, store, version)
-    }
 
-    /// Appends ID maps (if applicable) and trailing CRC to the buffer.
-    fn append_id_maps_and_crc(
-        &self,
-        mut buf: Vec<u8>,
-        store: &CompactStore,
-        _version: u8,
-    ) -> grafeo_common::utils::error::Result<Vec<u8>> {
         // ID maps.
         if store.preserves_ids() {
-            if let Some(ref node_map) = store.node_id_map {
-                write_len(&mut buf, node_map.len())?;
-                for (&nid, &(tid, off)) in node_map {
-                    write_u64(&mut buf, nid.as_u64());
-                    write_u16(&mut buf, tid);
-                    write_u64(&mut buf, off);
-                }
-            }
-            if let Some(ref edge_map) = store.edge_id_map {
-                write_len(&mut buf, edge_map.len())?;
-                for (&eid, &(rtid, pos)) in edge_map {
-                    write_u64(&mut buf, eid.as_u64());
-                    write_u16(&mut buf, rtid);
-                    write_u64(&mut buf, pos);
-                }
-            }
+            let node_rows: Vec<usize> =
+                store.node_tables_by_id.iter().map(NodeTable::len).collect();
+            write_id_map(
+                &mut out,
+                &mut buf,
+                store.node_id_map.as_ref(),
+                store.node_offset_to_id.as_deref(),
+                &node_rows,
+            )?;
+            let edge_rows: Vec<usize> = store
+                .rel_tables_by_id
+                .iter()
+                .map(RelTable::num_edges)
+                .collect();
+            write_id_map(
+                &mut out,
+                &mut buf,
+                store.edge_id_map.as_ref(),
+                store.edge_offset_to_id.as_deref(),
+                &edge_rows,
+            )?;
         }
-
-        // CRC32 at end.
-        let crc = crc32fast::hash(&buf);
-        buf.extend_from_slice(&crc.to_le_bytes());
-        Ok(buf)
+        out.drain(&mut buf)?;
+        out.finish()?;
+        Ok(())
     }
+}
+
+/// Passes the pieces of an encoding on to `out`, keeping the CRC32 of every
+/// byte, which the encoding ends with.
+struct CrcWriter<'w> {
+    out: &'w mut dyn io::Write,
+    crc: crc32fast::Hasher,
+}
+
+impl<'w> CrcWriter<'w> {
+    fn new(out: &'w mut dyn io::Write) -> Self {
+        Self {
+            out,
+            crc: crc32fast::Hasher::new(),
+        }
+    }
+
+    /// Writes `pending` and empties it, keeping its capacity for the next
+    /// piece.
+    fn drain(&mut self, pending: &mut Vec<u8>) -> io::Result<()> {
+        self.crc.update(pending);
+        self.out.write_all(pending)?;
+        pending.clear();
+        Ok(())
+    }
+
+    /// Writes the CRC32 of every byte drained before.
+    fn finish(self) -> io::Result<()> {
+        self.out.write_all(&self.crc.finalize().to_le_bytes())
+    }
+}
+
+/// The entries of `columns` in key order.
+fn in_key_order(
+    columns: &FxHashMap<PropertyKey, CompactColumn>,
+) -> Vec<(&PropertyKey, &CompactColumn)> {
+    let mut sorted: Vec<_> = columns.iter().collect();
+    sorted.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    sorted
+}
+
+/// What an id map needs of its ids: node ids and edge ids.
+trait MapId: Copy + Eq + std::hash::Hash {
+    /// The id that marks a reverse slot without an entry; never a real id.
+    const INVALID: Self;
+    /// What the ids name, for messages.
+    const WHAT: &'static str;
+
+    fn from_raw(raw: u64) -> Self;
+
+    fn raw(self) -> u64;
+}
+
+impl MapId for NodeId {
+    const INVALID: Self = NodeId::INVALID;
+    const WHAT: &'static str = "node";
+
+    fn from_raw(raw: u64) -> Self {
+        NodeId::new(raw)
+    }
+
+    fn raw(self) -> u64 {
+        self.as_u64()
+    }
+}
+
+impl MapId for EdgeId {
+    const INVALID: Self = EdgeId::INVALID;
+    const WHAT: &'static str = "edge";
+
+    fn from_raw(raw: u64) -> Self {
+        EdgeId::new(raw)
+    }
+
+    fn raw(self) -> u64 {
+        self.as_u64()
+    }
+}
+
+/// Writes an id map, when the store has one: its length, then `(id, table,
+/// row)` per entry, in table order and then row order, as `rows` (the map's
+/// reverse, built with it) lists them. Walking `rows` gives an order that
+/// depends on the store alone without sorting a copy of the map; every entry
+/// `rows` lists is checked against the map first, so an entry missing from
+/// `rows` cannot be dropped unnoticed. As the reader requires, every row of
+/// the tables (`table_rows` per table) has exactly one entry.
+fn write_id_map<Id: MapId>(
+    out: &mut CrcWriter<'_>,
+    buf: &mut Vec<u8>,
+    map: Option<&FxHashMap<Id, (u16, u64)>>,
+    rows: Option<&[Vec<Id>]>,
+    table_rows: &[usize],
+) -> grafeo_common::utils::error::Result<()> {
+    let Some(map) = map else {
+        return Ok(());
+    };
+    let what = Id::WHAT;
+    let disagree = |detail: String| {
+        Error::Internal(format!(
+            "the {what} id map of the compacted base and its reverse disagree: {detail}"
+        ))
+    };
+    let rows = rows.ok_or_else(|| disagree("there is no reverse".to_string()))?;
+    let table_id = |table: usize| {
+        u16::try_from(table).map_err(|_| disagree(format!("the reverse has table {table}")))
+    };
+    let entries = || {
+        rows.iter().enumerate().flat_map(move |(table, ids)| {
+            ids.iter()
+                .enumerate()
+                .filter(move |(_, id)| **id != Id::INVALID)
+                .map(move |(row, &id)| (table, row as u64, id))
+        })
+    };
+    let mut listed = 0usize;
+    for (table, row, id) in entries() {
+        if table_rows
+            .get(table)
+            .is_none_or(|&count| row >= count as u64)
+        {
+            return Err(disagree(format!(
+                "id {} is at table {table}, row {row}, which the tables do not hold",
+                id.raw()
+            )));
+        }
+        let table = table_id(table)?;
+        if map.get(&id) != Some(&(table, row)) {
+            return Err(disagree(format!(
+                "id {} is at table {table}, row {row} in the reverse, at {:?} in the map",
+                id.raw(),
+                map.get(&id)
+            )));
+        }
+        listed += 1;
+    }
+    if listed != map.len() {
+        return Err(disagree(format!(
+            "the map holds {} ids, the reverse {listed}",
+            map.len()
+        )));
+    }
+    let rows: usize = table_rows.iter().sum();
+    if listed != rows {
+        return Err(disagree(format!(
+            "they hold {listed} ids for the {rows} rows of the tables"
+        )));
+    }
+    write_len(buf, listed)?;
+    for (table, row, id) in entries() {
+        write_u64(buf, id.raw());
+        write_u16(buf, table_id(table)?);
+        write_u64(buf, row);
+        if buf.len() >= ID_MAP_PIECE {
+            out.drain(buf)?;
+        }
+    }
+    Ok(())
 }
 
 /// Writes a single column codec body using the layout matching the
@@ -257,15 +508,138 @@ fn write_column(
     Ok(())
 }
 
+// ── Chunks of the stream layout ────────────────────────────────────
+
+/// Writes `meta` as the metadata chunk of `section_type`: bincode in the
+/// standard configuration.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] when `meta` does not encode, or the
+/// sink's error.
+pub(super) fn write_meta<T: Serialize>(
+    sink: &mut dyn SectionSink,
+    section_type: SectionType,
+    meta: &T,
+) -> grafeo_common::utils::error::Result<()> {
+    let bytes = bincode::serde::encode_to_vec(meta, bincode::config::standard()).map_err(|e| {
+        Error::Serialization(format!(
+            "section {section_type:?}: the metadata chunk does not encode: {e}"
+        ))
+    })?;
+    sink.write_chunk(ChunkMeta::meta(), &bytes)
+}
+
+/// The metadata chunk of a section of the stream layout, after checking the
+/// chunks around it: the first chunk is the metadata chunk, with layout
+/// [`META_LAYOUT`] and no bytes after its fields, and every other chunk is a
+/// piece of one of the first `streams` streams of graph 0.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] naming the section and the chunk for any
+/// other sequence or metadata, or the error of fetching the metadata chunk.
+pub(super) fn read_meta<T: DeserializeOwned>(
+    source: &dyn SectionSource,
+    section_type: SectionType,
+    streams: u32,
+) -> grafeo_common::utils::error::Result<T> {
+    let refuse = |what: String| Error::Serialization(format!("section {section_type:?}: {what}"));
+    let chunks = source.chunks();
+    match chunks.first() {
+        Some(first) if *first == ChunkMeta::meta() => {}
+        Some(first) => {
+            return Err(refuse(format!(
+                "the first chunk is {}, where the metadata chunk belongs",
+                describe_chunk(first)
+            )));
+        }
+        None => return Err(refuse("there is no metadata chunk".to_string())),
+    }
+    for (index, chunk) in chunks.iter().enumerate().skip(1) {
+        if chunk.kind != ChunkKind::Stream || chunk.graph_id != 0 || chunk.column_id >= streams {
+            return Err(refuse(format!(
+                "chunk {index} is {}; after its metadata chunk the section holds pieces of its \
+                 {streams} streams of graph 0 only",
+                describe_chunk(chunk)
+            )));
+        }
+    }
+    let bytes = source.fetch(0)?;
+    match bytes.first() {
+        Some(&META_LAYOUT) => {}
+        Some(layout) => {
+            return Err(refuse(format!(
+                "the metadata chunk has layout {layout}, this build reads layout {META_LAYOUT}"
+            )));
+        }
+        None => return Err(refuse("the metadata chunk is empty".to_string())),
+    }
+    let (meta, read) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+        .map_err(|e| refuse(format!("the metadata chunk does not decode: {e}")))?;
+    if read != bytes.len() {
+        return Err(refuse(format!(
+            "the metadata chunk holds {} bytes after its fields",
+            bytes.len() - read
+        )));
+    }
+    Ok(meta)
+}
+
+/// A chunk as an error message names it.
+fn describe_chunk(chunk: &ChunkMeta) -> String {
+    if chunk.kind == ChunkKind::Stream {
+        format!(
+            "a piece of stream {} of graph {}",
+            chunk.column_id, chunk.graph_id
+        )
+    } else {
+        format!(
+            "a {:?} chunk of graph {}, column {}, first row {}",
+            chunk.kind, chunk.graph_id, chunk.column_id, chunk.row_start
+        )
+    }
+}
+
+/// `error` with `section_type` in front of its message when it is a
+/// [`Error::Serialization`] (corrupt section data); any other error as it is.
+pub(super) fn in_section(section_type: SectionType, error: Error) -> Error {
+    match error {
+        Error::Serialization(message) => {
+            Error::Serialization(format!("section {section_type:?}: {message}"))
+        }
+        other => other,
+    }
+}
+
+/// The error of a write to `stream` that failed with `error`: the sink's own
+/// error, which the stream writer keeps with its variant (the `io::Error` it
+/// returns carries only the text), or else `error` with `section_type` named.
+///
+/// A stream writer keeps every error it returns, so `finish` writes nothing
+/// here.
+pub(super) fn stream_write_error(
+    stream: ChunkStreamWriter<'_>,
+    section_type: SectionType,
+    error: io::Error,
+) -> Error {
+    stream
+        .finish()
+        .err()
+        .unwrap_or_else(|| stream_error(section_type, error))
+}
+
 impl Section for CompactStoreSection {
     fn section_type(&self) -> SectionType {
         SectionType::CompactStore
     }
 
     fn version(&self) -> u8 {
-        FORMAT_VERSION
+        FORMAT_VERSION_CHUNKED
     }
 
+    /// The version 4 encoding, as one buffer: what spill files and the
+    /// stream of [`write_to`](Section::write_to) hold.
     fn serialize(&self) -> grafeo_common::utils::error::Result<Vec<u8>> {
         self.serialize_with_version(FORMAT_VERSION)
     }
@@ -276,6 +650,41 @@ impl Section for CompactStoreSection {
         // skips the copy on the mmap path.
         let owned = bytes::Bytes::copy_from_slice(data);
         self.deserialize_from_bytes(owned)
+    }
+
+    /// The metadata chunk, then the version 4 encoding as stream 0, cut at
+    /// the section's byte cap.
+    fn write_to(&self, sink: &mut dyn SectionSink) -> grafeo_common::utils::error::Result<()> {
+        let meta = CompactMeta {
+            layout: META_LAYOUT,
+            max_bytes: self.caps.max_bytes,
+        };
+        write_meta(sink, SectionType::CompactStore, &meta)?;
+        let mut stream = ChunkStreamWriter::new(sink, 0, COMPACT_STREAM, self.caps);
+        match self.write_with_version(FORMAT_VERSION, &mut stream) {
+            Ok(()) => stream.finish().map(drop),
+            // Every I/O error comes from the stream.
+            Err(Error::Io(error)) => {
+                Err(stream_write_error(stream, SectionType::CompactStore, error))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A single raw chunk (0.5.x bytes) goes to the 0.5.x reader. Otherwise
+    /// the section is version 5: its metadata chunk and stream 0, read into
+    /// one buffer, which must hold the version 4 encoding.
+    fn read_from(&mut self, source: &dyn SectionSource) -> grafeo_common::utils::error::Result<()> {
+        if let Some(bytes) =
+            legacy_bytes(source).map_err(|e| in_section(SectionType::CompactStore, e))?
+        {
+            return self.load_encoding(bytes, &READABLE_ENCODINGS);
+        }
+        check_version(SectionType::CompactStore, source, FORMAT_VERSION_CHUNKED)?;
+        let _meta: CompactMeta = read_meta(source, SectionType::CompactStore, 1)?;
+        let encoding = read_stream(source, 0, COMPACT_STREAM)
+            .map_err(|e| in_section(SectionType::CompactStore, e))?;
+        self.load_encoding(encoding, &[FORMAT_VERSION])
     }
 
     fn is_dirty(&self) -> bool {
@@ -349,7 +758,12 @@ fn read_column(
     Ok((column, block_stats))
 }
 
-fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, String> {
+/// Reads a store from `data_bytes`, an encoding of one of the versions
+/// `accepted`.
+fn deserialize_compact_store(
+    data_bytes: &bytes::Bytes,
+    accepted: &[u8],
+) -> Result<CompactStore, String> {
     let data: &[u8] = data_bytes.as_ref();
     if data.len() < 10 {
         return Err("data too short for CompactStore section".into());
@@ -379,34 +793,37 @@ fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, 
     pos += 4;
     let version = data[pos];
     pos += 1;
-    if ![
-        FORMAT_VERSION_V1,
-        FORMAT_VERSION_V2,
-        FORMAT_VERSION_V3,
-        FORMAT_VERSION,
-    ]
-    .contains(&version)
-    {
+    if !accepted.contains(&version) {
         return Err(format!(
-            "unsupported CompactStore section version {version} (supported: {FORMAT_VERSION_V1} to {FORMAT_VERSION})"
+            "unsupported CompactStore section version {version} (supported here: {accepted:?})"
         ));
     }
     let flags = data[pos];
     pos += 1;
     let preserves_ids = flags & 0x01 != 0;
 
-    // Node tables.
+    // Node tables. Every count read below is untrusted: it is checked
+    // against the bytes left before anything is allocated for it.
     let num_node_tables = read_u32(data, &mut pos)? as usize;
+    check_table_count(num_node_tables, "node tables")?;
+    fits(
+        num_node_tables,
+        NODE_TABLE_MIN_BYTES,
+        data,
+        pos,
+        "node tables",
+    )?;
     let mut node_tables = Vec::with_capacity(num_node_tables);
     let mut label_to_table_id: FxHashMap<arcstr::ArcStr, u16> = FxHashMap::default();
     let mut table_id_to_label: Vec<arcstr::ArcStr> = Vec::with_capacity(num_node_tables);
 
     for table_idx in 0..num_node_tables {
-        let table_id = u16::try_from(table_idx).unwrap_or(0);
+        let table_id = u16::try_from(table_idx).map_err(|_| "node table id overflow")?;
         let label = read_string(data, &mut pos)?;
         let label = arcstr::ArcStr::from(label.as_str());
         let row_count = read_u32(data, &mut pos)? as usize;
         let num_cols = read_u32(data, &mut pos)? as usize;
+        fits(num_cols, COLUMN_MIN_BYTES, data, pos, "columns")?;
 
         let mut columns: FxHashMap<PropertyKey, CompactColumn> = FxHashMap::default();
         let mut zone_maps: FxHashMap<PropertyKey, ZoneMap> = FxHashMap::default();
@@ -446,31 +863,78 @@ fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, 
         label_to_table_id.insert(label.clone(), table_id);
         table_id_to_label.push(label);
     }
+    let node_rows: Vec<usize> = node_tables.iter().map(NodeTable::len).collect();
 
     // Relationship tables.
     let num_rel_tables = read_u32(data, &mut pos)? as usize;
+    check_table_count(num_rel_tables, "relationship tables")?;
+    fits(
+        num_rel_tables,
+        REL_TABLE_MIN_BYTES,
+        data,
+        pos,
+        "relationship tables",
+    )?;
     let mut rel_tables = Vec::with_capacity(num_rel_tables);
     let mut edge_type_to_rel_id: FxHashMap<arcstr::ArcStr, Vec<u16>> = FxHashMap::default();
     let mut rel_table_id_to_type: Vec<arcstr::ArcStr> = Vec::with_capacity(num_rel_tables);
 
     for rel_idx in 0..num_rel_tables {
-        let rel_table_id = u16::try_from(rel_idx).unwrap_or(0);
+        let rel_table_id = u16::try_from(rel_idx).map_err(|_| "relationship table id overflow")?;
         let edge_type = read_string(data, &mut pos)?;
         let edge_type = arcstr::ArcStr::from(edge_type.as_str());
         let src_tid = read_u16(data, &mut pos)?;
         let dst_tid = read_u16(data, &mut pos)?;
+        let (Some(&src_rows), Some(&dst_rows)) = (
+            node_rows.get(usize::from(src_tid)),
+            node_rows.get(usize::from(dst_tid)),
+        ) else {
+            return Err(format!(
+                "relationship table {rel_idx} ({edge_type}) joins tables {src_tid} and \
+                 {dst_tid} of {}",
+                node_rows.len()
+            ));
+        };
 
         let fwd = CsrAdjacency::read_from(data, &mut pos).map_err(|e| format!("fwd CSR: {e}"))?;
+        check_adjacency(&fwd, src_rows, dst_rows, rel_idx, "forward")?;
 
         let has_bwd = *data.get(pos).ok_or("truncated bwd flag")?;
         pos += 1;
         let bwd = if has_bwd == 1 {
-            Some(CsrAdjacency::read_from(data, &mut pos).map_err(|e| format!("bwd CSR: {e}"))?)
+            let bwd =
+                CsrAdjacency::read_from(data, &mut pos).map_err(|e| format!("bwd CSR: {e}"))?;
+            check_adjacency(&bwd, dst_rows, src_rows, rel_idx, "backward")?;
+            if bwd.num_edges() != fwd.num_edges() {
+                return Err(format!(
+                    "relationship table {rel_idx} has {} edges backward and {} forward",
+                    bwd.num_edges(),
+                    fwd.num_edges()
+                ));
+            }
+            if let Some(&position) = bwd
+                .edge_data()
+                .and_then(|positions| positions.iter().find(|&&p| p as usize >= fwd.num_edges()))
+            {
+                return Err(format!(
+                    "the backward adjacency of relationship table {rel_idx} maps to forward \
+                     edge {position} of {}",
+                    fwd.num_edges()
+                ));
+            }
+            Some(bwd)
         } else {
             None
         };
 
         let num_props = read_u32(data, &mut pos)? as usize;
+        fits(
+            num_props,
+            EDGE_COLUMN_MIN_BYTES,
+            data,
+            pos,
+            "edge property columns",
+        )?;
         let mut properties: FxHashMap<PropertyKey, CompactColumn> = FxHashMap::default();
         let mut prop_defs = Vec::with_capacity(num_props);
         for _ in 0..num_props {
@@ -483,14 +947,8 @@ fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, 
             properties.insert(key, column);
         }
 
-        let src_label = table_id_to_label
-            .get(src_tid as usize)
-            .cloned()
-            .unwrap_or_default();
-        let dst_label = table_id_to_label
-            .get(dst_tid as usize)
-            .cloned()
-            .unwrap_or_default();
+        let src_label = table_id_to_label[usize::from(src_tid)].clone();
+        let dst_label = table_id_to_label[usize::from(dst_tid)].clone();
 
         let schema = EdgeSchema::new(
             edge_type.as_str(),
@@ -531,6 +989,7 @@ fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, 
     }
     stats.total_nodes = total_nodes;
     stats.total_edges = total_edges;
+    let edge_rows: Vec<usize> = rel_tables.iter().map(RelTable::num_edges).collect();
 
     let mut store = CompactStore::new(
         node_tables,
@@ -544,42 +1003,8 @@ fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, 
 
     // ID maps.
     if preserves_ids {
-        let node_map_len = read_u32(data, &mut pos)? as usize;
-        let mut node_id_map = FxHashMap::with_capacity_and_hasher(node_map_len, Default::default());
-        let num_tables = store.node_tables_by_id.len();
-        let mut node_offset_to_id: Vec<Vec<NodeId>> = vec![Vec::new(); num_tables];
-        for _ in 0..node_map_len {
-            let nid = NodeId::new(read_u64(data, &mut pos)?);
-            let tid = read_u16(data, &mut pos)?;
-            let off = read_u64(data, &mut pos)?;
-            node_id_map.insert(nid, (tid, off));
-            let off_idx = usize::try_from(off).unwrap_or(usize::MAX);
-            if let Some(rev) = node_offset_to_id.get_mut(tid as usize) {
-                while rev.len() <= off_idx {
-                    rev.push(NodeId::INVALID);
-                }
-                rev[off_idx] = nid;
-            }
-        }
-
-        let edge_map_len = read_u32(data, &mut pos)? as usize;
-        let mut edge_id_map = FxHashMap::with_capacity_and_hasher(edge_map_len, Default::default());
-        let num_rel = store.rel_tables_by_id.len();
-        let mut edge_offset_to_id: Vec<Vec<EdgeId>> = vec![Vec::new(); num_rel];
-        for _ in 0..edge_map_len {
-            let eid = EdgeId::new(read_u64(data, &mut pos)?);
-            let rtid = read_u16(data, &mut pos)?;
-            let csr_pos = read_u64(data, &mut pos)?;
-            edge_id_map.insert(eid, (rtid, csr_pos));
-            let pos_idx = usize::try_from(csr_pos).unwrap_or(usize::MAX);
-            if let Some(rev) = edge_offset_to_id.get_mut(rtid as usize) {
-                while rev.len() <= pos_idx {
-                    rev.push(EdgeId::INVALID);
-                }
-                rev[pos_idx] = eid;
-            }
-        }
-
+        let (node_id_map, node_offset_to_id) = read_id_map(data, &mut pos, &node_rows)?;
+        let (edge_id_map, edge_offset_to_id) = read_id_map(data, &mut pos, &edge_rows)?;
         store.set_id_maps(
             node_id_map,
             edge_id_map,
@@ -589,6 +1014,144 @@ fn deserialize_compact_store(data_bytes: &bytes::Bytes) -> Result<CompactStore, 
     }
 
     Ok(store)
+}
+
+/// The fewest bytes a node table takes: its label's length, its row count
+/// and its column count.
+const NODE_TABLE_MIN_BYTES: usize = 2 + 4 + 4;
+
+/// The fewest bytes a node property column takes: its key's length, the zone
+/// map flag and the codec's discriminant.
+const COLUMN_MIN_BYTES: usize = 2 + 1 + 1;
+
+/// The fewest bytes a relationship table takes: its edge type's length, its
+/// two table ids, an empty adjacency (two counts and the edge data flag), the
+/// backward flag and the property count.
+const REL_TABLE_MIN_BYTES: usize = 2 + 2 + 2 + 9 + 1 + 4;
+
+/// The fewest bytes an edge property column takes: its key's length and the
+/// codec's discriminant.
+const EDGE_COLUMN_MIN_BYTES: usize = 2 + 1;
+
+/// The bytes of an id map entry: the id, the table and the row.
+const ID_MAP_ENTRY_BYTES: usize = 8 + 2 + 8;
+
+/// Refuses more tables than table ids can name.
+fn check_table_count(count: usize, what: &str) -> Result<(), String> {
+    let most = usize::from(super::id::MAX_TABLE_ID) + 1;
+    if count > most {
+        return Err(format!(
+            "{count} {what}, more than the {most} a compacted base holds"
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses `count` items of at least `each` bytes when the bytes left after
+/// `pos` cannot hold them, so that nothing is allocated from a count no file
+/// could hold.
+fn fits(count: usize, each: usize, data: &[u8], pos: usize, what: &str) -> Result<(), String> {
+    let left = data.len().saturating_sub(pos);
+    if count.checked_mul(each).is_none_or(|needed| needed > left) {
+        return Err(format!("{count} {what} do not fit the {left} bytes left"));
+    }
+    Ok(())
+}
+
+/// Refuses an adjacency of relationship table `table` that does not fit the
+/// tables it joins: one node per row of the table its edges leave from
+/// (`from_rows`), and every target a row of the table they reach (`to_rows`).
+fn check_adjacency(
+    csr: &CsrAdjacency,
+    from_rows: usize,
+    to_rows: usize,
+    table: usize,
+    direction: &str,
+) -> Result<(), String> {
+    if csr.num_nodes() != from_rows {
+        return Err(format!(
+            "the {direction} adjacency of relationship table {table} has {} nodes, the table \
+             its edges leave from {from_rows} rows",
+            csr.num_nodes()
+        ));
+    }
+    if let Some(&target) = csr
+        .targets()
+        .iter()
+        .find(|&&target| target as usize >= to_rows)
+    {
+        return Err(format!(
+            "the {direction} adjacency of relationship table {table} names row {target} of a \
+             table of {to_rows} rows"
+        ));
+    }
+    Ok(())
+}
+
+/// Reads an id map: its length, then `(id, table, row)` per entry. Every row
+/// of every table has exactly one entry (what the writer writes), so the
+/// length must be the rows of all tables, each table and row must exist, and
+/// no row or id may come twice. The reverse is allocated from the rows, which
+/// the length (checked against the bytes left) bounds.
+fn read_id_map<Id: MapId>(
+    data: &[u8],
+    pos: &mut usize,
+    rows: &[usize],
+) -> Result<(FxHashMap<Id, (u16, u64)>, Vec<Vec<Id>>), String> {
+    let what = Id::WHAT;
+    let len = read_u32(data, pos)? as usize;
+    fits(
+        len,
+        ID_MAP_ENTRY_BYTES,
+        data,
+        *pos,
+        &format!("{what} id map entries"),
+    )?;
+    let total = rows
+        .iter()
+        .try_fold(0usize, |total, &rows| total.checked_add(rows))
+        .ok_or_else(|| format!("the {what} tables hold more rows than this platform counts"))?;
+    if len != total {
+        return Err(format!(
+            "the {what} id map holds {len} entries for {total} rows"
+        ));
+    }
+    let mut map = FxHashMap::with_capacity_and_hasher(len, Default::default());
+    let mut reverse: Vec<Vec<Id>> = rows.iter().map(|&count| vec![Id::INVALID; count]).collect();
+    for _ in 0..len {
+        let entry = read_u64(data, pos)?;
+        let table = read_u16(data, pos)?;
+        let row = read_u64(data, pos)?;
+        let entry_id = Id::from_raw(entry);
+        if entry_id == Id::INVALID {
+            return Err(format!("the {what} id map holds the invalid id {entry}"));
+        }
+        let tables = reverse.len();
+        let slots = reverse.get_mut(usize::from(table)).ok_or_else(|| {
+            format!("the {what} id map puts id {entry} in table {table} of {tables}")
+        })?;
+        let table_rows = slots.len();
+        let slot = usize::try_from(row)
+            .ok()
+            .and_then(|row| slots.get_mut(row))
+            .ok_or_else(|| {
+                format!(
+                    "the {what} id map puts id {entry} at row {row} of table {table}, which has \
+                     {table_rows} rows"
+                )
+            })?;
+        if *slot != Id::INVALID {
+            return Err(format!(
+                "the {what} id map puts ids {} and {entry} both at table {table}, row {row}",
+                slot.raw()
+            ));
+        }
+        *slot = entry_id;
+        if map.insert(entry_id, (table, row)).is_some() {
+            return Err(format!("the {what} id map lists id {entry} twice"));
+        }
+    }
+    Ok((map, reverse))
 }
 
 // ── Write helpers ──────────────────────────────────────────────────
@@ -763,7 +1326,12 @@ mod tests {
     use crate::graph::compact::from_graph_store_preserving_ids;
     use crate::graph::lpg::LpgStore;
     use crate::graph::traits::GraphStore;
+    use grafeo_common::storage::{
+        ChunkCaps, ChunkMeta, ImageSource, MemoryImage, SectionSink, read_stream,
+    };
+    use grafeo_common::testing::chunk_caps::with_chunk_caps;
     use grafeo_common::types::Value;
+    use grafeo_common::utils::error::Error;
 
     #[test]
     fn test_round_trip_empty() {
@@ -922,7 +1490,7 @@ mod tests {
     fn test_section_type_and_version() {
         let section = CompactStoreSection::empty();
         assert_eq!(section.section_type(), SectionType::CompactStore);
-        assert_eq!(section.version(), FORMAT_VERSION);
+        assert_eq!(section.version(), FORMAT_VERSION_CHUNKED);
         assert!(!section.is_dirty());
         assert_eq!(section.memory_usage(), 0);
     }
@@ -1282,6 +1850,1022 @@ mod tests {
         assert_eq!(
             restored.get_node_property(sparse, &PropertyKey::new("u")),
             Some(Value::Int64(0))
+        );
+    }
+
+    // ── Streams: section version 5 ──────────────────────────────────
+
+    /// Two node tables and a rel table, with sparse columns: four `:City`
+    /// nodes (a name each, a population for every other one) and 57
+    /// `:Person` nodes (a name each, an age for every third, a score for
+    /// every fourth, an `active` flag for every fifth), each `LIVES_IN` a
+    /// city, every other edge with a `since` year and every third with a
+    /// distance in `km`. Returns the store and its node ids (the cities
+    /// first) and edge ids, in creation order.
+    fn store_for_streams() -> (LpgStore, Vec<NodeId>, Vec<EdgeId>) {
+        let store = LpgStore::new().unwrap();
+        let people = ["Alix", "Gus", "Vincent", "Jules", "Mia"];
+        let mut nodes = Vec::new();
+        for (city, population) in [
+            ("Amsterdam", Some(880_000)),
+            ("Berlin", None),
+            ("Paris", Some(1_988_000)),
+            ("Prague", None),
+        ] {
+            let id = store.create_node(&["City"]);
+            store.set_node_property(id, "name", Value::from(city));
+            if let Some(population) = population {
+                store.set_node_property(id, "population", Value::Int64(population));
+            }
+            nodes.push(id);
+        }
+        let mut edges = Vec::new();
+        for (i, n) in (0..57usize).zip(0i64..) {
+            let id = store.create_node(&["Person"]);
+            store.set_node_property(id, "name", Value::from(format!("{} {n}", people[i % 5])));
+            if i % 3 == 0 {
+                store.set_node_property(id, "age", Value::Int64(19 + n));
+            }
+            if i % 4 == 0 {
+                let score = f64::from(u8::try_from(i).unwrap()) * 0.88;
+                store.set_node_property(id, "score", Value::Float64(score));
+            }
+            if i % 5 == 0 {
+                store.set_node_property(id, "active", Value::Bool(i % 2 == 0));
+            }
+            let edge = store.create_edge(id, nodes[i % 4], "LIVES_IN");
+            if i % 2 == 0 {
+                store.set_edge_property(edge, "since", Value::Int64(1988 + n));
+            }
+            if i % 3 == 0 {
+                store.set_edge_property(edge, "km", Value::Int64(88 * n));
+            }
+            nodes.push(id);
+            edges.push(edge);
+        }
+        (store, nodes, edges)
+    }
+
+    /// Where two byte strings first differ (a length counts), without
+    /// printing kilobytes when they do.
+    fn first_difference(left: &[u8], right: &[u8]) -> Option<usize> {
+        left.iter()
+            .zip(right)
+            .position(|(left, right)| left != right)
+            .or_else(|| (left.len() != right.len()).then(|| left.len().min(right.len())))
+    }
+
+    /// The encoding depends on what the store holds, not on the hash maps
+    /// that hold it: a store read back writes the bytes it was read from,
+    /// although its maps iterate in another order (their seeds are random).
+    /// Golden fixtures and incremental checkpoints rest on this.
+    #[test]
+    fn a_compact_store_writes_the_same_bytes_after_a_round_trip() {
+        let (store, _, _) = store_for_streams();
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+        let first = CompactStoreSection::new(Arc::new(compact))
+            .serialize()
+            .unwrap();
+        let mut bytes = first.clone();
+        for round in 1..=3 {
+            let mut section = CompactStoreSection::empty();
+            section.deserialize(&bytes).unwrap();
+            bytes = CompactStoreSection::new(section.store().unwrap())
+                .serialize()
+                .unwrap();
+            assert_eq!(
+                first_difference(&first, &bytes),
+                None,
+                "round trip {round} wrote other bytes"
+            );
+        }
+    }
+
+    /// Caps small enough that the stream of a small store spans several
+    /// pieces.
+    const SMALL_CAPS: ChunkCaps = ChunkCaps {
+        max_rows: 3,
+        max_bytes: 512,
+    };
+
+    /// The section of the store `store` compacts to, built with `caps` as
+    /// this thread's caps.
+    fn section_of(store: &LpgStore, caps: ChunkCaps) -> CompactStoreSection {
+        let compact = Arc::new(from_graph_store_preserving_ids(store).unwrap());
+        with_chunk_caps(caps, || CompactStoreSection::new(compact))
+    }
+
+    /// The image holding what `section` writes.
+    fn image_of(section: &CompactStoreSection) -> MemoryImage {
+        MemoryImage::from_sections(&[section as &dyn Section]).unwrap()
+    }
+
+    /// The CompactStore section of `image`, read into an empty section.
+    fn load(image: &MemoryImage) -> grafeo_common::utils::error::Result<CompactStoreSection> {
+        let mut section = CompactStoreSection::empty();
+        section.read_from(&*image.section_source(SectionType::CompactStore).unwrap())?;
+        Ok(section)
+    }
+
+    /// A section of version `version` holding `chunks`, as a crafted file
+    /// would.
+    fn crafted(version: u8, chunks: &[(ChunkMeta, Vec<u8>)]) -> MemoryImage {
+        let mut image = MemoryImage::new();
+        image
+            .begin_section(SectionType::CompactStore, version)
+            .unwrap();
+        for (meta, bytes) in chunks {
+            image.write_chunk(*meta, bytes).unwrap();
+        }
+        image
+    }
+
+    /// The bytes of a metadata chunk with `layout`.
+    fn meta_chunk(layout: u8) -> (ChunkMeta, Vec<u8>) {
+        let meta = CompactMeta {
+            layout,
+            max_bytes: 512,
+        };
+        let bytes = bincode::serde::encode_to_vec(meta, bincode::config::standard()).unwrap();
+        (ChunkMeta::meta(), bytes)
+    }
+
+    /// A node as its labels and properties, each sorted, to compare across
+    /// stores.
+    type DescribedNode = (Vec<String>, Vec<(String, Value)>);
+
+    fn described_node(store: &CompactStore, id: NodeId) -> Option<DescribedNode> {
+        store.get_node(id).map(|node| {
+            let mut labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
+            labels.sort();
+            (labels, sorted_properties(node.properties.iter()))
+        })
+    }
+
+    /// An edge as its endpoints, type and sorted properties.
+    type DescribedEdge = (NodeId, NodeId, String, Vec<(String, Value)>);
+
+    fn described_edge(store: &CompactStore, id: EdgeId) -> Option<DescribedEdge> {
+        store.get_edge(id).map(|edge| {
+            (
+                edge.src,
+                edge.dst,
+                edge.edge_type.to_string(),
+                sorted_properties(edge.properties.iter()),
+            )
+        })
+    }
+
+    fn sorted_properties<'a>(
+        properties: impl Iterator<Item = (&'a PropertyKey, &'a Value)>,
+    ) -> Vec<(String, Value)> {
+        let mut sorted: Vec<(String, Value)> = properties
+            .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+            .collect();
+        sorted.sort_by(|left, right| left.0.cmp(&right.0));
+        sorted
+    }
+
+    /// The stream holds the version 4 encoding byte for byte: what
+    /// `serialize_with_version(4)` returns and `serialize` still writes (for
+    /// spill files), behind a metadata chunk with the caps.
+    #[test]
+    fn the_streamed_compact_encoding_equals_the_serialized_one() {
+        let (store, _, _) = store_for_streams();
+        let section = section_of(&store, SMALL_CAPS);
+        let image = image_of(&section);
+        let source = image.section_source(SectionType::CompactStore).unwrap();
+        assert_eq!(source.section_version(), FORMAT_VERSION_CHUNKED);
+        let chunks = source.chunks();
+        assert_eq!(chunks[0], ChunkMeta::meta(), "the metadata chunk first");
+        assert!(
+            chunks[1..]
+                .iter()
+                .all(|meta| *meta == ChunkMeta::stream_piece(0, 0, meta.row_start)),
+            "every other chunk is a piece of stream 0: {chunks:?}"
+        );
+        assert!(
+            chunks.len() > 4,
+            "at 512 bytes the stream spans several pieces: {} chunks",
+            chunks.len()
+        );
+        let meta: CompactMeta = bincode::serde::decode_from_slice(
+            &source.fetch(0).unwrap(),
+            bincode::config::standard(),
+        )
+        .unwrap()
+        .0;
+        assert_eq!((meta.layout, meta.max_bytes), (1, 512));
+
+        let streamed = read_stream(&*source, 0, 0).unwrap();
+        let serialized = section.serialize_with_version(FORMAT_VERSION).unwrap();
+        assert_eq!(serialized[4], FORMAT_VERSION);
+        assert_eq!(
+            first_difference(&streamed, &serialized),
+            None,
+            "the stream is the version 4 encoding"
+        );
+        assert_eq!(
+            first_difference(&section.serialize().unwrap(), &serialized),
+            None,
+            "serialize writes the version 4 encoding"
+        );
+        let error = section
+            .serialize_with_version(FORMAT_VERSION_CHUNKED)
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::Internal(message) if message.contains("version 5")),
+            "the section version is no encoding: {error:?}"
+        );
+    }
+
+    /// An id map and its reverse are built together. Should they ever
+    /// disagree, the writer refuses to write rather than write the entries of
+    /// one and lose those only the other has.
+    #[test]
+    fn id_maps_that_disagree_with_their_reverse_are_not_written() {
+        let (store, nodes, edges) = store_for_streams();
+        assert_eq!(nodes.len(), 61, "the counts below");
+        let written = |change: &dyn Fn(&mut CompactStore)| {
+            let mut compact = from_graph_store_preserving_ids(&store).unwrap();
+            change(&mut compact);
+            CompactStoreSection::new(Arc::new(compact)).serialize()
+        };
+        written(&|_| {}).unwrap();
+        let cases: [(&str, &dyn Fn(&mut CompactStore), &str); 6] = [
+            (
+                "a node the reverse lacks",
+                &|compact| {
+                    let rows = compact.node_offset_to_id.as_mut().unwrap();
+                    *rows[0].last_mut().unwrap() = NodeId::INVALID;
+                },
+                "the map holds 61 ids, the reverse 60",
+            ),
+            (
+                "two nodes swapped in the reverse",
+                &|compact| compact.node_offset_to_id.as_mut().unwrap()[1].swap(0, 1),
+                "in the reverse",
+            ),
+            (
+                "an edge the map lacks",
+                &|compact| {
+                    compact.edge_id_map.as_mut().unwrap().remove(&edges[3]);
+                },
+                &format!("id {} is at table 0", edges[3].as_u64()),
+            ),
+            (
+                "a node map without its reverse",
+                &|compact| compact.node_offset_to_id = None,
+                "there is no reverse",
+            ),
+            (
+                "a row without an id",
+                &|compact| {
+                    let rows = compact.node_offset_to_id.as_mut().unwrap();
+                    let id = std::mem::replace(&mut rows[0][0], NodeId::INVALID);
+                    compact.node_id_map.as_mut().unwrap().remove(&id);
+                },
+                "60 ids for the 61 rows",
+            ),
+            (
+                "an id past the rows of its table",
+                &|compact| {
+                    let rows = compact.node_offset_to_id.as_mut().unwrap();
+                    let row = rows[0].len() as u64;
+                    rows[0].push(NodeId::new(10_000));
+                    let map = compact.node_id_map.as_mut().unwrap();
+                    map.insert(NodeId::new(10_000), (0, row));
+                },
+                "which the tables do not hold",
+            ),
+        ];
+        for (case, change, expected) in cases {
+            let error = written(change).unwrap_err();
+            assert!(
+                matches!(&error, Error::Internal(message)
+                    if message.contains("disagree") && message.contains(expected)),
+                "{case}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compact_store_round_trips_through_streams() {
+        let (store, nodes, edges) = store_for_streams();
+        let original = Arc::new(from_graph_store_preserving_ids(&store).unwrap());
+        assert_eq!(original.node_tables_by_id.len(), 2, "two node tables");
+        assert_eq!(original.rel_tables_by_id.len(), 1, "one rel table");
+        let section = with_chunk_caps(SMALL_CAPS, || {
+            CompactStoreSection::new(Arc::clone(&original))
+        });
+        let image = image_of(&section);
+        let chunks = image
+            .section_source(SectionType::CompactStore)
+            .unwrap()
+            .chunks()
+            .len();
+        assert!(
+            chunks > 4,
+            "the stream spans several pieces: {chunks} chunks"
+        );
+
+        let restored = load(&image).unwrap().store().unwrap();
+        assert!(restored.preserves_ids());
+        assert_eq!(
+            (restored.node_count(), restored.edge_count()),
+            (nodes.len(), edges.len())
+        );
+        for &id in &nodes {
+            let node = described_node(&restored, id);
+            assert!(node.is_some(), "node {id:?} by its original id");
+            assert_eq!(node, described_node(&original, id), "node {id:?}");
+        }
+        for &id in &edges {
+            let edge = described_edge(&restored, id);
+            assert!(edge.is_some(), "edge {id:?} by its original id");
+            assert_eq!(edge, described_edge(&original, id), "edge {id:?}");
+        }
+        // The first person has an age and lives in Amsterdam; the second has
+        // no age, and still has none.
+        let (first, second) = (nodes[4], nodes[5]);
+        assert_eq!(
+            restored.get_node_property(first, &PropertyKey::new("age")),
+            Some(Value::Int64(19))
+        );
+        assert_eq!(
+            restored.get_node_property(second, &PropertyKey::new("age")),
+            None,
+            "a missing value stays missing"
+        );
+        assert_eq!(
+            restored.neighbors(first, crate::graph::Direction::Outgoing),
+            vec![nodes[0]]
+        );
+    }
+
+    /// Writing through streams, reading back and writing again gives the
+    /// same chunks: two checkpoints of one compacted base agree.
+    #[test]
+    fn two_checkpoints_of_one_compact_store_write_the_same_chunks() {
+        let (store, _, _) = store_for_streams();
+        let first = image_of(&section_of(&store, SMALL_CAPS));
+        let reopened = load(&first).unwrap().store().unwrap();
+        let second = image_of(&with_chunk_caps(SMALL_CAPS, || {
+            CompactStoreSection::new(reopened)
+        }));
+        let chunks = |image: &MemoryImage| {
+            let source = image.section_source(SectionType::CompactStore).unwrap();
+            (0..source.chunks().len())
+                .map(|index| (source.chunks()[index], source.fetch(index).unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let (first, second) = (chunks(&first), chunks(&second));
+        assert_eq!(first.len(), second.len(), "chunk count");
+        for (index, ((left_meta, left), (right_meta, right))) in
+            first.iter().zip(&second).enumerate()
+        {
+            assert_eq!(left_meta, right_meta, "chunk {index}");
+            assert_eq!(first_difference(left, right), None, "chunk {index}");
+        }
+    }
+
+    /// A 0.5.x file holds the section as one raw chunk of the version 3
+    /// encoding, which `read_from` hands to the 0.5.x reader.
+    #[test]
+    fn a_0_5_compact_section_still_loads() {
+        let (store, sparse, sparse_edge) = store_with_missing_properties();
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+        let bytes = CompactStoreSection::new(Arc::new(compact))
+            .serialize_with_version(FORMAT_VERSION_V3)
+            .unwrap();
+        let image = MemoryImage::from_raw(vec![(SectionType::CompactStore, bytes)]).unwrap();
+        let restored = load(&image).unwrap().store().unwrap();
+
+        assert_eq!((restored.node_count(), restored.edge_count()), (2, 2));
+        assert_eq!(
+            restored.get_node_property(sparse, &PropertyKey::new("n")),
+            Some(Value::Int64(2))
+        );
+        // Version 3 records no missing values: the empty value stored reads.
+        assert_eq!(
+            restored.get_node_property(sparse, &PropertyKey::new("u")),
+            Some(Value::Int64(0))
+        );
+        assert_eq!(
+            restored.get_edge_property(sparse_edge, &PropertyKey::new("n")),
+            Some(Value::Int64(2))
+        );
+    }
+
+    /// Chunk sequences no writer of this release produces are refused,
+    /// naming the section and what is wrong.
+    #[test]
+    fn crafted_compact_chunk_sequences_are_refused() {
+        let (store, _, _) = store_with_missing_properties();
+        let section = section_of(&store, ChunkCaps::DEFAULT);
+        let encoding = section.serialize_with_version(FORMAT_VERSION).unwrap();
+        let version_3 = section.serialize_with_version(FORMAT_VERSION_V3).unwrap();
+        let piece =
+            |stream: u32, bytes: &[u8]| (ChunkMeta::stream_piece(0, stream, 0), bytes.to_vec());
+        let mut long_meta = meta_chunk(1);
+        long_meta.1.push(88);
+
+        // What the writer writes loads: each case below changes one thing.
+        load(&crafted(5, &[meta_chunk(1), piece(0, &encoding)])).unwrap();
+
+        for (case, image, expected) in [
+            (
+                "an older section version",
+                crafted(4, &[meta_chunk(1), piece(0, &encoding)]),
+                "version 4",
+            ),
+            (
+                "a newer metadata layout",
+                crafted(5, &[meta_chunk(2), piece(0, &encoding)]),
+                "layout 2",
+            ),
+            (
+                "bytes after the metadata",
+                crafted(5, &[long_meta, piece(0, &encoding)]),
+                "1 bytes after its fields",
+            ),
+            (
+                "the stream before the metadata chunk",
+                crafted(5, &[piece(0, &encoding), meta_chunk(1)]),
+                "the first chunk is a piece of stream 0",
+            ),
+            (
+                "a second stream",
+                crafted(5, &[meta_chunk(1), piece(0, &encoding), piece(1, b"Gus")]),
+                "stream 1",
+            ),
+            (
+                "a column chunk",
+                crafted(
+                    5,
+                    &[
+                        meta_chunk(1),
+                        piece(0, &encoding),
+                        (ChunkMeta::column(0, 0, 0, 1, 0), b"Mia".to_vec()),
+                    ],
+                ),
+                "Column",
+            ),
+            (
+                "the version 3 encoding in the stream",
+                crafted(5, &[meta_chunk(1), piece(0, &version_3)]),
+                "version 3",
+            ),
+            ("no stream", crafted(5, &[meta_chunk(1)]), "too short"),
+        ] {
+            let error = load(&image).map(drop).unwrap_err();
+            assert!(
+                matches!(&error, Error::Serialization(message)
+                    if message.starts_with("section CompactStore") && message.contains(expected)),
+                "{case}: {error:?}"
+            );
+        }
+    }
+
+    /// Accepts `left` chunks, then refuses every chunk as a full disk would.
+    struct FullDisk {
+        left: usize,
+    }
+
+    impl SectionSink for FullDisk {
+        fn write_chunk(
+            &mut self,
+            _meta: ChunkMeta,
+            _bytes: &[u8],
+        ) -> grafeo_common::utils::error::Result<()> {
+            if self.left == 0 {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "no space left in Prague",
+                )));
+            }
+            self.left -= 1;
+            Ok(())
+        }
+    }
+
+    /// A sink error in the middle of the stream comes back as it was: a full
+    /// disk stays an I/O error of its kind.
+    #[test]
+    fn a_sink_error_in_the_stream_keeps_its_variant() {
+        let (store, _, _) = store_for_streams();
+        let section = section_of(&store, SMALL_CAPS);
+        // The metadata chunk and the first piece.
+        let error = section.write_to(&mut FullDisk { left: 2 }).unwrap_err();
+        assert!(
+            matches!(&error, Error::Io(inner)
+                if inner.kind() == std::io::ErrorKind::StorageFull
+                    && inner.to_string().contains("Prague")),
+            "{error:?}"
+        );
+    }
+
+    // ── Review round: determinism of compact(), crafted encodings ───
+
+    /// Forty nodes over four labels and sixty edges over four edge types,
+    /// each with a property: enough tables that a build in hash-map order
+    /// almost never repeats its order. Returns the store and its highest node
+    /// and edge ids.
+    fn travels() -> (LpgStore, u64, u64) {
+        let store = LpgStore::new().unwrap();
+        let mut nodes = Vec::new();
+        for (label, n) in ["Person", "City", "Museum", "Station"]
+            .iter()
+            .cycle()
+            .take(40)
+            .zip(0i64..)
+        {
+            let id = store.create_node(&[label]);
+            store.set_node_property(id, "n", Value::Int64(n * 3));
+            nodes.push(id);
+        }
+        let mut edges = Vec::new();
+        for ((kind, i), n) in ["KNOWS", "LIVES_IN", "VISITED", "NEAR"]
+            .iter()
+            .cycle()
+            .zip(0..60usize)
+            .zip(0i64..)
+        {
+            let edge = store.create_edge(nodes[i % 40], nodes[(i * 7 + 3) % 40], kind);
+            store.set_edge_property(edge, "km", Value::Int64(n * 19));
+            edges.push(edge);
+        }
+        let max_node = nodes.iter().map(NodeId::as_u64).max().unwrap();
+        let max_edge = edges.iter().map(EdgeId::as_u64).max().unwrap();
+        (store, max_node, max_edge)
+    }
+
+    /// `compact()` builds its tables in an order that depends on the data
+    /// alone: two compactions of the same data, and two merges of the same
+    /// overlay into the same base, write the same bytes. Golden fixtures and
+    /// incremental checkpoints rest on this.
+    #[test]
+    fn compactions_and_merges_of_the_same_data_write_the_same_bytes() {
+        let compacted = || {
+            let (store, _, _) = travels();
+            let compact = from_graph_store_preserving_ids(&store).unwrap();
+            CompactStoreSection::new(Arc::new(compact))
+                .serialize()
+                .unwrap()
+        };
+        let first = compacted();
+        for round in 1..=3 {
+            assert_eq!(
+                first_difference(&first, &compacted()),
+                None,
+                "compaction {round} wrote other bytes"
+            );
+        }
+
+        let merged = || {
+            use crate::graph::compact::layered::LayeredStore;
+            use crate::graph::traits::GraphStoreMut;
+            let (store, max_node, max_edge) = travels();
+            let base = from_graph_store_preserving_ids(&store).unwrap();
+            let layered = LayeredStore::new(base, max_node, max_edge).unwrap();
+            let prague = layered.create_node(&["City"]);
+            layered.set_node_property(prague, "n", Value::Int64(88));
+            let vincent = layered.create_node(&["Person"]);
+            let edge = layered.create_edge(vincent, prague, "LIVES_IN");
+            layered.set_edge_property(edge, "km", Value::Int64(3));
+            layered.create_edge(NodeId::new(3), vincent, "KNOWS");
+            layered.merge_overlay_in_place().unwrap();
+            CompactStoreSection::new(layered.base_store_arc())
+                .serialize()
+                .unwrap()
+        };
+        let first = merged();
+        for round in 1..=3 {
+            assert_eq!(
+                first_difference(&first, &merged()),
+                None,
+                "merge {round} wrote other bytes"
+            );
+        }
+    }
+
+    /// An `io::Write` that keeps the size of the largest write it was given.
+    #[derive(Default)]
+    struct LargestWrite {
+        largest: usize,
+        writes: usize,
+        written: usize,
+    }
+
+    impl std::io::Write for LargestWrite {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.largest = self.largest.max(data.len());
+            self.writes += 1;
+            self.written += data.len();
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The id maps go to the stream in pieces of at most 64 KiB (and one
+    /// entry), not as one buffer: 4,000 nodes hold 72,000 bytes of node id
+    /// map entries.
+    #[test]
+    fn id_map_entries_are_written_in_pieces_of_at_most_64_kib() {
+        let store = LpgStore::new().unwrap();
+        for n in 0..4_000i64 {
+            let id = store.create_node(&["Person"]);
+            store.set_node_property(id, "n", Value::Int64(n % 88));
+        }
+        let section =
+            CompactStoreSection::new(Arc::new(from_graph_store_preserving_ids(&store).unwrap()));
+        let mut out = LargestWrite::default();
+        section
+            .write_with_version(FORMAT_VERSION, &mut out)
+            .unwrap();
+        assert!(out.written > 72_000, "{} bytes", out.written);
+        assert!(
+            out.largest <= ID_MAP_PIECE + 18,
+            "a write of {} bytes",
+            out.largest
+        );
+        assert!(out.writes >= 4, "{} writes", out.writes);
+    }
+
+    /// A version 4 encoding written field by field, for inputs no writer
+    /// produces.
+    struct Fields(Vec<u8>);
+
+    impl Fields {
+        /// Magic, version 4 and the flag of preserved ids.
+        fn header() -> Self {
+            let mut bytes = MAGIC.to_vec();
+            bytes.push(FORMAT_VERSION);
+            bytes.push(1);
+            Self(bytes)
+        }
+
+        fn byte(mut self, value: u8) -> Self {
+            self.0.push(value);
+            self
+        }
+
+        fn u16(mut self, value: u16) -> Self {
+            self.0.extend_from_slice(&value.to_le_bytes());
+            self
+        }
+
+        fn u32(mut self, value: u32) -> Self {
+            self.0.extend_from_slice(&value.to_le_bytes());
+            self
+        }
+
+        fn u64(mut self, value: u64) -> Self {
+            self.0.extend_from_slice(&value.to_le_bytes());
+            self
+        }
+
+        fn name(mut self, name: &str) -> Self {
+            self = self.u16(u16::try_from(name.len()).unwrap());
+            self.0.extend_from_slice(name.as_bytes());
+            self
+        }
+
+        /// A node table without columns.
+        fn node_table(self, label: &str, rows: u32) -> Self {
+            self.name(label).u32(rows).u32(0)
+        }
+
+        /// An adjacency: its offsets, its targets and, for a backward one, the
+        /// forward position of each edge.
+        fn csr(mut self, offsets: &[u32], targets: &[u32], edge_data: Option<&[u32]>) -> Self {
+            self = self.u32(u32::try_from(offsets.len()).unwrap());
+            for &offset in offsets {
+                self = self.u32(offset);
+            }
+            self = self.u32(u32::try_from(targets.len()).unwrap());
+            for &target in targets {
+                self = self.u32(target);
+            }
+            match edge_data {
+                Some(positions) => {
+                    self = self.byte(1).u32(u32::try_from(positions.len()).unwrap());
+                    for &position in positions {
+                        self = self.u32(position);
+                    }
+                    self
+                }
+                None => self.byte(0),
+            }
+        }
+
+        /// An id map entry: an id at a row of a table.
+        fn entry(self, id: u64, table: u16, row: u64) -> Self {
+            self.u64(id).u16(table).u64(row)
+        }
+
+        /// The bytes and their CRC32.
+        fn sealed(self) -> Vec<u8> {
+            let mut bytes = self.0;
+            let crc = crc32fast::hash(&bytes);
+            bytes.extend_from_slice(&crc.to_le_bytes());
+            bytes
+        }
+    }
+
+    /// The parts of a small valid encoding, each case below changing one:
+    /// two `:Person` rows (ids 3 and 19) and one `KNOWS` edge (id 88) from the
+    /// first to the second.
+    struct Parts {
+        node_tables: Fields,
+        rel_tables: Fields,
+        node_map: Fields,
+        edge_map: Fields,
+    }
+
+    impl Parts {
+        fn valid() -> Self {
+            Self {
+                node_tables: Fields(Vec::new()).u32(1).node_table("Person", 2),
+                rel_tables: Fields(Vec::new())
+                    .u32(1)
+                    .name("KNOWS")
+                    .u16(0)
+                    .u16(0)
+                    .csr(&[0, 1, 1], &[1], None)
+                    .byte(1)
+                    .csr(&[0, 0, 1], &[0], Some(&[0]))
+                    .u32(0),
+                node_map: Fields(Vec::new()).u32(2).entry(3, 0, 0).entry(19, 0, 1),
+                edge_map: Fields(Vec::new()).u32(1).entry(88, 0, 0),
+            }
+        }
+
+        fn sealed(self) -> Vec<u8> {
+            let mut fields = Fields::header();
+            for part in [
+                self.node_tables,
+                self.rel_tables,
+                self.node_map,
+                self.edge_map,
+            ] {
+                fields.0.extend_from_slice(&part.0);
+            }
+            fields.sealed()
+        }
+    }
+
+    /// A rel table part with `fwd` and `bwd` as its adjacencies.
+    fn rel_tables(
+        src: u16,
+        dst: u16,
+        fwd: (&[u32], &[u32]),
+        bwd: (&[u32], &[u32], &[u32]),
+    ) -> Fields {
+        Fields(Vec::new())
+            .u32(1)
+            .name("KNOWS")
+            .u16(src)
+            .u16(dst)
+            .csr(fwd.0, fwd.1, None)
+            .byte(1)
+            .csr(bwd.0, bwd.1, Some(bwd.2))
+            .u32(0)
+    }
+
+    /// An encoding of one more node table (each empty) than table ids can
+    /// name.
+    fn more_tables_than_ids() -> Vec<u8> {
+        let tables = u32::from(super::super::id::MAX_TABLE_ID) + 2;
+        let mut fields = Fields::header().u32(tables);
+        for _ in 0..tables {
+            fields = fields.node_table("P", 0);
+        }
+        fields.u32(0).u32(0).u32(0).sealed()
+    }
+
+    /// Loads `encoding` as the stream of a version 5 section.
+    fn load_encoding_of(
+        encoding: &[u8],
+    ) -> grafeo_common::utils::error::Result<CompactStoreSection> {
+        let piece = (ChunkMeta::stream_piece(0, 0, 0), encoding.to_vec());
+        load(&crafted(5, &[meta_chunk(1), piece]))
+    }
+
+    /// Counts, table ids and rows read from a stream are untrusted: a count
+    /// no file could hold, a table that does not exist or a row past its
+    /// table is an error naming the section, never an abort, a huge
+    /// allocation or a silent misread.
+    #[test]
+    fn crafted_counts_tables_and_rows_are_refused() {
+        let store = load_encoding_of(&Parts::valid().sealed())
+            .unwrap()
+            .store()
+            .unwrap();
+        assert_eq!((store.node_count(), store.edge_count()), (2, 1));
+        assert_eq!(
+            store.neighbors(NodeId::new(3), crate::graph::Direction::Outgoing),
+            vec![NodeId::new(19)]
+        );
+
+        let with = |change: &dyn Fn(&mut Parts)| {
+            let mut parts = Parts::valid();
+            change(&mut parts);
+            parts.sealed()
+        };
+        let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+            (
+                "a node table count",
+                Fields::header().u32(u32::MAX).sealed(),
+                "node tables",
+            ),
+            (
+                "a column count",
+                with(&|parts| {
+                    parts.node_tables = Fields(Vec::new())
+                        .u32(1)
+                        .name("Person")
+                        .u32(2)
+                        .u32(u32::MAX);
+                }),
+                "columns",
+            ),
+            (
+                "a rel table count",
+                with(&|parts| parts.rel_tables = Fields(Vec::new()).u32(u32::MAX)),
+                "relationship tables",
+            ),
+            (
+                "an adjacency offset count",
+                with(&|parts| {
+                    parts.rel_tables = Fields(Vec::new())
+                        .u32(1)
+                        .name("KNOWS")
+                        .u16(0)
+                        .u16(0)
+                        .u32(u32::MAX);
+                }),
+                "offsets",
+            ),
+            (
+                "a node id map length",
+                with(&|parts| parts.node_map = Fields(Vec::new()).u32(u32::MAX)),
+                "node id map entries",
+            ),
+            (
+                "an edge id map length",
+                with(&|parts| parts.edge_map = Fields(Vec::new()).u32(u32::MAX)),
+                "edge id map entries",
+            ),
+            (
+                "a table that does not exist",
+                with(&|parts| {
+                    parts.node_map = Fields(Vec::new()).u32(2).entry(3, 7, 0).entry(19, 0, 1);
+                }),
+                "table 7",
+            ),
+            (
+                "a row past its table",
+                with(&|parts| {
+                    parts.node_map = Fields(Vec::new())
+                        .u32(2)
+                        .entry(3, 0, 0)
+                        .entry(19, 0, 10_000_000);
+                }),
+                "row 10000000",
+            ),
+            (
+                "the last row there is",
+                with(&|parts| {
+                    parts.node_map =
+                        Fields(Vec::new())
+                            .u32(2)
+                            .entry(3, 0, 0)
+                            .entry(19, 0, u64::MAX);
+                }),
+                "row 18446744073709551615",
+            ),
+            (
+                "two ids at one row",
+                with(&|parts| {
+                    parts.node_map = Fields(Vec::new()).u32(2).entry(3, 0, 0).entry(19, 0, 0);
+                }),
+                "both",
+            ),
+            (
+                "fewer ids than rows",
+                with(&|parts| parts.node_map = Fields(Vec::new()).u32(1).entry(3, 0, 0)),
+                "1 entries for 2 rows",
+            ),
+            (
+                "an edge past its table",
+                with(&|parts| parts.edge_map = Fields(Vec::new()).u32(1).entry(88, 0, 1)),
+                "row 1",
+            ),
+            (
+                "an edge table that does not exist",
+                with(&|parts| parts.edge_map = Fields(Vec::new()).u32(1).entry(88, 3, 0)),
+                "table 3",
+            ),
+            (
+                "a rel table between tables that do not exist",
+                with(&|parts| {
+                    parts.rel_tables =
+                        rel_tables(5, 0, (&[0, 1, 1], &[1]), (&[0, 0, 1], &[0], &[0]));
+                }),
+                "tables 5 and 0",
+            ),
+            (
+                "an adjacency whose offsets run backwards",
+                with(&|parts| {
+                    parts.rel_tables =
+                        rel_tables(0, 0, (&[0, 1, 0], &[1]), (&[0, 0, 1], &[0], &[0]));
+                }),
+                "offsets",
+            ),
+            (
+                "an adjacency of another table's size",
+                with(&|parts| {
+                    parts.rel_tables = rel_tables(0, 0, (&[0, 1], &[1]), (&[0, 0, 1], &[0], &[0]));
+                }),
+                "1 nodes",
+            ),
+            (
+                "a target past its table",
+                with(&|parts| {
+                    parts.rel_tables =
+                        rel_tables(0, 0, (&[0, 1, 1], &[7]), (&[0, 0, 1], &[0], &[0]));
+                }),
+                "row 7",
+            ),
+            (
+                "a backward edge without its forward edge",
+                with(&|parts| {
+                    parts.rel_tables =
+                        rel_tables(0, 0, (&[0, 1, 1], &[1]), (&[0, 0, 1], &[0], &[5]));
+                }),
+                "forward edge 5",
+            ),
+            (
+                "a backward adjacency with other edges",
+                with(&|parts| {
+                    parts.rel_tables =
+                        rel_tables(0, 0, (&[0, 1, 1], &[1]), (&[0, 0, 2], &[0, 0], &[0, 0]));
+                }),
+                "2 edges backward and 1 forward",
+            ),
+            (
+                "one id at two rows",
+                with(&|parts| {
+                    parts.node_map = Fields(Vec::new()).u32(2).entry(3, 0, 0).entry(3, 0, 1);
+                }),
+                "lists id 3 twice",
+            ),
+            (
+                "the invalid id",
+                with(&|parts| {
+                    parts.node_map = Fields(Vec::new())
+                        .u32(2)
+                        .entry(3, 0, 0)
+                        .entry(u64::MAX, 0, 1);
+                }),
+                "invalid id",
+            ),
+            (
+                "more tables than table ids name",
+                more_tables_than_ids(),
+                "more than the 32768",
+            ),
+        ];
+        for (case, encoding, expected) in cases {
+            let error = load_encoding_of(&encoding).map(drop).unwrap_err();
+            assert!(
+                matches!(&error, Error::Serialization(message)
+                    if message.starts_with("section CompactStore: ") && message.contains(expected)),
+                "{case}: {error:?}"
+            );
+        }
+    }
+
+    /// A 0.5.x section is checked as a streamed one is: a raw chunk with a
+    /// crafted count is an error, never an abort.
+    #[test]
+    fn a_crafted_0_5_compact_section_is_refused() {
+        let mut bytes = Parts::valid().sealed();
+        bytes[4] = FORMAT_VERSION_V3;
+        let crc_at = bytes.len() - 4;
+        bytes[6..10].copy_from_slice(&u32::MAX.to_le_bytes());
+        let crc = crc32fast::hash(&bytes[..crc_at]);
+        bytes[crc_at..].copy_from_slice(&crc.to_le_bytes());
+        let image = MemoryImage::from_raw(vec![(SectionType::CompactStore, bytes)]).unwrap();
+        let error = load(&image).map(drop).unwrap_err();
+        assert!(
+            matches!(&error, Error::Serialization(message)
+                if message.starts_with("section CompactStore: ") && message.contains("node tables")),
+            "{error:?}"
         );
     }
 }

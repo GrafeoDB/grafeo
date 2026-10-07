@@ -39,6 +39,30 @@ pub enum TripleRingInvariantError {
         /// Id where the lookup failed.
         id: u32,
     },
+    /// The packed dictionary holds a term twice: every later id would
+    /// name the term after it.
+    DuplicateTerm {
+        /// The id of the repeated term.
+        id: u32,
+        /// The id the term has already.
+        first: u32,
+    },
+    /// The N-Triples string of a term does not parse back to a term that
+    /// prints as that string (whitespace that parsing trims, a character
+    /// it does not decode): the ring would answer for another term.
+    TermDoesNotRoundTrip {
+        /// The id of the term.
+        id: u32,
+    },
+    /// A wavelet tree holds a term id the dictionary does not have.
+    SymbolOutsideDictionary {
+        /// Which tree: "subjects", "predicates" or "objects".
+        component: &'static str,
+        /// The largest id of the tree.
+        symbol: u64,
+        /// The number of terms of the dictionary.
+        terms: usize,
+    },
 }
 
 impl std::fmt::Display for TripleRingInvariantError {
@@ -59,6 +83,22 @@ impl std::fmt::Display for TripleRingInvariantError {
             Self::DictionaryMissingTerm { id } => write!(
                 f,
                 "triple ring packed dictionary missing term for id {id} (corrupt payload)"
+            ),
+            Self::DuplicateTerm { id, first } => write!(
+                f,
+                "triple ring packed dictionary holds the term of id {first} again as id {id}"
+            ),
+            Self::TermDoesNotRoundTrip { id } => write!(
+                f,
+                "triple ring packed dictionary term {id} does not parse back to itself"
+            ),
+            Self::SymbolOutsideDictionary {
+                component,
+                symbol,
+                terms,
+            } => write!(
+                f,
+                "triple ring {component} hold term id {symbol}, the dictionary has {terms}                  terms"
             ),
         }
     }
@@ -134,6 +174,32 @@ impl TermDictionary {
     #[must_use]
     pub fn get_id(&self, term: &Term) -> Option<u32> {
         self.term_to_id.get(term).copied()
+    }
+
+    /// The same terms with ids in the byte order of their N-Triples
+    /// strings, and the new id of each old id.
+    ///
+    /// Two terms that print alike keep the order of their old ids (a ring
+    /// holding them is refused when it is read back, see
+    /// [`TripleRing::from_packed_parts`]).
+    fn into_canonical(self) -> (Self, Vec<u32>) {
+        let rendered: Vec<String> = self.id_to_term.iter().map(ToString::to_string).collect();
+        let mut order: Vec<u32> = (0u32..).zip(&rendered).map(|(id, _)| id).collect();
+        order.sort_by(|&left, &right| {
+            rendered[left as usize]
+                .as_bytes()
+                .cmp(rendered[right as usize].as_bytes())
+        });
+        drop(rendered);
+        let mut remap = vec![0u32; order.len()];
+        let mut canonical = Self::with_capacity(order.len());
+        for (new, &old) in (0u32..).zip(&order) {
+            let term = Arc::clone(&self.id_to_term[old as usize]);
+            canonical.term_to_id.insert(Arc::clone(&term), new);
+            canonical.id_to_term.push(term);
+            remap[old as usize] = new;
+        }
+        (canonical, remap)
     }
 
     /// Returns size in bytes.
@@ -221,6 +287,19 @@ impl TripleRing {
                 spo_to_pos: SuccinctPermutation::default(),
                 spo_to_osp: SuccinctPermutation::default(),
             };
+        }
+
+        // Canonical ids: the terms in the byte order of their N-Triples
+        // strings, so the ring, and the bytes a checkpoint writes of it,
+        // depend only on the set of triples, not on the order they came in
+        // (a store hands them over in the order of a randomly seeded hash
+        // set).
+        let (canonical, remap) = dict.into_canonical();
+        dict = canonical;
+        for triple in &mut compact_triples {
+            triple.subject = remap[triple.subject as usize];
+            triple.predicate = remap[triple.predicate as usize];
+            triple.object = remap[triple.object as usize];
         }
 
         // Sort by SPO (primary order)
@@ -327,9 +406,13 @@ impl TripleRing {
     /// Returns [`TripleRingInvariantError`] if any of these structural
     /// invariants is broken: per-component lengths must equal
     /// `num_triples`, the packed dictionary's count must fit in `u32`,
-    /// and every id `< len` must resolve to a term. Without these
-    /// checks, a corrupt or hand-crafted payload could cause `get_spo`
-    /// to panic on out-of-bounds wavelet/permutation access.
+    /// every id `< len` must resolve to a term whose N-Triples string
+    /// parses back to a term printing as that string, no term may come
+    /// twice, and the wavelet trees may hold only ids the dictionary has.
+    /// Without these checks, a corrupt or hand-crafted payload could
+    /// cause `get_spo` to panic on out-of-bounds wavelet/permutation
+    /// access, or the ring to answer for other terms than it was built
+    /// from.
     pub fn from_packed_parts(
         packed_dict: super::PackedTermDictionary,
         num_triples: usize,
@@ -359,22 +442,44 @@ impl TripleRing {
             }
         }
 
-        // Materialize the packed dictionary into a heap TermDictionary.
-        // get_or_insert preserves insertion order, so id N in the
-        // packed dict ends up as id N in the heap dict.
         let dict_len = packed_dict.len();
         if u32::try_from(dict_len).is_err() {
             return Err(TripleRingInvariantError::DictionaryOverflow { len: dict_len });
         }
+        // The trees hold term ids: every one names a term of the
+        // dictionary (the symbols are sorted, the last is the largest).
+        for (component, tree) in [
+            ("subjects", &subjects),
+            ("predicates", &predicates),
+            ("objects", &objects),
+        ] {
+            if let Some(&symbol) = tree.symbols_slice().last()
+                && usize::try_from(symbol).map_or(true, |symbol| symbol >= dict_len)
+            {
+                return Err(TripleRingInvariantError::SymbolOutsideDictionary {
+                    component,
+                    symbol,
+                    terms: dict_len,
+                });
+            }
+        }
+
+        // Materialize the packed dictionary into a heap TermDictionary.
+        // get_or_insert preserves insertion order, so id N in the packed
+        // dict ends up as id N in the heap dict, as long as every term
+        // comes back as itself and no term comes twice.
         let mut dict = TermDictionary::with_capacity(dict_len);
-        for id in 0..dict_len {
-            // Cast is bounds-checked above.
-            #[allow(clippy::cast_possible_truncation)]
-            let id_u32 = id as u32;
-            let term = packed_dict
-                .get_term(id_u32)
-                .ok_or(TripleRingInvariantError::DictionaryMissingTerm { id: id_u32 })?;
-            dict.get_or_insert(term);
+        for id in (0u32..).take(dict_len) {
+            let missing = TripleRingInvariantError::DictionaryMissingTerm { id };
+            let text = packed_dict.get_term_str(id).ok_or(missing.clone())?;
+            let term = Term::from_ntriples(text).ok_or(missing)?;
+            if term.to_string() != text {
+                return Err(TripleRingInvariantError::TermDoesNotRoundTrip { id });
+            }
+            let given = dict.get_or_insert(term);
+            if given != id {
+                return Err(TripleRingInvariantError::DuplicateTerm { id, first: given });
+            }
         }
 
         Ok(Self {
@@ -1432,5 +1537,167 @@ mod tests {
         let bytes = ring.save_to_bytes().unwrap();
         let loaded = TripleRing::load_from_bytes(&bytes).unwrap();
         assert_eq!(loaded.len(), 0);
+    }
+
+    mod packed {
+        use super::*;
+        use crate::index::ring::{PackedTermDictionary, TripleRingInvariantError};
+        use bytes::Bytes;
+
+        /// Sixty triples over Alix, Gus, Vincent, Mia and Jules.
+        fn sixty() -> Vec<Triple> {
+            let people = ["alix", "gus", "vincent", "mia", "jules"];
+            (0..60usize)
+                .map(|i| {
+                    Triple::new(
+                        Term::iri(format!("http://example.org/{}/{}", people[i % 5], i % 19)),
+                        Term::iri(format!("http://example.org/p{}", i % 3)),
+                        Term::literal(format!("v{}", i % 7)),
+                    )
+                })
+                .collect()
+        }
+
+        /// The bytes of a packed dictionary holding `strings` as they are.
+        fn dictionary_of(strings: &[String]) -> PackedTermDictionary {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"PDCT");
+            out.extend_from_slice(&[1, 0, 0, 0]);
+            out.extend_from_slice(&(strings.len() as u64).to_le_bytes());
+            let table: Vec<u8> = strings.iter().flat_map(|s| s.bytes()).collect();
+            out.extend_from_slice(&(table.len() as u64).to_le_bytes());
+            out.extend_from_slice(&table);
+            let mut offset = 0u64;
+            for s in strings {
+                out.extend_from_slice(&offset.to_le_bytes());
+                offset += s.len() as u64;
+            }
+            out.extend_from_slice(&offset.to_le_bytes());
+            let mut sorted: Vec<u32> = (0u32..).take(strings.len()).collect();
+            sorted.sort_by(|a, b| strings[*a as usize].cmp(&strings[*b as usize]));
+            for id in sorted {
+                out.extend_from_slice(&id.to_le_bytes());
+            }
+            PackedTermDictionary::from_bytes(Bytes::from(out)).unwrap()
+        }
+
+        /// The terms of `ring` as their N-Triples strings, by id.
+        fn strings_of(ring: &TripleRing) -> Vec<String> {
+            (0u32..)
+                .take(ring.num_terms())
+                .map(|id| ring.dictionary().get_term(id).unwrap().to_string())
+                .collect()
+        }
+
+        /// `ring` rebuilt from its parts, with `dictionary` and `subjects`
+        /// in place of its own.
+        fn assemble(
+            ring: &TripleRing,
+            dictionary: PackedTermDictionary,
+            subjects: WaveletTree,
+        ) -> Result<TripleRing, TripleRingInvariantError> {
+            TripleRing::from_packed_parts(
+                dictionary,
+                ring.len(),
+                subjects,
+                ring.predicates_wt().clone(),
+                ring.objects_wt().clone(),
+                ring.spo_to_pos_perm().clone(),
+                ring.spo_to_osp_perm().clone(),
+            )
+        }
+
+        #[test]
+        fn the_parts_of_a_ring_assemble_into_it() {
+            let ring = TripleRing::from_triples(sixty().into_iter());
+            let restored = assemble(
+                &ring,
+                PackedTermDictionary::from_term_dict(ring.dictionary()),
+                ring.subjects_wt().clone(),
+            )
+            .unwrap();
+            for index in 0..ring.len() {
+                assert_eq!(restored.get_spo(index), ring.get_spo(index), "{index}");
+            }
+        }
+
+        /// A term held twice would shift every later id: refused.
+        #[test]
+        fn a_repeated_dictionary_term_is_refused() {
+            let ring = TripleRing::from_triples(sixty().into_iter());
+            let mut strings = strings_of(&ring);
+            strings[3] = strings[0].clone();
+            assert_eq!(
+                assemble(&ring, dictionary_of(&strings), ring.subjects_wt().clone()).unwrap_err(),
+                TripleRingInvariantError::DuplicateTerm { id: 3, first: 0 }
+            );
+        }
+
+        /// A term whose string parses to another term (here with the
+        /// trailing space parsing trims) would make the ring answer for the
+        /// other term: refused.
+        #[test]
+        fn a_term_that_does_not_parse_back_is_refused() {
+            let ring = TripleRing::from_triples(sixty().into_iter());
+            let mut strings = strings_of(&ring);
+            strings[5].push(' ');
+            assert_eq!(
+                assemble(&ring, dictionary_of(&strings), ring.subjects_wt().clone()).unwrap_err(),
+                TripleRingInvariantError::TermDoesNotRoundTrip { id: 5 }
+            );
+        }
+
+        /// A tree holding an id past the dictionary is refused, also one
+        /// that a cast to `u32` would turn into another term's id.
+        #[test]
+        fn a_symbol_outside_the_dictionary_is_refused() {
+            let ring = TripleRing::from_triples(sixty().into_iter());
+            let mut ids: Vec<u64> = (0..ring.len())
+                .map(|i| ring.subjects_wt().access(i))
+                .collect();
+            let last = ids.len() - 1;
+            let terms = ring.num_terms();
+            for symbol in [terms as u64, terms as u64 + 5, 1u64 << 32] {
+                ids[last] = symbol;
+                assert_eq!(
+                    assemble(
+                        &ring,
+                        PackedTermDictionary::from_term_dict(ring.dictionary()),
+                        WaveletTree::new(&ids)
+                    )
+                    .unwrap_err(),
+                    TripleRingInvariantError::SymbolOutsideDictionary {
+                        component: "subjects",
+                        symbol,
+                        terms
+                    }
+                );
+            }
+        }
+
+        /// Term ids follow the byte order of the terms' N-Triples strings,
+        /// whatever order the triples come in, so a ring is a function of
+        /// its triples.
+        #[test]
+        fn term_ids_follow_the_byte_order_of_the_terms() {
+            let forward = TripleRing::from_triples(sixty().into_iter());
+            let backward = TripleRing::from_triples(sixty().into_iter().rev());
+            let strings = strings_of(&forward);
+            assert!(
+                strings
+                    .windows(2)
+                    .all(|pair| pair[0].as_bytes() < pair[1].as_bytes()),
+                "ids in byte order: {strings:?}"
+            );
+            assert_eq!(strings_of(&backward), strings);
+            for index in 0..forward.len() {
+                assert_eq!(backward.get_spo(index), forward.get_spo(index), "{index}");
+                assert_eq!(
+                    (backward.spo_to_pos(index), backward.spo_to_osp(index)),
+                    (forward.spo_to_pos(index), forward.spo_to_osp(index)),
+                    "{index}"
+                );
+            }
+        }
     }
 }

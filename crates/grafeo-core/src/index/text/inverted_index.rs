@@ -2,7 +2,48 @@
 
 use super::tokenizer::{SimpleTokenizer, Tokenizer};
 use grafeo_common::types::NodeId;
+use grafeo_common::utils::error::Result;
 use std::collections::HashMap;
+
+/// Receives an [`InvertedIndex`] one posting list at a time, from
+/// [`InvertedIndex::visit`].
+///
+/// An error from any method ends the visit, which returns it.
+pub trait PostingsVisitor {
+    /// Receives the BM25 parameters, the sum of all document lengths, and
+    /// how many posting lists and document lengths follow.
+    ///
+    /// # Errors
+    ///
+    /// An error ends the visit.
+    fn header(
+        &mut self,
+        config: &BM25Config,
+        total_length: u64,
+        term_count: usize,
+        doc_count: usize,
+    ) -> Result<()>;
+
+    /// Receives the posting list of `term`: `count` pairs of a node and the
+    /// term's frequency in its document, in node order.
+    ///
+    /// # Errors
+    ///
+    /// An error ends the visit.
+    fn posting_list(
+        &mut self,
+        term: &str,
+        count: usize,
+        postings: &mut dyn Iterator<Item = (NodeId, u32)>,
+    ) -> Result<()>;
+
+    /// Receives the length (in tokens) of the document of `node`.
+    ///
+    /// # Errors
+    ///
+    /// An error ends the visit.
+    fn doc_length(&mut self, node: NodeId, length: u32) -> Result<()>;
+}
 
 /// Configuration for BM25 scoring.
 #[derive(Debug, Clone)]
@@ -338,25 +379,107 @@ impl InvertedIndex {
         self.config = config;
     }
 
-    /// Restore the index from a snapshot. Replaces all current data.
+    /// Restore the index from a snapshot. Replaces all current data and
+    /// keeps the BM25 configuration.
     pub fn restore(
         &mut self,
         postings: Vec<(String, Vec<(NodeId, u32)>)>,
         doc_lengths: Vec<(NodeId, u32)>,
         total_length: u64,
     ) {
-        self.postings.clear();
+        self.begin_restore(self.config.clone(), total_length);
         for (term, entries) in postings {
-            let posting_list = PostingList {
-                postings: entries
-                    .into_iter()
-                    .map(|(node_id, term_freq)| Posting { node_id, term_freq })
-                    .collect(),
-            };
-            self.postings.insert(term, posting_list);
+            self.restore_posting_list(term, entries);
         }
-        self.doc_lengths = doc_lengths.into_iter().collect();
+        for (node, length) in doc_lengths {
+            self.restore_doc_length(node, length);
+        }
+    }
+
+    /// Hands the index to `visitor`: the header, every document length in
+    /// node order, then every posting list in term order, each list in node
+    /// order.
+    ///
+    /// The order depends only on what the index holds, not on its hash maps
+    /// or the order documents were inserted in, so the same postings are
+    /// always handed over the same way. A list the index holds in node order
+    /// (as a restored index, or one built from nodes in id order, does) is
+    /// handed over as an iterator over the index's own list; another is
+    /// copied and sorted first (16 bytes per posting, one list at a time).
+    /// To sort, the visit also gathers references to every term (16 bytes
+    /// each) and a copy of the document lengths (16 bytes each).
+    ///
+    /// The index cannot change during the visit, so whoever calls it holds
+    /// the index's lock for its length: a checkpoint holds the read lock
+    /// while it writes the index to its sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error of `visitor`, which ends the visit.
+    pub fn visit(&self, visitor: &mut dyn PostingsVisitor) -> Result<()> {
+        visitor.header(
+            &self.config,
+            self.total_length,
+            self.postings.len(),
+            self.doc_lengths.len(),
+        )?;
+        let mut lengths: Vec<(NodeId, u32)> = self
+            .doc_lengths
+            .iter()
+            .map(|(node, length)| (*node, *length))
+            .collect();
+        lengths.sort_unstable_by_key(|(node, _)| *node);
+        for (node, length) in lengths {
+            visitor.doc_length(node, length)?;
+        }
+        let mut terms: Vec<(&String, &PostingList)> = self.postings.iter().collect();
+        terms.sort_unstable_by_key(|(term, _)| *term);
+        for (term, list) in terms {
+            let count = list.postings.len();
+            if list.postings.is_sorted_by_key(|posting| posting.node_id) {
+                let mut postings = list
+                    .postings
+                    .iter()
+                    .map(|posting| (posting.node_id, posting.term_freq));
+                visitor.posting_list(term, count, &mut postings)?;
+            } else {
+                let mut sorted: Vec<(NodeId, u32)> = list
+                    .postings
+                    .iter()
+                    .map(|posting| (posting.node_id, posting.term_freq))
+                    .collect();
+                sorted.sort_unstable_by_key(|(node, _)| *node);
+                visitor.posting_list(term, count, &mut sorted.into_iter())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Empties the index and sets its BM25 configuration and the sum of its
+    /// document lengths, for [`restore_posting_list`](Self::restore_posting_list)
+    /// and [`restore_doc_length`](Self::restore_doc_length) to fill. The
+    /// tokenizer stays.
+    pub fn begin_restore(&mut self, config: BM25Config, total_length: u64) {
+        self.postings = HashMap::new();
+        self.doc_lengths = HashMap::new();
         self.total_length = total_length;
+        self.config = config;
+    }
+
+    /// Sets the posting list of `term`: pairs of a node and the term's
+    /// frequency in its document, kept in this order.
+    pub fn restore_posting_list(&mut self, term: String, postings: Vec<(NodeId, u32)>) {
+        let postings = postings
+            .into_iter()
+            .map(|(node_id, term_freq)| Posting { node_id, term_freq })
+            .collect();
+        self.postings.insert(term, PostingList { postings });
+    }
+
+    /// Sets the length (in tokens) of the document of `node`. The sum of
+    /// all lengths stays what [`begin_restore`](Self::begin_restore) set.
+    pub fn restore_doc_length(&mut self, node: NodeId, length: u32) {
+        self.doc_lengths.insert(node, length);
     }
 
     /// Returns estimated heap memory in bytes.
@@ -552,7 +675,7 @@ mod tests {
             );
         }
 
-        // Node 2 has no matching terms — should score 0.0
+        // Node 2 has no matching terms: it scores 0.0
         let no_match_score = index.score_document(NodeId::new(2), query);
         assert_eq!(no_match_score, 0.0, "non-matching doc should score 0.0");
 
@@ -626,6 +749,207 @@ mod tests {
         assert!(
             empty_query_results.is_empty(),
             "empty query should return no results"
+        );
+    }
+
+    /// One call [`InvertedIndex::visit`] made.
+    #[derive(Debug, PartialEq)]
+    enum Visited {
+        /// k1 and b as bits, the total length, the term and document counts.
+        Header(u64, u64, u64, usize, usize),
+        /// A term, the count announced and the postings handed over.
+        List(String, usize, Vec<(NodeId, u32)>),
+        /// A node and the length of its document.
+        Length(NodeId, u32),
+    }
+
+    /// The calls of a visit, in order; refuses the call after the first
+    /// `fail_after` calls, when set.
+    #[derive(Debug, Default)]
+    struct Recorded {
+        calls: Vec<Visited>,
+        fail_after: Option<usize>,
+    }
+
+    impl Recorded {
+        /// Refuses the call when `fail_after` calls were recorded.
+        fn record(&mut self, call: Visited) -> Result<()> {
+            if self.fail_after == Some(self.calls.len()) {
+                return Err(grafeo_common::utils::error::Error::Internal(
+                    "Gus stops the visit".to_string(),
+                ));
+            }
+            self.calls.push(call);
+            Ok(())
+        }
+    }
+
+    impl PostingsVisitor for Recorded {
+        fn header(
+            &mut self,
+            config: &BM25Config,
+            total_length: u64,
+            term_count: usize,
+            doc_count: usize,
+        ) -> Result<()> {
+            self.record(Visited::Header(
+                config.k1.to_bits(),
+                config.b.to_bits(),
+                total_length,
+                term_count,
+                doc_count,
+            ))
+        }
+
+        fn posting_list(
+            &mut self,
+            term: &str,
+            count: usize,
+            postings: &mut dyn Iterator<Item = (NodeId, u32)>,
+        ) -> Result<()> {
+            self.record(Visited::List(term.to_string(), count, postings.collect()))
+        }
+
+        fn doc_length(&mut self, node: NodeId, length: u32) -> Result<()> {
+            self.record(Visited::Length(node, length))
+        }
+    }
+
+    /// Restores the index it holds from what `visit` hands over.
+    struct Restorer<'a>(&'a mut InvertedIndex);
+
+    impl PostingsVisitor for Restorer<'_> {
+        fn header(
+            &mut self,
+            config: &BM25Config,
+            total_length: u64,
+            _term_count: usize,
+            _doc_count: usize,
+        ) -> Result<()> {
+            self.0.begin_restore(config.clone(), total_length);
+            Ok(())
+        }
+
+        fn posting_list(
+            &mut self,
+            term: &str,
+            _count: usize,
+            postings: &mut dyn Iterator<Item = (NodeId, u32)>,
+        ) -> Result<()> {
+            self.0
+                .restore_posting_list(term.to_string(), postings.collect());
+            Ok(())
+        }
+
+        fn doc_length(&mut self, node: NodeId, length: u32) -> Result<()> {
+            self.0.restore_doc_length(node, length);
+            Ok(())
+        }
+    }
+
+    /// Three documents inserted out of node order: Paris twice in node 88,
+    /// once in node 3.
+    fn three_cities() -> InvertedIndex {
+        let mut index = InvertedIndex::new(BM25Config { k1: 1.9, b: 0.3 });
+        index.insert(NodeId::new(88), "Paris Mia Paris");
+        index.insert(NodeId::new(3), "Berlin Paris");
+        index.insert(NodeId::new(19), "Amsterdam");
+        index
+    }
+
+    /// The calls a visit of [`three_cities`] makes.
+    fn three_cities_visited() -> Vec<Visited> {
+        vec![
+            Visited::Header(1.9f64.to_bits(), 0.3f64.to_bits(), 6, 4, 3),
+            Visited::Length(NodeId::new(3), 2),
+            Visited::Length(NodeId::new(19), 1),
+            Visited::Length(NodeId::new(88), 3),
+            Visited::List("amsterdam".to_string(), 1, vec![(NodeId::new(19), 1)]),
+            Visited::List("berlin".to_string(), 1, vec![(NodeId::new(3), 1)]),
+            Visited::List("mia".to_string(), 1, vec![(NodeId::new(88), 1)]),
+            // In node order, although node 88 was inserted first.
+            Visited::List(
+                "paris".to_string(),
+                2,
+                vec![(NodeId::new(3), 1), (NodeId::new(88), 2)],
+            ),
+        ]
+    }
+
+    #[test]
+    fn visit_hands_over_the_documents_in_node_order_then_the_terms_in_order() {
+        let mut recorded = Recorded::default();
+        three_cities().visit(&mut recorded).unwrap();
+        assert_eq!(recorded.calls, three_cities_visited());
+    }
+
+    #[test]
+    fn a_visitor_error_ends_the_visit() {
+        let all = three_cities_visited();
+        for fail_after in 0..all.len() {
+            let mut visitor = Recorded {
+                fail_after: Some(fail_after),
+                ..Recorded::default()
+            };
+            let error = three_cities().visit(&mut visitor).unwrap_err();
+            assert!(error.to_string().contains("Gus stops the visit"), "{error}");
+            assert_eq!(
+                visitor.calls[..],
+                all[..fail_after],
+                "no call after the error in call {fail_after}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_restore_replaces_the_whole_index_and_searches_as_the_original() {
+        let original = three_cities();
+        let mut restored = InvertedIndex::new(BM25Config::default());
+        restored.insert(NodeId::new(5), "Gus Prague");
+        original.visit(&mut Restorer(&mut restored)).unwrap();
+
+        let (mut postings, lengths, total) = original.snapshot();
+        for (_, list) in &mut postings {
+            list.sort_by_key(|(node, _)| *node);
+        }
+        assert_eq!(
+            restored.snapshot(),
+            (postings, lengths, total),
+            "the original with every list in node order"
+        );
+        assert!(!restored.contains(NodeId::new(5)), "Gus is gone");
+        assert_eq!(
+            (restored.config().k1, restored.config().b),
+            (1.9, 0.3),
+            "the BM25 parameters come with the restore"
+        );
+        for query in ["paris", "berlin paris", "mia amsterdam"] {
+            let mut expected = original.search(query, 10);
+            let mut found = restored.search(query, 10);
+            expected.sort_by_key(|(node, _)| *node);
+            found.sort_by_key(|(node, _)| *node);
+            assert_eq!(found, expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn begin_restore_empties_the_index_and_keeps_the_total_it_is_given() {
+        let mut index = three_cities();
+        index.begin_restore(BM25Config { k1: 0.3, b: 0.88 }, 19);
+        assert!(index.is_empty() && index.term_count() == 0);
+        assert_eq!(index.snapshot(), (Vec::new(), Vec::new(), 19));
+        assert_eq!((index.config().k1, index.config().b), (0.3, 0.88));
+
+        index.restore_doc_length(NodeId::new(3), 19);
+        index.restore_posting_list("jules".to_string(), vec![(NodeId::new(3), 19)]);
+        assert_eq!(
+            index.snapshot(),
+            (
+                vec![("jules".to_string(), vec![(NodeId::new(3), 19)])],
+                vec![(NodeId::new(3), 19)],
+                19
+            ),
+            "a document length leaves the total as begin_restore set it"
         );
     }
 }

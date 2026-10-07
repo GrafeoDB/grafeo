@@ -122,7 +122,39 @@ pub use section::VectorStoreSection;
 
 use grafeo_common::types::NodeId;
 #[cfg(feature = "vector-index")]
+use grafeo_common::utils::error::Result;
+#[cfg(feature = "vector-index")]
 use std::collections::HashSet;
+
+// ── TopologyVisitor ────────────────────────────────────────────────
+
+/// Receives an HNSW topology one node at a time.
+///
+/// [`HnswIndex::visit_topology`] calls [`header`](Self::header) once, then
+/// [`node`](Self::node) for every node in increasing id order, so a visitor
+/// can write the topology out without holding a copy of it.
+#[cfg(feature = "vector-index")]
+pub trait TopologyVisitor {
+    /// Receives the entry point, the top level and the number of nodes that
+    /// follow.
+    ///
+    /// # Errors
+    ///
+    /// Returns the visitor's own error, which ends the visit.
+    fn header(
+        &mut self,
+        entry_point: Option<NodeId>,
+        max_level: usize,
+        node_count: usize,
+    ) -> Result<()>;
+
+    /// Receives node `id` and its neighbor lists, layer 0 first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the visitor's own error, which ends the visit.
+    fn node(&mut self, id: NodeId, layers: &[Vec<NodeId>]) -> Result<()>;
+}
 
 // ── VectorIndexKind ────────────────────────────────────────────────
 
@@ -336,6 +368,44 @@ impl VectorIndexKind {
         match self {
             Self::Hnsw(idx) => idx.restore_topology(entry_point, max_level, node_data),
             Self::Quantized(idx) => idx.restore_topology(entry_point, max_level, node_data),
+        }
+    }
+
+    /// Hands the topology to `visitor` one node at a time, in increasing id
+    /// order (see [`HnswIndex::visit_topology`]).
+    ///
+    /// The index's read locks (nodes, entry point and level) are held for the
+    /// whole visit: while a checkpoint writes the topology, inserts into this
+    /// index wait, and so do searches that arrive after a waiting insert
+    /// (`parking_lot`'s locks are fair). Memory stays bounded meanwhile: one
+    /// piece and one node's bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error `visitor` returns.
+    pub fn visit_topology(&self, visitor: &mut dyn TopologyVisitor) -> Result<()> {
+        match self {
+            Self::Hnsw(idx) => idx.visit_topology(visitor),
+            Self::Quantized(idx) => idx.visit_topology(visitor),
+        }
+    }
+
+    /// Starts restoring a topology node by node (see
+    /// [`HnswIndex::begin_restore`]).
+    pub fn begin_restore(&self, entry_point: Option<NodeId>, max_level: usize, node_count: usize) {
+        match self {
+            Self::Hnsw(idx) => idx.begin_restore(entry_point, max_level, node_count),
+            Self::Quantized(idx) => idx.begin_restore(entry_point, max_level, node_count),
+        }
+    }
+
+    /// Restores one node of a topology begun with
+    /// [`begin_restore`](Self::begin_restore) (see
+    /// [`HnswIndex::restore_node`]).
+    pub fn restore_node(&self, id: NodeId, layers: Vec<Vec<NodeId>>) {
+        match self {
+            Self::Hnsw(idx) => idx.restore_node(id, layers),
+            Self::Quantized(idx) => idx.restore_node(id, layers),
         }
     }
 

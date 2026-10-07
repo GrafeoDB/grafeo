@@ -482,37 +482,47 @@ impl CompactStoreBuilder {
             let fwd = CsrAdjacency::from_sorted_edges(src_node_count, &fwd_edges);
 
             // Optionally build backward CSR + pre-compute bwd-to-fwd position mapping.
-            let bwd =
-                if rtb.backward {
-                    let mut bwd_edges: Vec<(u32, u32)> =
-                        rtb.edges.iter().map(|&(src, dst)| (dst, src)).collect();
-                    bwd_edges.sort_by_key(|&(dst, _src)| dst);
-                    let mut bwd_csr = CsrAdjacency::from_sorted_edges(dst_node_count, &bwd_edges);
+            let bwd = if rtb.backward {
+                let mut bwd_edges: Vec<(u32, u32)> =
+                    rtb.edges.iter().map(|&(src, dst)| (dst, src)).collect();
+                bwd_edges.sort_by_key(|&(dst, _src)| dst);
+                let mut bwd_csr = CsrAdjacency::from_sorted_edges(dst_node_count, &bwd_edges);
 
-                    // For each backward edge (dst -> src), find the forward CSR position
-                    // of the corresponding (src -> dst) edge. This eliminates the O(degree)
-                    // linear scan in edges_to_target at query time.
-                    let mut mapping = Vec::with_capacity(bwd_edges.len());
-                    for &(dst, src) in &bwd_edges {
-                        let fwd_neighbors = fwd.neighbors(src);
-                        let fwd_start = fwd.offset_of(src);
-                        let local_idx = fwd_neighbors.iter().position(|&t| t == dst).ok_or_else(
-                            || {
-                                CompactStoreError::InconsistentEdgeData(format!(
-                                    "backward edge ({dst}->{src}) has no corresponding forward edge"
-                                ))
-                            },
-                        )?;
-                        // reason: local index within CSR neighbors fits u32
-                        #[allow(clippy::cast_possible_truncation)]
-                        mapping.push(fwd_start + local_idx as u32);
-                    }
-                    bwd_csr.set_edge_data(mapping);
+                // For each backward edge (dst -> src), find the forward CSR position
+                // of the corresponding (src -> dst) edge. This eliminates the O(degree)
+                // linear scan in edges_to_target at query time.
+                let mut mapping = Vec::with_capacity(bwd_edges.len());
+                // Parallel edges share their source and target: each
+                // backward edge takes the first forward position of its
+                // pair that no backward edge took before. Both sorts are
+                // stable, so parallel edges pair up in creation order.
+                let mut taken = vec![false; fwd.num_edges()];
+                for &(dst, src) in &bwd_edges {
+                    let fwd_neighbors = fwd.neighbors(src);
+                    let fwd_start = fwd.offset_of(src);
+                    let local_idx = fwd_neighbors
+                        .iter()
+                        .enumerate()
+                        .position(|(i, &t)| t == dst && !taken[fwd_start as usize + i])
+                        .ok_or_else(|| {
+                            CompactStoreError::InconsistentEdgeData(format!(
+                                "backward edge ({dst}->{src}) has no corresponding forward edge"
+                            ))
+                        })?;
+                    taken[fwd_start as usize + local_idx] = true;
+                    let local_idx = u32::try_from(local_idx).map_err(|_| {
+                        CompactStoreError::InconsistentEdgeData(format!(
+                            "node {src} has more forward edges than a u32 counts"
+                        ))
+                    })?;
+                    mapping.push(fwd_start + local_idx);
+                }
+                bwd_csr.set_edge_data(mapping);
 
-                    Some(bwd_csr)
-                } else {
-                    None
-                };
+                Some(bwd_csr)
+            } else {
+                None
+            };
 
             // Build edge property columns.
             let property_col_defs: Vec<ColumnDef> = rtb
@@ -714,8 +724,11 @@ enum InferredType {
 pub fn from_graph_store(
     store: &dyn crate::graph::traits::GraphStore,
 ) -> Result<CompactStore, CompactStoreError> {
-    // Step 1: Collect all nodes grouped by label, build ID mapping.
-    let labels = store.all_labels();
+    // Step 1: Collect all nodes grouped by label, build ID mapping. Labels
+    // in name order, so the tables (and the bytes they are written as) do
+    // not depend on the order a store lists its labels in.
+    let mut labels = store.all_labels();
+    labels.sort_unstable();
     if labels.is_empty() {
         return CompactStoreBuilder::new().build();
     }
@@ -868,8 +881,11 @@ pub fn from_graph_store(
         }
     }
 
-    // Step 4: Add relationship tables to the builder.
-    for ((edge_type, src_label, dst_label), edges) in &edge_groups {
+    // Step 4: Add relationship tables to the builder, in key order rather
+    // than the hash map's.
+    let mut groups: Vec<_> = edge_groups.iter().collect();
+    groups.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    for ((edge_type, src_label, dst_label), edges) in groups {
         let edge_props =
             edge_props_groups.get(&(edge_type.clone(), src_label.clone(), dst_label.clone()));
 
@@ -913,7 +929,8 @@ pub fn from_graph_store_preserving_ids(
 
     // ── Build node ID maps (replicate the label grouping logic) ────
 
-    let labels = store.all_labels();
+    let mut labels = store.all_labels();
+    labels.sort_unstable();
     if labels.is_empty() {
         compact.set_id_maps(
             FxHashMap::default(),
@@ -1023,8 +1040,10 @@ pub fn from_graph_store_preserving_ids(
         let Some(&rel_table_id) = rel_key_to_id.get(&key) else {
             continue;
         };
-        // Sort by (src_offset, dst_offset) to match CSR order.
-        entries.sort_by_key(|&(_, src, dst)| (src, dst));
+        // Sort by source alone, keeping each source's edges in the order they
+        // were found: the order the CSR keeps them in (a stable sort by source
+        // of the same edges), so each id lands on its own edge.
+        entries.sort_by_key(|&(_, src, _dst)| src);
 
         let rev = &mut edge_offset_to_id[rel_table_id as usize];
         for (csr_pos, (original_eid, _src, _dst)) in entries.iter().enumerate() {
@@ -2606,5 +2625,83 @@ mod tests {
             let rec = compact.get_edge(eid).unwrap();
             assert_eq!(rec.edge_type.as_str(), "LINK");
         }
+    }
+
+    /// Each original edge id still names its own edge after a compaction,
+    /// when a node's edges were created in another order than their targets:
+    /// the CSR keeps a source's edges in creation order, and so must the id
+    /// map.
+    #[test]
+    fn edge_ids_keep_their_edges_when_targets_were_created_in_another_order() {
+        use crate::graph::lpg::LpgStore;
+        use grafeo_common::types::EdgeId;
+
+        let store = LpgStore::new().unwrap();
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let mia = store.create_node(&["Person"]);
+        let to_mia = store.create_edge(alix, mia, "KNOWS");
+        store.set_edge_property(to_mia, "w", Value::Int64(3));
+        let to_gus = store.create_edge(alix, gus, "KNOWS");
+        store.set_edge_property(to_gus, "w", Value::Int64(19));
+
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+        let described = |id: EdgeId| {
+            let edge = compact.get_edge(id).unwrap();
+            let w = edge.properties.get(&PropertyKey::new("w")).cloned();
+            (edge.src, edge.dst, w)
+        };
+        assert_eq!(described(to_mia), (alix, mia, Some(Value::Int64(3))));
+        assert_eq!(described(to_gus), (alix, gus, Some(Value::Int64(19))));
+        let mut outgoing = compact.edges_from(alix, crate::graph::Direction::Outgoing);
+        outgoing.sort();
+        let mut expected = vec![(mia, to_mia), (gus, to_gus)];
+        expected.sort();
+        assert_eq!(outgoing, expected);
+    }
+
+    /// Parallel edges keep their own ids on incoming traversal: the backward
+    /// adjacency maps each to its own forward position, not every one to the
+    /// first.
+    #[test]
+    fn parallel_edges_keep_their_own_ids_on_incoming_traversal() {
+        use crate::graph::lpg::LpgStore;
+
+        let store = LpgStore::new().unwrap();
+        let vincent = store.create_node(&["Person"]);
+        let jules = store.create_node(&["Person"]);
+        let first = store.create_edge(vincent, jules, "KNOWS");
+        let second = store.create_edge(vincent, jules, "KNOWS");
+        let third = store.create_edge(vincent, jules, "KNOWS");
+
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+        let mut incoming: Vec<_> = compact
+            .edges_from(jules, crate::graph::Direction::Incoming)
+            .into_iter()
+            .map(|(_, edge)| edge)
+            .collect();
+        incoming.sort();
+        assert_eq!(incoming, vec![first, second, third]);
+
+        // Without original ids the edges keep distinct compact ids too.
+        let compact = from_graph_store(&store).unwrap();
+        let jules = compact.nodes_by_label("Person")[1];
+        let mut incoming: Vec<_> = compact
+            .edges_from(jules, crate::graph::Direction::Incoming)
+            .into_iter()
+            .map(|(_, edge)| edge)
+            .collect();
+        let mut outgoing: Vec<_> = compact
+            .edges_from(
+                compact.nodes_by_label("Person")[0],
+                crate::graph::Direction::Outgoing,
+            )
+            .into_iter()
+            .map(|(_, edge)| edge)
+            .collect();
+        incoming.sort();
+        outgoing.sort();
+        assert_eq!(incoming.len(), 3);
+        assert_eq!(incoming, outgoing, "the edges in, as the edges out");
     }
 }

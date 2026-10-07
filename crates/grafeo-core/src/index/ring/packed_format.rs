@@ -40,6 +40,11 @@
 //! Explicit offsets (rather than sequential parsing) let an mmap reader
 //! `Bytes::slice` directly to any sub-section without first walking the
 //! preceding ones.
+//!
+//! The six sub-sections are also the parts of the ring section of version 3
+//! (see [`super::section`]), which stores each in its own stream without the
+//! envelope; [`assemble_triple_ring`] builds the ring from the six parts
+//! however they were read.
 
 use bytes::Bytes;
 
@@ -80,9 +85,19 @@ pub enum PackedRingError {
     /// Embedded `PackedTermDictionary` failed to parse.
     Dict(PackedDictError),
     /// Embedded `PackedWaveletTree` failed to parse.
-    Wavelet(PackedWaveletError),
+    Wavelet {
+        /// Which tree: "subjects", "predicates" or "objects".
+        part: &'static str,
+        /// Why it does not parse.
+        error: PackedWaveletError,
+    },
     /// Embedded `PackedPermutation` failed to parse.
-    Permutation(PackedPermutationError),
+    Permutation {
+        /// Which permutation: "spo_to_pos" or "spo_to_osp".
+        part: &'static str,
+        /// Why it does not parse.
+        error: PackedPermutationError,
+    },
     /// `num_triples` declared in the header doesn't match the rebuilt
     /// permutations / wavelets.
     NumTriplesMismatch {
@@ -112,8 +127,12 @@ impl std::fmt::Display for PackedRingError {
                 "ring v2 CRC mismatch: expected {expected:#010X}, got {actual:#010X}"
             ),
             Self::Dict(e) => write!(f, "ring v2 dictionary parse error: {e}"),
-            Self::Wavelet(e) => write!(f, "ring v2 wavelet parse error: {e}"),
-            Self::Permutation(e) => write!(f, "ring v2 permutation parse error: {e}"),
+            Self::Wavelet { part, error } => {
+                write!(f, "ring v2 {part} wavelet parse error: {error}")
+            }
+            Self::Permutation { part, error } => {
+                write!(f, "ring v2 {part} permutation parse error: {error}")
+            }
             Self::NumTriplesMismatch { declared, observed } => write!(
                 f,
                 "ring v2 num_triples mismatch: declared {declared}, observed {observed}"
@@ -130,18 +149,6 @@ impl std::error::Error for PackedRingError {}
 impl From<PackedDictError> for PackedRingError {
     fn from(e: PackedDictError) -> Self {
         Self::Dict(e)
-    }
-}
-
-impl From<PackedWaveletError> for PackedRingError {
-    fn from(e: PackedWaveletError) -> Self {
-        Self::Wavelet(e)
-    }
-}
-
-impl From<PackedPermutationError> for PackedRingError {
-    fn from(e: PackedPermutationError) -> Self {
-        Self::Permutation(e)
     }
 }
 
@@ -305,12 +312,52 @@ pub fn deserialize_triple_ring(data: Bytes) -> Result<TripleRing, PackedRingErro
     let pos_slice = data.slice(to_usize(pos_offset)?..to_usize(osp_offset)?);
     let osp_slice = data.slice(to_usize(osp_offset)?..body_end);
 
-    let dict = PackedTermDictionary::from_bytes(dict_slice)?;
-    let subjects = deserialize_wavelet_tree(subj_slice)?;
-    let predicates = deserialize_wavelet_tree(pred_slice)?;
-    let objects = deserialize_wavelet_tree(obj_slice)?;
-    let spo_to_pos: SuccinctPermutation = deserialize_permutation(pos_slice)?;
-    let spo_to_osp: SuccinctPermutation = deserialize_permutation(osp_slice)?;
+    assemble_triple_ring(
+        num_triples,
+        dict_slice,
+        subj_slice,
+        pred_slice,
+        obj_slice,
+        pos_slice,
+        osp_slice,
+    )
+}
+
+/// The ring from its six parts, each in its packed format.
+///
+/// The parts are those the v2 envelope holds at its offsets: the
+/// [`PackedTermDictionary`], the wavelet trees of the subjects, predicates
+/// and objects, and the permutations from SPO to POS and to OSP order. Each
+/// part's buffer becomes its storage where the part keeps its bytes (the
+/// dictionary until the ring has read its terms, the level bits of the
+/// wavelet trees).
+///
+/// # Errors
+///
+/// Returns a [`PackedRingError`] when a part does not parse, when the
+/// subjects do not hold `num_triples` entries, or when the parts break an
+/// invariant of the ring (see [`TripleRing::from_packed_parts`]).
+pub fn assemble_triple_ring(
+    num_triples: usize,
+    dictionary: Bytes,
+    subjects: Bytes,
+    predicates: Bytes,
+    objects: Bytes,
+    spo_to_pos: Bytes,
+    spo_to_osp: Bytes,
+) -> Result<TripleRing, PackedRingError> {
+    let tree = |part: &'static str, bytes: Bytes| {
+        deserialize_wavelet_tree(bytes).map_err(|error| PackedRingError::Wavelet { part, error })
+    };
+    let permutation = |part: &'static str, bytes: Bytes| {
+        deserialize_permutation(bytes).map_err(|error| PackedRingError::Permutation { part, error })
+    };
+    let dict = PackedTermDictionary::from_bytes(dictionary)?;
+    let subjects = tree("subjects", subjects)?;
+    let predicates = tree("predicates", predicates)?;
+    let objects = tree("objects", objects)?;
+    let spo_to_pos: SuccinctPermutation = permutation("spo_to_pos", spo_to_pos)?;
+    let spo_to_osp: SuccinctPermutation = permutation("spo_to_osp", spo_to_osp)?;
 
     if subjects.len() != num_triples {
         return Err(PackedRingError::NumTriplesMismatch {
@@ -374,6 +421,89 @@ mod tests {
         };
         assert_eq!(restored.count(&pattern), ring.count(&pattern));
         assert_eq!(restored.count(&pattern), 2);
+    }
+
+    /// The bytes of the version 2 envelope, whose parts the streams of
+    /// version 3 hold, do not change: the length and the CRC32 of the body
+    /// (the trailer) of two envelopes. The format is that of 0.5.x; since
+    /// 0.6.0 the term ids follow the byte order of the terms, which changed
+    /// the bytes of the three-triple ring (the empty one kept its 0.5.x
+    /// bytes; `a_pinned_0_5_envelope_reads_through_read_from` in the
+    /// section's tests holds an envelope as 0.5.x wrote it). (The CRC32 of
+    /// a whole envelope is the same for every envelope: a CRC over bytes and
+    /// their own CRC is a constant.)
+    #[test]
+    fn the_packed_ring_bytes_are_unchanged() {
+        let body_crc = |bytes: &[u8]| crc32fast::hash(&bytes[..bytes.len() - TRAILER_SIZE]);
+        let bytes = serialize_triple_ring(&build_test_ring());
+        let empty = serialize_triple_ring(&TripleRing::from_triples(std::iter::empty()));
+        assert_eq!(
+            (bytes.len(), body_crc(&bytes)),
+            (615, 0xDD83_1D12),
+            "three triples"
+        );
+        assert_eq!((empty.len(), body_crc(&empty)), (252, 0x292E_F3EF), "empty");
+    }
+
+    /// The six parts of an envelope, given apart, assemble into the ring the
+    /// envelope holds; another triple count is refused.
+    #[test]
+    fn the_parts_of_an_envelope_assemble_into_its_ring() {
+        let ring = build_test_ring();
+        let bytes = Bytes::from(serialize_triple_ring(&ring));
+        let offset = |at: usize| {
+            usize::try_from(u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())).unwrap()
+        };
+        let bounds = [
+            offset(16),
+            offset(24),
+            offset(32),
+            offset(40),
+            offset(48),
+            offset(56),
+            bytes.len() - TRAILER_SIZE,
+        ];
+        let part = |index: usize| bytes.slice(bounds[index]..bounds[index + 1]);
+        let assemble = |num_triples| {
+            assemble_triple_ring(
+                num_triples,
+                part(0),
+                part(1),
+                part(2),
+                part(3),
+                part(4),
+                part(5),
+            )
+        };
+        let restored = assemble(3).expect("the parts assemble");
+        let pattern = TriplePattern {
+            subject: Some(Term::iri("http://ex.org/alix")),
+            predicate: None,
+            object: None,
+        };
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.count(&pattern), 2);
+        for index in 0..3 {
+            assert_eq!(
+                restored.get_spo(index),
+                ring.get_spo(index),
+                "triple {index}"
+            );
+        }
+        assert_eq!(
+            assemble(19).unwrap_err(),
+            PackedRingError::NumTriplesMismatch {
+                declared: 19,
+                observed: 3
+            }
+        );
+        assert!(
+            matches!(
+                assemble_triple_ring(3, part(1), part(1), part(2), part(3), part(4), part(5)),
+                Err(PackedRingError::Dict(PackedDictError::BadMagic))
+            ),
+            "a wavelet tree where the dictionary belongs"
+        );
     }
 
     #[test]

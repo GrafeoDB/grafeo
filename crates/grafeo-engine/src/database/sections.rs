@@ -5,7 +5,14 @@
 use std::sync::Arc;
 
 use grafeo_common::storage::Section;
-#[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
+#[cfg(all(
+    feature = "lpg",
+    any(
+        feature = "vector-index",
+        feature = "text-index",
+        feature = "ring-index"
+    )
+))]
 use grafeo_common::storage::{ChunkMeta, SectionSource};
 #[cfg(feature = "lpg")]
 use grafeo_common::storage::{ImageSource, SectionType};
@@ -182,9 +189,9 @@ pub(super) struct LoadedSections {
 ///
 /// # Errors
 ///
-/// Returns an error if a section cannot be read or decoded. A vector or text
-/// index section that can be read but not decoded is no error: its indexes
-/// are built from the data, which they only mirror.
+/// Returns an error if a section cannot be read or decoded. A vector, text
+/// or ring index section that can be read but not decoded is no error: its
+/// indexes are built from the data, which they only mirror.
 #[cfg(feature = "lpg")]
 pub(super) fn load_sections(
     image: &dyn ImageSource,
@@ -215,9 +222,17 @@ pub(super) fn load_sections(
         grafeo_core::graph::rdf::RdfStoreSection::new(Arc::clone(rdf_store)).read_from(&*source)?;
     }
 
+    // The ring only mirrors the triples, loaded just before: a ring section
+    // that does not decode is built from them instead.
     #[cfg(feature = "ring-index")]
-    if let Some(source) = image.section_source(SectionType::RdfRing) {
-        grafeo_core::index::ring::RdfRingSection::new(Arc::clone(rdf_store)).read_from(&*source)?;
+    if let Some(source) = image.section_source(SectionType::RdfRing)
+        && let Some(err) = read_mirror(
+            &mut grafeo_core::index::ring::RdfRingSection::new(Arc::clone(rdf_store)),
+            &*source,
+        )?
+    {
+        grafeo_common::grafeo_warn!("rebuilding the RDF ring from the triples: {err}");
+        rdf_store.rebuild_ring();
     }
 
     #[cfg(feature = "compact-store")]
@@ -402,7 +417,14 @@ fn restore_from_sections(
 /// # Errors
 ///
 /// Returns the error of a chunk that cannot be fetched.
-#[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
+#[cfg(all(
+    feature = "lpg",
+    any(
+        feature = "vector-index",
+        feature = "text-index",
+        feature = "ring-index"
+    )
+))]
 fn read_mirror(
     section: &mut dyn Section,
     source: &dyn SectionSource,
@@ -420,13 +442,27 @@ fn read_mirror(
 
 /// Serves the chunks of a section and remembers whether fetching one failed,
 /// so an unreadable section can be told apart from one that does not decode.
-#[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
+#[cfg(all(
+    feature = "lpg",
+    any(
+        feature = "vector-index",
+        feature = "text-index",
+        feature = "ring-index"
+    )
+))]
 struct FetchWatch<'a> {
     source: &'a dyn SectionSource,
     failed: std::cell::Cell<bool>,
 }
 
-#[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
+#[cfg(all(
+    feature = "lpg",
+    any(
+        feature = "vector-index",
+        feature = "text-index",
+        feature = "ring-index"
+    )
+))]
 impl SectionSource for FetchWatch<'_> {
     fn chunks(&self) -> &[ChunkMeta] {
         self.source.chunks()
@@ -530,7 +566,7 @@ impl super::GrafeoDB {
 mod tests {
     use super::*;
     use crate::GrafeoDB;
-    use grafeo_common::storage::{MemoryImage, SectionSink, ServedOnce, legacy_bytes};
+    use grafeo_common::storage::{ChunkKind, MemoryImage, SectionSink, ServedOnce, legacy_bytes};
 
     /// The default graph's HNSW and text indexes come back from their
     /// sections, not from the data; quantized indexes and those of named
@@ -768,6 +804,380 @@ mod tests {
         );
     }
 
+    /// A database with two RDF triples and their ring.
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
+    fn ringed_database() -> GrafeoDB {
+        let db = GrafeoDB::new_in_memory();
+        db.execute_sparql(
+            "INSERT DATA { <http://example.org/alix> <http://example.org/knows> \
+             <http://example.org/gus> . <http://example.org/gus> \
+             <http://example.org/lives_in> <http://example.org/berlin> }",
+        )
+        .unwrap();
+        db.rdf_store().rebuild_ring();
+        db
+    }
+
+    /// The image of a checkpoint of `db` in which `edit` may change the
+    /// bytes of each chunk of `section_type` as the section wrote it.
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
+    fn image_editing(
+        db: &GrafeoDB,
+        section_type: SectionType,
+        edit: impl Fn(&ChunkMeta, &mut Vec<u8>),
+    ) -> MemoryImage {
+        let commits = db.transaction_manager.hold_commits().unwrap();
+        let mut image = MemoryImage::new();
+        for section in db.checkpoint_sources().sections(&commits) {
+            image
+                .begin_section(section.section_type(), section.version())
+                .unwrap();
+            if section.section_type() != section_type {
+                section.write_to(&mut image).unwrap();
+                continue;
+            }
+            let own = MemoryImage::from_sections(&[&*section]).unwrap();
+            let source = own.section_source(section_type).unwrap();
+            for (index, meta) in source.chunks().iter().enumerate() {
+                let mut bytes = source.fetch(index).unwrap().to_vec();
+                edit(meta, &mut bytes);
+                image.write_chunk(*meta, &bytes).unwrap();
+            }
+        }
+        image
+    }
+
+    /// A ring section that can be read but not decoded is no error: the
+    /// ring, which only mirrors the triples, is built from them (with a
+    /// warning), and answers.
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
+    #[test]
+    fn a_ring_section_that_does_not_decode_is_rebuilt() {
+        use grafeo_core::graph::rdf::{RdfStore, Term, TriplePattern};
+        use grafeo_core::index::ring::RdfRingSection;
+
+        let db = ringed_database();
+        // The subjects (stream 1) lose their magic bytes.
+        let image = image_editing(&db, SectionType::RdfRing, |meta, bytes| {
+            if meta.kind == grafeo_common::storage::ChunkKind::Stream
+                && meta.column_id == 1
+                && meta.row_start == 0
+            {
+                bytes[0] ^= 0xFF;
+            }
+        });
+        let source = image.section_source(SectionType::RdfRing).unwrap();
+        let error = RdfRingSection::new(Arc::new(RdfStore::new()))
+            .read_from(&*source)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("bad magic"),
+            "the crafted section does not decode: {error}"
+        );
+        drop(source);
+
+        let rdf_store = Arc::new(RdfStore::new());
+        load_sections(
+            &image,
+            &Arc::new(LpgStore::new().unwrap()),
+            &Arc::new(crate::catalog::Catalog::new()),
+            &rdf_store,
+        )
+        .expect("the load succeeds");
+        assert_eq!(rdf_store.len(), 2, "the triples are loaded");
+        let ring = rdf_store
+            .ring()
+            .expect("the ring is built from the triples");
+        assert_eq!(ring.len(), 2);
+        let knows = TriplePattern {
+            subject: None,
+            predicate: Some(Term::iri("http://example.org/knows")),
+            object: None,
+        };
+        assert_eq!(ring.count(&knows), 1, "the ring answers");
+    }
+
+    /// A ring section as 0.5.x wrote it (one raw chunk of the version 2
+    /// envelope) that does not decode no longer fails the open: the ring is
+    /// built from the triples, as for a section of this release.
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
+    #[test]
+    fn a_0_5_ring_section_that_does_not_decode_is_rebuilt() {
+        use grafeo_core::graph::rdf::{RdfStore, Term, TriplePattern};
+
+        let db = ringed_database();
+        let commits = db.transaction_manager.hold_commits().unwrap();
+        let raw: Vec<(SectionType, Vec<u8>)> = db
+            .checkpoint_sources()
+            .sections(&commits)
+            .iter()
+            .map(|section| {
+                let mut bytes = section.serialize().unwrap();
+                if section.section_type() == SectionType::RdfRing {
+                    // A byte of the body: the envelope's checksum fails.
+                    let middle = bytes.len() / 2;
+                    bytes[middle] ^= 0xFF;
+                }
+                (section.section_type(), bytes)
+            })
+            .collect();
+        drop(commits);
+        assert!(
+            raw.iter()
+                .any(|(section_type, _)| *section_type == SectionType::RdfRing),
+            "the 0.5.x image has a ring section"
+        );
+
+        let rdf_store = Arc::new(RdfStore::new());
+        load_sections(
+            &MemoryImage::from_raw(raw).unwrap(),
+            &Arc::new(LpgStore::new().unwrap()),
+            &Arc::new(crate::catalog::Catalog::new()),
+            &rdf_store,
+        )
+        .expect("the load succeeds");
+        let ring = rdf_store
+            .ring()
+            .expect("the ring is built from the triples");
+        let lives_in = TriplePattern {
+            subject: None,
+            predicate: Some(Term::iri("http://example.org/lives_in")),
+            object: None,
+        };
+        assert_eq!((ring.len(), ring.count(&lives_in)), (2, 1));
+    }
+
+    /// Terms whose N-Triples string does not parse back to them (two blank
+    /// nodes that differ in a trailing space, a language tag with one) do
+    /// not come back from the ring section with shifted ids: the section is
+    /// refused and the ring built from the loaded triples, whose answers it
+    /// then gives.
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
+    #[test]
+    fn terms_that_do_not_survive_their_string_get_a_rebuilt_ring() {
+        use grafeo_core::graph::rdf::{RdfStore, Term, Triple, TriplePattern};
+
+        let db = ringed_database();
+        for triple in [
+            Triple::new(
+                Term::blank("b"),
+                Term::iri("http://example.org/knows"),
+                Term::iri("http://example.org/vincent"),
+            ),
+            Triple::new(
+                Term::blank("b "),
+                Term::iri("http://example.org/knows"),
+                Term::iri("http://example.org/jules"),
+            ),
+            Triple::new(
+                Term::iri("http://example.org/jules"),
+                Term::iri("http://example.org/motto"),
+                Term::lang_literal("gezellig", "nl "),
+            ),
+        ] {
+            db.rdf_store().insert(triple);
+        }
+        db.rdf_store().rebuild_ring();
+        let image = image_of(&db);
+
+        let rdf_store = Arc::new(RdfStore::new());
+        load_sections(
+            &image,
+            &Arc::new(LpgStore::new().unwrap()),
+            &Arc::new(crate::catalog::Catalog::new()),
+            &rdf_store,
+        )
+        .expect("the load succeeds");
+        let ring = rdf_store.ring().expect("a ring");
+        let loaded = rdf_store.triples();
+        assert_eq!(ring.len(), loaded.len(), "one ring entry per loaded triple");
+        for triple in &loaded {
+            let pattern = TriplePattern {
+                subject: Some(triple.subject().clone()),
+                predicate: Some(triple.predicate().clone()),
+                object: Some(triple.object().clone()),
+            };
+            assert_eq!(ring.count(&pattern), 1, "the ring holds {triple:?}");
+            let by_subject = TriplePattern {
+                subject: Some(triple.subject().clone()),
+                predicate: None,
+                object: None,
+            };
+            assert_eq!(
+                ring.count(&by_subject),
+                loaded
+                    .iter()
+                    .filter(|other| other.subject() == triple.subject())
+                    .count(),
+                "triples of {:?}",
+                triple.subject()
+            );
+        }
+    }
+
+    /// A section that writes the chunks it was given, as a file held them.
+    #[cfg(all(feature = "ring-index", feature = "sparql", feature = "grafeo-file"))]
+    struct Replayed {
+        section_type: SectionType,
+        version: u8,
+        chunks: Vec<(ChunkMeta, bytes::Bytes)>,
+    }
+
+    #[cfg(all(feature = "ring-index", feature = "sparql", feature = "grafeo-file"))]
+    impl Section for Replayed {
+        fn section_type(&self) -> SectionType {
+            self.section_type
+        }
+        fn version(&self) -> u8 {
+            self.version
+        }
+        fn serialize(&self) -> Result<Vec<u8>> {
+            Err(grafeo_common::utils::error::Error::Internal(
+                "a replayed section only writes its chunks".to_string(),
+            ))
+        }
+        fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
+            Err(grafeo_common::utils::error::Error::Internal(
+                "a replayed section is not read".to_string(),
+            ))
+        }
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            for (meta, bytes) in &self.chunks {
+                sink.write_chunk(*meta, bytes)?;
+            }
+            Ok(())
+        }
+        fn is_dirty(&self) -> bool {
+            true
+        }
+        fn mark_clean(&self) {}
+        fn memory_usage(&self) -> usize {
+            0
+        }
+    }
+
+    /// The open of a file whose ring section does not decode succeeds, and
+    /// the ring is built from the triples: the file holds a checkpoint whose
+    /// ring section has its subjects (stream 1) without their magic bytes,
+    /// with valid chunk checksums.
+    #[cfg(all(feature = "ring-index", feature = "sparql", feature = "grafeo-file"))]
+    #[test]
+    fn a_file_whose_ring_section_does_not_decode_opens() {
+        use grafeo_core::graph::rdf::{Term, TriplePattern};
+        use grafeo_storage::file::{CheckpointHeader, GrafeoFileManager};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ring.grafeo");
+        let db = GrafeoDB::open(&path).unwrap();
+        db.execute_sparql(
+            "INSERT DATA { <http://example.org/mia> <http://example.org/knows> \
+             <http://example.org/vincent> . <http://example.org/vincent> \
+             <http://example.org/lives_in> <http://example.org/amsterdam> }",
+        )
+        .unwrap();
+        db.rdf_store().rebuild_ring();
+        db.close().unwrap();
+        drop(db);
+
+        let fm = GrafeoFileManager::open(&path, None).unwrap();
+        let sections: Vec<Replayed> = fm
+            .read_image(|image| {
+                let mut sections = Vec::new();
+                for section_type in (0..=u8::MAX).filter_map(SectionType::from_u8) {
+                    let Some(source) = image.section_source(section_type) else {
+                        continue;
+                    };
+                    let mut chunks = Vec::new();
+                    for (index, meta) in source.chunks().iter().enumerate() {
+                        let mut bytes = source.fetch(index)?.to_vec();
+                        if section_type == SectionType::RdfRing
+                            && meta.kind == grafeo_common::storage::ChunkKind::Stream
+                            && meta.column_id == 1
+                            && meta.row_start == 0
+                        {
+                            bytes[0] ^= 0xFF;
+                        }
+                        chunks.push((*meta, bytes::Bytes::from(bytes)));
+                    }
+                    sections.push(Replayed {
+                        section_type,
+                        version: source.section_version(),
+                        chunks,
+                    });
+                }
+                Ok(sections)
+            })
+            .unwrap();
+        assert!(
+            sections
+                .iter()
+                .any(|section| section.section_type == SectionType::RdfRing
+                    && section.chunks.len() > 1),
+            "the file holds a streamed ring section"
+        );
+        let active = fm.active_header();
+        let refs: Vec<&dyn Section> = sections
+            .iter()
+            .map(|section| section as &dyn Section)
+            .collect();
+        fm.write_checkpoint(
+            &refs,
+            &CheckpointHeader {
+                checkpoint_lsn: active.checkpoint_lsn,
+                epoch: active.epoch,
+                last_transaction_id: active.last_transaction_id,
+                node_count: active.node_count,
+                edge_count: active.edge_count,
+            },
+        )
+        .unwrap();
+        fm.close().unwrap();
+        drop(fm);
+
+        let db = GrafeoDB::open(&path).expect("the open succeeds");
+        assert_eq!(db.rdf_store().len(), 2, "the triples are loaded");
+        let ring = db
+            .rdf_store()
+            .ring()
+            .expect("the ring is built from the triples");
+        let lives_in = TriplePattern {
+            subject: None,
+            predicate: Some(Term::iri("http://example.org/lives_in")),
+            object: None,
+        };
+        assert_eq!(
+            (ring.len(), ring.count(&lives_in)),
+            (2, 1),
+            "the ring answers"
+        );
+    }
+
+    /// A ring section whose chunks cannot be read fails the load, as an
+    /// unreadable vector or text index section does: the image is damaged.
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
+    #[test]
+    fn a_ring_section_that_cannot_be_read_fails_the_load() {
+        let db = ringed_database();
+        let image = image_of(&db);
+        let store = Arc::new(LpgStore::new().unwrap());
+        assert!(load(&image, &store).is_ok(), "the image itself loads");
+        let error = load(
+            &Unreadable {
+                image: &image,
+                unreadable: SectionType::RdfRing,
+            },
+            &store,
+        )
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("RdfRing") && error.contains("fails its checksum"),
+            "the fetch error is returned: {error}"
+        );
+    }
+
     /// `to_memory` loads the copy from every section but the LPG store's: a
     /// compacted base keeps the deletions of its overlay.
     #[cfg(feature = "compact-store")]
@@ -901,6 +1311,147 @@ mod tests {
                 &[("Doc".to_string(), "body".to_string())][..]
             ),
             "every index is left to build from the data"
+        );
+    }
+
+    /// A version 3 vector section whose stream ends early does not decode,
+    /// which is no error: the load leaves the index to build from the data,
+    /// as for any index section that does not decode. The intact section
+    /// restores it.
+    #[test]
+    fn a_vector_section_whose_stream_ends_early_is_built_from_the_data() {
+        /// Keeps the chunks a section writes.
+        struct Kept(Vec<(ChunkMeta, Vec<u8>)>);
+
+        impl SectionSink for Kept {
+            fn write_chunk(&mut self, meta: ChunkMeta, bytes: &[u8]) -> Result<()> {
+                self.0.push((meta, bytes.to_vec()));
+                Ok(())
+            }
+        }
+
+        let db = indexed_database();
+        let commits = db.transaction_manager.hold_commits().unwrap();
+        let mut image = MemoryImage::new();
+        for section in db.checkpoint_sources().sections(&commits) {
+            image
+                .begin_section(section.section_type(), section.version())
+                .unwrap();
+            if section.section_type() == SectionType::VectorStore {
+                assert_eq!(section.version(), 3, "the vector section streams");
+                let mut kept = Kept(Vec::new());
+                section.write_to(&mut kept).unwrap();
+                let (last, _) = kept.0.pop().unwrap();
+                assert_eq!(last.kind, ChunkKind::Stream, "the last piece is dropped");
+                for (meta, bytes) in kept.0 {
+                    image.write_chunk(meta, &bytes).unwrap();
+                }
+            } else {
+                section.write_to(&mut image).unwrap();
+            }
+        }
+        drop(commits);
+
+        let store = Arc::new(LpgStore::new().unwrap());
+        let loaded = load(&image, &store).unwrap();
+        assert_eq!(store.node_count(), 2, "the data is loaded");
+        assert!(
+            store.get_vector_index("Doc", "emb").is_none(),
+            "the index whose stream ends early is not kept"
+        );
+        let unbuilt: Vec<&str> = loaded
+            .unbuilt
+            .iter()
+            .flat_map(|graph| graph.vector.iter().map(|def| def.label.as_str()))
+            .collect();
+        assert_eq!(unbuilt, ["Doc"], "the index is left to build from the data");
+
+        let store = Arc::new(LpgStore::new().unwrap());
+        let loaded = load(&image_of(&db), &store).unwrap();
+        assert_eq!(
+            store
+                .get_vector_index("Doc", "emb")
+                .map(|index| index.len()),
+            Some(2),
+            "the intact section restores the index"
+        );
+        assert!(loaded.unbuilt.iter().all(|graph| graph.vector.is_empty()));
+    }
+
+    /// A streamed text section whose second stream lost its last piece is no
+    /// error: the first index, restored before the failure, is not kept
+    /// either, and both are left to build from the data.
+    #[test]
+    fn a_text_section_that_fails_in_its_second_stream_is_built_from_the_data() {
+        use grafeo_common::storage::ChunkKind;
+
+        let db = GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (:Doc {body: 'Amsterdam canal bridge'}), \
+             (:Note {text: 'Berlin museum Prague'})",
+        )
+        .unwrap();
+        db.create_text_index("Doc", "body").unwrap();
+        db.create_text_index("Note", "text").unwrap();
+
+        let commits = db.transaction_manager.hold_commits().unwrap();
+        let mut image = MemoryImage::new();
+        for section in db.checkpoint_sources().sections(&commits) {
+            image
+                .begin_section(section.section_type(), section.version())
+                .unwrap();
+            if section.section_type() != SectionType::TextIndex {
+                section.write_to(&mut image).unwrap();
+                continue;
+            }
+            let mut whole = MemoryImage::new();
+            whole
+                .begin_section(SectionType::TextIndex, section.version())
+                .unwrap();
+            section.write_to(&mut whole).unwrap();
+            let source = whole.section_source(SectionType::TextIndex).unwrap();
+            // Stream 1 holds "Note:text", the second key in order.
+            let last = source
+                .chunks()
+                .iter()
+                .rposition(|meta| meta.kind == ChunkKind::Stream && meta.column_id == 1)
+                .expect("the second index has a stream");
+            assert!(
+                source
+                    .chunks()
+                    .iter()
+                    .any(|meta| meta.kind == ChunkKind::Stream && meta.column_id == 0),
+                "the first index has a stream"
+            );
+            for (index, meta) in source.chunks().iter().enumerate() {
+                if index != last {
+                    image
+                        .write_chunk(*meta, &source.fetch(index).unwrap())
+                        .unwrap();
+                }
+            }
+        }
+        drop(commits);
+
+        let store = Arc::new(LpgStore::new().unwrap());
+        let loaded = load(&image, &store).unwrap();
+        assert_eq!(store.node_count(), 2, "the data is loaded");
+        for (label, property) in [("Doc", "body"), ("Note", "text")] {
+            assert!(
+                store.get_text_index(label, property).is_none(),
+                "the text index {label}:{property} of a section that failed is not kept"
+            );
+        }
+        assert_eq!(loaded.unbuilt.len(), 1, "one graph: the default one");
+        let mut text = loaded.unbuilt[0].text.clone();
+        text.sort_unstable();
+        assert_eq!(
+            text,
+            [
+                ("Doc".to_string(), "body".to_string()),
+                ("Note".to_string(), "text".to_string())
+            ],
+            "both text indexes are left to build from the data"
         );
     }
 

@@ -33,7 +33,7 @@ mod inverted_index;
 pub mod section;
 mod tokenizer;
 
-pub use inverted_index::{BM25Config, InvertedIndex};
+pub use inverted_index::{BM25Config, InvertedIndex, PostingsVisitor};
 pub use section::TextIndexSection;
 pub use tokenizer::{SimpleTokenizer, Tokenizer};
 

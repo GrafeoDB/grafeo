@@ -51,11 +51,12 @@
 //! - Malkov & Yashunin, "Efficient and robust approximate nearest neighbor
 //!   search using Hierarchical Navigable Small World graphs" (2018)
 
-use super::VectorAccessor;
 use super::compute_distance;
 use super::paged_topology::{MmapTopology, NeighborsIter as MmapNeighborsIter};
+use super::{TopologyVisitor, VectorAccessor};
 use crate::index::vector::HnswConfig;
 use grafeo_common::types::NodeId;
+use grafeo_common::utils::error::Result;
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
 use rand::{RngExt, SeedableRng};
@@ -123,6 +124,10 @@ fn snapshot_mmap_topology(topo: &MmapTopology) -> Vec<(NodeId, Vec<Vec<NodeId>>)
     }
     out
 }
+
+/// The most nodes [`HnswIndex::begin_restore`] sizes the topology map for up
+/// front; a restore of more grows the map as nodes arrive.
+const MAX_RESTORE_CAPACITY: usize = 1 << 16;
 
 /// Node data stored in the HNSW index (topology only, no vector data).
 #[derive(Debug, Clone)]
@@ -385,6 +390,86 @@ impl HnswIndex {
         *backend = TopologyBackend::Heap(fresh);
         *self.entry_point.write() = entry_point;
         *self.max_level.write() = max_level;
+    }
+
+    /// Hands the topology to `visitor`: the header, then every node in
+    /// increasing id order, under one read lock of the topology, the entry
+    /// point and the level (so the visitor sees one consistent state).
+    ///
+    /// A heap topology lends each node's lists as they are, after sorting
+    /// references to its nodes by id; an mmap-backed topology materializes
+    /// one node's lists at a time, in buffers reused from node to node.
+    ///
+    /// The read locks are held until the visitor has taken the last node. A
+    /// checkpoint writes the topology from inside the visit, so for as long
+    /// as that write takes, inserts into this index wait, and so do searches
+    /// that arrive after a waiting insert (`parking_lot`'s locks are fair:
+    /// a waiting writer queues the readers behind it). Memory stays bounded
+    /// meanwhile: the checkpoint holds one piece and one node's bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error `visitor` returns; no node is visited after it.
+    pub fn visit_topology(&self, visitor: &mut dyn TopologyVisitor) -> Result<()> {
+        let nodes = self.nodes.read();
+        let entry_point = self.entry_point.read();
+        let max_level = self.max_level.read();
+        visitor.header(*entry_point, *max_level, nodes.len())?;
+        match &*nodes {
+            TopologyBackend::Heap(map) => {
+                let mut sorted: Vec<(&NodeId, &HnswNode)> = map.iter().collect();
+                sorted.sort_unstable_by_key(|(id, _)| **id);
+                for (id, node) in sorted {
+                    visitor.node(*id, &node.neighbors)?;
+                }
+            }
+            TopologyBackend::Mmap(topo) => {
+                // The page index is in id order. `layers` keeps the lists of
+                // the node with the most layers so far, for the next nodes.
+                let mut layers: Vec<Vec<NodeId>> = Vec::new();
+                for id in topo.iter_node_ids() {
+                    let mut count = 0;
+                    while let Some(neighbors) = topo.neighbors_at(id, count) {
+                        if count == layers.len() {
+                            layers.push(Vec::new());
+                        }
+                        let layer = &mut layers[count];
+                        layer.clear();
+                        layer.extend(neighbors);
+                        count += 1;
+                    }
+                    visitor.node(id, &layers[..count])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Replaces the topology with an empty heap map and sets the entry point
+    /// and the level, for [`restore_node`](Self::restore_node) to fill in.
+    ///
+    /// `node_count` (the number of nodes the restore announces) only sizes
+    /// the map, for at most 1 << 16 nodes up front: a count read from a file
+    /// is not trusted with an allocation.
+    pub fn begin_restore(&self, entry_point: Option<NodeId>, max_level: usize, node_count: usize) {
+        let mut backend = self.nodes.write();
+        *backend = TopologyBackend::with_capacity(node_count.min(MAX_RESTORE_CAPACITY));
+        *self.entry_point.write() = entry_point;
+        *self.max_level.write() = max_level;
+    }
+
+    /// Restores node `id` with its neighbor lists (layer 0 first), replacing
+    /// any lists it had.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the topology is mmap-backed: call
+    /// [`begin_restore`](Self::begin_restore) first.
+    pub fn restore_node(&self, id: NodeId, layers: Vec<Vec<NodeId>>) {
+        self.nodes
+            .write()
+            .as_heap_mut()
+            .insert(id, HnswNode { neighbors: layers });
     }
 
     /// Adopt a [`MmapTopology`] as the topology backend (Phase 7c).
@@ -3022,5 +3107,173 @@ mod tests {
         assert!(results.is_empty(), "{results:?}");
         assert_eq!(mmap_index.len(), 0);
         assert!(mmap_index.is_empty());
+    }
+
+    // ── Streaming the topology one node at a time ──────────────────
+
+    use crate::index::vector::TopologyVisitor;
+    use grafeo_common::utils::error::{Error, Result};
+
+    /// Everything a visit hands over, in order.
+    #[derive(Default)]
+    struct Recorded {
+        headers: Vec<(Option<NodeId>, usize, usize)>,
+        nodes: Vec<(NodeId, Vec<Vec<NodeId>>)>,
+        /// Refuse the node at this position of the visit.
+        refuse_at: Option<usize>,
+    }
+
+    impl TopologyVisitor for Recorded {
+        fn header(
+            &mut self,
+            entry_point: Option<NodeId>,
+            max_level: usize,
+            node_count: usize,
+        ) -> Result<()> {
+            self.headers.push((entry_point, max_level, node_count));
+            Ok(())
+        }
+
+        fn node(&mut self, id: NodeId, layers: &[Vec<NodeId>]) -> Result<()> {
+            if self.refuse_at == Some(self.nodes.len()) {
+                return Err(Error::Internal(format!("Vincent refuses node {id:?}")));
+            }
+            self.nodes.push((id, layers.to_vec()));
+            Ok(())
+        }
+    }
+
+    /// 88 vectors of 3 dimensions on several levels (`ml` 1.0 puts about a
+    /// third of the nodes above layer 0).
+    fn layered_index() -> HnswIndex {
+        let mut config = HnswConfig::new(3, DistanceMetric::Euclidean);
+        config.ml = 1.0;
+        let index = HnswIndex::with_seed(config, 19);
+        let map: HashMap<NodeId, Arc<[f32]>> = (1..=88u64)
+            .map(|i| {
+                let vector: Arc<[f32]> =
+                    vec![(i * 3 % 19) as f32, (i * 19 % 88) as f32, i as f32].into();
+                (NodeId::new(i * 3), vector)
+            })
+            .collect();
+        let accessor = make_accessor(&map);
+        let mut ids: Vec<NodeId> = map.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            index.insert(id, &map[&id], &accessor);
+        }
+        index
+    }
+
+    /// The heap topology is visited as `snapshot_topology` lists it: the
+    /// header once, then every node in increasing id order with its lists.
+    #[test]
+    fn a_heap_topology_is_visited_in_id_order() {
+        let index = layered_index();
+        let (entry_point, max_level, nodes) = index.snapshot_topology();
+        assert!(max_level >= 1, "the index has upper layers");
+
+        let mut recorded = Recorded::default();
+        index.visit_topology(&mut recorded).unwrap();
+        assert_eq!(
+            recorded.headers,
+            [(entry_point, max_level, nodes.len())],
+            "one header with the entry point, the level and the node count"
+        );
+        assert_eq!(
+            recorded.nodes, nodes,
+            "every node in id order, with its lists"
+        );
+    }
+
+    /// An mmap-backed topology is visited with the same nodes and lists as
+    /// the heap one it was serialized from, layers above 0 included.
+    #[test]
+    fn an_mmap_backed_topology_streams_node_by_node() {
+        let heap = layered_index();
+        let (entry_point, max_level, nodes) = heap.snapshot_topology();
+        assert!(
+            nodes.iter().any(|(_, layers)| layers.len() > 1),
+            "some node has lists above layer 0"
+        );
+        let topo = MmapTopology::from_bytes(Bytes::from(serialize_topology(
+            entry_point,
+            max_level,
+            &nodes,
+        )))
+        .unwrap();
+        let mmap = HnswIndex::new(heap.config().clone());
+        mmap.adopt_mmap_topology(topo);
+        assert!(mmap.is_mmap_backed());
+
+        let mut recorded = Recorded::default();
+        mmap.visit_topology(&mut recorded).unwrap();
+        assert_eq!(recorded.headers, [(entry_point, max_level, nodes.len())]);
+        assert_eq!(recorded.nodes, nodes, "the same nodes and lists");
+        assert!(mmap.is_mmap_backed(), "a visit leaves the backend as it is");
+    }
+
+    /// A visitor's error stops the visit and is returned as it is.
+    #[test]
+    fn a_visitor_error_stops_the_visit() {
+        let index = layered_index();
+        let mut recorded = Recorded {
+            refuse_at: Some(3),
+            ..Recorded::default()
+        };
+        let error = index.visit_topology(&mut recorded).unwrap_err();
+        assert!(
+            matches!(&error, Error::Internal(message) if message.contains("Vincent refuses")),
+            "{error:?}"
+        );
+        assert_eq!(
+            recorded.nodes.len(),
+            3,
+            "no node is visited after the error"
+        );
+    }
+
+    /// `begin_restore` and `restore_node` rebuild a topology node by node,
+    /// in heap mode also when the index was mmap-backed before.
+    #[test]
+    fn a_topology_is_restored_node_by_node() {
+        let source = layered_index();
+        let (entry_point, max_level, nodes) = source.snapshot_topology();
+
+        let bytes =
+            serialize_topology(Some(NodeId::new(88)), 0, &[(NodeId::new(88), vec![vec![]])]);
+        let index = HnswIndex::new(source.config().clone());
+        index.adopt_mmap_topology(MmapTopology::from_bytes(Bytes::from(bytes)).unwrap());
+
+        index.begin_restore(entry_point, max_level, nodes.len());
+        assert!(!index.is_mmap_backed(), "a restore replaces the mmap view");
+        assert!(index.is_empty(), "a restore starts from an empty topology");
+        for (id, layers) in nodes.iter().rev() {
+            index.restore_node(*id, layers.clone());
+        }
+        assert_eq!(index.snapshot_topology(), (entry_point, max_level, nodes));
+    }
+
+    /// The node count a restore begins with only sizes the map, and a count
+    /// no file could hold is not allocated up front.
+    #[test]
+    fn begin_restore_allocates_at_most_a_bounded_capacity() {
+        let index = HnswIndex::new(HnswConfig::new(3, DistanceMetric::Cosine));
+        index.begin_restore(Some(NodeId::new(3)), 19, usize::MAX);
+        index.restore_node(NodeId::new(3), vec![vec![]]);
+        assert_eq!(
+            index.snapshot_topology(),
+            (
+                Some(NodeId::new(3)),
+                19,
+                vec![(NodeId::new(3), vec![vec![]])]
+            )
+        );
+        // At most 1 << 16 nodes up front: under 4 MiB of map.
+        assert!(
+            index.heap_memory_bytes() < 1 << 22,
+            "{} bytes held for one node",
+            index.heap_memory_bytes()
+        );
     }
 }

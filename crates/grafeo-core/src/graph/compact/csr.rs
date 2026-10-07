@@ -237,32 +237,47 @@ impl CsrAdjacency {
 
     /// Deserializes a CSR from a byte buffer at the given offset.
     ///
+    /// The counts and offsets come from a file, so they are checked before
+    /// they are trusted: no array is allocated larger than the bytes left can
+    /// fill, the offsets start at 0, never decrease and end at the number of
+    /// targets (so `neighbors` never slices past them), and edge data, when
+    /// present, has one entry per target.
+    ///
     /// # Errors
     ///
-    /// Returns an error string if data is truncated.
+    /// Returns an error string if data is truncated or does not describe an
+    /// adjacency.
     pub fn read_from(data: &[u8], pos: &mut usize) -> Result<Self, &'static str> {
-        let offsets_len = read_u32_le(data, pos)? as usize;
-        let mut offsets = Vec::with_capacity(offsets_len);
-        for _ in 0..offsets_len {
-            offsets.push(read_u32_le(data, pos)?);
-        }
-        let targets_len = read_u32_le(data, pos)? as usize;
-        let mut targets = Vec::with_capacity(targets_len);
-        for _ in 0..targets_len {
-            targets.push(read_u32_le(data, pos)?);
-        }
+        let offsets = read_u32_array(data, pos, "CSR offsets do not fit the bytes left")?;
+        let targets = read_u32_array(data, pos, "CSR targets do not fit the bytes left")?;
         let has_edge_data = *data.get(*pos).ok_or("truncated edge_data flag")?;
         *pos += 1;
-        let edge_data = if has_edge_data == 1 {
-            let ed_len = read_u32_le(data, pos)? as usize;
-            let mut ed = Vec::with_capacity(ed_len);
-            for _ in 0..ed_len {
-                ed.push(read_u32_le(data, pos)?);
-            }
-            Some(ed)
-        } else {
-            None
+        let edge_data = match has_edge_data {
+            0 => None,
+            1 => Some(read_u32_array(
+                data,
+                pos,
+                "CSR edge data does not fit the bytes left",
+            )?),
+            _ => return Err("CSR edge data flag is neither 0 nor 1"),
         };
+        match offsets.first() {
+            Some(0) => {}
+            Some(_) => return Err("CSR offsets do not start at 0"),
+            None => return Err("CSR has no offsets"),
+        }
+        if offsets.windows(2).any(|pair| pair[0] > pair[1]) {
+            return Err("CSR offsets decrease");
+        }
+        if offsets.last().map(|&last| last as usize) != Some(targets.len()) {
+            return Err("CSR offsets do not end at the number of targets");
+        }
+        if edge_data
+            .as_ref()
+            .is_some_and(|edge_data| edge_data.len() != targets.len())
+        {
+            return Err("CSR edge data and targets differ in length");
+        }
         Ok(Self::from_raw_parts(offsets, targets, edge_data))
     }
 
@@ -282,6 +297,25 @@ fn write_usize_as_u32(buf: &mut Vec<u8>, v: usize) -> grafeo_common::utils::erro
     let n = crate::codec::limits::checked_u32(v, "compact store adjacency size")?;
     buf.extend_from_slice(&n.to_le_bytes());
     Ok(())
+}
+
+/// Reads a `u32` count and that many `u32` values, refusing a count the
+/// bytes left cannot hold before anything is allocated for it.
+fn read_u32_array(
+    data: &[u8],
+    pos: &mut usize,
+    too_long: &'static str,
+) -> Result<Vec<u32>, &'static str> {
+    let count = read_u32_le(data, pos)? as usize;
+    let left = data.len().saturating_sub(*pos);
+    if count.checked_mul(4).is_none_or(|needed| needed > left) {
+        return Err(too_long);
+    }
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(read_u32_le(data, pos)?);
+    }
+    Ok(values)
 }
 
 fn read_u32_le(data: &[u8], pos: &mut usize) -> Result<u32, &'static str> {
@@ -347,5 +381,90 @@ mod tests {
         assert_eq!(csr.num_edges(), 0);
         assert_eq!(csr.source_for_position(0), None);
         assert_eq!(csr.memory_bytes(), 4); // 1 offset entry (sentinel)
+    }
+
+    /// An adjacency as `read_from` reads it: the counts as given, then the
+    /// values.
+    fn encoded(
+        offsets: (u32, &[u32]),
+        targets: (u32, &[u32]),
+        edge_data: Option<(u32, &[u32])>,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (count, values) in [offsets, targets] {
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for value in values {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        match edge_data {
+            Some((count, values)) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&count.to_le_bytes());
+                for value in values {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            None => bytes.push(0),
+        }
+        bytes
+    }
+
+    /// Counts and offsets read from a file are untrusted: a count the bytes
+    /// left cannot hold, offsets that do not describe the targets and edge
+    /// data of another length are errors, never an abort or a later panic
+    /// in `neighbors`.
+    #[test]
+    fn crafted_adjacencies_are_refused() {
+        let valid = encoded((3, &[0, 1, 2]), (2, &[1, 0]), Some((2, &[1, 0])));
+        let csr = CsrAdjacency::read_from(&valid, &mut 0).unwrap();
+        assert_eq!((csr.num_nodes(), csr.num_edges()), (2, 2));
+
+        for (case, bytes, expected) in [
+            (
+                "an offset count",
+                encoded((u32::MAX, &[]), (0, &[]), None),
+                "offsets",
+            ),
+            (
+                "a target count",
+                encoded((3, &[0, 1, 2]), (u32::MAX, &[]), None),
+                "targets",
+            ),
+            (
+                "an edge data count",
+                encoded((3, &[0, 1, 2]), (2, &[1, 0]), Some((u32::MAX, &[]))),
+                "edge data",
+            ),
+            ("no offsets", encoded((0, &[]), (0, &[]), None), "offsets"),
+            (
+                "a first offset past 0",
+                encoded((2, &[1, 1]), (1, &[0]), None),
+                "offsets",
+            ),
+            (
+                "offsets that run backwards",
+                encoded((3, &[0, 2, 1]), (2, &[1, 0]), None),
+                "offsets",
+            ),
+            (
+                "offsets that dip and end right",
+                encoded((4, &[0, 2, 1, 2]), (2, &[1, 0]), None),
+                "decrease",
+            ),
+            (
+                "a last offset short of the targets",
+                encoded((3, &[0, 1, 1]), (2, &[1, 0]), None),
+                "offsets",
+            ),
+            (
+                "edge data of another length",
+                encoded((3, &[0, 1, 2]), (2, &[1, 0]), Some((1, &[0]))),
+                "edge data",
+            ),
+        ] {
+            let error = CsrAdjacency::read_from(&bytes, &mut 0).unwrap_err();
+            assert!(error.contains(expected), "{case}: {error}");
+        }
     }
 }

@@ -720,4 +720,21 @@ for case_id, query in [
 ]:
     case(case_id, query)
 
+# AJ: a later MATCH joined to an earlier one by equal values runs as a hash join (#455):
+#     keys of both kinds of number, numeric strings and NULL (AJ3), more keys, keys
+#     computed from properties, conjuncts beside the keys, the checks of more labels
+#     (AJ8), and more rows than a batch holds (AJ9)
+for case_id, query, languages, fixture in [
+    ("AJ1", "MATCH (a:Person) MATCH (c:City) WHERE c.w = a.w + 4 RETURN a.name AS a, c.name AS c", BOTH, "social"),
+    ("AJ2", "MATCH (a:Person) MATCH (b:Person) WHERE b.age = a.age RETURN a.name AS a, b.name AS b", BOTH, "social"),
+    ("AJ3", "UNWIND [{k: 100}, {k: '100'}, {k: 100.0}, {k: '100.0'}, {k: null}, {k: 1e-17}] AS r MATCH (p:Person) WHERE p.w = r.k RETURN r.k AS k, p.name AS p", BOTH, "social"),
+    ("AJ4", "MATCH (a:Person) MATCH (b:Person) WHERE b.age = a.age AND b.w = a.w RETURN a.name AS a, b.name AS b", BOTH, "social"),
+    ("AJ5", "MATCH (a:Person)-[:LIVES_IN]->(c) MATCH (d:City) WHERE toUpper(d.name) = toUpper(c.name) AND d.w > 100 RETURN a.name AS a, d.name AS d", BOTH, "social"),
+    ("AJ6", "MATCH (a:N) MATCH (b:N) WHERE a.i < 50 AND b.m = a.i % 7 AND b.i < 100 RETURN count(*) AS c, sum(b.i) AS s", BOTH, "chain"),
+    ("AJ7", "MATCH (a:N) MATCH (b:N) WHERE a.i < 30 AND toString(b.i) = toString(a.m) RETURN a.i AS a, b.i AS b", BOTH, "chain"),
+    ("AJ8", "MATCH (r:Repository) MATCH (n:Graph:Repository) WHERE r.n < 3 AND n.n = r.n RETURN r.id AS r, n.id AS n", BOTH, "labels"),
+]:
+    case(case_id, query, languages, fixture)
+ordered("AJ9", "MATCH (a:N) MATCH (b:N) WHERE a.i < 3000 AND b.i = a.i * 2 RETURN a.i AS a, b.i AS b ORDER BY a DESC LIMIT 5", BOTH, "chain")
+
 # fmt: on

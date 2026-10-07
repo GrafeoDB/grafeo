@@ -105,7 +105,10 @@ pub(crate) fn checked_scan(filter: &FilterOp) -> Option<CheckedScan<'_>> {
     })
 }
 
-fn split_conjuncts<'a>(expr: &'a LogicalExpression, out: &mut Vec<&'a LogicalExpression>) {
+pub(super) fn split_conjuncts<'a>(
+    expr: &'a LogicalExpression,
+    out: &mut Vec<&'a LogicalExpression>,
+) {
     match expr {
         LogicalExpression::Binary {
             left,
@@ -169,8 +172,9 @@ fn seek_of<'a>(
 
 /// The variables a seek value reads, or `None` for an expression a seek does
 /// not evaluate (subqueries, comprehensions, functions whose value changes
-/// between calls).
-fn value_variables(expr: &LogicalExpression) -> Option<HashSet<String>> {
+/// between calls). The keys of a value join follow the same rule (see
+/// `value_join.rs`).
+pub(super) fn value_variables(expr: &LogicalExpression) -> Option<HashSet<String>> {
     let mut variables = HashSet::new();
     collect_value_variables(expr, &mut variables).then_some(variables)
 }

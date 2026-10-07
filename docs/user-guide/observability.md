@@ -246,15 +246,17 @@ print(result[0][0])
 Example output:
 
 ```text
-Projection [n.name]
-  Filter (n.age > 20)
-    NodeScan (n:Person) [label-first]
+Return (n.name)
+  Filter (n.age Gt 20) [range: age]
+    NodeScan (n:Person)
 ```
 
 Pushdown hints in square brackets indicate optimizer decisions:
 
 | Hint | Meaning |
 |------|---------|
+| `[hash join: t.k = f.k]` | A later `MATCH` joined to the rows before it by equal values, in a statement that only reads: its nodes are scanned once, not once per row |
+| `[range: prop]` | A range of constants read by a range scan, with or without an index |
 | `[label-first]` | Label filter applied at scan level |
 | `[index: prop]` | Property index used for filtering |
 | `[inline-filter]` | Filter merged into scan operator |

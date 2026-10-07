@@ -6,9 +6,10 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 
 use arcstr::ArcStr;
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{HashableValue, LogicalType, Value};
 
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder, copied_column_types};
@@ -162,6 +163,88 @@ impl HashKey {
     pub fn from_column(column: &ValueVector, row: usize) -> Option<Self> {
         column.get_value(row).map(|v| Self::from_value(&v))
     }
+
+    /// The key of `value` for a join on `=` (see
+    /// [`HashJoinOperator::with_value_equality_keys`]), or `None` for NULL,
+    /// which `=` finds equal to nothing. Values that `=` finds equal have
+    /// equal keys; values it tells apart may share one.
+    #[must_use]
+    pub fn for_equality(value: &Value) -> Option<Self> {
+        (!value.is_null()).then(|| Self::equality_key(value))
+    }
+
+    /// The key of a value, by the rules of `=` (a filter's `values_equal`).
+    fn equality_key(value: &Value) -> Self {
+        match value {
+            // Inside a list or map, NULL equals NULL.
+            Value::Null => HashKey::Null,
+            Value::Bool(b) => HashKey::Bool(*b),
+            // `=` compares an integer with a float as this `f64`.
+            Value::Int64(i) => Self::number_key(*i as f64),
+            Value::Float64(f) => Self::number_key(*f),
+            // A string equals a float it parses as (`'5.0' = 5.0`) and an
+            // integer it parses as (`'05' = 5`, and such a string parses as
+            // the float of that integer too), and otherwise only itself.
+            Value::String(s) => match s.parse::<f64>() {
+                Ok(number) if !number.is_nan() => Self::number_key(number),
+                _ => HashKey::String(s.clone()),
+            },
+            Value::List(items) => {
+                HashKey::Composite(items.iter().map(Self::equality_key).collect())
+            }
+            Value::Map(map) => HashKey::Composite(
+                map.iter()
+                    .map(|(key, value)| {
+                        HashKey::Composite(vec![
+                            HashKey::String(ArcStr::from(key.as_str())),
+                            Self::equality_key(value),
+                        ])
+                    })
+                    .collect(),
+            ),
+            Value::Path { nodes, edges } => HashKey::Composite(vec![
+                HashKey::Composite(nodes.iter().map(Self::equality_key).collect()),
+                HashKey::Composite(edges.iter().map(Self::equality_key).collect()),
+            ]),
+            // The elements compare as `f32`: zero equals negative zero.
+            Value::Vector(items) => HashKey::Composite(
+                items
+                    .iter()
+                    .map(|&item| {
+                        let item = if item == 0.0 { 0.0_f32 } else { item };
+                        HashKey::Int64(i64::from(item.to_bits()))
+                    })
+                    .collect(),
+            ),
+            // Temporal values, bytes and counters: `=` is their own equality,
+            // which their hash agrees with (a time compares by its UTC
+            // instant, a zoned datetime too).
+            other => {
+                let mut hasher = std::hash::DefaultHasher::new();
+                HashableValue(other.clone()).hash(&mut hasher);
+                HashKey::Int64(hasher.finish().cast_signed())
+            }
+        }
+    }
+
+    /// The key of a number: `=` compares numbers as `f64` within
+    /// `f64::EPSILON`. Below 2 in magnitude distinct values can be that close,
+    /// so they share a key; from 2 up, distinct values differ by at least
+    /// `f64::EPSILON` and are never equal. NaN and the infinities equal
+    /// nothing.
+    fn number_key(number: f64) -> Self {
+        let number = if number.abs() < 2.0 { 0.0 } else { number };
+        HashKey::Int64(number.to_bits().cast_signed())
+    }
+}
+
+/// How the keys of a [`HashJoinOperator`] match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyMatch {
+    /// The same value of the same kind ([`HashKey::from_value`]).
+    Exact,
+    /// As `=` compares values ([`HashKey::for_equality`]).
+    ValueEquality,
 }
 
 /// Hash join operator.
@@ -212,6 +295,8 @@ pub struct HashJoinOperator {
     residual: Option<Box<dyn JoinCondition>>,
     /// Whether a pair of the current probe row passed the residual condition.
     current_probe_kept: bool,
+    /// How keys match.
+    keys: KeyMatch,
     /// Whether we're in the emit unmatched phase (for outer joins).
     emitting_unmatched: bool,
     /// Current chunk index when emitting unmatched rows.
@@ -258,6 +343,7 @@ impl HashJoinOperator {
             build_matched: Vec::new(),
             residual: None,
             current_probe_kept: false,
+            keys: KeyMatch::Exact,
             emitting_unmatched: false,
             unmatched_chunk_idx: 0,
             unmatched_row_idx: 0,
@@ -270,6 +356,19 @@ impl HashJoinOperator {
     #[must_use]
     pub fn with_residual(mut self, condition: Box<dyn JoinCondition>) -> Self {
         self.residual = Some(condition);
+        self
+    }
+
+    /// Matches the keys by value equality, as `=` compares them (see
+    /// [`HashKey::for_equality`]): `5` meets `5.0` and `'5'`. Keys `=` tells
+    /// apart may meet too (`5` meets `'5.0'`), so a filter above the join
+    /// decides each pair. A row with NULL in a key column meets no row.
+    ///
+    /// For a probe side that does not write: an inner join without a build
+    /// row to meet ends without reading it.
+    #[must_use]
+    pub fn with_value_equality_keys(mut self) -> Self {
+        self.keys = KeyMatch::ValueEquality;
         self
     }
 
@@ -349,13 +448,32 @@ impl HashJoinOperator {
         copied_column_types(&types, &self.output_schema)
     }
 
-    /// Extracts a hash key from a chunk row.
+    /// Extracts a hash key from a chunk row. With value-equality keys, a row
+    /// with NULL in a key column has the key `Null`, which meets no row.
     fn extract_key(
         &self,
         chunk: &DataChunk,
         row: usize,
         key_columns: &[usize],
     ) -> Result<HashKey, OperatorError> {
+        if self.keys == KeyMatch::ValueEquality {
+            let mut keys = Vec::with_capacity(key_columns.len());
+            for &column in key_columns {
+                let value = chunk
+                    .column(column)
+                    .ok_or_else(|| OperatorError::ColumnNotFound(format!("column {column}")))?
+                    .get_value(row);
+                match value.as_ref().and_then(HashKey::for_equality) {
+                    Some(key) => keys.push(key),
+                    None => return Ok(HashKey::Null),
+                }
+            }
+            return Ok(if keys.len() == 1 {
+                keys.swap_remove(0)
+            } else {
+                HashKey::Composite(keys)
+            });
+        }
         if key_columns.len() == 1 {
             let col = chunk.column(key_columns[0]).ok_or_else(|| {
                 OperatorError::ColumnNotFound(format!("column {}", key_columns[0]))
@@ -541,6 +659,12 @@ impl Operator for HashJoinOperator {
         if !self.build_complete {
             self.build_hash_table()?;
         }
+        if self.keys == KeyMatch::ValueEquality
+            && self.join_type == JoinType::Inner
+            && self.hash_table.is_empty()
+        {
+            return Ok(None);
+        }
 
         // Phase 3: Emit unmatched build rows (right/full outer join)
         if self.emitting_unmatched {
@@ -580,11 +704,19 @@ impl Operator for HashJoinOperator {
                 // If we don't have current matches, look them up
                 if self.current_matches.is_empty() && self.current_match_position == 0 {
                     let key = self.extract_key(probe_chunk, probe_row, &self.probe_keys)?;
+                    // A NULL value-equality key meets nothing, not even the
+                    // NULL keys an outer join keeps on the build side.
+                    let candidates = if self.keys == KeyMatch::ValueEquality && key == HashKey::Null
+                    {
+                        None
+                    } else {
+                        self.hash_table.get(&key)
+                    };
 
                     // Handle semi/anti joins differently: a probe row has a match
                     // when a pair with the same key passes the residual condition.
                     let has_match = || {
-                        self.hash_table.get(&key).is_some_and(|candidates| {
+                        candidates.is_some_and(|candidates| {
                             self.residual.as_ref().is_none_or(|residual| {
                                 candidates.iter().any(|&(chunk_idx, row)| {
                                     residual.evaluate(
@@ -631,8 +763,7 @@ impl Operator for HashJoinOperator {
                             continue;
                         }
                         _ => {
-                            self.current_matches =
-                                self.hash_table.get(&key).cloned().unwrap_or_default();
+                            self.current_matches = candidates.cloned().unwrap_or_default();
                             self.current_probe_kept = false;
                         }
                     }
@@ -1846,5 +1977,407 @@ mod tests {
         // PartialOrd delegates to Ord, just verify it returns Some
         assert!(HashKey::Null.partial_cmp(&HashKey::Int64(1)).is_some());
         assert!(HashKey::Int64(1).partial_cmp(&HashKey::Int64(2)).is_some());
+    }
+
+    // `=` is evaluated by a filter over an LPG store.
+    #[cfg(feature = "lpg")]
+    mod value_equality {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use grafeo_common::types::{
+            Date, Duration, PropertyKey, Time, Timestamp, Value, ZonedDatetime,
+        };
+
+        use super::*;
+        use crate::execution::operators::filter::{
+            BinaryFilterOp, ExpressionPredicate, FilterExpression,
+        };
+        use crate::graph::GraphStoreSearch;
+        use crate::graph::lpg::LpgStore;
+
+        fn list(items: Vec<Value>) -> Value {
+            Value::List(items.into())
+        }
+
+        fn map(key: &str, value: Value) -> Value {
+            Value::Map(Arc::new(BTreeMap::from([(PropertyKey::new(key), value)])))
+        }
+
+        fn time(text: &str) -> Value {
+            Value::Time(Time::parse(text).expect("a time"))
+        }
+
+        fn zoned(text: &str) -> Value {
+            Value::ZonedDatetime(ZonedDatetime::parse(text).expect("a zoned datetime"))
+        }
+
+        /// Values that `=` compares in more than one way: integers and floats
+        /// near zero, near 2 and past 2^53, strings that read as numbers,
+        /// nulls inside lists, maps, times and datetimes at one instant in
+        /// different offsets, and vectors with a negative zero.
+        fn values() -> Vec<Value> {
+            let two_to_53 = 1_i64 << 53;
+            let mut values: Vec<Value> = [0, 1, -1, 2, 5, 7, 1000, two_to_53, two_to_53 + 1]
+                .into_iter()
+                .chain([i64::MAX, i64::MIN])
+                .map(Value::Int64)
+                .collect();
+            values.extend(
+                [
+                    1.0,
+                    0.0,
+                    -0.0,
+                    1e-17,
+                    -1e-17,
+                    0.5,
+                    1.5,
+                    2.0,
+                    1.999_999_999_999_999_8,
+                    0.999_999_999_999_999_9,
+                    -0.999_999_999_999_999_9,
+                    5.0,
+                    1000.0,
+                    // 2^53 and 2^53 + 1 round to the same float
+                    two_to_53 as f64,
+                    (two_to_53 + 1) as f64,
+                    f64::NAN,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                ]
+                .map(Value::Float64),
+            );
+            values.extend(
+                [
+                    "5", "05", "+5", "5.0", "-0", "0", "1e3", "NaN", "inf", "abc", "", " 5",
+                ]
+                .map(Value::from),
+            );
+            values.extend([
+                Value::Bool(true),
+                Value::Bool(false),
+                list(vec![Value::Int64(1)]),
+                list(vec![Value::Float64(1.0)]),
+                list(vec![Value::from("1")]),
+                list(vec![Value::Null]),
+                list(vec![Value::Int64(1), Value::Null]),
+                list(vec![Value::Float64(1.0), Value::Null]),
+                list(Vec::new()),
+                map("a", Value::Int64(1)),
+                map("a", Value::Float64(1.0)),
+                map("b", Value::Int64(1)),
+                Value::Date(Date::parse("2026-10-07").expect("a date")),
+                Value::Date(Date::parse("2026-10-08").expect("a date")),
+                Value::Timestamp(Timestamp::from_micros(1_000_000)),
+                time("14:00:00+01:00"),
+                time("13:00:00Z"),
+                time("13:00:00"),
+                time("14:00:00"),
+                zoned("2026-10-07T14:00:00+01:00"),
+                zoned("2026-10-07T13:00:00Z"),
+                zoned("2026-10-07T13:00:00+01:00"),
+                Value::Duration(Duration::new(0, 1, 0)),
+                Value::Duration(Duration::new(0, 0, 86_400_000_000_000)),
+                Value::Bytes(vec![1_u8, 2].into()),
+                Value::Bytes(vec![1_u8, 3].into()),
+                Value::Vector(vec![0.0_f32].into()),
+                Value::Vector(vec![-0.0_f32].into()),
+                Value::Vector(vec![1.0_f32].into()),
+                Value::Path {
+                    nodes: vec![Value::Int64(1), Value::Float64(2.0)].into(),
+                    edges: vec![Value::Int64(3)].into(),
+                },
+                Value::Path {
+                    nodes: vec![Value::Float64(1.0), Value::Int64(2)].into(),
+                    edges: vec![Value::Float64(3.0)].into(),
+                },
+            ]);
+            values
+        }
+
+        /// Whether `a = b` is TRUE, evaluated as a filter evaluates it.
+        fn equal(a: &Value, b: &Value) -> bool {
+            let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+            let predicate = ExpressionPredicate::new(
+                FilterExpression::Binary {
+                    left: Box::new(FilterExpression::Literal(a.clone())),
+                    op: BinaryFilterOp::Eq,
+                    right: Box::new(FilterExpression::Literal(b.clone())),
+                },
+                std::collections::HashMap::new(),
+                store,
+            );
+            let chunk = DataChunkBuilder::new(&[LogicalType::Int64]).finish();
+            predicate.eval_at(&chunk, 0) == Some(Value::Bool(true))
+        }
+
+        #[test]
+        fn values_that_compare_equal_have_equal_keys() {
+            let values = values();
+            for a in &values {
+                for b in &values {
+                    if equal(a, b) {
+                        assert_eq!(
+                            HashKey::for_equality(a),
+                            HashKey::for_equality(b),
+                            "{a:?} = {b:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// The pairs that make the keys above more than exact: `=` finds
+        /// them equal, so the invariant covers them.
+        #[test]
+        fn equality_holds_across_kinds_and_forms() {
+            let two_to_53 = 1_i64 << 53;
+            let pairs = [
+                (Value::from("5"), Value::Int64(5)),
+                (Value::from("05"), Value::Int64(5)),
+                (Value::from("+5"), Value::Int64(5)),
+                (Value::from("5"), Value::Float64(5.0)),
+                (Value::from("5.0"), Value::Float64(5.0)),
+                (Value::from("1e3"), Value::Float64(1000.0)),
+                (Value::from("-0"), Value::Float64(1e-17)),
+                (Value::from("NaN"), Value::from("NaN")),
+                (Value::Int64(5), Value::Float64(5.0)),
+                (Value::Int64(0), Value::Float64(1e-17)),
+                (Value::Float64(1e-17), Value::Float64(-1e-17)),
+                (Value::Float64(0.0), Value::Float64(-0.0)),
+                (Value::Float64(0.999_999_999_999_999_9), Value::Int64(1)),
+                (Value::Float64(0.999_999_999_999_999_9), Value::Float64(1.0)),
+                (Value::Float64(-0.999_999_999_999_999_9), Value::Int64(-1)),
+                (
+                    Value::Int64(two_to_53 + 1),
+                    Value::Float64(two_to_53 as f64),
+                ),
+                (list(vec![Value::Null]), list(vec![Value::Null])),
+                (
+                    list(vec![Value::Int64(1), Value::Null]),
+                    list(vec![Value::Float64(1.0), Value::Null]),
+                ),
+                (list(vec![Value::from("1")]), list(vec![Value::Int64(1)])),
+                (map("a", Value::Int64(1)), map("a", Value::Float64(1.0))),
+                (time("14:00:00+01:00"), time("13:00:00Z")),
+                (
+                    zoned("2026-10-07T14:00:00+01:00"),
+                    zoned("2026-10-07T13:00:00Z"),
+                ),
+                (
+                    Value::Vector(vec![0.0_f32].into()),
+                    Value::Vector(vec![-0.0_f32].into()),
+                ),
+            ];
+            for (a, b) in pairs {
+                assert!(equal(&a, &b), "{a:?} = {b:?}");
+            }
+            // And these are not: a key may still be shared (see the keys).
+            for (a, b) in [
+                (Value::from("5.0"), Value::Int64(5)),
+                (Value::Int64(two_to_53), Value::Int64(two_to_53 + 1)),
+                (Value::Float64(f64::NAN), Value::Float64(f64::NAN)),
+                (Value::Float64(f64::INFINITY), Value::Float64(f64::INFINITY)),
+                (Value::Float64(2.0), Value::Float64(1.999_999_999_999_999_8)),
+                (time("13:00:00"), time("13:00:00Z")),
+                (Value::Null, Value::Null),
+            ] {
+                assert!(!equal(&a, &b), "{a:?} <> {b:?}");
+            }
+        }
+
+        /// NULL equals nothing, so it has no key; a NULL inside a list is a
+        /// value like any other.
+        #[test]
+        fn null_has_no_key() {
+            assert_eq!(HashKey::for_equality(&Value::Null), None);
+            assert!(HashKey::for_equality(&list(vec![Value::Null])).is_some());
+        }
+
+        /// Values `=` tells apart get different keys here, so the join does
+        /// not pair every row with every other.
+        #[test]
+        fn values_far_apart_have_different_keys() {
+            for (a, b) in [
+                (Value::Int64(2), Value::Int64(3)),
+                (Value::Int64(2), Value::Float64(2.5)),
+                (Value::Float64(1e3), Value::Float64(1e3 + 1.0)),
+                (Value::from("abc"), Value::from("abd")),
+                (Value::from("abc"), Value::Int64(0)),
+                (Value::Bool(true), Value::Bool(false)),
+                (list(vec![Value::Int64(1)]), list(vec![Value::Int64(2)])),
+                (map("a", Value::Int64(1)), map("b", Value::Int64(1))),
+                (time("13:00:00Z"), time("14:00:00Z")),
+                (
+                    zoned("2026-10-07T13:00:00+01:00"),
+                    zoned("2026-10-07T13:00:00Z"),
+                ),
+                (
+                    Value::Vector(vec![0.0_f32].into()),
+                    Value::Vector(vec![1.0_f32].into()),
+                ),
+            ] {
+                assert_ne!(
+                    HashKey::for_equality(&a),
+                    HashKey::for_equality(&b),
+                    "{a:?} and {b:?}"
+                );
+            }
+        }
+
+        /// A chunk with one column of `Any` values, one per row.
+        fn values_chunk(values: &[Value]) -> DataChunk {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+            for value in values {
+                builder.column_mut(0).unwrap().push_value(value.clone());
+                builder.advance_row();
+            }
+            builder.finish()
+        }
+
+        /// The pairs of key values an inner join with value-equality keys
+        /// returns, in order.
+        fn joined(probe: &[Value], build: &[Value]) -> Vec<(Value, Value)> {
+            let mut join = HashJoinOperator::new(
+                Box::new(MockOperator::new(vec![values_chunk(probe)])),
+                Box::new(MockOperator::new(vec![values_chunk(build)])),
+                vec![0],
+                vec![0],
+                JoinType::Inner,
+                vec![LogicalType::Any, LogicalType::Any],
+            )
+            .with_value_equality_keys();
+            let mut pairs = Vec::new();
+            while let Some(chunk) = join.next().unwrap() {
+                for row in chunk.selected_indices() {
+                    pairs.push((
+                        chunk.column(0).unwrap().get_value(row).unwrap(),
+                        chunk.column(1).unwrap().get_value(row).unwrap(),
+                    ));
+                }
+            }
+            pairs
+        }
+
+        /// 5 meets 5.0 and '5', and '5.0', which `=` rejects (the filter
+        /// above the join does): the keys pick the candidates, each probe row
+        /// with its build rows in build order. NULL meets nothing.
+        #[test]
+        fn a_join_on_value_equality_keys_pairs_candidates_in_order() {
+            let probe = [Value::Int64(5), Value::Null, Value::Int64(7)];
+            let build = [
+                Value::Float64(5.0),
+                Value::from("5"),
+                Value::Null,
+                Value::from("5.0"),
+                Value::Int64(7),
+                Value::from("x"),
+            ];
+            assert_eq!(
+                joined(&probe, &build),
+                [
+                    (Value::Int64(5), Value::Float64(5.0)),
+                    (Value::Int64(5), Value::from("5")),
+                    (Value::Int64(5), Value::from("5.0")),
+                    (Value::Int64(7), Value::Int64(7)),
+                ]
+            );
+        }
+
+        /// A probe side that must not be read.
+        struct Unread;
+
+        impl Operator for Unread {
+            fn next(&mut self) -> OperatorResult {
+                panic!("the probe side was read")
+            }
+
+            fn reset(&mut self) {}
+
+            fn name(&self) -> &'static str {
+                "Unread"
+            }
+
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+                self
+            }
+        }
+
+        /// Without a build row to meet, or with only NULL keys, an inner join
+        /// on value-equality keys ends without reading its probe side.
+        #[test]
+        fn an_empty_build_side_ends_the_join_unprobed() {
+            for build in [
+                Vec::new(),
+                vec![values_chunk(&[]), values_chunk(&[Value::Null, Value::Null])],
+            ] {
+                let mut join = HashJoinOperator::new(
+                    Box::new(Unread),
+                    Box::new(MockOperator::new(build)),
+                    vec![0],
+                    vec![0],
+                    JoinType::Inner,
+                    vec![LogicalType::Any, LogicalType::Any],
+                )
+                .with_value_equality_keys();
+                assert!(join.next().unwrap().is_none());
+                assert!(join.next().unwrap().is_none());
+            }
+        }
+
+        /// A NULL in any key column of a row matches nothing, on either side.
+        #[test]
+        fn a_null_in_any_key_column_matches_nothing() {
+            let pairs = |values: &[[Value; 2]]| {
+                let mut builder = DataChunkBuilder::new(&[LogicalType::Any, LogicalType::Any]);
+                for row in values {
+                    for (column, value) in row.iter().enumerate() {
+                        builder
+                            .column_mut(column)
+                            .unwrap()
+                            .push_value(value.clone());
+                    }
+                    builder.advance_row();
+                }
+                MockOperator::new(vec![builder.finish()])
+            };
+            let probe = pairs(&[
+                [Value::Int64(1), Value::Null],
+                [Value::Int64(1), Value::Int64(2)],
+            ]);
+            let build = pairs(&[
+                [Value::Int64(1), Value::Null],
+                [Value::Float64(1.0), Value::Float64(2.0)],
+                [Value::Null, Value::Int64(2)],
+            ]);
+            let mut join = HashJoinOperator::new(
+                Box::new(probe),
+                Box::new(build),
+                vec![0, 1],
+                vec![0, 1],
+                JoinType::Inner,
+                vec![LogicalType::Any; 4],
+            )
+            .with_value_equality_keys();
+            let mut rows = Vec::new();
+            while let Some(chunk) = join.next().unwrap() {
+                for row in chunk.selected_indices() {
+                    rows.push(
+                        (0..4)
+                            .map(|column| chunk.column(column).unwrap().get_value(row).unwrap())
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
+            assert_eq!(
+                rows,
+                [vec![
+                    Value::Int64(1),
+                    Value::Int64(2),
+                    Value::Float64(1.0),
+                    Value::Float64(2.0)
+                ]]
+            );
+        }
     }
 }

@@ -708,6 +708,7 @@ impl LogicalOperator {
                     }
                     Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
                     Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
+                    Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
                     None => String::new(),
                 };
                 format!("{}{hint}", fmt_expr(&op.predicate))
@@ -1126,6 +1127,7 @@ impl LogicalOperator {
                     }
                     Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
                     Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
+                    Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
                     None => String::new(),
                 };
                 let _ = writeln!(
@@ -1454,6 +1456,15 @@ impl LogicalOperator {
     }
 }
 
+/// The text of a [`PushdownHint::HashJoin`]: `[hash join: t.k = f.k, ...]`.
+fn hash_join_hint(keys: &[(LogicalExpression, LogicalExpression)]) -> String {
+    let keys: Vec<String> = keys
+        .iter()
+        .map(|(scanned, row)| format!("{} = {}", fmt_expr(scanned), fmt_expr(row)))
+        .collect();
+    format!(" [hash join: {}]", keys.join(", "))
+}
+
 /// Format a logical expression compactly for EXPLAIN output.
 fn fmt_expr(expr: &LogicalExpression) -> String {
     match expr {
@@ -1470,6 +1481,20 @@ fn fmt_expr(expr: &LogicalExpression) -> String {
         LogicalExpression::FunctionCall { name, args, .. } => {
             let arg_strs: Vec<String> = args.iter().map(fmt_expr).collect();
             format!("{name}({})", arg_strs.join(", "))
+        }
+        LogicalExpression::List(items) => {
+            let items: Vec<String> = items.iter().map(fmt_expr).collect();
+            format!("[{}]", items.join(", "))
+        }
+        LogicalExpression::Map(entries) => {
+            let entries: Vec<String> = entries
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", fmt_expr(value)))
+                .collect();
+            format!("{{{}}}", entries.join(", "))
+        }
+        LogicalExpression::IndexAccess { base, index } => {
+            format!("{}[{}]", fmt_expr(base), fmt_expr(index))
         }
         _ => format!("{expr:?}"),
     }
@@ -1773,6 +1798,13 @@ pub enum PushdownHint {
     LabelFirst,
     /// The node is looked up by ID for each input row.
     IdSeek,
+    /// The nodes are scanned once and joined to the input's rows by hash on
+    /// values that must be equal: each key is the value of the scanned node,
+    /// then that of the row.
+    HashJoin {
+        /// The keys, as the filter writes them.
+        keys: Vec<(LogicalExpression, LogicalExpression)>,
+    },
 }
 
 /// Filter rows based on a predicate.
@@ -4819,10 +4851,25 @@ mod tests {
         };
         assert_eq!(fmt_expr(&fc), "toLower(name)");
 
+        let list =
+            LogicalExpression::List(vec![var("a"), LogicalExpression::Literal(Value::Int64(1))]);
+        assert_eq!(fmt_expr(&list), "[a, 1]");
+
+        let map = LogicalExpression::Map(vec![
+            ("k".into(), p.clone()),
+            ("v".into(), LogicalExpression::List(Vec::new())),
+        ]);
+        assert_eq!(fmt_expr(&map), "{k: n.age, v: []}");
+
+        let index = LogicalExpression::IndexAccess {
+            base: Box::new(p),
+            index: Box::new(LogicalExpression::Literal(Value::Int64(0))),
+        };
+        assert_eq!(fmt_expr(&index), "n.age[0]");
+
         // Fallback arm: non-common variant hits the `_ => format!("{expr:?}")` path.
-        let list = LogicalExpression::List(vec![var("a")]);
-        let out = fmt_expr(&list);
-        assert!(out.contains("List") || out.contains('['));
+        let labels = LogicalExpression::Labels("n".into());
+        assert_eq!(fmt_expr(&labels), format!("{labels:?}"));
     }
 
     // ==================== fmt_triple_component helper ====================

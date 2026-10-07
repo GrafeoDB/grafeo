@@ -71,7 +71,9 @@
 //! 2. **Zone-map short-circuit**: if the column's zone summary proves the
 //!    predicate cannot match any row group, plan an `EmptyOperator`.
 //! 3. **Property index seek**: equality on an indexed property becomes an
-//!    index scan (O(1) per lookup) instead of a filtered full scan.
+//!    index scan (O(1) per lookup) instead of a filtered full scan. A scan
+//!    for each input row looks its key up per row (`seek`), or, without an
+//!    index, is joined to the input by hash on equal values (`value_join`).
 //! 4. **Range index lookup**: `>`, `<`, `>=`, `<=` on an indexed
 //!    property becomes a range scan.
 //! 5. **Hybrid vector+text pushdown** (feature-gated): compound
@@ -96,7 +98,7 @@
 mod aggregate;
 mod expand;
 mod expression;
-mod filter;
+pub(crate) mod filter;
 mod filter_hybrid;
 mod join;
 mod mutation;
@@ -105,6 +107,7 @@ pub(crate) mod reachability;
 pub(crate) mod scan;
 pub(crate) mod seek;
 mod subquery;
+pub(crate) mod value_join;
 
 #[cfg(feature = "algos")]
 use crate::query::plan::CallProcedureOp;
@@ -246,6 +249,9 @@ pub struct Planner {
     /// Variables from variable-length expand patterns (group-list variables).
     /// Used by the aggregate planner to detect horizontal aggregation (GE09).
     pub(super) group_list_variables: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Whether the statement being planned writes, known while its root is
+    /// planned (see [`value_join::StatementScope`]).
+    pub(super) statement_writes: std::cell::Cell<Option<bool>>,
     /// When true, each physical operator is wrapped in `ProfiledOperator`.
     profiling: std::cell::Cell<bool>,
     /// Profile entries collected during planning (post-order).
@@ -307,6 +313,7 @@ impl Planner {
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
+            statement_writes: std::cell::Cell::new(None),
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             write_tracker: None,
@@ -378,6 +385,7 @@ impl Planner {
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
+            statement_writes: std::cell::Cell::new(None),
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             write_tracker,
@@ -1002,6 +1010,7 @@ impl Planner {
 
     /// Plans a single logical operator.
     fn plan_operator(&self, op: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let _statement = value_join::StatementScope::enter(&self.statement_writes, op);
         // A chain of filters over a node scan reads the label with the fewest
         // nodes (see `scan.rs`); PROFILE then shows the plan that runs.
         let reordered = match op {

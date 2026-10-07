@@ -181,7 +181,7 @@ fn move_scan_label(
 /// Whether `predicate` reads a property of `variable` that a vector or text
 /// index on one of `labels` covers.
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-fn search_index_covers(
+pub(super) fn search_index_covers(
     predicate: &LogicalExpression,
     variable: &str,
     labels: [&str; 2],

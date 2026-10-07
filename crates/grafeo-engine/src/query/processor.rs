@@ -579,7 +579,9 @@ impl QueryProcessor {
 /// Annotates filter operators in the plan with pushdown hints.
 ///
 /// Walks the whole plan tree looking for `Filter -> NodeScan` patterns and
-/// checks whether a property index exists for equality predicates. With
+/// names the path the planner takes for each (see `plan_filter`): a seek, a
+/// hash join on values, an index lookup, a range scan or a label-first scan
+/// (see [`scan_hint`](crate::query::planner::lpg::filter::scan_hint)). With
 /// `current`, a read of the store as it is now (see
 /// [`may_choose_scan_label`](crate::query::planner::lpg::scan::may_choose_scan_label)),
 /// a node scan below filters that require more of its labels shows the label
@@ -587,10 +589,23 @@ impl QueryProcessor {
 /// filter it plans (see
 /// [`with_smallest_scan_label`](crate::query::planner::lpg::scan::with_smallest_scan_label)).
 /// Without it, the planner uses no property index, and the plan shows none.
+/// `op` is the statement's root: a statement that writes plans no hash join
+/// on values.
 pub(crate) fn annotate_pushdown_hints(
     op: &mut LogicalOperator,
     store: &dyn grafeo_core::graph::GraphStoreSearch,
     current: bool,
+) {
+    let writes = op.has_mutations();
+    annotate_hints(op, store, current, writes);
+}
+
+/// [`annotate_pushdown_hints`] below the root of a statement that `writes`.
+fn annotate_hints(
+    op: &mut LogicalOperator,
+    store: &dyn grafeo_core::graph::GraphStoreSearch,
+    current: bool,
+    writes: bool,
 ) {
     if let LogicalOperator::Filter(filter) = op {
         // The label the planner scans, chosen at the top of a chain of filters
@@ -601,97 +616,37 @@ pub(crate) fn annotate_pushdown_hints(
             *filter = reordered;
         }
         // Recurse into children first
-        annotate_pushdown_hints(&mut filter.input, store, current);
+        annotate_hints(&mut filter.input, store, current, writes);
 
-        // Annotate this filter if it sits on top of a NodeScan
-        if let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
-            filter.pushdown_hint = infer_pushdown(&filter.predicate, scan, store, current);
-        } else if let Some(hint) = crate::query::planner::lpg::seek::checked_scan(filter)
-            .and_then(|below| seek_hint(&filter.predicate, below.scan, store, current))
-        {
-            // The seek takes over the checks between it and the scan: they
-            // run in its filter, not on a scan of their own.
+        // A seek or a hash join replaces the scan below the filter
+        let replaced = crate::query::planner::lpg::seek::checked_scan(filter).and_then(|below| {
+            seek_hint(&filter.predicate, below.scan, store, current)
+                .or_else(|| value_join_hint(filter, writes))
+        });
+        if let Some(hint) = replaced {
+            // It takes over the checks between it and the scan: they run in
+            // its filter or on the nodes it scans, not on a scan of their own.
             filter.pushdown_hint = Some(hint);
             let mut below = filter.input.as_mut();
             while let LogicalOperator::Filter(check) = below {
                 check.pushdown_hint = None;
                 below = check.input.as_mut();
             }
+        } else if let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
+            filter.pushdown_hint = crate::query::planner::lpg::filter::scan_hint(
+                &filter.predicate,
+                scan,
+                store,
+                current,
+            );
         }
         return;
     }
     let taken = std::mem::replace(op, LogicalOperator::Empty);
     *op = taken.map_children(|mut child| {
-        annotate_pushdown_hints(&mut child, store, current);
+        annotate_hints(&mut child, store, current, writes);
         child
     });
-}
-
-/// Infers the pushdown strategy for a filter predicate over a node scan;
-/// an index only with `current` (see [`annotate_pushdown_hints`]).
-fn infer_pushdown(
-    predicate: &LogicalExpression,
-    scan: &crate::query::plan::NodeScanOp,
-    store: &dyn grafeo_core::graph::GraphStore,
-    current: bool,
-) -> Option<crate::query::plan::PushdownHint> {
-    #[allow(clippy::wildcard_imports)]
-    use crate::query::plan::*;
-
-    if let Some(hint) = seek_hint(predicate, scan, store, current) {
-        return Some(hint);
-    }
-
-    match predicate {
-        // Equality with a constant: the plan-time index lookup
-        LogicalExpression::Binary { left, op, right } if *op == BinaryOp::Eq => {
-            if let Some(prop) = extract_property_name(left, &scan.variable)
-                .or_else(|| extract_property_name(right, &scan.variable))
-            {
-                let constant = matches!(left.as_ref(), LogicalExpression::Literal(_))
-                    || matches!(right.as_ref(), LogicalExpression::Literal(_));
-                if current && scan.input.is_none() && constant && store.has_property_index(&prop) {
-                    return Some(PushdownHint::IndexLookup { property: prop });
-                }
-                if scan.label.is_some() {
-                    return Some(PushdownHint::LabelFirst);
-                }
-            }
-            None
-        }
-        // Range: n.prop > value, n.prop < value, etc.
-        LogicalExpression::Binary {
-            left,
-            op: BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le,
-            right,
-        } => {
-            if let Some(prop) = extract_property_name(left, &scan.variable)
-                .or_else(|| extract_property_name(right, &scan.variable))
-            {
-                if current && store.has_property_index(&prop) {
-                    return Some(PushdownHint::RangeScan { property: prop });
-                }
-                if scan.label.is_some() {
-                    return Some(PushdownHint::LabelFirst);
-                }
-            }
-            None
-        }
-        // AND: check the left side (first conjunct) for pushdown
-        LogicalExpression::Binary {
-            left,
-            op: BinaryOp::And,
-            ..
-        } => infer_pushdown(left, scan, store, current),
-        _ => {
-            // Any other predicate on a labeled scan gets label-first
-            if scan.label.is_some() {
-                Some(PushdownHint::LabelFirst)
-            } else {
-                None
-            }
-        }
-    }
 }
 
 /// The seek the planner makes of a filter over `scan`: an ID, or an indexed
@@ -722,16 +677,21 @@ fn seek_hint(
     })
 }
 
-/// Extracts the property name if the expression is `Property { variable, property }`
-/// and the variable matches the scan variable.
-fn extract_property_name(expr: &LogicalExpression, scan_var: &str) -> Option<String> {
-    if let LogicalExpression::Property { variable, property } = expr
-        && variable == scan_var
-    {
-        Some(property.clone())
-    } else {
-        None
-    }
+/// The hash join on values the planner makes of `filter` in a statement that
+/// `writes` or not, if any (see
+/// [`value_join`](crate::query::planner::lpg::value_join::value_join)).
+fn value_join_hint(
+    filter: &crate::query::plan::FilterOp,
+    writes: bool,
+) -> Option<crate::query::plan::PushdownHint> {
+    let join = crate::query::planner::lpg::value_join::value_join(filter, writes)?;
+    Some(crate::query::plan::PushdownHint::HashJoin {
+        keys: join
+            .keys
+            .iter()
+            .map(|key| (key.scanned.clone(), key.row.clone()))
+            .collect(),
+    })
 }
 
 /// Builds a `QueryResult` containing the EXPLAIN plan tree text.

@@ -11,7 +11,10 @@
 //! 2. Zone-map short-circuit fires before any index lookup so we can
 //!    skip opening an index file at all when summary statistics prove
 //!    emptiness.
-//! 3. Property-index and range-index attempts come before hybrid
+//! 3. A scan that runs for each input row is looked up per row by an ID or
+//!    an indexed key (the seek, `seek.rs`), or else joined to the input by
+//!    hash on equal values (`value_join.rs`). Property-index and
+//!    range-index attempts on a scan without input come next, before hybrid
 //!    pushdown because they are cheaper and strictly more specific.
 //! 4. Compound hybrid (`try_plan_filter_compound_hybrid`) is tried
 //!    before single-sided vector/text pushdown so an `AND` over both
@@ -34,9 +37,10 @@ use grafeo_common::types::NodeId;
 use super::{
     Arc, BinaryOp, EmptyOperator, Error, ExpressionPredicate, FilterOp, FilterOperator,
     GraphStoreSearch, HashJoinOperator, HashMap, LogicalExpression, LogicalOperator,
-    NodeListOperator, Operator, PhysicalJoinType, RangeBounds, RangeScanOperator, Result,
-    TransactionId, UnaryOp, Value,
+    NodeListOperator, NodeScanOp, Operator, PhysicalJoinType, RangeBounds, RangeScanOperator,
+    Result, TransactionId, UnaryOp, Value,
 };
+use crate::query::plan::PushdownHint;
 
 /// Cross-type equality comparison with Int64/Float64 coercion.
 fn values_equal_coerced(a: &Value, b: &Value) -> bool {
@@ -129,6 +133,12 @@ impl super::Planner {
 
         // A key from the input row, or an ID: look the node up per row
         if let Some(result) = self.try_plan_filter_with_node_seek(filter)? {
+            return Ok(result);
+        }
+
+        // Values of the input row equal to values of the node: scan once and
+        // join on them
+        if let Some(result) = self.try_plan_filter_with_value_join(filter)? {
             return Ok(result);
         }
 
@@ -669,7 +679,7 @@ impl super::Planner {
 
         // Extract property equality conditions from the predicate
         // Handles both simple (n.prop = val) and compound (n.a = 1 AND n.b = 2)
-        let conditions = self.extract_equality_conditions(&filter.predicate, &scan_variable);
+        let conditions = Self::extract_equality_conditions(&filter.predicate, &scan_variable);
 
         if conditions.is_empty() {
             return Ok(None);
@@ -737,7 +747,7 @@ impl super::Planner {
         // Check for remaining predicate parts that weren't pushed down
         // (e.g., range conditions in a compound predicate like `n.name = 'Alix' AND n.age > 30`)
         if let Some(remaining) =
-            self.extract_remaining_predicate(&filter.predicate, &scan_variable, &conditions)
+            Self::extract_remaining_predicate(&filter.predicate, &scan_variable, &conditions)
         {
             let variable_columns: HashMap<String, usize> = columns
                 .iter()
@@ -798,24 +808,8 @@ impl super::Planner {
             return Ok(None);
         }
 
-        // Right side: List of literal expressions, or a Literal containing a Value::List.
-        let values: Vec<Value> = match right.as_ref() {
-            LogicalExpression::List(items) => {
-                let mut out = Vec::with_capacity(items.len());
-                for item in items {
-                    match item {
-                        LogicalExpression::Literal(v) if !v.is_null() => out.push(v.clone()),
-                        // A non-literal element (parameter, expression) means
-                        // we can't enumerate at plan time. Bail to slow path.
-                        _ => return Ok(None),
-                    }
-                }
-                out
-            }
-            LogicalExpression::Literal(Value::List(items)) => {
-                items.iter().filter(|v| !v.is_null()).cloned().collect()
-            }
-            _ => return Ok(None),
+        let Some(values) = in_list_values(right) else {
+            return Ok(None);
         };
         if values.is_empty() {
             // `prop IN []` is always false: return an empty result without
@@ -854,7 +848,6 @@ impl super::Planner {
     /// Given `n.name = 'Alix' AND n.age > 30` with pushed conditions `[("name", "Alix")]`,
     /// returns `Some(n.age > 30)`. Returns `None` when all conditions were pushed down.
     pub(super) fn extract_remaining_predicate(
-        &self,
         predicate: &LogicalExpression,
         target_variable: &str,
         pushed_conditions: &[(String, Value)],
@@ -866,9 +859,9 @@ impl super::Planner {
                 right,
             } => {
                 let left_remaining =
-                    self.extract_remaining_predicate(left, target_variable, pushed_conditions);
+                    Self::extract_remaining_predicate(left, target_variable, pushed_conditions);
                 let right_remaining =
-                    self.extract_remaining_predicate(right, target_variable, pushed_conditions);
+                    Self::extract_remaining_predicate(right, target_variable, pushed_conditions);
 
                 match (left_remaining, right_remaining) {
                     (Some(l), Some(r)) => Some(LogicalExpression::Binary {
@@ -887,7 +880,7 @@ impl super::Planner {
                 right,
             } => {
                 // Check if this equality was pushed down
-                if let Some((var, prop, val)) = self.extract_property_equality(left, right)
+                if let Some((var, prop, val)) = Self::extract_property_equality(left, right)
                     && var == target_variable
                     && pushed_conditions
                         .iter()
@@ -908,18 +901,16 @@ impl super::Planner {
     /// - `n.name = "Alix"` → `[("name", "Alix")]`
     /// - `n.name = "Alix" AND n.age = 30` → `[("name", "Alix"), ("age", 30)]`
     pub(super) fn extract_equality_conditions(
-        &self,
         predicate: &LogicalExpression,
         target_variable: &str,
     ) -> Vec<(String, Value)> {
         let mut conditions = Vec::new();
-        self.collect_equality_conditions(predicate, target_variable, &mut conditions);
+        Self::collect_equality_conditions(predicate, target_variable, &mut conditions);
         conditions
     }
 
     /// Recursively collects equality conditions from AND expressions.
     pub(super) fn collect_equality_conditions(
-        &self,
         expr: &LogicalExpression,
         target_variable: &str,
         conditions: &mut Vec<(String, Value)>,
@@ -931,8 +922,8 @@ impl super::Planner {
                 op: BinaryOp::And,
                 right,
             } => {
-                self.collect_equality_conditions(left, target_variable, conditions);
-                self.collect_equality_conditions(right, target_variable, conditions);
+                Self::collect_equality_conditions(left, target_variable, conditions);
+                Self::collect_equality_conditions(right, target_variable, conditions);
             }
 
             // Handle equality: extract property and value
@@ -941,7 +932,7 @@ impl super::Planner {
                 op: BinaryOp::Eq,
                 right,
             } => {
-                if let Some((var, prop, val)) = self.extract_property_equality(left, right)
+                if let Some((var, prop, val)) = Self::extract_property_equality(left, right)
                     && var == target_variable
                 {
                     conditions.push((prop, val));
@@ -957,7 +948,6 @@ impl super::Planner {
     /// Returns `None` for NULL literals: `property = NULL` is UNKNOWN in
     /// three-valued logic and must never be optimized into an index lookup.
     pub(super) fn extract_property_equality(
-        &self,
         left: &LogicalExpression,
         right: &LogicalExpression,
     ) -> Option<(String, String, Value)> {
@@ -1025,7 +1015,7 @@ impl super::Planner {
 
         // Try to extract BETWEEN pattern first (more efficient)
         if let Some((variable, property, min, max, min_inc, max_inc)) =
-            self.extract_between_predicate(&filter.predicate)
+            Self::extract_between_predicate(&filter.predicate)
             && variable == scan_variable
         {
             self.record_absorbed_scan_entry("NodeScan", &filter.input);
@@ -1044,7 +1034,7 @@ impl super::Planner {
 
         // Try to extract simple range predicate
         if let Some((variable, property, op, value)) =
-            self.extract_range_predicate(&filter.predicate)
+            Self::extract_range_predicate(&filter.predicate)
             && variable == scan_variable
         {
             let (min, max, min_inc, max_inc) = match op {
@@ -1122,7 +1112,6 @@ impl super::Planner {
     ///
     /// Returns `(variable, property, operator, value)` if found.
     pub(super) fn extract_range_predicate(
-        &self,
         predicate: &LogicalExpression,
     ) -> Option<(String, String, BinaryOp, Value)> {
         match predicate {
@@ -1175,7 +1164,6 @@ impl super::Planner {
     ///
     /// Returns `(variable, property, min_value, max_value, min_inclusive, max_inclusive)`.
     pub(super) fn extract_between_predicate(
-        &self,
         predicate: &LogicalExpression,
     ) -> Option<(String, String, Value, Value, bool, bool)> {
         // Must be an AND expression
@@ -1189,8 +1177,8 @@ impl super::Planner {
         };
 
         // Extract range predicates from both sides
-        let left_range = self.extract_range_predicate(left);
-        let right_range = self.extract_range_predicate(right);
+        let left_range = Self::extract_range_predicate(left);
+        let right_range = Self::extract_range_predicate(right);
 
         let (left_var, left_prop, left_op, left_val) = left_range?;
         let (right_var, right_prop, right_op, right_val) = right_range?;
@@ -1223,6 +1211,102 @@ impl super::Planner {
 
         Some((left_var, left_prop, min_val, max_val, min_inc, max_inc))
     }
+}
+
+/// The values the index path of `var.prop IN list` looks up: a list of
+/// literals that are not NULL (`None` when an element is something else,
+/// which the plan cannot enumerate), or a literal list without its NULLs.
+fn in_list_values(list: &LogicalExpression) -> Option<Vec<Value>> {
+    match list {
+        LogicalExpression::List(items) => items
+            .iter()
+            .map(|item| match item {
+                LogicalExpression::Literal(value) if !value.is_null() => Some(value.clone()),
+                _ => None,
+            })
+            .collect(),
+        LogicalExpression::Literal(Value::List(items)) => {
+            Some(items.iter().filter(|v| !v.is_null()).cloned().collect())
+        }
+        _ => None,
+    }
+}
+
+/// The hint `EXPLAIN` shows for the path [`plan_filter`][pf] takes for a
+/// filter over `scan` after the seek, with the indexes of `store`; `current`
+/// as in `reads_the_current_store`. These paths read a scan without input,
+/// in the order the planner tries them: the index lookup of equalities with
+/// constants or the label-first scan of their label, the index lookup of an
+/// `IN` list of constants, the range scan of a range of constants (with or
+/// without an index), a vector or text index search (no hint), and
+/// otherwise the scan of the label with the filter above it. A scan per input
+/// row takes none of them.
+///
+/// [pf]: super::Planner::plan_filter
+pub(crate) fn scan_hint(
+    predicate: &LogicalExpression,
+    scan: &NodeScanOp,
+    store: &dyn GraphStoreSearch,
+    current: bool,
+) -> Option<PushdownHint> {
+    let has_index = |property: &str| store.has_property_index(property);
+    if scan.input.is_some() {
+        return None;
+    }
+    let variable = scan.variable.as_str();
+    let conditions = super::Planner::extract_equality_conditions(predicate, variable);
+    if !conditions.is_empty() {
+        if current && let Some((property, _)) = conditions.iter().find(|(p, _)| has_index(p)) {
+            return Some(PushdownHint::IndexLookup {
+                property: property.clone(),
+            });
+        }
+        if scan.label.is_some() {
+            return Some(PushdownHint::LabelFirst);
+        }
+    }
+    if current
+        && let LogicalExpression::Binary {
+            left,
+            op: BinaryOp::In,
+            right,
+        } = predicate
+        && let LogicalExpression::Property {
+            variable: read,
+            property,
+        } = left.as_ref()
+        && read == variable
+        && has_index(property)
+        && in_list_values(right).is_some()
+    {
+        return Some(PushdownHint::IndexLookup {
+            property: property.clone(),
+        });
+    }
+    if current {
+        let between = super::Planner::extract_between_predicate(predicate)
+            .map(|(read, property, ..)| (read, property));
+        let range = || {
+            super::Planner::extract_range_predicate(predicate)
+                .map(|(read, property, ..)| (read, property))
+        };
+        if let Some((_, property)) = between
+            .filter(|(read, _)| read == variable)
+            .or_else(|| range().filter(|(read, _)| read == variable))
+        {
+            return Some(PushdownHint::RangeScan { property });
+        }
+    }
+    // A vector or text index on the label that covers a property the filter
+    // reads can take it (see `filter_hybrid.rs`), and the search runs instead
+    // of the scan.
+    #[cfg(any(feature = "vector-index", feature = "text-index"))]
+    if let Some(label) = scan.label.as_deref()
+        && super::scan::search_index_covers(predicate, variable, [label, label], store)
+    {
+        return None;
+    }
+    scan.label.as_ref().map(|_| PushdownHint::LabelFirst)
 }
 
 /// Extracted vector predicate from a filter expression.

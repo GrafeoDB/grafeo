@@ -6937,6 +6937,93 @@ mod tests {
         assert_gus_is_gone(&layered, gus);
     }
 
+    /// A write that copies Gus, whose embedding the overlay's vector index
+    /// holds, while Gus is deleted: the copy syncs the vector index only
+    /// after it releases the overlay's node lock (see `adopt_node`), but it
+    /// holds the copy lock until the sync is done, and the delete waits for
+    /// that lock, so the sync never puts Gus back after the delete. A delete
+    /// outside a transaction leaves him out of the index, and after either
+    /// delete (in a transaction once it commits) a vector search never finds
+    /// him.
+    #[cfg(feature = "vector-index")]
+    #[test]
+    fn a_copy_racing_a_delete_of_its_node_never_brings_its_vector_back() {
+        use crate::index::vector::{HnswConfig, HnswIndex, VectorIndexKind};
+
+        for in_a_transaction in [true, false] {
+            let store = LpgStore::new().unwrap();
+            let person = |name: &str, embedding: [f32; 2]| {
+                let id = store.create_node(&["Person"]);
+                store.set_node_property(id, "name", Value::from(name));
+                store.set_node_property(id, "embedding", Value::Vector(Arc::from(embedding)));
+                id
+            };
+            let alix = person("Alix", [0.0, 1.0]);
+            let gus = person("Gus", [1.0, 0.0]);
+            let layered = Arc::new(
+                LayeredStore::new(
+                    from_graph_store_preserving_ids(&store).unwrap(),
+                    gus.as_u64(),
+                    0,
+                )
+                .unwrap(),
+            );
+            let overlay = layered.overlay_store();
+            let index = Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(HnswConfig::new(
+                2,
+                DistanceMetric::Euclidean,
+            ))));
+            overlay.add_vector_index("Person", "embedding", Arc::clone(&index));
+            let key = PropertyKey::new("embedding");
+            for id in [alix, gus] {
+                let Some(Value::Vector(vector)) = layered.get_node_property(id, &key) else {
+                    panic!("node {id:?} has a vector in the base");
+                };
+                index.insert(id, &vector, &overlay.index_vectors("embedding"));
+            }
+            let epoch = layered.current_epoch();
+
+            race_at(
+                &layered,
+                CopyStep::NodeCopy,
+                |layered| layered.set_node_property(gus, "age", Value::Int64(19)),
+                move |layered| {
+                    if in_a_transaction {
+                        assert!(layered.delete_node_versioned(gus, epoch, DELETER).unwrap());
+                    } else {
+                        assert!(layered.delete_node(gus));
+                    }
+                },
+            );
+            if in_a_transaction {
+                commit_deleter(&layered);
+            } else {
+                assert!(
+                    !index.contains(gus),
+                    "the delete outside a transaction took Gus out of the index"
+                );
+            }
+
+            let nearest: Vec<NodeId> = layered
+                .vector_search(
+                    Some("Person"),
+                    "embedding",
+                    &[1.0, 0.0],
+                    3,
+                    DistanceMetric::Euclidean,
+                )
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            assert_eq!(
+                nearest,
+                vec![alix],
+                "a search after the delete (in a transaction: {in_a_transaction})"
+            );
+            assert!(layered.get_node(gus).is_none(), "Gus is deleted");
+        }
+    }
+
     /// A write to a copied node or edge that another transaction is deleting
     /// writes nothing: it finds the delete's tombstone, as a copy does,
     /// instead of writing a value behind the delete's pending one. After the

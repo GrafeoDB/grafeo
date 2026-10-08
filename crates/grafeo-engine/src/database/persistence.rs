@@ -379,6 +379,76 @@ fn refuse_too_deep(
     Ok(())
 }
 
+/// Refuses `snapshot` when it holds data this build cannot read (see
+/// [`FeatureData`](super::sections::FeatureData)): RDF triples or graphs
+/// without the `triple-store` feature, vector or text index definitions
+/// without `vector-index` or `text-index`. Such a build would `action`
+/// (`import`, `restore`) the snapshot without that data.
+///
+/// # Errors
+///
+/// Returns an error that says what the snapshot holds (`1 in the default
+/// graph, 3 in graph trips`, `on :Document(embedding)`) and the features, in
+/// that case.
+fn refuse_unreadable_snapshot(snapshot: &Snapshot, action: &str) -> Result<()> {
+    use super::sections::{FeatureData, RDF_TRIPLES, TEXT_INDEXES, VECTOR_INDEXES, refusal_of};
+
+    // Plain loops that append to one string per kind of data: this runs in
+    // the WebAssembly packages, whose size is gated.
+    let mut found: Vec<(&FeatureData, String)> = Vec::new();
+    if !RDF_TRIPLES.in_build() {
+        let mut held = String::new();
+        if !snapshot.rdf_triples.is_empty() {
+            held.push_str(&snapshot.rdf_triples.len().to_string());
+            held.push_str(" in the default graph");
+        }
+        for graph in &snapshot.rdf_named_graphs {
+            if !held.is_empty() {
+                held.push_str(", ");
+            }
+            held.push_str(&graph.triples.len().to_string());
+            held.push_str(" in graph ");
+            held.push_str(&graph.name);
+        }
+        if !held.is_empty() {
+            found.push((&RDF_TRIPLES, held));
+        }
+    }
+    if !VECTOR_INDEXES.in_build() {
+        let mut held = String::new();
+        for def in &snapshot.indexes.vector_indexes {
+            push_index_on(&mut held, &def.label, &def.property);
+        }
+        if !held.is_empty() {
+            found.push((&VECTOR_INDEXES, held));
+        }
+    }
+    if !TEXT_INDEXES.in_build() {
+        let mut held = String::new();
+        for def in &snapshot.indexes.text_indexes {
+            push_index_on(&mut held, &def.label, &def.property);
+        }
+        if !held.is_empty() {
+            found.push((&TEXT_INDEXES, held));
+        }
+    }
+    if found.is_empty() {
+        Ok(())
+    } else {
+        Err(refusal_of("the snapshot", action, &found))
+    }
+}
+
+/// Appends the index on `property` of the nodes with `label` to `held`, the
+/// list a refusal names: `on :Document(embedding), :Document(title)`.
+fn push_index_on(held: &mut String, label: &str, property: &str) {
+    held.push_str(if held.is_empty() { "on :" } else { ", :" });
+    held.push_str(label);
+    held.push('(');
+    held.push_str(property);
+    held.push(')');
+}
+
 /// Collects all triples from an RDF store into snapshot format.
 #[cfg(feature = "triple-store")]
 fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<SnapshotTriple> {
@@ -695,7 +765,9 @@ fn collect_schema(catalog: &std::sync::Arc<crate::catalog::Catalog>) -> Snapshot
 /// Restores indexes from snapshot metadata by rebuilding them from existing data.
 ///
 /// Must be called after all nodes/edges have been populated, since index
-/// creation scans existing data.
+/// creation scans existing data. A build without `vector-index` or
+/// `text-index` has refused a snapshot with such definitions before (see
+/// [`refuse_unreadable_snapshot`]).
 fn restore_indexes_from_snapshot(db: &super::GrafeoDB, indexes: &SnapshotIndexes) {
     for name in &indexes.property_indexes {
         db.lpg_store().create_property_index(name);
@@ -1141,11 +1213,16 @@ impl super::GrafeoDB {
     /// snapshot, and duplicate node/edge IDs are rejected. If validation
     /// fails, no database is created.
     ///
+    /// A build without the `triple-store`, `vector-index` or `text-index`
+    /// feature refuses a snapshot that holds RDF triples, or vector or text
+    /// index definitions: it would create the database without them.
+    ///
     /// # Errors
     ///
     /// Returns an error if the snapshot is invalid, contains dangling edge
     /// references, has duplicate IDs, holds an RDF term that is not an
-    /// N-Triples term, or deserialization fails.
+    /// N-Triples term, or deserialization fails; and, naming the data and the
+    /// feature, if it holds data this build cannot read.
     pub fn import_snapshot(data: &[u8]) -> Result<Self> {
         if data.is_empty() {
             return Err(Error::Internal("empty snapshot data".to_string()));
@@ -1161,6 +1238,9 @@ impl super::GrafeoDB {
         let config = bincode::config::standard();
         let (snapshot, _): (Snapshot, _) = bincode::serde::decode_from_slice(data, config)
             .map_err(|e| Error::Internal(format!("snapshot import failed: {e}")))?;
+        // Before the database is created: this build would import the
+        // snapshot without the data it cannot read.
+        refuse_unreadable_snapshot(&snapshot, "import")?;
 
         // Validate default graph data
         validate_snapshot_data(&snapshot.nodes, &snapshot.edges)?;
@@ -1222,8 +1302,9 @@ impl super::GrafeoDB {
     /// [`export_snapshot()`](Self::export_snapshot), so it is plaintext
     /// (snapshots are never encrypted).
     ///
-    /// All validation (duplicate IDs, dangling edge references, RDF terms) is
-    /// performed before any data is modified. If validation fails, the current database
+    /// All validation (duplicate IDs, dangling edge references, RDF terms,
+    /// data this build cannot read) is performed before any data is
+    /// modified. If validation fails, the current database
     /// is left unchanged. If validation passes, the store is cleared and
     /// rebuilt from the snapshot atomically (from the perspective of
     /// subsequent queries).
@@ -1233,11 +1314,17 @@ impl super::GrafeoDB {
     /// the snapshot is held as a plain store, which the next checkpoint
     /// writes as one (a reopen finds no compacted base).
     ///
+    /// A build without the `triple-store`, `vector-index` or `text-index`
+    /// feature refuses a snapshot that holds RDF triples, or vector or text
+    /// index definitions, and leaves the database as it was: it would restore
+    /// the database without them.
+    ///
     /// # Errors
     ///
     /// Returns an error if the snapshot is invalid, contains dangling edge
     /// references, has duplicate IDs, holds an RDF term that is not an
-    /// N-Triples term, or deserialization fails, after a commit that did not
+    /// N-Triples term or data this build cannot read (naming the data and the
+    /// feature), or deserialization fails, after a commit that did not
     /// complete (the restored database could never be checkpointed, see
     /// [`TransactionManager`](crate::transaction::TransactionManager)),
     /// on a read-only database, and the database-closed error after `close()`
@@ -1269,7 +1356,9 @@ impl super::GrafeoDB {
         let (snapshot, _): (Snapshot, _) = bincode::serde::decode_from_slice(data, config)
             .map_err(|e| Error::Internal(format!("snapshot restore failed: {e}")))?;
 
-        // Validate all data before making any changes
+        // Validate all data before making any changes, and refuse data this
+        // build cannot read, which it would restore the database without.
+        refuse_unreadable_snapshot(&snapshot, "restore")?;
         validate_snapshot_data(&snapshot.nodes, &snapshot.edges)?;
         for ng in &snapshot.named_graphs {
             validate_snapshot_data(&ng.nodes, &ng.edges)?;

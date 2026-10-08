@@ -22,7 +22,12 @@ impl super::Planner {
         // 3. No GROUP BY
         // 4. All aggregates are simple (COUNT, SUM, AVG, MIN, MAX)
         // 5. It does not read after a write (the regular path reads the
-        //    writing input whole first, see `after_write`)
+        //    writing input whole first, see `after_write`). A `count(*)` or
+        //    an aggregated variable reads nothing itself, and the chain
+        //    reads its whole source before its first expand (the lazy chain
+        //    collects every batch, and the node scan of a MATCH from a bound
+        //    node reads a writing input whole, see `plan_node_scan`): the
+        //    count over the chain counts what the whole write left.
         if self.factorized_execution
             && agg.group_by.is_empty()
             && !(super::after_write::aggregate_reads(agg)
@@ -521,5 +526,94 @@ fn entity_type(entity: Option<EntityValue>) -> LogicalType {
         Some(EntityValue::Nodes) => LogicalType::List(Box::new(LogicalType::Node)),
         Some(EntityValue::Edges) => LogicalType::List(Box::new(LogicalType::Edge)),
         _ => LogicalType::Any,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Planner;
+    use crate::query::plan::{
+        AggregateExpr, AggregateFunction, AggregateOp, CreateNodeOp, ExpandDirection, ExpandOp,
+        LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp, PathMode, ProjectOp,
+        Projection,
+    };
+    use crate::transaction::TransactionManager;
+    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
+    use std::sync::Arc;
+
+    /// A one-hop expand from `from` to `to` along `edge_type` over `input`.
+    fn expand(from: &str, edge_type: &str, to: &str, input: LogicalOperator) -> LogicalOperator {
+        LogicalOperator::Expand(ExpandOp {
+            from_variable: from.to_string(),
+            to_variable: to.to_string(),
+            edge_variable: None,
+            direction: ExpandDirection::Outgoing,
+            edge_types: vec![edge_type.to_string()],
+            min_hops: 1,
+            max_hops: Some(1),
+            input: Box::new(input),
+            path_alias: None,
+            path_mode: PathMode::Walk,
+            quantified: false,
+        })
+    }
+
+    /// `CREATE (h:Hub) WITH h MATCH (h)-[:R]->(q)-[:S]->(t) RETURN count(*)`
+    /// runs factorized: the chain reads its whole source (the node scan of
+    /// the bound `h`, which reads its writing input whole, see
+    /// `plan_node_scan`) before its first expand, so the count reads after
+    /// the whole write without a step of its own (the queries in
+    /// `tests/pattern_after_write.rs` check the count).
+    #[test]
+    fn a_count_over_a_chain_from_a_written_node_is_planned_factorized() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let transaction_manager = Arc::new(TransactionManager::new());
+        let transaction_id = transaction_manager.begin();
+        let epoch = transaction_manager.current_epoch();
+        let planner = Planner::with_context(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>),
+            Arc::clone(&transaction_manager),
+            Some(transaction_id),
+            epoch,
+        );
+        let write = LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Variable("h".to_string()),
+                alias: None,
+            }],
+            input: Box::new(LogicalOperator::CreateNode(CreateNodeOp {
+                variable: "h".to_string(),
+                labels: vec!["Hub".to_string()],
+                properties: Vec::new(),
+                input: None,
+            })),
+            pass_through_input: false,
+        });
+        let scan = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "h".to_string(),
+            label: None,
+            input: Some(Box::new(write)),
+        });
+        let count = LogicalOperator::Aggregate(AggregateOp {
+            group_by: Vec::new(),
+            aggregates: vec![AggregateExpr {
+                function: AggregateFunction::Count,
+                expression: None,
+                expression2: None,
+                distinct: false,
+                alias: Some("found".to_string()),
+                percentile: None,
+                separator: None,
+            }],
+            input: Box::new(expand("q", "S", "t", expand("h", "R", "q", scan))),
+            having: None,
+        });
+
+        let physical = planner.plan(&LogicalPlan::new(count)).unwrap();
+
+        assert_eq!(physical.operator.name(), "FactorizedAggregate");
+        assert_eq!(physical.columns, ["found"]);
     }
 }

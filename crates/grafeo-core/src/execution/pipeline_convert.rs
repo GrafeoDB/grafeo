@@ -157,6 +157,10 @@ fn decompose_recursive_memory(
             let limit = any
                 .downcast::<LimitOperator>()
                 .expect("name() returned 'Limit' but downcast failed");
+            // A limit over a write stays a source: see `decompose_recursive`.
+            if limit.runs_input_to_the_end() {
+                return limit;
+            }
             let (child, count) = limit.into_parts();
             push_ops.push(Box::new(LimitPushOperator::new(count)));
             decompose_recursive_memory(child, push_ops, ctx)
@@ -236,6 +240,12 @@ fn decompose_recursive(
             let limit = any
                 .downcast::<LimitOperator>()
                 .expect("name() returned 'Limit' but downcast failed");
+            // A limit over a write runs its input to the end, which a push
+            // limit cannot: once it has its rows, the pipeline stops reading
+            // the source. It stays a source, pulled to its end.
+            if limit.runs_input_to_the_end() {
+                return limit;
+            }
             let (child, count) = limit.into_parts();
             push_ops.push(Box::new(LimitPushOperator::new(count)));
             decompose_recursive(child, push_ops)
@@ -463,6 +473,21 @@ mod tests {
         // Pipeline order: filter first, then limit
         assert!(push_ops[0].name().contains("Filter"));
         assert!(push_ops[1].name().contains("Limit"));
+    }
+
+    /// A limit over a write runs its input to the end, so it stays the
+    /// source: a push limit would stop the pipeline at its last row.
+    #[test]
+    fn a_limit_running_its_input_to_the_end_stays_a_source() {
+        let scan: Box<dyn Operator> = Box::new(TestScanOperator::new());
+        let limit = LimitOperator::new(scan, 0).running_its_input_to_the_end();
+        let predicate: Box<dyn Predicate> = Box::new(AlwaysTruePredicate);
+        let filter: Box<dyn Operator> = Box::new(FilterOperator::new(Box::new(limit), predicate));
+
+        let (source, push_ops) = convert_to_pipeline(filter);
+        assert_eq!(source.name(), "Limit");
+        assert_eq!(push_ops.len(), 1);
+        assert!(push_ops[0].name().contains("Filter"));
     }
 
     #[test]

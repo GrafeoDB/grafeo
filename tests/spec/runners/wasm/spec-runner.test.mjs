@@ -147,6 +147,20 @@ function executeQuery(db, language, query, params) {
   return db.executeWithLanguage(query, key)
 }
 
+/**
+ * Frees `db`. Without it every test's database stays in the WASM heap, and
+ * with all features the heap runs out after about 3,500 tests: every later
+ * test then fails with `RuntimeError: unreachable`.
+ */
+function release(db) {
+  try {
+    db.free()
+  } catch (err) {
+    // After a panic the instance may trap again; the test already reported it
+    if (!(err instanceof WebAssembly.RuntimeError)) throw err
+  }
+}
+
 const RUNNER_CAPABILITIES = new Set([])
 
 /** Cached set of compiled feature flags, populated on first use. */
@@ -206,20 +220,24 @@ for (const filePath of gtestFiles) {
             if (!WASM_AVAILABLE) return ctx.skip()
             if (tc.skip) return ctx.skip()
             const db = new Database()
-            if (!isAvailable(db, lang)) return ctx.skip()
-            // Check the file's and the test's requires, as single tests do
-            for (const req of [...(meta.requires || []), ...(tc.requires || [])]) {
-              if (!isAvailable(db, req)) return ctx.skip()
-            }
-            const effectiveDataset = tc.dataset || meta.dataset
-            if (effectiveDataset && effectiveDataset !== 'empty') {
-              loadDataset(db, effectiveDataset)
-            }
             try {
-              runTestCase(db, { ...tc, query }, lang, meta.language || 'gql')
-            } catch (err) {
-              if (err instanceof WebAssembly.RuntimeError) return ctx.skip()
-              throw err
+              if (!isAvailable(db, lang)) return ctx.skip()
+              // Check the file's and the test's requires, as single tests do
+              for (const req of [...(meta.requires || []), ...(tc.requires || [])]) {
+                if (!isAvailable(db, req)) return ctx.skip()
+              }
+              const effectiveDataset = tc.dataset || meta.dataset
+              if (effectiveDataset && effectiveDataset !== 'empty') {
+                loadDataset(db, effectiveDataset)
+              }
+              try {
+                runTestCase(db, { ...tc, query }, lang, meta.language || 'gql')
+              } catch (err) {
+                if (err instanceof WebAssembly.RuntimeError) return ctx.skip()
+                throw err
+              }
+            } finally {
+              release(db)
             }
           })
         }
@@ -233,33 +251,36 @@ for (const filePath of gtestFiles) {
         if (tc.skip) return ctx.skip()
 
         const db = new Database()
-
-        // Check language availability (file-level and per-test)
-        if (!isAvailable(db, meta.language)) return ctx.skip()
-        if (tc.language && !isAvailable(db, tc.language)) return ctx.skip()
-
-        // Check requires: skip if binding does not expose the required method
-        for (const req of meta.requires) {
-          if (!isAvailable(db, req)) return ctx.skip()
-        }
-
-        // Check per-test requires
-        for (const req of (tc.requires || [])) {
-          if (!isAvailable(db, req)) return ctx.skip()
-        }
-
-        // Load dataset (per-test override takes priority)
-        const effectiveDataset = tc.dataset || meta.dataset
-        if (effectiveDataset && effectiveDataset !== 'empty') {
-          loadDataset(db, effectiveDataset)
-        }
-
         try {
-          runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql')
-        } catch (err) {
-          // WASM panics (e.g. rand(), SystemTime) surface as RuntimeError: unreachable
-          if (err instanceof WebAssembly.RuntimeError) return ctx.skip()
-          throw err
+          // Check language availability (file-level and per-test)
+          if (!isAvailable(db, meta.language)) return ctx.skip()
+          if (tc.language && !isAvailable(db, tc.language)) return ctx.skip()
+
+          // Check requires: skip if binding does not expose the required method
+          for (const req of meta.requires) {
+            if (!isAvailable(db, req)) return ctx.skip()
+          }
+
+          // Check per-test requires
+          for (const req of (tc.requires || [])) {
+            if (!isAvailable(db, req)) return ctx.skip()
+          }
+
+          // Load dataset (per-test override takes priority)
+          const effectiveDataset = tc.dataset || meta.dataset
+          if (effectiveDataset && effectiveDataset !== 'empty') {
+            loadDataset(db, effectiveDataset)
+          }
+
+          try {
+            runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql')
+          } catch (err) {
+            // WASM panics (e.g. rand(), SystemTime) surface as RuntimeError: unreachable
+            if (err instanceof WebAssembly.RuntimeError) return ctx.skip()
+            throw err
+          }
+        } finally {
+          release(db)
         }
       })
     }

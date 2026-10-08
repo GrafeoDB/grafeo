@@ -1267,6 +1267,14 @@ pub(crate) fn wrap_return(
     })
 }
 
+/// Ends a statement that has no result: one without a `RETURN` (openCypher,
+/// ISO GQL), or with GQL's `FINISH`. A `RETURN` of no items, which the
+/// planner runs to the end of its input for the writes and which returns no
+/// rows and no columns.
+pub(crate) fn no_result(input: LogicalOperator) -> LogicalOperator {
+    wrap_return(input, Vec::new(), false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -373,6 +373,32 @@ fn explain_marks_the_clause_read_after_a_write() {
     }
 }
 
+/// A join reads the whole write before its first row (an `OPTIONAL MATCH`
+/// reads its writing input first and its own pattern whole), so the clause
+/// after it is not read again: EXPLAIN marks nothing, and every row finds
+/// the hub as the whole write left it.
+#[test]
+fn a_clause_after_a_join_after_a_write_is_not_read_again() {
+    for language in LANGUAGES {
+        let query = format!(
+            "{} WITH h, i OPTIONAL MATCH (t:Hub) RETURN i, t.c AS found",
+            hub_write(language)
+        );
+        let session = GrafeoDB::new_in_memory().session();
+        assert_eq!(
+            marked(&session, language, &query),
+            Vec::<String>::new(),
+            "{language:?} `EXPLAIN {query}`:\n{}",
+            explain(&session, language, &query).join("\n")
+        );
+        assert_eq!(
+            run(&session, language, &query),
+            each_row(int(4)),
+            "{language:?} `{query}`"
+        );
+    }
+}
+
 /// A `MATCH` after a write reads its whole input first already, so a `MERGE`
 /// after it reads complete rows and is not marked (the `RETURN` after the
 /// `MERGE` is, for the `MERGE` writes). A `MERGE` right after the write is,

@@ -6,7 +6,7 @@
 use super::common::{
     build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
     combine_with_and, comma_part_join_variables, comma_part_reads_earlier_rows,
-    expand_subquery_return_star, has_all_labels, is_aggregate_function, optional_join,
+    expand_subquery_return_star, has_all_labels, is_aggregate_function, no_result, optional_join,
     to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
     wrap_sort,
 };
@@ -210,6 +210,10 @@ impl CypherTranslator {
         let root = plan.ok_or_else(|| {
             Error::Query(QueryError::new(QueryErrorKind::Semantic, "Empty query"))
         })?;
+        // A query that ends with an update has no result (openCypher).
+        if query.clauses.last().is_some_and(ends_without_result) {
+            return Ok(LogicalPlan::new(no_result(root)));
+        }
         Ok(LogicalPlan::new(root))
     }
 
@@ -1251,7 +1255,7 @@ impl CypherTranslator {
 
     fn translate_merge_statement(&self, merge: &ast::MergeClause) -> Result<LogicalPlan> {
         let op = self.translate_merge(merge, None)?;
-        Ok(LogicalPlan::new(op))
+        Ok(LogicalPlan::new(no_result(op)))
     }
 
     fn translate_merge(
@@ -2103,7 +2107,7 @@ impl CypherTranslator {
         let root = plan.ok_or_else(|| {
             Error::Query(QueryError::new(QueryErrorKind::Semantic, "Empty CREATE"))
         })?;
-        Ok(LogicalPlan::new(root))
+        Ok(LogicalPlan::new(no_result(root)))
     }
 
     fn translate_delete(
@@ -2902,6 +2906,23 @@ impl CypherTranslator {
     }
 }
 
+/// Whether a query that ends with `clause` has no result (openCypher): an
+/// update (`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `FOREACH`) or a unit
+/// subquery `CALL` (one that returns rows cannot end a query). A procedure
+/// `CALL` keeps its output.
+fn ends_without_result(clause: &ast::Clause) -> bool {
+    matches!(
+        clause,
+        ast::Clause::Create(_)
+            | ast::Clause::Merge(_)
+            | ast::Clause::Set(_)
+            | ast::Clause::Remove(_)
+            | ast::Clause::Delete(_)
+            | ast::Clause::ForEach(_)
+            | ast::Clause::CallSubquery { .. }
+    )
+}
+
 /// Whether a `CALL` subquery's body ends with a `RETURN` (an `ORDER BY`,
 /// `SKIP` or `LIMIT` may follow it): one without is a unit subquery, which
 /// runs for its writes and returns no rows of its own.
@@ -2962,6 +2983,19 @@ fn contains_aggregate(expr: &ast::Expression) -> bool {
 mod tests {
     use super::*;
     use crate::query::plan::{FilterOp, LimitOp, SkipOp, SortOp};
+
+    /// The plan of a query that ends with an update, under the `RETURN` of
+    /// no items that gives it no result.
+    fn without_result(plan: &LogicalPlan) -> &LogicalOperator {
+        let LogicalOperator::Return(ret) = &plan.root else {
+            panic!(
+                "a query ending with an update has no result: {:?}",
+                plan.root
+            );
+        };
+        assert!(ret.items.is_empty(), "no columns: {ret:?}");
+        &ret.input
+    }
 
     // === Basic MATCH Tests ===
 
@@ -3117,13 +3151,13 @@ mod tests {
     fn test_translate_create_node() {
         let plan = translate("CREATE (n:Person {name: 'Alix'})").unwrap();
 
-        if let LogicalOperator::CreateNode(create) = &plan.root {
+        if let LogicalOperator::CreateNode(create) = without_result(&plan) {
             assert_eq!(create.variable, "n");
             assert_eq!(create.labels, vec!["Person".to_string()]);
             assert_eq!(create.properties.len(), 1);
             assert_eq!(create.properties[0].0, "name");
         } else {
-            panic!("Expected CreateNode, got {:?}", plan.root);
+            panic!("Expected CreateNode, got {:?}", without_result(&plan));
         }
     }
 
@@ -3132,14 +3166,14 @@ mod tests {
         let plan = translate("CREATE (a:Person)-[:KNOWS]->(b:Person)").unwrap();
 
         // Should have CreateEdge at root
-        if let LogicalOperator::CreateEdge(edge) = &plan.root {
+        if let LogicalOperator::CreateEdge(edge) = without_result(&plan) {
             assert_eq!(edge.edge_type, "KNOWS");
             // Input should be CreateNode for b
             if let LogicalOperator::CreateNode(node_b) = edge.input.as_ref() {
                 assert_eq!(node_b.variable, "b");
             }
         } else {
-            panic!("Expected CreateEdge, got {:?}", plan.root);
+            panic!("Expected CreateEdge, got {:?}", without_result(&plan));
         }
     }
 
@@ -3147,7 +3181,7 @@ mod tests {
     fn test_translate_delete_node() {
         let plan = translate("MATCH (n:Person) DELETE n").unwrap();
 
-        if let LogicalOperator::DeleteNode(delete) = &plan.root {
+        if let LogicalOperator::DeleteNode(delete) = without_result(&plan) {
             assert_eq!(delete.variable, "n");
             if let LogicalOperator::NodeScan(scan) = delete.input.as_ref() {
                 assert_eq!(scan.variable, "n");
@@ -3156,7 +3190,7 @@ mod tests {
                 panic!("Expected NodeScan input");
             }
         } else {
-            panic!("Expected DeleteNode, got {:?}", plan.root);
+            panic!("Expected DeleteNode, got {:?}", without_result(&plan));
         }
     }
 
@@ -3368,13 +3402,13 @@ mod tests {
     fn test_translate_merge() {
         let plan = translate("MERGE (n:Person {name: 'Alix'})").unwrap();
 
-        if let LogicalOperator::Merge(merge) = &plan.root {
+        if let LogicalOperator::Merge(merge) = without_result(&plan) {
             assert_eq!(merge.variable, "n");
             assert_eq!(merge.labels, vec!["Person".to_string()]);
             assert_eq!(merge.match_properties.len(), 1);
             assert_eq!(merge.match_properties[0].0, "name");
         } else {
-            panic!("Expected Merge, got {:?}", plan.root);
+            panic!("Expected Merge, got {:?}", without_result(&plan));
         }
     }
 
@@ -3383,11 +3417,11 @@ mod tests {
         let plan =
             translate("MERGE (n:Person {name: 'Alix'}) ON CREATE SET n.created = true").unwrap();
 
-        if let LogicalOperator::Merge(merge) = &plan.root {
+        if let LogicalOperator::Merge(merge) = without_result(&plan) {
             assert_eq!(merge.on_create.len(), 1);
             assert_eq!(merge.on_create[0].0, "created");
         } else {
-            panic!("Expected Merge, got {:?}", plan.root);
+            panic!("Expected Merge, got {:?}", without_result(&plan));
         }
     }
 
@@ -3419,7 +3453,7 @@ mod tests {
         // Test map in CREATE with properties
         let plan = translate("CREATE (n:Person {name: 'Alix', age: 30})").unwrap();
 
-        if let LogicalOperator::CreateNode(create) = &plan.root {
+        if let LogicalOperator::CreateNode(create) = without_result(&plan) {
             assert_eq!(create.properties.len(), 2);
         } else {
             panic!("Expected CreateNode");
@@ -4070,8 +4104,11 @@ mod tests {
         // FOREACH translates to a unit Apply over the MATCH, importing every
         // variable of the row: its subplan unwinds the list from the row and
         // runs the SET once per item.
-        let LogicalOperator::Apply(apply) = &plan.root else {
-            panic!("expected a unit Apply at the root, got {:?}", plan.root);
+        let LogicalOperator::Apply(apply) = without_result(&plan) else {
+            panic!(
+                "expected a unit Apply at the root, got {:?}",
+                without_result(&plan)
+            );
         };
         assert!(apply.unit, "FOREACH passes each row on once");
         assert!(!apply.optional);

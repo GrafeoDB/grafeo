@@ -981,7 +981,8 @@ impl JsGrafeoDB {
     /// Converts the default graph to a columnar CompactStore for faster queries.
     ///
     /// Builds a columnar store with CSR adjacency from all nodes and edges and
-    /// drops the original store to free memory. The database stays writable:
+    /// drops the original store to free memory. The database stays writable
+    /// unless opened read-only (`openReadOnly()`, where writes still throw):
     /// later writes go to an overlay on top of the columnar base, which is
     /// merged into the base under memory pressure or by calling `compact()`
     /// again. Named graphs and the property, text and vector indexes stay.

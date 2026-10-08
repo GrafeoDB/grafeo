@@ -1,0 +1,92 @@
+# Rosetta: statements without a result
+#
+# A statement that ends with a write and no RETURN has no result: no rows and
+# no columns (openCypher; ISO GQL's omitted result, which FINISH asks for
+# too). A Cypher query ending with CREATE, MERGE, SET, REMOVE, DELETE,
+# FOREACH or a unit CALL used to return a row of internal columns for each
+# row it wrote, and a GQL one a row without columns. The runners check the
+# rows; the engine tests (statement_without_a_result) check the columns and
+# the write counters.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Statements without a result
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: a_create_without_return_has_no_rows
+    variants:
+      gql: "FOR i IN [1, 2] INSERT (:W {i: i})"
+      cypher: "UNWIND [1, 2] AS i CREATE (:W {i: i})"
+    expect:
+      empty: true
+
+  - name: a_standalone_create_has_no_rows
+    variants:
+      cypher: "CREATE (:W {k: 3})-[:R]->(:W {k: 19})"
+    expect:
+      empty: true
+
+  - name: a_merge_without_return_has_no_rows
+    variants:
+      gql: "FOR i IN [3, 19, 3] MERGE (:W {k: i})"
+      cypher: "UNWIND [3, 19, 3] AS i MERGE (:W {k: i})"
+    expect:
+      empty: true
+
+  - name: a_set_without_return_has_no_rows
+    setup:
+      - "INSERT (:W {k: 3}), (:W {k: 19})"
+    variants:
+      gql: "MATCH (w:W) SET w.k = 88"
+      cypher: "MATCH (w:W) SET w.k = 88"
+    expect:
+      empty: true
+
+  - name: a_remove_without_return_has_no_rows
+    setup:
+      - "INSERT (:W {k: 3}), (:W {k: 19})"
+    variants:
+      gql: "MATCH (w:W) REMOVE w.k"
+      cypher: "MATCH (w:W) REMOVE w.k"
+    expect:
+      empty: true
+
+  - name: a_delete_without_return_has_no_rows
+    setup:
+      - "INSERT (:W {k: 3})-[:R]->(:W {k: 19})"
+    variants:
+      gql: "MATCH (w:W) DETACH DELETE w"
+      cypher: "MATCH (w:W) DETACH DELETE w"
+    expect:
+      empty: true
+
+  - name: a_foreach_without_return_has_no_rows
+    variants:
+      cypher: "UNWIND [1, 2] AS i FOREACH (x IN [i, i] | CREATE (:W {x: x}))"
+    expect:
+      empty: true
+
+  - name: a_unit_call_at_the_end_has_no_rows
+    variants:
+      cypher: "UNWIND [1, 2] AS i CALL { WITH i CREATE (:W {i: i}) }"
+    expect:
+      empty: true
+
+  - name: finish_has_no_rows
+    variants:
+      gql: "FOR i IN [1, 2] INSERT (:W {i: i}) FINISH"
+    expect:
+      empty: true
+
+  # The write still runs to its end, past the first chunk of rows.
+  - name: a_write_without_return_writes_every_row
+    statements:
+      - "FOR i IN range(1, 3000) INSERT (:W {i: i})"
+      - "MATCH (w:W) RETURN count(w) AS nodes, sum(w.i) AS total"
+    expect:
+      rows:
+        - [3000, 4501500]

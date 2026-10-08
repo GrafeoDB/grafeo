@@ -75,6 +75,11 @@ pub(crate) fn property_type_record(data_type: &PropertyDataType) -> PropertyType
 }
 
 /// The property type of a record (see [`property_type_record`]).
+///
+/// It builds a box per `LIST<...>` level while the record's own boxes still
+/// live: the memory bound of the catalog records counts both, 32 bytes a
+/// level, and caps the levels of a record
+/// ([`MAX_LIST_LEVELS_PER_RECORD`](grafeo_common::storage::catalog_record::MAX_LIST_LEVELS_PER_RECORD)).
 #[must_use]
 pub(crate) fn property_data_type(record: &PropertyTypeRecord) -> PropertyDataType {
     let mut levels = 0usize;
@@ -859,6 +864,21 @@ mod tests {
             property_type_record(&T::ListTyped(Box::new(T::ZonedDatetime))),
             PropertyTypeRecord::ListOf(Box::new(PropertyTypeRecord::ZonedDatetime))
         );
+    }
+
+    /// The memory bound of the catalog records counts 32 bytes per `LIST`
+    /// level: a 16-byte box in the record and another in the property type
+    /// `property_data_type` builds from it.
+    #[test]
+    fn a_list_level_takes_a_16_byte_box_here_as_in_the_record() {
+        use std::mem::size_of;
+
+        assert_eq!(size_of::<PropertyDataType>(), 16);
+        assert_eq!(size_of::<PropertyTypeRecord>(), 16);
+        let record = PropertyTypeRecord::ListOf(Box::new(PropertyTypeRecord::ListOf(Box::new(
+            PropertyTypeRecord::Int64,
+        ))));
+        assert_eq!(property_data_type(&record).list_levels(), 2);
     }
 
     fn city() -> NodeTypeDefinition {

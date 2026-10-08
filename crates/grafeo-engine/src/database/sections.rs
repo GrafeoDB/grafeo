@@ -298,6 +298,9 @@ pub(super) struct LoadedSections {
 /// such data, before it changes anything on disk: [`load_sections`] for the
 /// image of a file ([`FEATURE_DATA`] says where it holds what), the replay of
 /// a WAL for its records, and the load of a 0.5.x snapshot for the snapshot.
+/// An import or restore of a snapshot refuses the triples and the index
+/// definitions it holds the same way, before it changes anything (a
+/// snapshot holds a compacted database as plain nodes and edges).
 #[cfg(feature = "lpg")]
 pub(super) struct FeatureData {
     /// What the data is, as the error names it.
@@ -348,7 +351,7 @@ pub(super) const RDF_TRIPLES: FeatureData = FeatureData {
 /// Vector indexes: a build without the feature cannot build them, and its
 /// checkpoint writes the catalog without their definitions.
 #[cfg(feature = "lpg")]
-const VECTOR_INDEXES: FeatureData = FeatureData {
+pub(super) const VECTOR_INDEXES: FeatureData = FeatureData {
     what: "vector indexes",
     feature: "vector-index",
     in_build: cfg!(feature = "vector-index"),
@@ -357,7 +360,7 @@ const VECTOR_INDEXES: FeatureData = FeatureData {
 
 /// Text indexes, as [`VECTOR_INDEXES`].
 #[cfg(feature = "lpg")]
-const TEXT_INDEXES: FeatureData = FeatureData {
+pub(super) const TEXT_INDEXES: FeatureData = FeatureData {
     what: "text indexes",
     feature: "text-index",
     in_build: cfg!(feature = "text-index"),
@@ -370,15 +373,16 @@ const FEATURE_DATA: [&FeatureData; 4] = [&COMPACTED, &RDF_TRIPLES, &VECTOR_INDEX
 
 #[cfg(feature = "lpg")]
 impl FeatureData {
+    /// Whether this build has the feature that reads this data.
+    pub(super) const fn in_build(&self) -> bool {
+        self.in_build
+    }
+
     /// Where the image holds this data, or `None` when it holds none:
     /// `sections RdfStore, RdfRing` (only which sections the image holds is
     /// looked at), or `on :Document(embedding), ...` for the indexes of this
     /// kind that `indexes`, the image's catalog, defines.
     fn held(&self, image: &dyn ImageSource, indexes: &[GraphIndexes]) -> Option<String> {
-        let on = |graph: &Option<String>, label: &str, property: &str| match graph {
-            None => format!(":{label}({property})"),
-            Some(graph) => format!(":{label}({property}) in graph {graph}"),
-        };
         let (kind, found): (&str, Vec<String>) = match self.held_in {
             HeldIn::Sections(section_types) => (
                 "sections",
@@ -396,7 +400,7 @@ impl FeatureData {
                         graph
                             .vector
                             .iter()
-                            .map(|def| on(&graph.graph, &def.label, &def.property))
+                            .map(|def| index_on(graph.graph.as_deref(), &def.label, &def.property))
                     })
                     .collect(),
             ),
@@ -405,10 +409,9 @@ impl FeatureData {
                 indexes
                     .iter()
                     .flat_map(|graph| {
-                        graph
-                            .text
-                            .iter()
-                            .map(|(label, property)| on(&graph.graph, label, property))
+                        graph.text.iter().map(|(label, property)| {
+                            index_on(graph.graph.as_deref(), label, property)
+                        })
                     })
                     .collect(),
             ),
@@ -417,11 +420,35 @@ impl FeatureData {
     }
 }
 
+/// An index on `property` of the nodes with `label`, as a refusal names it:
+/// `:Document(embedding)`, with ` in graph trips` for one of a named graph
+/// (`graph`).
+#[cfg(feature = "lpg")]
+fn index_on(graph: Option<&str>, label: &str, property: &str) -> String {
+    match graph {
+        None => format!(":{label}({property})"),
+        Some(graph) => format!(":{label}({property}) in graph {graph}"),
+    }
+}
+
 /// The error that refuses `path` (a database file, or its WAL) for the data
 /// in `found` this build cannot read, each with where `path` holds it.
 #[cfg(feature = "lpg")]
 pub(super) fn refusal(
     path: &std::path::Path,
+    found: &[(&FeatureData, String)],
+) -> grafeo_common::utils::error::Error {
+    refusal_of(&path.display().to_string(), "open", found)
+}
+
+/// The error that refuses `subject` (what it names: a database file or its
+/// WAL by its path, or `the snapshot`) for the data in `found` this build
+/// cannot read, each with where `subject` holds it, and tells to `action` it
+/// (`open`, `import`, `restore`) with a build that has the features.
+#[cfg(feature = "lpg")]
+pub(super) fn refusal_of(
+    subject: &str,
+    action: &str,
     found: &[(&FeatureData, String)],
 ) -> grafeo_common::utils::error::Error {
     let parts: Vec<String> = found
@@ -433,16 +460,15 @@ pub(super) fn refusal(
             )
         })
         .collect();
-    let (holds, open) = match parts.split_last() {
+    let (holds, build) = match parts.split_last() {
         Some((last, before)) if !before.is_empty() => (
             format!("{}; and {last}", before.join("; ")),
-            "open it with a build that has these features",
+            "a build that has these features",
         ),
-        _ => (parts.concat(), "open it with such a build"),
+        _ => (parts.concat(), "such a build"),
     };
     grafeo_common::utils::error::Error::InvalidValue(format!(
-        "{} holds {holds}: {open}",
-        path.display()
+        "{subject} holds {holds}: {action} it with {build}"
     ))
 }
 

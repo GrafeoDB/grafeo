@@ -354,6 +354,40 @@ fn a_longer_pattern_from_a_written_node_sees_the_whole_write() {
     }
 }
 
+/// An aggregate with no group key straight over a chain of expands from a
+/// written node (which the planner may run factorized, without the rows of
+/// the chain) counts what the whole write left: each of the four rows
+/// reaches four `T`, so the count is sixteen, with factorized execution on
+/// and off.
+#[test]
+fn an_aggregate_over_a_chain_from_a_written_node_counts_the_whole_write() {
+    for factorized in [true, false] {
+        for language in LANGUAGES {
+            for rest in [
+                "MATCH (h)-[:R]->(q)-[:S]->(t) RETURN count(*) AS found",
+                "MATCH (h)-[:R]->(q)-[:S]->(t) RETURN count(t) AS found",
+                "MATCH (h)-[]->(q)-[]->(t) RETURN count(*) AS found",
+                "MATCH (h)-[:R]->(q)-[:S]->(t) WITH count(*) AS found RETURN found",
+                "MATCH (h)-[:R]->(q) RETURN count(*) AS found",
+            ] {
+                let config = if factorized {
+                    Config::in_memory()
+                } else {
+                    Config::in_memory().without_factorized_execution()
+                };
+                let db = GrafeoDB::with_config(config).unwrap();
+                let session = db.session();
+                let query = format!("{} {rest}", hub_write(language));
+                assert_eq!(
+                    run(&session, language, &query),
+                    vec![vec![int(16)]],
+                    "{language:?} `{query}` (factorized: {factorized})"
+                );
+            }
+        }
+    }
+}
+
 /// An `OPTIONAL MATCH` from a written node, and a part of a `MATCH` joined
 /// to another on a shared variable, see the whole write too.
 #[test]

@@ -12,7 +12,7 @@ use super::common::{
     build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
     combine_with_and, comma_part_join_variables, comma_part_reads_earlier_rows,
     expand_subquery_return_star, flatten_and_conjuncts, has_all_labels, is_aggregate_function,
-    is_binary_set_function, join_and_conjuncts, optional_join, references_any,
+    is_binary_set_function, join_and_conjuncts, no_result, optional_join, references_any,
     to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
     wrap_sort,
 };
@@ -871,11 +871,11 @@ impl GqlTranslator {
             }
         }
 
-        // FINISH: consume input, return empty result (mutations already applied)
+        // FINISH: the statement has no result (ISO GQL's omitted result: no
+        // rows and no columns); the input runs to its end for its writes. The
+        // Limit(0) under it passes no row on to a NEXT after it.
         if query.return_clause.is_finish {
-            // Wrap in a Limit(0) to consume input but return no rows
-            plan = wrap_limit(plan, 0);
-            return Ok(LogicalPlan::new(plan));
+            return Ok(LogicalPlan::new(no_result(wrap_limit(plan, 0))));
         }
 
         // Check if RETURN contains aggregate functions
@@ -3101,11 +3101,19 @@ mod tests {
         );
 
         let plan = result.unwrap();
-        // FINISH is translated as Limit(0)
-        if let LogicalOperator::Limit(limit) = &plan.root {
+        // FINISH is a statement without a result (a RETURN of no items) over
+        // a Limit(0)
+        let LogicalOperator::Return(ret) = &plan.root else {
+            panic!(
+                "Expected a RETURN of no items for FINISH, got {:?}",
+                plan.root
+            );
+        };
+        assert!(ret.items.is_empty(), "FINISH returns no columns");
+        if let LogicalOperator::Limit(limit) = ret.input.as_ref() {
             assert_eq!(limit.count, 0, "FINISH should produce Limit(0)");
         } else {
-            panic!("Expected Limit operator for FINISH, got {:?}", plan.root);
+            panic!("Expected Limit operator for FINISH, got {:?}", ret.input);
         }
     }
 

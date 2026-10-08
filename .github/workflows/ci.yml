@@ -359,7 +359,8 @@ jobs:
   # `compact-store` (the `grafeo` crate, the CLI), triples without
   # `triple-store` (in the file, its WAL or a 0.5.x WAL directory, so also with
   # `wal`) and vector and text indexes without `vector-index` and `text-index`
-  # (the engine's default build, the CLI). A job of its own: the rust-test
+  # (the engine's default build, the CLI), and of snapshots with such triples
+  # or indexes (import and restore). A job of its own: the rust-test
   # runners are near their disk limit, and these are extra engine builds.
   minimal-features:
     name: Minimal Features
@@ -394,8 +395,8 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
-      - name: Test migration and close without the wal feature, files with data this build cannot read
-        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close --test compacted_file_without_compact_store --test rdf_file_without_triple_store --test search_indexes_without_their_features
+      - name: Test migration and close without the wal feature, files and snapshots with data this build cannot read
+        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close --test compacted_file_without_compact_store --test rdf_file_without_triple_store --test search_indexes_without_their_features --test snapshot_without_its_features
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"

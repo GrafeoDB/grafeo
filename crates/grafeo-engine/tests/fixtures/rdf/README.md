@@ -18,8 +18,8 @@ The database went through these steps, in a persistent database (`Config::persis
 4. `close()`.
 
 So the file holds the triples (`RdfStore` section), the Ring index (`RdfRing`) and the people (the LPG section), and
-a build that reads all of it finds both triples and Alix and Gus; a build without `triple-store` would find the
-people alone.
+a build that reads all of it finds both triples and Alix and Gus; a build without `triple-store` refuses the file
+rather than serving the people without their triples.
 
 Write it again (after a change of the file format, which `the_fixture_holds_rdf_triples` reports) with the test that
 runs these steps:

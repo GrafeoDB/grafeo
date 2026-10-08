@@ -8,7 +8,10 @@ tags:
 
 # Mutations
 
-Cypher supports mutations for creating, updating and deleting graph data.
+Cypher supports mutations for creating, updating and deleting graph data. A query that ends with an update
+(`CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, `FOREACH` or a `CALL` subquery without `RETURN`) has no result, as
+in openCypher: no rows and no columns. End it with `RETURN` to get values back; the result's write counters say
+what it changed either way.
 
 ## Creating Nodes
 

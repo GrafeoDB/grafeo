@@ -175,6 +175,72 @@ fn property_types_nest_at_most_128_lists() {
     }
 }
 
+/// The property types of one node or edge type nest at most 32,768
+/// `LIST<...>` levels in all, as many as one catalog record holds: 256
+/// properties of the deepest type. `CREATE`, `CREATE OR REPLACE`,
+/// `ALTER ... ADD` and inline graph types refuse more and change nothing, so
+/// no statement builds a type a checkpoint cannot write; a type at the cap
+/// survives a checkpoint and a reopen.
+#[test]
+fn the_property_types_of_a_type_nest_at_most_32768_lists_in_all() {
+    let nested = |levels: usize| format!("{}INT64{}", "LIST<".repeat(levels), ">".repeat(levels));
+    let deepest: Vec<String> = (0..256).map(|n| format!("p{n} {}", nested(128))).collect();
+    let deepest = deepest.join(", ");
+    let past = format!("{deepest}, extra LIST<INT64>");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wide.grafeo");
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    db.execute(&format!("CREATE NODE TYPE Wide ({deepest})"))
+        .unwrap();
+    db.execute(&format!("CREATE EDGE TYPE WIDE ({deepest})"))
+        .unwrap();
+    for statement in [
+        format!("CREATE NODE TYPE Wider ({past})"),
+        format!("CREATE EDGE TYPE WIDER ({past})"),
+        format!("CREATE OR REPLACE NODE TYPE Wide ({past})"),
+        format!("CREATE OR REPLACE EDGE TYPE WIDE ({past})"),
+        "ALTER NODE TYPE Wide ADD extra LIST<INT64>".to_string(),
+        "ALTER EDGE TYPE WIDE ADD extra LIST<INT64>".to_string(),
+        format!("CREATE GRAPH TYPE wider (NODE TYPE Wider ({past}))"),
+        format!("CREATE GRAPH TYPE wider (EDGE TYPE WIDER ({past}))"),
+    ] {
+        let error = db.execute(&statement).unwrap_err().to_string();
+        assert!(
+            error.contains("nest at most 32768 LIST<...> levels in all"),
+            "{}: {error}",
+            &statement[..statement.len().min(60)]
+        );
+    }
+    for (query, name) in [
+        ("SHOW NODE TYPES", "Wider"),
+        ("SHOW EDGE TYPES", "WIDER"),
+        ("SHOW GRAPH TYPES", "wider"),
+    ] {
+        let rows = db.execute(query).unwrap();
+        assert!(
+            rows.rows().iter().all(|row| row[0] != Value::from(name)),
+            "{query}: the refused {name} was created"
+        );
+    }
+    // A property with no LIST level still fits.
+    db.execute("ALTER NODE TYPE Wide ADD city STRING").unwrap();
+    db.close().unwrap();
+    drop(db);
+
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    assert_eq!(
+        property_list(&db, "SHOW NODE TYPES", "Wide"),
+        format!("{deepest}, city STRING"),
+        "the refused statements left Wide as it was, and it reopens"
+    );
+    assert_eq!(
+        property_list(&db, "SHOW EDGE TYPES", "WIDE"),
+        deepest,
+        "the refused statements left WIDE as it was, and it reopens"
+    );
+}
+
 #[test]
 fn the_new_types_survive_a_reopen_after_wal_replay() {
     let (_dir, db) = crate::common::replay::reopened_after_crash(

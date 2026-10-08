@@ -124,3 +124,21 @@ tests:
     expect:
       rows:
         - [10]
+
+  # A LIMIT 0 or FINISH in a CALL body cuts the body's rows, not its write: it
+  # used to read none of its input there, so the body wrote nothing.
+  - name: finish_in_a_call_body_keeps_every_write
+    statements:
+      - "FOR i IN [1, 2] CALL (i) { FOR j IN [1, 2, 3] INSERT (:L {i: i, j: j}) FINISH } RETURN count(*) AS rows"
+      - "MATCH (n:L) RETURN count(n) AS nodes"
+    expect:
+      rows:
+        - [6]
+
+  - name: a_limit_zero_in_a_call_body_keeps_every_write
+    variants:
+      gql: "FOR i IN [1, 2] CALL { FOR j IN [1, 2, 3] INSERT (:L) RETURN j LIMIT 0 } WITH count(*) AS rows MATCH (n:L) RETURN rows, count(n) AS nodes"
+      cypher: "UNWIND [1, 2] AS i CALL { UNWIND [1, 2, 3] AS j CREATE (:L) RETURN j LIMIT 0 } WITH count(*) AS rows MATCH (n:L) RETURN rows, count(n) AS nodes"
+    expect:
+      rows:
+        - [0, 6]

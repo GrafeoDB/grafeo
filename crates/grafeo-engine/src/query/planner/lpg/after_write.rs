@@ -34,10 +34,12 @@ pub(crate) const MARKER: &str = "[after the write]";
 /// variables, a filter on values, `SKIP`, an expand from a node of the row,
 /// which reads only what the rows before its own wrote). An aggregate, a
 /// sort, and a clause that reads after the write ([`reads_after_the_write`])
-/// read their whole input before their first row, and so do a `MATCH`, an
-/// `OPTIONAL MATCH`, a join and a `CALL` whose input writes (`plan_node_scan`,
-/// `plan_left_join`, `plan_join`, `plan_apply`): above them every write
-/// below is done. Anything else that writes counts as pending.
+/// read their whole input before their first row, and so do a `MATCH` and a
+/// `CALL` whose input writes (`plan_node_scan`, `plan_apply`) and a join (an
+/// `OPTIONAL MATCH` too), which reads its whole right side for its hash
+/// table and a writing left side first (`plan_join`, `plan_left_join`):
+/// above them every write below is done. Anything else that writes counts
+/// as pending.
 pub(crate) fn writes_pending(op: &LogicalOperator) -> bool {
     match op {
         LogicalOperator::CreateNode(_)
@@ -64,9 +66,9 @@ pub(crate) fn writes_pending(op: &LogicalOperator) -> bool {
         LogicalOperator::Aggregate(_)
         | LogicalOperator::Sort(_)
         | LogicalOperator::Limit(_)
-        | LogicalOperator::NodeScan(_) => false,
-        LogicalOperator::LeftJoin(join) => join.right.has_mutations(),
-        LogicalOperator::Join(join) => join.right.has_mutations(),
+        | LogicalOperator::NodeScan(_)
+        | LogicalOperator::LeftJoin(_)
+        | LogicalOperator::Join(_) => false,
         LogicalOperator::Apply(apply) => apply.subplan.has_mutations(),
         other => other.has_mutations(),
     }
@@ -193,8 +195,8 @@ mod tests {
     use super::*;
     use crate::query::plan::{
         AggregateExpr, AggregateFunction, ApplyOp, BinaryOp, CreateNodeOp, ExpandDirection,
-        ExpandOp, FilterOp, LeftJoinOp, LimitOp, MergeOp, NodeScanOp, PathMode, Projection,
-        ReturnItem, SetPropertyOp,
+        ExpandOp, FilterOp, JoinOp, JoinType, LeftJoinOp, LimitOp, MergeOp, NodeScanOp, PathMode,
+        Projection, ReturnItem, SetPropertyOp,
     };
     use grafeo_common::types::Value;
 
@@ -449,6 +451,34 @@ mod tests {
             unit: true,
         });
         assert!(writes_pending(&writing_call));
+    }
+
+    /// A join reads its whole right side (the hash table) before its first
+    /// row, and its whole left side first when that one writes (`plan_join`,
+    /// `plan_left_join`): above a join no write below it is pending,
+    /// whichever side writes, so the `RETURN` above it is not read again and
+    /// EXPLAIN marks nothing.
+    #[test]
+    fn above_a_join_no_write_is_pending() {
+        for (left, right) in [(set(), scan("t")), (scan("t"), set())] {
+            let inner = LogicalOperator::Join(JoinOp {
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+                join_type: JoinType::Inner,
+                conditions: Vec::new(),
+            });
+            let optional = LogicalOperator::LeftJoin(LeftJoinOp {
+                left: Box::new(left),
+                right: Box::new(right),
+                condition: None,
+            });
+            for join in [inner, optional] {
+                assert!(!writes_pending(&join), "{join:?}");
+                let returned = ret(vec![property("h", "c")], join);
+                assert!(!reads_after_the_write(&returned), "{returned:?}");
+                assert!(clauses_after_a_write(&returned).is_empty(), "{returned:?}");
+            }
+        }
     }
 
     /// A statement that only reads has no pending write anywhere, so no

@@ -35,8 +35,9 @@
 //! A default value is written through the lossless value codec
 //! ([`serde_option_value`](super::value_codec::serde_option_value)), so it
 //! keeps its kind and bits. A property type is written as its number of
-//! `LIST<...>` levels (at most [`MAX_LIST_TYPE_DEPTH`]) and the code of the
-//! type inside them, both as bincode u32:
+//! `LIST<...>` levels (at most [`MAX_LIST_TYPE_DEPTH`], and at most
+//! [`MAX_LIST_LEVELS_PER_RECORD`] over all the property types of a record)
+//! and the code of the type inside them, both as bincode u32:
 //!
 //! | Code | Type | Code | Type |
 //! | --- | --- | --- | --- |
@@ -62,20 +63,30 @@
 //!
 //! The limit is not a memory ceiling: it does not count the lists, the
 //! `LIST<...>` levels of property types or the default values a payload
-//! decodes into. Their memory is proportional to the payload, at most 470
-//! bytes per payload byte while it decodes, before the allocator's own
-//! overhead: so at most 940 MiB for the largest payload. The densest records
-//! are node and edge types whose properties are typed 128 `LIST` levels
-//! deep: such a property takes 5 payload bytes (an empty name, the levels
-//! and the code, the nullable flag and no default) and 2,312 bytes of
-//! memory, a 16-byte box per level and three times its 88-byte entry while
-//! the list of properties grows (the old buffer and the new one, twice as
-//! large). Every other element takes at most 120 bytes per payload byte:
+//! decodes into. Every element but a level takes memory in proportion to its
+//! bytes, at most 120 bytes per payload byte while the payload decodes and
+//! the engine converts the record, before the allocator's own overhead: an
+//! element is held at most three times, while its list grows (the old buffer
+//! and the new one, twice as large) or while the engine copies the list. So
 //! three times 24 bytes for a list's empty string (1 payload byte), three
 //! times 48 for an empty string pair, two absent endpoints or an empty
-//! constraint (2 bytes), and, while the value codec builds a default value's
-//! list of nulls, three times the 40 bytes of each null (1 byte) as the list
-//! grows and becomes shared.
+//! constraint (2 bytes), three times 88 for a property (5 bytes: an empty
+//! name, the levels and the code, the nullable flag and no default), and,
+//! while the value codec builds a default value's list of nulls, three times
+//! the 40 bytes of each null (1 byte) as the list grows and becomes shared.
+//!
+//! A `LIST<...>` level takes no payload byte of its own (a type's levels are
+//! one count) but 32 bytes of memory: a 16-byte box here, and another in the
+//! engine's property type, which the engine builds while the record's box
+//! still lives. Its memory cannot be bounded per payload byte, so it is
+//! bounded per record: the property types of a record nest at most
+//! [`MAX_LIST_LEVELS_PER_RECORD`] levels in all, 32,768, which take at most
+//! 1 MiB, as much as serde allocates ahead of the elements of a list whose
+//! length is damaged, in any record. A payload of `n` bytes so decodes into
+//! at most `120 n` bytes plus 1 MiB: at most 241 MiB for the largest payload.
+//! The writer refuses a record past the cap, and the reader counts each
+//! type's levels before it reads their code and builds them, so it refuses
+//! the record at the type that passes the cap.
 //!
 //! The framing itself (`RecordFraming`, `encode_framed_record`,
 //! `read_framed_records`) knows nothing of the catalog: another family of
@@ -84,11 +95,11 @@
 use std::fmt;
 use std::io::{self, Read};
 
-use serde::de::{DeserializeOwned, Error as _};
+use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, SeqAccess, Visitor};
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+use super::value_codec::{MAX_PROPERTY_VALUE_DEPTH, encoded_len, nests_too_deep};
 use crate::types::Value;
 use crate::utils::error::{Error, Result};
 
@@ -107,6 +118,22 @@ pub const MAX_CATALOG_RECORD_PAYLOAD: u32 = 1 << 21;
 /// hold no value a write accepts. The writer refuses a deeper type and the
 /// reader refuses one before it builds a level.
 pub const MAX_LIST_TYPE_DEPTH: usize = MAX_PROPERTY_VALUE_DEPTH;
+
+/// The most `LIST<...>` levels the property types of one record nest in
+/// all: 32,768, so 256 properties of the deepest type.
+///
+/// At 32 bytes of memory per level, they take at most 1 MiB however few
+/// payload bytes hold them (see the module documentation). The writer
+/// refuses a record past the cap, and the reader refuses one before it builds
+/// the levels of the type that passes it.
+pub const MAX_LIST_LEVELS_PER_RECORD: usize = 1 << 15;
+
+// A record holds a property of the deepest type.
+const _: () = assert!(MAX_LIST_LEVELS_PER_RECORD >= MAX_LIST_TYPE_DEPTH);
+
+/// The most bytes serde allocates ahead of the elements of a list, from the
+/// length the payload claims.
+const LIST_PREALLOCATION_LIMIT: usize = 1 << 20;
 
 /// The bincode limit of a catalog payload decode: eight times
 /// [`MAX_CATALOG_RECORD_PAYLOAD`].
@@ -235,6 +262,35 @@ impl PropertyTypeRecord {
             _ => return None,
         })
     }
+
+    /// The type of `levels` `LIST<...>` levels around the type of `code`.
+    /// The levels are counted before the code is read or a level is built:
+    /// they must not pass [`MAX_LIST_TYPE_DEPTH`] nor `levels_left`, the
+    /// levels the record may still hold, which they are then taken from.
+    fn of_levels_and_code(
+        levels: u32,
+        code: u32,
+        levels_left: &mut usize,
+    ) -> std::result::Result<Self, String> {
+        let depth = usize::try_from(levels)
+            .ok()
+            .filter(|depth| *depth <= MAX_LIST_TYPE_DEPTH)
+            .ok_or_else(|| {
+                format!(
+                    "a property type nested {levels} LIST levels deep, deeper than \
+                     {MAX_LIST_TYPE_DEPTH}"
+                )
+            })?;
+        *levels_left = levels_left.checked_sub(depth).ok_or_else(|| {
+            format!(
+                "the property types nest more than the {MAX_LIST_LEVELS_PER_RECORD} LIST \
+                 levels a record may hold"
+            )
+        })?;
+        let element =
+            Self::of_code(code).ok_or_else(|| format!("unknown property type code {code}"))?;
+        Ok((0..depth).fold(element, |inner, _| Self::ListOf(Box::new(inner))))
+    }
 }
 
 impl Serialize for PropertyTypeRecord {
@@ -256,26 +312,42 @@ impl Serialize for PropertyTypeRecord {
 impl<'de> Deserialize<'de> for PropertyTypeRecord {
     /// Reads what [`serialize`](Self::serialize) wrote; refuses more levels
     /// than [`MAX_LIST_TYPE_DEPTH`] before it builds one, and an unknown
-    /// code.
+    /// code. A record reads the types of its properties another way, which
+    /// also counts their levels against [`MAX_LIST_LEVELS_PER_RECORD`].
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        let (levels, code) = <(u32, u32)>::deserialize(deserializer)?;
-        if usize::try_from(levels)
-            .ok()
-            .is_none_or(|levels| levels > MAX_LIST_TYPE_DEPTH)
-        {
-            return Err(D::Error::custom(format_args!(
-                "a property type nested {levels} LIST levels deep, deeper than \
-                 {MAX_LIST_TYPE_DEPTH}"
-            )));
+        let mut levels_left = MAX_LIST_TYPE_DEPTH;
+        TypeSeed {
+            levels_left: &mut levels_left,
         }
-        let element = Self::of_code(code)
-            .ok_or_else(|| D::Error::custom(format_args!("unknown property type code {code}")))?;
-        Ok((0..levels).fold(element, |inner, _| Self::ListOf(Box::new(inner))))
+        .deserialize(deserializer)
+    }
+}
+
+/// Reads a property type, taking its levels from those its record may still
+/// hold.
+struct TypeSeed<'a> {
+    levels_left: &'a mut usize,
+}
+
+impl<'de> DeserializeSeed<'de> for TypeSeed<'_> {
+    type Value = PropertyTypeRecord;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<PropertyTypeRecord, D::Error> {
+        let (levels, code) = <(u32, u32)>::deserialize(deserializer)?;
+        PropertyTypeRecord::of_levels_and_code(levels, code, self.levels_left)
+            .map_err(D::Error::custom)
     }
 }
 
 /// A property of a node or edge type.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// It has no `Deserialize` of its own: a node or edge type record reads its
+/// properties together, counting the `LIST<...>` levels of their types
+/// against [`MAX_LIST_LEVELS_PER_RECORD`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PropertyRecord {
     /// The property's name.
     pub name: String,
@@ -287,6 +359,101 @@ pub struct PropertyRecord {
     #[serde(with = "crate::storage::value_codec::serde_option_value")]
     pub default_value: Option<Value>,
 }
+
+/// The fields of a [`PropertyRecord`], in the order it writes them.
+const PROPERTY_FIELDS: &[&str] = &["name", "data_type", "nullable", "default_value"];
+
+/// Reads the properties of a node or edge type record, counting the
+/// `LIST<...>` levels of their types against [`MAX_LIST_LEVELS_PER_RECORD`]
+/// as it goes, each type's levels before they are built.
+fn deserialize_properties<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<PropertyRecord>, D::Error> {
+    deserializer.deserialize_seq(PropertiesVisitor)
+}
+
+struct PropertiesVisitor;
+
+impl<'de> Visitor<'de> for PropertiesVisitor {
+    type Value = Vec<PropertyRecord>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a list of properties")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<Vec<PropertyRecord>, A::Error> {
+        // As serde does for any list: no more than its limit ahead of the
+        // elements, whatever length the payload claims.
+        let ahead = seq
+            .size_hint()
+            .unwrap_or(0)
+            .min(LIST_PREALLOCATION_LIMIT / std::mem::size_of::<PropertyRecord>());
+        let mut properties = Vec::with_capacity(ahead);
+        let mut levels_left = MAX_LIST_LEVELS_PER_RECORD;
+        while let Some(property) = seq.next_element_seed(PropertySeed {
+            levels_left: &mut levels_left,
+        })? {
+            properties.push(property);
+        }
+        Ok(properties)
+    }
+}
+
+/// Reads one property, taking the levels of its type from those its record
+/// may still hold.
+struct PropertySeed<'a> {
+    levels_left: &'a mut usize,
+}
+
+impl<'de> DeserializeSeed<'de> for PropertySeed<'_> {
+    type Value = PropertyRecord;
+
+    fn deserialize<D: Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<PropertyRecord, D::Error> {
+        deserializer.deserialize_struct("PropertyRecord", PROPERTY_FIELDS, self)
+    }
+}
+
+impl<'de> Visitor<'de> for PropertySeed<'_> {
+    type Value = PropertyRecord;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a property")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<PropertyRecord, A::Error> {
+        let missing = |index: usize| A::Error::invalid_length(index, &"a property of 4 fields");
+        let name: String = seq.next_element()?.ok_or_else(|| missing(0))?;
+        let data_type = seq
+            .next_element_seed(TypeSeed {
+                levels_left: self.levels_left,
+            })?
+            .ok_or_else(|| missing(1))?;
+        let nullable: bool = seq.next_element()?.ok_or_else(|| missing(2))?;
+        let DefaultValue(default_value) = seq.next_element()?.ok_or_else(|| missing(3))?;
+        Ok(PropertyRecord {
+            name,
+            data_type,
+            nullable,
+            default_value,
+        })
+    }
+}
+
+/// A property's default value, read as [`PropertyRecord`] writes it.
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct DefaultValue(
+    #[serde(with = "crate::storage::value_codec::serde_option_value")] Option<Value>,
+);
 
 /// A constraint of a node or edge type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,6 +479,7 @@ pub struct NodeTypeRecord {
     /// The type's name, which is also its label.
     pub name: String,
     /// Its properties, in declaration order.
+    #[serde(deserialize_with = "deserialize_properties")]
     pub properties: Vec<PropertyRecord>,
     /// Its constraints.
     pub constraints: Vec<TypeConstraintRecord>,
@@ -337,6 +505,7 @@ pub struct EdgeTypeRecord {
     /// The type's name, which is also its edge type.
     pub name: String,
     /// Its properties, in declaration order.
+    #[serde(deserialize_with = "deserialize_properties")]
     pub properties: Vec<PropertyRecord>,
     /// Its constraints.
     pub constraints: Vec<TypeConstraintRecord>,
@@ -561,11 +730,16 @@ impl CatalogRecord {
     /// # Errors
     ///
     /// Returns [`Error::Serialization`] when the payload would hold more than
-    /// [`MAX_CATALOG_RECORD_PAYLOAD`] bytes, a property type nests more than
-    /// [`MAX_LIST_TYPE_DEPTH`] `LIST` levels, or the value codec refuses a
-    /// default value. `out` is then left as it was.
+    /// [`MAX_CATALOG_RECORD_PAYLOAD`] bytes (for default values, counted
+    /// before one is encoded), a property type nests more than
+    /// [`MAX_LIST_TYPE_DEPTH`] `LIST` levels, the property types nest more
+    /// than [`MAX_LIST_LEVELS_PER_RECORD`] in all, or the value codec refuses
+    /// a default value. `out` is then left as it was.
     pub fn encode_framed(&self, out: &mut Vec<u8>) -> Result<()> {
         encode_framed_record(&CATALOG_FRAMING, self.kind(), RECORD_REQUIRED, out, |out| {
+            // The value codec encodes each default value whole before the
+            // payload takes it: refuse them from their sizes first.
+            out.check_room(self.default_value_bytes())?;
             self.encode_payload(out)
         })
     }
@@ -576,10 +750,24 @@ impl CatalogRecord {
     /// # Errors
     ///
     /// Returns [`Error::Serialization`] when a property type nests more than
-    /// [`MAX_LIST_TYPE_DEPTH`] `LIST` levels, the value codec refuses a
-    /// default value or `out` refuses a write; `out` may then hold part of
-    /// the payload.
+    /// [`MAX_LIST_TYPE_DEPTH`] `LIST` levels, the property types nest more
+    /// than [`MAX_LIST_LEVELS_PER_RECORD`] in all (before a byte is written),
+    /// the value codec refuses a default value or `out` refuses a write;
+    /// `out` may then hold part of the payload.
     pub(crate) fn encode_payload(&self, out: &mut impl io::Write) -> Result<()> {
+        let levels = self
+            .properties()
+            .iter()
+            .map(|property| property.data_type.levels_and_code().0)
+            .fold(0usize, usize::saturating_add);
+        if levels > MAX_LIST_LEVELS_PER_RECORD {
+            return Err(Error::Serialization(format!(
+                "a {} of kind {} would nest {levels} LIST levels in its property types, more \
+                 than the {MAX_LIST_LEVELS_PER_RECORD} it may hold",
+                CATALOG_FRAMING.what,
+                self.kind()
+            )));
+        }
         match self {
             Self::Schema(record) => encode_bincode_payload(record, out),
             Self::NodeType(record) => encode_bincode_payload(record, out),
@@ -591,6 +779,36 @@ impl CatalogRecord {
             Self::IndexName(record) => encode_bincode_payload(record, out),
             Self::Procedure(record) => encode_bincode_payload(record, out),
         }
+    }
+
+    /// The properties of a node or edge type; none for the other kinds.
+    fn properties(&self) -> &[PropertyRecord] {
+        match self {
+            Self::NodeType(record) => &record.properties,
+            Self::EdgeType(record) => &record.properties,
+            Self::Schema(_)
+            | Self::GraphType(_)
+            | Self::GraphBinding(_)
+            | Self::Constraint(_)
+            | Self::Index(_)
+            | Self::IndexName(_)
+            | Self::Procedure(_) => &[],
+        }
+    }
+
+    /// The bytes the value codec writes for the default values of the
+    /// record's properties, counted without encoding them. A value nested
+    /// deeper than a property value may be ([`nests_too_deep`]) counts
+    /// nothing, so the count recurses no deeper than that: the value codec
+    /// refuses it, as it reaches the depth it refuses, or it is written
+    /// through the payload's maximum as before.
+    fn default_value_bytes(&self) -> usize {
+        self.properties()
+            .iter()
+            .filter_map(|property| property.default_value.as_ref())
+            .filter(|value| !nests_too_deep(value))
+            .map(encoded_len)
+            .fold(0, usize::saturating_add)
     }
 
     /// The record of `kind` whose payload is `payload`, or `None` for a kind
@@ -690,6 +908,26 @@ pub(crate) struct PayloadWriter<'a> {
     room: usize,
     /// Whether a write was refused for want of room.
     overflowed: bool,
+}
+
+impl PayloadWriter<'_> {
+    /// Refuses, as a write past the maximum is refused, a part of `bytes`
+    /// bytes the payload has no room left for: a part that is built whole
+    /// before it is written is so refused before it is built.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Serialization`] when `bytes` passes the room left;
+    /// [`encode_framed_record`] then reports the payload as too large.
+    pub(crate) fn check_room(&mut self, bytes: usize) -> Result<()> {
+        if bytes > self.room {
+            self.overflowed = true;
+            return Err(Error::Serialization(
+                "the payload passes its maximum".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl io::Write for PayloadWriter<'_> {
@@ -1705,30 +1943,62 @@ mod tests {
         );
     }
 
-    /// The memory bound of the module documentation, at most 470 bytes per
-    /// payload byte while a payload decodes, from its parts: each element a
-    /// payload holds, encoded at its smallest, against the memory its types
-    /// take (three times an element while its list grows, and a 16-byte box
-    /// per `LIST` level), so a change to a record type that breaks the bound
-    /// fails here. The densest element, a property typed 128 `LIST` levels
-    /// deep, decodes to one box per level.
-    #[test]
-    fn a_payload_decodes_into_at_most_470_bytes_of_memory_per_byte() {
-        use std::mem::size_of;
+    fn node_type(properties: Vec<PropertyRecord>) -> CatalogRecord {
+        CatalogRecord::NodeType(NodeTypeRecord {
+            name: "Event".into(),
+            properties,
+            constraints: Vec::new(),
+            parent_types: Vec::new(),
+            key_labels: Vec::new(),
+        })
+    }
 
-        const BOUND: usize = 470;
-        fn smallest<T: Serialize>(element: &T) -> usize {
-            let mut out = Vec::new();
-            encode_bincode_payload(element, &mut out).unwrap();
-            out.len()
-        }
-        let in_a_list = |size: usize| 3 * size;
+    fn edge_type(properties: Vec<PropertyRecord>) -> CatalogRecord {
+        CatalogRecord::EdgeType(EdgeTypeRecord {
+            name: "Event".into(),
+            properties,
+            constraints: Vec::new(),
+            endpoints: Vec::new(),
+            key_labels: Vec::new(),
+        })
+    }
+
+    /// The most `LIST` levels a record holds, as densely as they encode:
+    /// 256 properties with empty names, typed 128 levels deep.
+    fn deepest_properties() -> Vec<PropertyRecord> {
         let deepest = property(
             "",
             list_of(MAX_LIST_TYPE_DEPTH, PropertyTypeRecord::String),
             true,
             None,
         );
+        vec![deepest; MAX_LIST_LEVELS_PER_RECORD / MAX_LIST_TYPE_DEPTH]
+    }
+
+    /// The memory bound of the module documentation, at most 120 bytes per
+    /// payload byte and 32 bytes per `LIST` level, so at most 1 MiB for the
+    /// levels a record may hold, from its parts: each element a payload
+    /// holds, encoded at its smallest, against the memory its types take
+    /// (three times an element while its list grows), so a change to a record
+    /// type that breaks the bound fails here. Then the densest record under
+    /// [`MAX_LIST_LEVELS_PER_RECORD`], 256 properties typed 128 levels deep in
+    /// 1,292 payload bytes, decodes to one box per level and stays within the
+    /// bound, which it could not without the levels' own term: their memory
+    /// does not grow with the payload.
+    #[test]
+    fn a_payload_decodes_into_at_most_120_bytes_per_byte_and_1_mib_of_list_levels() {
+        use std::mem::size_of;
+
+        const PER_BYTE: usize = 120;
+        // A level's 16-byte box here, and another in the engine's property
+        // type, built while the record's chain still lives.
+        const PER_LEVEL: usize = 32;
+        fn smallest<T: Serialize>(element: &T) -> usize {
+            let mut out = Vec::new();
+            encode_bincode_payload(element, &mut out).unwrap();
+            out.len()
+        }
+        let in_a_list = |size: usize| 3 * size;
         let elements = [
             (
                 "an empty string",
@@ -1754,37 +2024,50 @@ mod tests {
                 in_a_list(size_of::<TypeConstraintRecord>()),
             ),
             (
-                "a property typed 128 LIST levels deep",
-                smallest(&deepest),
-                in_a_list(size_of::<PropertyRecord>())
-                    + MAX_LIST_TYPE_DEPTH * size_of::<PropertyTypeRecord>(),
+                "a property, its levels apart",
+                smallest(&property("", PropertyTypeRecord::String, true, None)),
+                in_a_list(size_of::<PropertyRecord>()),
             ),
             // A default value's list of nulls, one byte per null.
             ("a null in a list", 1, in_a_list(size_of::<Value>())),
         ];
         for (element, bytes, memory) in elements {
             assert!(
-                memory <= BOUND * bytes,
+                memory <= PER_BYTE * bytes,
                 "{element}: {memory} bytes of memory from {bytes} payload bytes"
             );
         }
-        assert_eq!(smallest(&deepest), 5, "the densest element's bytes");
         assert_eq!(
-            BOUND * usize::try_from(MAX_CATALOG_RECORD_PAYLOAD).unwrap(),
-            940 << 20,
+            PER_LEVEL,
+            2 * size_of::<PropertyTypeRecord>(),
+            "a box per level holds one property type"
+        );
+        let levels = PER_LEVEL * MAX_LIST_LEVELS_PER_RECORD;
+        assert_eq!(levels, 1 << 20, "the levels of a record take at most 1 MiB");
+        let maximum = usize::try_from(MAX_CATALOG_RECORD_PAYLOAD).unwrap();
+        assert_eq!(
+            PER_BYTE * maximum + levels,
+            241 << 20,
             "the bound for the largest payload"
         );
 
-        let record = CatalogRecord::NodeType(NodeTypeRecord {
-            name: "Event".into(),
-            properties: vec![deepest; 3],
-            constraints: Vec::new(),
-            parent_types: Vec::new(),
-            key_labels: Vec::new(),
-        });
-        let [CatalogRecord::NodeType(read)] = &read_all(&framed(&record)).unwrap()[..] else {
+        let properties = deepest_properties();
+        let count = properties.len();
+        let bytes = framed(&node_type(properties));
+        let payload = bytes.len() - RECORD_HEADER_BYTES;
+        assert_eq!(
+            payload, 1_292,
+            "name 6, count 3, 5 bytes per property, three empty lists"
+        );
+        let memory = count * in_a_list(size_of::<PropertyRecord>()) + levels;
+        assert!(
+            memory <= PER_BYTE * payload + levels && memory > PER_BYTE * payload,
+            "{memory} bytes of memory from {payload} payload bytes"
+        );
+        let [CatalogRecord::NodeType(read)] = &read_all(&bytes).unwrap()[..] else {
             panic!("one node type");
         };
+        assert_eq!(read.properties.len(), count);
         for property in &read.properties {
             assert_eq!(
                 property.data_type.levels_and_code(),
@@ -1792,6 +2075,124 @@ mod tests {
                 "one box per level"
             );
         }
+    }
+
+    /// The property types of a record nest at most
+    /// [`MAX_LIST_LEVELS_PER_RECORD`] `LIST` levels in all: node and edge
+    /// types at the cap round trip, and the writer refuses one level more,
+    /// appending nothing.
+    #[test]
+    fn list_levels_past_the_record_cap_are_refused_by_the_writer() {
+        for record in [
+            node_type(deepest_properties()),
+            edge_type(deepest_properties()),
+        ] {
+            assert!(
+                read_all(&framed(&record)).unwrap() == [record],
+                "a record at the cap round trips"
+            );
+        }
+        let mut past = deepest_properties();
+        past.push(property(
+            "scores",
+            list_of(1, PropertyTypeRecord::Int64),
+            true,
+            None,
+        ));
+        for (kind, record) in [(2, node_type(past.clone())), (3, edge_type(past))] {
+            let mut out = vec![3, 19, 88];
+            let error = record.encode_framed(&mut out).unwrap_err();
+            assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("kind {kind}"))
+                    && message.contains("32769 LIST levels")
+                    && message.contains("32768"),
+                "{message}"
+            );
+            assert_eq!(out, [3, 19, 88], "a refused record appends nothing");
+        }
+    }
+
+    /// The reader refuses a record whose property types nest more than
+    /// [`MAX_LIST_LEVELS_PER_RECORD`] levels in all, counting each type's
+    /// levels before it reads the code they wrap and builds them: the type
+    /// that passes the cap is refused, even with a code no release knows.
+    /// The count starts again with each record.
+    #[test]
+    fn list_levels_past_the_record_cap_are_refused_by_the_reader_before_they_are_built() {
+        let at_cap = [
+            framed(&node_type(deepest_properties())),
+            framed(&edge_type(deepest_properties())),
+        ]
+        .concat();
+        assert_eq!(
+            read_all(&at_cap).unwrap().len(),
+            2,
+            "each record has its own count"
+        );
+
+        // A read that should fail, without printing 32,768 levels if it
+        // does not.
+        let refused = |bytes: &[u8]| match read_all(bytes) {
+            Ok(records) => panic!("{} records read past the cap", records.len()),
+            Err(error) => error.to_string(),
+        };
+        let mut properties = deepest_properties();
+        properties.push(property("x", PropertyTypeRecord::Int64, true, None));
+        for record in [node_type(properties.clone()), edge_type(properties)] {
+            let bytes = framed(&record);
+            // The header, the name, the property count (257: 0xFB and a
+            // u16), 256 properties of 5 bytes and the name "x".
+            let levels_at =
+                RECORD_HEADER_BYTES + (1 + "Event".len()) + 3 + 256 * 5 + (1 + "x".len());
+            assert_eq!(bytes[levels_at..levels_at + 2], [0, 1], "no level, INT64");
+
+            let mut past = bytes.clone();
+            past[levels_at] = 1;
+            let error = refused(&past);
+            assert!(
+                error.contains("32768 LIST levels") && error.contains("record 0 at byte 0"),
+                "{error}"
+            );
+
+            past[levels_at + 1] = 99;
+            let error = refused(&past);
+            assert!(
+                error.contains("32768 LIST levels") && !error.contains("code 99"),
+                "the levels are refused before the code is read: {error}"
+            );
+        }
+    }
+
+    /// A record whose default values take more bytes than a payload holds
+    /// is refused from their sizes, before one is encoded: a default value
+    /// the value codec refuses, ahead of the oversized one, is never reached.
+    #[test]
+    fn oversized_default_values_are_refused_before_they_are_encoded() {
+        use super::super::value_codec::MAX_VALUE_DEPTH;
+
+        let maximum = usize::try_from(MAX_CATALOG_RECORD_PAYLOAD).unwrap();
+        let too_deep =
+            (0..=MAX_VALUE_DEPTH).fold(Value::Null, |inner, _| Value::List(vec![inner].into()));
+        let record = node_type(vec![
+            property("nested", PropertyTypeRecord::List, true, Some(too_deep)),
+            property(
+                "notes",
+                PropertyTypeRecord::String,
+                true,
+                Some(Value::from("Amsterdam ".repeat(maximum / 10 + 1))),
+            ),
+        ]);
+        let mut out = vec![3, 19, 88];
+        let error = record.encode_framed(&mut out).unwrap_err();
+        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        let message = error.to_string();
+        assert!(
+            message.contains("catalog record of kind 2") && message.contains(&maximum.to_string()),
+            "{message}"
+        );
+        assert_eq!(out, [3, 19, 88], "a refused record appends nothing");
     }
 
     /// A record whose payload would pass the maximum is refused while it is

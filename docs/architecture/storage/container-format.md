@@ -241,7 +241,8 @@ counts of at most 2^32 - 1, nesting of at most 128 levels, see
 sections: the compacted base in `COMPACT_STORE` keeps its 32-bit counts and
 lengths (see [Stream Sections](#stream-sections)), and the RDF ring index
 holds at most 2^32 - 1 terms and triples. Each schema entry is one catalog
-record of at most 2 MiB (see [Catalog Records](#catalog-records)). A
+record of at most 2 MiB, whose property types nest at most 32,768 `LIST<...>`
+levels in all (see [Catalog Records](#catalog-records)). A
 checkpoint that meets a value or an entry past these limits fails, names it
 and keeps the WAL.
 
@@ -558,7 +559,9 @@ expression). An edge type's endpoints are pairs of a source and a target node
 type, either of them none for any node type: the cross product of the types
 `CONNECTING (...) TO (...)` lists, and no pairs for an edge type that connects
 any nodes. A property type is two `u32`: the number of `LIST<...>` levels
-around it (at most 128) and the code of the type inside them:
+around it (at most 128, and at most 32,768 over all the property types of one
+record, so 256 properties of the deepest type) and the code of the type inside
+them:
 
 | Code | Type | Code | Type |
 |------|------|------|------|
@@ -593,24 +596,30 @@ kind with the required flag; a length over 2 MiB (before it reads the
 payload, which it reads into a buffer that grows with the bytes present); a
 stream that ends inside a record; a payload that does not decode as its
 kind's record or has bytes left over, a property type nested more than 128
-levels or of an unknown code; a record that repeats or comes before the
-record of its kind before it (only an index name may repeat); endpoint pairs
-that are not a cross product; and a record the catalog refuses, such as a
-binding to a graph type no record defines. A schema record also creates the
-schema's default graph.
+levels or of an unknown code, property types that nest more than 32,768 levels
+in all (each type's levels are counted before they are built); a record that
+repeats or comes before the record of its kind before it (only an index name
+may repeat); endpoint pairs that are not a cross product; and a record the
+catalog refuses, such as a binding to a graph type no record defines. A schema
+record also creates the schema's default graph.
 
-A payload decodes into memory in proportion to its bytes: at most 470 bytes
-per payload byte while it decodes, before the allocator's own overhead, so at
-most 940 MiB for a payload of 2 MiB. The densest is a node or edge type whose
-properties are typed 128 `LIST` levels deep: each such property takes 5
-payload bytes and 2,312 bytes of memory, a 16-byte box per level and three
-times its 88-byte entry while the list of properties grows. Any other list
-element, and a default value's list of nulls, takes at most 120 bytes per
-payload byte. A damaged length inside a payload allocates no more than that:
-a string's length counts against a decode limit of 16 MiB before the string
-is allocated (which no payload of 2 MiB reaches), a list allocates at most
-1 MiB ahead of its elements, and a default value's counts are checked against
-the bytes left.
+A payload of `n` bytes decodes into at most `120 n` bytes of memory plus 1 MiB
+for its `LIST<...>` levels, while it decodes and the database converts it,
+before the allocator's own overhead: so at most 241 MiB for a payload of
+2 MiB. Every list element, and each null of a default value's list, takes at
+most 120 bytes per payload byte (three times its size while its list grows
+or is copied: a property, 5 bytes at its smallest, takes three times 88). A
+level takes no payload byte of its own, as a type's levels are one count, but
+32 bytes of memory (a 16-byte box in the record and another in the database's
+type), so its memory is bounded per record instead: the cap of 32,768 levels
+holds the levels of a record to 1 MiB, as much as a damaged list length may
+allocate ahead of its elements in any record. A damaged length inside a
+payload allocates no more than that: a string's length counts against a
+decode limit of 16 MiB before the string is allocated (which no payload of
+2 MiB reaches), a list allocates at most 1 MiB ahead of its elements, and a
+default value's counts are checked against the bytes left. A checkpoint that
+meets a type past the cap of levels fails, naming it, and `CREATE NODE TYPE`,
+`CREATE EDGE TYPE`, `ALTER ... ADD` and inline graph types refuse one.
 
 ### Memory
 
@@ -627,7 +636,7 @@ These sections hold more, in proportion to their data:
 
 | Section | Writing | Reading |
 |---------|---------|---------|
-| `CATALOG` | A sorted copy of every entry, and the record being written | The record being read (at most 470 bytes per payload byte, see [Catalog Records](#catalog-records)), and the named constraints, index definitions and index names until the last record |
+| `CATALOG` | A sorted copy of every entry, and the record being written | The record being read (at most 120 bytes per payload byte plus 1 MiB, see [Catalog Records](#catalog-records)), and the named constraints, index definitions and index names until the last record |
 | `LPG_STORE` | The sorted ids of the table being written (8 bytes per node or edge) and, without `temporal`, of each of its property columns (8 bytes per value) | |
 | `RDF_STORE` | A reference to every triple, sorted (8 bytes per triple) | |
 | `VECTOR_STORE` | A reference to every node of an in-memory topology, sorted by id (16 bytes per node) | |

@@ -14,7 +14,7 @@
 #![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
-use grafeo_engine::{GrafeoDB, Session};
+use grafeo_engine::{Config, GrafeoDB, Session};
 
 #[derive(Debug, Clone, Copy)]
 enum Language {
@@ -124,9 +124,10 @@ fn a_unit_call_keeps_one_row_per_input_row() {
     }
 }
 
-/// The rows after a unit subquery are those before it, values and order
-/// included, and only their variables are there: `RETURN *` returns `i`
-/// alone.
+/// The rows after a unit subquery are those before it, each once with its
+/// values, and only their variables are there: `RETURN *` returns `i`
+/// alone. Without `ORDER BY` the row order is unspecified, so the database
+/// shuffles the rows (`shuffle_unordered`) and they are compared sorted.
 #[test]
 fn a_unit_call_passes_each_row_on_unchanged() {
     for (language, query) in [
@@ -140,10 +141,13 @@ fn a_unit_call_passes_each_row_on_unchanged() {
             "FOR i IN [19, 3, 88] CALL (i) { FOR x IN range(1, 2) INSERT (:W {i: i}) } RETURN i",
         ),
     ] {
-        let session = GrafeoDB::new_in_memory().session();
+        let db = GrafeoDB::with_config(Config::in_memory().with_shuffle_unordered(true)).unwrap();
+        let session = db.session();
+        let mut rows = run(&session, language, query);
+        rows.sort_by_key(|row| row[0].as_int64());
         assert_eq!(
-            run(&session, language, query),
-            [[int(19)], [int(3)], [int(88)]],
+            rows,
+            [[int(3)], [int(19)], [int(88)]],
             "{language:?} `{query}`"
         );
     }

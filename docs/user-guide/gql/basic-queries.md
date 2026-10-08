@@ -163,7 +163,9 @@ RETURN p.name, p.age
 
 ## FINISH
 
-`FINISH` consumes all input rows and returns an empty result. Use it for mutation-only queries where you do not need output.
+`FINISH` runs the query to its end, its writes included, and returns no result: no rows and no columns. Use it for
+mutation-only queries where you do not need output. A query that writes after a `MATCH` or `FOR` and ends without
+`RETURN` has no result either.
 
 ```sql
 -- Insert data without returning anything

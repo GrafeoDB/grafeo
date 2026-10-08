@@ -2576,12 +2576,13 @@ impl PyGrafeoDB {
     ///
     /// Builds a columnar store with CSR adjacency from all nodes and edges and
     /// drops the original store to free memory, giving up to ~60x memory
-    /// reduction and 100x+ traversal speedup. The database stays writable:
-    /// later writes go to an overlay on top of the columnar base, which is
-    /// merged into the base under memory pressure or by calling ``compact()``
-    /// again (``recompact()`` in Rust). Named graphs and the property, text
-    /// and vector indexes stay. Compaction keeps no version history, so
-    /// point-in-time reads see the compacted data at every epoch.
+    /// reduction and 100x+ traversal speedup. The database stays writable
+    /// unless opened read-only (``open_read_only()``, where writes still
+    /// fail): later writes go to an overlay on top of the columnar base,
+    /// which is merged into the base under memory pressure or by calling
+    /// ``compact()`` again (``recompact()`` in Rust). Named graphs and the
+    /// property, text and vector indexes stay. Compaction keeps no version
+    /// history, so point-in-time reads see the compacted data at every epoch.
     ///
     /// Raises:
     ///     GrafeoError: While a transaction is open (commit or roll it back

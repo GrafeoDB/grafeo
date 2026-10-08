@@ -10,10 +10,8 @@ use super::{
     SessionContext,
 };
 use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
-use crate::graph::{GraphStore, GraphStoreSearch};
-use grafeo_common::types::{
-    EdgeId, EpochId, LogicalType, NodeId, PropertyKey, TransactionId, Value,
-};
+use crate::graph::GraphStoreSearch;
+use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, Value};
 use std::sync::Arc;
 
 /// Configuration for a node merge operation.
@@ -127,18 +125,19 @@ impl MergeOperator {
     ///
     /// Skips [`PropertySource::Expression`] sources: those need an augmented
     /// row containing the merged node/edge and are evaluated separately by
-    /// [`Self::resolve_action_properties`].
+    /// [`Self::resolve_action_properties`]. A property of a node or edge is
+    /// read as `writer`'s transaction sees it.
     fn resolve_properties(
         props: &[(String, PropertySource)],
         chunk: Option<&DataChunk>,
         row: usize,
-        store: &dyn GraphStore,
+        writer: &GraphWriter,
     ) -> Vec<(String, Value)> {
         props
             .iter()
             .map(|(name, source)| {
                 let value = if let Some(chunk) = chunk {
-                    source.resolve(chunk, row, store)
+                    source.resolve(chunk, row, writer)
                 } else {
                     // Standalone mode: only constants are valid
                     match source {
@@ -211,12 +210,7 @@ impl MergeOperator {
         if !Self::has_expression_source(props) {
             // Fast path: no runtime expressions, fall through to the existing
             // resolver which understands Column/Constant/PropertyAccess.
-            return Ok(Self::resolve_properties(
-                props,
-                chunk,
-                row,
-                self.writer.store().as_ref(),
-            ));
+            return Ok(Self::resolve_properties(props, chunk, row, &self.writer));
         }
 
         let augmented = self.build_augmented_node_chunk(chunk, row, merged_node);
@@ -245,7 +239,7 @@ impl MergeOperator {
                     }
                     predicate.eval_at(&augmented, 0).unwrap_or(Value::Null)
                 }
-                _ => source.resolve(&augmented, 0, self.writer.store().as_ref()),
+                _ => source.resolve(&augmented, 0, &self.writer),
             };
             out.push((name.clone(), value));
         }
@@ -356,19 +350,16 @@ impl MergeOperator {
         chunk: Option<&DataChunk>,
         row: usize,
     ) -> Result<Vec<NodeId>, super::OperatorError> {
-        let store_ref: &dyn GraphStore = self.writer.store().as_ref();
         // Match properties cannot reference the MERGE variable (ISO §15.5),
         // so they resolve against the input chunk directly.
         let resolved_match = resolve_match_properties(
             &self.config.match_properties,
             chunk,
             row,
-            store_ref,
             MatchContext {
                 search_store: self.search_store.as_ref(),
                 session_context: &self.session_context,
-                viewing_epoch: self.writer.viewing_epoch(),
-                transaction_id: self.writer.transaction_id(),
+                writer: &self.writer,
                 cache: &mut self.match_expressions,
             },
         )?;
@@ -404,8 +395,12 @@ impl MergeOperator {
                 .map(|created| vec![created])
         } else {
             // No runtime expressions: create with all properties at once.
-            let resolved_on_create =
-                Self::resolve_properties(&self.config.on_create_properties, chunk, row, store_ref);
+            let resolved_on_create = Self::resolve_properties(
+                &self.config.on_create_properties,
+                chunk,
+                row,
+                &self.writer,
+            );
             self.writer
                 .create_node(
                     &self.config.labels,
@@ -642,7 +637,7 @@ impl MergeRelationshipOperator {
                 props,
                 Some(chunk),
                 row,
-                self.writer.store().as_ref(),
+                &self.writer,
             ));
         }
 
@@ -672,7 +667,7 @@ impl MergeRelationshipOperator {
                     }
                     predicate.eval_at(&augmented, 0).unwrap_or(Value::Null)
                 }
-                _ => source.resolve(&augmented, 0, self.writer.store().as_ref()),
+                _ => source.resolve(&augmented, 0, &self.writer),
             };
             out.push((name.clone(), value));
         }
@@ -766,17 +761,14 @@ impl Operator for MergeRelationshipOperator {
                         found: "None".to_string(),
                     })?;
 
-                let store_ref: &dyn GraphStore = self.writer.store().as_ref();
                 let resolved_match = resolve_match_properties(
                     &self.config.match_properties,
                     Some(&chunk),
                     row,
-                    store_ref,
                     MatchContext {
                         search_store: self.search_store.as_ref(),
                         session_context: &self.session_context,
-                        viewing_epoch: self.writer.viewing_epoch(),
-                        transaction_id: self.writer.transaction_id(),
+                        writer: &self.writer,
                         cache: &mut self.match_expressions,
                     },
                 )?;
@@ -818,7 +810,7 @@ impl Operator for MergeRelationshipOperator {
                             &self.config.on_create_properties,
                             Some(&chunk),
                             row,
-                            store_ref,
+                            &self.writer,
                         );
                         self.writer.create_edge(
                             src_val,
@@ -872,8 +864,8 @@ impl Operator for MergeRelationshipOperator {
 struct MatchContext<'a> {
     search_store: Option<&'a Arc<dyn GraphStoreSearch>>,
     session_context: &'a SessionContext,
-    viewing_epoch: Option<EpochId>,
-    transaction_id: Option<TransactionId>,
+    /// The MERGE's writer: values are read as its transaction sees them.
+    writer: &'a GraphWriter,
     /// The operator's compiled evaluators, reused across rows.
     cache: &'a mut Option<super::mutation::PropertyExpressions>,
 }
@@ -885,11 +877,15 @@ fn resolve_match_properties(
     props: &[(String, PropertySource)],
     chunk: Option<&DataChunk>,
     row: usize,
-    store: &dyn GraphStore,
     context: MatchContext<'_>,
 ) -> Result<Vec<(String, Value)>, OperatorError> {
     if !MergeOperator::has_expression_source(props) {
-        return Ok(MergeOperator::resolve_properties(props, chunk, row, store));
+        return Ok(MergeOperator::resolve_properties(
+            props,
+            chunk,
+            row,
+            context.writer,
+        ));
     }
     let chunk = chunk.ok_or_else(|| {
         OperatorError::Execution(
@@ -904,14 +900,7 @@ fn resolve_match_properties(
                 context.session_context.clone(),
             )
         })
-        .resolve_row(
-            props,
-            chunk,
-            row,
-            store,
-            context.viewing_epoch,
-            context.transaction_id,
-        )
+        .resolve_row(props, chunk, row, context.writer)
 }
 
 #[cfg(all(test, feature = "lpg"))]
@@ -920,6 +909,7 @@ mod tests {
     use crate::execution::operators::ConstraintValidator;
     use crate::graph::GraphStoreMut;
     use crate::graph::lpg::LpgStore;
+    use grafeo_common::types::TransactionId;
 
     fn const_props(props: Vec<(&str, Value)>) -> Vec<(String, PropertySource)> {
         props

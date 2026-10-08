@@ -2095,11 +2095,13 @@ pub extern "C" fn grafeo_wal_checkpoint(db: *mut GrafeoDatabase) -> GrafeoStatus
 
 /// Converts the default graph to a columnar CompactStore for faster queries.
 ///
-/// Builds a columnar store with CSR adjacency from all nodes and edges. The
-/// database stays writable: later writes go to an overlay on top of the
-/// columnar base, which is merged into the base under memory pressure or by
-/// calling `grafeo_compact` again. Named graphs and indexes stay. Fails (an
-/// error status) while a transaction is open, or if the conversion fails.
+/// Builds a columnar store with CSR adjacency from all nodes and edges. A
+/// read-write database stays writable: later writes go to an overlay on top
+/// of the columnar base, which is merged into the base under memory pressure
+/// or by calling `grafeo_compact` again. One opened with
+/// `grafeo_open_read_only` stays read-only: writes still fail. Named graphs
+/// and indexes stay. Fails (an error status) while a transaction is open, or
+/// if the conversion fails.
 #[cfg(feature = "compact-store")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_compact(db: *mut GrafeoDatabase) -> GrafeoStatus {
@@ -2293,6 +2295,38 @@ mod tests {
             );
             assert!(last_error().contains("GRAFEO-T007"), "{}", last_error());
         }
+        grafeo_free_database(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `grafeo_compact` keeps a database opened with `grafeo_open_read_only`
+    /// read-only: the compaction succeeds, a write after it still fails, and
+    /// the data stays as it was.
+    #[cfg(feature = "compact-store")]
+    #[test]
+    fn compact_keeps_a_read_only_database_read_only() {
+        let dir =
+            std::env::temp_dir().join(format!("grafeo-c-read-only-compact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = CString::new(dir.join("people.grafeo").to_str().unwrap()).unwrap();
+        let db = grafeo_open(path.as_ptr());
+        assert!(!db.is_null());
+        let insert_alix = CString::new("INSERT (:Person {name: 'Alix'})").unwrap();
+        let result = grafeo_execute(db, insert_alix.as_ptr());
+        assert!(!result.is_null(), "the write before the read-only open");
+        grafeo_free_result(result);
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok);
+        grafeo_free_database(db);
+
+        let db = grafeo_open_read_only(path.as_ptr());
+        assert!(!db.is_null());
+        assert_eq!(grafeo_compact(db), GrafeoStatus::Ok);
+        let insert_gus = CString::new("INSERT (:Person {name: 'Gus'})").unwrap();
+        let result = grafeo_execute(db, insert_gus.as_ptr());
+        assert!(result.is_null(), "a write after grafeo_compact still fails");
+        assert_eq!(grafeo_node_count(db), 1, "Alix alone");
+        grafeo_close(db);
         grafeo_free_database(db);
         let _ = std::fs::remove_dir_all(&dir);
     }

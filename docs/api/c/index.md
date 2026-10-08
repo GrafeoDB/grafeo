@@ -425,13 +425,13 @@ GrafeoStatus grafeo_wal_checkpoint(GrafeoDatabase* db);
 
 ### Compact Store
 
-Convert to a read-only columnar store for faster queries. Requires the `compact-store` feature.
+Convert to a layered columnar store for faster queries. Requires the `compact-store` feature.
 
 ```c
 GrafeoStatus grafeo_compact(GrafeoDatabase* db);
 ```
 
-After this call, all write operations return an error. Queries continue to work with lower memory usage and faster traversal.
+After this call, queries run with lower memory usage and faster traversal, and writes go to a mutable overlay that the next `grafeo_compact` merges into the base. A database opened with `grafeo_open_read_only` stays read-only: writes still return an error. Fails while a transaction is open.
 
 ## Memory Management
 

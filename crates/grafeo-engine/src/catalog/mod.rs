@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use parking_lot::{Mutex, RwLock};
 
 use grafeo_common::collections::{GrafeoConcurrentMap, grafeo_concurrent_map};
+use grafeo_common::storage::catalog_record::MAX_LIST_LEVELS_PER_RECORD;
 use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
 use grafeo_common::types::{EdgeTypeId, IndexId, LabelId, PropertyKeyId, Value};
 
@@ -606,6 +607,8 @@ impl Catalog {
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeNotFound` if the node type does not exist.
     /// * `CatalogError::TypeAlreadyExists` if the property already exists on the type.
+    /// * `CatalogError::TooManyListLevels` if the type's property types would
+    ///   nest more `LIST<...>` levels in all than its catalog record holds.
     pub fn alter_node_type_add_property(
         &self,
         type_name: &str,
@@ -641,6 +644,8 @@ impl Catalog {
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeNotFound` if the edge type does not exist.
     /// * `CatalogError::TypeAlreadyExists` if the property already exists on the type.
+    /// * `CatalogError::TooManyListLevels` if the type's property types would
+    ///   nest more `LIST<...>` levels in all than its catalog record holds.
     pub fn alter_edge_type_add_property(
         &self,
         type_name: &str,
@@ -1234,6 +1239,25 @@ impl PropertyDataType {
     /// being 1 deep), and as deep as the catalog records store.
     pub const MAX_LIST_DEPTH: usize = MAX_PROPERTY_VALUE_DEPTH;
 
+    /// The most `LIST<...>` levels the property types of one node or edge
+    /// type nest in all: as many as its catalog record holds
+    /// ([`MAX_LIST_LEVELS_PER_RECORD`], 32,768, so 256 properties of the
+    /// deepest type).
+    pub const MAX_LIST_LEVELS_PER_TYPE: usize = MAX_LIST_LEVELS_PER_RECORD;
+
+    /// The `LIST<...>` levels around the type inside them, counted, not
+    /// recursed into.
+    #[must_use]
+    pub fn list_levels(&self) -> usize {
+        let mut levels = 0;
+        let mut current = self;
+        while let Self::ListTyped(inner) = current {
+            levels += 1;
+            current = inner;
+        }
+        levels
+    }
+
     /// Parses a type name string (case-insensitive) into a `PropertyDataType`.
     ///
     /// Reads every spelling [`Display`](std::fmt::Display) writes, including
@@ -1354,6 +1378,32 @@ pub struct TypedProperty {
     pub nullable: bool,
     /// Default value (used when property is not explicitly set).
     pub default_value: Option<Value>,
+}
+
+impl TypedProperty {
+    /// Refuses the properties of one node or edge type when their types
+    /// nest more `LIST<...>` levels in all than
+    /// [`PropertyDataType::MAX_LIST_LEVELS_PER_TYPE`], more than the type's
+    /// catalog record holds.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::TooManyListLevels`] with the levels they nest.
+    pub(crate) fn check_list_levels<'a>(
+        properties: impl IntoIterator<Item = &'a Self>,
+    ) -> Result<(), CatalogError> {
+        let levels = properties
+            .into_iter()
+            .map(|property| property.data_type.list_levels())
+            .fold(0usize, usize::saturating_add);
+        if levels > PropertyDataType::MAX_LIST_LEVELS_PER_TYPE {
+            return Err(CatalogError::TooManyListLevels {
+                levels,
+                limit: PropertyDataType::MAX_LIST_LEVELS_PER_TYPE,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// A constraint on a node or edge type.
@@ -1888,6 +1938,8 @@ impl SchemaCatalog {
     ///
     /// * `CatalogError::TypeNotFound` if the node type does not exist.
     /// * `CatalogError::TypeAlreadyExists` if the property already exists on the type.
+    /// * `CatalogError::TooManyListLevels` if the type's property types would
+    ///   nest more `LIST<...>` levels in all than its catalog record holds.
     pub fn alter_node_type_add_property(
         &self,
         type_name: &str,
@@ -1903,6 +1955,7 @@ impl SchemaCatalog {
                 property.name, type_name
             )));
         }
+        TypedProperty::check_list_levels(def.properties.iter().chain([&property]))?;
         def.properties.push(property);
         Ok(())
     }
@@ -1938,6 +1991,8 @@ impl SchemaCatalog {
     ///
     /// * `CatalogError::TypeNotFound` if the edge type does not exist.
     /// * `CatalogError::TypeAlreadyExists` if the property already exists on the type.
+    /// * `CatalogError::TooManyListLevels` if the type's property types would
+    ///   nest more `LIST<...>` levels in all than its catalog record holds.
     pub fn alter_edge_type_add_property(
         &self,
         type_name: &str,
@@ -1953,6 +2008,7 @@ impl SchemaCatalog {
                 property.name, type_name
             )));
         }
+        TypedProperty::check_list_levels(def.properties.iter().chain([&property]))?;
         def.properties.push(property);
         Ok(())
     }
@@ -2231,6 +2287,15 @@ pub enum CatalogError {
         /// The most levels a property type nests.
         limit: usize,
     },
+    /// The property types of a node or edge type nest more `LIST<...>`
+    /// levels in all than `limit`
+    /// ([`PropertyDataType::MAX_LIST_LEVELS_PER_TYPE`]).
+    TooManyListLevels {
+        /// The levels they nest.
+        levels: usize,
+        /// The most levels they may nest.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -2250,6 +2315,11 @@ impl std::fmt::Display for CatalogError {
             Self::PropertyTypeTooDeep { limit } => {
                 write!(f, "A property type nests at most {limit} LIST<...> levels")
             }
+            Self::TooManyListLevels { levels, limit } => write!(
+                f,
+                "The property types of a node or edge type nest at most {limit} LIST<...> \
+                 levels in all, not {levels}"
+            ),
         }
     }
 }

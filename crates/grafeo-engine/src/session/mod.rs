@@ -131,6 +131,29 @@ fn typed_property(
     })
 }
 
+/// The catalog's properties for the property definitions of one node or
+/// edge type in a type DDL statement, with their default values.
+///
+/// # Errors
+///
+/// A semantic error when the catalog refuses a property's type (one that
+/// nests too many `LIST<...>` levels), or the types nest more `LIST<...>`
+/// levels in all than the type's catalog record holds.
+#[cfg(all(feature = "lpg", feature = "gql"))]
+fn typed_properties(
+    definitions: &[grafeo_adapters::query::gql::ast::PropertyDefinition],
+) -> Result<Vec<crate::catalog::TypedProperty>> {
+    use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+
+    let properties = definitions
+        .iter()
+        .map(typed_property)
+        .collect::<Result<Vec<_>>>()?;
+    crate::catalog::TypedProperty::check_list_levels(&properties)
+        .map_err(|e| Error::Query(QueryError::new(QueryErrorKind::Semantic, e.to_string())))?;
+    Ok(properties)
+}
+
 /// How a session's queries are planned, from the database's configuration.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PlanOptions {
@@ -1499,11 +1522,7 @@ impl Session {
                     .collect();
                 let def = NodeTypeDefinition {
                     name: effective_name.clone(),
-                    properties: stmt
-                        .properties
-                        .iter()
-                        .map(typed_property)
-                        .collect::<Result<_>>()?,
+                    properties: typed_properties(&stmt.properties)?,
                     constraints: Vec::new(),
                     parent_types: stmt.parent_types.clone(),
                     key_labels: Vec::new(),
@@ -1549,11 +1568,7 @@ impl Session {
                     .collect();
                 let def = EdgeTypeDefinition {
                     name: effective_name.clone(),
-                    properties: stmt
-                        .properties
-                        .iter()
-                        .map(typed_property)
-                        .collect::<Result<_>>()?,
+                    properties: typed_properties(&stmt.properties)?,
                     constraints: Vec::new(),
                     source_node_types: stmt.source_node_types.clone(),
                     target_node_types: stmt.target_node_types.clone(),
@@ -1901,15 +1916,15 @@ impl Session {
                     .map(|inline| {
                         let (InlineElementType::Node { properties, .. }
                         | InlineElementType::Edge { properties, .. }) = inline;
-                        properties
-                            .iter()
-                            .map(|p| {
-                                typed_property(p).map(|typed| TypedProperty {
+                        typed_properties(properties).map(|typed| {
+                            typed
+                                .into_iter()
+                                .map(|typed| TypedProperty {
                                     default_value: None,
                                     ..typed
                                 })
-                            })
-                            .collect::<Result<Vec<_>>>()
+                                .collect::<Vec<_>>()
+                        })
                     })
                     .collect::<Result<Vec<_>>>()?;
 

@@ -1260,8 +1260,10 @@ impl GrafeoDB {
     /// written later. The original store is dropped to free memory.
     ///
     /// Unlike the pre-0.5.39 behavior, the database remains writable after
-    /// compaction: new writes go to the overlay. Call [`recompact()`](Self::recompact)
-    /// to merge the overlay back into the columnar base periodically.
+    /// compaction: new writes go to the overlay. One opened read-only
+    /// (`open_read_only`) stays read-only: writes still fail. Call
+    /// [`recompact()`](Self::recompact) to merge the overlay back into the
+    /// columnar base periodically.
     ///
     /// Compaction keeps no version history: point-in-time reads
     /// ([`get_node_at_epoch`](Self::get_node_at_epoch), `execute_at_epoch`) see

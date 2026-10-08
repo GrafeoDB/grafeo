@@ -1,7 +1,7 @@
 //! Projection, RETURN, sort, limit, and skip planning.
 
 use grafeo_common::collections::GrafeoSet;
-use grafeo_core::execution::operators::EntityValue;
+use grafeo_core::execution::operators::{EntityValue, LimitOperator};
 
 use super::{
     Arc, Error, FilterExpression, GraphStoreSearch, HashMap, LimitOp, LogicalExpression,
@@ -15,7 +15,19 @@ impl super::Planner {
     pub(super) fn plan_return(&self, ret: &ReturnOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // A standalone RETURN (`RETURN 2 * 3 AS product`) reads one empty row.
         let (input_op, input_columns) = self.plan_input(&ret.input)?;
+        if ret.items.is_empty() {
+            return Ok(Self::plan_no_result(input_op));
+        }
         self.plan_return_with_input(ret, input_op, input_columns)
+    }
+
+    /// Plans the end of a statement without a result (a `RETURN` of no
+    /// items: no `RETURN` in GQL or Cypher, or GQL's `FINISH`; see
+    /// `common::no_result`): its input runs to its end for its writes, and
+    /// it returns no rows and no columns.
+    fn plan_no_result(input_op: Box<dyn Operator>) -> (Box<dyn Operator>, Vec<String>) {
+        let operator = LimitOperator::new(input_op, 0).running_its_input_to_the_end();
+        (Box::new(operator), Vec::new())
     }
 
     /// Plans a RETURN operator with an already-planned input operator.
@@ -648,13 +660,16 @@ impl super::Planner {
         let (input_op, columns) = plan_result?;
         // After a write the LIMIT cuts the rows, not the write: the whole
         // input is read first, so the rows after the limit are written too
-        // (see `after_write`).
+        // (see `after_write`). A LIMIT over any write reads its input to the
+        // end, also a `LIMIT 0` (GQL's `FINISH`), which would otherwise read
+        // none of it.
         let input_op = super::mutation::read_first_after_a_write(input_op, &limit.input);
-        Ok(crate::query::planner::common::build_limit(
-            input_op,
-            columns,
-            limit.count.value(),
-        ))
+        if limit.input.has_mutations() {
+            let operator =
+                LimitOperator::new(input_op, limit.count.value()).running_its_input_to_the_end();
+            return Ok((Box::new(operator), columns));
+        }
+        Ok(common::build_limit(input_op, columns, limit.count.value()))
     }
 
     /// Plans a SKIP operator.

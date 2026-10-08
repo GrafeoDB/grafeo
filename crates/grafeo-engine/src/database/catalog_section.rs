@@ -2171,6 +2171,71 @@ mod tests {
         );
     }
 
+    /// A node or edge type whose property types nest more `LIST` levels in
+    /// all than a catalog record holds (one the catalog API registers, as no
+    /// statement builds one) fails the checkpoint with an error naming it.
+    #[test]
+    fn a_type_past_the_list_level_cap_fails_the_write_naming_it() {
+        use grafeo_common::storage::catalog_record::{
+            MAX_LIST_LEVELS_PER_RECORD, MAX_LIST_TYPE_DEPTH,
+        };
+
+        use crate::catalog::PropertyDataType;
+
+        let deepest = (0..MAX_LIST_TYPE_DEPTH).fold(PropertyDataType::Int64, |inner, _| {
+            PropertyDataType::ListTyped(Box::new(inner))
+        });
+        let mut properties: Vec<TypedProperty> = (0..MAX_LIST_LEVELS_PER_RECORD
+            / MAX_LIST_TYPE_DEPTH)
+            .map(|n| TypedProperty {
+                name: format!("p{n}"),
+                data_type: deepest.clone(),
+                nullable: true,
+                default_value: None,
+            })
+            .collect();
+        properties.push(TypedProperty {
+            name: "extra".to_string(),
+            data_type: PropertyDataType::ListTyped(Box::new(PropertyDataType::Int64)),
+            nullable: true,
+            default_value: None,
+        });
+        for (edge, name) in [(false, "node type 'Wide'"), (true, "edge type 'WIDE'")] {
+            let section = make_section();
+            if edge {
+                section
+                    .catalog
+                    .register_or_replace_edge_type_def(EdgeTypeDefinition {
+                        name: "WIDE".to_string(),
+                        properties: properties.clone(),
+                        constraints: vec![],
+                        source_node_types: vec![],
+                        target_node_types: vec![],
+                        key_labels: vec![],
+                    });
+            } else {
+                section
+                    .catalog
+                    .register_or_replace_node_type(NodeTypeDefinition {
+                        name: "Wide".to_string(),
+                        properties: properties.clone(),
+                        constraints: vec![],
+                        parent_types: vec![],
+                        key_labels: vec![],
+                    });
+            }
+            let error = MemoryImage::from_sections(&[&section])
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("Catalog")
+                    && error.contains(name)
+                    && error.contains("32769 LIST levels"),
+                "{error}"
+            );
+        }
+    }
+
     /// An edge type whose endpoint lists make more (source, target) pairs
     /// than a catalog record holds fails the checkpoint naming it, from the
     /// lists' sizes, before a pair is built: 1,000 types on each side would

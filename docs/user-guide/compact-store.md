@@ -14,9 +14,10 @@ CompactStore is a columnar graph format that trades some write performance for l
 memory and query wins. After ingesting data, call `compact()` to switch the database
 to a columnar layout with CSR adjacency. From 0.5.39, `compact()` is **non-destructive
 and writable**: it produces a layered store with an immutable columnar base plus a
-mutable overlay. Inserts and property updates after `compact()` land in the overlay;
-compacting again merges the overlay back into a fresh base (`recompact()` in Rust,
-`compact()` again in Python and Node.js).
+mutable overlay (a database opened read-only stays read-only, see
+[Writes After `compact()`](#writes-after-compact)). Inserts and property updates after
+`compact()` land in the overlay; compacting again merges the overlay back into a fresh
+base (`recompact()` in Rust, `compact()` again in Python and Node.js).
 
 Queries keep working across all supported languages. The property, vector and text
 indexes made before `compact()` stay (with their configuration), new ones can be
@@ -181,6 +182,10 @@ Property values are automatically mapped to the most efficient columnar codec:
 Since 0.5.39, `compact()` returns a layered store: an immutable columnar base plus a
 mutable overlay. New inserts and property updates land in the overlay and are visible
 to subsequent queries (`get_node`, property reads, pattern matching, `list_graphs`).
+
+A database opened read-only (`open_read_only()` in Python and Rust, `openReadOnly()` in
+Node.js, `grafeo_open_read_only()` in C) stays read-only: `compact()` speeds up its
+reads, and writes still fail.
 
 Compact again to merge the overlay back into a fresh base (`recompact()` in Rust):
 

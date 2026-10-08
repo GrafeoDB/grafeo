@@ -575,7 +575,7 @@ version(): string
 
 ### compact()
 
-Converts the database to a read-only [CompactStore](../../user-guide/compact-store.md). Takes a snapshot of all nodes and edges, builds a columnar store with CSR adjacency, and switches to read-only mode. Write operations will throw after this call.
+Converts the database to a layered [CompactStore](../../user-guide/compact-store.md) for faster queries: a columnar base with CSR adjacency, built from a snapshot of all nodes and edges, plus a mutable overlay. The database stays writable: new writes land in the overlay, and calling `compact()` again merges them into a fresh base. A database opened with `openReadOnly()` stays read-only: writes still throw. Throws while a transaction is open.
 
 ```typescript
 compact(): void

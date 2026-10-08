@@ -61,6 +61,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use grafeo_common::storage::ChunkCaps;
 use grafeo_common::testing::chunk_caps::with_chunk_caps;
 use grafeo_common::types::{NodeId, Value};
+use grafeo_engine::database::BatchEdge;
 use grafeo_engine::{Config, DurabilityMode, GrafeoDB};
 use grafeo_storage::file::GrafeoFileManager;
 
@@ -451,6 +452,11 @@ const PEOPLE_SCALE: Scale = Scale {
 /// The bytes of a biography: the data dominates the people.
 const BIO: usize = 4_096;
 
+/// Seed outside the measurement in bounded batches. A direct single write
+/// gives tiered storage a new 1 MiB epoch arena; one per record can exhaust
+/// memory before the checkpoint or open under test starts (#433).
+const SEED_BATCH: usize = 1_024;
+
 /// Per person, a node with three values and an edge with one: the sorted ids
 /// of each table (8 bytes per node or edge) and of each property column (8
 /// bytes per value). An open holds what it builds.
@@ -463,22 +469,35 @@ const PERSON: Documented = Documented {
 /// each knowing the one before.
 fn add_people(db: &GrafeoDB, people: usize, bio: usize) {
     let mut previous: Option<NodeId> = None;
-    for index in 0..people {
-        let person = db
-            .create_node_with_props(
-                &["Person"],
+    for start in (0..people).step_by(SEED_BATCH) {
+        let properties = (start..(start + SEED_BATCH).min(people))
+            .map(|index| {
                 [
-                    ("name", Value::from(PEOPLE[index % PEOPLE.len()])),
-                    ("age", Value::from(i64::try_from(19 + index % 88).unwrap())),
-                    ("bio", Value::from(text_of(index, bio))),
-                ],
-            )
+                    ("name".into(), Value::from(PEOPLE[index % PEOPLE.len()])),
+                    (
+                        "age".into(),
+                        Value::from(i64::try_from(19 + index % 88).unwrap()),
+                    ),
+                    ("bio".into(), Value::from(text_of(index, bio))),
+                ]
+                .into_iter()
+                .collect()
+            })
+            .collect();
+        let nodes = db
+            .batch_create_nodes_with_props("Person", properties)
             .unwrap();
-        if let Some(previous) = previous {
-            db.create_edge_with_props(previous, person, "KNOWS", [("since", 1988_i64)])
-                .unwrap();
+        let mut edges = Vec::with_capacity(nodes.len());
+        for person in nodes {
+            if let Some(previous) = previous {
+                edges.push(
+                    BatchEdge::new(previous, person, "KNOWS")
+                        .with_properties([("since", 1988_i64)]),
+                );
+            }
+            previous = Some(person);
         }
-        previous = Some(person);
+        db.batch_create_edges(edges).unwrap();
     }
 }
 
@@ -551,11 +570,15 @@ fn checkpoint_and_open_memory_does_not_grow_with_a_vector_index() {
         },
         &|db, documents| {
             let mut state = 88;
-            for _ in 0..documents {
-                let embedding: Vec<f32> = (0..16)
-                    .map(|_| (next(&mut state) % 1_000) as f32 / 1_000.0)
+            for start in (0..documents).step_by(SEED_BATCH) {
+                let embeddings = (start..(start + SEED_BATCH).min(documents))
+                    .map(|_| {
+                        (0..16)
+                            .map(|_| (next(&mut state) % 1_000) as f32 / 1_000.0)
+                            .collect()
+                    })
                     .collect();
-                db.create_node_with_props(&["Doc"], [("embedding", &embedding[..])])
+                db.batch_create_nodes("Doc", "embedding", embeddings)
                     .unwrap();
             }
             db.create_vector_index(
@@ -602,15 +625,19 @@ fn checkpoint_and_open_memory_does_not_grow_with_a_text_index() {
             use std::fmt::Write as _;
 
             let mut state = 19;
-            for _ in 0..documents {
-                let mut body = String::new();
-                for _ in 0..40 {
-                    let term = usize::try_from(next(&mut state) % 1_024).unwrap();
-                    let city = CITIES[term % CITIES.len()].to_lowercase();
-                    write!(body, "{city}{term} ").unwrap();
-                }
-                db.create_node_with_props(&["Doc"], [("body", body)])
-                    .unwrap();
+            for start in (0..documents).step_by(SEED_BATCH) {
+                let properties = (start..(start + SEED_BATCH).min(documents))
+                    .map(|_| {
+                        let mut body = String::new();
+                        for _ in 0..40 {
+                            let term = usize::try_from(next(&mut state) % 1_024).unwrap();
+                            let city = CITIES[term % CITIES.len()].to_lowercase();
+                            write!(body, "{city}{term} ").unwrap();
+                        }
+                        [("body".into(), Value::from(body))].into_iter().collect()
+                    })
+                    .collect();
+                db.batch_create_nodes_with_props("Doc", properties).unwrap();
             }
             db.create_text_index("Doc", "body").unwrap();
         },

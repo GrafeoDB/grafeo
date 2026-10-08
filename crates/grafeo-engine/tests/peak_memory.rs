@@ -476,11 +476,6 @@ const PEOPLE_SCALE: Scale = Scale {
 /// The bytes of a biography: the data dominates the people.
 const BIO: usize = 4_096;
 
-/// Seed outside the measurement in bounded batches. A direct single write
-/// gives tiered storage a new 1 MiB epoch arena; one per record can exhaust
-/// memory before the checkpoint or open under test starts (#433).
-const SEED_BATCH: usize = 1_024;
-
 /// Per person, a node with three values and an edge with one: the sorted ids
 /// of each table (8 bytes per node or edge) and of each property column (8
 /// bytes per value). An open holds what it builds.

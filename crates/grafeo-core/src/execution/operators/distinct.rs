@@ -3,7 +3,7 @@
 //! This module provides:
 //! - `DistinctOperator`: Removes duplicate rows based on all or specified columns
 
-use std::collections::HashSet;
+use indexmap::IndexSet;
 
 use grafeo_common::types::{HashableValue, Value};
 
@@ -48,7 +48,7 @@ pub struct DistinctOperator {
     /// Columns to consider for uniqueness (None = all columns).
     distinct_columns: Option<Vec<usize>>,
     /// Set of seen row keys.
-    seen: HashSet<RowKey>,
+    seen: IndexSet<RowKey>,
 }
 
 impl DistinctOperator {
@@ -57,7 +57,7 @@ impl DistinctOperator {
         Self {
             child,
             distinct_columns: None,
-            seen: HashSet::new(),
+            seen: IndexSet::new(),
         }
     }
 
@@ -71,7 +71,7 @@ impl DistinctOperator {
         Self {
             child,
             distinct_columns: Some(columns),
-            seen: HashSet::new(),
+            seen: IndexSet::new(),
         }
     }
 }
@@ -289,6 +289,66 @@ mod tests {
         ];
         let input = MockOperator::new(vec![value_rows_chunk(&expected)]);
         let mut distinct = DistinctOperator::new(Box::new(input));
+
+        assert_eq!(collect_value_rows(&mut distinct), expected);
+        distinct.reset();
+        assert_eq!(collect_value_rows(&mut distinct), expected);
+    }
+
+    #[test]
+    fn test_distinct_preserves_counter_identity_across_growth_and_reset() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let counter = |id: usize, reverse: bool| {
+            let mut entries: Vec<_> = (0..8_u64)
+                .map(|replica| (format!("actor-{id}-{replica}"), replica + 1))
+                .collect();
+            if reverse {
+                entries.reverse();
+            }
+            Value::GCounter(Arc::new(entries.into_iter().collect()))
+        };
+        let signed_counter = |positive: bool, reverse: bool| {
+            let mut entries = [("left".to_owned(), 4), ("right".to_owned(), 6)];
+            if reverse {
+                entries.reverse();
+            }
+            let counts = Arc::new(entries.into_iter().collect::<HashMap<_, _>>());
+            let empty = Arc::new(HashMap::new());
+            let (pos, neg) = if positive {
+                (counts, empty)
+            } else {
+                (empty, counts)
+            };
+            Value::OnCounter { pos, neg }
+        };
+        // These equally sized maps all have total 36, but different actors.
+        // Retaining 512 keys makes the operator grow its initially empty set.
+        let mut expected: Vec<_> = (0..512)
+            .map(|id| vec![counter(id, false), Value::from(format!("first-{id}"))])
+            .collect();
+        expected.extend([
+            vec![signed_counter(true, false), Value::from("first positive")],
+            vec![signed_counter(false, false), Value::from("first negative")],
+        ]);
+
+        let mut rows = expected.clone();
+        // Reconstruct equal maps in reverse insertion order, with a changed
+        // payload to prove DISTINCT retains each complete first input row.
+        rows.extend((0..512).map(|id| vec![counter(id, true), Value::from("duplicate")]));
+        rows.extend([
+            vec![
+                signed_counter(false, true),
+                Value::from("duplicate negative"),
+            ],
+            vec![
+                signed_counter(true, true),
+                Value::from("duplicate positive"),
+            ],
+        ]);
+        let input = MockOperator::new(rows.chunks(128).map(value_rows_chunk).collect());
+        let mut distinct = DistinctOperator::on_columns(Box::new(input), vec![0]);
 
         assert_eq!(collect_value_rows(&mut distinct), expected);
         distinct.reset();

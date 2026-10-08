@@ -819,3 +819,69 @@ fn test_skip_all() {
 
     assert_eq!(result.rows().len(), 0);
 }
+
+/// Later input chunks must update groups that pressure spilled to disk.
+#[cfg(feature = "spill")]
+#[test]
+fn grouped_distinct_keeps_later_rows_after_pressure_spill() {
+    use grafeo_common::memory::buffer::{MemoryRegion, PressureLevel};
+    use grafeo_engine::Config;
+
+    let spill_root = tempfile::tempdir().unwrap();
+    let db = GrafeoDB::with_config(
+        Config::in_memory()
+            .with_memory_limit(64 * 1024 * 1024)
+            .with_spill_path(spill_root.path()),
+    )
+    .unwrap();
+    let manager = db.buffer_manager();
+    let query = "UNWIND range(0, 8191) AS x \
+                 RETURN x % 512 AS bucket, count(DISTINCT x) AS c";
+    let session = db.session();
+
+    let check = |result: &grafeo_engine::database::QueryResult| {
+        let mut rows = result.rows().to_vec();
+        rows.sort_by_key(|row| row[0].as_int64().unwrap());
+        assert_eq!(rows.len(), 512);
+        for (bucket, row) in rows.iter().enumerate() {
+            assert_eq!(
+                row,
+                &vec![
+                    Value::Int64(i64::try_from(bucket).unwrap()),
+                    Value::Int64(16)
+                ]
+            );
+        }
+    };
+
+    // Establish the expected result through the same ordinary query caller.
+    check(&GrafeoDB::new_in_memory().session().execute(query).unwrap());
+    // Keep pressure High throughout execution. Each source chunk revisits all
+    // 512 groups, above the spill guard, so later chunks reload spilled groups.
+    let pressure = manager
+        .try_allocate(
+            manager.config().budget * 9 / 10,
+            MemoryRegion::ExecutionBuffers,
+        )
+        .unwrap();
+    assert_eq!(manager.pressure_level(), PressureLevel::High);
+    check(&session.execute(query).unwrap());
+    check(&session.execute(query).unwrap()); // Cached plan, still under pressure.
+    assert_eq!(manager.pressure_level(), PressureLevel::High);
+    drop(pressure);
+
+    // PROFILE executes the pull engine and returns its report, not query rows.
+    let profile = session.execute(&format!("PROFILE {query}")).unwrap();
+    let report = profile.rows()[0][0].as_str().unwrap();
+    let aggregate = report
+        .lines()
+        .find(|line| line.trim_start().starts_with("HashAggregate "))
+        .unwrap();
+    assert!(aggregate.contains("  rows=512  "), "{report}");
+    assert!(
+        std::fs::read_dir(spill_root.path())
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}

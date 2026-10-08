@@ -43,6 +43,8 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Fixed
 
+- **Grouped aggregates resume after spilling**: later input rows update reloaded DISTINCT and statistical accumulators, with floating compensation and optional values preserved.
+
 - **Encryption at rest did nothing**: `Config::encryption` was ignored, so databases were written in plaintext. The database file and its WAL are now encrypted, and an open without the right key fails. Encrypted databases do not spill yet, so encryption with a spill path, with `TierOverride::ForceDisk` or without a database path now fails. A 0.5.x database migrated with a key becomes an encrypted file; its `.pre-0.6` copy stays unencrypted.
 - **Writes after `close()` were lost**: a write through a handle kept after `close()`, or from another thread while `close()` ran, returned success but was gone after a reopen, and a checkpoint, save, backup or `compact()` from such a handle could overwrite newer data. These now fail with `GRAFEO-T007` (Python: `DatabaseClosedError`); one already in progress completes first. Reads still work, and in-memory databases are not affected.
 - **Writes during a commit could land in the middle of it** ([#548](https://github.com/GrafeoDB/grafeo/issues/548)): a direct write, or another transaction writing the same entities, could hide the committed value from point-in-time reads or undo it on rollback, another query could see part of a commit, and crash recovery could replay two commits in the wrong order. A commit now completes before anything that comes after it.

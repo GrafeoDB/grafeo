@@ -3,11 +3,12 @@
 //! This operator computes shortest paths between source and target nodes
 //! using BFS for unweighted graphs.
 
+use super::expand::visible_edges_from;
 use super::{Operator, OperatorResult};
 use crate::execution::chunk::DataChunkBuilder;
 use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
-use grafeo_common::types::{LogicalType, NodeId, Value};
+use grafeo_common::types::{EpochId, LogicalType, NodeId, TransactionId, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -37,6 +38,12 @@ pub struct ShortestPathOperator {
     min_hops: u32,
     /// Maximum number of edges in a path (`None` = unbounded).
     max_hops: Option<u32>,
+    /// Transaction ID for MVCC visibility (None = use the viewing epoch).
+    transaction_id: Option<TransactionId>,
+    /// Epoch for version visibility (None = every edge in the store).
+    viewing_epoch: Option<EpochId>,
+    /// When true, skip versioned MVCC lookups (fast path for read-only queries).
+    read_only: bool,
     /// Whether the operator has been exhausted.
     exhausted: bool,
 }
@@ -61,8 +68,30 @@ impl ShortestPathOperator {
             all_paths: false,
             min_hops: 0,
             max_hops: None,
+            transaction_id: None,
+            viewing_epoch: None,
+            read_only: false,
             exhausted: false,
         }
+    }
+
+    /// Sets the transaction context for MVCC visibility: the search then
+    /// walks only the edges (and reaches only the nodes) visible at `epoch`
+    /// to `transaction_id`, its own uncommitted edges included.
+    pub fn with_transaction_context(
+        mut self,
+        epoch: EpochId,
+        transaction_id: Option<TransactionId>,
+    ) -> Self {
+        self.viewing_epoch = Some(epoch);
+        self.transaction_id = transaction_id;
+        self
+    }
+
+    /// Marks this search as read-only, enabling fast-path lookups.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
     }
 
     /// Sets whether to find all shortest paths.
@@ -216,27 +245,24 @@ impl ShortestPathOperator {
         }
     }
 
-    /// Gets neighbors of a node in a specific direction, respecting edge type filter.
+    /// Gets neighbors of a node in a specific direction, respecting the edge
+    /// type filter and visibility (see [`visible_edges_from`]).
     ///
     /// This is the direction-parameterized variant used by bidirectional BFS
     /// to traverse the forward and backward frontiers independently.
     fn get_neighbors_directed(&self, node: NodeId, direction: Direction) -> Vec<NodeId> {
-        self.store
-            .edges_from(node, direction)
-            .into_iter()
-            .filter(|(_target, edge_id)| {
-                if self.edge_types.is_empty() {
-                    true
-                } else if let Some(actual_type) = self.store.edge_type(*edge_id) {
-                    self.edge_types
-                        .iter()
-                        .any(|t| actual_type.as_str().eq_ignore_ascii_case(t.as_str()))
-                } else {
-                    false
-                }
-            })
-            .map(|(target, _)| target)
-            .collect()
+        visible_edges_from(
+            self.store.as_ref(),
+            node,
+            direction,
+            &self.edge_types,
+            self.viewing_epoch,
+            self.transaction_id,
+            self.read_only,
+        )
+        .into_iter()
+        .map(|(target, _)| target)
+        .collect()
     }
 
     /// Gets neighbors of a node respecting edge type filter and direction.

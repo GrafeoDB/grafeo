@@ -140,3 +140,43 @@ tests:
         - [1]
         - [2]
         - [3]
+
+  # ---------------------------------------------------------------------------
+  # Typed patterns over the edges an earlier clause wrote: the write links
+  # (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}) and a shortcut (h)-[:X]->(t).
+  # A typed variable-length expand, a chain of typed expands and a typed
+  # shortest path used to see none of these edges (an untyped one did).
+  # ---------------------------------------------------------------------------
+
+  - name: a_typed_variable_length_expand_sees_the_written_edges
+    variants:
+      gql: "INSERT (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h MATCH (h)-[:R|S]->{1,2}(n) RETURN n.i AS i ORDER BY i"
+      cypher: "CREATE (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h MATCH (h)-[:R|S*1..2]->(n) RETURN n.i AS i ORDER BY i"
+    expect:
+      rows:
+        - [3]
+        - [19]
+
+  - name: a_chain_of_typed_expands_sees_the_written_edges
+    variants:
+      gql: "INSERT (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h MATCH (h)-[:R]->(q)-[:S]->(n) RETURN q.i AS q, n.i AS n"
+      cypher: "CREATE (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h MATCH (h)-[:R]->(q)-[:S]->(n) RETURN q.i AS q, n.i AS n"
+    expect:
+      rows:
+        - [3, 19]
+
+  - name: a_typed_shortest_path_sees_the_written_edges
+    variants:
+      gql: "INSERT (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h, t MATCH p = ANY SHORTEST (h)-[:R|S]->+(t) RETURN length(p) AS hops"
+      cypher: "CREATE (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h, t MATCH p = shortestPath((h)-[:R|S*]->(t)) RETURN length(p) AS hops"
+    expect:
+      rows:
+        - [2]
+
+  - name: all_typed_shortest_paths_see_the_written_edges
+    variants:
+      gql: "INSERT (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h, t MATCH p = ALL SHORTEST (h)-[:R|S]->+(t) RETURN length(p) AS hops"
+      cypher: "CREATE (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h, t MATCH p = allShortestPaths((h)-[:R|S*]->(t)) RETURN length(p) AS hops"
+    expect:
+      rows:
+        - [2]

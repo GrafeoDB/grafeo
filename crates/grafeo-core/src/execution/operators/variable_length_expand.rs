@@ -1,5 +1,6 @@
 //! Variable-length expand operator for multi-hop path traversal.
 
+use super::expand::visible_edges_from;
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
@@ -372,45 +373,18 @@ impl VariableLengthExpandOperator {
         Ok(())
     }
 
-    /// Gets edges from a node, respecting filters and visibility.
+    /// Gets edges from a node, respecting filters and visibility (see
+    /// [`visible_edges_from`]).
     fn get_edges(&self, node_id: NodeId) -> Vec<(NodeId, EdgeId)> {
-        let epoch = self.viewing_epoch;
-        let transaction_id = self.transaction_id;
-        let use_versioned = !self.read_only;
-
-        self.store
-            .edges_from(node_id, self.direction)
-            .into_iter()
-            .filter(|(target_id, edge_id)| {
-                // Filter by edge type if specified
-                let type_matches = if self.edge_types.is_empty() {
-                    true
-                } else if let Some(actual_type) = self.store.edge_type(*edge_id) {
-                    self.edge_types
-                        .iter()
-                        .any(|t| actual_type.as_str().eq_ignore_ascii_case(t.as_str()))
-                } else {
-                    false
-                };
-
-                if !type_matches {
-                    return false;
-                }
-
-                // Filter by visibility
-                if let Some(epoch) = epoch {
-                    if use_versioned && let Some(tx) = transaction_id {
-                        self.store.is_edge_visible_versioned(*edge_id, epoch, tx)
-                            && self.store.is_node_visible_versioned(*target_id, epoch, tx)
-                    } else {
-                        self.store.is_edge_visible_at_epoch(*edge_id, epoch)
-                            && self.store.is_node_visible_at_epoch(*target_id, epoch)
-                    }
-                } else {
-                    true
-                }
-            })
-            .collect()
+        visible_edges_from(
+            self.store.as_ref(),
+            node_id,
+            self.direction,
+            &self.edge_types,
+            self.viewing_epoch,
+            self.transaction_id,
+            self.read_only,
+        )
     }
 
     /// Checks whether a candidate expansion is allowed under the current path mode.

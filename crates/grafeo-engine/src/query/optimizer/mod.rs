@@ -3189,6 +3189,7 @@ mod tests {
                 })),
                 shared_variables: vec!["b".to_string()],
                 optional: false,
+                unit: false,
             })
         }
 

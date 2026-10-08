@@ -2118,6 +2118,11 @@ pub struct ApplyOp {
     /// When true, uses left-join semantics: outer rows with no matching inner
     /// rows are emitted with NULLs for the inner columns (OPTIONAL CALL).
     pub optional: bool,
+    /// When true, the subplan runs only for its writes: each outer row comes
+    /// out once, as it came in, however many rows the subplan produces for it
+    /// (none included), and none of the subplan's columns are added. This is
+    /// how a Cypher `FOREACH` runs its updates.
+    pub unit: bool,
 }
 
 /// Parameter scan: leaf operator for correlated subquery inner plans.
@@ -3325,6 +3330,7 @@ mod tests {
             subplan: Box::new(leaf("Company")),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         });
         let apply_children = apply.children();
         assert_eq!(apply_children.len(), 2);
@@ -3728,6 +3734,7 @@ mod tests {
             subplan: Box::new(read()),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         });
         assert!(!apply_readonly.has_mutations());
 
@@ -3736,6 +3743,7 @@ mod tests {
             subplan: Box::new(mutating()),
             shared_variables: vec![],
             optional: true,
+            unit: false,
         });
         assert!(apply_inner_mutates.has_mutations());
     }
@@ -3854,6 +3862,7 @@ mod tests {
             subplan: leaf_empty(),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         });
         assert_eq!(apply.children().len(), 2);
 
@@ -4246,6 +4255,7 @@ mod tests {
             subplan: leaf_empty(),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         });
         assert_eq!(apply.display_label(), "");
 
@@ -4592,6 +4602,7 @@ mod tests {
             subplan: leaf_empty(),
             shared_variables: vec!["a".into()],
             optional: true,
+            unit: false,
         });
         assert!(apply.explain_tree().contains("Apply"));
 
@@ -4952,6 +4963,7 @@ mod tests {
                 })),
                 shared_variables: vec![],
                 optional: false,
+                unit: false,
             })
         };
         assert_eq!(

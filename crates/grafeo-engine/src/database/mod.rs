@@ -1237,8 +1237,10 @@ impl GrafeoDB {
     ///
     /// Takes a snapshot of all nodes and edges from the current store, builds
     /// a columnar `CompactStore` with CSR adjacency as the read-only base,
-    /// and creates a fresh `LpgStore` overlay for future mutations. The
-    /// original store is dropped to free memory.
+    /// and creates an empty `LpgStore` overlay for future mutations, which
+    /// keeps the named graphs and the indexes (property, text and vector,
+    /// with their configuration): they find the compacted nodes and those
+    /// written later. The original store is dropped to free memory.
     ///
     /// Unlike the pre-0.5.39 behavior, the database remains writable after
     /// compaction: new writes go to the overlay. Call [`recompact()`](Self::recompact)
@@ -1317,50 +1319,38 @@ impl GrafeoDB {
         }
 
         let current_store = self.graph_store();
-        let root = self.root_store();
-
-        // Determine max node/edge IDs for overlay seeding.
-        let max_node_id = if let Some(ref store) = root {
-            store.next_node_id().saturating_sub(1)
-        } else {
-            current_store.node_ids().last().map_or(0, |id| id.as_u64())
-        };
-        let max_edge_id = if let Some(ref store) = root {
-            store.next_edge_id().saturating_sub(1)
-        } else {
-            // Scan edges to find max ID.
-            let mut max_eid = 0u64;
-            for nid in current_store.node_ids() {
-                for (_, eid) in
-                    current_store.edges_from(nid, grafeo_core::graph::Direction::Outgoing)
-                {
-                    max_eid = max_eid.max(eid.as_u64());
-                }
-            }
-            max_eid
-        };
-
         let compact = from_graph_store_preserving_ids(current_store.as_ref())
             .map_err(|e| Error::Internal(e.to_string()))?;
 
-        let layered = Arc::new(
-            LayeredStore::new(compact, max_node_id, max_edge_id)
-                .map_err(|e| Error::Internal(e.to_string()))?,
-        );
+        let layered = match self.root_store() {
+            // The overlay carries on the built-in store (or the overlay an
+            // earlier compact() left), as a merge's carries on the old
+            // overlay: its named graphs, which stay outside the columnar
+            // base, its id allocators, and its indexes, whose text and
+            // vector entries cover the base.
+            Some(store) => LayeredStore::carrying_on(compact, &store),
+            // An external store has none of that: the overlay's ids start
+            // past its data.
+            None => {
+                let max_node_id = current_store.node_ids().last().map_or(0, |id| id.as_u64());
+                let mut max_edge_id = 0u64;
+                for nid in current_store.node_ids() {
+                    for (_, eid) in
+                        current_store.edges_from(nid, grafeo_core::graph::Direction::Outgoing)
+                    {
+                        max_edge_id = max_edge_id.max(eid.as_u64());
+                    }
+                }
+                LayeredStore::new(compact, max_node_id, max_edge_id)
+            }
+        }
+        .map_err(|e| Error::Internal(e.to_string()))?;
+        let layered = Arc::new(layered);
 
         // Sync the overlay's epoch with the TransactionManager so MVCC
         // visibility works correctly for nodes created after compact().
         let current_epoch = self.transaction_manager.current_epoch();
         layered.overlay_store().sync_epoch(current_epoch);
-
-        // Named graphs are LPG-specific and outside the columnar base; move them
-        // from the pre-compact overlay into the new overlay so they survive
-        // compaction.
-        if let Some(ref old) = root {
-            layered
-                .overlay_store()
-                .install_named_graphs(old.take_named_graphs());
-        }
 
         self.external_read_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreSearch>);
         self.external_write_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreMut>);
@@ -2378,12 +2368,10 @@ impl GrafeoDB {
     /// [`graph_store()`](Self::graph_store) which returns the trait interface.
     ///
     /// After [`compact()`](Self::compact) this is the overlay of the layered
-    /// store as it is now (owned), which holds the changes since the last
-    /// merge into the base: a merge under memory pressure replaces it, so
-    /// call this again rather than keeping the store across writes. It
-    /// holds only what changed since the last merge:
-    /// [`graph_store()`](Self::graph_store) reads the compacted base with it.
-    /// Otherwise it borrows the database's store.
+    /// store as it is now, which holds only what changed since the last
+    /// merge into the base ([`graph_store()`](Self::graph_store) reads the
+    /// compacted base with it): a merge under memory pressure replaces it, so
+    /// call this again rather than keeping the store across writes.
     ///
     /// # Panics
     ///
@@ -2391,10 +2379,10 @@ impl GrafeoDB {
     /// ([`with_store`](Self::with_store), [`with_read_store`](Self::with_read_store)).
     #[cfg(feature = "lpg")]
     #[must_use]
-    pub fn store(&self) -> std::borrow::Cow<'_, Arc<LpgStore>> {
+    pub fn store(&self) -> Arc<LpgStore> {
         match &self.store {
-            Some(store) => std::borrow::Cow::Borrowed(store),
-            None => std::borrow::Cow::Owned(self.lpg_store()),
+            Some(store) => Arc::clone(store),
+            None => self.lpg_store(),
         }
     }
 

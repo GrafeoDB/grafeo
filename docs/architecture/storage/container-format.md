@@ -533,7 +533,7 @@ framed, little-endian:
 | Field | Size | Meaning |
 |-------|------|---------|
 | `kind` | `u8` | What the record holds (below); `0` is never written |
-| `flags` | `u8` | Bit 0: required (see below). A reader refuses any other bit |
+| `flags` | `u8` | Bit 0: required (see below). A reader refuses another of bits 0 to 3 and ignores bits 4 to 7, as for directory entries |
 | `length` | `u32` | Length of the payload, at most 2 MiB (2,097,152 bytes) |
 | payload | `length` bytes | The kind's record in bincode (bincode 2, standard configuration: variable-length little-endian integers) |
 
@@ -588,7 +588,7 @@ kind's fields do not change: a version that needs other fields adds a kind.
 A reader refuses, naming the chunk or the record (by its entry, or by its
 position and the byte it starts at): a first chunk other than the metadata
 chunk, another layout, bytes after the metadata, a chunk other than a piece
-of stream 0 of graph 0; kind 0, a flag bit other than bit 0, or an unknown
+of stream 0 of graph 0; kind 0, a flag among bits 0 to 3 other than bit 0, or an unknown
 kind with the required flag; a length over 2 MiB (before it reads the
 payload, which it reads into a buffer that grows with the bytes present); a
 stream that ends inside a record; a payload that does not decode as its

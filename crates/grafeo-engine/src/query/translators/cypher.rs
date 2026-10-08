@@ -347,6 +347,7 @@ impl CypherTranslator {
             subplan: Box::new(subplan),
             shared_variables,
             optional: false,
+            unit: false,
         }))
     }
 
@@ -472,37 +473,62 @@ impl CypherTranslator {
         Ok(Some(imported))
     }
 
-    /// Translates `FOREACH (var IN list | clauses)` to Unwind + mutation pipeline.
+    /// Translates `FOREACH (var IN list | clauses)`: for each row, the list is
+    /// unwound and the update clauses run once per item, and the row then goes
+    /// on once, as it came in (openCypher). The updates run as a unit Apply
+    /// (see [`ApplyOp::unit`]) that imports every variable of the row: an
+    /// empty or null list writes nothing and keeps the row, a longer one does
+    /// not repeat it, and neither `var` nor what the updates bind is a
+    /// variable after the `FOREACH`.
     fn translate_foreach(
         &self,
         foreach: &ast::ForEachClause,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "FOREACH requires preceding input (e.g., a MATCH clause)",
-            ))
-        })?;
+        // As the first clause it runs for the one row a query starts from,
+        // which has no variables to import.
+        let first = input.is_none();
+        let input = input.unwrap_or(LogicalOperator::Empty);
 
         let list_expr = self.translate_expression(&foreach.list)?;
 
-        // Unwind the list into individual rows
+        // Unwind the list of the row the updates run for into one row per item
+        let unwind_input = if first {
+            LogicalOperator::Empty
+        } else {
+            LogicalOperator::ParameterScan(ParameterScanOp {
+                columns: vec!["*".to_string()],
+            })
+        };
         let unwind = LogicalOperator::Unwind(UnwindOp {
-            input: Box::new(input),
+            input: Box::new(unwind_input),
             expression: list_expr,
             variable: foreach.variable.clone(),
             ordinality_var: None,
             offset_var: None,
         });
 
-        // Chain the inner mutation clauses
-        let mut plan = unwind;
+        // Chain the inner update clauses, which see the row's variables (a
+        // nested FOREACH or CALL imports them through `*`)
+        let outer_names = input.bound_variables(self.call_scope.borrow().as_ref());
+        let enclosing = self.call_scope.replace(outer_names);
+        let mut body = Ok(unwind);
         for clause in &foreach.clauses {
-            plan = self.translate_clause(clause, Some(plan))?;
+            body = body.and_then(|plan| self.translate_clause(clause, Some(plan)));
         }
+        self.call_scope.replace(enclosing);
 
-        Ok(plan)
+        Ok(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(input),
+            subplan: Box::new(body?),
+            shared_variables: if first {
+                Vec::new()
+            } else {
+                vec!["*".to_string()]
+            },
+            optional: false,
+            unit: true,
+        }))
     }
 
     /// Extracts all named variables from a Cypher AST pattern.
@@ -2851,6 +2877,7 @@ impl CypherTranslator {
                     subplan: Box::new(inner_plan),
                     shared_variables: vec![anchor],
                     optional: false,
+                    unit: false,
                 });
 
                 // 6. Replace expression with Variable reference
@@ -4023,29 +4050,27 @@ mod tests {
     fn test_translate_foreach() {
         let plan = translate("MATCH (n:Person) FOREACH (x IN [1,2,3] | SET n.x = 1)").unwrap();
 
-        // FOREACH translates to Unwind + mutation pipeline
-        // The plan should contain an Unwind operator somewhere
-        fn find_unwind(op: &LogicalOperator) -> bool {
-            match op {
-                LogicalOperator::Unwind(_) => true,
-                LogicalOperator::SetProperty(s) => find_unwind(&s.input),
-                LogicalOperator::Filter(f) => find_unwind(&f.input),
-                LogicalOperator::Return(r) => find_unwind(&r.input),
-                _ => false,
-            }
-        }
-
-        assert!(
-            find_unwind(&plan.root),
-            "FOREACH should produce an Unwind operator in the plan"
-        );
-
-        // The root should be a SetProperty (the inner SET clause)
-        assert!(
-            matches!(&plan.root, LogicalOperator::SetProperty(_)),
-            "Expected SetProperty at root for FOREACH with SET, got {:?}",
-            std::mem::discriminant(&plan.root)
-        );
+        // FOREACH translates to a unit Apply over the MATCH, importing every
+        // variable of the row: its subplan unwinds the list from the row and
+        // runs the SET once per item.
+        let LogicalOperator::Apply(apply) = &plan.root else {
+            panic!("expected a unit Apply at the root, got {:?}", plan.root);
+        };
+        assert!(apply.unit, "FOREACH passes each row on once");
+        assert!(!apply.optional);
+        assert_eq!(apply.shared_variables, ["*"]);
+        assert!(matches!(&*apply.input, LogicalOperator::NodeScan(_)));
+        let LogicalOperator::SetProperty(set) = &*apply.subplan else {
+            panic!("expected the SET in the subplan, got {:?}", apply.subplan);
+        };
+        let LogicalOperator::Unwind(unwind) = &*set.input else {
+            panic!("expected the Unwind below the SET, got {:?}", set.input);
+        };
+        assert_eq!(unwind.variable, "x");
+        assert!(matches!(
+            &*unwind.input,
+            LogicalOperator::ParameterScan(scan) if scan.columns == ["*"]
+        ));
     }
 
     // === Basic Query Translation Tests ===

@@ -197,6 +197,28 @@ impl LayeredStore {
         Ok(Self::from_parts(Arc::new(base), overlay))
     }
 
+    /// Creates a layered store over `base`, the compacted default graph of
+    /// `store`, under an empty overlay that carries on `store` as a merge's
+    /// new overlay carries on the old one (see [`LpgStore::successor`]): its
+    /// named graphs, epoch, id allocators and index definitions, with the
+    /// text and vector indexes, which cover the base's nodes. When `store` is
+    /// itself the overlay of a layered store, the base nodes it deleted,
+    /// which `base` leaves out, leave those indexes.
+    ///
+    /// `store` must have no open changes: no transaction is open in it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the overlay `LpgStore` cannot be created.
+    pub fn carrying_on(
+        base: CompactStore,
+        store: &LpgStore,
+    ) -> Result<Self, grafeo_common::memory::AllocError> {
+        let gone: Vec<NodeId> = store.base_tombstones().deleted_nodes().collect();
+        let overlay = successor_over(store, &base, &gone)?;
+        Ok(Self::from_parts(Arc::new(base), Arc::new(overlay)))
+    }
+
     /// Phase 5e: builds a `LayeredStore` adopting an existing
     /// `Arc<LpgStore>` as the overlay rather than allocating a fresh
     /// one. Used by the open path when reloading a previously-compacted
@@ -478,25 +500,13 @@ impl LayeredStore {
         } else {
             Vec::new()
         };
-        let fresh = Arc::new(
-            self.overlay
-                .load()
-                .successor(&gone)
-                .expect("LpgStore allocation"),
-        );
-        // New ids never collide with the base's: the old overlay's
-        // allocators are at least past them, unless they were never seeded.
-        let max_nid = base
-            .as_deref()
-            .map_or_else(
-                || self.base.load().all_node_ids(),
-                CompactStore::all_node_ids,
+        let fresh = {
+            let current = self.base.load();
+            let under = base.as_deref().unwrap_or(&current);
+            Arc::new(
+                successor_over(&self.overlay.load(), under, &gone).expect("LpgStore allocation"),
             )
-            .into_iter()
-            .map(|id| id.as_u64())
-            .max()
-            .unwrap_or(0);
-        fresh.set_next_node_id(fresh.next_node_id().max(max_nid + 1));
+        };
 
         // Odd while the writes below are in progress. As in a textbook
         // sequence lock, a release fence follows the increment and pairs
@@ -822,6 +832,29 @@ impl LayeredStore {
             .base_tombstones()
             .edge_deleted_for(id, epoch, transaction_id)
     }
+}
+
+/// The empty overlay that carries on `overlay` over `base` (see
+/// [`LpgStore::successor`]), without the deleted base nodes `gone` that
+/// `base` leaves out.
+///
+/// New ids never collide with the base's: the allocators of `overlay` are
+/// past them already, unless they were never seeded, and the new node id
+/// allocator is moved past every id of `base` for that case.
+fn successor_over(
+    overlay: &LpgStore,
+    base: &CompactStore,
+    gone: &[NodeId],
+) -> Result<LpgStore, grafeo_common::memory::AllocError> {
+    let fresh = overlay.successor(gone)?;
+    let max_nid = base
+        .all_node_ids()
+        .into_iter()
+        .map(|id| id.as_u64())
+        .max()
+        .unwrap_or(0);
+    fresh.set_next_node_id(fresh.next_node_id().max(max_nid + 1));
+    Ok(fresh)
 }
 
 /// The current base lends its vectors to the overlay's vector indexes.

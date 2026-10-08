@@ -3,12 +3,12 @@
 use super::{
     AddLabelOp, AddLabelOperator, AntiJoinOp, Arc, CreateEdgeOp, CreateEdgeOperator, CreateNodeOp,
     CreateNodeOperator, DeleteEdgeOp, DeleteEdgeOperator, DeleteNodeOp, DeleteNodeOperator,
-    Direction, EntityValue, Error, ExpandDirection, ExpressionPredicate, HashMap, LeftJoinOp,
-    LogicalExpression, LogicalOperator, LogicalType, MergeConfig, MergeOp, MergeOperator,
-    MergeRelationshipConfig, MergeRelationshipOp, MergeRelationshipOperator, Operator, ProjectExpr,
-    ProjectOperator, PropertySource, RemoveLabelOp, RemoveLabelOperator, Result, SetPropertyOp,
-    SetPropertyOperator, ShortestPathOp, ShortestPathOperator, UnaryOp, UnwindOp, UnwindOperator,
-    Value,
+    Direction, EagerOperator, EntityValue, Error, ExpandDirection, ExpressionPredicate, HashMap,
+    LeftJoinOp, LogicalExpression, LogicalOperator, LogicalType, MergeConfig, MergeOp,
+    MergeOperator, MergeRelationshipConfig, MergeRelationshipOp, MergeRelationshipOperator,
+    Operator, ProjectExpr, ProjectOperator, PropertySource, RemoveLabelOp, RemoveLabelOperator,
+    Result, SetPropertyOp, SetPropertyOperator, ShortestPathOp, ShortestPathOperator, UnaryOp,
+    UnwindOp, UnwindOperator, Value,
 };
 #[cfg(feature = "algos")]
 use super::{CallProcedureOp, StaticResultOperator};
@@ -415,7 +415,7 @@ impl super::Planner {
             (None, Vec::new())
         } else {
             let (op, cols) = self.plan_operator(&merge.input)?;
-            (Some(op), cols)
+            (Some(read_first_after_a_write(op, &merge.input)), cols)
         };
 
         // Match properties cannot reference the MERGE variable (ISO §15.5).
@@ -496,6 +496,7 @@ impl super::Planner {
         merge_rel: &MergeRelationshipOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (input_op, mut columns) = self.plan_operator(&merge_rel.input)?;
+        let input_op = read_first_after_a_write(input_op, &merge_rel.input);
 
         // Find source and target node columns
         let source_column = columns
@@ -616,7 +617,8 @@ impl super::Planner {
             ExpandDirection::Both => Direction::Both,
         };
 
-        // Create the shortest path operator
+        // Create the shortest path operator: it walks the edges this query
+        // sees, its transaction's uncommitted ones included, as an expand does.
         let operator: Box<dyn Operator> = Box::new(
             ShortestPathOperator::new(
                 Arc::clone(&self.store),
@@ -627,7 +629,9 @@ impl super::Planner {
                 direction,
             )
             .with_all_paths(sp.all_paths)
-            .with_hop_bounds(sp.min_hops, sp.max_hops),
+            .with_hop_bounds(sp.min_hops, sp.max_hops)
+            .with_transaction_context(self.viewing_epoch, self.transaction_id)
+            .with_read_only(self.read_only),
         );
 
         // Add path length column with the expected naming convention
@@ -1385,4 +1389,18 @@ fn has_computed_source(properties: &[(String, PropertySource)]) -> bool {
 /// evaluate computed property values against.
 fn single_row_input() -> Box<dyn Operator> {
     Box::new(grafeo_core::execution::operators::single_row::SingleRowOperator::new())
+}
+
+/// The planned input `op` of a MERGE, read whole before the first row comes
+/// out when its plan `input` writes: a MERGE after a write (`UNWIND ... CREATE
+/// (:P {k: i}) WITH i MERGE (:P {k: 301 - i})`) then finds what every row of
+/// the earlier clauses wrote, not only what the rows before its own did, as
+/// a MATCH there does (see `plan_node_scan`). The MERGE itself still runs row
+/// by row, so a row sees what the MERGE created for the rows before it.
+fn read_first_after_a_write(op: Box<dyn Operator>, input: &LogicalOperator) -> Box<dyn Operator> {
+    if input.has_mutations() {
+        Box::new(EagerOperator::new(op))
+    } else {
+        op
+    }
 }

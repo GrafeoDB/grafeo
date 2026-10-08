@@ -3782,6 +3782,7 @@ mod tests {
             })),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         }));
 
         let mut binder = Binder::new();
@@ -3816,6 +3817,7 @@ mod tests {
             })),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         }));
 
         let mut binder = Binder::new();
@@ -4610,6 +4612,7 @@ mod tests {
             subplan: Box::new(subplan),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         }));
 
         let mut binder = Binder::new();
@@ -4669,6 +4672,7 @@ mod tests {
             subplan: Box::new(subplan),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         }));
 
         let mut binder = Binder::new();

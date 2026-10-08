@@ -3647,6 +3647,7 @@ mod tests {
             subplan: Box::new(scan_any("b")),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         }));
         let physical = planner.plan(&logical).unwrap();
         assert!(physical.columns().contains(&"a".to_string()));

@@ -542,7 +542,7 @@ fn a_session_opened_before_recompact_writes_the_live_overlay() {
 fn compact_frees_the_store_it_compacted() {
     let mut db = GrafeoDB::new_in_memory();
     db.execute(INSERT_PEOPLE).unwrap();
-    let compacted = Arc::downgrade(&*db.store());
+    let compacted = Arc::downgrade(&db.store());
     db.compact().unwrap();
     assert!(
         compacted.upgrade().is_none(),

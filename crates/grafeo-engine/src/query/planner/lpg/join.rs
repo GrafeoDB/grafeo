@@ -369,34 +369,44 @@ impl super::Planner {
     /// injects outer row values into the inner plan via [`ParameterState`].
     /// Below a write, the Apply reads its whole input before the subquery
     /// runs, so that the subquery sees what all the rows wrote (as a scan
-    /// after a write does, see `plan_node_scan`).
+    /// after a write does, see `plan_node_scan`). A unit Apply (`FOREACH`,
+    /// see [`ApplyOp::unit`]) passes its input's rows on with their own
+    /// columns only.
     pub(super) fn plan_apply(&self, apply: &ApplyOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // A subquery that comes first runs once, on one empty row.
         let (outer_op, outer_columns) = self.plan_input(&apply.input)?;
         let input_writes = apply.input.has_mutations();
         let output = subquery_output(&apply.subplan);
         let subplan = output.as_ref().unwrap_or(&apply.subplan);
+        let configure = |mut op: ApplyOperator, inner_col_count: usize| {
+            if apply.optional {
+                op = op.with_optional(inner_col_count);
+            }
+            if apply.unit {
+                op = op.with_unit();
+            }
+            if input_writes {
+                op = op.with_outer_first();
+            }
+            op
+        };
 
         if apply.shared_variables.is_empty() {
             // Uncorrelated Apply
             let (inner_op, inner_columns) = self.plan_operator(subplan)?;
             // Any other subquery materializes values (PropertyAccess,
             // NodeResolve, aggregates, etc.), so its output columns are scalar.
-            if output.is_none() {
+            if output.is_none() && !apply.unit {
                 for col in &inner_columns {
                     self.scalar_columns.borrow_mut().insert(col.clone());
                 }
             }
             let inner_col_count = inner_columns.len();
             let mut columns = outer_columns;
-            columns.extend(inner_columns);
-            let mut op = ApplyOperator::new(outer_op, inner_op);
-            if apply.optional {
-                op = op.with_optional(inner_col_count);
+            if !apply.unit {
+                columns.extend(inner_columns);
             }
-            if input_writes {
-                op = op.with_outer_first();
-            }
+            let op = configure(ApplyOperator::new(outer_op, inner_op), inner_col_count);
             return Ok((Box::new(op), columns));
         }
 
@@ -437,7 +447,9 @@ impl super::Planner {
 
         // Any other subquery materializes values, so register them as scalar
         // to prevent the outer RETURN from misinterpreting them as node IDs.
-        if output.is_none() {
+        // A unit subplan's columns are dropped: the outer row's own (an
+        // imported node among them) keep what they are.
+        if output.is_none() && !apply.unit {
             for col in &inner_columns {
                 self.scalar_columns.borrow_mut().insert(col.clone());
             }
@@ -446,15 +458,13 @@ impl super::Planner {
         // Build correlated Apply
         let mut columns = outer_columns;
         let inner_col_count = inner_columns.len();
-        columns.extend(inner_columns);
-        let mut op =
-            ApplyOperator::new_correlated(outer_op, inner_op, param_state, param_col_indices);
-        if apply.optional {
-            op = op.with_optional(inner_col_count);
+        if !apply.unit {
+            columns.extend(inner_columns);
         }
-        if input_writes {
-            op = op.with_outer_first();
-        }
+        let op = configure(
+            ApplyOperator::new_correlated(outer_op, inner_op, param_state, param_col_indices),
+            inner_col_count,
+        );
         Ok((Box::new(op), columns))
     }
 }

@@ -8,7 +8,7 @@
 //! | Bytes | Field |
 //! | --- | --- |
 //! | 1 | kind |
-//! | 1 | flags: bit 0 is [`RECORD_REQUIRED`]; a reader refuses any other bit |
+//! | 1 | flags: bit 0 is [`RECORD_REQUIRED`]; a reader refuses another of bits 0 to 3 and ignores bits 4 to 7 |
 //! | 4 | payload length, u32 little endian, at most [`MAX_CATALOG_RECORD_PAYLOAD`] |
 //! | length | payload: bincode (standard configuration) of the kind's record type |
 //!
@@ -94,8 +94,14 @@ const CATALOG_DECODE_LIMIT: usize = 1 << 24;
 /// The bytes of a record's frame before its payload: kind, flags, length.
 pub(crate) const RECORD_HEADER_BYTES: usize = 6;
 
-/// The flag bits this release knows.
+/// The flag bits this release knows (and the only ones it writes).
 const KNOWN_FLAGS: u8 = RECORD_REQUIRED;
+
+/// Bits 0 to 3 change how a record is read, so a reader refuses one it does
+/// not know; bits 4 to 7 do not, and a reader ignores them: the split of the
+/// directory entries' and the file header's flags, so a later release can add
+/// a flag older readers may pass over.
+const INCOMPATIBLE_FLAGS: u8 = 0x0F;
 
 const KIND_SCHEMA: u8 = 1;
 const KIND_NODE_TYPE: u8 = 2;
@@ -606,7 +612,8 @@ impl CatalogRecord {
 /// Returns [`Error::Serialization`] naming the record (its index, from 0,
 /// and the byte it starts at) for:
 ///
-/// - kind 0, or flag bits other than [`RECORD_REQUIRED`];
+/// - kind 0, or a flag among bits 0 to 3 other than [`RECORD_REQUIRED`]
+///   (bits 4 to 7 are ignored);
 /// - an unknown kind with the required flag set;
 /// - a payload longer than [`MAX_CATALOG_RECORD_PAYLOAD`];
 /// - a stream that ends inside a record's header or payload;
@@ -772,12 +779,12 @@ pub(crate) fn read_framed_records<T>(
         }
         let [kind, flags, length @ ..] = header;
         let length = u32::from_le_bytes(length);
-        if flags & !KNOWN_FLAGS != 0 {
+        if flags & INCOMPATIBLE_FLAGS & !KNOWN_FLAGS != 0 {
             return Err(framing.error(
                 index,
                 offset,
                 format_args!(
-                    "flags {flags:#04x} hold bits this release does not know (bit 0, required, \
+                    "flags {flags:#04x} hold bits among 0 to 3 this release does not know (bit 0, required, \
                      is the only one)"
                 ),
             ));
@@ -1488,12 +1495,14 @@ mod tests {
     }
 
     #[test]
-    fn every_flag_value_but_none_and_required_is_refused() {
+    fn only_unknown_flags_among_bits_0_to_3_are_refused() {
         for flags in 0..=u8::MAX {
             let mut bytes = framed(&schema("Paris"));
             bytes[1] = flags;
             let known = read_all(&bytes);
-            if flags <= RECORD_REQUIRED {
+            // Bits 4 to 7 are ignored, so only bits 0 to 3 decide.
+            let read_bits = flags & 0x0F;
+            if read_bits <= RECORD_REQUIRED {
                 assert_eq!(known.unwrap(), [schema("Paris")], "flags {flags:#04x}");
             } else {
                 let error = known.unwrap_err().to_string();
@@ -1504,7 +1513,7 @@ mod tests {
             }
             bytes[0] = 99;
             let unknown = read_all(&bytes);
-            match flags {
+            match read_bits {
                 0 => assert!(unknown.unwrap().is_empty(), "an optional record is skipped"),
                 RECORD_REQUIRED => assert!(
                     unknown.unwrap_err().to_string().contains("required"),

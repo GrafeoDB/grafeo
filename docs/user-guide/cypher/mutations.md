@@ -148,7 +148,8 @@ match, and `ON MATCH` and a later `SET` apply to all of them.
 
 ## FOREACH
 
-Iterate over a list and execute mutations for each element:
+Iterate over a list and execute mutations for each element. `FOREACH` passes each row on once, unchanged; its
+variable and what its updates bind are not visible after it:
 
 ```cypher
 -- Create nodes from a list

@@ -264,6 +264,7 @@ fn combine_queries(
             subplan: Box::new(right),
             shared_variables: Vec::new(),
             optional: false,
+            unit: false,
         }),
     })
 }
@@ -729,6 +730,7 @@ impl GqlTranslator {
                                 subplan: Box::new(call_plan),
                                 shared_variables: Vec::new(),
                                 optional: false,
+                                unit: false,
                             });
                         }
                     }
@@ -1580,6 +1582,7 @@ impl GqlTranslator {
             subplan: Box::new(inner_plan),
             shared_variables,
             optional,
+            unit: false,
         }))
     }
 

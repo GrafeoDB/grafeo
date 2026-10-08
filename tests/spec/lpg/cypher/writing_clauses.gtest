@@ -326,6 +326,41 @@ tests:
       rows:
         - [3]
 
+  # FOREACH passes each row on once, whatever its list holds: it used to
+  # repeat the row once per item, and to drop it for an empty or null list.
+  - name: foreach_keeps_the_row_for_a_longer_list
+    statements:
+      - "UNWIND [3, 19] AS i FOREACH (x IN [1, 2] | CREATE (:Z {i: i, x: x})) RETURN i"
+    expect:
+      rows:
+        - [3]
+        - [19]
+
+  - name: foreach_writes_once_per_item
+    statements:
+      - "UNWIND [3, 19] AS i FOREACH (x IN [1, 2] | CREATE (:Z {i: i, x: x})) RETURN count(*) AS rows"
+      - "MATCH (z:Z) RETURN count(z) AS written"
+    expect:
+      rows:
+        - [4]
+
+  - name: foreach_keeps_the_row_for_an_empty_list
+    query: "UNWIND [3, 19, 88] AS i FOREACH (x IN [] | CREATE (:Z)) RETURN count(*) AS rows"
+    expect:
+      rows:
+        - [3]
+
+  - name: foreach_keeps_the_row_for_a_null_list
+    query: "UNWIND [3, 19, 88] AS i FOREACH (x IN null | CREATE (:Z)) RETURN count(*) AS rows"
+    expect:
+      rows:
+        - [3]
+
+  - name: foreach_variable_is_not_visible_after_it
+    query: "UNWIND [3] AS i FOREACH (x IN [1, 2] | CREATE (:Z)) RETURN x"
+    expect:
+      error: "Undefined variable 'x'"
+
   # ---------------------------------------------------------------------------
   # Computed property values in CREATE and MERGE (used to fail with an internal
   # error in CREATE, and silently became NULL in MERGE)

@@ -18,9 +18,10 @@ mutable overlay. Inserts and property updates after `compact()` land in the over
 compacting again merges the overlay back into a fresh base (`recompact()` in Rust,
 `compact()` again in Python and Node.js).
 
-Queries keep working across all supported languages, indexes (vector, text, hybrid)
-can be created and searched post-compact, and named graphs are preserved across
-`compact()` / `recompact()`.
+Queries keep working across all supported languages. The property, vector and text
+indexes made before `compact()` stay (with their configuration), new ones can be
+created after it, and they find the compacted nodes and those written later. Named
+graphs are preserved across `compact()` / `recompact()`.
 
 **When to use it:** workloads that ingest once and query many times, or read-heavy
 workloads with occasional updates. Code analysis tools, static knowledge graphs,

@@ -7,12 +7,9 @@
 //! Shared types ([`AggregateFunction`], [`AggregateExpr`], [`HashableValue`]) live in
 //! the [`super::accumulator`] module.
 
+use grafeo_common::types::{HashableValue as GroupValueKey, LogicalType, Value};
 use indexmap::IndexMap;
 use std::collections::HashSet;
-use std::sync::Arc;
-
-use arcstr::ArcStr;
-use grafeo_common::types::{LogicalType, PropertyKey, Value};
 
 use super::accumulator::{AggregateExpr, AggregateFunction, HashableValue};
 use super::{Operator, OperatorError, OperatorResult};
@@ -646,91 +643,19 @@ fn agg_value_to_string(val: &Value) -> String {
 
 /// A group key for hash-based aggregation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct GroupKey(Vec<GroupKeyPart>);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum GroupKeyPart {
-    Null,
-    Bool(bool),
-    Int64(i64),
-    String(ArcStr),
-    Bytes(Arc<[u8]>),
-    Date(grafeo_common::types::Date),
-    Time(grafeo_common::types::Time),
-    Timestamp(grafeo_common::types::Timestamp),
-    Duration(grafeo_common::types::Duration),
-    ZonedDatetime(grafeo_common::types::ZonedDatetime),
-    List(Vec<GroupKeyPart>),
-    Map(Vec<(ArcStr, GroupKeyPart)>),
-}
-
-impl GroupKeyPart {
-    fn from_value(v: Value) -> Self {
-        match v {
-            Value::Null => Self::Null,
-            Value::Bool(b) => Self::Bool(b),
-            Value::Int64(i) => Self::Int64(i),
-            // reason: intentional bit-level reinterpretation for grouping equality
-            #[allow(clippy::cast_possible_wrap)]
-            Value::Float64(f) => Self::Int64(f.to_bits() as i64),
-            Value::String(s) => Self::String(s.clone()),
-            Value::Bytes(b) => Self::Bytes(b),
-            Value::Date(d) => Self::Date(d),
-            Value::Time(t) => Self::Time(t),
-            Value::Timestamp(ts) => Self::Timestamp(ts),
-            Value::Duration(d) => Self::Duration(d),
-            Value::ZonedDatetime(zdt) => Self::ZonedDatetime(zdt),
-            Value::List(items) => Self::List(items.iter().cloned().map(Self::from_value).collect()),
-            Value::Map(map) => {
-                // BTreeMap already iterates in key order, so this is deterministic
-                let entries: Vec<(ArcStr, GroupKeyPart)> = map
-                    .iter()
-                    .map(|(k, v)| (ArcStr::from(k.as_str()), Self::from_value(v.clone())))
-                    .collect();
-                Self::Map(entries)
-            }
-            // Path, Vector, GCounter, OnCounter: use Debug string as fallback
-            other => Self::String(ArcStr::from(format!("{other:?}"))),
-        }
-    }
-
-    fn to_value(&self) -> Value {
-        match self {
-            Self::Null => Value::Null,
-            Self::Bool(b) => Value::Bool(*b),
-            Self::Int64(i) => Value::Int64(*i),
-            Self::String(s) => Value::String(s.clone()),
-            Self::Bytes(b) => Value::Bytes(Arc::clone(b)),
-            Self::Date(d) => Value::Date(*d),
-            Self::Time(t) => Value::Time(*t),
-            Self::Timestamp(ts) => Value::Timestamp(*ts),
-            Self::Duration(d) => Value::Duration(*d),
-            Self::ZonedDatetime(zdt) => Value::ZonedDatetime(*zdt),
-            Self::List(parts) => {
-                let values: Vec<Value> = parts.iter().map(Self::to_value).collect();
-                Value::List(Arc::from(values.into_boxed_slice()))
-            }
-            Self::Map(entries) => {
-                let map: std::collections::BTreeMap<PropertyKey, Value> = entries
-                    .iter()
-                    .map(|(k, v)| (PropertyKey::new(k.as_str()), v.to_value()))
-                    .collect();
-                Value::Map(Arc::new(map))
-            }
-        }
-    }
-}
+pub struct GroupKey(Vec<GroupValueKey>);
 
 impl GroupKey {
     /// Creates a group key from column values.
     fn from_row(chunk: &DataChunk, row: usize, group_columns: &[usize]) -> Self {
-        let parts: Vec<GroupKeyPart> = group_columns
+        let parts: Vec<GroupValueKey> = group_columns
             .iter()
             .map(|&col_idx| {
                 chunk
                     .column(col_idx)
                     .and_then(|col| col.get_value(row))
-                    .map_or(GroupKeyPart::Null, GroupKeyPart::from_value)
+                    .unwrap_or(Value::Null)
+                    .into()
             })
             .collect();
         GroupKey(parts)
@@ -738,7 +663,7 @@ impl GroupKey {
 
     /// Converts the group key back to values.
     fn to_values(&self) -> Vec<Value> {
-        self.0.iter().map(GroupKeyPart::to_value).collect()
+        self.0.iter().map(|value| value.0.clone()).collect()
     }
 }
 
@@ -1123,6 +1048,53 @@ impl Operator for SimpleAggregateOperator {
 mod tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
+    use arcstr::ArcStr;
+    use std::sync::Arc;
+
+    #[test]
+    fn group_identity_preserves_typed_values_across_chunks() {
+        use crate::execution::vector::ValueVector;
+        use grafeo_common::types::HashableValue as ValueKey;
+        use std::collections::HashMap;
+
+        let vector = Value::Vector(Arc::from([1.0_f32, 2.0]));
+        let values = vec![
+            Value::Int64(0),
+            Value::Float64(0.0),
+            Value::Float64(-0.0),
+            Value::Float64(f64::from_bits(0x7ff8_0000_0000_0001)),
+            Value::Float64(f64::from_bits(0x7ff8_0000_0000_0002)),
+            Value::List(Arc::from([Value::Int64(0)])),
+            Value::List(Arc::from([Value::Float64(0.0)])),
+            Value::String(ArcStr::from(format!("{vector:?}"))),
+            vector,
+            Value::Null,
+        ];
+        let chunks = (0..2)
+            .map(|_| DataChunk::new(vec![ValueVector::from_values(&values)]))
+            .collect();
+        let mut aggregate = HashAggregateOperator::new(
+            Box::new(MockOperator::new(chunks)),
+            vec![0],
+            vec![AggregateExpr::count_star()],
+            vec![LogicalType::Any, LogicalType::Int64],
+        );
+        let result = aggregate.next().unwrap().unwrap();
+        let actual: HashMap<ValueKey, i64> = result
+            .selected_indices()
+            .map(|row| {
+                (
+                    result.column(0).unwrap().get_value(row).unwrap().into(),
+                    result.column(1).unwrap().get_int64(row).unwrap(),
+                )
+            })
+            .collect();
+        let expected: HashMap<ValueKey, i64> =
+            values.into_iter().map(|value| (value.into(), 2)).collect();
+        assert_eq!(result.row_count(), expected.len());
+        assert_eq!(actual, expected);
+        assert!(aggregate.next().unwrap().is_none());
+    }
 
     struct MockOperator {
         chunks: Vec<DataChunk>,

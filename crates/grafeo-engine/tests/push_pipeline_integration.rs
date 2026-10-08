@@ -16,6 +16,148 @@
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
+#[test]
+fn native_group_identity_matches_profile_for_typed_keys() {
+    use grafeo_common::types::HashableValue;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    for values in [
+        vec![Value::Int64(0), Value::Float64(0.0)],
+        vec![
+            Value::List(Arc::from([Value::Int64(0)])),
+            Value::List(Arc::from([Value::Float64(0.0)])),
+        ],
+    ] {
+        let db = GrafeoDB::new_in_memory();
+        for value in values.iter().chain(values.iter()) {
+            db.create_node_with_props(&["TypedKey"], [("v", value.clone())])
+                .unwrap();
+        }
+        let session = db.session();
+        let query = "MATCH (n:TypedKey) RETURN n.v AS key, count(*) AS c";
+        let expected: HashMap<HashableValue, i64> =
+            values.into_iter().map(|value| (value.into(), 2)).collect();
+        for _ in 0..2 {
+            let result = session.execute(query).unwrap();
+            let actual: HashMap<HashableValue, i64> = result
+                .rows()
+                .iter()
+                .map(|row| (row[0].clone().into(), row[1].as_int64().unwrap()))
+                .collect();
+            assert_eq!(result.rows().len(), 2);
+            assert_eq!(actual, expected);
+        }
+        let profile = session.execute(&format!("PROFILE {query}")).unwrap();
+        let report = profile.rows()[0][0].as_str().unwrap();
+        let aggregate = report
+            .lines()
+            .find(|line| line.trim_start().starts_with("HashAggregate "))
+            .unwrap();
+        assert!(aggregate.contains("  rows=2  "), "{report}");
+    }
+}
+
+#[test]
+fn native_distinct_identity_matches_profile_for_typed_keys() {
+    use grafeo_common::types::HashableValue;
+    use std::collections::HashSet;
+
+    let db = GrafeoDB::new_in_memory();
+    let values = [Value::Int64(0), Value::Float64(0.0)];
+    for value in values.iter().chain(values.iter()) {
+        db.create_node_with_props(&["TypedKey"], [("v", value.clone())])
+            .unwrap();
+    }
+    let session = db.session();
+    let query = "MATCH (n:TypedKey) RETURN DISTINCT n.v AS key";
+    let expected: HashSet<HashableValue> = values.into_iter().map(Into::into).collect();
+    for _ in 0..2 {
+        let result = session.execute(query).unwrap();
+        let actual: HashSet<HashableValue> = result
+            .rows()
+            .iter()
+            .map(|row| row[0].clone().into())
+            .collect();
+        assert_eq!(result.rows().len(), 2);
+        assert_eq!(actual, expected);
+    }
+    let profile = session.execute(&format!("PROFILE {query}")).unwrap();
+    let report = profile.rows()[0][0].as_str().unwrap();
+    let distinct = report
+        .lines()
+        .find(|line| line.trim_start().starts_with("Distinct "))
+        .unwrap();
+    assert!(distinct.contains("  rows=2  "), "{report}");
+}
+
+#[test]
+fn native_group_identity_keeps_opposite_counter_states() {
+    use grafeo_common::types::HashableValue;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let empty = Arc::new(HashMap::new());
+    let actor = Arc::new(HashMap::from([("actor".to_owned(), 1_u64)]));
+    let positive = Value::OnCounter {
+        pos: Arc::clone(&actor),
+        neg: Arc::clone(&empty),
+    };
+    let negative = Value::OnCounter {
+        pos: empty,
+        neg: actor,
+    };
+    let db = GrafeoDB::new_in_memory();
+    for value in [&positive, &negative, &positive] {
+        db.create_node_with_props(&["CounterKey"], [("v", value.clone())])
+            .unwrap();
+    }
+    let expected: HashMap<HashableValue, i64> =
+        HashMap::from([(positive.into(), 2), (negative.into(), 1)]);
+    let session = db.session();
+    for _ in 0..2 {
+        let result = session
+            .execute("MATCH (n:CounterKey) RETURN n.v AS key, count(*) AS c")
+            .unwrap();
+        let actual: HashMap<HashableValue, i64> = result
+            .rows()
+            .iter()
+            .map(|row| (row[0].clone().into(), row[1].as_int64().unwrap()))
+            .collect();
+        assert_eq!(result.rows().len(), 2);
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn native_distinct_identity_keeps_counter_replica_maps() {
+    use grafeo_common::types::HashableValue;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    let first = Value::GCounter(Arc::new(HashMap::from([("first".to_owned(), 1_u64)])));
+    let second = Value::GCounter(Arc::new(HashMap::from([("second".to_owned(), 1_u64)])));
+    let db = GrafeoDB::new_in_memory();
+    for value in [&first, &second, &first] {
+        db.create_node_with_props(&["CounterKey"], [("v", value.clone())])
+            .unwrap();
+    }
+    let expected: HashSet<HashableValue> = [first, second].into_iter().map(Into::into).collect();
+    let session = db.session();
+    for _ in 0..2 {
+        let result = session
+            .execute("MATCH (n:CounterKey) RETURN DISTINCT n.v AS key")
+            .unwrap();
+        let actual: HashSet<HashableValue> = result
+            .rows()
+            .iter()
+            .map(|row| row[0].clone().into())
+            .collect();
+        assert_eq!(result.rows().len(), 2);
+        assert_eq!(actual, expected);
+    }
+}
+
 fn setup_people_db() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();

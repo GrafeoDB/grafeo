@@ -525,6 +525,35 @@ impl MemoryConsumer for TextIndexConsumer {
     }
 }
 
+#[cfg(all(test, feature = "compact-store", feature = "mmap", feature = "lpg"))]
+std::thread_local! {
+    static BEFORE_COMPACT_BASE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static AFTER_COMPACT_BASE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, feature = "compact-store", feature = "mmap", feature = "lpg"))]
+fn set_before_compact_base_publish_hook(hook: impl FnOnce() + 'static) {
+    BEFORE_COMPACT_BASE_PUBLISH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(all(test, feature = "compact-store", feature = "mmap", feature = "lpg"))]
+fn run_before_compact_base_publish_hook() {
+    let hook = BEFORE_COMPACT_BASE_PUBLISH.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(all(test, feature = "compact-store", feature = "mmap", feature = "lpg"))]
+fn run_after_compact_base_publish_hook() {
+    let hook = AFTER_COMPACT_BASE_PUBLISH.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// Memory consumer for the CompactStore base under a `LayeredStore`.
 ///
 /// Delegates spill/reload to a [`CompactStoreTiered`] wrapper and atomically
@@ -564,15 +593,17 @@ impl CompactStoreConsumer {
             .map(|dir| dir.join("compact_base.grafeo"))
     }
 
-    /// The tier wrapper, holding the layered store's current base: a merge
-    /// of the overlay replaces the base, and the wrapper follows it (see
-    /// [`CompactStoreTiered::follow`](super::compact_tiered::CompactStoreTiered::follow)).
-    fn live_tiered(&self) -> Option<Arc<super::compact_tiered::CompactStoreTiered>> {
-        let tiered = self.tiered.upgrade()?;
-        if let Some(layered) = self.layered.upgrade() {
+    fn live_base(
+        tiered: &super::compact_tiered::CompactStoreTiered,
+        layered: &grafeo_core::graph::compact::layered::LayeredStore,
+    ) -> Arc<grafeo_core::graph::compact::CompactStore> {
+        // Memory callbacks may run inside a tier operation. They must neither
+        // wait for it nor replace its owner metadata between preparation and
+        // publication. Account for the live base even while follow is deferred.
+        if let Some(_transition) = tiered.try_transition() {
             tiered.follow(&layered.base_store_arc());
         }
-        Some(tiered)
+        layered.base_store_arc()
     }
 }
 
@@ -586,7 +617,11 @@ impl MemoryConsumer for CompactStoreConsumer {
         // When OnDisk, the heap copy of CompactStore is still alive (we
         // deserialized from mmap eagerly). Report its heap bytes in both
         // states; the OS page cache that backs mmap lives outside the heap.
-        self.live_tiered().map_or(0, |t| t.memory_bytes())
+        let (Some(tiered), Some(layered)) = (self.tiered.upgrade(), self.layered.upgrade()) else {
+            return 0;
+        };
+        let base = Self::live_base(&tiered, &layered);
+        tiered.memory_bytes_for(&base)
     }
 
     fn eviction_priority(&self) -> u8 {
@@ -603,20 +638,22 @@ impl MemoryConsumer for CompactStoreConsumer {
     }
 
     fn can_spill(&self) -> bool {
-        let Some(tiered) = self.live_tiered() else {
+        let (Some(tiered), Some(layered)) = (self.tiered.upgrade(), self.layered.upgrade()) else {
             return false;
         };
-        self.spill_path.is_some() && !tiered.is_on_disk()
+        let base = Self::live_base(&tiered, &layered);
+        self.spill_path.is_some() && !tiered.is_on_disk_for(&base)
     }
 
     fn current_tier(&self) -> grafeo_common::memory::StorageTier {
         use grafeo_common::memory::StorageTier;
-        let Some(tiered) = self.live_tiered() else {
+        let (Some(tiered), Some(layered)) = (self.tiered.upgrade(), self.layered.upgrade()) else {
             return StorageTier::Uninitialized;
         };
-        if tiered.is_on_disk() {
+        let base = Self::live_base(&tiered, &layered);
+        if tiered.is_on_disk_for(&base) {
             StorageTier::OnDisk
-        } else if self.memory_usage() == 0 {
+        } else if base.memory_bytes() == 0 {
             StorageTier::Uninitialized
         } else {
             StorageTier::InMemory
@@ -625,51 +662,71 @@ impl MemoryConsumer for CompactStoreConsumer {
 
     fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
         let tiered = self
-            .live_tiered()
+            .tiered
+            .upgrade()
             .ok_or_else(|| SpillError::IoError("compact-store tiered dropped".to_string()))?;
+        let Some(layered) = self.layered.upgrade() else {
+            return Ok(0);
+        };
+        let Some(_transition) = tiered.try_transition() else {
+            return Ok(0);
+        };
+        let base = layered.base_store_arc();
+        tiered.follow(&base);
 
-        if tiered.is_on_disk() {
+        if tiered.is_on_disk_for(&base) {
             return Ok(0);
         }
 
         let path = self.spill_file().ok_or(SpillError::NoSpillDirectory)?;
 
-        let before = tiered.memory_bytes();
-        let spilled = tiered.store();
-        tiered
-            .persist_to_mmap(&path)
-            .map_err(|e| SpillError::IoError(e.to_string()))?;
-
-        // Publish the fresh (mmap-backed) base to the LayeredStore so readers
-        // switch over and the old allocation can drop, unless a merge of the
-        // overlay replaced the base meanwhile: its base stays, and the wrapper
-        // follows it on the next call. If the LayeredStore is gone, the weak
-        // ref returns None and there's nothing to swap here.
-        if let Some(layered) = self.layered.upgrade() {
-            layered.swap_base_if(&spilled, tiered.store());
+        let before = base.memory_bytes();
+        let prepared =
+            super::compact_tiered::CompactStoreTiered::prepare_mmap(Arc::clone(&base), &path)
+                .map_err(|e| SpillError::IoError(e.to_string()))?;
+        let replacement = prepared.store();
+        let after = replacement.memory_bytes();
+        #[cfg(test)]
+        run_before_compact_base_publish_hook();
+        if !layered.swap_base_if(&base, replacement) {
+            return Ok(0);
         }
-
-        let after = tiered.memory_bytes();
+        #[cfg(test)]
+        run_after_compact_base_publish_hook();
+        tiered.install_if_current(&base, prepared);
         Ok(before.saturating_sub(after))
     }
 
     fn reload(&self) -> Result<(), SpillError> {
         let tiered = self
-            .live_tiered()
+            .tiered
+            .upgrade()
             .ok_or_else(|| SpillError::IoError("compact-store tiered dropped".to_string()))?;
+        let Some(layered) = self.layered.upgrade() else {
+            return Err(SpillError::IoError("layered store dropped".to_string()));
+        };
+        let Some(_transition) = tiered.try_transition() else {
+            return Err(SpillError::IoError(
+                "compact-store reload deferred: tier transition busy".to_string(),
+            ));
+        };
+        let base = layered.base_store_arc();
+        tiered.follow(&base);
 
-        if !tiered.is_on_disk() {
+        if !tiered.is_on_disk_for(&base) {
             return Ok(());
         }
 
-        let on_disk = tiered.store();
-        tiered
-            .reload_to_ram()
+        let prepared = super::compact_tiered::CompactStoreTiered::prepare_ram(Arc::clone(&base))
             .map_err(|e| SpillError::IoError(e.to_string()))?;
-        // As in `spill`: a merge that replaced the base meanwhile wins.
-        if let Some(layered) = self.layered.upgrade() {
-            layered.swap_base_if(&on_disk, tiered.store());
+        if !layered.swap_base_if(&base, prepared.store()) {
+            return Err(SpillError::IoError(
+                "compact-store reload deferred: base changed".to_string(),
+            ));
         }
+        #[cfg(test)]
+        run_after_compact_base_publish_hook();
+        tiered.install_if_current(&base, prepared);
         Ok(())
     }
 }
@@ -814,6 +871,239 @@ mod tests {
     };
     use grafeo_common::utils::error::Result;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// A stale spill must not supply the replacement that a fresh spill
+    /// publishes after an overlay merge (#596).
+    #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
+    #[test]
+    fn a_stale_spill_cannot_supply_a_fresh_spills_published_base() {
+        use super::super::compact_tiered::{CompactStoreTiered, set_before_install_hook};
+        use grafeo_common::types::{PropertyKey, Value};
+        use grafeo_core::graph::compact::from_graph_store_preserving_ids;
+        use grafeo_core::graph::compact::layered::LayeredStore;
+        use grafeo_core::graph::lpg::LpgStore;
+        use grafeo_core::graph::traits::{GraphStore, GraphStoreMut};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const WAIT: Duration = Duration::from_secs(10);
+        enum FreshSpill {
+            BeforePublish,
+            Done,
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let initial = LpgStore::new().unwrap();
+        let alix = initial.create_node(&["Person"]);
+        initial.set_node_property(alix, "name", Value::from("Alix"));
+        initial.set_node_property(alix, "age", Value::Int64(33));
+        let layered = Arc::new(
+            LayeredStore::new(
+                from_graph_store_preserving_ids(&initial).unwrap(),
+                alix.as_u64(),
+                0,
+            )
+            .unwrap(),
+        );
+        let tiered = Arc::new(CompactStoreTiered::new_in_memory(layered.base_store_arc()));
+        let consumer = Arc::new(CompactStoreConsumer::new(
+            &tiered,
+            &layered,
+            Some(dir.path().to_path_buf()),
+        ));
+
+        // S1 has mapped A but has not installed it into the tier wrapper.
+        let (prepared_tx, prepared_rx) = mpsc::channel();
+        let (install_tx, install_rx) = mpsc::channel();
+        let (stale_done_tx, stale_done_rx) = mpsc::channel();
+        let stale_consumer = Arc::clone(&consumer);
+        let stale = std::thread::spawn(move || {
+            set_before_install_hook(move || {
+                prepared_tx.send(()).unwrap();
+                install_rx
+                    .recv_timeout(WAIT)
+                    .expect("release stale install");
+            });
+            let result = stale_consumer.spill(usize::MAX);
+            stale_done_tx.send(()).unwrap();
+            result
+        });
+        prepared_rx
+            .recv_timeout(WAIT)
+            .expect("stale spill prepared A");
+
+        // The real merge publishes B, with both the updated base property
+        // and a node created since A was compacted.
+        layered.set_node_property(alix, "age", Value::Int64(44));
+        let gus = layered.create_node(&["Person"]);
+        layered.set_node_property(gus, "name", Value::from("Gus"));
+        layered.set_node_property(gus, "age", Value::Int64(19));
+        layered.merge_overlay_in_place().unwrap();
+        assert_eq!(layered.node_count(), 2);
+        // Introspection must describe B without replacing an owned transition.
+        assert!(consumer.memory_usage() >= layered.base_store_arc().memory_bytes());
+        assert!(consumer.can_spill());
+        assert_eq!(
+            consumer.current_tier(),
+            grafeo_common::memory::StorageTier::InMemory
+        );
+
+        // S2 either installs B and pauses before publishing, or declines a
+        // busy transition. Completion is an event too, so either policy
+        // releases S1 without relying on a sleep or hanging the test.
+        let (fresh_tx, fresh_rx) = mpsc::channel();
+        let (publish_tx, publish_rx) = mpsc::channel();
+        let fresh_consumer = Arc::clone(&consumer);
+        let fresh = std::thread::spawn(move || {
+            let before_publish_tx = fresh_tx.clone();
+            set_before_compact_base_publish_hook(move || {
+                before_publish_tx.send(FreshSpill::BeforePublish).unwrap();
+                publish_rx
+                    .recv_timeout(WAIT)
+                    .expect("release fresh publish");
+            });
+            let result = fresh_consumer.spill(usize::MAX);
+            fresh_tx.send(FreshSpill::Done).unwrap();
+            result
+        });
+        let event = fresh_rx.recv_timeout(WAIT).expect("fresh spill progressed");
+
+        // Let S1 install A and attempt its stale publication before S2
+        // reads the tier wrapper for its replacement.
+        install_tx.send(()).unwrap();
+        stale_done_rx
+            .recv_timeout(WAIT)
+            .expect("stale spill finished");
+        stale
+            .join()
+            .expect("stale spill thread")
+            .expect("stale spill");
+        match event {
+            FreshSpill::BeforePublish => {
+                publish_tx.send(()).unwrap();
+                assert!(matches!(
+                    fresh_rx.recv_timeout(WAIT).expect("fresh spill finished"),
+                    FreshSpill::Done
+                ));
+                fresh
+                    .join()
+                    .expect("fresh spill thread")
+                    .expect("fresh spill");
+            }
+            FreshSpill::Done => {
+                fresh
+                    .join()
+                    .expect("fresh spill thread")
+                    .expect("fresh spill");
+                consumer.spill(usize::MAX).expect("retry fresh spill");
+            }
+        }
+
+        assert_eq!(layered.node_count(), 2, "a spill preserves merged nodes");
+        for (id, name, age) in [(alix, "Alix", 44), (gus, "Gus", 19)] {
+            assert_eq!(
+                layered.get_node_property(id, &PropertyKey::new("name")),
+                Some(Value::from(name)),
+                "a spill preserves the merged name"
+            );
+            assert_eq!(
+                layered.get_node_property(id, &PropertyKey::new("age")),
+                Some(Value::Int64(age)),
+                "a spill preserves the merged age"
+            );
+        }
+        assert!(
+            Arc::ptr_eq(&layered.base_store_arc(), &tiered.store()),
+            "the published base is the tier wrapper's store"
+        );
+    }
+
+    #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
+    #[test]
+    fn a_busy_compact_reload_is_not_counted_as_completed() {
+        use super::super::compact_tiered::CompactStoreTiered;
+        use grafeo_common::memory::StorageTier;
+        use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
+        use grafeo_core::graph::compact::from_graph_store_preserving_ids;
+        use grafeo_core::graph::compact::layered::LayeredStore;
+        use grafeo_core::graph::lpg::LpgStore;
+        use grafeo_core::graph::traits::GraphStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let initial = LpgStore::new().unwrap();
+        let node = initial.create_node(&["Person"]);
+        let layered = Arc::new(
+            LayeredStore::new(
+                from_graph_store_preserving_ids(&initial).unwrap(),
+                node.as_u64(),
+                0,
+            )
+            .unwrap(),
+        );
+        let tiered = Arc::new(CompactStoreTiered::new_in_memory(layered.base_store_arc()));
+        let consumer = Arc::new(CompactStoreConsumer::new(
+            &tiered,
+            &layered,
+            Some(dir.path().to_path_buf()),
+        ));
+        consumer.spill(usize::MAX).unwrap();
+        let manager = BufferManager::new(BufferManagerConfig::default());
+        manager.register_consumer(Arc::clone(&consumer) as Arc<dyn MemoryConsumer>);
+        let transition = tiered.try_transition().unwrap();
+        assert_eq!(manager.reload_eligible(1.0), 0, "busy reload was deferred");
+        assert_eq!(consumer.current_tier(), StorageTier::OnDisk);
+        drop(transition);
+        assert_eq!(
+            manager.reload_eligible(1.0),
+            1,
+            "retry completed the reload"
+        );
+        assert_eq!(consumer.current_tier(), StorageTier::InMemory);
+        assert_eq!(layered.node_count(), 1);
+        assert!(Arc::ptr_eq(&layered.base_store_arc(), &tiered.store()));
+    }
+
+    #[cfg(all(
+        feature = "compact-store",
+        feature = "mmap",
+        feature = "lpg",
+        feature = "gql"
+    ))]
+    #[test]
+    fn restoring_after_base_publication_preserves_the_restored_tier() {
+        use super::super::GrafeoDB;
+        use crate::Config;
+        use grafeo_core::graph::traits::GraphStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut db =
+            GrafeoDB::with_config(Config::in_memory().with_spill_path(dir.path().to_path_buf()))
+                .unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.compact().unwrap();
+        let db = Arc::new(db);
+        let empty = GrafeoDB::new_in_memory();
+        let snapshot = empty.export_snapshot().unwrap();
+        let restoring = Arc::clone(&db);
+        AFTER_COMPACT_BASE_PUBLISH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                restoring.restore_snapshot(&snapshot).unwrap();
+            }));
+        });
+        db.buffer_manager.spill_all();
+        assert_eq!(db.node_count(), 0);
+        let tiered = db.compact_tiered().unwrap();
+        assert_eq!(
+            tiered.store().node_count(),
+            0,
+            "restore retired the old base"
+        );
+        assert!(!tiered.is_on_disk());
+        assert!(Arc::ptr_eq(
+            &db.layered_store().unwrap().base_store_arc(),
+            &tiered.store()
+        ));
+    }
 
     /// Test section that records `swap_to_mmap` and `reload_to_ram`.
     ///

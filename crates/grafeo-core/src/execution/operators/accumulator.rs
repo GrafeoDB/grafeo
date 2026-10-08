@@ -2,7 +2,7 @@
 //!
 //! Provides the canonical definitions of [`AggregateFunction`], [`AggregateExpr`],
 //! [`AggregateState`], and [`HashableValue`] used by both `aggregate.rs` (pull)
-//! and `push/aggregate.rs`.
+//! and `push/aggregate/mod.rs`.
 
 // Re-export AggregateState so both pull and push operators import from one place.
 pub use super::aggregate::AggregateState;

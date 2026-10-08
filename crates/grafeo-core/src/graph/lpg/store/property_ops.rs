@@ -686,10 +686,13 @@ impl LpgStore {
             }
 
             // Remove PENDING entries from affected label version logs and
-            // reconcile label_index to match the restored state.
+            // reconcile label_index to match the restored state. The label
+            // index comes before the node labels in the lock order, as in a
+            // delete: in the other order, this rollback and a delete in
+            // another transaction each held one and waited for the other.
             if !label_nodes.is_empty() {
-                let mut labels = self.node_labels.write();
                 let mut index = self.label_index.write();
+                let mut labels = self.node_labels.write();
 
                 for node_id in &label_nodes {
                     // Get the label set BEFORE removing PENDING (the transactional state)
@@ -937,10 +940,12 @@ impl LpgStore {
                 }
             }
 
-            // Pop PENDING entries from label version logs and reconcile label_index
+            // Pop PENDING entries from label version logs and reconcile
+            // label_index, taking the label index first (the lock order, see
+            // `rollback_transaction_properties`).
             if !label_counts.is_empty() {
-                let mut labels = self.node_labels.write();
                 let mut index = self.label_index.write();
+                let mut labels = self.node_labels.write();
 
                 for (node_id, count) in &label_counts {
                     let tx_labels = labels

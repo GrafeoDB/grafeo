@@ -233,11 +233,12 @@ pub struct GrafeoDB {
     session_layers: crate::session::LayersSlot,
     /// Disk-backed tier wrapper for the compact base, set after `compact()`.
     ///
-    /// Provides the spill path for [`CompactStoreConsumer`]: when the buffer
-    /// manager signals memory pressure, the consumer calls
-    /// `persist_to_mmap()` here and then publishes the fresh base to
-    /// `layered_store` via `swap_base_if()`. A merge of the overlay replaces
-    /// the base; the consumer brings the wrapper in line with it first.
+    /// Holds the tier of the base for [`CompactStoreConsumer`]: under memory
+    /// pressure the consumer has the wrapper write and map a copy of the
+    /// base, publishes the copy to `layered_store` only while that still
+    /// reads the base it copied (`swap_base_if()`), and then installs the
+    /// copy here. A merge of the overlay replaces the base; the consumer
+    /// brings the wrapper in line with it first.
     #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
     compact_tiered: Option<Arc<compact_tiered::CompactStoreTiered>>,
 }

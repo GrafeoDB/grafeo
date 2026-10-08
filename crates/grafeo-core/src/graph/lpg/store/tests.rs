@@ -2542,3 +2542,103 @@ fn index_searches_drop_committed_base_deletes_and_ask_for_more() {
     store.retain_live_index_hits(&mut threshold);
     assert_eq!(threshold, [(alix, 1.0), (mia, 0.5)], "a threshold search");
 }
+
+// === Lock order of a rollback (temporal) ===
+
+/// A rollback that undoes label changes takes the label index before the
+/// node labels, in the store's lock order, as a delete does: in the other
+/// order a rollback and a delete in another transaction could each hold one
+/// lock and wait for the other, which hung the busy child process of
+/// `checkpoint_during_commit` on CI.
+#[cfg(feature = "temporal")]
+mod rollback_lock_order {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// How long `undo` gets to reach the label locks once it runs: it needs
+    /// microseconds.
+    const WINDOW: Duration = Duration::from_millis(250);
+
+    /// Runs `undo` on another thread while this one holds the label index,
+    /// as a delete does before it takes the node labels, and returns whether
+    /// `undo` took the node labels meanwhile: it would then wait for the
+    /// index while holding them, and the delete for them while holding the
+    /// index.
+    fn takes_the_node_labels_before_the_index(
+        store: &Arc<LpgStore>,
+        undo: impl FnOnce(&LpgStore) + Send + 'static,
+    ) -> bool {
+        let index = store.label_index.write();
+        let started = Arc::new(AtomicBool::new(false));
+        let undoing = {
+            let store = Arc::clone(store);
+            let started = Arc::clone(&started);
+            std::thread::spawn(move || {
+                started.store(true, Ordering::Release);
+                undo(&store);
+            })
+        };
+        while !started.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        let until = Instant::now() + WINDOW;
+        let mut out_of_order = false;
+        while !out_of_order && Instant::now() < until {
+            out_of_order = store.node_labels.is_locked();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(index);
+        undoing.join().unwrap();
+        out_of_order
+    }
+
+    #[test]
+    fn a_rollback_takes_the_label_index_before_the_node_labels() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Person"]);
+        let transaction = TransactionId::new(19);
+        assert!(store.add_label_versioned(alix, "Employee", transaction));
+
+        let out_of_order = takes_the_node_labels_before_the_index(&store, move |store| {
+            store.rollback_transaction_properties(transaction);
+        });
+        assert!(
+            !out_of_order,
+            "the rollback took the node labels while waiting for the label index"
+        );
+        assert!(
+            !store.get_node(alix).unwrap().has_label("Employee"),
+            "the rollback removed the label"
+        );
+        assert_eq!(store.nodes_by_label("Employee"), [], "and its index entry");
+        assert_eq!(store.nodes_by_label("Person"), [alix]);
+    }
+
+    #[test]
+    fn a_rollback_to_a_savepoint_takes_the_label_index_before_the_node_labels() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let gus = store.create_node(&["Person"]);
+        let transaction = TransactionId::new(88);
+        assert!(store.add_label_versioned(gus, "Employee", transaction));
+        let savepoint = store.property_undo_log_position(transaction);
+        assert!(store.add_label_versioned(gus, "Manager", transaction));
+
+        let out_of_order = takes_the_node_labels_before_the_index(&store, move |store| {
+            store.rollback_transaction_properties_to(transaction, savepoint);
+        });
+        assert!(
+            !out_of_order,
+            "the rollback to the savepoint took the node labels while waiting for the label index"
+        );
+        let node = store.get_node(gus).unwrap();
+        assert!(
+            node.has_label("Employee") && !node.has_label("Manager"),
+            "the label from before the savepoint stays, the one after it goes"
+        );
+        assert_eq!(store.nodes_by_label("Manager"), []);
+        assert_eq!(store.nodes_by_label("Employee"), [gus]);
+    }
+}

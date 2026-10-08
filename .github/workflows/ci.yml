@@ -670,9 +670,9 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     steps:
-      # Instrumented test binaries with full debug info fill the runner's
-      # disk, and the linker then dies with a bus error: remove preinstalled
-      # SDKs that this job does not use, as rust-test does.
+      # Instrumented test binaries fill the runner's disk, and the linker
+      # then dies with a bus error: remove preinstalled SDKs that this job
+      # does not use, as rust-test does (see also the debug info below).
       - name: Free disk space
         run: |
           df -h /
@@ -692,10 +692,16 @@ jobs:
       # Full profile: --all-features ensures coverage includes all language
       # parsers, AI features, and optional modules. Binding crates, build
       # scripts, test helpers, and benchmarks are excluded from the report.
+      # Line tables only, as in rust-test: the report comes from the coverage
+      # mapping the instrumentation embeds, not from debug info, and full
+      # debug info in every instrumented test binary ran the runner out of
+      # disk space.
       - name: Generate coverage report
         run: |
           cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info \
             --ignore-filename-regex '(crates/bindings/|build\.rs|tests/|benches/)'
+        env:
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7

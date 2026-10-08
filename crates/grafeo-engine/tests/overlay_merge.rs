@@ -699,6 +699,45 @@ mod base_tiers {
         assert_the_wrapper_holds_the_base(&db);
         assert_eq!(db.rows(PEOPLE), names(&["Alix", "Gus", "Mia", "Vincent"]));
     }
+
+    /// #596 on a file database: a merge, a checkpoint, a spill of the base
+    /// and a reload keep the merged commits, also after a reopen.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    #[test]
+    fn a_base_spill_after_a_merge_and_a_checkpoint_keeps_the_merged_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("people.grafeo");
+        {
+            let mut db = GrafeoDB::open(&path).unwrap();
+            db.execute(INSERT_PEOPLE).unwrap();
+            db.compact().unwrap();
+            db.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
+            assert!(merge_under_pressure(&db), "no transaction is open");
+            db.wal_checkpoint().unwrap();
+
+            db.buffer_manager().spill_consumer_by_name(BASE_CONSUMER);
+            assert!(
+                db.compact_tiered().unwrap().is_on_disk(),
+                "the merged base is spilled"
+            );
+            assert_eq!(db.rows(PEOPLE), names(&["Alix", "Gus", "Mia", "Vincent"]));
+            db.execute("INSERT (:Person {name: 'Jules'})").unwrap();
+            db.buffer_manager().reload_eligible(1.0);
+            assert!(!db.compact_tiered().unwrap().is_on_disk(), "reloaded");
+            assert_eq!(
+                db.rows(PEOPLE),
+                names(&["Alix", "Gus", "Jules", "Mia", "Vincent"])
+            );
+            db.close().unwrap();
+        }
+        let db = GrafeoDB::open(&path).unwrap();
+        assert_eq!(
+            db.rows(PEOPLE),
+            names(&["Alix", "Gus", "Jules", "Mia", "Vincent"]),
+            "after the reopen"
+        );
+        db.close().unwrap();
+    }
 }
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]

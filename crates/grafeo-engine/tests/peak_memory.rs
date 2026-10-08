@@ -45,6 +45,12 @@
 //! The counters are global, so the tests that measure take turns (nextest
 //! runs each test in a process of its own anyway).
 //!
+//! The tests build their databases in batches of 1,000 entities ([`BATCH`]),
+//! one commit each: what a checkpoint and an open hold does not depend on
+//! how many commits built the database, and a commit per entity runs out of
+//! memory on Windows in a build with grafeo-core's `tiered-storage` (see
+//! [`BATCH`]).
+//!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test peak_memory -- --nocapture
 //! ```
@@ -55,12 +61,14 @@
     reason = "GlobalAlloc is an unsafe trait; this only forwards to System"
 )]
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use grafeo_common::storage::ChunkCaps;
 use grafeo_common::testing::chunk_caps::with_chunk_caps;
-use grafeo_common::types::{NodeId, Value};
+use grafeo_common::types::{NodeId, PropertyKey, Value};
+use grafeo_engine::database::BatchEdge;
 use grafeo_engine::{Config, DurabilityMode, GrafeoDB};
 use grafeo_storage::file::GrafeoFileManager;
 
@@ -410,6 +418,23 @@ fn assert_flat(
 const PEOPLE: [&str; 5] = ["Alix", "Gus", "Vincent", "Mia", "Jules"];
 const CITIES: [&str; 4] = ["Amsterdam", "Berlin", "Paris", "Prague"];
 
+/// The entities a test adds per commit. In a build with grafeo-core's
+/// `tiered-storage` (which `--all-features` on the workspace turns on),
+/// every commit's epoch gets an arena with a first chunk of 1 MiB that lives
+/// as long as the database (#433). Windows commits that memory: built with a
+/// direct call per entity, a database of 20,000 entities held 20 GiB, and
+/// the tests ran out of memory on CI. In batches of 1,000 they hold 20 MiB of
+/// arenas.
+const BATCH: usize = 1_000;
+
+/// Hands `items` to `add` in batches of [`BATCH`].
+fn in_batches<T>(items: impl Iterator<Item = T>, mut add: impl FnMut(Vec<T>)) {
+    let mut items = items.peekable();
+    while items.peek().is_some() {
+        add(items.by_ref().take(BATCH).collect());
+    }
+}
+
 /// A text of `length` bytes that no other `index` gives.
 fn text_of(index: usize, length: usize) -> String {
     let mut text = format!(
@@ -462,24 +487,31 @@ const PERSON: Documented = Documented {
 /// Adds `people` people with a name, an age and a biography of `bio` bytes,
 /// each knowing the one before.
 fn add_people(db: &GrafeoDB, people: usize, bio: usize) {
-    let mut previous: Option<NodeId> = None;
-    for index in 0..people {
-        let person = db
-            .create_node_with_props(
-                &["Person"],
-                [
-                    ("name", Value::from(PEOPLE[index % PEOPLE.len()])),
-                    ("age", Value::from(i64::try_from(19 + index % 88).unwrap())),
-                    ("bio", Value::from(text_of(index, bio))),
-                ],
-            )
-            .unwrap();
-        if let Some(previous) = previous {
-            db.create_edge_with_props(previous, person, "KNOWS", [("since", 1988_i64)])
-                .unwrap();
-        }
-        previous = Some(person);
-    }
+    let mut persons: Vec<NodeId> = Vec::with_capacity(people);
+    in_batches(
+        (0..people).map(|index| {
+            HashMap::from([
+                (
+                    PropertyKey::from("name"),
+                    Value::from(PEOPLE[index % PEOPLE.len()]),
+                ),
+                (
+                    PropertyKey::from("age"),
+                    Value::from(i64::try_from(19 + index % 88).unwrap()),
+                ),
+                (PropertyKey::from("bio"), Value::from(text_of(index, bio))),
+            ])
+        }),
+        |batch| persons.extend(db.batch_create_nodes_with_props("Person", batch).unwrap()),
+    );
+    in_batches(
+        persons.windows(2).map(|pair| {
+            BatchEdge::new(pair[0], pair[1], "KNOWS").with_properties([("since", 1988_i64)])
+        }),
+        |batch| {
+            db.batch_create_edges(batch).unwrap();
+        },
+    );
 }
 
 /// Checks that the people [`add_people`] added came back.
@@ -551,13 +583,16 @@ fn checkpoint_and_open_memory_does_not_grow_with_a_vector_index() {
         },
         &|db, documents| {
             let mut state = 88;
-            for _ in 0..documents {
-                let embedding: Vec<f32> = (0..16)
-                    .map(|_| (next(&mut state) % 1_000) as f32 / 1_000.0)
-                    .collect();
-                db.create_node_with_props(&["Doc"], [("embedding", &embedding[..])])
-                    .unwrap();
-            }
+            in_batches(
+                (0..documents).map(|_| {
+                    (0..16)
+                        .map(|_| (next(&mut state) % 1_000) as f32 / 1_000.0)
+                        .collect()
+                }),
+                |batch| {
+                    db.batch_create_nodes("Doc", "embedding", batch).unwrap();
+                },
+            );
             db.create_vector_index(
                 "Doc",
                 "embedding",
@@ -602,16 +637,20 @@ fn checkpoint_and_open_memory_does_not_grow_with_a_text_index() {
             use std::fmt::Write as _;
 
             let mut state = 19;
-            for _ in 0..documents {
-                let mut body = String::new();
-                for _ in 0..40 {
-                    let term = usize::try_from(next(&mut state) % 1_024).unwrap();
-                    let city = CITIES[term % CITIES.len()].to_lowercase();
-                    write!(body, "{city}{term} ").unwrap();
-                }
-                db.create_node_with_props(&["Doc"], [("body", body)])
-                    .unwrap();
-            }
+            in_batches(
+                (0..documents).map(|_| {
+                    let mut body = String::new();
+                    for _ in 0..40 {
+                        let term = usize::try_from(next(&mut state) % 1_024).unwrap();
+                        let city = CITIES[term % CITIES.len()].to_lowercase();
+                        write!(body, "{city}{term} ").unwrap();
+                    }
+                    HashMap::from([(PropertyKey::from("body"), Value::from(body))])
+                }),
+                |batch| {
+                    db.batch_create_nodes_with_props("Doc", batch).unwrap();
+                },
+            );
             db.create_text_index("Doc", "body").unwrap();
         },
         &|db, documents| {

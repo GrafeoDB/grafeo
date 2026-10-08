@@ -29,15 +29,18 @@
 //!
 //! # Memory accounting
 //!
-//! The bytes freed by a tier transition depend on whether the caller drops
-//! the old in-memory store. [`persist_to_mmap`](CompactStoreTiered::persist_to_mmap)
-//! consumes the old `Arc<CompactStore>` and replaces it with a fresh one
-//! deserialized from mmap bytes. If the caller kept another `Arc` around
-//! (e.g. in a [`LayeredStore`](grafeo_core::graph::compact::layered::LayeredStore)),
-//! that clone still keeps the old allocation live; callers under memory
-//! pressure should route reads through
-//! [`store()`](CompactStoreTiered::store) and hold the tiered wrapper, not
-//! raw CompactStore clones.
+//! A spill frees the heap of the base once nothing holds the old
+//! `Arc<CompactStore>` any more. The database's memory consumer
+//! (`section_consumer::CompactStoreConsumer`) prepares a mapped copy of the
+//! base, publishes it to the
+//! [`LayeredStore`](grafeo_core::graph::compact::layered::LayeredStore) only
+//! while the layered store still reads the base it copied, and then installs
+//! it in this wrapper; the old base is freed when the last reader that loaded
+//! it lets go. A reload goes the same way with a copy in memory.
+//! [`persist_to_mmap`](CompactStoreTiered::persist_to_mmap) and
+//! [`reload_to_ram`](CompactStoreTiered::reload_to_ram) change this wrapper
+//! alone: the layered store keeps reading the store it holds, so for a
+//! database they free nothing.
 //!
 //! # Feature flags
 //!
@@ -59,46 +62,53 @@ use memmap2::Mmap;
 use parking_lot::MutexGuard;
 use parking_lot::{Mutex, RwLock};
 
-#[cfg(test)]
-thread_local! {
-    static BEFORE_MMAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static BEFORE_INSTALL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(super) fn set_before_install_hook(hook: impl FnOnce() + 'static) {
-    BEFORE_INSTALL.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-}
-
-#[cfg(test)]
-fn run_before_mmap_hook() {
-    let hook = BEFORE_MMAP.with(|slot| slot.borrow_mut().take());
-    if let Some(hook) = hook {
-        hook();
-    }
-}
-
-#[cfg(test)]
-fn run_before_install_hook() {
-    let hook = BEFORE_INSTALL.with(|slot| slot.borrow_mut().take());
-    if let Some(hook) = hook {
-        hook();
-    }
-}
-
 /// Two-state disk-backed wrapper around a [`CompactStore`].
 pub struct CompactStoreTiered {
     state: RwLock<TierState>,
+    /// Held by a tier change from its first look at the store until the new
+    /// state is installed: by a spill or a reload of the memory consumer,
+    /// [`persist`](Self::persist), [`persist_to_mmap`](Self::persist_to_mmap)
+    /// and [`reload_to_ram`](Self::reload_to_ram). The consumer's other
+    /// callbacks only try it: while a change runs they neither wait nor make
+    /// the wrapper follow a new base, which would mark the base the change
+    /// just published as held in memory (see
+    /// `section_consumer::CompactStoreConsumer`).
     transition: Mutex<()>,
+    /// A test hook that a tier change runs once at a step, so a test can
+    /// run another change, a merge or a restore there.
+    #[cfg(test)]
+    hook: Mutex<Option<(TierStep, TierHook)>>,
 }
 
-/// A fully prepared tier change that has not replaced the live state.
+/// See [`CompactStoreTiered::hook`].
+#[cfg(test)]
+type TierHook = Box<dyn FnOnce() + Send>;
+
+/// The step of a tier change at which [`CompactStoreTiered::hook`] runs.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TierStep {
+    /// A spill created its temporary file and wrote nothing to it yet.
+    TempCreated,
+    /// A spill's file is in place under its final name, not mapped yet.
+    Written,
+    /// The new store is ready (mapped, or read back into memory), and
+    /// neither published to the layered store nor installed in the wrapper.
+    Prepared,
+    /// The memory consumer published the new store to the layered store and
+    /// has not installed it in the wrapper yet.
+    Published,
+}
+
+/// A tier change, fully prepared, that has not replaced the wrapper's state:
+/// the new store, with the mapping that backs it after a spill.
 pub(super) struct PreparedTier {
     state: TierState,
     written: usize,
 }
 
 impl PreparedTier {
+    /// The new store, for the layered store to read once it is published.
     #[cfg(feature = "lpg")]
     pub(super) fn store(&self) -> Arc<CompactStore> {
         Arc::clone(self.state.store())
@@ -134,9 +144,30 @@ impl CompactStoreTiered {
     /// Creates a tiered wrapper starting in the in-memory state.
     #[must_use]
     pub fn new_in_memory(store: Arc<CompactStore>) -> Self {
+        Self::from_state(TierState::InMemory(store))
+    }
+
+    fn from_state(state: TierState) -> Self {
         Self {
-            state: RwLock::new(TierState::InMemory(store)),
+            state: RwLock::new(state),
             transition: Mutex::new(()),
+            #[cfg(test)]
+            hook: Mutex::new(None),
+        }
+    }
+
+    /// Sets the hook the next tier change runs once at `step` (see `hook`).
+    #[cfg(test)]
+    pub(super) fn set_tier_hook(&self, step: TierStep, hook: impl FnOnce() + Send + 'static) {
+        *self.hook.lock() = Some((step, Box::new(hook)));
+    }
+
+    /// Runs the hook, if one is set for `step`, once.
+    #[cfg(test)]
+    pub(super) fn run_tier_hook(&self, step: TierStep) {
+        let hook = self.hook.lock().take_if(|(at, _)| *at == step);
+        if let Some((_, hook)) = hook {
+            hook();
         }
     }
 
@@ -148,6 +179,10 @@ impl CompactStoreTiered {
         Arc::clone(self.state.read().store())
     }
 
+    /// Installs `prepared` while the wrapper still holds `expected`, the
+    /// store it was prepared from. Otherwise the change is dropped: a merge
+    /// or a restore replaced the base meanwhile, and the wrapper follows that
+    /// base, never the copy of the one it replaced.
     pub(super) fn install_if_current(&self, expected: &Arc<CompactStore>, prepared: PreparedTier) {
         let mut state = self.state.write();
         if Arc::ptr_eq(state.store(), expected) {
@@ -183,7 +218,7 @@ impl CompactStoreTiered {
         let store = self.store();
         let section = CompactStoreSection::new(store);
         let bytes = section.serialize()?;
-        write_atomically(path, &bytes)?;
+        self.write_atomically(path, &bytes)?;
         Ok(bytes.len())
     }
 
@@ -202,22 +237,36 @@ impl CompactStoreTiered {
     pub fn persist_to_mmap(&self, path: &Path) -> Result<usize> {
         let _transition = self.transition.lock();
         let expected = self.store();
-        let prepared = Self::prepare_mmap(Arc::clone(&expected), path)?;
+        let prepared = self.prepare_mmap(Arc::clone(&expected), path)?;
         let written = prepared.written;
         self.install_if_current(&expected, prepared);
         Ok(written)
     }
 
-    pub(super) fn prepare_mmap(store: Arc<CompactStore>, path: &Path) -> Result<PreparedTier> {
+    /// Writes `store` to `path` and maps the file, without changing the
+    /// wrapper's state: the caller publishes the mapped copy and then
+    /// installs it (see [`install_if_current`](Self::install_if_current)).
+    ///
+    /// The copy maps the file this call wrote, through the handle it wrote
+    /// with, also when another database spilling to the same directory
+    /// replaced `path` meanwhile.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Internal` if serialization, the file write, the mmap
+    /// or the deserialize fails.
+    pub(super) fn prepare_mmap(
+        &self,
+        store: Arc<CompactStore>,
+        path: &Path,
+    ) -> Result<PreparedTier> {
         let bytes = CompactStoreSection::new(store).serialize()?;
-        // Keep the exact file we wrote: another wrapper may replace the same
-        // path between our rename and mmap (for example after recompact).
-        let file = write_atomically(path, &bytes)?;
+        let file = self.write_atomically(path, &bytes)?;
         #[cfg(test)]
-        run_before_mmap_hook();
+        self.run_tier_hook(TierStep::Written);
         let (mmap_bytes, store) = deserialize_mmap(&file, path)?;
         #[cfg(test)]
-        run_before_install_hook();
+        self.run_tier_hook(TierStep::Prepared);
         Ok(PreparedTier {
             state: TierState::OnDisk {
                 path: path.to_path_buf(),
@@ -238,14 +287,11 @@ impl CompactStoreTiered {
     /// or deserialized into a valid `CompactStore`.
     pub fn open_mmap(path: &Path) -> Result<Self> {
         let (mmap_bytes, store) = open_and_deserialize(path)?;
-        Ok(Self {
-            state: RwLock::new(TierState::OnDisk {
-                path: path.to_path_buf(),
-                _mmap_bytes: mmap_bytes,
-                store,
-            }),
-            transition: Mutex::new(()),
-        })
+        Ok(Self::from_state(TierState::OnDisk {
+            path: path.to_path_buf(),
+            _mmap_bytes: mmap_bytes,
+            store,
+        }))
     }
 
     /// Reloads the store into a heap-owning `InMemory` tier and drops the
@@ -274,12 +320,19 @@ impl CompactStoreTiered {
             };
             Arc::clone(store)
         };
-        let prepared = Self::prepare_ram(Arc::clone(&expected))?;
+        let prepared = self.prepare_ram(Arc::clone(&expected))?;
         self.install_if_current(&expected, prepared);
         Ok(())
     }
 
-    pub(super) fn prepare_ram(store: Arc<CompactStore>) -> Result<PreparedTier> {
+    /// Copies `store` into memory the wrapper owns (see
+    /// [`reload_to_ram`](Self::reload_to_ram)), without changing the
+    /// wrapper's state: the caller publishes the copy and then installs it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Internal` if serialization or deserialization fails.
+    pub(super) fn prepare_ram(&self, store: Arc<CompactStore>) -> Result<PreparedTier> {
         let section = CompactStoreSection::new(store);
         let bytes = section.serialize()?;
         let mut reloaded = CompactStoreSection::empty();
@@ -287,6 +340,8 @@ impl CompactStoreTiered {
         let new_store = reloaded.store().ok_or_else(|| {
             Error::Internal("empty CompactStoreSection after reload_to_ram".to_string())
         })?;
+        #[cfg(test)]
+        self.run_tier_hook(TierStep::Prepared);
         Ok(PreparedTier {
             state: TierState::InMemory(new_store),
             written: 0,
@@ -333,71 +388,89 @@ impl CompactStoreTiered {
 
 #[cfg(feature = "lpg")]
 impl CompactStoreTiered {
+    /// Takes the transition lock if no tier change holds it (see
+    /// `transition`), without waiting: a change takes long while it writes
+    /// the base, and the memory consumer's callbacks must not stall on it.
     pub(super) fn try_transition(&self) -> Option<MutexGuard<'_, ()>> {
         self.transition.try_lock()
     }
 
+    /// Whether the wrapper holds `store`, the layered store's base, and holds
+    /// it mapped. While a change that has not installed its state yet holds
+    /// the transition lock, the wrapper may still hold the base before the
+    /// change, and then this is `false`.
     pub(super) fn is_on_disk_for(&self, store: &Arc<CompactStore>) -> bool {
         let state = self.state.read();
         matches!(&*state, TierState::OnDisk { .. }) && Arc::ptr_eq(state.store(), store)
     }
 
+    /// Heap bytes of `store`, the layered store's base, and of the store the
+    /// wrapper holds when that is another one: until the wrapper follows the
+    /// base, both are alive.
     pub(super) fn memory_bytes_for(&self, store: &Arc<CompactStore>) -> usize {
         let state = self.state.read();
         let current = store.memory_bytes();
         if Arc::ptr_eq(state.store(), store) {
             current
         } else {
-            // A contended reconciliation can temporarily retain the old base.
             current.saturating_add(state.store().memory_bytes())
         }
     }
 }
 
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<std::fs::File> {
-    use std::io::Write;
+impl CompactStoreTiered {
+    /// Writes `bytes` to `path` through a temporary file in the same
+    /// directory that a rename puts in place, and returns the open file.
+    ///
+    /// Each call writes its own temporary file, and the caller maps the
+    /// returned handle, not `path`: two databases can spill to one directory
+    /// at once, and each maps the bytes it wrote.
+    fn write_atomically(&self, path: &Path, bytes: &[u8]) -> Result<std::fs::File> {
+        use std::io::Write;
 
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| Error::Internal(format!("create dir for {}: {e}", parent.display())))?;
-    }
-    // Distinct wrappers can spill concurrently to the same destination.
-    // A unique sibling and an open handle keep each prepared snapshot intact.
-    let (tmp, mut file) = loop {
-        let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-        let tmp = path.with_extension(format!("grafeo.{}.{sequence}.tmp", std::process::id()));
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-        {
-            Ok(file) => break (tmp, file),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(Error::Internal(format!(
-                    "create {}: {error}",
-                    tmp.display()
-                )));
-            }
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::Internal(format!("create dir for {}: {e}", parent.display()))
+            })?;
         }
-    };
-    if let Err(error) = file.write_all(bytes) {
-        drop(file);
-        let _ = std::fs::remove_file(&tmp);
-        return Err(Error::Internal(format!("write {}: {error}", tmp.display())));
+        let (tmp, mut file) = loop {
+            let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+            let tmp = path.with_extension(format!("grafeo.{}.{sequence}.tmp", std::process::id()));
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+            {
+                Ok(file) => break (tmp, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(Error::Internal(format!(
+                        "create {}: {error}",
+                        tmp.display()
+                    )));
+                }
+            }
+        };
+        #[cfg(test)]
+        self.run_tier_hook(TierStep::TempCreated);
+        if let Err(error) = file.write_all(bytes) {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::Internal(format!("write {}: {error}", tmp.display())));
+        }
+        if let Err(error) = std::fs::rename(&tmp, path) {
+            drop(file);
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::Internal(format!(
+                "rename {} -> {}: {error}",
+                tmp.display(),
+                path.display()
+            )));
+        }
+        Ok(file)
     }
-    if let Err(error) = std::fs::rename(&tmp, path) {
-        drop(file);
-        let _ = std::fs::remove_file(&tmp);
-        return Err(Error::Internal(format!(
-            "rename {} -> {}: {error}",
-            tmp.display(),
-            path.display()
-        )));
-    }
-    Ok(file)
 }
 
 fn open_and_deserialize(path: &Path) -> Result<(Bytes, Arc<CompactStore>)> {
@@ -463,10 +536,8 @@ mod tests {
         other.create_node(&["Replacement"]);
         let other = CompactStoreTiered::new_in_memory(Arc::new(from_graph_store(&other).unwrap()));
         let replacement_path = path.clone();
-        BEFORE_MMAP.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move || {
-                other.persist_to_mmap(&replacement_path).unwrap();
-            }));
+        tiered.set_tier_hook(TierStep::Written, move || {
+            other.persist_to_mmap(&replacement_path).unwrap();
         });
         tiered.persist_to_mmap(&path).unwrap();
         assert_eq!(tiered.store().node_count(), 16);
@@ -482,7 +553,7 @@ mod tests {
         let replacement = Arc::new(from_graph_store(&replacement).unwrap());
         let following = Arc::clone(&tiered);
         let new_base = Arc::clone(&replacement);
-        set_before_install_hook(move || {
+        tiered.set_tier_hook(TierStep::Prepared, move || {
             assert!(following.follow(&new_base));
         });
         tiered

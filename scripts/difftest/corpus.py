@@ -334,10 +334,24 @@ ordered("H3", "MATCH (a:Person) LET b = a RETURN b ORDER BY b.age LIMIT 2", GQL)
 ordered("I1", "MATCH (a:Person)-[r:LIVES_IN]->(c) RETURN * ORDER BY r.years")
 ordered("I2", "MATCH (a:Person)-[r:LIVES_IN]->(c) RETURN * ORDER BY a.name LIMIT 1")
 
-# J: aggregation over nodes and edges
+# J: aggregation over nodes and edges; J4 to J6: a grouped aggregate skips null operands,
+#    also the first one of a group
 ordered("J1", "MATCH (a:Person)-[r]->(b) RETURN b.name AS n, count(r) AS c ORDER BY c DESC, n")
 case("J2", "MATCH (a:Person)-[r]->(b) RETURN r, count(*) AS c")
 case("J3", "MATCH (a:Person)-[r]->(b) RETURN collect(r.w) AS ws")
+case("J4", "UNWIND [null, 3, 1] AS x RETURN 0 AS g, min(x) AS a, max(x) AS b")
+case("J5", "UNWIND [null, 3] AS x RETURN 0 AS g, sample(x) AS s")
+case("J6", "UNWIND [null, 19, 3] AS x RETURN 0 AS g, collect(x) AS xs, collect(DISTINCT x) AS ds")
+# J7 to J14: values beside a computed group key or aggregate operand keep their kind (they
+# were copied through as nodes, so strings, floats, booleans, lists, maps and paths became 0)
+case("J7", "MATCH (a:Person) WITH a.name AS name, a.age AS age RETURN age % 2 AS odd, collect(name) AS names")
+case("J8", "MATCH (a:Person) WITH a.name AS name, a.age AS age RETURN name, sum(age * 2) AS doubled")
+case("J9", "MATCH (a:Person) WITH a.age / 16.0 AS share, a.age > 30 AS senior, [a.name, a.age] AS pair, {age: a.age} AS info RETURN 0 AS g, collect(share) AS shares, collect(senior) AS seniors, collect(pair) AS pairs, collect(info) AS infos")
+case("J10", "MATCH (a:Person) WITH a.name AS name, a.age AS age RETURN count(DISTINCT name) AS names, max(name) AS last, sum(age * 2) AS doubled")
+case("J11", "UNWIND [2.5, 3.5] AS x RETURN 0 AS g, collect(x) AS xs, sum(x) AS total")
+case("J12", "MATCH (a:Person) WITH a.name AS name, a.age AS age WITH age % 2 AS odd, collect(name) AS names RETURN odd, names")
+case("J13", "MATCH (a:Person)-[r:KNOWS]->(b) RETURN a.age % 2 AS odd, collect(r) AS rs, collect(b) AS bs, sum(r.w * 2) AS doubled")
+case("J14", "MATCH p = (a:Person)-[:KNOWS]->(b) RETURN a.age % 2 AS odd, collect(p) AS ps")
 
 # K: variables bound before a later pattern, and values through a later MATCH
 for case_id, query, languages in [

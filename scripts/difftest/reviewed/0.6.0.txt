@@ -58,3 +58,20 @@ AP3|gql 8adb268fc9 A comma part that shares a node with an earlier part goes on 
 AP4|cypher 063db839ae A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
 AP4|gql 063db839ae A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
 AP5|gql 499c39eaf8 A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
+J4|gql 191751d025 A grouped min or max skips a null first value of its group; it returned null.
+J5|gql 7b6b099948 A grouped sample skips a null first value of its group; it returned null.
+J6|gql 2ffa9663c9 A grouped collect skips nulls, as without a group key and in Cypher; it listed them.
+J7|cypher 24270a78b4 Values beside a computed group key keep their kind; strings, floats, booleans, lists, maps and paths were copied through as nodes and became 0.
+J7|gql 24270a78b4 Values beside a computed group key keep their kind; strings, floats, booleans, lists, maps and paths were copied through as nodes and became 0.
+J8|cypher 57e2bbf68a A string group key beside a computed operand keeps its groups; the names became 0 and every group merged into one.
+J8|gql 57e2bbf68a A string group key beside a computed operand keeps its groups; the names became 0 and every group merged into one.
+J9|cypher 52df54130a Floats, booleans, lists and maps beside a literal group key keep their values; they became 0.
+J9|gql 52df54130a Floats, booleans, lists and maps beside a literal group key keep their values; they became 0.
+J10|cypher d3f3f0f0d0 Values beside a computed aggregate operand keep their kind; count(DISTINCT name) counted one 0 and max(name) returned 0.
+J10|gql d3f3f0f0d0 Values beside a computed aggregate operand keep their kind; count(DISTINCT name) counted one 0 and max(name) returned 0.
+J11|cypher d6c3ec3163 Unwound floats beside a literal group key keep their values; collect and sum saw 0.
+J11|gql d6c3ec3163 Unwound floats beside a literal group key keep their values; collect and sum saw 0.
+J12|cypher 24270a78b4 Values beside a computed key in an aggregating WITH keep their kind; the names became 0.
+J12|gql 24270a78b4 Values beside a computed key in an aggregating WITH keep their kind; the names became 0.
+J14|cypher 986c8f67b9 Paths beside a computed group key stay paths; they became 0.
+J14|gql 986c8f67b9 Paths beside a computed group key stay paths; they became 0.

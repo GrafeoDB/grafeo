@@ -36,6 +36,8 @@ impl Session {
         let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         Self {
             store,
+            #[cfg(feature = "compact-store")]
+            layers: None,
             lpg_backend: super::LpgBackend::Active,
             graph_store,
             graph_store_mut,
@@ -127,10 +129,12 @@ impl Session {
             .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
-        let planner = planner.with_wal(self.wal.clone());
+        let planner = planner.with_wal(self.wal().cloned());
         #[cfg(all(feature = "cdc", feature = "lpg"))]
-        let planner =
-            planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
+        let planner = planner.with_cdc_log(
+            Some(Arc::clone(&self.cdc_log)),
+            self.root_store().current_epoch(),
+        );
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         let executor = self.make_executor(physical_plan.columns.clone());
@@ -213,10 +217,12 @@ impl Session {
             .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
-        let planner = planner.with_wal(self.wal.clone());
+        let planner = planner.with_wal(self.wal().cloned());
         #[cfg(all(feature = "cdc", feature = "lpg"))]
-        let planner =
-            planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
+        let planner = planner.with_cdc_log(
+            Some(Arc::clone(&self.cdc_log)),
+            self.root_store().current_epoch(),
+        );
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         let executor = self.make_executor(physical_plan.columns.clone());
@@ -290,10 +296,12 @@ impl Session {
             .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
-        let planner = planner.with_wal(self.wal.clone());
+        let planner = planner.with_wal(self.wal().cloned());
         #[cfg(all(feature = "cdc", feature = "lpg"))]
-        let planner =
-            planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
+        let planner = planner.with_cdc_log(
+            Some(Arc::clone(&self.cdc_log)),
+            self.root_store().current_epoch(),
+        );
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         let executor = self.make_executor(physical_plan.columns.clone());
@@ -372,10 +380,12 @@ impl Session {
             .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
-        let planner = planner.with_wal(self.wal.clone());
+        let planner = planner.with_wal(self.wal().cloned());
         #[cfg(all(feature = "cdc", feature = "lpg"))]
-        let planner =
-            planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
+        let planner = planner.with_cdc_log(
+            Some(Arc::clone(&self.cdc_log)),
+            self.root_store().current_epoch(),
+        );
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         let executor = self.make_executor(physical_plan.columns.clone());

@@ -131,10 +131,10 @@ use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::AdaptiveContext;
 use grafeo_core::execution::operators::{
     AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, ConstraintValidator,
-    CreateEdgeOperator, CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, EmptyOperator,
-    EntityKind, EntityValue, ExecutionPathMode, ExpandOperator, ExpandStep, ExpressionPredicate,
-    FactorizedAggregate, FactorizedAggregateOperator, FilterExpression, FilterOperator,
-    HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
+    CreateEdgeOperator, CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, EagerOperator,
+    EmptyOperator, EntityKind, EntityValue, ExecutionPathMode, ExpandOperator, ExpandStep,
+    ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
+    FilterOperator, HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
     JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LeapfrogJoinOperator,
     LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator, MergeRelationshipConfig,
     MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator, Operator,
@@ -1006,6 +1006,21 @@ impl Planner {
         } else {
             result
         }
+    }
+
+    /// Plans the input of an operator that can start a query. `Empty`, the
+    /// one empty row a query starts from (`RETURN 1`, a first `WITH`, `UNWIND`,
+    /// `OPTIONAL MATCH` or `CALL`, a filter moved down to it), is a single row
+    /// without columns; any other input is planned as usual. `plan_operator`
+    /// refuses `Empty`, so the row is profiled here: PROFILE walks the logical
+    /// tree, `Empty` included, and needs an entry for each of its operators.
+    fn plan_input(&self, input: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        if !matches!(input, LogicalOperator::Empty) {
+            return self.plan_operator(input);
+        }
+        let row: Box<dyn Operator> =
+            Box::new(grafeo_core::execution::operators::single_row::SingleRowOperator::new());
+        self.maybe_profile(Ok((row, Vec::new())), input)
     }
 
     /// Plans a single logical operator.

@@ -10,10 +10,10 @@ use std::collections::{HashMap, HashSet};
 
 use super::common::{
     build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
-    combine_with_and, expand_subquery_return_star, flatten_and_conjuncts, has_all_labels,
-    is_aggregate_function, is_binary_set_function, join_and_conjuncts, optional_join,
-    references_any, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
-    wrap_skip, wrap_sort,
+    combine_with_and, comma_part_join_variables, expand_subquery_return_star,
+    flatten_and_conjuncts, has_all_labels, is_aggregate_function, is_binary_set_function,
+    join_and_conjuncts, optional_join, references_any, to_aggregate_function, wrap_distinct,
+    wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
@@ -1178,6 +1178,17 @@ impl GqlTranslator {
         vars
     }
 
+    /// The variable of the node a pattern starts from, if it names one.
+    fn pattern_start(pattern: &ast::Pattern) -> Option<&str> {
+        match pattern {
+            ast::Pattern::Node(node) => node.variable.as_deref(),
+            ast::Pattern::Path(path) => path.source.variable.as_deref(),
+            ast::Pattern::Quantified { .. }
+            | ast::Pattern::Union(_)
+            | ast::Pattern::MultisetUnion(_) => None,
+        }
+    }
+
     /// Translates a MATCH clause with an optional initial input.
     ///
     /// When `initial_input` is provided (e.g. from a preceding UNWIND), the
@@ -1186,7 +1197,9 @@ impl GqlTranslator {
     /// so that property filters like `{id: x}` can reference them.
     ///
     /// When multiple comma-separated patterns share variables, creates proper
-    /// `JoinOp` operators with equality conditions instead of cross products.
+    /// `JoinOp` operators with equality conditions instead of cross products;
+    /// the variables of the input count as shared too (see
+    /// [`comma_part_join_variables`]).
     fn translate_match_with_input(
         &self,
         match_clause: &ast::MatchClause,
@@ -1230,15 +1243,28 @@ impl GqlTranslator {
             .map(|ap| Self::pattern_variables(&ap.pattern))
             .collect();
 
+        // The variables the input binds, those of the outer row for a
+        // subquery's `WITH *` included (none when they are not known here)
+        let input_vars = initial_input
+            .as_ref()
+            .and_then(|input| input.bound_variables(self.call_scope.borrow().as_ref()))
+            .unwrap_or_default();
+
         let mut plan: Option<LogicalOperator> = initial_input;
         let mut bound_vars: HashSet<String> = HashSet::new();
 
         for (index, aliased_pattern) in match_clause.patterns.iter().enumerate() {
             let current_vars = &pattern_vars[index];
-            let shared: Vec<String> = current_vars.intersection(&bound_vars).cloned().collect();
+            let shared = comma_part_join_variables(
+                current_vars,
+                Self::pattern_start(&aliased_pattern.pattern),
+                &bound_vars,
+                &input_vars,
+            );
 
             // Determine the input for this pattern: if shared variables exist,
-            // translate independently and join; otherwise chain as before.
+            // translate independently and join; otherwise go on from the rows
+            // before (a cross product, or an expand from the bound start).
             let pattern_input = if shared.is_empty() { plan.take() } else { None };
 
             // Check per-pattern search prefix (e.g., p = ANY SHORTEST (...))

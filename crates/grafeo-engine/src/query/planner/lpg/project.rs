@@ -13,17 +13,8 @@ use super::{
 impl super::Planner {
     /// Plans a RETURN clause.
     pub(super) fn plan_return(&self, ret: &ReturnOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Handle Empty input (standalone RETURN like: RETURN 2 * 3 AS product)
-        let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) =
-            if matches!(ret.input.as_ref(), LogicalOperator::Empty) {
-                let single_row_op: Box<dyn Operator> = Box::new(
-                    grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
-                );
-                (single_row_op, Vec::new())
-            } else {
-                self.plan_operator(&ret.input)?
-            };
-
+        // A standalone RETURN (`RETURN 2 * 3 AS product`) reads one empty row.
+        let (input_op, input_columns) = self.plan_input(&ret.input)?;
         self.plan_return_with_input(ret, input_op, input_columns)
     }
 
@@ -385,17 +376,8 @@ impl super::Planner {
         &self,
         project: &crate::query::plan::ProjectOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Handle Empty input specially (standalone WITH like: WITH [1,2,3] AS nums)
-        let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) =
-            if matches!(project.input.as_ref(), LogicalOperator::Empty) {
-                // Create a single-row operator for projecting literals
-                let single_row_op: Box<dyn Operator> = Box::new(
-                    grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
-                );
-                (single_row_op, Vec::new())
-            } else {
-                self.plan_operator(&project.input)?
-            };
+        // A standalone WITH (`WITH [1, 2, 3] AS nums`) projects one empty row.
+        let (input_op, input_columns) = self.plan_input(&project.input)?;
         // EXISTS and COUNT subqueries the edge check cannot answer run per row
         // first (see `subquery.rs`); the projections read their counts.
         let (lifted_projections, input_op, input_columns) = self.lift_projections(

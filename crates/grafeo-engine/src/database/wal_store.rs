@@ -448,7 +448,7 @@ impl GraphStoreMut for WalGraphStore {
         edge_type: &str,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> EdgeId {
+    ) -> grafeo_common::utils::error::Result<EdgeId> {
         let id = self
             .inner
             .create_edge_versioned(src, dst, edge_type, epoch, transaction_id);
@@ -458,7 +458,7 @@ impl GraphStoreMut for WalGraphStore {
             dst,
             edge_type: edge_type.to_string(),
         });
-        id
+        Ok(id)
     }
 
     fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
@@ -1025,7 +1025,7 @@ mod tests {
         let tx = TransactionId::new(1);
         let a = ws.create_node(&["Node"]);
         let b = ws.create_node(&["Node"]);
-        let eid = ws.create_edge_versioned(a, b, "KNOWS", epoch, tx);
+        let eid = ws.create_edge_versioned(a, b, "KNOWS", epoch, tx).unwrap();
 
         assert!(eid.is_valid());
         // 2 CreateNode + 1 CreateEdge
@@ -1119,7 +1119,7 @@ mod tests {
         let tx = TransactionId::new(1);
         let a = ws.create_node(&["Node"]);
         let b = ws.create_node(&["Node"]);
-        let eid = ws.create_edge_versioned(a, b, "LINK", epoch, tx);
+        let eid = ws.create_edge_versioned(a, b, "LINK", epoch, tx).unwrap();
         assert_eq!(wal.len(), 3);
 
         // Delete nonexistent: no log

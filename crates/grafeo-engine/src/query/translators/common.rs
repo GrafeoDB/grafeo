@@ -622,12 +622,44 @@ pub(crate) fn collect_operator_variables(op: &LogicalOperator, vars: &mut HashSe
         }
         LogicalOperator::Project(proj) => {
             for p in &proj.projections {
-                if let Some(alias) = &p.alias {
-                    vars.insert(alias.clone());
+                // A variable passed on as it is (`WITH i`) keeps its name.
+                match (&p.alias, &p.expression) {
+                    (Some(name), _) | (None, LogicalExpression::Variable(name)) => {
+                        vars.insert(name.clone());
+                    }
+                    (None, _) => {}
                 }
             }
             collect_operator_variables(&proj.input, vars);
         }
+        // A write passes its input's rows on, with the node or edge it
+        // creates or merges (`UNWIND ... AS i CREATE (n) WITH i OPTIONAL
+        // MATCH (t {k: i})` reads `i` through the write).
+        LogicalOperator::CreateNode(create) => {
+            vars.insert(create.variable.clone());
+            if let Some(input) = &create.input {
+                collect_operator_variables(input, vars);
+            }
+        }
+        LogicalOperator::CreateEdge(create) => {
+            if let Some(variable) = &create.variable {
+                vars.insert(variable.clone());
+            }
+            collect_operator_variables(&create.input, vars);
+        }
+        LogicalOperator::Merge(merge) => {
+            vars.insert(merge.variable.clone());
+            collect_operator_variables(&merge.input, vars);
+        }
+        LogicalOperator::MergeRelationship(merge) => {
+            vars.insert(merge.variable.clone());
+            collect_operator_variables(&merge.input, vars);
+        }
+        LogicalOperator::SetProperty(set) => collect_operator_variables(&set.input, vars),
+        LogicalOperator::AddLabel(add) => collect_operator_variables(&add.input, vars),
+        LogicalOperator::RemoveLabel(remove) => collect_operator_variables(&remove.input, vars),
+        LogicalOperator::DeleteNode(delete) => collect_operator_variables(&delete.input, vars),
+        LogicalOperator::DeleteEdge(delete) => collect_operator_variables(&delete.input, vars),
         LogicalOperator::Join(join) => {
             collect_operator_variables(&join.left, vars);
             collect_operator_variables(&join.right, vars);
@@ -673,9 +705,43 @@ pub(crate) fn collect_operator_variables(op: &LogicalOperator, vars: &mut HashSe
         _ => {
             // For other operators, do not recurse to avoid false positives.
             // The common cases (NodeScan, Expand, Filter, Join, LeftJoin,
-            // Unwind, Project, Aggregate, Return) are covered above.
+            // Unwind, Project, Aggregate, Return, the writes) are covered
+            // above.
         }
     }
+}
+
+/// The variables on which a comma-separated part of a MATCH (`part`, the
+/// variables it names, starting from the node variable `start`) is joined to
+/// the rows of the parts before it, in name order, or none when the part goes
+/// on from those rows instead. `clause` holds the variables of the earlier
+/// parts of the clause, `input` those of the rows the clause starts from (a
+/// MATCH, UNWIND or subquery import before it).
+///
+/// A part goes on from the rows when it shares no variable with the earlier
+/// parts, or when it starts from a variable of the input: its scan reuses the
+/// bound start and expands from it, and an expand to a node or edge that is
+/// bound already binds a fresh variable checked against it (`close_cycles`).
+/// Any other part is matched on its own and joined on every variable it
+/// shares with the earlier parts or with the input, so that a part like
+/// `(a)<-[:R]-(b)` after `(b:C)` still meets the `a` of the input.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn comma_part_join_variables(
+    part: &HashSet<String>,
+    start: Option<&str>,
+    clause: &HashSet<String>,
+    input: &HashSet<String>,
+) -> Vec<String> {
+    if part.is_disjoint(clause) || start.is_some_and(|start| input.contains(start)) {
+        return Vec::new();
+    }
+    let mut shared: Vec<String> = part
+        .iter()
+        .filter(|name| clause.contains(*name) || input.contains(*name))
+        .cloned()
+        .collect();
+    shared.sort();
+    shared
 }
 
 /// The left join of an OPTIONAL MATCH: `right` matched for each row of

@@ -720,10 +720,10 @@ impl super::GrafeoDB {
         if files.is_empty() && !rebuild_every_index {
             return Ok(());
         }
-        let folded = fold_in(self.lpg_store(), &files);
+        let folded = fold_in(&self.lpg_store(), &files);
         let mut rebuilt = folded.indexes.clone();
         if rebuild_every_index {
-            rebuilt.extend(every_vector_index(self.lpg_store()));
+            rebuilt.extend(every_vector_index(&self.lpg_store()));
         }
         for (label, property) in &rebuilt {
             // A crash point where the rebuild is to be made durable: a
@@ -732,7 +732,7 @@ impl super::GrafeoDB {
             if !self.read_only {
                 grafeo_common::testing::crash::maybe_crash("legacy_spill:rebuild");
             }
-            rebuild_index(self.lpg_store(), label, property);
+            rebuild_index(&self.lpg_store(), label, property);
         }
         let shared: Vec<String> = folded
             .files
@@ -1002,7 +1002,7 @@ mod tests {
         for dimensions in [0, 3] {
             let vector: Vec<f32> = [3.0, 19.0, 88.0].into_iter().take(dimensions).collect();
             write_old(&path, dimensions, &[(alix.as_u64(), vector)]);
-            let folded = fold_in(store, &find(dir.path(), true));
+            let folded = fold_in(&store, &find(dir.path(), true));
             assert!(folded.files.is_empty(), "{dimensions} dimensions");
             assert_eq!(folded.filled, 0);
             assert_eq!(folded.kept.len(), 1, "{dimensions} dimensions");
@@ -1051,7 +1051,7 @@ mod tests {
             ],
         );
 
-        let folded = fold_in(db.lpg_store(), &find(dir.path(), true));
+        let folded = fold_in(&db.lpg_store(), &find(dir.path(), true));
         assert_eq!(folded.filled, 1, "Alix");
         assert!(folded.files.is_empty(), "not deleted");
         assert_eq!(folded.kept.len(), 1);
@@ -1109,7 +1109,7 @@ mod tests {
         let found = find(dir.path(), true);
         std::fs::remove_file(&path).unwrap();
 
-        let folded = fold_in(db.lpg_store(), &found);
+        let folded = fold_in(&db.lpg_store(), &found);
         assert!(folded.files.is_empty(), "not deleted");
         assert!(folded.kept.is_empty(), "not kept: {:?}", folded.kept);
         assert!(
@@ -1177,7 +1177,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         assert!(read(&path).is_err(), "longer than its header says");
-        let folded = fold_in(db.lpg_store(), &find(dir.path(), true));
+        let folded = fold_in(&db.lpg_store(), &find(dir.path(), true));
         assert!(folded.files.is_empty(), "the file is to be deleted");
         assert_eq!(folded.kept.len(), 1);
         assert!(
@@ -1203,7 +1203,7 @@ mod tests {
             .unwrap();
         let store = db.lpg_store();
         super::super::test_backing::spill(
-            store,
+            &store,
             "embedding",
             Arc::new(super::super::test_backing::Unreadable(alix)),
         );
@@ -1213,7 +1213,7 @@ mod tests {
             &[(alix.as_u64(), vec![3.0, 19.0])],
         );
 
-        let folded = fold_in(store, &find(dir.path(), true));
+        let folded = fold_in(&store, &find(dir.path(), true));
         assert!(folded.files.is_empty(), "the file is to be deleted");
         assert!(folded.kept.is_empty());
         assert_eq!(folded.filled, 0);
@@ -1241,7 +1241,7 @@ mod tests {
             &records,
         );
 
-        let folded = fold_in_batches(db.lpg_store(), &find(dir.path(), true), 40);
+        let folded = fold_in_batches(&db.lpg_store(), &find(dir.path(), true), 40);
         assert_eq!((folded.batches, folded.filled), (3, 5));
         assert_eq!(folded.files.len(), 1);
     }
@@ -1267,7 +1267,7 @@ mod tests {
             .unwrap()
             .set_len(HEADER_BYTES as u64 + 16 * 319)
             .unwrap();
-        let read = fill_from(db.lpg_store(), &file, &mut old, 16);
+        let read = fill_from(&db.lpg_store(), &file, &mut old, 16);
         assert!(read.stopped.is_some(), "the read stops");
         assert!(
             read.filled > 0 && read.filled < 1988,
@@ -1300,7 +1300,7 @@ mod tests {
         }
         let store = db.lpg_store();
 
-        let folded = fold_in(store, &find(dir.path(), true));
+        let folded = fold_in(&store, &find(dir.path(), true));
         let paths: Vec<&PathBuf> = folded.files.iter().map(|file| &file.path).collect();
         assert_eq!(paths, vec![&good]);
         assert_eq!(folded.kept.len(), 1);

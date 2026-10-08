@@ -1831,3 +1831,228 @@ fn test_raw_i64_inline_and_mapped_find_eq_match() {
     assert_eq!(inline.find_eq(&target), mapped.find_eq(&target));
     assert!(!inline.find_eq(&target).is_empty(), "expected non-empty");
 }
+
+// ===========================================================================
+// Nodes with several labels: a table per label set, each label reads them
+// ===========================================================================
+
+/// Vincent is a Person and an Actor, Jules a Person and Mia an Actor.
+/// Returns the store and the ids of Vincent, Jules and Mia.
+fn people_and_actors() -> (crate::graph::lpg::LpgStore, NodeId, NodeId, NodeId) {
+    let store = crate::graph::lpg::LpgStore::new().unwrap();
+    let vincent = store.create_node(&["Person", "Actor"]);
+    store.set_node_property(vincent, "name", Value::from("Vincent"));
+    let jules = store.create_node(&["Person"]);
+    store.set_node_property(jules, "name", Value::from("Jules"));
+    let mia = store.create_node(&["Actor"]);
+    store.set_node_property(mia, "name", Value::from("Mia"));
+    (store, vincent, jules, mia)
+}
+
+/// The labels of node `id` in `store`, sorted.
+fn sorted_labels_of(store: &dyn GraphStore, id: NodeId) -> Vec<String> {
+    let mut labels: Vec<String> = store
+        .get_node(id)
+        .map(|node| node.labels.iter().map(ToString::to_string).collect())
+        .unwrap_or_default();
+    labels.sort();
+    labels
+}
+
+fn sorted_ids(mut ids: Vec<NodeId>) -> Vec<NodeId> {
+    ids.sort_unstable();
+    ids
+}
+
+#[test]
+fn a_compacted_node_keeps_each_of_its_labels() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+
+    let (store, vincent, jules, mia) = people_and_actors();
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+
+    assert_eq!(sorted_labels_of(&compact, vincent), ["Actor", "Person"]);
+    assert_eq!(sorted_labels_of(&compact, jules), ["Person"]);
+    assert_eq!(
+        sorted_ids(compact.nodes_by_label("Person")),
+        sorted_ids(vec![vincent, jules]),
+        "a Person scan finds Vincent too"
+    );
+    assert_eq!(
+        sorted_ids(compact.nodes_by_label("Actor")),
+        sorted_ids(vec![vincent, mia]),
+        "an Actor scan finds Vincent too"
+    );
+    assert!(
+        compact.nodes_by_label("Actor|Person").is_empty(),
+        "no label is named after a label set"
+    );
+    assert_eq!(compact.nodes_by_label_count("Person"), 2);
+    assert_eq!(compact.nodes_by_label_count("Actor"), 2);
+    assert!(compact.node_in_label(vincent, "Person"));
+    assert!(compact.node_in_label(vincent, "Actor"));
+    assert!(!compact.node_in_label(jules, "Actor"));
+    assert!(
+        (compact.estimate_label_cardinality("Actor") - 2.0).abs() < 1e-9,
+        "the planner's estimate counts each node with the label: {}",
+        compact.estimate_label_cardinality("Actor")
+    );
+    let statistics = compact.statistics();
+    for label in ["Person", "Actor"] {
+        assert_eq!(
+            statistics.get_label(label).map(|s| s.node_count),
+            Some(2),
+            "{label} statistics"
+        );
+    }
+    assert!(statistics.get_label("Actor|Person").is_none());
+    let mut labels = compact.all_labels();
+    labels.sort();
+    assert_eq!(labels, ["Actor", "Person"]);
+}
+
+/// A label scan reads every table whose label set has the label, and
+/// returns their rows in id order: Jules (id 0) is a row of the Person
+/// table, which comes after the table of Vincent's set (Actor and Person)
+/// because the tables follow the labels in name order.
+#[test]
+fn a_label_scan_spans_every_table_whose_set_has_the_label() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+
+    let store = crate::graph::lpg::LpgStore::new().unwrap();
+    let jules = store.create_node(&["Person"]);
+    let vincent = store.create_node(&["Person", "Actor"]);
+    let mia = store.create_node(&["Actor"]);
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+    assert_eq!(compact.nodes_by_label("Person"), vec![jules, vincent]);
+    assert_eq!(compact.nodes_by_label("Actor"), vec![vincent, mia]);
+
+    // Without preserved ids, the ids encode the table and the row.
+    let compact = super::from_graph_store(&store).unwrap();
+    let people = compact.nodes_by_label("Person");
+    assert_eq!(people.len(), 2, "{people:?}");
+    assert_eq!(people, sorted_ids(people.clone()), "in id order");
+}
+
+/// The layered store reads the base's labels: its scans, counts and
+/// statistics count Vincent under each of his labels, also after a delete.
+#[test]
+fn a_layered_store_reads_each_label_of_a_compacted_node() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::compact::layered::LayeredStore;
+    use crate::graph::traits::GraphStoreMut;
+
+    let (store, vincent, jules, mia) = people_and_actors();
+    // Two more Persons, so that the base holds more of them than there are
+    // tombstones and copies below.
+    let alix = store.create_node(&["Person"]);
+    let alix_in_berlin = store.create_node(&["Person"]);
+    let base = from_graph_store_preserving_ids(&store).unwrap();
+    let layered = LayeredStore::new(
+        base,
+        store.next_node_id() - 1,
+        store.next_edge_id().saturating_sub(1),
+    )
+    .unwrap();
+    let gus = layered.create_node(&["Person"]);
+
+    assert_eq!(sorted_labels_of(&layered, vincent), ["Actor", "Person"]);
+    assert_eq!(
+        sorted_ids(layered.nodes_by_label("Person")),
+        sorted_ids(vec![vincent, jules, alix, alix_in_berlin, gus])
+    );
+    assert_eq!(layered.nodes_by_label_count("Person"), 5);
+    let statistics = layered.statistics();
+    assert_eq!(
+        statistics.get_label("Person").map(|s| s.node_count),
+        Some(5)
+    );
+    assert_eq!(statistics.get_label("Actor").map(|s| s.node_count), Some(2));
+
+    assert!(layered.delete_node(vincent));
+    // Four base Persons, one tombstone and one id in the overlay: the count
+    // checks the labels of the deleted id, Person being the second of his.
+    assert_eq!(
+        layered.nodes_by_label_count("Person"),
+        4,
+        "Vincent is no Person left"
+    );
+    assert_eq!(
+        sorted_ids(layered.nodes_by_label("Person")),
+        sorted_ids(vec![jules, alix, alix_in_berlin, gus])
+    );
+    assert_eq!(
+        layered.nodes_by_label_count("Actor"),
+        1,
+        "Mia is the Actor left"
+    );
+    assert_eq!(layered.nodes_by_label("Actor"), vec![mia]);
+}
+
+/// `drop_base` leaves the overlay alone: the base's nodes, the tombstone of
+/// a base delete and the ids of base nodes copied into the overlay go, and
+/// the copies and the overlay's own nodes stay.
+#[test]
+fn dropping_the_base_leaves_only_the_overlay() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::compact::layered::LayeredStore;
+    use crate::graph::traits::GraphStoreMut;
+
+    let (store, vincent, jules, mia) = people_and_actors();
+    let layered = LayeredStore::new(
+        from_graph_store_preserving_ids(&store).unwrap(),
+        store.next_node_id() - 1,
+        store.next_edge_id().saturating_sub(1),
+    )
+    .unwrap();
+    let gus = layered.create_node(&["Person"]);
+    assert!(layered.delete_node(mia));
+    layered.set_node_property(jules, "age", Value::Int64(19));
+    assert_eq!(
+        layered.overlay_mutation_count(),
+        3,
+        "Gus, the copy of Jules and the tombstone of Mia"
+    );
+
+    let empty = layered.drop_base();
+    assert_eq!((empty.node_count(), empty.edge_count()), (0, 0));
+    assert!(std::sync::Arc::ptr_eq(&empty, &layered.base_store_arc()));
+    assert_eq!(
+        layered.overlay_mutation_count(),
+        0,
+        "no tombstone and no copied id is left"
+    );
+    assert!(
+        layered.snapshot_deleted_node_ids().is_empty(),
+        "no delete of a base node is left to write"
+    );
+    assert!(layered.get_node(vincent).is_none(), "the base is gone");
+    assert_eq!(
+        sorted_ids(layered.nodes_by_label("Person")),
+        sorted_ids(vec![jules, gus]),
+        "the copy of Jules and Gus stay"
+    );
+    assert_eq!(layered.node_count(), 2);
+}
+
+/// The builder's single-label tables are named by their label, also when it
+/// holds the separator or the escape character of a label set's key.
+#[test]
+fn a_builder_label_holding_the_separator_is_one_label() {
+    let store = CompactStoreBuilder::new()
+        .node_table("In|Out", |t| t.column_dict("name", &["Alix"]))
+        .node_table("C:\\Data", |t| t.column_dict("name", &["Gus"]))
+        .rel_table("LINKS", "In|Out", "C:\\Data", |r| {
+            r.edges([(0, 0)]).backward(true)
+        })
+        .build()
+        .unwrap();
+    let alix = store.nodes_by_label("In|Out");
+    assert_eq!(alix.len(), 1);
+    assert_eq!(sorted_labels_of(&store, alix[0]), ["In|Out"]);
+    assert!(store.nodes_by_label("In").is_empty(), "In|Out is one label");
+    assert_eq!(store.node_table("In|Out").map(|t| t.len()), Some(1));
+    let gus = store.nodes_by_label("C:\\Data");
+    assert_eq!(sorted_labels_of(&store, gus[0]), ["C:\\Data"]);
+    assert_eq!(store.neighbors(alix[0], Direction::Outgoing), gus);
+}

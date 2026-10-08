@@ -1213,7 +1213,7 @@ impl RdfPlanner {
             &right_columns,
             &left_types,
             &right_types,
-            None,
+            std::convert::identity,
         ))
     }
 

@@ -12,6 +12,7 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 
 use super::CompactStore;
 use super::id::encode_node_id;
+use super::node_table::NodeTable;
 use crate::graph::Direction;
 use crate::graph::lpg::CompareOp;
 use crate::graph::lpg::{Edge, Node};
@@ -28,7 +29,9 @@ impl GraphStore for CompactStore {
         }
 
         let mut node = Node::new(id);
-        node.add_label(nt.label());
+        for label in self.labels_of_table(table_id) {
+            node.add_label(label.clone());
+        }
         let props = nt.get_all_properties(row);
         for (k, v) in props {
             node.set_property(k, v);
@@ -239,28 +242,31 @@ impl GraphStore for CompactStore {
         }
     }
 
+    /// The rows of every table whose label set has `label`.
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
-        let compact_ids = self
-            .label_to_table_id
-            .get(label)
-            .map(|&tid| self.node_tables_by_id[tid as usize].node_ids())
-            .unwrap_or_default();
-        if self.preserves_ids() {
-            compact_ids
-                .into_iter()
-                .map(|cid| self.to_original_node_id(cid))
-                .collect()
-        } else {
-            compact_ids
+        let tables = self.tables_with_label(label);
+        let mut ids: Vec<NodeId> = tables
+            .iter()
+            .filter_map(|&tid| self.resolve_node_table(tid))
+            .flat_map(|table| table.node_ids())
+            .map(|cid| self.to_original_node_id(cid))
+            .collect();
+        // One table's rows come in row order, as they always did; the rows
+        // of several tables are put in id order.
+        if tables.len() > 1 {
+            ids.sort_unstable();
         }
+        ids
     }
 
     fn nodes_by_label_count(&self, label: &str) -> usize {
         // Row count is preserved across the compact->original ID mapping, so
         // NodeTable::len() is authoritative whether preserves_ids() is set or not.
-        self.label_to_table_id
-            .get(label)
-            .map_or(0, |&tid| self.node_tables_by_id[tid as usize].len())
+        self.tables_with_label(label)
+            .iter()
+            .filter_map(|&tid| self.resolve_node_table(tid))
+            .map(NodeTable::len)
+            .sum()
     }
 
     fn node_count(&self) -> usize {
@@ -414,10 +420,7 @@ impl GraphStore for CompactStore {
     }
 
     fn estimate_label_cardinality(&self, label: &str) -> f64 {
-        self.label_to_table_id
-            .get(label)
-            .and_then(|&tid| self.node_tables_by_id.get(tid as usize))
-            .map_or(0.0, |nt| nt.len() as f64)
+        self.nodes_by_label_count(label) as f64
     }
 
     fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
@@ -453,9 +456,9 @@ impl GraphStore for CompactStore {
     }
 
     fn all_labels(&self) -> Vec<String> {
-        self.table_id_to_label
-            .iter()
-            .map(|s| s.to_string())
+        self.label_to_table_ids
+            .keys()
+            .map(ToString::to_string)
             .collect()
     }
 

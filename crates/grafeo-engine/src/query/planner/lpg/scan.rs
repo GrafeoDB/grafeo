@@ -1,8 +1,8 @@
 //! Node scan planning, and the choice of the label a node scan reads.
 
 use super::{
-    Arc, BinaryOp, EpochId, ExpressionPredicate, FilterExpression, FilterOp, FilterOperator,
-    GraphStoreSearch, HashMap, LogicalExpression, LogicalOperator, LogicalType,
+    Arc, BinaryOp, EagerOperator, EpochId, ExpressionPredicate, FilterExpression, FilterOp,
+    FilterOperator, GraphStoreSearch, HashMap, LogicalExpression, LogicalOperator, LogicalType,
     NestedLoopJoinOperator, NodeScanOp, Operator, PhysicalJoinType, Result, ScanOperator,
     TransactionId, Value,
 };
@@ -268,12 +268,19 @@ impl super::Planner {
 
         // If there's an input, chain operators with a nested loop join (cross join)
         if let Some(input) = &scan.input {
-            let (input_op, mut input_columns) = self.plan_operator(input)?;
+            let (mut input_op, mut input_columns) = self.plan_operator(input)?;
 
             // If the scan variable already exists in the input (e.g., from a
             // correlated ParameterScan), skip the redundant scan and reuse the
             // bound value. This avoids a cross product in CALL { WITH var MATCH (var)... }.
+            // After a write (`... CREATE (h)-[:R]->() WITH h MATCH (h)-[:R]->(q)`)
+            // the whole input is read first, so that the pattern from the
+            // bound node (its labels and properties, the expands and paths
+            // from it) sees what every row wrote, as the scan below does.
             if input_columns.contains(&scan.variable) {
+                if input.has_mutations() {
+                    input_op = Box::new(EagerOperator::new(input_op));
+                }
                 // If the second MATCH clause has a label constraint, enforce it
                 // as a filter on the already-bound variable.
                 if let Some(label) = &scan.label {

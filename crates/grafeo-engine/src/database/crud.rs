@@ -30,7 +30,7 @@ impl super::GrafeoDB {
             self.current_graph.read().as_deref(),
         )
         .and_then(|key| self.lpg_store().graph(&key))
-        .unwrap_or_else(|| Arc::clone(self.lpg_store()))
+        .unwrap_or_else(|| self.lpg_store())
     }
 
     /// The epoch the direct reads see: the last one whose commit is

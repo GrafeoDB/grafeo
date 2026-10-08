@@ -176,6 +176,54 @@ fn a_savepoint_rollback_restores_only_the_later_base_deletes() {
     assert_eq!(db.rows(KNOWS), gus_knows_mia);
 }
 
+/// Guarantee 10: a transaction begun before another session's commit still
+/// sees the base nodes and edges that later writes copied into the overlay,
+/// with their labels and values: a copy is there at every epoch, as the base
+/// entity it copies is.
+#[test]
+fn a_transaction_begun_before_a_commit_sees_base_entities_copied_after_it() {
+    let db = compacted_people();
+    let mut older = db.session();
+    older.begin_transaction().unwrap();
+    assert_eq!(older.state(), everyone(), "before the commit");
+
+    // A commit after the older transaction began moves the epoch on; then
+    // writes copy Gus (a new edge from him) and Alix's KNOWS edge (a value
+    // the older transaction does not read) into the overlay.
+    db.execute("INSERT (:City {name: 'Berlin'})").unwrap();
+    db.execute(
+        "MATCH (g:Person {name: 'Gus'}), (c:City {name: 'Berlin'}) \
+         INSERT (g)-[:LIVES_IN]->(c)",
+    )
+    .unwrap();
+    db.execute("MATCH (:Person {name: 'Alix'})-[k:KNOWS]->() SET k.note = 'Paris'")
+        .unwrap();
+
+    assert_eq!(
+        older.state(),
+        everyone(),
+        "the older transaction sees the copied Gus, his age and both KNOWS edges"
+    );
+    assert_eq!(
+        older.rows("MATCH (g:Person {name: 'Gus'}) RETURN labels(g) AS labels"),
+        vec![vec![Value::List(vec![Value::from("Person")].into())]],
+        "the copied Gus keeps his label for the older transaction"
+    );
+    assert_eq!(
+        older.rows(CITIES),
+        Vec::<Vec<Value>>::new(),
+        "the commit after the older transaction began stays unseen"
+    );
+    older.rollback().unwrap();
+
+    assert_eq!(db.state(), everyone(), "a new reader");
+    assert_eq!(
+        db.rows("MATCH (:Person {name: 'Gus'})-[:LIVES_IN]->(c:City) RETURN c.name AS name"),
+        names(&["Berlin"]),
+        "a new reader sees the edge the copy got"
+    );
+}
+
 /// A delete without `DETACH` refuses a node with edges, but not the edges the
 /// transaction deleted itself, which the base keeps until the commit.
 #[test]
@@ -280,7 +328,7 @@ mod file {
 
     /// The database path a child process works on.
     const PATH_VAR: &str = "GRAFEO_COMPACT_TRANSACTIONS_PATH";
-    /// Which child: "open" or "committed".
+    /// Which child: "open", "updated_open" or "committed".
     const CHILD_VAR: &str = "GRAFEO_COMPACT_TRANSACTIONS_CHILD";
     /// Exit code of a child that reached its end.
     const EXITED: i32 = 19;
@@ -322,6 +370,11 @@ mod file {
             return;
         };
         let db = GrafeoDB::open(PathBuf::from(path)).unwrap();
+        if which == "updated_open" {
+            // A committed new age, which copies Gus into the overlay.
+            db.execute("MATCH (g:Person {name: 'Gus'}) SET g.age = 3")
+                .unwrap();
+        }
         let mut session = db.session();
         session.begin_transaction().unwrap();
         session
@@ -330,7 +383,7 @@ mod file {
         match which.as_str() {
             // The checkpoint runs while the delete is open, and the process
             // ends with the transaction still open.
-            "open" => {
+            "open" | "updated_open" => {
                 db.wal_checkpoint().unwrap();
             }
             // The delete commits, then a checkpoint writes it.
@@ -353,6 +406,26 @@ mod file {
         crash_child("open", &path);
         let db = GrafeoDB::open(&path).unwrap();
         assert_eq!(db.state(), everyone());
+        db.close().unwrap();
+    }
+
+    /// Guarantee 9, second half: a committed new age copies Gus into the
+    /// overlay, then a checkpoint while a transaction deletes him, then a
+    /// crash: the file keeps the copy with the committed age (and his name),
+    /// and his edges.
+    #[test]
+    fn a_checkpoint_during_an_open_delete_of_an_updated_base_node_keeps_the_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("people.grafeo");
+        compacted_file(&path);
+        crash_child("updated_open", &path);
+        let db = GrafeoDB::open(&path).unwrap();
+        let (people, knows, _) = everyone();
+        assert_eq!(
+            db.state(),
+            (people, knows, vec![vec![Value::Int64(3)]]),
+            "Gus with the committed age, and both edges"
+        );
         db.close().unwrap();
     }
 

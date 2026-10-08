@@ -4,6 +4,7 @@
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
+use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result, SourceSpan};
 
 /// Maximum nesting depth for recursive parsing constructs (parenthesized
@@ -5925,11 +5926,7 @@ impl<'a> Parser<'a> {
                     }
                     let prop_name = self.get_identifier_name();
                     self.advance();
-                    if !self.is_identifier() {
-                        return Err(self.error("Expected type name"));
-                    }
-                    let data_type = self.get_identifier_name();
-                    self.advance();
+                    let data_type = self.parse_property_type_name()?;
                     let nullable = if self.current.kind == TokenKind::Not {
                         self.advance();
                         if self.current.kind != TokenKind::Null {
@@ -6086,6 +6083,56 @@ impl<'a> Parser<'a> {
         )))
     }
 
+    /// Reads a property type: a name, `ZONED DATETIME`, `LOCAL DATETIME`, or
+    /// `LIST<type>` (nested), returned in the canonical spelling
+    /// `PropertyDataType::from_type_name` reads: a single name as written (the
+    /// catalog ignores its case), the two-word types in capitals with one
+    /// space, and `LIST<...>` around its element type. The same string goes
+    /// into the WAL record of the statement, so replay reads the same type
+    /// (#569).
+    ///
+    /// The `LIST<` levels are counted, not recursed into, and at most
+    /// [`MAX_PROPERTY_VALUE_DEPTH`] are accepted, as deep as a property value
+    /// may be: a type of any depth is refused without a stack overflow.
+    fn parse_property_type_name(&mut self) -> Result<String> {
+        let mut levels = 0;
+        let mut element = loop {
+            if !self.is_identifier() {
+                return Err(self.error("Expected type name"));
+            }
+            let name = self.get_identifier_name();
+            self.advance();
+
+            if name.eq_ignore_ascii_case("LIST") && self.current.kind == TokenKind::Lt {
+                levels += 1;
+                if levels > MAX_PROPERTY_VALUE_DEPTH {
+                    return Err(self.error(&format!(
+                        "A property type nests at most {MAX_PROPERTY_VALUE_DEPTH} LIST<...> levels"
+                    )));
+                }
+                self.advance();
+                continue;
+            }
+            if name.eq_ignore_ascii_case("ZONED") || name.eq_ignore_ascii_case("LOCAL") {
+                let prefix = name.to_ascii_uppercase();
+                if !self.try_accept_identifier_keyword("DATETIME") {
+                    return Err(self.error(&format!("Expected DATETIME after {prefix}")));
+                }
+                break format!("{prefix} DATETIME");
+            }
+            break name;
+        };
+
+        for _ in 0..levels {
+            if self.current.kind != TokenKind::Gt {
+                return Err(self.error(&format!("Expected '>' to close LIST<{element}")));
+            }
+            self.advance();
+            element = format!("LIST<{element}>");
+        }
+        Ok(element)
+    }
+
     fn parse_property_definitions(&mut self) -> Result<Vec<PropertyDefinition>> {
         self.expect(TokenKind::LParen)?;
 
@@ -6099,11 +6146,7 @@ impl<'a> Parser<'a> {
                 let name = self.get_identifier_name();
                 self.advance();
 
-                if !self.is_identifier() {
-                    return Err(self.error("Expected type name"));
-                }
-                let data_type = self.get_identifier_name();
-                self.advance();
+                let data_type = self.parse_property_type_name()?;
 
                 let nullable = if self.current.kind == TokenKind::Not {
                     self.advance();
@@ -6170,11 +6213,7 @@ impl<'a> Parser<'a> {
                 let name = self.get_identifier_name();
                 self.advance();
 
-                if !self.is_identifier() {
-                    return Err(self.error("Expected type name"));
-                }
-                let data_type = self.get_identifier_name();
-                self.advance();
+                let data_type = self.parse_property_type_name()?;
 
                 let nullable = if self.current.kind == TokenKind::Not {
                     self.advance();
@@ -7912,6 +7951,105 @@ mod tests {
             properties("ALTER NODE TYPE Sensor ADD `property` STRING"),
             vec![pair("property", "STRING")]
         );
+        assert_eq!(
+            properties("ALTER NODE TYPE Sensor ADD seen local datetime NOT NULL"),
+            vec![pair("seen", "LOCAL DATETIME")]
+        );
+    }
+
+    /// The property types of #569: `ZONED DATETIME`, `LOCAL DATETIME` and
+    /// `LIST<type>`, nested, in the spelling the catalog reads back.
+    #[test]
+    fn test_property_types_with_two_words_and_typed_lists() {
+        let types = |query: &str| -> Vec<(String, String, bool)> {
+            let Statement::Schema(SchemaStatement::CreateNodeType(stmt)) =
+                Parser::new(query).parse().unwrap()
+            else {
+                panic!("{query}: expected CREATE NODE TYPE");
+            };
+            stmt.properties
+                .into_iter()
+                .map(|def| (def.name, def.data_type, def.nullable))
+                .collect()
+        };
+        let property = |name: &str, data_type: &str, nullable: bool| {
+            (name.to_string(), data_type.to_string(), nullable)
+        };
+
+        assert_eq!(
+            types("CREATE NODE TYPE T (a ZONED DATETIME, b LIST<LIST<STRING>> NOT NULL)"),
+            vec![
+                property("a", "ZONED DATETIME", true),
+                property("b", "LIST<LIST<STRING>>", false),
+            ]
+        );
+        assert_eq!(
+            types(
+                "CREATE NODE TYPE T (a local datetime DEFAULT NULL, \
+                 b list<zoned datetime>, c LIST, d STRING)"
+            ),
+            vec![
+                property("a", "LOCAL DATETIME", true),
+                property("b", "LIST<ZONED DATETIME>", true),
+                property("c", "LIST", true),
+                property("d", "STRING", true),
+            ]
+        );
+
+        let Statement::Schema(SchemaStatement::CreateGraphType(stmt)) = Parser::new(
+            "CREATE GRAPH TYPE g ((:Stop {at ZONED DATETIME})-[:LEG {at LIST<LOCAL DATETIME>}]->(:Stop))",
+        )
+        .parse()
+        .unwrap() else {
+            panic!("expected CREATE GRAPH TYPE");
+        };
+        let inline_types: Vec<String> = stmt
+            .inline_types
+            .iter()
+            .flat_map(|inline| match inline {
+                InlineElementType::Node { properties, .. }
+                | InlineElementType::Edge { properties, .. } => properties,
+            })
+            .map(|def| def.data_type.clone())
+            .collect();
+        assert_eq!(inline_types, ["ZONED DATETIME", "LIST<LOCAL DATETIME>"]);
+
+        for (query, expected) in [
+            ("CREATE NODE TYPE T (a ZONED TIME)", "Expected DATETIME"),
+            ("CREATE NODE TYPE T (a LOCAL)", "Expected DATETIME"),
+            ("CREATE NODE TYPE T (a LIST<STRING)", "Expected '>'"),
+            ("CREATE NODE TYPE T (a LIST<)", "Expected type name"),
+            ("CREATE NODE TYPE T (a LIST<LIST<STRING>)", "Expected '>'"),
+        ] {
+            let error = Parser::new(query).parse().unwrap_err().to_string();
+            assert!(error.contains(expected), "{query}: {error}");
+        }
+    }
+
+    /// A property type nests at most 128 `LIST<...>` levels, as deep as a
+    /// property value may be; a deeper one, however deep, is refused with the
+    /// limit named, without a stack overflow.
+    #[test]
+    fn test_property_types_nest_at_most_128_lists() {
+        let nested =
+            |levels: usize| format!("{}STRING{}", "LIST<".repeat(levels), ">".repeat(levels));
+        let query = |levels: usize| format!("CREATE NODE TYPE T (a {} NOT NULL)", nested(levels));
+
+        let Statement::Schema(SchemaStatement::CreateNodeType(stmt)) =
+            Parser::new(&query(128)).parse().unwrap()
+        else {
+            panic!("expected CREATE NODE TYPE");
+        };
+        assert_eq!(stmt.properties[0].data_type, nested(128));
+        assert!(!stmt.properties[0].nullable);
+
+        for levels in [129, 100_000] {
+            let error = Parser::new(&query(levels)).parse().unwrap_err().to_string();
+            assert!(
+                error.contains("at most 128 LIST<...> levels"),
+                "{levels} levels: {error}"
+            );
+        }
     }
 
     #[test]

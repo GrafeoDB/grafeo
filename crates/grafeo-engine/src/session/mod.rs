@@ -43,6 +43,14 @@ use crate::transaction::TransactionManager;
 /// Auto-created by `CREATE SCHEMA` and auto-dropped by `DROP SCHEMA`.
 const SCHEMA_DEFAULT_GRAPH: &str = "__default__";
 
+/// The layered store a compacted database's sessions read and write the
+/// default graph through, shared by the database and all its sessions:
+/// `compact()` fills it, so a session opened before it follows too (see
+/// [`Session::layered`]).
+#[cfg(all(feature = "compact-store", feature = "lpg"))]
+pub(crate) type LayersSlot =
+    Arc<parking_lot::RwLock<Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>>>>;
+
 /// The database's named graph projections, shared by its sessions.
 #[cfg(feature = "lpg")]
 pub(crate) type ProjectionRegistry = Arc<
@@ -97,6 +105,32 @@ fn parse_default_literal(text: &str) -> Value {
     Value::String(text.into())
 }
 
+/// The catalog's property for a property definition of a type DDL statement,
+/// with its default value.
+///
+/// # Errors
+///
+/// A semantic error when the catalog refuses the type (one that nests too
+/// many `LIST<...>` levels).
+#[cfg(all(feature = "lpg", feature = "gql"))]
+fn typed_property(
+    definition: &grafeo_adapters::query::gql::ast::PropertyDefinition,
+) -> Result<crate::catalog::TypedProperty> {
+    use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+
+    let data_type = crate::catalog::PropertyDataType::from_type_name(&definition.data_type)
+        .map_err(|e| Error::Query(QueryError::new(QueryErrorKind::Semantic, e.to_string())))?;
+    Ok(crate::catalog::TypedProperty {
+        name: definition.name.clone(),
+        data_type,
+        nullable: definition.nullable,
+        default_value: definition
+            .default_value
+            .as_ref()
+            .map(|s| parse_default_literal(s)),
+    })
+}
+
 /// How a session's queries are planned, from the database's configuration.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PlanOptions {
@@ -149,9 +183,18 @@ pub(crate) struct SessionConfig {
 /// tracks its own transaction state, so you can have multiple concurrent
 /// sessions without them interfering.
 pub struct Session {
-    /// The underlying store.
+    /// The underlying store. Read it through
+    /// [`root_store`](Self::root_store): after `compact()` the store is the
+    /// layered store's overlay, which a merge replaces, and this is an empty
+    /// placeholder (or, for a session opened before `compact()`, the store
+    /// the database had then, which it no longer reads).
     #[cfg(feature = "lpg")]
     store: Arc<LpgStore>,
+    /// The database's layered store once it is compacted, whose overlay is
+    /// then this session's store and which it reads and writes the default
+    /// graph through (see [`layered`](Self::layered)).
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    layers: Option<LayersSlot>,
     /// Classifies the role of `store` for the active backend.
     /// Search procedures (CALL grafeo.search.*) only reach into `store` when
     /// this is `Active`. External-store sessions keep `store` as a placeholder
@@ -304,6 +347,8 @@ impl Session {
         let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         Self {
             store,
+            #[cfg(feature = "compact-store")]
+            layers: None,
             lpg_backend: LpgBackend::Active,
             graph_store,
             graph_store_mut,
@@ -353,19 +398,54 @@ impl Session {
         }
     }
 
-    /// Overrides the graph store and write store used by the query engine.
-    ///
-    /// Used by the layered store integration: the session's `store` field is
-    /// the overlay `LpgStore` (for MVCC), but reads and writes should route
-    /// through the `LayeredStore` (which merges base + overlay).
+    /// Routes the session through the database's layered store once the
+    /// database is compacted (`slot` holds it, or will once `compact()`
+    /// runs): queries read and write it (base and overlay), and the
+    /// session's own store (named graphs, the MVCC steps of its
+    /// transactions) is its overlay, asked for each time (see
+    /// [`root_store`](Self::root_store)).
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    pub(crate) fn override_stores(
-        &mut self,
-        read_store: Arc<dyn GraphStoreSearch>,
-        write_store: Option<Arc<dyn GraphStoreMut>>,
-    ) {
-        self.graph_store = read_store;
-        self.graph_store_mut = write_store;
+    pub(crate) fn follow_layers(&mut self, slot: LayersSlot) {
+        self.layers = Some(slot);
+    }
+
+    /// The database's layered store, once it is compacted. A session opened
+    /// before `compact()` goes on with it from the next statement on: a
+    /// transaction cannot be open across `compact()`, which refuses to run
+    /// then, so the switch falls between transactions; a statement that
+    /// resolved its store before `compact()` and began its transaction after
+    /// it plans against the layered store (see
+    /// `create_planner_for_store_with_read_only`).
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    fn layered(&self) -> Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>> {
+        self.layers.as_ref().and_then(|slot| slot.read().clone())
+    }
+
+    /// The session's own `LpgStore`: the default graph's store, which holds
+    /// the named graphs and on which its transactions commit and roll back.
+    /// After `compact()` it is the layered store's overlay as it is now: a
+    /// merge under memory pressure replaces the overlay (while no
+    /// transaction is open), and the session goes on with the new one.
+    #[cfg(feature = "lpg")]
+    fn root_store(&self) -> Arc<LpgStore> {
+        #[cfg(feature = "compact-store")]
+        if let Some(layered) = self.layered() {
+            return layered.overlay_store();
+        }
+        Arc::clone(&self.store)
+    }
+
+    /// The session's WAL buffer, if it logs its writes: not once the
+    /// database is compacted, whose sessions write the layered store, which
+    /// the WAL wrapper cannot record (#448), so a session opened before
+    /// `compact()` stops logging as it switches to the layered store.
+    #[cfg(feature = "wal")]
+    fn wal(&self) -> Option<&Arc<crate::transaction::wal_buffer::WalBuffer>> {
+        #[cfg(all(feature = "compact-store", feature = "lpg"))]
+        if self.layered().is_some() {
+            return None;
+        }
+        self.wal.as_ref()
     }
 
     /// Sets the WAL for this session (shared with the database).
@@ -378,7 +458,7 @@ impl Session {
     pub(crate) fn set_wal(&mut self, wal: Arc<grafeo_storage::wal::LpgWal>) {
         let buffer = Arc::new(crate::transaction::wal_buffer::WalBuffer::new(wal));
         let wal_store = Arc::new(crate::database::wal_store::WalGraphStore::new(
-            Arc::clone(&self.store),
+            self.root_store(),
             Arc::clone(&buffer),
         ));
         self.graph_store = Arc::clone(&wal_store) as Arc<dyn GraphStoreSearch>;
@@ -393,7 +473,7 @@ impl Session {
     /// WAL write failures are logged via `grafeo_warn!` and not propagated.
     #[cfg(feature = "wal")]
     fn flush_wal_outside_transaction(&self) {
-        if let Some(ref wal) = self.wal
+        if let Some(wal) = self.wal()
             && self.current_transaction.lock().is_none()
             && let Err(e) = wal.flush_implicit()
         {
@@ -444,6 +524,8 @@ impl Session {
         Ok(Self {
             #[cfg(feature = "lpg")]
             store: Arc::new(LpgStore::new()?),
+            #[cfg(all(feature = "compact-store", feature = "lpg"))]
+            layers: None,
             #[cfg(feature = "lpg")]
             lpg_backend: LpgBackend::Placeholder,
             graph_store: read_store,
@@ -583,13 +665,19 @@ impl Session {
     /// The graph store for the graph with storage key `key` (see
     /// [`active_store`](Self::active_store)).
     fn store_for_key(&self, key: Option<&str>) -> Arc<dyn GraphStoreSearch> {
+        #[cfg(all(feature = "compact-store", feature = "lpg"))]
+        if key.is_none()
+            && let Some(layered) = self.layered()
+        {
+            return layered;
+        }
         match key {
             None => Arc::clone(&self.graph_store),
             #[cfg(feature = "lpg")]
-            Some(name) => match self.store.graph(name) {
+            Some(name) => match self.root_store().graph(name) {
                 Some(named_store) => {
                     #[cfg(feature = "wal")]
-                    if let Some(wal) = &self.wal {
+                    if let Some(wal) = self.wal() {
                         return Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
                             named_store,
                             Arc::clone(wal),
@@ -618,15 +706,31 @@ impl Session {
     /// The writable store for the graph with storage key `key` (see
     /// [`active_write_store`](Self::active_write_store)).
     fn write_store_for_key(&self, key: Option<&str>) -> Option<Arc<dyn GraphStoreMut>> {
+        #[cfg(all(feature = "compact-store", feature = "lpg"))]
+        if key.is_none()
+            && let Some(layered) = self.layered()
+        {
+            let store: Arc<dyn GraphStoreMut> = layered;
+            #[cfg(feature = "cdc")]
+            let store: Arc<dyn GraphStoreMut> = match &self.cdc_pending_events {
+                Some(pending) => Arc::new(crate::database::cdc_store::CdcGraphStore::wrap(
+                    store,
+                    Arc::clone(&self.cdc_log),
+                    Arc::clone(pending),
+                )),
+                None => store,
+            };
+            return Some(store);
+        }
         match key {
             None => self.graph_store_mut.as_ref().map(Arc::clone),
             #[cfg(feature = "lpg")]
-            Some(name) => match self.store.graph(name) {
+            Some(name) => match self.root_store().graph(name) {
                 Some(named_store) => {
                     let store: Arc<dyn GraphStoreMut> = Arc::clone(&named_store) as _;
 
                     #[cfg(feature = "wal")]
-                    let store: Arc<dyn GraphStoreMut> = match &self.wal {
+                    let store: Arc<dyn GraphStoreMut> = match self.wal() {
                         Some(wal) => {
                             Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
                                 named_store,
@@ -668,8 +772,8 @@ impl Session {
     #[cfg(feature = "lpg")]
     fn active_lpg_store(&self) -> Arc<LpgStore> {
         self.active_lpg_graph_key()
-            .and_then(|name| self.store.graph(&name))
-            .unwrap_or_else(|| Arc::clone(&self.store))
+            .and_then(|name| self.root_store().graph(&name))
+            .unwrap_or_else(|| self.root_store())
     }
 
     /// The storage key of the graph [`active_lpg_store`](Self::active_lpg_store)
@@ -678,7 +782,7 @@ impl Session {
     #[cfg(feature = "lpg")]
     fn active_lpg_graph_key(&self) -> Option<String> {
         self.active_graph_storage_key()
-            .filter(|name| self.store.graph(name).is_some())
+            .filter(|name| self.root_store().graph(name).is_some())
     }
 
     /// Resolves a graph name to a concrete `LpgStore`.
@@ -686,12 +790,12 @@ impl Session {
     #[cfg(feature = "lpg")]
     fn resolve_store(&self, graph_name: &Option<String>) -> Arc<LpgStore> {
         match graph_name {
-            None => Arc::clone(&self.store),
-            Some(name) if name.eq_ignore_ascii_case("default") => Arc::clone(&self.store),
+            None => self.root_store(),
+            Some(name) if name.eq_ignore_ascii_case("default") => self.root_store(),
             Some(name) => self
-                .store
+                .root_store()
                 .graph(name)
-                .unwrap_or_else(|| Arc::clone(&self.store)),
+                .unwrap_or_else(|| self.root_store()),
         }
     }
 
@@ -985,7 +1089,7 @@ impl Session {
                 // Validate source graph exists for LIKE / AS COPY OF
                 if let Some(ref src) = like_graph {
                     let src_key = self.effective_graph_key(src);
-                    if self.store.graph(&src_key).is_none() {
+                    if self.root_store().graph(&src_key).is_none() {
                         return Err(Error::Query(QueryError::new(
                             QueryErrorKind::Semantic,
                             format!("Source graph '{src}' does not exist"),
@@ -994,7 +1098,7 @@ impl Session {
                 }
                 if let Some(ref src) = copy_of {
                     let src_key = self.effective_graph_key(src);
-                    if self.store.graph(&src_key).is_none() {
+                    if self.root_store().graph(&src_key).is_none() {
                         return Err(Error::Query(QueryError::new(
                             QueryErrorKind::Semantic,
                             format!("Source graph '{src}' does not exist"),
@@ -1003,7 +1107,7 @@ impl Session {
                 }
 
                 let created = self
-                    .store
+                    .root_store()
                     .create_graph(&storage_key)
                     .map_err(|e| Error::Internal(e.to_string()))?;
                 if !created && !if_not_exists {
@@ -1022,7 +1126,7 @@ impl Session {
                 // AS COPY OF: copy data from source graph
                 if let Some(ref src) = copy_of {
                     let src_key = self.effective_graph_key(src);
-                    self.store
+                    self.root_store()
                         .copy_graph(Some(&src_key), Some(&storage_key))
                         .map_err(|e| Error::Internal(e.to_string()))?;
                 }
@@ -1059,7 +1163,7 @@ impl Session {
             #[cfg(feature = "lpg")]
             SessionCommand::DropGraph { name, if_exists } => {
                 let storage_key = self.effective_graph_key(&name);
-                let dropped = self.store.drop_graph(&storage_key);
+                let dropped = self.root_store().drop_graph(&storage_key);
                 if !dropped && !if_exists {
                     return Err(Error::Query(QueryError::new(
                         QueryErrorKind::Semantic,
@@ -1102,7 +1206,7 @@ impl Session {
                 // Verify graph exists (resolve within current schema)
                 let effective_key = self.effective_graph_key(&name);
                 if !name.eq_ignore_ascii_case("default")
-                    && self.store.graph(&effective_key).is_none()
+                    && self.root_store().graph(&effective_key).is_none()
                 {
                     return Err(Error::Query(QueryError::new(
                         QueryErrorKind::Semantic,
@@ -1132,7 +1236,7 @@ impl Session {
                 }
                 let effective_key = self.effective_graph_key(&name);
                 if !name.eq_ignore_ascii_case("default")
-                    && self.store.graph(&effective_key).is_none()
+                    && self.root_store().graph(&effective_key).is_none()
                 {
                     return Err(Error::Query(QueryError::new(
                         QueryErrorKind::Semantic,
@@ -1316,7 +1420,7 @@ impl Session {
         records.push(WalRecord::TransactionCommit {
             transaction_id: TransactionId::SYSTEM,
         });
-        if let Some(ref wal) = self.wal
+        if let Some(wal) = self.wal()
             && let Err(e) = wal.wal().log_batch(&records)
         {
             grafeo_common::grafeo_warn!("Failed to log schema change to WAL: {}", e);
@@ -1329,9 +1433,7 @@ impl Session {
         &self,
         cmd: grafeo_adapters::query::gql::ast::SchemaStatement,
     ) -> Result<QueryResult> {
-        use crate::catalog::{
-            EdgeTypeDefinition, NodeTypeDefinition, PropertyDataType, TypedProperty,
-        };
+        use crate::catalog::{EdgeTypeDefinition, NodeTypeDefinition, TypedProperty};
         use grafeo_adapters::query::gql::ast::SchemaStatement;
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
         #[cfg(feature = "wal")]
@@ -1400,18 +1502,11 @@ impl Session {
                     properties: stmt
                         .properties
                         .iter()
-                        .map(|p| TypedProperty {
-                            name: p.name.clone(),
-                            data_type: PropertyDataType::from_type_name(&p.data_type),
-                            nullable: p.nullable,
-                            default_value: p
-                                .default_value
-                                .as_ref()
-                                .map(|s| parse_default_literal(s)),
-                        })
-                        .collect(),
+                        .map(typed_property)
+                        .collect::<Result<_>>()?,
                     constraints: Vec::new(),
                     parent_types: stmt.parent_types.clone(),
+                    key_labels: Vec::new(),
                 };
                 let replaced =
                     stmt.or_replace && self.catalog.drop_node_type(&effective_name).is_ok();
@@ -1457,19 +1552,12 @@ impl Session {
                     properties: stmt
                         .properties
                         .iter()
-                        .map(|p| TypedProperty {
-                            name: p.name.clone(),
-                            data_type: PropertyDataType::from_type_name(&p.data_type),
-                            nullable: p.nullable,
-                            default_value: p
-                                .default_value
-                                .as_ref()
-                                .map(|s| parse_default_literal(s)),
-                        })
-                        .collect(),
+                        .map(typed_property)
+                        .collect::<Result<_>>()?,
                     constraints: Vec::new(),
                     source_node_types: stmt.source_node_types.clone(),
                     target_node_types: stmt.target_node_types.clone(),
+                    key_labels: Vec::new(),
                 };
                 let replaced =
                     stmt.or_replace && self.catalog.drop_edge_type_def(&effective_name).is_ok();
@@ -1804,11 +1892,32 @@ impl Session {
                         (nt, et, stmt.open)
                     };
 
+                // The properties of every inline element type first, so a
+                // property type the catalog refuses registers none of them.
+                // Inline declarations take no default values.
+                let inline_properties = stmt
+                    .inline_types
+                    .iter()
+                    .map(|inline| {
+                        let (InlineElementType::Node { properties, .. }
+                        | InlineElementType::Edge { properties, .. }) = inline;
+                        properties
+                            .iter()
+                            .map(|p| {
+                                typed_property(p).map(|typed| TypedProperty {
+                                    default_value: None,
+                                    ..typed
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
                 // GG03: Process inline element type entries. Per ISO/IEC 39075,
                 // a bare `NODE TYPE Name` or `EDGE TYPE Name` inside a graph
                 // type body is a reference; anything with a property block or
                 // a KEY clause is an inline declaration. See issue #316.
-                for inline in &stmt.inline_types {
+                for (inline, typed_properties) in stmt.inline_types.iter().zip(inline_properties) {
                     match inline {
                         InlineElementType::Node {
                             name,
@@ -1829,23 +1938,18 @@ impl Session {
                                     )));
                                 }
                             } else {
+                                // The key labels are also the type's parent
+                                // types, as before they were stored.
                                 let def = NodeTypeDefinition {
                                     name: inline_effective.clone(),
-                                    properties: properties
-                                        .iter()
-                                        .map(|p| TypedProperty {
-                                            name: p.name.clone(),
-                                            data_type: PropertyDataType::from_type_name(
-                                                &p.data_type,
-                                            ),
-                                            nullable: p.nullable,
-                                            default_value: None,
-                                        })
-                                        .collect(),
+                                    properties: typed_properties,
                                     constraints: Vec::new(),
                                     parent_types: key_labels.clone(),
+                                    key_labels: key_labels.clone(),
                                 };
                                 self.catalog.register_or_replace_node_type(def);
+                                #[cfg(not(feature = "wal"))]
+                                let _ = properties;
                                 #[cfg(feature = "wal")]
                                 {
                                     let props_for_wal: Vec<(String, String, bool)> = properties
@@ -1866,10 +1970,10 @@ impl Session {
                         InlineElementType::Edge {
                             name,
                             properties,
+                            key_labels,
                             source_node_types,
                             target_node_types,
                             is_reference,
-                            ..
                         } => {
                             let inline_effective = self.effective_type_key(name);
                             if *is_reference {
@@ -1884,22 +1988,15 @@ impl Session {
                             } else {
                                 let def = EdgeTypeDefinition {
                                     name: inline_effective.clone(),
-                                    properties: properties
-                                        .iter()
-                                        .map(|p| TypedProperty {
-                                            name: p.name.clone(),
-                                            data_type: PropertyDataType::from_type_name(
-                                                &p.data_type,
-                                            ),
-                                            nullable: p.nullable,
-                                            default_value: None,
-                                        })
-                                        .collect(),
+                                    properties: typed_properties,
                                     constraints: Vec::new(),
                                     source_node_types: source_node_types.clone(),
                                     target_node_types: target_node_types.clone(),
+                                    key_labels: key_labels.clone(),
                                 };
                                 self.catalog.register_or_replace_edge_type_def(def);
+                                #[cfg(not(feature = "wal"))]
+                                let _ = properties;
                                 #[cfg(feature = "wal")]
                                 {
                                     let props_for_wal: Vec<(String, String, bool)> = properties
@@ -1998,7 +2095,11 @@ impl Session {
                         // Auto-create the schema's default graph partition so that
                         // SESSION SET SCHEMA + queries work without an explicit graph.
                         let default_key = format!("{name}/{SCHEMA_DEFAULT_GRAPH}");
-                        if self.store.create_graph(&default_key).unwrap_or(false) {
+                        if self
+                            .root_store()
+                            .create_graph(&default_key)
+                            .unwrap_or(false)
+                        {
                             wal_log!(self, WalRecord::CreateNamedGraph { name: default_key });
                         }
                         Ok(QueryResult::status(format!("Created schema '{name}'")))
@@ -2019,7 +2120,7 @@ impl Session {
                 let prefix = format!("{name}/");
                 let default_graph_key = format!("{name}/{SCHEMA_DEFAULT_GRAPH}");
                 let has_graphs = self
-                    .store
+                    .root_store()
                     .graph_names()
                     .iter()
                     .any(|g| g.starts_with(&prefix) && *g != default_graph_key);
@@ -2048,7 +2149,7 @@ impl Session {
                     Ok(()) => {
                         wal_log!(self, WalRecord::DropSchema { name: name.clone() });
                         // Drop the auto-created default graph partition
-                        if self.store.drop_graph(&default_graph_key) {
+                        if self.root_store().drop_graph(&default_graph_key) {
                             wal_log!(
                                 self,
                                 WalRecord::DropNamedGraph {
@@ -2090,15 +2191,7 @@ impl Session {
                     for alt in &stmt.alterations {
                         match alt {
                             TypeAlteration::AddProperty(prop) => {
-                                let typed = TypedProperty {
-                                    name: prop.name.clone(),
-                                    data_type: PropertyDataType::from_type_name(&prop.data_type),
-                                    nullable: prop.nullable,
-                                    default_value: prop
-                                        .default_value
-                                        .as_ref()
-                                        .map(|s| parse_default_literal(s)),
-                                };
+                                let typed = typed_property(prop)?;
                                 self.catalog
                                     .alter_node_type_add_property(&effective_name, typed)
                                     .map_err(|e| {
@@ -2168,15 +2261,7 @@ impl Session {
                     for alt in &stmt.alterations {
                         match alt {
                             TypeAlteration::AddProperty(prop) => {
-                                let typed = TypedProperty {
-                                    name: prop.name.clone(),
-                                    data_type: PropertyDataType::from_type_name(&prop.data_type),
-                                    nullable: prop.nullable,
-                                    default_value: prop
-                                        .default_value
-                                        .as_ref()
-                                        .map(|s| parse_default_literal(s)),
-                                };
+                                let typed = typed_property(prop)?;
                                 self.catalog
                                     .alter_edge_type_add_property(&effective_name, typed)
                                     .map_err(|e| {
@@ -2781,7 +2866,7 @@ impl Session {
     #[cfg(feature = "lpg")]
     fn execute_show_graphs(&self) -> Result<QueryResult> {
         let schema = self.current_schema.lock().clone();
-        let all_names = self.store.graph_names();
+        let all_names = self.root_store().graph_names();
 
         let mut names: Vec<String> = match &schema {
             Some(s) => {
@@ -4218,7 +4303,7 @@ impl Session {
         // (`current` is held, so this cannot go through
         // `flush_wal_outside_transaction`.)
         #[cfg(feature = "wal")]
-        if let Some(ref wal) = self.wal
+        if let Some(wal) = self.wal()
             && let Err(e) = wal.flush_implicit()
         {
             grafeo_common::grafeo_warn!("Session: failed to write WAL records: {}", e);
@@ -4382,7 +4467,7 @@ impl Session {
         // identify committed transactions and their epoch boundaries (#252)
         // and no other session's records can land inside the group (#411).
         #[cfg(feature = "wal")]
-        if let Some(ref wal) = self.wal {
+        if let Some(wal) = self.wal() {
             use grafeo_storage::wal::WalRecord;
             if let Err(e) = wal.flush(&[
                 WalRecord::TransactionCommit { transaction_id },
@@ -4405,7 +4490,7 @@ impl Session {
         // commit is complete. The database has one epoch: the root store
         // follows every commit, also one that only touched named graphs (a
         // checkpoint saves the root's epoch for all of them).
-        self.store.sync_epoch(commit_epoch);
+        self.root_store().sync_epoch(commit_epoch);
         for graph_name in &touched {
             let store = self.resolve_store(graph_name);
             store.sync_epoch(commit_epoch);
@@ -4574,7 +4659,7 @@ impl Session {
         // The transaction's WAL records were only buffered: drop them. Nothing
         // of it reached the WAL, so there is nothing to undo on replay.
         #[cfg(feature = "wal")]
-        if let Some(ref wal) = self.wal {
+        if let Some(wal) = self.wal() {
             wal.clear();
         }
 
@@ -4635,7 +4720,7 @@ impl Session {
                 .as_ref()
                 .map_or(0, |p| p.lock().len()),
             #[cfg(feature = "wal")]
-            wal_position: self.wal.as_ref().map_or(0, |w| w.len()),
+            wal_position: self.wal().map_or(0, |w| w.len()),
         }
     }
 
@@ -4721,7 +4806,7 @@ impl Session {
 
         // Drop the WAL records buffered after the savepoint.
         #[cfg(feature = "wal")]
-        if let Some(ref wal) = self.wal {
+        if let Some(wal) = self.wal() {
             wal.truncate(sp_state.wal_position);
         }
 
@@ -4981,7 +5066,7 @@ impl Session {
     #[cfg(feature = "lpg")]
     fn check_active_graph(&self) -> Result<()> {
         match self.active_graph_storage_key() {
-            Some(key) if self.store.graph(&key).is_none() => {
+            Some(key) if self.root_store().graph(&key).is_none() => {
                 let name = self
                     .current_graph
                     .lock()
@@ -5197,6 +5282,9 @@ impl Session {
         use crate::query::Planner;
         use grafeo_core::execution::operators::{LazyValue, SessionContext};
 
+        #[cfg(all(feature = "compact-store", feature = "lpg"))]
+        let store = self.current_default_store(store);
+
         // Capture store reference for lazy introspection (only computed if info()/schema() called).
         let info_store = Arc::clone(&store);
         let schema_store = Arc::clone(&store);
@@ -5234,8 +5322,8 @@ impl Session {
         // store — `self.store` is an empty placeholder in that case and would
         // make search procedures see a store with no data or indexes.
         #[cfg(feature = "lpg")]
-        if matches!(self.lpg_backend, LpgBackend::Active) {
-            planner = planner.with_lpg_store(Arc::clone(&self.store));
+        if self.searches_own_store() {
+            planner = planner.with_lpg_store(self.root_store());
         }
 
         #[cfg(feature = "lpg")]
@@ -5251,6 +5339,40 @@ impl Session {
         )));
 
         planner
+    }
+
+    /// `store`, which the statement resolved for the active graph before
+    /// its implicit transaction began, or the layered store when the active
+    /// graph is the default graph and that is its store now: a `compact()`
+    /// ran in between (the transaction began after it, and none can be open
+    /// across one), and a plan against the store from before would read data
+    /// the database no longer has. Named graphs keep their stores across
+    /// `compact()` (one dropped meanwhile stays without data).
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    fn current_default_store(&self, store: Arc<dyn GraphStoreSearch>) -> Arc<dyn GraphStoreSearch> {
+        match self.layered() {
+            Some(layered) if self.active_graph_storage_key().is_none() => {
+                let layered = layered as Arc<dyn GraphStoreSearch>;
+                if Arc::ptr_eq(&store, &layered) {
+                    store
+                } else {
+                    layered
+                }
+            }
+            _ => store,
+        }
+    }
+
+    /// Whether search procedures reach the session's own store: the
+    /// database's built-in store, or after `compact()` its overlay; not the
+    /// empty placeholder of a session on an external store.
+    #[cfg(feature = "lpg")]
+    fn searches_own_store(&self) -> bool {
+        #[cfg(feature = "compact-store")]
+        if self.layered().is_some() {
+            return true;
+        }
+        matches!(self.lpg_backend, LpgBackend::Active)
     }
 
     /// The checks for writes to `store`: the catalog's schema and
@@ -5313,7 +5435,7 @@ impl Session {
                 // default graph when no graph of that name exists.
                 let graph = key
                     .as_deref()
-                    .filter(|name| self.store.graph(name).is_some());
+                    .filter(|name| self.root_store().graph(name).is_some());
                 writer = writer.with_write_tracker(Arc::new(
                     crate::transaction::TransactionWriteTracker::new(Arc::clone(
                         &self.transaction_manager,
@@ -7541,5 +7663,65 @@ mod tests {
 
         assert_eq!(session.active_store().node_count(), 0);
         assert!(session.active_write_store().is_none());
+    }
+
+    /// On a compacted database too, a selected graph dropped meanwhile keeps
+    /// resolving to no data when the planner checks the statement's store
+    /// against the default graph's: it is never the default graph's.
+    #[cfg(feature = "compact-store")]
+    #[test]
+    fn a_dropped_selected_graph_of_a_compacted_database_plans_against_nothing() {
+        let mut db = GrafeoDB::new_in_memory();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.create_graph("model").unwrap();
+        db.compact().unwrap();
+        let session = db.session();
+        session.use_graph("model");
+        assert!(db.drop_graph("model").unwrap());
+
+        let planned = session.current_default_store(session.active_store());
+        assert_eq!(planned.node_count(), 0, "not the default graph's Alix");
+    }
+
+    /// A statement of a session opened before `compact()` that resolved its
+    /// store before `compact()` and began its transaction after it plans
+    /// against the compacted store: it reads what the database has, not the
+    /// store from before `compact()`.
+    #[cfg(all(feature = "compact-store", feature = "gql"))]
+    #[test]
+    fn a_statement_straddling_compact_plans_against_the_compacted_store() {
+        use crate::query::optimizer::Optimizer;
+        use crate::query::translators::gql;
+
+        let mut db = GrafeoDB::new_in_memory();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        let session = db.session();
+        let resolved = session.active_store();
+        db.compact().unwrap();
+        db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+
+        session.begin_transaction_inner(false, None).unwrap();
+        let gql::GqlTranslationResult::Plan(plan) =
+            gql::translate_full("MATCH (p:Person) RETURN p.name ORDER BY p.name").unwrap()
+        else {
+            panic!("a query plan");
+        };
+        let plan = Optimizer::from_graph_store(&*resolved)
+            .optimize(plan)
+            .unwrap();
+        let (epoch, transaction_id) = session.get_transaction_context();
+        let planner = session.create_planner_for_store(resolved, epoch, transaction_id);
+        let mut physical = planner.plan(&plan).unwrap();
+        let result = session
+            .make_executor(physical.columns.clone())
+            .execute(physical.operator.as_mut())
+            .unwrap();
+        session.rollback_inner().unwrap();
+
+        assert_eq!(
+            result.rows(),
+            [vec![Value::from("Alix")], vec![Value::from("Gus")]],
+            "the compacted store, with what was written after compact()"
+        );
     }
 }

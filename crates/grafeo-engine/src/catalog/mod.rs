@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use parking_lot::{Mutex, RwLock};
 
 use grafeo_common::collections::{GrafeoConcurrentMap, grafeo_concurrent_map};
+use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
 use grafeo_common::types::{EdgeTypeId, IndexId, LabelId, PropertyKeyId, Value};
 
 /// The database's schema dictionary - maps names to compact internal IDs.
@@ -1216,21 +1217,62 @@ pub enum PropertyDataType {
     Edge,
     /// Any type (no enforcement).
     Any,
+    // The 0.5.x catalog layouts (catalog section v1, snapshot v4) are bincode
+    // of this enum, which numbers the variants by position: new variants go
+    // here, after the existing ones.
+    /// Datetime with a fixed UTC offset (`ZONED DATETIME`), matching
+    /// [`Value::ZonedDatetime`].
+    ZonedDatetime,
+    /// Datetime without a time zone (`LOCAL DATETIME`), matching
+    /// [`Value::Timestamp`], which `local_datetime()` returns.
+    LocalDatetime,
 }
 
 impl PropertyDataType {
+    /// The most `LIST<...>` levels a property type nests: as deep as a
+    /// property value may be ([`MAX_PROPERTY_VALUE_DEPTH`], a list of scalars
+    /// being 1 deep), and as deep as the catalog records store.
+    pub const MAX_LIST_DEPTH: usize = MAX_PROPERTY_VALUE_DEPTH;
+
     /// Parses a type name string (case-insensitive) into a `PropertyDataType`.
-    #[must_use]
-    pub fn from_type_name(name: &str) -> Self {
+    ///
+    /// Reads every spelling [`Display`](std::fmt::Display) writes, including
+    /// `ZONED DATETIME`, `LOCAL DATETIME` and nested `LIST<...>`, so the type
+    /// names of WAL records and `SHOW` output read back as the same type.
+    /// Unknown names are [`Any`](Self::Any).
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::PropertyTypeTooDeep`] when the name nests more than
+    /// [`MAX_LIST_DEPTH`](Self::MAX_LIST_DEPTH) `LIST<...>` levels. The levels
+    /// are counted, not recursed into, so a name of any depth is refused
+    /// without a stack overflow.
+    pub fn from_type_name(name: &str) -> Result<Self, CatalogError> {
         let upper = name.to_uppercase();
-        // Handle parameterized LIST<element_type>
-        if let Some(inner) = upper
+        let mut element = upper.as_str();
+        let mut levels = 0;
+        while let Some(inner) = element
             .strip_prefix("LIST<")
             .and_then(|s| s.strip_suffix('>'))
         {
-            return Self::ListTyped(Box::new(Self::from_type_name(inner)));
+            levels += 1;
+            if levels > Self::MAX_LIST_DEPTH {
+                return Err(CatalogError::PropertyTypeTooDeep {
+                    limit: Self::MAX_LIST_DEPTH,
+                });
+            }
+            element = inner;
         }
-        match upper.as_str() {
+        let mut data_type = Self::from_element_name(element);
+        for _ in 0..levels {
+            data_type = Self::ListTyped(Box::new(data_type));
+        }
+        Ok(data_type)
+    }
+
+    /// The type a name without `LIST<...>` around it names (in capitals).
+    fn from_element_name(upper: &str) -> Self {
+        match upper {
             "STRING" | "VARCHAR" | "TEXT" => Self::String,
             "INT" | "INT64" | "INTEGER" | "BIGINT" => Self::Int64,
             "FLOAT" | "FLOAT64" | "DOUBLE" | "REAL" => Self::Float64,
@@ -1238,6 +1280,8 @@ impl PropertyDataType {
             "DATE" => Self::Date,
             "TIME" => Self::Time,
             "TIMESTAMP" | "DATETIME" => Self::Timestamp,
+            "ZONED DATETIME" | "ZONED_DATETIME" | "ZONEDDATETIME" => Self::ZonedDatetime,
+            "LOCAL DATETIME" | "LOCAL_DATETIME" | "LOCALDATETIME" => Self::LocalDatetime,
             "DURATION" | "INTERVAL" => Self::Duration,
             "LIST" | "ARRAY" => Self::List,
             "MAP" | "RECORD" => Self::Map,
@@ -1259,7 +1303,8 @@ impl PropertyDataType {
             (Self::Bool, Value::Bool(_)) => true,
             (Self::Date, Value::Date(_)) => true,
             (Self::Time, Value::Time(_)) => true,
-            (Self::Timestamp, Value::Timestamp(_)) => true,
+            (Self::Timestamp | Self::LocalDatetime, Value::Timestamp(_)) => true,
+            (Self::ZonedDatetime, Value::ZonedDatetime(_)) => true,
             (Self::Duration, Value::Duration(_)) => true,
             (Self::List, Value::List(_)) => true,
             (Self::ListTyped(elem_type), Value::List(items)) => {
@@ -1292,6 +1337,8 @@ impl std::fmt::Display for PropertyDataType {
             Self::Node => write!(f, "NODE"),
             Self::Edge => write!(f, "EDGE"),
             Self::Any => write!(f, "ANY"),
+            Self::ZonedDatetime => write!(f, "ZONED DATETIME"),
+            Self::LocalDatetime => write!(f, "LOCAL DATETIME"),
         }
     }
 }
@@ -1440,6 +1487,14 @@ pub struct NodeTypeDefinition {
     pub constraints: Vec<TypeConstraint>,
     /// Parent type names for inheritance (GQL `EXTENDS`).
     pub parent_types: Vec<String>,
+    /// The labels of the type's `KEY (...)` clause in a graph type. A node
+    /// type declared inline also gets them as parent types.
+    ///
+    /// Not serialized: the 0.5.x catalog layouts (catalog section version 1,
+    /// snapshot v4) are bincode of this struct and have no such field; the
+    /// catalog records of version 2 hold it.
+    #[serde(skip)]
+    pub key_labels: Vec<String>,
 }
 
 /// Definition of an edge type (relationship type schema).
@@ -1455,6 +1510,13 @@ pub struct EdgeTypeDefinition {
     pub source_node_types: Vec<String>,
     /// Allowed target node types (empty = any).
     pub target_node_types: Vec<String>,
+    /// The labels of the type's `KEY (...)` clause in a graph type.
+    ///
+    /// Not serialized: the 0.5.x catalog layouts (catalog section version 1,
+    /// snapshot v4) are bincode of this struct and have no such field; the
+    /// catalog records of version 2 hold it.
+    #[serde(skip)]
+    pub key_labels: Vec<String>,
 }
 
 /// Definition of a graph type (constrains which node/edge types a graph allows).
@@ -1596,6 +1658,7 @@ impl SchemaCatalog {
             properties: all_properties,
             constraints: all_constraints,
             parent_types: base.parent_types.clone(),
+            key_labels: base.key_labels.clone(),
         })
     }
 
@@ -1812,6 +1875,7 @@ impl SchemaCatalog {
                     properties: Vec::new(),
                     constraints: vec![constraint],
                     parent_types: Vec::new(),
+                    key_labels: Vec::new(),
                 },
             );
         }
@@ -2161,6 +2225,12 @@ pub enum CatalogError {
     SchemaAlreadyExists(String),
     /// No schema with this name exists.
     SchemaNotFound(String),
+    /// A property type nests more `LIST<...>` levels than `limit`
+    /// ([`PropertyDataType::MAX_LIST_DEPTH`]).
+    PropertyTypeTooDeep {
+        /// The most levels a property type nests.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -2177,6 +2247,9 @@ impl std::fmt::Display for CatalogError {
             Self::TypeNotFound(name) => write!(f, "Type not found: {name}"),
             Self::SchemaAlreadyExists(name) => write!(f, "Schema already exists: {name}"),
             Self::SchemaNotFound(name) => write!(f, "Schema not found: {name}"),
+            Self::PropertyTypeTooDeep { limit } => {
+                write!(f, "A property type nests at most {limit} LIST<...> levels")
+            }
         }
     }
 }
@@ -3328,5 +3401,124 @@ mod tests {
             CatalogError::LabelNotFound("X".to_string()),
             CatalogError::LabelNotFound("Y".to_string())
         );
+    }
+
+    /// `SHOW` prints a property type with `Display` and WAL replay reads the
+    /// statement's spelling with `from_type_name`: every type, nested in
+    /// lists too, reads back as itself (#569).
+    #[test]
+    fn every_property_type_reads_back_from_its_name() {
+        use PropertyDataType as T;
+
+        let list = |element: T| T::ListTyped(Box::new(element));
+        let types = [
+            T::String,
+            T::Int64,
+            T::Float64,
+            T::Bool,
+            T::Date,
+            T::Time,
+            T::Timestamp,
+            T::Duration,
+            T::List,
+            list(T::Int64),
+            T::Map,
+            T::Bytes,
+            T::Node,
+            T::Edge,
+            T::Any,
+            T::ZonedDatetime,
+            T::LocalDatetime,
+            list(T::ZonedDatetime),
+            list(list(T::LocalDatetime)),
+        ];
+        for data_type in types {
+            let name = data_type.to_string();
+            assert_eq!(T::from_type_name(&name), Ok(data_type.clone()), "{name}");
+            assert_eq!(
+                T::from_type_name(&name.to_lowercase()),
+                Ok(data_type),
+                "{name} in lowercase"
+            );
+        }
+        assert_eq!(T::ZonedDatetime.to_string(), "ZONED DATETIME");
+        assert_eq!(T::LocalDatetime.to_string(), "LOCAL DATETIME");
+        for spelling in ["zoned_datetime", "ZonedDateTime"] {
+            assert_eq!(
+                T::from_type_name(spelling),
+                Ok(T::ZonedDatetime),
+                "{spelling}"
+            );
+        }
+        for spelling in ["local_datetime", "LocalDateTime"] {
+            assert_eq!(
+                T::from_type_name(spelling),
+                Ok(T::LocalDatetime),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            T::from_type_name("DATETIME"),
+            Ok(T::Timestamp),
+            "a plain DATETIME stays a TIMESTAMP"
+        );
+    }
+
+    /// A type name nests at most 128 `LIST<...>` levels; a deeper one, however
+    /// deep, is refused with the limit named, without a stack overflow (the
+    /// levels are counted, not recursed into).
+    #[test]
+    fn property_type_names_nest_at_most_128_lists() {
+        let nested = |levels: usize| {
+            format!(
+                "{}local datetime{}",
+                "list<".repeat(levels),
+                ">".repeat(levels)
+            )
+        };
+        let mut expected = PropertyDataType::LocalDatetime;
+        for _ in 0..128 {
+            expected = PropertyDataType::ListTyped(Box::new(expected));
+        }
+        assert_eq!(PropertyDataType::MAX_LIST_DEPTH, 128);
+        assert_eq!(PropertyDataType::from_type_name(&nested(128)), Ok(expected));
+
+        for levels in [129, 100_000] {
+            let error = PropertyDataType::from_type_name(&nested(levels)).unwrap_err();
+            assert_eq!(
+                error,
+                CatalogError::PropertyTypeTooDeep { limit: 128 },
+                "{levels} levels"
+            );
+            assert_eq!(
+                error.to_string(),
+                "A property type nests at most 128 LIST<...> levels"
+            );
+        }
+    }
+
+    /// `ZONED DATETIME` holds only zoned datetimes and `LOCAL DATETIME` only
+    /// local ones (`Value::Timestamp`); both take a null, as every type does.
+    #[test]
+    fn zoned_and_local_datetimes_match_only_their_own_values() {
+        use grafeo_common::types::{Timestamp, ZonedDatetime};
+
+        let zoned =
+            Value::ZonedDatetime(ZonedDatetime::parse("2026-10-05T10:30:00+02:00").unwrap());
+        let local = Value::Timestamp(Timestamp::from_secs(1_791_000_000));
+        let zoned_type = PropertyDataType::ZonedDatetime;
+        let local_type = PropertyDataType::LocalDatetime;
+
+        assert!(zoned_type.matches(&zoned));
+        assert!(!zoned_type.matches(&local), "a local datetime is not zoned");
+        assert!(!zoned_type.matches(&Value::from("2026-10-05T10:30:00+02:00")));
+        assert!(local_type.matches(&local));
+        assert!(!local_type.matches(&zoned), "a zoned datetime is not local");
+        assert!(!local_type.matches(&Value::Int64(88)));
+        assert!(zoned_type.matches(&Value::Null) && local_type.matches(&Value::Null));
+
+        let zoned_list = PropertyDataType::ListTyped(Box::new(zoned_type));
+        assert!(zoned_list.matches(&Value::List(vec![zoned.clone(), Value::Null].into())));
+        assert!(!zoned_list.matches(&Value::List(vec![zoned, local].into())));
     }
 }

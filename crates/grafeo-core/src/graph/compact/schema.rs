@@ -65,14 +65,17 @@ impl ColumnDef {
     }
 }
 
-/// Schema for a node table, one per label.
+/// Schema for a node table, one per label set.
 ///
-/// All nodes with a given label share the same columnar layout defined here.
-/// The `table_id` is encoded into [`NodeId`](grafeo_common::types::NodeId)
-/// values via [`encode_node_id`](super::id::encode_node_id).
+/// All nodes with a given set of labels share the same columnar layout
+/// defined here. The `table_id` is encoded into
+/// [`NodeId`](grafeo_common::types::NodeId) values via
+/// [`encode_node_id`](super::id::encode_node_id).
 #[derive(Debug, Clone)]
 pub struct TableSchema {
-    /// The node label this table stores (e.g. "Person", "Movie").
+    /// The table's key: the labels of its nodes in name order, joined with
+    /// `|` (a `\` escapes a `\` or `|` in a label), such as "Person" or
+    /// "Actor|Person".
     pub label: ArcStr,
     /// Unique table identifier, encoded into node IDs (15-bit max).
     pub table_id: u16,

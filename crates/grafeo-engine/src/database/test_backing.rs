@@ -138,7 +138,7 @@ mod tests {
                 .node_property_column_entries(&PropertyKey::new("embedding"))
                 .unwrap(),
         );
-        spill(store, "embedding", backing.clone());
+        spill(&store, "embedding", backing.clone());
 
         let hits = db
             .vector_search("Item", "embedding", &[3.0, 19.0], 2, None, None)
@@ -301,8 +301,8 @@ mod key_order_tests {
     #[test]
     fn a_key_that_cannot_be_read_is_a_read_error() {
         let db = GrafeoDB::new_in_memory();
-        with_an_unreadable_key(db.lpg_store());
-        assert_read_error(&**db.lpg_store(), "the store");
+        with_an_unreadable_key(&db.lpg_store());
+        assert_read_error(&*db.lpg_store(), "the store");
         assert_read_error(&*db.selected_graph_store().unwrap(), "the selected graph");
         assert!(
             db.create_projection("people", ProjectionSpec::new().with_node_labels(["Person"]))

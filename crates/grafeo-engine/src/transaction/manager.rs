@@ -155,6 +155,13 @@ pub struct TransactionInfo {
     pub write_set: HashSet<GraphEntity>,
     /// Set of entities read by this transaction (for serializable isolation).
     pub read_set: HashSet<GraphEntity>,
+    /// The nodes this transaction deleted (in `write_set` too): another
+    /// transaction's edge to one of them conflicts with the delete.
+    pub delete_set: HashSet<GraphEntity>,
+    /// The nodes the edges this transaction created end at, claimed against
+    /// a delete by another transaction (see
+    /// [`TransactionManager::record_endpoints`]).
+    pub endpoint_set: HashSet<GraphEntity>,
 }
 
 impl TransactionInfo {
@@ -166,8 +173,45 @@ impl TransactionInfo {
             start_epoch,
             write_set: HashSet::new(),
             read_set: HashSet::new(),
+            delete_set: HashSet::new(),
+            endpoint_set: HashSet::new(),
         }
     }
+
+    /// Whether `claim` of `entity` by another transaction conflicts with
+    /// this transaction's writes and claims, and why.
+    fn conflict_with(&self, claim: Claim, entity: &GraphEntity) -> Option<String> {
+        let written = || self.write_set.contains(entity);
+        match claim {
+            Claim::Write if written() => Some(format!("Write-write conflict on entity {entity}")),
+            Claim::Delete if written() => Some(format!("Write-write conflict on entity {entity}")),
+            Claim::Delete if self.endpoint_set.contains(entity) => Some(format!(
+                "Write conflict on entity {entity}: another transaction creates an edge to the \
+                 node this transaction deletes"
+            )),
+            Claim::Endpoint if self.delete_set.contains(entity) => Some(format!(
+                "Write conflict on entity {entity}: another transaction deletes the node this \
+                 transaction creates an edge to"
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// How a transaction claims an entity for conflict detection
+/// (first-writer-wins between open transactions, and at commit against the
+/// transactions that committed after it began).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// A write: conflicts with another transaction's writes (deletes
+    /// included).
+    Write,
+    /// The delete of a node: a write, which also conflicts with another
+    /// transaction's claim on the node as an edge's endpoint.
+    Delete,
+    /// The endpoint of an edge the transaction creates: conflicts only with
+    /// another transaction's delete of the node.
+    Endpoint,
 }
 
 /// Manages transactions and MVCC versioning.
@@ -422,7 +466,56 @@ impl TransactionManager {
         transaction_id: TransactionId,
         entity: impl Into<GraphEntity>,
     ) -> Result<()> {
-        let entity = entity.into();
+        self.record_claims(transaction_id, Claim::Write, [entity.into()])
+    }
+
+    /// Records the delete of a node: a write, as
+    /// [`record_write`](Self::record_write) records one, that also conflicts
+    /// with an open transaction that creates an edge to the node (see
+    /// [`record_endpoints`](Self::record_endpoints)), first writer wins; at
+    /// commit, with one that did and committed after this one began.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction is not active, or if another open
+    /// transaction wrote the node or claimed it as an edge's endpoint.
+    pub fn record_delete(
+        &self,
+        transaction_id: TransactionId,
+        entity: impl Into<GraphEntity>,
+    ) -> Result<()> {
+        self.record_claims(transaction_id, Claim::Delete, [entity.into()])
+    }
+
+    /// Claims the endpoints of an edge the transaction is about to create,
+    /// so no committed edge ends at a deleted node: an open transaction that
+    /// deletes one of them conflicts with this one, first writer wins, and at
+    /// commit so does one that deleted one and committed after this one
+    /// began. A claim does not conflict with other writes of the node or
+    /// with other claims on it: transactions that create edges to one node,
+    /// or set its properties, go on side by side.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction is not active, or if another open
+    /// transaction deletes one of the endpoints; nothing is claimed then.
+    pub fn record_endpoints(
+        &self,
+        transaction_id: TransactionId,
+        endpoints: [GraphEntity; 2],
+    ) -> Result<()> {
+        self.record_claims(transaction_id, Claim::Endpoint, endpoints)
+    }
+
+    /// Records `claim` of each of `entities` for `transaction_id`, after
+    /// checking it against the writes and claims of the other open
+    /// transactions (first-writer-wins): all of them, or none on a conflict.
+    fn record_claims<const N: usize>(
+        &self,
+        transaction_id: TransactionId,
+        claim: Claim,
+        entities: [GraphEntity; N],
+    ) -> Result<()> {
         let mut txns = self.transactions.write();
 
         // First-writer-wins conflict detection. Skip the scan when only one
@@ -430,15 +523,20 @@ impl TransactionManager {
         // progress still holds its writes.
         if self.active_count.load(Ordering::Relaxed) > 1 {
             for (other_tx, other_info) in txns.iter() {
-                if *other_tx != transaction_id
-                    && matches!(
+                if *other_tx == transaction_id
+                    || !matches!(
                         other_info.state,
                         TransactionState::Active | TransactionState::Committing
                     )
-                    && other_info.write_set.contains(&entity)
+                {
+                    continue;
+                }
+                if let Some(conflict) = entities
+                    .iter()
+                    .find_map(|entity| other_info.conflict_with(claim, entity))
                 {
                     return Err(Error::Transaction(TransactionError::WriteConflict(
-                        format!("Write-write conflict on entity {entity}"),
+                        conflict,
                     )));
                 }
             }
@@ -457,7 +555,20 @@ impl TransactionManager {
             )));
         }
 
-        info.write_set.insert(entity);
+        for entity in entities {
+            match claim {
+                Claim::Write => {
+                    info.write_set.insert(entity);
+                }
+                Claim::Delete => {
+                    info.write_set.insert(entity.clone());
+                    info.delete_set.insert(entity);
+                }
+                Claim::Endpoint => {
+                    info.endpoint_set.insert(entity);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -572,6 +683,34 @@ impl TransactionManager {
                                 )));
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // The same for the endpoints of our new edges and the nodes we
+        // deleted: a transaction that committed after our snapshot deleted
+        // a node we link to, or linked to a node we delete (neither saw the
+        // other's change, so its commit would leave a dangling edge).
+        if others_committed && !(ours.endpoint_set.is_empty() && ours.delete_set.is_empty()) {
+            for (other_tx, commit_epoch) in committed.iter() {
+                if *other_tx != transaction_id
+                    && commit_epoch.as_u64() > our_start_epoch.as_u64()
+                    && let Some(other_info) = txns.get(other_tx)
+                {
+                    let conflict = ours
+                        .endpoint_set
+                        .iter()
+                        .find_map(|entity| other_info.conflict_with(Claim::Endpoint, entity))
+                        .or_else(|| {
+                            ours.delete_set
+                                .iter()
+                                .find_map(|entity| other_info.conflict_with(Claim::Delete, entity))
+                        });
+                    if let Some(conflict) = conflict {
+                        return Err(Error::Transaction(TransactionError::WriteConflict(
+                            conflict,
+                        )));
                     }
                 }
             }
@@ -1836,10 +1975,16 @@ mod tests {
     /// How long work that should wait gets to finish anyway.
     const BRIEFLY: std::time::Duration = std::time::Duration::from_millis(100);
 
+    /// How long work that should not wait gets to finish: long, so a loaded
+    /// machine does not fail the test, and finite, so a wait fails it
+    /// instead of hanging.
+    const PATIENTLY: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// Runs `work` on a scoped thread; returns whether it finished within
-    /// [`BRIEFLY`], and its handle.
-    fn spawn_and_wait_briefly<'scope, T: Send + 'scope>(
+    /// `wait`, and its handle.
+    fn spawn_and_wait<'scope, T: Send + 'scope>(
         scope: &'scope std::thread::Scope<'scope, '_>,
+        wait: std::time::Duration,
         work: impl FnOnce() -> T + Send + 'scope,
     ) -> (bool, std::thread::ScopedJoinHandle<'scope, T>) {
         let (done, finished) = std::sync::mpsc::channel();
@@ -1848,7 +1993,7 @@ mod tests {
             let _ = done.send(());
             result
         });
-        (finished.recv_timeout(BRIEFLY).is_ok(), handle)
+        (finished.recv_timeout(wait).is_ok(), handle)
     }
 
     /// A checkpoint's hold waits for a store change of an open transaction
@@ -1860,7 +2005,7 @@ mod tests {
         let manager = &mgr;
         std::thread::scope(|scope| {
             let writing = mgr.write_in_progress();
-            let (finished, checkpoint) = spawn_and_wait_briefly(scope, move || {
+            let (finished, checkpoint) = spawn_and_wait(scope, BRIEFLY, move || {
                 drop(manager.hold_commits().unwrap());
             });
             assert!(!finished, "the hold waits for the write in progress");
@@ -1868,7 +2013,7 @@ mod tests {
             checkpoint.join().unwrap();
 
             let held = mgr.hold_commits().unwrap();
-            let (finished, write) = spawn_and_wait_briefly(scope, move || {
+            let (finished, write) = spawn_and_wait(scope, BRIEFLY, move || {
                 drop(manager.write_in_progress());
             });
             assert!(!finished, "a write waits for the checkpoint's hold");
@@ -1887,13 +2032,13 @@ mod tests {
         let manager = &mgr;
         std::thread::scope(|scope| {
             let writing = mgr.write_in_progress();
-            let (finished, other) = spawn_and_wait_briefly(scope, move || {
+            let (finished, other) = spawn_and_wait(scope, PATIENTLY, move || {
                 drop(manager.write_in_progress());
             });
             assert!(finished, "another write runs alongside");
             other.join().unwrap();
 
-            let (finished, change) = spawn_and_wait_briefly(scope, move || {
+            let (finished, change) = spawn_and_wait(scope, PATIENTLY, move || {
                 drop(manager.hold_commits_for_change().unwrap());
             });
             assert!(finished, "the change does not wait for the write");
@@ -1901,7 +2046,7 @@ mod tests {
             drop(writing);
 
             let held = mgr.hold_commits_for_change().unwrap();
-            let (finished, write) = spawn_and_wait_briefly(scope, move || {
+            let (finished, write) = spawn_and_wait(scope, PATIENTLY, move || {
                 drop(manager.write_in_progress());
             });
             assert!(finished, "a write does not wait for the change");
@@ -1936,12 +2081,157 @@ mod tests {
                 .try_hold_commits()
                 .unwrap()
                 .expect("the merge holds commits off when nothing is in progress");
-            let (finished, write) = spawn_and_wait_briefly(scope, move || {
+            let (finished, write) = spawn_and_wait(scope, BRIEFLY, move || {
                 drop(manager.write_in_progress());
             });
             assert!(!finished, "a write waits for the merge");
             drop(held);
             write.join().unwrap();
         });
+    }
+
+    // === Edge endpoints claimed against deletes ===
+
+    /// Alix, Gus and Vincent as entities of the default graph.
+    fn people() -> (GraphEntity, GraphEntity, GraphEntity) {
+        (
+            GraphEntity::from(NodeId::new(3)),
+            GraphEntity::from(NodeId::new(19)),
+            GraphEntity::from(NodeId::new(88)),
+        )
+    }
+
+    /// Whether `result` is a write conflict.
+    fn is_conflict(result: &Result<impl std::fmt::Debug>) -> bool {
+        matches!(
+            result,
+            Err(Error::Transaction(TransactionError::WriteConflict(_)))
+        )
+    }
+
+    /// A delete of a node that an open transaction claimed as an edge's
+    /// endpoint is a conflict; a delete of another node is not.
+    #[test]
+    fn a_delete_conflicts_with_an_open_claim_on_the_node() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, vincent) = people();
+        let linker = mgr.begin();
+        let deleter = mgr.begin();
+        mgr.record_endpoints(linker, [alix, gus.clone()]).unwrap();
+
+        let deleted = mgr.record_delete(deleter, gus);
+        assert!(is_conflict(&deleted), "got {deleted:?}");
+        mgr.record_delete(deleter, vincent).unwrap();
+        mgr.commit(linker).unwrap();
+        mgr.commit(deleter).unwrap();
+    }
+
+    /// A claim on a node an open transaction deletes is a conflict, and
+    /// claims neither endpoint: once the delete is rolled back, another
+    /// transaction deletes the other endpoint without a conflict.
+    #[test]
+    fn a_claim_conflicts_with_an_open_delete_and_claims_nothing() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, _) = people();
+        let deleter = mgr.begin();
+        let linker = mgr.begin();
+        mgr.record_delete(deleter, gus.clone()).unwrap();
+
+        let claimed = mgr.record_endpoints(linker, [alix.clone(), gus]);
+        assert!(is_conflict(&claimed), "got {claimed:?}");
+        mgr.abort(deleter).unwrap();
+        let other = mgr.begin();
+        mgr.record_delete(other, alix)
+            .expect("the failed claim left Alix unclaimed");
+    }
+
+    /// Claims conflict with deletes only: transactions that create edges to
+    /// one node, and one that writes the node, all commit.
+    #[test]
+    fn claims_do_not_conflict_with_claims_or_writes() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, vincent) = people();
+        let alix_links = mgr.begin();
+        let vincent_links = mgr.begin();
+        let writer = mgr.begin();
+        mgr.record_endpoints(alix_links, [alix, gus.clone()])
+            .unwrap();
+        mgr.record_endpoints(vincent_links, [vincent, gus.clone()])
+            .unwrap();
+        mgr.record_write(writer, gus).unwrap();
+        mgr.commit(alix_links).unwrap();
+        mgr.commit(vincent_links).unwrap();
+        mgr.commit(writer).unwrap();
+    }
+
+    /// A transaction whose new edge ends at a node another transaction
+    /// deleted and committed after it began fails its commit.
+    #[test]
+    fn a_claim_fails_the_commit_after_a_later_committed_delete() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, _) = people();
+        let linker = mgr.begin();
+        let deleter = mgr.begin();
+        mgr.record_delete(deleter, gus.clone()).unwrap();
+        mgr.commit(deleter).unwrap();
+
+        mgr.record_endpoints(linker, [alix, gus])
+            .expect("the delete is committed: no open transaction holds it");
+        let committed = mgr.commit(linker);
+        assert!(is_conflict(&committed), "got {committed:?}");
+    }
+
+    /// The other way around: a delete fails its commit when another
+    /// transaction committed an edge to the node after the delete's
+    /// transaction began.
+    #[test]
+    fn a_delete_fails_the_commit_after_a_later_committed_claim() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, _) = people();
+        let deleter = mgr.begin();
+        let linker = mgr.begin();
+        mgr.record_endpoints(linker, [alix, gus.clone()]).unwrap();
+        mgr.commit(linker).unwrap();
+
+        mgr.record_delete(deleter, gus).unwrap();
+        let committed = mgr.commit(deleter);
+        assert!(is_conflict(&committed), "got {committed:?}");
+    }
+
+    /// A claim committed before a transaction began is part of its snapshot
+    /// (it sees the edge, and deletes it with the node): no conflict.
+    #[test]
+    fn a_claim_committed_before_the_transaction_began_does_not_conflict() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, _) = people();
+        let linker = mgr.begin();
+        mgr.record_endpoints(linker, [alix, gus.clone()]).unwrap();
+        mgr.commit(linker).unwrap();
+
+        let deleter = mgr.begin();
+        mgr.record_delete(deleter, gus).unwrap();
+        mgr.commit(deleter).unwrap();
+    }
+
+    /// Claims of one node id in two graphs are claims of two nodes: a delete
+    /// in one graph does not conflict with an edge in the other.
+    #[test]
+    fn claims_in_different_graphs_do_not_conflict() {
+        let mgr = TransactionManager::new();
+        let gus = NodeId::new(19);
+        let linker = mgr.begin();
+        let deleter = mgr.begin();
+        mgr.record_endpoints(
+            linker,
+            [
+                GraphEntity::new(Some(Arc::from("Paris")), gus),
+                GraphEntity::new(Some(Arc::from("Paris")), gus),
+            ],
+        )
+        .unwrap();
+        mgr.record_delete(deleter, GraphEntity::new(Some(Arc::from("Prague")), gus))
+            .unwrap();
+        mgr.commit(linker).unwrap();
+        mgr.commit(deleter).unwrap();
     }
 }

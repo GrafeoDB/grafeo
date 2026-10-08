@@ -90,6 +90,38 @@ CREATE OR REPLACE NODE TYPE Person (
 )
 ```
 
+### Property Types
+
+Each property of a node or edge type has one of these types. A value written to the property (when a node or edge of the type is created, or with `SET`) must have the type, or the write fails; `NULL` is accepted unless the property is `NOT NULL`. Types match strictly: an integer is not a `FLOAT64`, and a zoned datetime is not a `LOCAL DATETIME`.
+
+| Type | Also written | Values |
+|------|--------------|--------|
+| `STRING` | `VARCHAR`, `TEXT` | Strings |
+| `INT64` | `INT`, `INTEGER`, `BIGINT` | Integers |
+| `FLOAT64` | `FLOAT`, `DOUBLE`, `REAL` | Floats |
+| `BOOLEAN` | `BOOL` | `TRUE` and `FALSE` |
+| `DATE` | | Dates, such as `date('2024-03-19')` |
+| `TIME` | | Times of day, such as `time('08:30:00')` |
+| `LOCAL DATETIME` | | Dates with a time and no time zone, such as `local_datetime('2024-03-19T08:30:00')` |
+| `TIMESTAMP` | `DATETIME` | The same values as `LOCAL DATETIME` |
+| `ZONED DATETIME` | | Dates with a time and a UTC offset, such as `zoned_datetime('2024-03-19T08:30:00+01:00')` |
+| `DURATION` | `INTERVAL` | Durations, such as `duration('P3D')` |
+| `BYTES` | `BINARY`, `BLOB` | Byte strings |
+| `LIST` | `ARRAY` | Lists of any values |
+| `LIST<type>` | | Lists whose elements all have `type`, such as `LIST<STRING>` or `LIST<ZONED DATETIME>`; they nest up to 128 levels, as in `LIST<LIST<INT64>>` |
+| `ANY` | | Any value |
+
+```sql
+CREATE NODE TYPE Event (
+    title STRING NOT NULL,
+    begins ZONED DATETIME,
+    departs LOCAL DATETIME,
+    tags LIST<STRING>
+)
+```
+
+`SHOW NODE TYPES` and `SHOW EDGE TYPES` list each property with its type, in the first spelling of the table.
+
 ### Altering Types
 
 Add or remove properties from existing type definitions:

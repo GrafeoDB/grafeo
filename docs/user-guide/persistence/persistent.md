@@ -92,6 +92,7 @@ Features:
 - Two alternating database headers, and a CRC-32 checksum on every header and every piece of data
 - Checkpoints are copy-on-write: a checkpoint writes the new state into space in the file that the last good state does not use, and switches the database header to it only once it is on disk. A checkpoint that fails or is cut off by a crash (for example on a full disk) leaves the last good state readable. A checkpoint needs free disk space for a second copy of the data while it runs; the next checkpoint reuses the space of the older copy.
 - A checkpoint writes the data in chunks of at most 1 MiB as it goes, without first encoding whole sections in memory. While it writes a vector or text index, changes to that index (inserting, updating or removing a node's vector or text) wait until the index is written, and so do searches of that index that arrive after a waiting change.
+- A checkpoint writes the committed state, also while transactions are open: what an open transaction deleted or changed is written as it was committed, and nothing it created is written. A checkpoint taken while an open transaction has changed the default graph leaves out the vector and text indexes, and the next open builds them from the data. `save()`, `to_memory()`, `export_snapshot()` and the backups copy the committed state in the same way.
 - Exclusive file locking prevents multiple processes from opening the same file simultaneously
 
 ### Storage Format Setting (Rust)
@@ -125,6 +126,8 @@ To share a database between processes, run it behind [Grafeo Server](https://git
 ## After `close()`
 
 Once `close()` of a persistent database starts, the handle takes no more writes: commits and statements that write (in every query language, SPARQL updates included), schema statements and graph commands, the direct calls that write (nodes, edges, properties and labels, named graphs, property, vector and text indexes, imports, `batch_insert_rdf` and `restore_snapshot`), and the calls that persist (`wal_checkpoint()`, `save()`, the backups, `compact()`) fail with the database-closed error (`GRAFEO-T007`, Python `DatabaseClosedError`). A write already in progress, `restore_snapshot` included, completes first and is saved; so does an import or `batch_insert_rdf` that is already writing, while one still reading its input is refused. Reads still work. Open the database again to write. An in-memory database has nothing to persist and keeps working.
+
+A transaction still open when `close()` runs is left out of the file: the final checkpoint writes the committed state (see above). Its commit then fails with the database-closed error; it can only roll back.
 
 ## Reopening a Database
 

@@ -18,7 +18,9 @@
 //!    pushdown because they are cheaper and strictly more specific.
 //! 4. Compound hybrid (`try_plan_filter_compound_hybrid`) is tried
 //!    before single-sided vector/text pushdown so an `AND` over both
-//!    kinds doesn't get torn apart into a scan + filter.
+//!    kinds doesn't get torn apart into a scan + filter. These index
+//!    searches, too, replace only a scan without input: they find the
+//!    nodes alone, and a scan per input row keeps that row.
 //! 5. The generic `FilterOperator` is the last resort; whatever fell
 //!    through still runs correctly, just without an index.
 //!
@@ -63,28 +65,6 @@ impl super::Planner {
         node.is_some_and(|node| label.is_none_or(|label| node.has_label(label)))
     }
 
-    /// Plans the input of a filter. `Empty` is the one empty row a query
-    /// starts from, as for `RETURN`, `WITH` and `CALL` (a condition that reads
-    /// no variable can be moved down to it): a single row without columns.
-    fn plan_filter_input(
-        &self,
-        input: &LogicalOperator,
-    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        if !matches!(input, LogicalOperator::Empty) {
-            return self.plan_operator(input);
-        }
-        // PROFILE walks the logical tree, `Empty` included (see `plan_unwind`).
-        if self.profiling.get() {
-            let (entry, _stats) =
-                crate::query::profile::ProfileEntry::new("Empty", input.display_label());
-            self.profile_entries.borrow_mut().push(entry);
-        }
-        Ok((
-            Box::new(grafeo_core::execution::operators::single_row::SingleRowOperator::new()),
-            Vec::new(),
-        ))
-    }
-
     /// Plans a filter operator.
     ///
     /// Uses zone map pre-filtering to potentially skip scans when predicates
@@ -98,22 +78,27 @@ impl super::Planner {
         // Check for complex EXISTS/NOT EXISTS patterns and rewrite as semi/anti join.
         // Simple single-hop EXISTS patterns from a node of the row are handled
         // by the fast path in convert_expression() -> extract_exists_pattern().
+        // Not below a write: the join reads the subquery before its input, so
+        // the subquery would miss what the input writes; per row (below), it
+        // runs after the whole input.
+        let input_writes = filter.input.has_mutations();
         let outer = filter.input.bound_variables(None);
-        if let Some((subquery, is_negated, remaining)) =
-            self.extract_complex_exists(&filter.predicate, outer.as_ref())
+        if !input_writes
+            && let Some((subquery, is_negated, remaining)) =
+                self.extract_complex_exists(&filter.predicate, outer.as_ref())
         {
             return self.plan_exists_as_semi_join(&filter.input, subquery, is_negated, remaining);
         }
 
         // EXISTS and COUNT subqueries the edge check cannot answer run per row
-        // of the input (see `subquery.rs`).
+        // of the input (see `subquery.rs`), and below a write all of them.
         // With the variables the input's rows hold, a subquery that shares
         // none of them is lifted too (counted once instead of per row).
         let input_columns: Option<Vec<String>> = filter
             .input
             .bound_variables(None)
             .map(|names| names.into_iter().collect());
-        if self.has_subquery_to_lift(&filter.predicate, input_columns.as_deref()) {
+        if self.has_subquery_to_lift(&filter.predicate, input_columns.as_deref(), input_writes) {
             return self.plan_filter_with_subqueries(filter);
         }
 
@@ -125,7 +110,7 @@ impl super::Planner {
             && let Some(false) = self.check_zone_map_for_predicate(&filter.predicate, &filter.input)
         {
             // Zone map says no matches possible - return empty result
-            let (_, columns) = self.plan_filter_input(&filter.input)?;
+            let (_, columns) = self.plan_input(&filter.input)?;
             let schema = self.derive_schema_from_columns(&columns);
             let empty_op = Box::new(EmptyOperator::new(schema));
             return Ok((empty_op, columns));
@@ -180,7 +165,7 @@ impl super::Planner {
         }
 
         // Plan the input operator first
-        let (input_op, columns) = self.plan_filter_input(&filter.input)?;
+        let (input_op, columns) = self.plan_input(&filter.input)?;
 
         // Build variable to column index mapping
         let variable_columns: HashMap<String, usize> = columns
@@ -221,20 +206,22 @@ impl super::Planner {
             .input
             .bound_variables(None)
             .map(|names| names.into_iter().collect());
-        let (with_subqueries, plain): (Vec<_>, Vec<_>) = conjuncts
-            .into_iter()
-            .partition(|conjunct| self.has_subquery_to_lift(conjunct, input_columns.as_deref()));
+        let input_writes = filter.input.has_mutations();
+        let (with_subqueries, plain): (Vec<_>, Vec<_>) =
+            conjuncts.into_iter().partition(|conjunct| {
+                self.has_subquery_to_lift(conjunct, input_columns.as_deref(), input_writes)
+            });
         let (input_op, columns) = match join_conjuncts(plain) {
             Some(predicate) => self.plan_filter(&FilterOp {
                 predicate,
                 input: filter.input.clone(),
                 pushdown_hint: filter.pushdown_hint.clone(),
             })?,
-            None => self.plan_filter_input(&filter.input)?,
+            None => self.plan_input(&filter.input)?,
         };
         let predicate = join_conjuncts(with_subqueries)
             .ok_or_else(|| Error::Internal("filter without a subquery to lift".to_string()))?;
-        self.filter_rest(input_op, columns, &predicate, filter.input.has_mutations())
+        self.filter_rest(input_op, columns, &predicate, input_writes)
     }
 
     /// Filters `input` by `predicate`, whose `EXISTS` and `COUNT` subqueries
@@ -1397,10 +1384,15 @@ impl super::Planner {
         &self,
         filter: &super::FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        // Only push down when input is a full label scan (no nested input)
+        // Only push down when input is a full label scan (no nested input):
+        // the search finds the nodes alone, so a scan per input row (a later
+        // MATCH, an UNWIND) checks the predicate per row instead.
         let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
             return Ok(None);
         };
+        if scan.input.is_some() {
+            return Ok(None);
+        }
         let Some(ref label) = scan.label else {
             return Ok(None);
         };

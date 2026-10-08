@@ -192,15 +192,14 @@ stores: vector/text scan and search now fall through both layers.
 
 ## Limitations
 
+- `compact()` and `recompact()` fail while a transaction is open: commit or roll it back first.
 - **Overlay write path**: writes go through the overlay, which is less optimized than
   `LpgStore`'s full MVCC path. Sustained write-heavy workloads should stay on `LpgStore`
   or compact again periodically.
-- **Multi-label nodes**: nodes with multiple labels are stored under a compound key
-  (e.g., `"Actor|Person"`, sorted alphabetically). A query like `MATCH (n:Person)` will
-  not match nodes stored under `"Actor|Person"`. Workarounds:
-    - **Preferred:** use a single label per node before compacting.
-    - **Alternative:** query the compound label explicitly, e.g., `MATCH (n:Actor:Person)` (labels in alphabetical order).
-    - **Alternative:** assign a canonical "primary" label and store additional labels as a list property instead.
+- **Multi-label nodes in databases compacted by 0.5.44 or older**: those versions stored
+  the labels of a node with several as one name (`"Actor|Person"`). Since 0.6.0 each label
+  reads such a node again (`MATCH (n:Person)` and `MATCH (n:Actor)` both find it), but a
+  single label that holds a `|` reads as two labels in those files.
 - **No disk serialization**: `compact()` operates in memory. To persist a compacted database,
   use snapshot export (WASM) or save before compacting.
 - **Databases compacted by 0.5.44 or older**: those versions stored a property that a node or

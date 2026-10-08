@@ -31,7 +31,9 @@ impl super::Planner {
         }
         // Fall through to regular aggregate if factorized planning fails
 
-        let (mut input_op, input_columns) = self.plan_operator(&agg.input)?;
+        // An aggregate that comes first (`RETURN count(*)`) aggregates the
+        // one empty row.
+        let (mut input_op, input_columns) = self.plan_input(&agg.input)?;
 
         // Build variable to column index mapping
         let mut variable_columns: HashMap<String, usize> = input_columns

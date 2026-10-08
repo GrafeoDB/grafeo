@@ -320,12 +320,12 @@ fn every_kind_of_section_survives_a_reopen() {
 }
 
 /// Every kind of section written in chunks of one row and 64 bytes (each
-/// row, and each 64 bytes of an index stream, in a chunk of its own) comes
-/// back with the default caps. The small caps cut the LPG store and the index
-/// sections into more chunks than the default caps do. (Chunks of three rows
-/// and 1 KiB would cut none of them: each graph has two nodes, each index
-/// stream is shorter. The catalog is still one raw chunk, and one triple is
-/// one row of the RDF store; `chunked_sections.rs` cuts RDF graphs.)
+/// row, and each 64 bytes of an index stream or of the catalog's records, in
+/// a chunk of its own) comes back with the default caps. The small caps cut
+/// the LPG store, the index sections and the catalog into more chunks than
+/// the default caps do. (Chunks of three rows and 1 KiB would cut none of
+/// them: each graph has two nodes, each stream is shorter. One triple is one
+/// row of the RDF store; `chunked_sections.rs` cuts RDF graphs.)
 #[test]
 #[cfg(all(feature = "sparql", feature = "vector-index", feature = "text-index"))]
 fn every_kind_of_section_survives_a_reopen_in_small_chunks() {
@@ -335,7 +335,7 @@ fn every_kind_of_section_survives_a_reopen_in_small_chunks() {
     });
     let default = every_kind_of_section_after_a_reopen(ChunkCaps::DEFAULT);
     for ((section_type, small), (_, default)) in small.iter().zip(&default) {
-        if !matches!(section_type, SectionType::Catalog | SectionType::RdfStore) {
+        if *section_type != SectionType::RdfStore {
             assert!(
                 small > default,
                 "{section_type:?}: {small} chunks with the small caps, {default} with the \

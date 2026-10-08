@@ -1,0 +1,157 @@
+# Rosetta: a later MATCH with comma-separated parts that reuse a variable
+#
+# A part of a later MATCH that names a node or edge an earlier clause bound
+# goes on from that node or edge, in whatever order the parts come. The
+# second clause of `MATCH (a:Person) MATCH (b:City), (a)-[:VISITED]->(b)`
+# used to start its variables from its first part, not from the rows before
+# it, so `a` matched any person: every person came back with every visit.
+#
+# Setup (GQL, one statement): Alix (k 1), Gus (k 3), Vincent (k 19) and Mia
+# (k 88); Amsterdam, Berlin and Paris. VISITED Alix->Amsterdam (w 3),
+# Gus->Berlin (w 19), Gus->Amsterdam (w 88), Vincent->Paris (w 33) and
+# Vincent->Mia (w 38), who is no city. Mia visited nothing.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: A later MATCH with comma-separated parts
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: later_part_expands_from_the_bound_node
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) MATCH (b:City), (a)-[:VISITED]->(b) RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (a:Person) MATCH (b:City), (a)-[:VISITED]->(b) RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, Paris]
+
+  - name: later_part_back_to_the_bound_node
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) MATCH (b:City), (b)<-[:VISITED]-(a) RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (a:Person) MATCH (b:City), (b)<-[:VISITED]-(a) RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, Paris]
+
+  - name: parts_in_the_other_order
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) MATCH (a)-[:VISITED]->(b), (b:City) RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (a:Person) MATCH (a)-[:VISITED]->(b), (b:City) RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, Paris]
+
+  - name: where_after_the_later_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) MATCH (b:City), (a)-[:VISITED]->(b) WHERE a.k = 1 RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (a:Person) MATCH (b:City), (a)-[:VISITED]->(b) WHERE a.k = 1 RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+
+  - name: where_after_the_first_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "MATCH (a:Person WHERE a.k = 3) MATCH (b:City), (a)-[:VISITED]->(b) RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (a:Person) WHERE a.k = 3 MATCH (b:City), (a)-[:VISITED]->(b) RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Gus, Amsterdam]
+        - [Gus, Berlin]
+
+  - name: optional_later_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) OPTIONAL MATCH (b:City), (a)-[:VISITED]->(b) RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (a:Person) OPTIONAL MATCH (b:City), (a)-[:VISITED]->(b) RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, Paris]
+        - [Mia, null]
+
+  - name: later_part_through_a_bound_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "MATCH (a:Person)-[r:VISITED]->(c:City) MATCH (b:City), (b)<-[r]-(x) RETURN x.name AS x, b.name AS b, r.w AS w"
+      cypher: "MATCH (a:Person)-[r:VISITED]->(c:City) MATCH (b:City), (b)<-[r]-(x) RETURN x.name AS x, b.name AS b, r.w AS w"
+    expect:
+      rows:
+        - [Alix, Amsterdam, 3]
+        - [Gus, Amsterdam, 88]
+        - [Gus, Berlin, 19]
+        - [Vincent, Paris, 33]
+
+  - name: unwound_values_stay_with_their_rows
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "UNWIND [1, 3] AS k MATCH (a:Person {k: k}) MATCH (b:City), (a)-[:VISITED]->(b) RETURN k, a.name AS a, b.name AS b"
+      cypher: "UNWIND [1, 3] AS k MATCH (a:Person {k: k}) MATCH (b:City), (a)-[:VISITED]->(b) RETURN k, a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [1, Alix, Amsterdam]
+        - [3, Gus, Amsterdam]
+        - [3, Gus, Berlin]
+
+  - name: later_part_reads_an_unwound_value
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "UNWIND [3, 19] AS w MATCH (a:Person) MATCH (b:City), (a)-[:VISITED {w: w}]->(b) RETURN w, a.name AS a, b.name AS b"
+      cypher: "UNWIND [3, 19] AS w MATCH (a:Person) MATCH (b:City), (a)-[:VISITED {w: w}]->(b) RETURN w, a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [3, Alix, Amsterdam]
+        - [19, Gus, Berlin]
+
+  - name: subquery_importing_everything_expands_from_the_outer_node
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) CALL { WITH * MATCH (b:City), (a)-[:VISITED]->(b) RETURN b.name AS b } RETURN a.name AS a, b"
+      cypher: "MATCH (a:Person) CALL { WITH * MATCH (b:City), (a)-[:VISITED]->(b) RETURN b.name AS b } RETURN a.name AS a, b"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, Paris]
+
+  - name: subquery_part_expands_from_the_imported_node
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "MATCH (a:Person) CALL { WITH a MATCH (b:City), (a)-[:VISITED]->(b) RETURN b.name AS b } RETURN a.name AS a, b"
+      cypher: "MATCH (a:Person) CALL { WITH a MATCH (b:City), (a)-[:VISITED]->(b) RETURN b.name AS b } RETURN a.name AS a, b"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, Paris]

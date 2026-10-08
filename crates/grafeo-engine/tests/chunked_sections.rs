@@ -60,7 +60,7 @@ const CITIES: [&str; 4] = ["Amsterdam", "Berlin", "Paris", "Prague"];
 fn dump(db: &GrafeoDB) -> Vec<String> {
     let mut lines = Vec::new();
     let store = db.store();
-    dump_graph(&mut lines, "default graph", store);
+    dump_graph(&mut lines, "default graph", &store);
     let mut names = db.list_graphs();
     names.sort();
     for name in names {
@@ -761,12 +761,11 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
         "OverlayDeletions",
     ] {
         let chunks = counts.get(section).copied().unwrap_or(0);
-        // The catalog is still one raw chunk; every other section is a
-        // metadata chunk and its data.
-        let least = if section == "Catalog" { 1 } else { 2 };
+        // Every section is a metadata chunk and its data (the catalog's
+        // records: the constraint and the index definitions).
         assert!(
-            chunks >= least,
-            "the {section} section is in the image in {least} chunks or more: {counts:?}"
+            chunks >= 2,
+            "the {section} section is in the image in 2 chunks or more: {counts:?}"
         );
     }
     check(&db, "written in small chunks");

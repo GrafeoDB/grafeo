@@ -1,0 +1,51 @@
+# Reviewed differences between 0.5.44 and 0.6.0: case key, fingerprint of the reviewed result, why it changed.
+AM10|gql f3c6308779 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM11|cypher 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM11|gql 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM12|cypher 499c39eaf8 A later MATCH part that reuses a node bound before goes on from it; with an UNWIND value in its property map it found nothing.
+AM12|gql 499c39eaf8 A later MATCH part that reuses a node bound before goes on from it; with an UNWIND value in its property map it found nothing.
+AM1|cypher 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM1|gql 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM2|cypher 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM2|gql 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM4|cypher be07b7a80a A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM4|gql be07b7a80a A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM5|cypher f3c6308779 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM7|cypher b31ee6f0b5 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM7|gql b31ee6f0b5 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM8|cypher 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM8|gql 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM9|cypher e553f086fb A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM9|gql e553f086fb A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AN1|cypher de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN1|gql de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN2|cypher cb16ccbd56 A vector search on a scan that runs per earlier row keeps those rows; it returned one row per document instead of one per file and document.
+AN2|gql cb16ccbd56 A vector search on a scan that runs per earlier row keeps those rows; it returned one row per document instead of one per file and document.
+AN3|cypher de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN3|gql de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN4|cypher de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN4|gql de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN5|cypher de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN5|gql de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN6|cypher 4bdf75ef64 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN6|gql 4bdf75ef64 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN7|cypher 8be13af3a0 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN7|gql 8be13af3a0 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN8|cypher 20d3c58fc5 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN8|gql 20d3c58fc5 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AK1|cypher 3a7ef06131 A compacted node keeps each of its labels.
+AK1|gql 3a7ef06131 A compacted node keeps each of its labels.
+AK2|cypher a3a187c5ba A compacted node keeps each of its labels.
+AK2|gql a3a187c5ba A compacted node keeps each of its labels.
+AK3|cypher a2469cdbe4 A compacted node keeps each of its labels.
+AK3|gql a2469cdbe4 A compacted node keeps each of its labels.
+AK4|cypher 532bea123e A compacted node keeps each of its labels.
+AK4|gql 532bea123e A compacted node keeps each of its labels.
+AK5|cypher a8066ca5ee A compacted node keeps each of its labels.
+AK5|gql a8066ca5ee A compacted node keeps each of its labels.
+AK6|cypher 848246582e A compacted node keeps each of its labels.
+AK6|gql 848246582e A compacted node keeps each of its labels.
+AK7|cypher 6135805667 A compacted node keeps each of its labels.
+AK7|gql 6135805667 A compacted node keeps each of its labels.
+AK9|cypher b8453dd2d3 A compacted node keeps each of its labels.
+AK9|gql b8453dd2d3 A compacted node keeps each of its labels.

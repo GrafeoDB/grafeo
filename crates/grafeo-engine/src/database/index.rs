@@ -189,7 +189,7 @@ impl super::GrafeoDB {
         graph: Option<&str>,
     ) -> Result<(Arc<dyn GraphStoreSearch>, Arc<LpgStore>)> {
         match graph {
-            None => Ok((self.graph_store(), Arc::clone(self.lpg_store()))),
+            None => Ok((self.graph_store(), self.lpg_store())),
             Some(key) => {
                 let store = self
                     .lpg_store()
@@ -198,6 +198,16 @@ impl super::GrafeoDB {
                 Ok((Arc::clone(&store) as Arc<dyn GraphStoreSearch>, store))
             }
         }
+    }
+
+    /// The store that takes an index of the graph with storage key `graph`
+    /// (`None` for the default graph), resolved while commits are held: after
+    /// `compact()` the default graph's store is the layered store's overlay,
+    /// which a merge under memory pressure may replace while the index is
+    /// built, and the merge cannot run while commits are held.
+    #[cfg(any(feature = "vector-index", feature = "text-index"))]
+    fn install_target(&self, graph: Option<&str>) -> Result<Arc<LpgStore>> {
+        self.index_target(graph).map(|(_, target)| target)
     }
 
     /// [`create_vector_index`](Self::create_vector_index) in the graph with
@@ -244,7 +254,10 @@ impl super::GrafeoDB {
         #[cfg(feature = "vector-index")]
         let mut vectors: Vec<(grafeo_common::types::NodeId, Vec<f32>)> = Vec::new();
 
-        let (graph, target) = self.index_target(graph)?;
+        // The store that takes the index is resolved once commits are held
+        // (see `install_target`).
+        let graph_key = graph;
+        let (graph, _) = self.index_target(graph_key)?;
         for node_id in graph.nodes_by_label(label) {
             if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key) {
                 if let Some(expected) = found_dims {
@@ -283,10 +296,14 @@ impl super::GrafeoDB {
                     // Tests start a checkpoint or `close()` here, which must wait.
                     #[cfg(feature = "testing-statement-injection")]
                     grafeo_common::testing::commit_hook::run_during_held_change();
-                    target.add_vector_index(label, property, Arc::new(index));
+                    self.install_target(graph_key)?.add_vector_index(
+                        label,
+                        property,
+                        Arc::new(index),
+                    );
                 }
 
-                let _ = (m, ef_construction, &target);
+                let _ = (m, ef_construction, graph_key);
                 grafeo_info!(
                     "Empty vector index created: :{label}({property}) - 0 vectors, {d} dimensions, metric={metric_name}",
                     metric_name = metric.name()
@@ -332,11 +349,12 @@ impl super::GrafeoDB {
             // Tests start a checkpoint or `close()` here, which must wait.
             #[cfg(feature = "testing-statement-injection")]
             grafeo_common::testing::commit_hook::run_during_held_change();
-            target.add_vector_index(label, property, Arc::new(index));
+            self.install_target(graph_key)?
+                .add_vector_index(label, property, Arc::new(index));
         }
 
         // Suppress unused variable warnings when vector-index is off
-        let _ = (m, ef_construction, &target);
+        let _ = (m, ef_construction, graph_key);
 
         grafeo_info!(
             "Vector index created: :{label}({property}) - {vector_count} vectors, {dims} dimensions, metric={metric_name}",
@@ -537,8 +555,11 @@ impl super::GrafeoDB {
         let mut index = InvertedIndex::new(BM25Config::default());
         let prop_key = PropertyKey::new(property);
 
-        // Index all existing nodes with this label + property
-        let (graph, target) = self.index_target(graph)?;
+        // Index all existing nodes with this label + property; the store that
+        // takes the index is resolved once commits are held (see
+        // `install_target`).
+        let graph_key = graph;
+        let (graph, _) = self.index_target(graph_key)?;
         let nodes = graph.nodes_by_label(label);
         for node_id in nodes {
             if let Some(Value::String(text)) = graph.get_node_property(node_id, &prop_key) {
@@ -550,7 +571,11 @@ impl super::GrafeoDB {
         // Tests start a checkpoint or `close()` here, which must wait.
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_held_change();
-        target.add_text_index(label, property, Arc::new(RwLock::new(index)));
+        self.install_target(graph_key)?.add_text_index(
+            label,
+            property,
+            Arc::new(RwLock::new(index)),
+        );
         Ok(())
     }
 

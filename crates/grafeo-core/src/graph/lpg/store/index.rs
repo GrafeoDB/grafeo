@@ -12,7 +12,94 @@ use std::sync::Arc;
 #[cfg(feature = "vector-index")]
 use crate::index::vector::VectorIndexKind;
 
+/// Lends the vectors of the compacted base a store is the overlay of (see
+/// [`LpgStore::set_base_vectors`]).
+#[cfg(all(feature = "compact-store", feature = "vector-index"))]
+pub(crate) trait BaseVectors: Send + Sync {
+    /// Calls `f` with the vector in property `key` of base node `id`, and
+    /// returns whether there was one.
+    fn with_base_vector(&self, id: NodeId, key: &PropertyKey, f: &mut dyn FnMut(&[f32])) -> bool;
+}
+
+/// The vectors the vector indexes of a store read: the store's own, and,
+/// when the store is the overlay of a compacted base, the base's for a node
+/// the store holds no vector of the property for. An index of an overlay
+/// holds base and overlay nodes in one HNSW graph, so the upkeep links a new
+/// vector to its nearest neighbors among both, and a search measures both.
+///
+/// The overlay holds the vector of every base node it holds a copy of (a
+/// copy takes all of a node's values), and an index drops a node whose value
+/// is removed or is not a vector: so for a node an index holds, the base's
+/// vector is the node's own.
+#[cfg(feature = "vector-index")]
+pub(crate) struct IndexVectors<'a> {
+    store: &'a LpgStore,
+    key: PropertyKey,
+    #[cfg(feature = "compact-store")]
+    base: Option<Arc<dyn BaseVectors>>,
+}
+
+#[cfg(feature = "vector-index")]
+impl crate::index::vector::VectorAccessor for IndexVectors<'_> {
+    fn get_vector(&self, id: NodeId) -> Option<Arc<[f32]>> {
+        if let Some(Value::Vector(vector)) = self.store.node_properties.get(id, &self.key) {
+            return Some(vector);
+        }
+        let mut copied = None;
+        self.with_base_vector(id, &mut |vector| copied = Some(Arc::from(vector)));
+        copied
+    }
+
+    fn with_vector(&self, id: NodeId, f: &mut dyn FnMut(&[f32])) -> bool {
+        self.store
+            .node_properties
+            .with_vector(id, &self.key, &mut *f)
+            .is_some()
+            || self.with_base_vector(id, f)
+    }
+}
+
+#[cfg(feature = "vector-index")]
+impl IndexVectors<'_> {
+    /// Lends the base's vector of `id`, when the store is an overlay and
+    /// holds no vector of its own for it.
+    fn with_base_vector(&self, id: NodeId, f: &mut dyn FnMut(&[f32])) -> bool {
+        #[cfg(feature = "compact-store")]
+        {
+            self.base
+                .as_ref()
+                .is_some_and(|base| base.with_base_vector(id, &self.key, f))
+        }
+        #[cfg(not(feature = "compact-store"))]
+        {
+            let _ = (id, f);
+            false
+        }
+    }
+}
+
 impl LpgStore {
+    /// The vectors of property `key` that this store's vector indexes read
+    /// (see [`IndexVectors`]).
+    #[cfg(feature = "vector-index")]
+    pub(crate) fn index_vectors(&self, key: impl Into<PropertyKey>) -> IndexVectors<'_> {
+        IndexVectors {
+            store: self,
+            key: key.into(),
+            #[cfg(feature = "compact-store")]
+            base: self.base_vectors.read().clone(),
+        }
+    }
+
+    /// Makes this store the overlay of a compacted base whose vectors
+    /// `base` lends: its vector indexes read them for the nodes it holds no
+    /// vector for (see [`IndexVectors`]). A [`successor`](Self::successor)
+    /// reads them too.
+    #[cfg(all(feature = "compact-store", feature = "vector-index"))]
+    pub(crate) fn set_base_vectors(&self, base: Arc<dyn BaseVectors>) {
+        *self.base_vectors.write() = Some(base);
+    }
+
     /// Creates an index on a node property for O(1) lookups by value.
     ///
     /// After creating an index, calls to [`Self::find_nodes_by_property`] will be
@@ -161,7 +248,7 @@ impl LpgStore {
         if indexes.is_empty() {
             return;
         }
-        let accessor = crate::index::vector::PropertyVectorAccessor::new(self, key);
+        let accessor = self.index_vectors(key);
         let vector = crate::index::vector::VectorAccessor::get_vector(&accessor, node_id);
         for index in indexes {
             match &vector {
@@ -192,7 +279,7 @@ impl LpgStore {
         if indexes.is_empty() {
             return;
         }
-        let accessor = crate::index::vector::PropertyVectorAccessor::new(self, key.as_str());
+        let accessor = self.index_vectors(key.clone());
         if let Some(vector) = crate::index::vector::VectorAccessor::get_vector(&accessor, node_id) {
             for index in indexes {
                 if !index.contains(node_id) {
@@ -240,8 +327,7 @@ impl LpgStore {
                 })
                 .collect();
             for (property, index) in indexes {
-                let accessor =
-                    crate::index::vector::PropertyVectorAccessor::new(self, property.as_str());
+                let accessor = self.index_vectors(property.as_str());
                 if let Some(vector) =
                     crate::index::vector::VectorAccessor::get_vector(&accessor, node_id)
                 {
@@ -313,7 +399,7 @@ impl LpgStore {
             else {
                 continue;
             };
-            let accessor = crate::index::vector::PropertyVectorAccessor::new(self, property);
+            let accessor = self.index_vectors(property);
             if let Some(vector) =
                 crate::index::vector::VectorAccessor::get_vector(&accessor, node_id)
             {

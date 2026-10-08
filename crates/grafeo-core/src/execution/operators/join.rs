@@ -247,6 +247,14 @@ enum KeyMatch {
     ValueEquality,
 }
 
+/// How a [`HashJoinOperator`] reads its probe side.
+enum ProbeInput {
+    /// Chunk by chunk, after the build side.
+    Streamed,
+    /// Whole, before the build side: its chunks once it is read.
+    ReadFirst(Option<VecDeque<DataChunk>>),
+}
+
 /// Hash join operator.
 ///
 /// Builds a hash table from the build side (right) and probes with the probe side (left).
@@ -297,6 +305,8 @@ pub struct HashJoinOperator {
     current_probe_kept: bool,
     /// How keys match.
     keys: KeyMatch,
+    /// Whether the probe side is read chunk by chunk or whole first.
+    probe_input: ProbeInput,
     /// Whether we're in the emit unmatched phase (for outer joins).
     emitting_unmatched: bool,
     /// Current chunk index when emitting unmatched rows.
@@ -344,6 +354,7 @@ impl HashJoinOperator {
             residual: None,
             current_probe_kept: false,
             keys: KeyMatch::Exact,
+            probe_input: ProbeInput::Streamed,
             emitting_unmatched: false,
             unmatched_chunk_idx: 0,
             unmatched_row_idx: 0,
@@ -369,6 +380,16 @@ impl HashJoinOperator {
     #[must_use]
     pub fn with_value_equality_keys(mut self) -> Self {
         self.keys = KeyMatch::ValueEquality;
+        self
+    }
+
+    /// Reads the whole probe side before the build side, so that the build
+    /// side sees what the probe side wrote: in `UNWIND ... CREATE (:N {k: i})
+    /// WITH i OPTIONAL MATCH (t:N {k: 301 - i})` the first rows look for
+    /// nodes that later rows create (the build side is read first otherwise).
+    #[must_use]
+    pub fn with_probe_first(mut self) -> Self {
+        self.probe_input = ProbeInput::ReadFirst(None);
         self
     }
 
@@ -570,9 +591,13 @@ impl HashJoinOperator {
         Ok(())
     }
 
-    /// Gets the next probe chunk.
+    /// Gets the next probe chunk, from the buffer when the probe side was read
+    /// first.
     fn get_next_probe_chunk(&mut self) -> Result<bool, OperatorError> {
-        let chunk = self.probe_side.next()?;
+        let chunk = match &mut self.probe_input {
+            ProbeInput::ReadFirst(Some(chunks)) => chunks.pop_front(),
+            ProbeInput::ReadFirst(None) | ProbeInput::Streamed => self.probe_side.next()?,
+        };
         if let Some(ref c) = chunk {
             // Initialize match tracking for outer joins
             if matches!(self.join_type, JoinType::Left | JoinType::Full) {
@@ -655,6 +680,14 @@ impl HashJoinOperator {
 
 impl Operator for HashJoinOperator {
     fn next(&mut self) -> OperatorResult {
+        if let ProbeInput::ReadFirst(read @ None) = &mut self.probe_input {
+            let mut chunks = VecDeque::new();
+            while let Some(chunk) = self.probe_side.next()? {
+                chunks.push_back(chunk);
+            }
+            *read = Some(chunks);
+        }
+
         // Phase 1: Build hash table
         if !self.build_complete {
             self.build_hash_table()?;
@@ -858,6 +891,9 @@ impl Operator for HashJoinOperator {
         self.hash_table.clear();
         self.build_chunks.clear();
         self.build_complete = false;
+        if let ProbeInput::ReadFirst(read) = &mut self.probe_input {
+            *read = None;
+        }
         self.current_probe_chunk = None;
         self.current_probe_row = 0;
         self.current_match_position = 0;
@@ -2379,5 +2415,119 @@ mod tests {
                 ]]
             );
         }
+    }
+
+    /// A probe side that "writes" one unit per chunk it returns: three
+    /// chunks of one row each, holding 1, 2 and 3.
+    struct WritingProbe {
+        written: std::sync::Arc<std::sync::atomic::AtomicI64>,
+        position: i64,
+    }
+
+    impl Operator for WritingProbe {
+        fn next(&mut self) -> OperatorResult {
+            if self.position == 3 {
+                return Ok(None);
+            }
+            self.position += 1;
+            self.written
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(create_int_chunk(&[self.position])))
+        }
+
+        fn reset(&mut self) {
+            self.position = 0;
+        }
+
+        fn name(&self) -> &'static str {
+            "WritingProbe"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// A build side of one row: what the probe side wrote when it was read.
+    struct ReadingBuild {
+        written: std::sync::Arc<std::sync::atomic::AtomicI64>,
+        done: bool,
+    }
+
+    impl Operator for ReadingBuild {
+        fn next(&mut self) -> OperatorResult {
+            if self.done {
+                return Ok(None);
+            }
+            self.done = true;
+            Ok(Some(create_int_chunk(&[self
+                .written
+                .load(std::sync::atomic::Ordering::SeqCst)])))
+        }
+
+        fn reset(&mut self) {
+            self.done = false;
+        }
+
+        fn name(&self) -> &'static str {
+            "ReadingBuild"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// With the probe side read first, the build side sees all of what the
+    /// probe side wrote; without, it is read before the probe side writes
+    /// anything. A left join on no keys pairs each probe row with the build
+    /// row; after a reset, the probe side is read first again.
+    #[test]
+    fn reading_the_probe_side_first_shows_the_build_side_all_its_writes() {
+        let join = |probe_first: bool| {
+            let written = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+            let join = HashJoinOperator::new(
+                Box::new(WritingProbe {
+                    written: std::sync::Arc::clone(&written),
+                    position: 0,
+                }),
+                Box::new(ReadingBuild {
+                    written,
+                    done: false,
+                }),
+                vec![],
+                vec![],
+                JoinType::Left,
+                vec![LogicalType::Int64, LogicalType::Int64],
+            );
+            if probe_first {
+                join.with_probe_first()
+            } else {
+                join
+            }
+        };
+        let pairs = |join: &mut HashJoinOperator| {
+            let mut rows = Vec::new();
+            while let Some(chunk) = join.next().unwrap() {
+                for row in chunk.selected_indices() {
+                    rows.push((
+                        chunk.column(0).unwrap().get_int64(row).unwrap(),
+                        chunk.column(1).unwrap().get_int64(row).unwrap(),
+                    ));
+                }
+            }
+            rows
+        };
+
+        assert_eq!(pairs(&mut join(false)), [(1, 0), (2, 0), (3, 0)]);
+
+        let mut first = join(true);
+        assert_eq!(pairs(&mut first), [(1, 3), (2, 3), (3, 3)]);
+        first.reset();
+        assert_eq!(
+            pairs(&mut first),
+            [(1, 6), (2, 6), (3, 6)],
+            "a reset reads the probe side first again"
+        );
     }
 }

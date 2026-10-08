@@ -34,7 +34,8 @@ use grafeo_core::graph::lpg::LpgStore;
 /// `to_memory()` copies a database through them.
 #[derive(Clone)]
 pub(super) struct CheckpointSources {
-    /// The LPG store; the overlay after `compact()`.
+    /// The LPG store, `None` after `compact()` (see
+    /// [`root_store`](Self::root_store)).
     #[cfg(feature = "lpg")]
     pub store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
     /// The compacted base and overlay, after `compact()`.
@@ -48,12 +49,31 @@ pub(super) struct CheckpointSources {
 }
 
 impl CheckpointSources {
+    /// The LPG store: after `compact()` the layered store's overlay as it is
+    /// now (a merge replaces it, never while commits are held).
+    #[cfg(feature = "lpg")]
+    pub fn root_store(&self) -> Option<Arc<grafeo_core::graph::lpg::LpgStore>> {
+        #[cfg(feature = "compact-store")]
+        if let Some(layered) = &self.layered {
+            return Some(layered.overlay_store());
+        }
+        self.store.clone()
+    }
+
     /// Builds every section of the database. The caller holds commits off
     /// (`_commits`, see
     /// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager)):
     /// no commit is in the middle of being written while the sections are
     /// built and serialized, so they hold every commit whole, and none that
     /// did not complete.
+    ///
+    /// The sections hold the committed state, also while transactions are
+    /// open (the hold also holds their writes and rollbacks): the LPG
+    /// section writes it from the stores and the open transactions' undo
+    /// logs, and the vector and text index sections, which mirror what the
+    /// transactions wrote, are left out while one is open in the store
+    /// whose indexes they hold; the load then builds those indexes from the
+    /// data.
     pub fn sections(&self, _commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
         #[cfg_attr(
             not(any(feature = "lpg", feature = "triple-store")),
@@ -65,7 +85,7 @@ impl CheckpointSources {
         let mut sections: Vec<Box<dyn Section>> = Vec::new();
 
         #[cfg(feature = "lpg")]
-        if let Some(store) = &self.store {
+        if let Some(store) = &self.root_store() {
             let transaction_manager = Arc::clone(&self.transaction_manager);
             sections.push(Box::new(CatalogSection::new(
                 Arc::clone(&self.catalog),
@@ -83,9 +103,20 @@ impl CheckpointSources {
                 )));
             }
 
+            // The vector and text indexes take a transaction's values as it
+            // writes them, and keep them until it commits or rolls back. The
+            // LPG section writes the committed state; an index section would
+            // hold what a transaction still open wrote. So while one is open
+            // in the store whose indexes the sections hold (the overlay after
+            // `compact()`; those of named graphs are always built from the
+            // data), the sections are left out, and the load builds the
+            // indexes from the committed data (see `restore_indexes`).
+            #[cfg(any(feature = "vector-index", feature = "text-index"))]
+            let indexes_committed = !store.has_open_changes();
+
             // Vector indexes: persist HNSW topology to avoid rebuild on load
             #[cfg(feature = "vector-index")]
-            {
+            if indexes_committed {
                 let indexes = store.vector_index_entries();
                 if !indexes.is_empty() {
                     sections.push(Box::new(
@@ -96,7 +127,7 @@ impl CheckpointSources {
 
             // Text indexes: persist BM25 postings to avoid rebuild on load
             #[cfg(feature = "text-index")]
-            {
+            if indexes_committed {
                 let indexes = store.text_index_entries();
                 if !indexes.is_empty() {
                     sections.push(Box::new(grafeo_core::index::text::TextIndexSection::new(
@@ -124,16 +155,27 @@ impl CheckpointSources {
     }
 
     /// Adds the compacted base, the overlay and the overlay's deletions, or
-    /// returns `false` when the database is not compacted.
+    /// returns `false` when the database is not compacted. A base that
+    /// holds nothing (a restore drops the base) adds nothing: the overlay is
+    /// then written as the plain LPG store, so the database reopens as one.
     #[cfg(all(feature = "lpg", feature = "compact-store"))]
     fn push_layered(&self, sections: &mut Vec<Box<dyn Section>>) -> bool {
+        use grafeo_core::graph::GraphStore;
         use grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection;
         use grafeo_core::graph::compact::section::CompactStoreSection;
 
         let Some(layered) = &self.layered else {
             return false;
         };
-        sections.push(Box::new(CompactStoreSection::new(layered.base_store_arc())));
+        let base = layered.base_store_arc();
+        if base.node_count() == 0 && base.edge_count() == 0 {
+            // No tombstone names a base entity either: there is none.
+            sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
+                layered.overlay_store(),
+            )));
+            return true;
+        }
+        sections.push(Box::new(CompactStoreSection::new(base)));
         sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
             layered.overlay_store(),
         )));
@@ -147,6 +189,97 @@ impl CheckpointSources {
         }
         true
     }
+
+    /// Whether a transaction still open has changed the LPG store (the
+    /// overlay after `compact()`) or one of its named graphs: the stores
+    /// then hold what it wrote (see [`LpgStore::has_open_changes`]), which a
+    /// copy must leave out. The caller holds commits off (`_commits`), which
+    /// also holds the writes and rollbacks of open transactions, so the
+    /// answer holds until it lets go.
+    #[cfg(feature = "lpg")]
+    pub fn has_open_changes(&self, _commits: &CommitsHeld<'_>) -> bool {
+        self.root_store().is_some_and(|store| {
+            store.has_open_changes()
+                || store.graph_names().iter().any(|name| {
+                    store
+                        .graph(name)
+                        .is_some_and(|graph| graph.has_open_changes())
+                })
+        })
+    }
+
+    /// The LPG data as committed, for a copy that reads the stores
+    /// themselves instead of the sections (`export_snapshot`): the stores as
+    /// they are when no open transaction has changed them, else a store of
+    /// its own loaded from the LPG section, which writes the committed state
+    /// (what open transactions deleted, the values and labels they changed
+    /// as committed, nothing they created), with the compacted base under it.
+    /// `None` for a database without the built-in LPG store.
+    ///
+    /// The committed copy costs as much memory as the store (more while the
+    /// section is decoded); it is only made while a transaction is open.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the LPG section cannot be written or read back.
+    #[cfg(feature = "lpg")]
+    pub fn committed(&self, commits: &CommitsHeld<'_>) -> Result<Option<CommittedLpg>> {
+        use grafeo_common::storage::MemoryImage;
+        use grafeo_core::graph::lpg::LpgStoreSection;
+
+        let Some(store) = &self.root_store() else {
+            return Ok(None);
+        };
+        let open = self.has_open_changes(commits);
+        let store = if open {
+            let section = LpgStoreSection::new(Arc::clone(store));
+            let image = MemoryImage::from_sections(&[&section as &dyn Section])?;
+            let copy = Arc::new(LpgStore::new()?);
+            let source = image.section_source(SectionType::LpgStore).ok_or_else(|| {
+                grafeo_common::utils::error::Error::Internal(
+                    "the committed copy of the LPG store has no LPG section".to_string(),
+                )
+            })?;
+            LpgStoreSection::new(Arc::clone(&copy)).read_from(&*source)?;
+            copy
+        } else {
+            Arc::clone(store)
+        };
+        #[cfg(feature = "compact-store")]
+        let layered = self.layered.as_ref().map(|layered| {
+            if !open {
+                return Arc::clone(layered);
+            }
+            // The base does not change while compacted; the copy of the
+            // overlay takes the committed tombstones of base entities (a
+            // pending one is the open transaction's).
+            let committed = grafeo_core::graph::compact::layered::LayeredStore::with_overlay(
+                layered.base_store_arc(),
+                Arc::clone(&store),
+            );
+            committed.seed_deleted_from_base(
+                layered.snapshot_deleted_node_ids(),
+                layered.snapshot_deleted_edge_ids(),
+            );
+            Arc::new(committed)
+        });
+        Ok(Some(CommittedLpg {
+            store,
+            #[cfg(feature = "compact-store")]
+            layered,
+        }))
+    }
+}
+
+/// The LPG data of a database as committed (see
+/// [`CheckpointSources::committed`]).
+#[cfg(feature = "lpg")]
+pub(super) struct CommittedLpg {
+    /// The LPG store, the overlay after `compact()`, with its named graphs.
+    pub store: Arc<LpgStore>,
+    /// The compacted base with the overlay in `store`, after `compact()`.
+    #[cfg(feature = "compact-store")]
+    pub layered: Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>>,
 }
 
 /// What loading leaves for [`GrafeoDB::finish_load`](super::GrafeoDB) to do
@@ -262,7 +395,9 @@ pub(super) fn load_sections(
 /// Returns the vector and text indexes left to build from the data: those
 /// of named graphs (the sections hold only the default graph's), quantized
 /// ones (the section holds the HNSW graph, not the quantized codes) and any
-/// a section did not hold.
+/// a section did not hold (a checkpoint taken while a transaction was open
+/// in the default graph writes no index sections, see
+/// [`CheckpointSources::sections`]).
 #[cfg(feature = "lpg")]
 fn restore_indexes(
     image: &dyn ImageSource,
@@ -676,6 +811,79 @@ mod tests {
             .unwrap();
         db.create_text_index("Doc", "body").unwrap();
         db
+    }
+
+    /// The vector and text index sections are written while no transaction
+    /// open in the default graph has changed it, and left out while one has
+    /// (its indexes hold what it wrote): the load then leaves the indexes to
+    /// build from the committed data. A transaction open in a named graph
+    /// only leaves them in, since the sections hold the default graph's
+    /// indexes only.
+    #[test]
+    fn index_sections_are_left_out_while_the_default_graph_has_open_changes() {
+        let index_sections = [SectionType::VectorStore, SectionType::TextIndex];
+        let written = |db: &GrafeoDB| -> Vec<SectionType> {
+            let types = image_of(db).section_types();
+            index_sections
+                .into_iter()
+                .filter(|section_type| types.contains(section_type))
+                .collect()
+        };
+        let db = indexed_database();
+        db.create_graph("travel").unwrap();
+        assert_eq!(written(&db), index_sections, "no transaction is open");
+
+        let mut travel = db.session();
+        travel.use_graph("travel");
+        travel.begin_transaction().unwrap();
+        travel.execute("INSERT (:City {name: 'Prague'})").unwrap();
+        assert_eq!(
+            written(&db),
+            index_sections,
+            "a transaction open in a named graph only"
+        );
+
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session
+            .execute("MATCH (d:Doc {body: 'Amsterdam'}) SET d.body = 'Paris'")
+            .unwrap();
+        let image = image_of(&db);
+        assert_eq!(written(&db), [], "a transaction open in the default graph");
+        let store = Arc::new(LpgStore::new().unwrap());
+        let loaded = load(&image, &store).unwrap();
+        let unbuilt: Vec<(Option<&str>, Vec<&str>, &[(String, String)])> = loaded
+            .unbuilt
+            .iter()
+            .map(|graph| {
+                let vector = graph.vector.iter().map(|def| def.label.as_str()).collect();
+                (graph.graph.as_deref(), vector, &graph.text[..])
+            })
+            .collect();
+        assert_eq!(
+            unbuilt,
+            [(
+                None,
+                vec!["Doc"],
+                &[("Doc".to_string(), "body".to_string())][..]
+            )],
+            "the load leaves both indexes to build from the data"
+        );
+        assert_eq!(
+            store
+                .get_text_index("Doc", "body")
+                .map(|index| index.read().len()),
+            None,
+            "no text index comes from the image"
+        );
+
+        session.commit().unwrap();
+        travel.rollback().unwrap();
+        assert_eq!(
+            written(&db),
+            index_sections,
+            "after a commit and a rollback"
+        );
     }
 
     /// A database whose checkpoint holds every kind of section this build
@@ -1730,9 +1938,9 @@ mod tests {
     /// Every section a checkpoint writes streams chunks: none is one raw
     /// chunk, which only 0.5.x bytes are. Each holds one metadata chunk, first
     /// (the LPG store's last: it lists the names met while the chunks before
-    /// it were written). The catalog is the one exception until it is written
-    /// as records (#517): it must still be exactly one raw chunk, so this test
-    /// fails, and is to be updated, when that changes.
+    /// it were written), and its data in chunks of their own; a catalog
+    /// without entries (the compacted database's) is its metadata chunk
+    /// alone.
     #[test]
     fn no_production_section_writes_a_raw_chunk() {
         let mut uncompacted = vec![
@@ -1745,7 +1953,8 @@ mod tests {
         uncompacted.push(SectionType::RdfStore);
         #[cfg(all(feature = "sparql", feature = "ring-index"))]
         uncompacted.push(SectionType::RdfRing);
-        let mut databases = vec![(database_with_every_section(), by_byte(uncompacted))];
+        // The indexed database's catalog holds its index definitions.
+        let mut databases = vec![(database_with_every_section(), by_byte(uncompacted), true)];
         #[cfg(feature = "compact-store")]
         databases.push((
             compacted_database_with_deletions(),
@@ -1755,8 +1964,9 @@ mod tests {
                 SectionType::CompactStore,
                 SectionType::OverlayDeletions,
             ]),
+            false,
         ));
-        for (db, expected) in databases {
+        for (db, expected, catalog_entries) in databases {
             let commits = db.transaction_manager.hold_commits().unwrap();
             let sections = db.checkpoint_sources().sections(&commits);
             let refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
@@ -1770,11 +1980,11 @@ mod tests {
             for section_type in image.section_types() {
                 let source = image.section_source(section_type).unwrap();
                 let chunks = source.chunks();
-                if section_type == SectionType::Catalog {
+                if section_type == SectionType::Catalog && !catalog_entries {
                     assert_eq!(
                         chunks,
-                        [ChunkMeta::raw()],
-                        "the catalog is one raw chunk until it is written as records"
+                        [ChunkMeta::meta()],
+                        "a catalog without entries is its metadata chunk alone"
                     );
                     continue;
                 }

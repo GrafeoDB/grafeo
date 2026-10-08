@@ -25,6 +25,8 @@ mod versioning;
 #[cfg(test)]
 mod tests;
 
+#[cfg(all(feature = "compact-store", feature = "vector-index"))]
+pub(crate) use index::BaseVectors;
 pub(crate) use open_changes::OpenChanges;
 
 use super::PropertyStorage;
@@ -559,6 +561,14 @@ pub struct LpgStore {
     /// is held for writing, so a reader may hold it while it reads the rest
     /// of the store.
     base_tombstones: RwLock<BaseTombstones>,
+
+    /// The vectors of the compacted base, when this store is its overlay
+    /// (see [`set_base_vectors`](Self::set_base_vectors)), which the vector
+    /// indexes read for the nodes this store holds no vector for.
+    /// Lock order: a leaf: [`index_vectors`](Self::index_vectors) clones it
+    /// out before any vector is read.
+    #[cfg(all(feature = "compact-store", feature = "vector-index"))]
+    base_vectors: RwLock<Option<Arc<dyn BaseVectors>>>,
 }
 
 impl LpgStore {
@@ -624,6 +634,8 @@ impl LpgStore {
             named_graphs: RwLock::new(FxHashMap::default()),
             property_undo_log: RwLock::new(FxHashMap::default()),
             base_tombstones: RwLock::new(BaseTombstones::default()),
+            #[cfg(all(feature = "compact-store", feature = "vector-index"))]
+            base_vectors: RwLock::new(None),
         })
     }
 
@@ -820,6 +832,75 @@ impl LpgStore {
     /// named graphs across a compact rebuild.
     pub fn install_named_graphs(&self, graphs: FxHashMap<String, Arc<LpgStore>>) {
         *self.named_graphs.write() = graphs;
+    }
+
+    /// A new, empty store that carries on this one once its default graph's
+    /// data lives elsewhere: the overlay a merge of a layered store starts,
+    /// after it moved the old overlay's data into the compacted base.
+    ///
+    /// The new store has this store's named graphs (the same stores), its
+    /// epoch, id allocators and backward-adjacency setting, and its text and
+    /// vector indexes (the same indexes, which cover the base's nodes too,
+    /// and read the base's vectors where this store does) without the nodes
+    /// in `gone`: the deleted base nodes the new base
+    /// leaves out, which no tombstone hides any longer. Its property indexes
+    /// are on the same keys and empty, as they index only the store's own
+    /// nodes. Its data, change logs and base tombstones start empty, so this
+    /// store must have no open changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError`] if the new store cannot be allocated.
+    pub fn successor(&self, gone: &[NodeId]) -> Result<Self, AllocError> {
+        let successor = Self::with_config(LpgStoreConfig {
+            backward_edges: self.backward_adj.is_some(),
+            ..LpgStoreConfig::default()
+        })?;
+        successor.current_epoch.store(
+            self.current_epoch.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+        successor.set_next_node_id(self.next_node_id());
+        successor.set_next_edge_id(self.next_edge_id());
+        successor
+            .named_graphs
+            .write()
+            .clone_from(&self.named_graphs.read());
+        *successor.property_indexes.write() = self
+            .property_indexes
+            .read()
+            .keys()
+            .map(|key| (key.clone(), DashMap::new()))
+            .collect();
+        #[cfg(feature = "vector-index")]
+        {
+            successor
+                .vector_indexes
+                .write()
+                .clone_from(&self.vector_indexes.read());
+            for &id in gone {
+                successor.remove_from_all_vector_indexes(id);
+            }
+            // The indexes go on over the same base.
+            #[cfg(feature = "compact-store")]
+            successor
+                .base_vectors
+                .write()
+                .clone_from(&self.base_vectors.read());
+        }
+        #[cfg(feature = "text-index")]
+        {
+            successor
+                .text_indexes
+                .write()
+                .clone_from(&self.text_indexes.read());
+            for &id in gone {
+                successor.remove_from_all_text_indexes(id);
+            }
+        }
+        #[cfg(not(any(feature = "vector-index", feature = "text-index")))]
+        let _ = gone;
+        Ok(successor)
     }
 
     /// Returns the number of named graphs.

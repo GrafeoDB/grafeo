@@ -5,9 +5,9 @@
 
 use super::common::{
     build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
-    combine_with_and, expand_subquery_return_star, has_all_labels, is_aggregate_function,
-    optional_join, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
-    wrap_skip, wrap_sort,
+    combine_with_and, comma_part_join_variables, expand_subquery_return_star, has_all_labels,
+    is_aggregate_function, optional_join, to_aggregate_function, wrap_distinct, wrap_filter,
+    wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
@@ -76,6 +76,10 @@ struct CypherTranslator {
     /// Alias-to-output-column-name mapping from the most recent RETURN/WITH clause.
     /// Used by ORDER BY to resolve alias references to actual output column names.
     return_aliases: RefCell<HashMap<String, String>>,
+    /// While the clauses of a CALL subquery are translated, the variables of
+    /// the outer row it runs for (`None`: not known, or not in a subquery):
+    /// the ones its `WITH *` imports.
+    call_scope: RefCell<Option<HashSet<String>>>,
 }
 
 impl CypherTranslator {
@@ -84,6 +88,7 @@ impl CypherTranslator {
             edge_variables: RefCell::new(HashSet::new()),
             anon_counter: Cell::new(0),
             return_aliases: RefCell::new(HashMap::new()),
+            call_scope: RefCell::new(None),
         }
     }
 
@@ -302,7 +307,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let outer_names = match &input {
-            Some(outer) => outer.bound_variables(None),
+            Some(outer) => outer.bound_variables(self.call_scope.borrow().as_ref()),
             None => Some(HashSet::new()),
         };
         let mut shared_variables: Vec<String> = Vec::new();
@@ -379,17 +384,21 @@ impl CypherTranslator {
                 }
             }
         }
-        let mut inner_plan = (!shared_variables.is_empty()).then(|| {
+        let inner_plan = (!shared_variables.is_empty()).then(|| {
             LogicalOperator::ParameterScan(ParameterScanOp {
                 columns: shared_variables.clone(),
             })
         });
 
-        // Translate the remaining inner subquery clauses
+        // Translate the remaining inner subquery clauses, which see the outer
+        // row's variables through `WITH *`
+        let enclosing = self.call_scope.replace(outer_names.cloned());
+        let mut translated = Ok(inner_plan);
         for clause in clauses_iter {
-            inner_plan = Some(self.translate_clause(clause, inner_plan)?);
+            translated = translated.and_then(|plan| self.translate_clause(clause, plan).map(Some));
         }
-        let mut inner_plan = inner_plan.ok_or_else(|| {
+        self.call_scope.replace(enclosing);
+        let mut inner_plan = translated?.ok_or_else(|| {
             Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "CALL subquery requires at least one clause",
@@ -526,13 +535,23 @@ impl CypherTranslator {
         vars
     }
 
+    /// The variable of the node a pattern starts from, if it names one.
+    fn pattern_start(pattern: &ast::Pattern) -> Option<&str> {
+        match pattern {
+            ast::Pattern::Node(node) => node.variable.as_deref(),
+            ast::Pattern::Path(path) => path.start.variable.as_deref(),
+            ast::Pattern::NamedPath { pattern, .. } => Self::pattern_start(pattern),
+        }
+    }
+
     /// Translates comma-separated patterns, creating proper joins for shared
     /// variables instead of cross products.
     ///
     /// The first pattern receives `input` (to chain with prior clauses like
-    /// UNWIND). Subsequent patterns that share variables with earlier patterns
-    /// are translated independently and joined via `JoinOp` with equality
-    /// conditions on the shared variables.
+    /// UNWIND or an earlier MATCH). A later pattern goes on from the rows
+    /// before it, or is translated on its own and joined to them on the
+    /// variables it shares with them, the input's included (see
+    /// [`comma_part_join_variables`]).
     fn translate_comma_patterns(
         &self,
         patterns: &[ast::Pattern],
@@ -550,6 +569,13 @@ impl CypherTranslator {
             return self.translate_pattern(&patterns[0], input);
         }
 
+        // The variables the input binds, those of the outer row for a
+        // subquery's `WITH *` included (none when they are not known here)
+        let input_vars = input
+            .as_ref()
+            .and_then(|input| input.bound_variables(self.call_scope.borrow().as_ref()))
+            .unwrap_or_default();
+
         // Multiple patterns: detect shared variables and create joins
         let pattern_vars: Vec<HashSet<String>> =
             patterns.iter().map(Self::pattern_variables).collect();
@@ -559,10 +585,16 @@ impl CypherTranslator {
 
         for (index, pattern) in patterns.iter().enumerate().skip(1) {
             let current_vars = &pattern_vars[index];
-            let shared: Vec<String> = current_vars.intersection(&bound_vars).cloned().collect();
+            let shared = comma_part_join_variables(
+                current_vars,
+                Self::pattern_start(pattern),
+                &bound_vars,
+                &input_vars,
+            );
 
             if shared.is_empty() {
-                // No shared variables: chain as input (cross product)
+                // Go on from the rows before: a cross product, or an expand
+                // from the bound start
                 plan = self.translate_pattern(pattern, Some(plan))?;
             } else {
                 // Shared variables: translate independently and inner join

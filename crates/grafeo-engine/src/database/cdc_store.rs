@@ -652,10 +652,10 @@ impl GraphStoreMut for CdcGraphStore {
         edge_type: &str,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> EdgeId {
+    ) -> grafeo_common::utils::error::Result<EdgeId> {
         let id = self
             .inner
-            .create_edge_versioned(src, dst, edge_type, epoch, transaction_id);
+            .create_edge_versioned(src, dst, edge_type, epoch, transaction_id)?;
         let mut event = make_event(
             EntityId::Edge(id),
             ChangeKind::Create,
@@ -664,7 +664,7 @@ impl GraphStoreMut for CdcGraphStore {
         );
         describe_edge(&mut event, edge_type, src, dst);
         self.buffer_event(event);
-        id
+        Ok(id)
     }
 
     fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
@@ -1755,7 +1755,7 @@ mod tests {
         let b = cdc.create_node(&["B"]);
         let epoch = EpochId(1);
         let tx = TransactionId::new(1);
-        let eid = cdc.create_edge_versioned(a, b, "KNOWS", epoch, tx);
+        let eid = cdc.create_edge_versioned(a, b, "KNOWS", epoch, tx).unwrap();
 
         let pending = cdc.pending_events().lock().clone();
         let edge_events: Vec<_> = pending

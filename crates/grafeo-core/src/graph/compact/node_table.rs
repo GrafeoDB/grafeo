@@ -1,6 +1,6 @@
-//! Per-label columnar node storage.
+//! Columnar node storage, a table per label set.
 //!
-//! Each `NodeTable` stores all nodes of a single label as typed columns.
+//! Each `NodeTable` stores all nodes with one set of labels as typed columns.
 //! Nodes are addressed by row offset; the `NodeId` encodes (table_id, offset).
 
 use grafeo_common::types::{NodeId, PropertyKey, Value};
@@ -11,9 +11,9 @@ use super::id::encode_node_id;
 use super::schema::TableSchema;
 use super::zone_map::ZoneMap;
 
-/// Per-label columnar storage for nodes.
+/// Columnar storage for the nodes with one set of labels.
 ///
-/// All nodes sharing a label are stored in a single `NodeTable` with one
+/// All nodes with the same labels are stored in a single `NodeTable` with one
 /// [`CompactColumn`] per property. Row offsets are combined with the table ID
 /// via [`encode_node_id`] to produce globally unique [`NodeId`] values.
 #[derive(Debug)]
@@ -95,7 +95,9 @@ impl NodeTable {
         self.schema.table_id
     }
 
-    /// Returns the label shared by all nodes in this table.
+    /// Returns the table's key: the labels of its nodes in name order,
+    /// joined with `|` (a `\` escapes a `\` or `|` in a label). A table of
+    /// single-label nodes has their label as its key.
     #[must_use]
     pub fn label(&self) -> &str {
         self.schema.label.as_str()

@@ -56,6 +56,36 @@ impl WriteTracker for TransactionWriteTracker {
             .map_err(|e| OperatorError::WriteConflict(e.to_string()))
     }
 
+    fn record_node_delete(
+        &self,
+        transaction_id: TransactionId,
+        node_id: NodeId,
+    ) -> Result<(), OperatorError> {
+        self.manager
+            .record_delete(
+                transaction_id,
+                GraphEntity::new(self.graph.clone(), node_id),
+            )
+            .map_err(|e| OperatorError::WriteConflict(e.to_string()))
+    }
+
+    fn record_edge_endpoints(
+        &self,
+        transaction_id: TransactionId,
+        src: NodeId,
+        dst: NodeId,
+    ) -> Result<(), OperatorError> {
+        self.manager
+            .record_endpoints(
+                transaction_id,
+                [
+                    GraphEntity::new(self.graph.clone(), src),
+                    GraphEntity::new(self.graph.clone(), dst),
+                ],
+            )
+            .map_err(|e| OperatorError::WriteConflict(e.to_string()))
+    }
+
     fn record_edge_write(
         &self,
         transaction_id: TransactionId,

@@ -281,6 +281,30 @@ impl GraphWriter {
         Ok(())
     }
 
+    /// Records the delete of node `id` for write-conflict detection: it also
+    /// conflicts with an edge another transaction creates to the node (see
+    /// [`WriteTracker::record_node_delete`](super::WriteTracker::record_node_delete)).
+    fn record_delete(&self, id: NodeId) -> Result<(), OperatorError> {
+        if let (Some(tracker), Some(transaction_id)) = (&self.write_tracker, self.transaction_id) {
+            tracker.record_node_delete(transaction_id, id)?;
+        }
+        Ok(())
+    }
+
+    /// Checks that this writer's transaction sees both endpoints of an edge
+    /// it is about to create, and claims them, so a transaction that deletes
+    /// one of them conflicts with this one (see
+    /// [`WriteTracker::record_edge_endpoints`](super::WriteTracker::record_edge_endpoints)):
+    /// no committed edge ends at a deleted node.
+    fn claim_endpoints(&self, src: NodeId, dst: NodeId) -> Result<(), OperatorError> {
+        self.require_node(src)?;
+        self.require_node(dst)?;
+        if let (Some(tracker), Some(transaction_id)) = (&self.write_tracker, self.transaction_id) {
+            tracker.record_edge_endpoints(transaction_id, src, dst)?;
+        }
+        Ok(())
+    }
+
     /// Marks this writer's store changes as in progress while the guard
     /// lives (see [`WriteTracker::write_in_progress`](super::WriteTracker::write_in_progress)):
     /// a checkpoint or a copy of the store waits for them, and they wait for
@@ -510,9 +534,10 @@ impl GraphWriter {
     ///
     /// # Errors
     ///
-    /// Returns a write conflict, or an error for a node with edges and no `detach`.
+    /// Returns a write conflict (also with a transaction that creates an
+    /// edge to the node), or an error for a node with edges and no `detach`.
     pub fn delete_node(&self, id: NodeId, detach: bool) -> Result<bool, OperatorError> {
-        self.record(Entity::Node(id))?;
+        self.record_delete(id)?;
         let _writing = self.write_in_progress();
         if detach {
             let outgoing = self.store.edges_from(id, Direction::Outgoing);
@@ -563,12 +588,17 @@ impl GraphWriter {
 
     // === Edges ===
 
-    /// Creates an edge after checking it against the schema: allowed type,
-    /// endpoint labels, property types and required properties.
+    /// Creates an edge after checking that the transaction sees both
+    /// endpoints, which it claims against a concurrent delete, and checking
+    /// the edge against the schema: allowed type, endpoint labels, property
+    /// types and required properties.
     ///
     /// # Errors
     ///
-    /// Returns the first constraint the edge would violate; nothing is written then.
+    /// Returns an error for an endpoint the transaction does not see (one it
+    /// deleted, or that does not exist), a write conflict with a transaction
+    /// that deletes an endpoint, or the first constraint the edge would
+    /// violate; nothing is written then.
     pub fn create_edge(
         &self,
         src: NodeId,
@@ -577,6 +607,7 @@ impl GraphWriter {
         properties: Vec<(String, Value)>,
     ) -> Result<EdgeId, OperatorError> {
         refuse_too_deep(plain_values(&properties))?;
+        self.claim_endpoints(src, dst)?;
         if let Some(validator) = &self.validator {
             self.check_new_edge(validator.as_ref(), src, dst, edge_type)?;
             for (name, value) in &properties {
@@ -592,11 +623,13 @@ impl GraphWriter {
 
     /// Creates an edge whose remaining properties depend on the edge itself
     /// (MERGE `ON CREATE SET` expressions that read it), like
-    /// [`create_node_with`](Self::create_node_with).
+    /// [`create_node_with`](Self::create_node_with); the endpoints are
+    /// checked and claimed as [`create_edge`](Self::create_edge) does.
     ///
     /// # Errors
     ///
-    /// Returns the first constraint violated, or `derive`'s error.
+    /// Returns the errors of [`create_edge`](Self::create_edge), or
+    /// `derive`'s error.
     pub fn create_edge_with(
         &self,
         src: NodeId,
@@ -606,6 +639,7 @@ impl GraphWriter {
         derive: impl FnOnce(EdgeId) -> Result<Vec<(String, Value)>, OperatorError>,
     ) -> Result<EdgeId, OperatorError> {
         refuse_too_deep(plain_values(&properties))?;
+        self.claim_endpoints(src, dst)?;
         if let Some(validator) = &self.validator {
             self.check_new_edge(validator.as_ref(), src, dst, edge_type)?;
             for (name, value) in &properties {
@@ -791,9 +825,10 @@ impl GraphWriter {
         dst: NodeId,
         edge_type: &str,
     ) -> Result<EdgeId, OperatorError> {
-        let id =
-            self.store
-                .create_edge_versioned(src, dst, edge_type, self.epoch(), self.transaction());
+        let id = self
+            .store
+            .create_edge_versioned(src, dst, edge_type, self.epoch(), self.transaction())
+            .map_err(conflict_or_refused)?;
         self.record(Entity::Edge(id))?;
         self.count(|c| &c.edges_created, 1);
         Ok(id)
@@ -903,6 +938,20 @@ impl GraphWriter {
 /// property value whose file cannot be read, which a rollback would lose.
 fn refused(error: grafeo_common::utils::error::Error) -> OperatorError {
     OperatorError::Execution(error.to_string())
+}
+
+/// A write the store refused: a write conflict stays one (a compacted store
+/// refuses an edge to a node another transaction deleted), anything else is
+/// [`refused`].
+fn conflict_or_refused(error: grafeo_common::utils::error::Error) -> OperatorError {
+    use grafeo_common::utils::error::{Error, TransactionError};
+
+    match error {
+        Error::Transaction(TransactionError::WriteConflict(message)) => {
+            OperatorError::WriteConflict(message)
+        }
+        other => refused(other),
+    }
 }
 
 /// The node's labels as strings.
@@ -1154,6 +1203,19 @@ mod tests {
             Ok(())
         }
 
+        fn record_node_delete(&self, _: TransactionId, _: NodeId) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
+        fn record_edge_endpoints(
+            &self,
+            _: TransactionId,
+            _: NodeId,
+            _: NodeId,
+        ) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
         fn record_edge_write(&self, _: TransactionId, _: EdgeId) -> Result<(), OperatorError> {
             Ok(())
         }
@@ -1379,5 +1441,123 @@ mod tests {
             0,
             "a write outside a transaction holds commits off instead"
         );
+    }
+
+    // === Edge endpoints ===
+
+    /// A write tracker that notes what it is asked to record, and refuses
+    /// the claims of an edge's endpoints when told to.
+    #[derive(Default)]
+    struct Claims {
+        freeze: RwLock<()>,
+        recorded: parking_lot::Mutex<Vec<String>>,
+        refuse_endpoints: AtomicBool,
+    }
+
+    impl Claims {
+        fn note(&self, what: String) {
+            self.recorded.lock().push(what);
+        }
+    }
+
+    impl WriteTracker for Claims {
+        fn write_in_progress(&self) -> WriteInProgress<'_> {
+            self.freeze.read()
+        }
+
+        fn record_node_write(&self, _: TransactionId, id: NodeId) -> Result<(), OperatorError> {
+            self.note(format!("write node {}", id.as_u64()));
+            Ok(())
+        }
+
+        fn record_node_delete(&self, _: TransactionId, id: NodeId) -> Result<(), OperatorError> {
+            self.note(format!("delete node {}", id.as_u64()));
+            Ok(())
+        }
+
+        fn record_edge_endpoints(
+            &self,
+            _: TransactionId,
+            src: NodeId,
+            dst: NodeId,
+        ) -> Result<(), OperatorError> {
+            if self.refuse_endpoints.load(Ordering::SeqCst) {
+                return Err(OperatorError::WriteConflict("another delete".to_string()));
+            }
+            self.note(format!("endpoints {} {}", src.as_u64(), dst.as_u64()));
+            Ok(())
+        }
+
+        fn record_edge_write(&self, _: TransactionId, id: EdgeId) -> Result<(), OperatorError> {
+            self.note(format!("write edge {}", id.as_u64()));
+            Ok(())
+        }
+    }
+
+    /// [`transaction_writer`] with a [`Claims`] tracker.
+    fn claiming_writer() -> (Arc<LpgStore>, Arc<Claims>, GraphWriter, People) {
+        let (store, _, _, people) = transaction_writer();
+        let claims = Arc::new(Claims::default());
+        let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
+        let writer = GraphWriter::new(target)
+            .with_transaction_context(store.current_epoch(), Some(TransactionId::new(19)))
+            .with_write_tracker(Arc::clone(&claims) as Arc<dyn WriteTracker>);
+        (store, claims, writer, people)
+    }
+
+    /// A new edge claims its endpoints before it is written, also one MERGE
+    /// creates, and a delete of a node is recorded as a delete: the claims a
+    /// concurrent delete conflicts with.
+    #[test]
+    fn an_edge_claims_its_endpoints_and_a_delete_is_recorded_as_one() {
+        let (_store, claims, writer, people) = claiming_writer();
+        let knows = writer
+            .create_edge(people.vincent, people.gus, "KNOWS", Vec::new())
+            .unwrap();
+        let merged = writer
+            .create_edge_with(people.gus, people.alix, "KNOWS", Vec::new(), |_| {
+                Ok(Vec::new())
+            })
+            .unwrap();
+        writer.delete_node(people.vincent, true).unwrap();
+
+        let (vincent, gus, alix) = (
+            people.vincent.as_u64(),
+            people.gus.as_u64(),
+            people.alix.as_u64(),
+        );
+        assert_eq!(
+            *claims.recorded.lock(),
+            [
+                format!("endpoints {vincent} {gus}"),
+                format!("write edge {}", knows.as_u64()),
+                format!("endpoints {gus} {alix}"),
+                format!("write edge {}", merged.as_u64()),
+                format!("delete node {vincent}"),
+                format!("write edge {}", knows.as_u64()),
+            ]
+        );
+    }
+
+    /// A refused claim, and an endpoint the transaction does not see, write
+    /// no edge.
+    #[test]
+    fn an_edge_whose_endpoints_cannot_be_claimed_is_not_written() {
+        let (store, claims, writer, people) = claiming_writer();
+        let edges = store.edge_count();
+        claims.refuse_endpoints.store(true, Ordering::SeqCst);
+        let refused = writer.create_edge(people.alix, people.vincent, "KNOWS", Vec::new());
+        assert!(
+            matches!(refused, Err(OperatorError::WriteConflict(_))),
+            "got {refused:?}"
+        );
+        claims.refuse_endpoints.store(false, Ordering::SeqCst);
+
+        writer.delete_node(people.vincent, false).unwrap();
+        let deleted = writer.create_edge(people.alix, people.vincent, "KNOWS", Vec::new());
+        assert!(deleted.is_err(), "an endpoint the transaction deleted");
+        let missing = writer.create_edge(people.alix, NodeId::new(388), "KNOWS", Vec::new());
+        assert!(missing.is_err(), "an endpoint that does not exist");
+        assert_eq!(store.edge_count(), edges, "no edge written");
     }
 }

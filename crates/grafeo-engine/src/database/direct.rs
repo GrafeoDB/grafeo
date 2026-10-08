@@ -217,7 +217,7 @@ impl GrafeoDB {
     /// an external store, and not on a compacted database's default graph,
     /// the layered store (its named graphs are plain stores in the overlay).
     fn writes_without_session(&self, graph: Option<&str>) -> bool {
-        if self.read_only || self.store.is_none() {
+        if self.read_only || self.root_store().is_none() {
             return false;
         }
         #[cfg(feature = "compact-store")]
@@ -238,7 +238,7 @@ impl GrafeoDB {
         &self,
         target: DirectTarget<'_>,
     ) -> Result<Option<(Arc<LpgStore>, Option<String>)>> {
-        let Some(root) = self.store.as_ref() else {
+        let Some(root) = self.root_store() else {
             return Ok(None);
         };
         let key = match target {
@@ -249,7 +249,7 @@ impl GrafeoDB {
             DirectTarget::Named { schema, name } => graph_storage_key(schema, Some(name)),
         };
         let Some(key) = key else {
-            return Ok(Some((Arc::clone(root), None)));
+            return Ok(Some((root, None)));
         };
         if let Some(store) = root.graph(&key) {
             return Ok(Some((store, Some(key))));
@@ -517,7 +517,7 @@ impl GrafeoDB {
             if count.is_multiple_of(self.config.gc_interval) {
                 let min_epoch = self.transaction_manager.min_active_epoch();
                 root.gc_versions(min_epoch);
-                if !Arc::ptr_eq(root, store) {
+                if !Arc::ptr_eq(&root, store) {
                     store.gc_versions(min_epoch);
                 }
                 self.transaction_manager.gc();

@@ -7,14 +7,17 @@
 //! A section streams out and in as chunks ([`section`]), cut by the caps and
 //! byte streams of [`chunk`]; an image ([`image`]) serves the sections of one
 //! checkpoint, from a file or from memory. [`value_codec`] is a lossless
-//! codec for property values, for the chunked sections to encode them with.
+//! codec for property values, for the chunked sections to encode them with,
+//! and [`catalog_record`] holds the catalog's typed, framed records.
 
+pub mod catalog_record;
 pub mod chunk;
 pub mod image;
 pub mod page_fetcher;
 pub mod section;
 pub mod value_codec;
 
+pub use catalog_record::{CatalogRecord, RECORD_REQUIRED, read_catalog_records};
 pub use chunk::{
     ChunkCaps, ChunkIdentities, ChunkStreamReader, ChunkStreamWriter, read_stream, stream_error,
 };

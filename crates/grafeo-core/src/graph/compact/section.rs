@@ -26,15 +26,14 @@ use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::CompactStore;
 use super::column::{ColumnCodec, CompactColumn};
 use super::csr::CsrAdjacency;
 use super::node_table::NodeTable;
 use super::rel_table::RelTable;
 use super::schema::{ColumnDef, ColumnType, EdgeSchema, TableSchema};
 use super::zone_map::ZoneMap;
+use super::{CompactStore, label_set_key, labels_of_key, labels_of_unescaped_key};
 use crate::codec::limits::{checked_u16, checked_u32};
-use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 
 /// Magic bytes identifying a CompactStore encoding.
 const MAGIC: [u8; 4] = *b"GCST";
@@ -225,10 +224,16 @@ impl CompactStoreSection {
         let flags: u8 = u8::from(store.preserves_ids());
         buf.push(flags);
 
-        // Node tables.
+        // Node tables, each named by its key; the 0.5.x encodings by the
+        // labels joined without escapes, as 0.5.x wrote them.
         write_len(&mut buf, store.node_tables_by_id.len())?;
-        for nt in &store.node_tables_by_id {
-            write_str(&mut buf, nt.label())?;
+        for (nt, labels) in store.node_tables_by_id.iter().zip(&store.table_labels) {
+            if version >= FORMAT_VERSION {
+                write_str(&mut buf, nt.label())?;
+            } else {
+                let joined: Vec<&str> = labels.iter().map(arcstr::ArcStr::as_str).collect();
+                write_str(&mut buf, &joined.join("|"))?;
+            }
             write_len(&mut buf, nt.len())?;
             let columns = nt.columns();
             let zone_maps = nt.zone_maps();
@@ -814,13 +819,18 @@ fn deserialize_compact_store(
         "node tables",
     )?;
     let mut node_tables = Vec::with_capacity(num_node_tables);
-    let mut label_to_table_id: FxHashMap<arcstr::ArcStr, u16> = FxHashMap::default();
-    let mut table_id_to_label: Vec<arcstr::ArcStr> = Vec::with_capacity(num_node_tables);
+    let mut table_labels: Vec<Vec<arcstr::ArcStr>> = Vec::with_capacity(num_node_tables);
+    // Each table is named by its key: the labels of its nodes, escaped since
+    // the version 4 encoding (see `labels_of_key`).
+    let labels_of = if version >= FORMAT_VERSION {
+        labels_of_key
+    } else {
+        labels_of_unescaped_key
+    };
 
     for table_idx in 0..num_node_tables {
         let table_id = u16::try_from(table_idx).map_err(|_| "node table id overflow")?;
-        let label = read_string(data, &mut pos)?;
-        let label = arcstr::ArcStr::from(label.as_str());
+        let labels = labels_of(&read_string(data, &mut pos)?);
         let row_count = read_u32(data, &mut pos)? as usize;
         let num_cols = read_u32(data, &mut pos)? as usize;
         fits(num_cols, COLUMN_MIN_BYTES, data, pos, "columns")?;
@@ -851,7 +861,8 @@ fn deserialize_compact_store(
             columns.insert(key, column);
         }
 
-        let schema = TableSchema::new(label.as_str(), table_id, col_defs);
+        // The key as this build writes it, whichever build wrote the file.
+        let schema = TableSchema::new(label_set_key(&labels), table_id, col_defs);
         let table = NodeTable::from_columns_with_block_stats(
             schema,
             columns,
@@ -860,8 +871,7 @@ fn deserialize_compact_store(
             row_count,
         );
         node_tables.push(table);
-        label_to_table_id.insert(label.clone(), table_id);
-        table_id_to_label.push(label);
+        table_labels.push(labels);
     }
     let node_rows: Vec<usize> = node_tables.iter().map(NodeTable::len).collect();
 
@@ -947,14 +957,11 @@ fn deserialize_compact_store(
             properties.insert(key, column);
         }
 
-        let src_label = table_id_to_label[usize::from(src_tid)].clone();
-        let dst_label = table_id_to_label[usize::from(dst_tid)].clone();
-
         let schema = EdgeSchema::new(
             edge_type.as_str(),
             rel_table_id,
-            src_label.as_str(),
-            dst_label.as_str(),
+            node_tables[usize::from(src_tid)].label(),
+            node_tables[usize::from(dst_tid)].label(),
             prop_defs,
         );
 
@@ -967,38 +974,15 @@ fn deserialize_compact_store(
         rel_tables.push(table);
     }
 
-    // Compute statistics.
-    let mut stats = Statistics::new();
-    let mut total_nodes = 0u64;
-    let mut total_edges = 0u64;
-    for (idx, nt) in node_tables.iter().enumerate() {
-        let c = nt.len() as u64;
-        total_nodes += c;
-        stats.update_label(table_id_to_label[idx].as_str(), LabelStatistics::new(c));
-    }
-    let mut edge_counts: FxHashMap<&str, u64> = FxHashMap::default();
-    for (idx, rt) in rel_tables.iter().enumerate() {
-        let c = rt.num_edges() as u64;
-        total_edges += c;
-        *edge_counts
-            .entry(rel_table_id_to_type[idx].as_str())
-            .or_default() += c;
-    }
-    for (et, count) in edge_counts {
-        stats.update_edge_type(et, EdgeTypeStatistics::new(count, 0.0, 0.0));
-    }
-    stats.total_nodes = total_nodes;
-    stats.total_edges = total_edges;
     let edge_rows: Vec<usize> = rel_tables.iter().map(RelTable::num_edges).collect();
 
+    // The store computes the statistics.
     let mut store = CompactStore::new(
         node_tables,
-        label_to_table_id,
+        table_labels,
         rel_tables,
         edge_type_to_rel_id,
-        table_id_to_label,
         rel_table_id_to_type,
-        stats,
     );
 
     // ID maps.
@@ -2867,5 +2851,249 @@ mod tests {
                 if message.starts_with("section CompactStore: ") && message.contains("node tables")),
             "{error:?}"
         );
+    }
+
+    // ── Nodes with several labels ──────────────────────────────────
+
+    /// The labels of node `id` in `store`, sorted.
+    fn sorted_labels(store: &CompactStore, id: NodeId) -> Vec<String> {
+        described_node(store, id)
+            .map(|(labels, _)| labels)
+            .unwrap_or_default()
+    }
+
+    fn sorted_ids(mut ids: Vec<NodeId>) -> Vec<NodeId> {
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Each node keeps its labels through a checkpoint and a reopen: two
+    /// labels, labels holding the separator (`|`) and the escape character
+    /// (`\`) of a label set's key, and the set {In, Out} beside the label
+    /// `In|Out`.
+    #[test]
+    fn the_labels_of_compacted_nodes_round_trip_through_the_section() {
+        let store = LpgStore::new().unwrap();
+        let vincent = store.create_node(&["Person", "Actor"]);
+        let pipe = store.create_node(&["In|Out"]);
+        let pair = store.create_node(&["In", "Out"]);
+        let both = store.create_node(&["In|Out", "Person"]);
+        let slash = store.create_node(&["C:\\Data\\", "Person"]);
+        let expected: [(NodeId, &[&str]); 5] = [
+            (vincent, &["Actor", "Person"]),
+            (pipe, &["In|Out"]),
+            (pair, &["In", "Out"]),
+            (both, &["In|Out", "Person"]),
+            (slash, &["C:\\Data\\", "Person"]),
+        ];
+        let section =
+            CompactStoreSection::new(Arc::new(from_graph_store_preserving_ids(&store).unwrap()));
+        let restored = load(&image_of(&section)).unwrap().store().unwrap();
+        for (id, labels) in expected {
+            assert_eq!(sorted_labels(&restored, id), labels, "node {id:?}");
+        }
+        assert_eq!(
+            sorted_ids(restored.nodes_by_label("In|Out")),
+            sorted_ids(vec![pipe, both])
+        );
+        assert_eq!(restored.nodes_by_label("In"), vec![pair]);
+        assert_eq!(
+            sorted_ids(restored.nodes_by_label("Person")),
+            sorted_ids(vec![vincent, both, slash])
+        );
+        assert_eq!(restored.nodes_by_label_count("Person"), 3);
+
+        // The 0.5.x encoding a test may still write joins the labels as
+        // 0.5.x did, and reads back the same for labels without `|`.
+        let version_3 = section.serialize_with_version(FORMAT_VERSION_V3).unwrap();
+        let image = MemoryImage::from_raw(vec![(SectionType::CompactStore, version_3)]).unwrap();
+        let restored = load(&image).unwrap().store().unwrap();
+        assert_eq!(sorted_labels(&restored, vincent), ["Actor", "Person"]);
+        assert_eq!(
+            sorted_labels(&restored, slash),
+            ["C:\\Data\\", "Person"],
+            "0.5.x keys have no escapes"
+        );
+    }
+
+    /// The empty label is not the absence of labels: a node labeled `` and a
+    /// node without labels compact into tables of their own and keep their
+    /// labels, in memory and through the section.
+    #[test]
+    fn an_empty_label_is_not_the_absence_of_labels() {
+        let store = LpgStore::new().unwrap();
+        let mia = store.create_node(&[""]);
+        let gus = store.create_node(&[]);
+        let jules = store.create_node(&["", "Person"]);
+        let section =
+            CompactStoreSection::new(Arc::new(from_graph_store_preserving_ids(&store).unwrap()));
+        let restored = load(&image_of(&section)).unwrap().store().unwrap();
+        for (stage, compact) in [
+            ("compacted", section.store().unwrap()),
+            ("read back", restored),
+        ] {
+            assert_eq!(sorted_labels(&compact, mia), [""], "{stage}: Mia");
+            assert!(sorted_labels(&compact, gus).is_empty(), "{stage}: Gus");
+            assert_eq!(
+                sorted_labels(&compact, jules),
+                ["", "Person"],
+                "{stage}: Jules"
+            );
+            assert_eq!(
+                sorted_ids(compact.nodes_by_label("")),
+                sorted_ids(vec![mia, jules]),
+                "{stage}: the nodes labeled ``"
+            );
+            assert_eq!(compact.node_count(), 3, "{stage}");
+        }
+    }
+
+    /// The nodes without labels (the table of the empty key) round trip
+    /// through the section with their properties and their edges, in both
+    /// directions, to and from a labeled node, in the encoding this build
+    /// writes and the 0.5.x one, and the store writes the bytes it was read
+    /// from.
+    #[test]
+    fn nodes_without_labels_round_trip_through_the_section() {
+        let store = LpgStore::new().unwrap();
+        let gus = store.create_node(&[]);
+        store.set_node_property(gus, "name", Value::from("Gus"));
+        store.set_node_property(gus, "age", Value::Int64(19));
+        let alix = store.create_node(&["Person"]);
+        store.set_node_property(alix, "name", Value::from("Alix"));
+        let mia = store.create_node(&[]);
+        store.set_node_property(mia, "name", Value::from("Mia"));
+        store.set_node_property(mia, "age", Value::Int64(88));
+        let to_alix = store.create_edge(gus, alix, "KNOWS");
+        store.set_edge_property(to_alix, "since", Value::Int64(3));
+        let to_mia = store.create_edge(alix, mia, "KNOWS");
+        let section =
+            CompactStoreSection::new(Arc::new(from_graph_store_preserving_ids(&store).unwrap()));
+        let first = section.serialize().unwrap();
+        let version_3 = section.serialize_with_version(FORMAT_VERSION_V3).unwrap();
+
+        for (encoding, image) in [
+            ("this build's", image_of(&section)),
+            (
+                "the 0.5.x",
+                MemoryImage::from_raw(vec![(SectionType::CompactStore, version_3)]).unwrap(),
+            ),
+        ] {
+            let restored = load(&image).unwrap().store().unwrap();
+            assert_eq!(
+                sorted_ids(restored.node_ids()),
+                sorted_ids(vec![alix, gus, mia]),
+                "{encoding} encoding: every node"
+            );
+            assert_eq!(
+                described_node(&restored, gus),
+                Some((
+                    Vec::new(),
+                    vec![
+                        ("age".to_string(), Value::Int64(19)),
+                        ("name".to_string(), Value::from("Gus"))
+                    ]
+                )),
+                "{encoding} encoding: Gus, without labels"
+            );
+            assert_eq!(
+                described_node(&restored, mia),
+                Some((
+                    Vec::new(),
+                    vec![
+                        ("age".to_string(), Value::Int64(88)),
+                        ("name".to_string(), Value::from("Mia"))
+                    ]
+                )),
+                "{encoding} encoding: Mia, without labels"
+            );
+            assert_eq!(restored.nodes_by_label("Person"), vec![alix]);
+            assert_eq!(restored.statistics().total_nodes, 3, "{encoding} encoding");
+            assert_eq!(
+                restored.edges_from(gus, crate::graph::Direction::Outgoing),
+                vec![(alix, to_alix)],
+                "{encoding} encoding: out of Gus"
+            );
+            assert_eq!(
+                restored.edges_from(alix, crate::graph::Direction::Incoming),
+                vec![(gus, to_alix)],
+                "{encoding} encoding: into Alix"
+            );
+            assert_eq!(
+                restored.edges_from(mia, crate::graph::Direction::Incoming),
+                vec![(alix, to_mia)],
+                "{encoding} encoding: into Mia"
+            );
+            assert_eq!(
+                restored.get_edge_property(to_alix, &PropertyKey::new("since")),
+                Some(Value::Int64(3))
+            );
+        }
+
+        let mut section = CompactStoreSection::empty();
+        section.deserialize(&first).unwrap();
+        let again = CompactStoreSection::new(section.store().unwrap())
+            .serialize()
+            .unwrap();
+        assert_eq!(first_difference(&first, &again), None, "the same bytes");
+    }
+
+    /// 0.5.44 (the version 3 encoding, a raw chunk) and earlier 0.6 builds
+    /// (version 4) named the table of a node with several labels by the
+    /// labels joined with `|`, without escapes: its nodes read back with each
+    /// label, and a backslash in a label stays one.
+    #[test]
+    fn a_joined_label_key_of_an_older_build_reads_as_separate_labels() {
+        let encoding = |key: &str, version: u8| {
+            let mut parts = Parts::valid();
+            parts.node_tables = Fields(Vec::new()).u32(1).node_table(key, 2);
+            let mut bytes = parts.sealed();
+            bytes[4] = version;
+            let crc_at = bytes.len() - 4;
+            let crc = crc32fast::hash(&bytes[..crc_at]);
+            bytes[crc_at..].copy_from_slice(&crc.to_le_bytes());
+            bytes
+        };
+        let (alix, gus) = (NodeId::new(3), NodeId::new(19));
+        for key in ["Employee|Person", "C:\\Data|Person"] {
+            let first = key.split('|').next().unwrap();
+            let version_3 = MemoryImage::from_raw(vec![(
+                SectionType::CompactStore,
+                encoding(key, FORMAT_VERSION_V3),
+            )])
+            .unwrap();
+            for (build, store) in [
+                ("0.5.44", load(&version_3).unwrap().store().unwrap()),
+                (
+                    "an earlier 0.6 build",
+                    load_encoding_of(&encoding(key, FORMAT_VERSION))
+                        .unwrap()
+                        .store()
+                        .unwrap(),
+                ),
+            ] {
+                for id in [alix, gus] {
+                    assert_eq!(
+                        sorted_labels(&store, id),
+                        [first, "Person"],
+                        "{build}: {key}"
+                    );
+                }
+                for label in [first, "Person"] {
+                    assert_eq!(
+                        sorted_ids(store.nodes_by_label(label)),
+                        vec![alix, gus],
+                        "{build}: {label} of {key}"
+                    );
+                    assert_eq!(store.nodes_by_label_count(label), 2, "{build}: {label}");
+                }
+                assert!(store.nodes_by_label(key).is_empty(), "{build}: {key}");
+                assert_eq!(
+                    store.statistics().get_label("Person").map(|s| s.node_count),
+                    Some(2),
+                    "{build}"
+                );
+            }
+        }
     }
 }

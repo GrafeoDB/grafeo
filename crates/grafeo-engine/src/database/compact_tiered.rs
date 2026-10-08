@@ -211,6 +211,33 @@ impl CompactStoreTiered {
         Ok(())
     }
 
+    /// Makes `base` the wrapped store, in memory, unless the wrapper holds
+    /// it already, and returns whether it changed: a merge of the overlay
+    /// replaced the layered store's base, and the wrapper must spill and
+    /// report that base from then on, never bring back the one it held.
+    pub fn follow(&self, base: &Arc<CompactStore>) -> bool {
+        let mut state = self.state.write();
+        let held = match &*state {
+            TierState::InMemory(store) | TierState::OnDisk { store, .. } => store,
+        };
+        if Arc::ptr_eq(held, base) {
+            return false;
+        }
+        *state = TierState::InMemory(Arc::clone(base));
+        true
+    }
+
+    /// Replaces the store with `store`, held in memory: the empty base a
+    /// restore leaves (see `GrafeoDB::restore_snapshot`), so a later spill
+    /// writes that base and never the one the restore dropped. A spilled
+    /// store's mapping goes once its last reader drops it; its file stays, as
+    /// [`reload_to_ram`](Self::reload_to_ram) leaves it.
+    pub fn replace(&self, store: Arc<CompactStore>) {
+        let retired = std::mem::replace(&mut *self.state.write(), TierState::InMemory(store));
+        // Freed after the lock is released.
+        drop(retired);
+    }
+
     /// Estimated heap memory footprint of the wrapped store, in bytes.
     ///
     /// When the state is `OnDisk`, this counts the heap copy alone: the

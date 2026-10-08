@@ -9,7 +9,6 @@ use grafeo_common::types::{PropertyKey, Value};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
-use super::CompactStore;
 use super::column::{ColumnCodec, CompactColumn};
 use super::csr::CsrAdjacency;
 use super::id::MAX_TABLE_ID;
@@ -17,8 +16,8 @@ use super::node_table::NodeTable;
 use super::rel_table::RelTable;
 use super::schema::{ColumnDef, ColumnType, EdgeSchema, TableSchema};
 use super::zone_map::ZoneMap;
+use super::{CompactStore, label_set_key};
 use crate::codec::{BitPackedInts, BitVector, DictionaryBuilder};
-use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -68,6 +67,14 @@ pub enum CompactStoreError {
         /// Maximum allowed table count.
         max: u16,
     },
+    /// A node table would hold more nodes than its `u32` row offsets address.
+    #[error("node table {key:?} holds more than {max} nodes")]
+    TableTooLarge {
+        /// The table's key: the labels of its nodes.
+        key: String,
+        /// The most nodes a table holds.
+        max: u32,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +83,10 @@ pub enum CompactStoreError {
 
 /// Builder for node table columns. Obtained through [`CompactStoreBuilder::node_table`].
 pub struct NodeTableBuilder {
-    label: ArcStr,
+    /// The labels of the table's nodes, in name order.
+    labels: Vec<ArcStr>,
+    /// The table's key, which relationship tables name it by.
+    key: ArcStr,
     columns: Vec<(PropertyKey, CompactColumn)>,
     zone_maps: Vec<(PropertyKey, ZoneMap)>,
     len: Option<usize>,
@@ -85,9 +95,15 @@ pub struct NodeTableBuilder {
 }
 
 impl NodeTableBuilder {
-    fn new(label: impl Into<ArcStr>) -> Self {
+    /// A table for the nodes with the labels `labels`.
+    fn new(labels: &[ArcStr]) -> Self {
+        let key = label_set_key(labels);
+        let mut labels = labels.to_vec();
+        labels.sort_unstable();
+        labels.dedup();
         Self {
-            label: label.into(),
+            labels,
+            key,
             columns: Vec::new(),
             zone_maps: Vec::new(),
             len: None,
@@ -209,23 +225,23 @@ impl NodeTableBuilder {
 /// Builder for relationship table edges and properties. Obtained through [`CompactStoreBuilder::rel_table`].
 pub struct RelTableBuilder {
     edge_type: ArcStr,
-    src_label: ArcStr,
-    dst_label: ArcStr,
+    /// The key of the source node table.
+    src_key: ArcStr,
+    /// The key of the destination node table.
+    dst_key: ArcStr,
     edges: Vec<(u32, u32)>,
     backward: bool,
     properties: Vec<(PropertyKey, CompactColumn)>,
 }
 
 impl RelTableBuilder {
-    fn new(
-        edge_type: impl Into<ArcStr>,
-        src_label: impl Into<ArcStr>,
-        dst_label: impl Into<ArcStr>,
-    ) -> Self {
+    /// A table of `edge_type` edges between the node tables of the keys
+    /// `src_key` and `dst_key`.
+    fn new(edge_type: impl Into<ArcStr>, src_key: ArcStr, dst_key: ArcStr) -> Self {
         Self {
             edge_type: edge_type.into(),
-            src_label: src_label.into(),
-            dst_label: dst_label.into(),
+            src_key,
+            dst_key,
             edges: Vec::new(),
             backward: false,
             properties: Vec::new(),
@@ -283,33 +299,61 @@ impl CompactStoreBuilder {
         Self::default()
     }
 
-    /// Defines a node table with the given label.
+    /// Defines a node table with the given label: its nodes have that label
+    /// alone.
     ///
     /// The closure receives a [`NodeTableBuilder`] that can be used to add
     /// columns.
     pub fn node_table(
-        mut self,
+        self,
         label: &str,
         f: impl FnOnce(&mut NodeTableBuilder) -> &mut NodeTableBuilder,
     ) -> Self {
-        let mut builder = NodeTableBuilder::new(label);
+        self.node_table_of(&[ArcStr::from(label)], f)
+    }
+
+    /// Defines the node table of the nodes whose labels are `labels`.
+    fn node_table_of(
+        mut self,
+        labels: &[ArcStr],
+        f: impl FnOnce(&mut NodeTableBuilder) -> &mut NodeTableBuilder,
+    ) -> Self {
+        let mut builder = NodeTableBuilder::new(labels);
         f(&mut builder);
         self.node_table_builders.push(builder);
         self
     }
 
-    /// Defines a relationship table connecting two node labels.
+    /// Defines a relationship table connecting two node labels: the tables
+    /// that [`node_table`](Self::node_table) defined for them.
     ///
     /// The closure receives a [`RelTableBuilder`] that can be used to set
     /// edges, backward CSR, and properties.
     pub fn rel_table(
-        mut self,
+        self,
         edge_type: &str,
         src_label: &str,
         dst_label: &str,
         f: impl FnOnce(&mut RelTableBuilder) -> &mut RelTableBuilder,
     ) -> Self {
-        let mut builder = RelTableBuilder::new(edge_type, src_label, dst_label);
+        self.rel_table_between(
+            edge_type,
+            label_set_key(&[src_label]),
+            label_set_key(&[dst_label]),
+            f,
+        )
+    }
+
+    /// Defines a relationship table between the node tables of the keys
+    /// `src_key` and `dst_key`.
+    fn rel_table_between(
+        mut self,
+        edge_type: &str,
+        src_key: ArcStr,
+        dst_key: ArcStr,
+        f: impl FnOnce(&mut RelTableBuilder) -> &mut RelTableBuilder,
+    ) -> Self {
+        let mut builder = RelTableBuilder::new(edge_type, src_key, dst_key);
         f(&mut builder);
         self.rel_table_builders.push(builder);
         self
@@ -336,24 +380,24 @@ impl CompactStoreBuilder {
             }
         }
 
-        // Step 2: Validate no duplicate labels.
+        // Step 2: Validate no duplicate label sets.
         {
-            let mut seen_labels = FxHashSet::default();
+            let mut seen_keys = FxHashSet::default();
             for ntb in &self.node_table_builders {
-                if !seen_labels.insert(&ntb.label) {
-                    return Err(CompactStoreError::DuplicateLabel(ntb.label.to_string()));
+                if !seen_keys.insert(&ntb.key) {
+                    return Err(CompactStoreError::DuplicateLabel(ntb.key.to_string()));
                 }
             }
         }
 
-        // Step 2b: Validate no duplicate (edge_type, src_label, dst_label) triples.
+        // Step 2b: Validate no duplicate (edge_type, src_key, dst_key) triples.
         {
             let mut seen_triples = FxHashSet::default();
             for rtb in &self.rel_table_builders {
-                if !seen_triples.insert((&rtb.edge_type, &rtb.src_label, &rtb.dst_label)) {
+                if !seen_triples.insert((&rtb.edge_type, &rtb.src_key, &rtb.dst_key)) {
                     return Err(CompactStoreError::DuplicateEdgeType(format!(
                         "{} ({} -> {})",
-                        rtb.edge_type, rtb.src_label, rtb.dst_label
+                        rtb.edge_type, rtb.src_key, rtb.dst_key
                     )));
                 }
             }
@@ -377,8 +421,7 @@ impl CompactStoreBuilder {
         }
 
         // Step 3: Assign sequential table IDs.
-        let mut label_to_table_id: FxHashMap<ArcStr, u16> = FxHashMap::default();
-        let mut table_id_to_label: Vec<ArcStr> = Vec::new();
+        let mut key_to_table_id: FxHashMap<ArcStr, u16> = FxHashMap::default();
 
         for (idx, ntb) in self.node_table_builders.iter().enumerate() {
             // Validated in Step 2c: count <= MAX_TABLE_ID + 1, so idx fits u16.
@@ -388,13 +431,13 @@ impl CompactStoreBuilder {
                     count: idx,
                     max: MAX_TABLE_ID,
                 })?;
-            label_to_table_id.insert(ntb.label.clone(), table_id);
-            table_id_to_label.push(ntb.label.clone());
+            key_to_table_id.insert(ntb.key.clone(), table_id);
         }
 
         // Step 4: Build each NodeTable.
         let mut node_tables_by_id: Vec<NodeTable> =
             Vec::with_capacity(self.node_table_builders.len());
+        let mut table_labels: Vec<Vec<ArcStr>> = Vec::with_capacity(self.node_table_builders.len());
 
         for (idx, ntb) in self.node_table_builders.into_iter().enumerate() {
             // Validated in Step 2c: count <= MAX_TABLE_ID + 1, so idx fits u16.
@@ -416,7 +459,8 @@ impl CompactStoreBuilder {
                 })
                 .collect();
 
-            let schema = TableSchema::new(ntb.label.as_str(), table_id, col_defs);
+            let schema = TableSchema::new(ntb.key.clone(), table_id, col_defs);
+            table_labels.push(ntb.labels);
 
             let columns: FxHashMap<PropertyKey, CompactColumn> = ntb.columns.into_iter().collect();
 
@@ -460,13 +504,13 @@ impl CompactStoreBuilder {
                 })?;
             rel_table_id_to_type.push(rtb.edge_type.clone());
 
-            // Resolve labels to table IDs.
-            let src_table_id = *label_to_table_id
-                .get(&rtb.src_label)
-                .ok_or_else(|| CompactStoreError::LabelNotFound(rtb.src_label.to_string()))?;
-            let dst_table_id = *label_to_table_id
-                .get(&rtb.dst_label)
-                .ok_or_else(|| CompactStoreError::LabelNotFound(rtb.dst_label.to_string()))?;
+            // Resolve the node tables' keys to table IDs.
+            let src_table_id = *key_to_table_id
+                .get(&rtb.src_key)
+                .ok_or_else(|| CompactStoreError::LabelNotFound(rtb.src_key.to_string()))?;
+            let dst_table_id = *key_to_table_id
+                .get(&rtb.dst_key)
+                .ok_or_else(|| CompactStoreError::LabelNotFound(rtb.dst_key.to_string()))?;
 
             // Get source and destination node counts for CSR sizing.
             let src_node_count = node_tables_by_id
@@ -537,8 +581,8 @@ impl CompactStoreBuilder {
             let schema = EdgeSchema::new(
                 rtb.edge_type.as_str(),
                 rel_table_id,
-                rtb.src_label.as_str(),
-                rtb.dst_label.as_str(),
+                rtb.src_key.as_str(),
+                rtb.dst_key.as_str(),
                 property_col_defs,
             );
 
@@ -553,41 +597,13 @@ impl CompactStoreBuilder {
             rel_tables_by_id.push(table);
         }
 
-        // Step 6: Compute initial Statistics.
-        let mut stats = Statistics::new();
-        let mut total_nodes: u64 = 0;
-        let mut total_edges: u64 = 0;
-
-        for (idx, nt) in node_tables_by_id.iter().enumerate() {
-            let count = nt.len() as u64;
-            total_nodes += count;
-            let label = &table_id_to_label[idx];
-            stats.update_label(label.as_str(), LabelStatistics::new(count));
-        }
-
-        let mut edge_type_counts: FxHashMap<&str, u64> = FxHashMap::default();
-        for (idx, rt) in rel_tables_by_id.iter().enumerate() {
-            let count = rt.num_edges() as u64;
-            total_edges += count;
-            let edge_type = &rel_table_id_to_type[idx];
-            *edge_type_counts.entry(edge_type.as_str()).or_default() += count;
-        }
-        for (edge_type, count) in edge_type_counts {
-            stats.update_edge_type(edge_type, EdgeTypeStatistics::new(count, 0.0, 0.0));
-        }
-
-        stats.total_nodes = total_nodes;
-        stats.total_edges = total_edges;
-
-        // Step 7: Construct the CompactStore.
+        // Step 6: Construct the CompactStore, which computes the statistics.
         Ok(CompactStore::new(
             node_tables_by_id,
-            label_to_table_id,
+            table_labels,
             rel_tables_by_id,
             edge_type_to_rel_id,
-            table_id_to_label,
             rel_table_id_to_type,
-            stats,
         ))
     }
 }
@@ -713,9 +729,11 @@ enum InferredType {
 /// | `String` | `Dict` | |
 /// | All others | `Dict` | Serialized via `Display` |
 ///
-/// Nodes with multiple labels use a canonical combined key (labels sorted,
-/// joined with `|`). `Null` values are stored as zero/false/empty-string
-/// depending on the inferred codec.
+/// The nodes with the same labels make one table, which every read of each
+/// of their labels reads; its key is the labels in name order, joined with
+/// `|` (see `label_set_key`). The nodes without labels make the table of the
+/// empty key. `Null` values are stored as zero/false/empty-string depending
+/// on the inferred codec.
 ///
 /// # Errors
 ///
@@ -724,86 +742,107 @@ enum InferredType {
 pub fn from_graph_store(
     store: &dyn crate::graph::traits::GraphStore,
 ) -> Result<CompactStore, CompactStoreError> {
-    // Step 1: Collect all nodes grouped by label, build ID mapping. Labels
-    // in name order, so the tables (and the bytes they are written as) do
-    // not depend on the order a store lists its labels in.
+    compact_graph_store(store).map(|(compact, _)| compact)
+}
+
+/// The nodes of `store` in the order they become table rows: the nodes of
+/// each label, in label name order (a node with several labels where the
+/// first of them lists it), and then the nodes without labels, in id order.
+/// Each table holds the nodes of one label set in this order, so its rows
+/// and the order of the tables (and the bytes they are written as) depend on
+/// what the store holds, not on the order it lists its labels in.
+fn nodes_in_table_order(
+    store: &dyn crate::graph::traits::GraphStore,
+) -> Vec<grafeo_common::types::NodeId> {
     let mut labels = store.all_labels();
     labels.sort_unstable();
-    if labels.is_empty() {
-        return CompactStoreBuilder::new().build();
+    let mut seen: FxHashSet<grafeo_common::types::NodeId> = FxHashSet::default();
+    let mut order = Vec::new();
+    for label in &labels {
+        order.extend(
+            store
+                .nodes_by_label(label)
+                .into_iter()
+                .filter(|&id| seen.insert(id)),
+        );
     }
+    // The nodes without labels are under none of them.
+    order.extend(store.node_ids().into_iter().filter(|id| !seen.contains(id)));
+    order
+}
 
+/// [`from_graph_store`], and the ids of the nodes of each table in row
+/// order, by table id.
+fn compact_graph_store(
+    store: &dyn crate::graph::traits::GraphStore,
+) -> Result<(CompactStore, Vec<Vec<grafeo_common::types::NodeId>>), CompactStoreError> {
     // old_node_id -> (label_key, offset_within_label)
     let mut id_map: FxHashMap<grafeo_common::types::NodeId, (ArcStr, u32)> = FxHashMap::default();
 
-    // label_key -> (ordered node IDs, property_key -> Vec<Value>)
+    // label_key -> (the labels, ordered node IDs, property_key -> Vec<Value>)
     // We use Vec<Value> to collect per-column values in row order.
     let mut label_data: Vec<(
         ArcStr,
+        Vec<ArcStr>,
         Vec<grafeo_common::types::NodeId>,
         FxHashMap<PropertyKey, Vec<Value>>,
     )> = Vec::new();
 
-    // Collect all node IDs per label. Nodes with multiple labels use a
-    // compound key (sorted labels joined with "|").
-    let mut seen_node_ids: FxHashSet<grafeo_common::types::NodeId> = FxHashSet::default();
+    // Step 1: Collect the nodes per label set, in table order, and build
+    // the ID mapping.
     let mut label_key_index: FxHashMap<ArcStr, usize> = FxHashMap::default();
 
-    for label in &labels {
-        let node_ids = store.nodes_by_label(label);
-        for &nid in &node_ids {
-            if !seen_node_ids.insert(nid) {
-                continue; // already assigned via an earlier label
+    for nid in nodes_in_table_order(store) {
+        // Get the node to check its full label set.
+        let Some(node) = store.get_node(nid) else {
+            continue;
+        };
+
+        let label_key = label_set_key(&node.labels);
+
+        // Find or create the label_data entry.
+        let entry_idx = if let Some(&idx) = label_key_index.get(&label_key) {
+            idx
+        } else {
+            let idx = label_data.len();
+            label_key_index.insert(label_key.clone(), idx);
+            label_data.push((
+                label_key.clone(),
+                node.labels.to_vec(),
+                Vec::new(),
+                FxHashMap::default(),
+            ));
+            idx
+        };
+
+        let (_, _, ref mut node_ids_vec, ref mut props_map) = label_data[entry_idx];
+        // The node's row in its table, which the adjacency addresses with a
+        // `u32` offset.
+        let row = node_ids_vec.len();
+        let offset = u32::try_from(row).map_err(|_| CompactStoreError::TableTooLarge {
+            key: label_key.to_string(),
+            max: u32::MAX,
+        })?;
+        node_ids_vec.push(nid);
+        id_map.insert(nid, (label_key, offset));
+
+        // Collect properties.
+        for (key, value) in node.properties.iter() {
+            let col = props_map
+                .entry(key.clone())
+                .or_insert_with(|| vec![Value::Null; row]);
+            // Pad with nulls if this key appeared for the first time.
+            while col.len() < row {
+                col.push(Value::Null);
             }
+            col.push(value.clone());
+        }
 
-            // Get the node to check its full label set.
-            let Some(node) = store.get_node(nid) else {
-                continue;
-            };
-
-            let label_key: ArcStr = if node.labels.len() <= 1 {
-                ArcStr::from(label.as_str())
-            } else {
-                let mut sorted: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
-                sorted.sort_unstable();
-                ArcStr::from(sorted.join("|"))
-            };
-
-            // Find or create the label_data entry.
-            let entry_idx = if let Some(&idx) = label_key_index.get(&label_key) {
-                idx
-            } else {
-                let idx = label_data.len();
-                label_key_index.insert(label_key.clone(), idx);
-                label_data.push((label_key.clone(), Vec::new(), FxHashMap::default()));
-                idx
-            };
-
-            let (_, ref mut node_ids_vec, ref mut props_map) = label_data[entry_idx];
-            // reason: node offset within a table fits u32
-            #[allow(clippy::cast_possible_truncation)]
-            let offset = node_ids_vec.len() as u32;
-            node_ids_vec.push(nid);
-            id_map.insert(nid, (label_key, offset));
-
-            // Collect properties.
-            for (key, value) in node.properties.iter() {
-                let col = props_map
-                    .entry(key.clone())
-                    .or_insert_with(|| vec![Value::Null; offset as usize]);
-                // Pad with nulls if this key appeared for the first time.
-                while col.len() < offset as usize {
-                    col.push(Value::Null);
-                }
-                col.push(value.clone());
-            }
-
-            // Pad all existing columns that this node didn't have.
-            let expected_len = offset as usize + 1;
-            for col in props_map.values_mut() {
-                while col.len() < expected_len {
-                    col.push(Value::Null);
-                }
+        // Pad all existing columns that this node didn't have.
+        let expected_len = row + 1;
+        for col in props_map.values_mut() {
+            while col.len() < expected_len {
+                col.push(Value::Null);
             }
         }
     }
@@ -811,9 +850,9 @@ pub fn from_graph_store(
     // Step 2: Infer column types and build CompactStoreBuilder.
     let mut builder = CompactStoreBuilder::new();
 
-    for (label_key, node_ids_for_label, props_map) in &label_data {
+    for (_, node_labels, node_ids_for_label, props_map) in &label_data {
         let node_count = node_ids_for_label.len();
-        builder = builder.node_table(label_key.as_str(), |t| {
+        builder = builder.node_table_of(node_labels, |t| {
             // Ensure row count is set even when there are no properties.
             t.record_len(node_count);
             for (key, values) in props_map {
@@ -836,7 +875,7 @@ pub fn from_graph_store(
         FxHashMap::default();
 
     // Iterate all nodes and their outgoing edges.
-    for (_label_key, node_ids, _) in &label_data {
+    for (_, _, node_ids, _) in &label_data {
         for &nid in node_ids {
             let outgoing = store.edges_from(nid, crate::graph::Direction::Outgoing);
             for (_target_nid, edge_id) in outgoing {
@@ -885,15 +924,12 @@ pub fn from_graph_store(
     // than the hash map's.
     let mut groups: Vec<_> = edge_groups.iter().collect();
     groups.sort_unstable_by(|left, right| left.0.cmp(right.0));
-    for ((edge_type, src_label, dst_label), edges) in groups {
+    for ((edge_type, src_key, dst_key), edges) in groups {
         let edge_props =
-            edge_props_groups.get(&(edge_type.clone(), src_label.clone(), dst_label.clone()));
+            edge_props_groups.get(&(edge_type.clone(), src_key.clone(), dst_key.clone()));
 
-        builder = builder.rel_table(
-            edge_type.as_str(),
-            src_label.as_str(),
-            dst_label.as_str(),
-            |r| {
+        builder =
+            builder.rel_table_between(edge_type.as_str(), src_key.clone(), dst_key.clone(), |r| {
                 r.edges(edges.clone()).backward(true);
 
                 // Add edge property columns.
@@ -905,11 +941,16 @@ pub fn from_graph_store(
                 }
 
                 r
-            },
-        );
+            });
     }
 
-    builder.build()
+    // The builder numbers the node tables in the order they were added.
+    let compact = builder.build()?;
+    let node_ids_by_table = label_data
+        .into_iter()
+        .map(|(_, _, node_ids, _)| node_ids)
+        .collect();
+    Ok((compact, node_ids_by_table))
 }
 
 /// Builds a [`CompactStore`] from any [`GraphStore`](crate::graph::GraphStore) with original ID preservation.
@@ -925,63 +966,19 @@ pub fn from_graph_store(
 pub fn from_graph_store_preserving_ids(
     store: &dyn crate::graph::traits::GraphStore,
 ) -> Result<CompactStore, CompactStoreError> {
-    let mut compact = from_graph_store(store)?;
+    // ── Node ID maps: the nodes of each table, in row order ────────
 
-    // ── Build node ID maps (replicate the label grouping logic) ────
-
-    let mut labels = store.all_labels();
-    labels.sort_unstable();
-    if labels.is_empty() {
-        compact.set_id_maps(
-            FxHashMap::default(),
-            FxHashMap::default(),
-            Vec::new(),
-            Vec::new(),
-        );
-        return Ok(compact);
-    }
-
+    let (mut compact, node_offset_to_id) = compact_graph_store(store)?;
     let mut node_id_map: FxHashMap<grafeo_common::types::NodeId, (u16, u64)> = FxHashMap::default();
-    let num_tables = compact.node_tables_by_id.len();
-    let mut node_offset_to_id: Vec<Vec<grafeo_common::types::NodeId>> =
-        vec![Vec::new(); num_tables];
-
-    // Track per-label-key offset counters (same order as from_graph_store step 1).
-    let mut seen: FxHashSet<grafeo_common::types::NodeId> = FxHashSet::default();
-    let mut label_key_offsets: FxHashMap<ArcStr, u32> = FxHashMap::default();
-
-    for label in &labels {
-        let node_ids = store.nodes_by_label(label);
-        for &nid in &node_ids {
-            if !seen.insert(nid) {
-                continue;
-            }
-            let Some(node) = store.get_node(nid) else {
-                continue;
-            };
-
-            let label_key: ArcStr = if node.labels.len() <= 1 {
-                ArcStr::from(label.as_str())
-            } else {
-                let mut sorted: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
-                sorted.sort_unstable();
-                ArcStr::from(sorted.join("|"))
-            };
-
-            let offset = label_key_offsets.entry(label_key.clone()).or_insert(0);
-            let current_offset = *offset;
-            *offset += 1;
-
-            if let Some(&table_id) = compact.label_to_table_id.get(&label_key) {
-                node_id_map.insert(nid, (table_id, u64::from(current_offset)));
-                if let Some(rev) = node_offset_to_id.get_mut(table_id as usize) {
-                    // Extend if needed (offsets should be sequential).
-                    while rev.len() <= current_offset as usize {
-                        rev.push(grafeo_common::types::NodeId::INVALID);
-                    }
-                    rev[current_offset as usize] = nid;
-                }
-            }
+    for (table, node_ids) in node_offset_to_id.iter().enumerate() {
+        // The builder refused more tables than a u16 numbers.
+        let table_id = u16::try_from(table).map_err(|_| CompactStoreError::TableCountOverflow {
+            kind: "node",
+            count: node_offset_to_id.len(),
+            max: MAX_TABLE_ID,
+        })?;
+        for (row, &nid) in node_ids.iter().enumerate() {
+            node_id_map.insert(nid, (table_id, row as u64));
         }
     }
 
@@ -1634,17 +1631,26 @@ mod tests {
 
         let compact = from_graph_store(&store).unwrap();
 
-        // Single-label node goes to "Person" table.
-        let person_ids = compact.nodes_by_label("Person");
-        assert_eq!(person_ids.len(), 1);
-
-        // Multi-label node goes to "Actor|Person" compound table.
-        let compound_ids = compact.nodes_by_label("Actor|Person");
-        assert_eq!(compound_ids.len(), 1);
+        // The multi-label node is a row of the table of its label set, and
+        // both labels read it; no label is named after the set.
+        assert_eq!(compact.nodes_by_label("Person").len(), 2);
+        let actors = compact.nodes_by_label("Actor");
+        assert_eq!(actors.len(), 1);
+        assert!(
+            compact.nodes_by_label("Actor|Person").is_empty(),
+            "no label is named after the set"
+        );
+        assert_eq!(
+            compact
+                .node_table("Person")
+                .map(super::super::node_table::NodeTable::len),
+            Some(1),
+            "the table of the nodes whose only label is Person"
+        );
 
         // Verify the multi-label node's property survived.
         let val = compact
-            .get_node_property(compound_ids[0], &PropertyKey::new("name"))
+            .get_node_property(actors[0], &PropertyKey::new("name"))
             .unwrap();
         assert_eq!(val, Value::String(ArcStr::from("Vincent")));
     }
@@ -2162,12 +2168,18 @@ mod tests {
 
         let store = LpgStore::new().unwrap();
 
-        // Labels "Zebra" and "Alpha" should be sorted to "Alpha|Zebra".
+        // The table of "Zebra" and "Alpha" is named by the sorted labels,
+        // "Alpha|Zebra", and each label reads it.
         let a = store.create_node(&["Zebra", "Alpha"]);
         store.set_node_property(a, "name", Value::from("Butch"));
 
         let compact = from_graph_store(&store).unwrap();
-        let ids = compact.nodes_by_label("Alpha|Zebra");
+        assert_eq!(
+            compact.label_for_table_id(0).map(ArcStr::as_str),
+            Some("Alpha|Zebra")
+        );
+        let ids = compact.nodes_by_label("Alpha");
+        assert_eq!(ids, compact.nodes_by_label("Zebra"));
         assert_eq!(ids.len(), 1);
 
         let val = compact
@@ -2544,6 +2556,15 @@ mod tests {
         };
         assert!(format!("{table_overflow}").contains("node"));
         assert!(format!("{table_overflow}").contains("99999"));
+
+        let too_large = CompactStoreError::TableTooLarge {
+            key: "Person".to_string(),
+            max: u32::MAX,
+        };
+        assert_eq!(
+            format!("{too_large}"),
+            "node table \"Person\" holds more than 4294967295 nodes"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -2703,5 +2724,147 @@ mod tests {
         outgoing.sort();
         assert_eq!(incoming.len(), 3);
         assert_eq!(incoming, outgoing, "the edges in, as the edges out");
+    }
+
+    // -------------------------------------------------------------------
+    // Nodes without labels
+    // -------------------------------------------------------------------
+
+    use grafeo_common::types::NodeId;
+
+    /// Gus and Mia have no labels, Alix is a Person: Gus knows Alix since 3,
+    /// Alix knows Mia since 19, and Gus knows Mia since 88. Returns the store
+    /// and the ids of Alix, Gus and Mia.
+    fn store_with_unlabeled_nodes() -> (crate::graph::lpg::LpgStore, [NodeId; 3]) {
+        let store = crate::graph::lpg::LpgStore::new().unwrap();
+        let gus = store.create_node(&[]);
+        store.set_node_property(gus, "name", Value::from("Gus"));
+        store.set_node_property(gus, "age", Value::Int64(19));
+        let alix = store.create_node(&["Person"]);
+        store.set_node_property(alix, "name", Value::from("Alix"));
+        let mia = store.create_node(&[]);
+        store.set_node_property(mia, "name", Value::from("Mia"));
+        for (src, dst, since) in [(gus, alix, 3), (alix, mia, 19), (gus, mia, 88)] {
+            let edge = store.create_edge(src, dst, "KNOWS");
+            store.set_edge_property(edge, "since", Value::Int64(since));
+        }
+        (store, [alix, gus, mia])
+    }
+
+    /// The name of node `id` of `store`, and its labels.
+    fn named(store: &dyn crate::graph::GraphStore, id: NodeId) -> Option<(String, Vec<String>)> {
+        let node = store.get_node(id)?;
+        let name = node.get_property("name")?.as_str()?.to_string();
+        let mut labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
+        labels.sort();
+        Some((name, labels))
+    }
+
+    /// Who knows whom since when, by name, sorted: read from each node's
+    /// outgoing and incoming edges, which must agree.
+    fn knows(store: &dyn crate::graph::GraphStore) -> Vec<(String, String, Value)> {
+        use crate::graph::Direction;
+        let name = |id: NodeId| named(store, id).map_or_else(String::new, |(name, _)| name);
+        let mut outgoing = Vec::new();
+        let mut incoming = Vec::new();
+        for id in store.node_ids() {
+            for (target, edge) in store.edges_from(id, Direction::Outgoing) {
+                let since = store
+                    .get_edge_property(edge, &PropertyKey::new("since"))
+                    .unwrap_or(Value::Null);
+                outgoing.push((name(id), name(target), since));
+            }
+            for (source, edge) in store.edges_from(id, Direction::Incoming) {
+                let since = store
+                    .get_edge_property(edge, &PropertyKey::new("since"))
+                    .unwrap_or(Value::Null);
+                incoming.push((name(source), name(id), since));
+            }
+        }
+        outgoing.sort_by_key(|row| format!("{row:?}"));
+        incoming.sort_by_key(|row| format!("{row:?}"));
+        assert_eq!(outgoing, incoming, "the edges in, as the edges out");
+        outgoing
+    }
+
+    /// The edges of `store_with_unlabeled_nodes`, by name.
+    fn expected_knows() -> Vec<(String, String, Value)> {
+        vec![
+            ("Alix".into(), "Mia".into(), Value::Int64(19)),
+            ("Gus".into(), "Alix".into(), Value::Int64(3)),
+            ("Gus".into(), "Mia".into(), Value::Int64(88)),
+        ]
+    }
+
+    /// A compaction keeps the nodes without labels: with their properties,
+    /// in the scans and counts and the statistics, and with their edges
+    /// (to and from labeled nodes and between themselves, both ways).
+    #[test]
+    fn nodes_without_labels_are_compacted_whole() {
+        let (store, [alix, gus, mia]) = store_with_unlabeled_nodes();
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+
+        assert_eq!(compact.node_count(), 3, "every node");
+        assert_eq!(
+            compact.node_ids(),
+            vec![gus, alix, mia],
+            "the scan of all nodes"
+        );
+        assert_eq!(compact.nodes_by_label("Person"), vec![alix]);
+        assert_eq!(
+            named(&compact, gus),
+            Some(("Gus".to_string(), Vec::new())),
+            "Gus has no label"
+        );
+        assert_eq!(
+            compact.get_node_property(gus, &PropertyKey::new("age")),
+            Some(Value::Int64(19))
+        );
+        assert_eq!(named(&compact, mia), Some(("Mia".to_string(), Vec::new())));
+        assert_eq!(
+            named(&compact, alix),
+            Some(("Alix".to_string(), vec!["Person".to_string()]))
+        );
+        assert_eq!(compact.edge_count(), 3, "every edge");
+        assert_eq!(knows(&compact), expected_knows());
+
+        let statistics = compact.statistics();
+        assert_eq!(statistics.total_nodes, 3, "the statistics count every node");
+        assert_eq!(statistics.total_edges, 3);
+        assert_eq!(
+            statistics.get_label("Person").map(|label| label.node_count),
+            Some(1)
+        );
+
+        // Without the original ids too.
+        let compact = from_graph_store(&store).unwrap();
+        assert_eq!(compact.node_count(), 3);
+        assert_eq!(compact.statistics().total_nodes, 3);
+        assert_eq!(knows(&compact), expected_knows());
+    }
+
+    /// A store whose nodes have no labels at all compacts whole, not empty.
+    #[test]
+    fn a_store_without_labels_compacts_whole() {
+        let store = crate::graph::lpg::LpgStore::new().unwrap();
+        let vincent = store.create_node(&[]);
+        store.set_node_property(vincent, "name", Value::from("Vincent"));
+        let jules = store.create_node(&[]);
+        store.set_node_property(jules, "name", Value::from("Jules"));
+        let edge = store.create_edge(vincent, jules, "KNOWS");
+        store.set_edge_property(edge, "since", Value::Int64(1988));
+
+        for compact in [
+            from_graph_store_preserving_ids(&store).unwrap(),
+            from_graph_store(&store).unwrap(),
+        ] {
+            assert_eq!(compact.node_count(), 2, "both nodes");
+            assert_eq!(compact.edge_count(), 1, "their edge");
+            assert!(compact.all_labels().is_empty(), "no label");
+            assert_eq!(
+                knows(&compact),
+                vec![("Vincent".into(), "Jules".into(), Value::Int64(1988))]
+            );
+        }
     }
 }

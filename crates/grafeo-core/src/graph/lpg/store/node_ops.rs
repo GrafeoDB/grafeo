@@ -1400,3 +1400,286 @@ impl LpgStore {
         ids
     }
 }
+
+/// Copies of a compacted base's nodes, for the layered store this store is
+/// the overlay of.
+#[cfg(feature = "compact-store")]
+impl LpgStore {
+    /// Adopts node `id` of the compacted base this store is the overlay of,
+    /// before a write changes it: inserts it with `labels` and `properties`
+    /// as created at [`EpochId::INITIAL`] by the system (with `temporal`,
+    /// its label set and values too), so every reader sees the copy as it
+    /// saw the base node, whatever its snapshot. The label, property, text
+    /// and vector indexes and the live count take it in, as for a created
+    /// node; the id allocator is not touched (the base's ids are below it).
+    ///
+    /// Atomic: the node lock is held from the check that `id` is absent
+    /// until the copy is complete, so a reader (a checkpoint too) sees the
+    /// whole copy or none of it, and of two adoptions of one id only the
+    /// first inserts. Every lock the copy takes comes after the node lock
+    /// in the store's lock order.
+    ///
+    /// Returns `false`, changing nothing, when the store holds `id` already
+    /// (another write adopted it first).
+    #[cfg(not(feature = "tiered-storage"))]
+    pub(crate) fn adopt_node(
+        &self,
+        id: NodeId,
+        labels: &[&str],
+        properties: impl IntoIterator<Item = (PropertyKey, Value)>,
+    ) -> bool {
+        let mut nodes = self.nodes.write();
+        if nodes.contains_key(&id) {
+            return false;
+        }
+        let record = adopted_node_record(id, labels);
+        nodes.insert(
+            id,
+            VersionChain::with_initial(record, EpochId::INITIAL, TransactionId::SYSTEM),
+        );
+        self.fill_adopted_node(id, labels, properties);
+        drop(nodes);
+        true
+    }
+
+    /// Adopts node `id` of the compacted base this store is the overlay of.
+    /// (Tiered storage version: see the version without it.)
+    ///
+    /// The record goes into the current epoch's arena before the version
+    /// lock is taken (see the lock order on `arena_allocator`); an adoption
+    /// that then finds `id` taken leaves its record unused there.
+    #[cfg(feature = "tiered-storage")]
+    pub(crate) fn adopt_node(
+        &self,
+        id: NodeId,
+        labels: &[&str],
+        properties: impl IntoIterator<Item = (PropertyKey, Value)>,
+    ) -> bool {
+        if self.node_versions.read().contains_key(&id) {
+            return false;
+        }
+        let arena_epoch = self.current_epoch();
+        let (offset, _stored) = self
+            .arena_allocator
+            .arena_or_create(arena_epoch)
+            .expect("failed to create arena for epoch")
+            .alloc_value_with_offset(adopted_node_record(id, labels))
+            .expect("arena allocation failed for node record");
+        let mut versions = self.node_versions.write();
+        if versions.contains_key(&id) {
+            return false;
+        }
+        let hot_ref =
+            HotVersionRef::new(EpochId::INITIAL, arena_epoch, offset, TransactionId::SYSTEM);
+        versions.insert(id, VersionIndex::with_initial(hot_ref));
+        self.fill_adopted_node(id, labels, properties);
+        drop(versions);
+        true
+    }
+
+    /// Gives a node being adopted its labels and values at the initial
+    /// epoch, with the indexes they belong in, and counts it live. The
+    /// caller holds the node lock, which comes before every lock this takes.
+    fn fill_adopted_node(
+        &self,
+        id: NodeId,
+        labels: &[&str],
+        properties: impl IntoIterator<Item = (PropertyKey, Value)>,
+    ) {
+        #[cfg(not(feature = "temporal"))]
+        self.register_node_labels(id, labels);
+        #[cfg(feature = "temporal")]
+        self.register_node_labels(id, labels, EpochId::INITIAL);
+        for (key, value) in properties {
+            self.update_property_index_on_set(id, &key, &value);
+            #[cfg(feature = "text-index")]
+            self.update_text_index_on_set(id, key.as_str(), &value);
+            #[cfg(feature = "vector-index")]
+            let synced = key.clone();
+            #[cfg(not(feature = "temporal"))]
+            self.node_properties.set(id, key, value);
+            #[cfg(feature = "temporal")]
+            self.node_properties.set(id, key, value, EpochId::INITIAL);
+            #[cfg(feature = "vector-index")]
+            self.sync_vector_indexes_for_property(id, synced.as_str());
+        }
+        self.live_node_count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The record of an adopted node: created at the initial epoch. Its label
+/// count saturates at `u16::MAX` (the store reads the labels from its label
+/// map, not from this count).
+#[cfg(feature = "compact-store")]
+fn adopted_node_record(id: NodeId, labels: &[&str]) -> NodeRecord {
+    let mut record = NodeRecord::new(id, EpochId::INITIAL);
+    record.set_label_count(u16::try_from(labels.len()).unwrap_or(u16::MAX));
+    record
+}
+
+#[cfg(all(test, feature = "compact-store"))]
+mod adopt_tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    /// The sorted labels of `node`.
+    fn labels_of(node: &Node) -> Vec<String> {
+        let mut labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
+        labels.sort();
+        labels
+    }
+
+    /// Gus's values, as the compacted base holds them.
+    fn gus_values() -> [(PropertyKey, Value); 2] {
+        [
+            (PropertyKey::new("name"), Value::from("Gus")),
+            (PropertyKey::new("age"), Value::Int64(88)),
+        ]
+    }
+
+    /// An adopted node is there at every epoch, for a transaction and for a
+    /// read at an epoch alike, with its labels and values (with `temporal`,
+    /// their versions are at the initial epoch), and the label and property
+    /// indexes and the live count take it in.
+    #[test]
+    fn an_adopted_node_is_there_at_every_epoch() {
+        let store = LpgStore::new().unwrap();
+        store.create_property_index("name");
+        store.sync_epoch(EpochId::new(19));
+        let gus = NodeId::new(3);
+        assert!(store.adopt_node(gus, &["Person", "Employee"], gus_values()));
+
+        for epoch in [EpochId::INITIAL, EpochId::new(3), EpochId::new(19)] {
+            for (reader, node) in [
+                ("a read at the epoch", store.get_node_at_epoch(gus, epoch)),
+                (
+                    "a transaction",
+                    store.get_node_versioned(gus, epoch, TransactionId::new(88)),
+                ),
+            ] {
+                let node = node.unwrap_or_else(|| panic!("{reader} at {epoch:?} misses Gus"));
+                assert_eq!(
+                    labels_of(&node),
+                    ["Employee", "Person"],
+                    "{reader} at {epoch:?}"
+                );
+                assert_eq!(node.get_property("name"), Some(&Value::from("Gus")));
+                assert_eq!(node.get_property("age"), Some(&Value::Int64(88)));
+            }
+            assert!(store.is_node_visible_at_epoch(gus, epoch));
+        }
+        assert_eq!(store.node_count(), 1);
+        assert_eq!(store.nodes_by_label("Employee"), vec![gus]);
+        assert_eq!(store.nodes_by_label_count("Person"), 1);
+        assert_eq!(
+            store.find_nodes_by_property("name", &Value::from("Gus")),
+            vec![gus],
+            "the property index holds the adopted value"
+        );
+        store.compute_statistics();
+        assert_eq!(store.statistics().total_nodes, 1, "the live count");
+        #[cfg(feature = "temporal")]
+        assert_eq!(
+            store.node_property_history_for_key(gus, "age"),
+            vec![(EpochId::INITIAL, Value::Int64(88))],
+            "the value's version is at the initial epoch"
+        );
+    }
+
+    /// The text and vector indexes on an adopted node's label take in its
+    /// values, as they do a created node's.
+    #[cfg(all(feature = "text-index", feature = "vector-index"))]
+    #[test]
+    fn an_adopted_node_is_in_the_text_and_vector_indexes() {
+        use crate::index::text::{BM25Config, InvertedIndex};
+        use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind};
+
+        let store = LpgStore::new().unwrap();
+        let text = Arc::new(parking_lot::RwLock::new(InvertedIndex::new(
+            BM25Config::default(),
+        )));
+        store.add_text_index("Person", "bio", Arc::clone(&text));
+        let vectors = Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(HnswConfig::new(
+            3,
+            DistanceMetric::Euclidean,
+        ))));
+        store.add_vector_index("Person", "embedding", Arc::clone(&vectors));
+        let gus = NodeId::new(3);
+        assert!(store.adopt_node(
+            gus,
+            &["Person"],
+            [
+                (PropertyKey::new("bio"), Value::from("Amsterdam to Berlin")),
+                (
+                    PropertyKey::new("embedding"),
+                    Value::Vector(vec![3.0, 19.0, 88.0].into()),
+                ),
+            ],
+        ));
+        assert!(text.read().contains(gus), "the text index holds Gus");
+        assert!(vectors.contains(gus), "the vector index holds Gus");
+    }
+
+    /// Adopting takes no id from the allocator, also for an id above it: the
+    /// next create gets the id it would have got.
+    #[test]
+    fn adopting_leaves_the_id_allocator_alone() {
+        let store = LpgStore::new().unwrap();
+        store.set_next_node_id(19);
+        assert!(store.adopt_node(NodeId::new(3), &["Person"], []));
+        assert!(store.adopt_node(NodeId::new(88), &["Person"], []));
+        assert_eq!(store.next_node_id(), 19);
+        assert_eq!(store.create_node(&["Person"]), NodeId::new(19));
+    }
+
+    /// Adopting an id the store holds changes nothing: the node keeps the
+    /// labels and values written since it was adopted, and counts once.
+    #[test]
+    fn adopting_a_held_id_changes_nothing() {
+        let store = LpgStore::new().unwrap();
+        let gus = NodeId::new(3);
+        assert!(store.adopt_node(gus, &["Person"], gus_values()));
+        store.set_node_property(gus, "age", Value::Int64(19));
+        assert!(!store.adopt_node(gus, &["Director"], gus_values()));
+
+        let node = store.get_node(gus).unwrap();
+        assert_eq!(labels_of(&node), ["Person"]);
+        assert_eq!(node.get_property("age"), Some(&Value::Int64(19)));
+        assert_eq!(store.node_count(), 1);
+        assert_eq!(store.nodes_by_label("Director"), Vec::<NodeId>::new());
+        store.compute_statistics();
+        assert_eq!(store.statistics().total_nodes, 1, "the live count");
+    }
+
+    /// Threads adopting one id at the same time: one inserts, and the live
+    /// count and the label index count the node once.
+    #[test]
+    fn concurrent_adoptions_of_one_id_insert_once() {
+        const THREADS: usize = 3;
+        let store = Arc::new(LpgStore::new().unwrap());
+        for round in 0..88_u64 {
+            let id = NodeId::new(round);
+            let start = Arc::new(Barrier::new(THREADS));
+            let adopters: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    let (store, start) = (Arc::clone(&store), Arc::clone(&start));
+                    std::thread::spawn(move || {
+                        start.wait();
+                        store.adopt_node(id, &["Person"], gus_values())
+                    })
+                })
+                .collect();
+            let inserted = adopters
+                .into_iter()
+                .map(|adopter| adopter.join().unwrap())
+                .filter(|&inserted| inserted)
+                .count();
+            assert_eq!(inserted, 1, "round {round}: one adoption inserts");
+        }
+        assert_eq!(store.node_count(), 88);
+        assert_eq!(store.nodes_by_label_count("Person"), 88);
+        store.compute_statistics();
+        assert_eq!(store.statistics().total_nodes, 88, "the live count");
+    }
+}

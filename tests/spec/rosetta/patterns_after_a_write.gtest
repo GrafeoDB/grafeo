@@ -1,0 +1,142 @@
+# Rosetta: patterns after a write
+#
+# A pattern after a write in the same query sees all of what the query wrote
+# before it, also what the rows after the current one wrote: an OPTIONAL
+# MATCH, a MATCH that goes on from a node the write binds (an expand, a
+# shortest path, the labels and properties it checks), and a part of a MATCH
+# joined to another on a shared variable. An OPTIONAL MATCH after a write used
+# to see none of it (every row kept nulls), a MATCH from a written node only
+# what the rows up to its own wrote.
+#
+# Cypher needs a WITH between the write and a reading clause; GQL takes no
+# WHERE on a MATCH after a WITH (the WHERE goes into the element pattern).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Patterns after a write
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL MATCH: the row i writes (:N {k: i}) and looks for k: 4 - i
+  # ---------------------------------------------------------------------------
+
+  - name: an_optional_match_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) WITH i OPTIONAL MATCH (t:N {k: 4 - i}) RETURN i, t.k AS k"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i OPTIONAL MATCH (t:N {k: 4 - i}) RETURN i, t.k AS k"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 2]
+        - [3, 1]
+
+  - name: an_optional_match_after_a_write_sees_the_later_rows_through_an_index
+    setup:
+      - "CREATE INDEX idx_k FOR (n:N) ON (n.k)"
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) WITH i OPTIONAL MATCH (t:N {k: 4 - i}) RETURN i, t.k AS k"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i OPTIONAL MATCH (t:N {k: 4 - i}) RETURN i, t.k AS k"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 2]
+        - [3, 1]
+
+  # GQL takes an OPTIONAL MATCH right after an INSERT.
+  - name: an_optional_match_right_after_an_insert_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (n:N {k: i}) OPTIONAL MATCH (t:N {k: 4 - n.k}) RETURN i, t.k AS k"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 2]
+        - [3, 1]
+
+  # The condition that reads the row decides the matches: the row 1 looks for
+  # k: 4, which no row writes, and keeps its nulls.
+  - name: an_optional_match_after_a_write_keeps_a_row_without_a_match
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) WITH i OPTIONAL MATCH (t:N WHERE t.k = 5 - i) RETURN i, t.k AS k"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i OPTIONAL MATCH (t:N) WHERE t.k = 5 - i RETURN i, t.k AS k"
+    expect:
+      rows:
+        - [1, null]
+        - [2, 3]
+        - [3, 2]
+
+  # ---------------------------------------------------------------------------
+  # A MATCH from a written node: the row i merges the one hub and links a new
+  # (:Q {i: i}) to it, so every row sees four.
+  # ---------------------------------------------------------------------------
+
+  - name: an_expand_from_a_written_node_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) INSERT (h)-[:R]->(:Q {i: i}) WITH h, i MATCH (h)-[:R]->(q) RETURN i, count(q) AS found"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) CREATE (h)-[:R]->(:Q {i: i}) WITH h, i MATCH (h)-[:R]->(q) RETURN i, count(q) AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: an_optional_match_from_a_written_node_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) INSERT (h)-[:R]->(:Q {i: i}) WITH h, i OPTIONAL MATCH (h)-[:R]->(q:Q {i: 4}) RETURN i, q.i AS last"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) CREATE (h)-[:R]->(:Q {i: i}) WITH h, i OPTIONAL MATCH (h)-[:R]->(q:Q {i: 4}) RETURN i, q.i AS last"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: a_joined_part_of_a_match_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) INSERT (h)-[:R]->(:Q {i: i}) WITH h, i MATCH (h)-[:R]->(q), (q)<-[:R]-(g) RETURN i, count(*) AS found"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) CREATE (h)-[:R]->(:Q {i: i}) WITH h, i MATCH (h)-[:R]->(q), (q)<-[:R]-(g) RETURN i, count(*) AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  # The row i links the hubs k: i - 1 and k: i, so the path from its hub
+  # k: i - 1 to the last hub k: 4 has 5 - i edges, written by it and later rows.
+  - name: a_shortest_path_from_a_written_node_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (a:Hub {k: i - 1}) MERGE (b:Hub {k: i}) MERGE (z:Hub {k: 4}) INSERT (a)-[:R]->(b) WITH a, z, i MATCH p = ANY SHORTEST (a)-[*]->(z) RETURN i, length(p) AS hops"
+      cypher: "UNWIND range(1, 4) AS i MERGE (a:Hub {k: i - 1}) MERGE (b:Hub {k: i}) MERGE (z:Hub {k: 4}) CREATE (a)-[:R]->(b) WITH a, z, i MATCH p = shortestPath((a)-[*]->(z)) RETURN i, length(p) AS hops"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 3]
+        - [3, 2]
+        - [4, 1]
+
+  # The row i marks the hub k: i - 1, so the hub of each row but the last is
+  # marked by the row after it.
+  - name: the_label_check_on_a_written_node_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) SET b:Seen WITH a, i MATCH (a:Seen) RETURN i"
+      cypher: "UNWIND range(1, 4) AS i MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) SET b:Seen WITH a, i MATCH (a:Seen) RETURN i"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  - name: the_property_check_on_a_written_node_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) SET b.seen = true WITH a, i MATCH (a {seen: true}) RETURN i"
+      cypher: "UNWIND range(1, 4) AS i MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) SET b.seen = true WITH a, i MATCH (a {seen: true}) RETURN i"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]

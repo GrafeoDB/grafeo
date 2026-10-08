@@ -56,14 +56,21 @@ impl super::Planner {
 
         let output_schema = self.derive_schema_from_columns(&all_columns);
 
-        let join_op: Box<dyn Operator> = Box::new(HashJoinOperator::new(
+        let mut hash_join = HashJoinOperator::new(
             left_op,
             right_op,
             probe_keys,
             build_keys,
             physical_join_type,
             output_schema,
-        ));
+        );
+        // After a write (`... CREATE ... WITH h MATCH (h)-[:R]->(q), (q)<-[:R]-(g)`)
+        // the left side is read first, so that the right side sees what every
+        // left row wrote; the hash join reads its right side first otherwise.
+        if join.left.has_mutations() {
+            hash_join = hash_join.with_probe_first();
+        }
+        let join_op: Box<dyn Operator> = Box::new(hash_join);
 
         // Deduplicate shared variable columns: right-side columns that also
         // appear on the left are redundant (the join guarantees equality).
@@ -360,19 +367,13 @@ impl super::Planner {
     ///
     /// When `shared_variables` is non-empty, creates a correlated Apply that
     /// injects outer row values into the inner plan via [`ParameterState`].
+    /// Below a write, the Apply reads its whole input before the subquery
+    /// runs, so that the subquery sees what all the rows wrote (as a scan
+    /// after a write does, see `plan_node_scan`).
     pub(super) fn plan_apply(&self, apply: &ApplyOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // A subquery that comes first runs once, on one empty row.
-        let (outer_op, outer_columns): (Box<dyn Operator>, Vec<String>) =
-            if matches!(apply.input.as_ref(), LogicalOperator::Empty) {
-                (
-                    Box::new(
-                        grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
-                    ),
-                    Vec::new(),
-                )
-            } else {
-                self.plan_operator(&apply.input)?
-            };
+        let (outer_op, outer_columns) = self.plan_input(&apply.input)?;
+        let input_writes = apply.input.has_mutations();
         let output = subquery_output(&apply.subplan);
         let subplan = output.as_ref().unwrap_or(&apply.subplan);
 
@@ -392,6 +393,9 @@ impl super::Planner {
             let mut op = ApplyOperator::new(outer_op, inner_op);
             if apply.optional {
                 op = op.with_optional(inner_col_count);
+            }
+            if input_writes {
+                op = op.with_outer_first();
             }
             return Ok((Box::new(op), columns));
         }
@@ -447,6 +451,9 @@ impl super::Planner {
             ApplyOperator::new_correlated(outer_op, inner_op, param_state, param_col_indices);
         if apply.optional {
             op = op.with_optional(inner_col_count);
+        }
+        if input_writes {
+            op = op.with_outer_first();
         }
         Ok((Box::new(op), columns))
     }

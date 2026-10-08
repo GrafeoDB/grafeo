@@ -18,6 +18,8 @@ use parking_lot::RwLock;
 
 use super::CompactStore;
 use crate::graph::Direction;
+#[cfg(feature = "vector-index")]
+use crate::graph::lpg::BaseVectors;
 use crate::graph::lpg::{CompareOp, Edge, LpgStore, Node};
 use crate::graph::traits::{GraphStore, GraphStoreMut, GraphStoreSearch};
 #[cfg(feature = "vector-index")]
@@ -50,14 +52,19 @@ pub struct LayeredStore {
     /// acquire the current Arc via `self.base.load()` without locking;
     /// [`swap_base`](Self::swap_base) publishes a new base in a single
     /// `store()` call.
-    base: ArcSwap<CompactStore>,
+    ///
+    /// Shared with the overlay, whose vector indexes read the vectors of
+    /// the current base (see `LpgStore::set_base_vectors`).
+    base: Arc<ArcSwap<CompactStore>>,
     /// Mutable overlay for new and modified data.
     ///
     /// Held via [`ArcSwap`] (Phase 5c) so the engine can atomically
     /// replace the overlay with a fresh empty `LpgStore` after a
     /// `merge_overlay_in_place` call: existing readers continue holding
     /// the old `Arc` until they finish, while subsequent reads pick up
-    /// the empty overlay.
+    /// the empty overlay. Whoever keeps working with the overlay (the
+    /// engine's sessions and database) asks for it again after a merge, as
+    /// [`overlay_store`](Self::overlay_store) says.
     ///
     /// The overlay also keeps the tombstones of deleted base nodes and
     /// edges, in its undo log while their transaction is open, so a merge's
@@ -79,6 +86,23 @@ pub struct LayeredStore {
     /// [`read_consistent`](Self::read_consistent), which waits for it only
     /// while a merge publishes its result.
     merge_guard: RwLock<()>,
+    /// Keeps a copy of a base node or edge and a delete of it apart: held
+    /// by a copy (`ensure_in_overlay`, `ensure_edge_in_overlay`) from its
+    /// tombstone check to its dirty mark, and by a delete of a base entity
+    /// (`delete_node_from_layers`, `delete_edge_from_layers`,
+    /// `delete_node_edges`) from its dirty check to its tombstone. A copy
+    /// that comes second finds the tombstone and copies nothing; a delete
+    /// that comes second finds the copy and deletes it with the base entity.
+    /// Without it, a copy that checked for a tombstone before a delete wrote
+    /// one, and a delete that checked for a copy before the copy was made,
+    /// left a live copy of a deleted id.
+    ///
+    /// Lock order: after `merge_guard` (every mutation holds it shared, and
+    /// a merge, which holds it exclusively, never takes this one). Reads
+    /// never take it. A holder takes it once (a copy of an edge copies its
+    /// endpoints before it), and takes the dirty sets and the overlay's
+    /// locks one at a time while it holds it.
+    copies: parking_lot::Mutex<()>,
     /// Counts the publishes of merges and overlay resets: odd while one
     /// swaps the base and the overlay and clears the dirty and deleted sets,
     /// even otherwise. See [`read_consistent`](Self::read_consistent).
@@ -91,6 +115,10 @@ pub struct LayeredStore {
     /// test can read or panic inside a publish.
     #[cfg(test)]
     publish_hook: parking_lot::Mutex<Option<(PublishStep, TestHook)>>,
+    /// A test hook that a copy or a delete of a base entity runs once at a
+    /// step, so a test can run the other one there.
+    #[cfg(test)]
+    copy_hook: parking_lot::Mutex<Option<(CopyStep, TestHook)>>,
 }
 
 /// See [`LayeredStore::read_hook`] and [`LayeredStore::publish_hook`].
@@ -106,6 +134,21 @@ enum PublishStep {
     /// The base and the overlay are swapped, and the dirty and deleted sets
     /// are not cleared yet.
     LayersSwapped,
+}
+
+/// The step of a copy or a delete of a base entity at which
+/// [`LayeredStore::copy_hook`] runs.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyStep {
+    /// A copy of a base node: it found no tombstone, and copies nothing yet.
+    NodeCopy,
+    /// A delete of a base node: it deleted the copy it found, if any, and
+    /// writes no tombstone yet.
+    NodeDelete,
+    /// A copy of a base edge: it found no tombstone (its endpoints are
+    /// copied), and copies the edge itself not yet.
+    EdgeCopy,
 }
 
 #[cfg(test)]
@@ -200,33 +243,54 @@ impl LayeredStore {
                 dirty_edges.insert(edge.id);
             }
         }
+        let base = Arc::new(ArcSwap::new(base));
+        Self::read_base_vectors_from(&overlay, &base);
         Self {
-            base: ArcSwap::new(base),
+            base,
             overlay: ArcSwap::new(overlay),
             dirty_node_ids: RwLock::new(dirty_nodes),
             dirty_edge_ids: RwLock::new(dirty_edges),
             merge_guard: RwLock::new(()),
+            copies: parking_lot::Mutex::new(()),
             publish_generation: AtomicU64::new(0),
             #[cfg(test)]
             read_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             publish_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            copy_hook: parking_lot::Mutex::new(None),
         }
     }
 
     fn from_parts(base: Arc<CompactStore>, overlay: Arc<LpgStore>) -> Self {
+        let base = Arc::new(ArcSwap::new(base));
+        Self::read_base_vectors_from(&overlay, &base);
         Self {
-            base: ArcSwap::new(base),
+            base,
             overlay: ArcSwap::new(overlay),
             dirty_node_ids: RwLock::new(FxHashSet::default()),
             dirty_edge_ids: RwLock::new(FxHashSet::default()),
             merge_guard: RwLock::new(()),
+            copies: parking_lot::Mutex::new(()),
             publish_generation: AtomicU64::new(0),
             #[cfg(test)]
             read_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             publish_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            copy_hook: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Makes `overlay` read the vectors of `base` for its vector indexes,
+    /// which hold the base's nodes and the overlay's in one HNSW graph; its
+    /// successors after a merge read them too, from the base the merge
+    /// swaps in.
+    fn read_base_vectors_from(overlay: &LpgStore, base: &Arc<ArcSwap<CompactStore>>) {
+        #[cfg(feature = "vector-index")]
+        overlay.set_base_vectors(Arc::clone(base) as Arc<dyn BaseVectors>);
+        #[cfg(not(feature = "vector-index"))]
+        let _ = (overlay, base);
     }
 
     /// Sets the hook the next read runs once between its layer loads (see
@@ -265,6 +329,22 @@ impl LayeredStore {
         }
     }
 
+    /// Sets the hook the next copy or delete of a base entity runs once at
+    /// `step` (see `copy_hook`).
+    #[cfg(test)]
+    fn set_copy_hook(&self, step: CopyStep, hook: impl FnOnce(&LayeredStore) + Send + 'static) {
+        *self.copy_hook.lock() = Some((step, Box::new(hook)));
+    }
+
+    /// Runs the copy hook, if one is set for `step`, once.
+    #[cfg(test)]
+    fn run_copy_hook(&self, step: CopyStep) {
+        let hook = self.copy_hook.lock().take_if(|(at, _)| *at == step);
+        if let Some((_, hook)) = hook {
+            hook(self);
+        }
+    }
+
     /// Returns a shared reference to the compact base store.
     #[must_use]
     pub fn base_store_arc(&self) -> Arc<CompactStore> {
@@ -273,11 +353,13 @@ impl LayeredStore {
 
     /// Atomically replaces the compact base store.
     ///
-    /// The engine calls this after spilling the base to a mmap'd file: the
-    /// old in-memory `Arc<CompactStore>` drops (freeing heap memory once the
-    /// last external reference is released), and subsequent reads go through
-    /// the new mmap-backed `CompactStore`. Overlay state (dirty sets,
-    /// deleted sets, the overlay `LpgStore`) is untouched.
+    /// After a swap to a mmap-backed copy of the base, the old in-memory
+    /// `Arc<CompactStore>` drops (freeing heap memory once the last external
+    /// reference is released), and subsequent reads go through the new
+    /// mmap-backed `CompactStore`. Overlay state (dirty sets, deleted sets,
+    /// the overlay `LpgStore`) is untouched. A swap that publishes another
+    /// copy of a base read earlier uses [`swap_base_if`](Self::swap_base_if),
+    /// as the engine does, so it never undoes a merge.
     ///
     /// Returns the previous base `Arc`, so callers can inspect refcounts or
     /// keep it alive while in-flight readers drain.
@@ -285,11 +367,25 @@ impl LayeredStore {
         self.base.swap(new_base)
     }
 
+    /// Replaces the compact base with `new_base` only while it is still
+    /// `expected` (the same `Arc`), and returns whether it did.
+    ///
+    /// A tier change of the base (a spill to a mmap'd file or a reload)
+    /// swaps this way: it publishes another copy of the base it read, and a
+    /// merge of the overlay that replaced the base meanwhile must win, or
+    /// the merged changes would be gone with the old base.
+    pub fn swap_base_if(&self, expected: &Arc<CompactStore>, new_base: Arc<CompactStore>) -> bool {
+        let previous = self.base.compare_and_swap(expected, new_base);
+        Arc::ptr_eq(&previous, expected)
+    }
+
     /// Returns the current overlay LPG store as an owned `Arc`.
     ///
     /// Phase 5c: the overlay is now wrapped in an `ArcSwap` so it can
     /// be atomically replaced after a merge. Callers receive a snapshot
-    /// `Arc` that remains valid even if the overlay is later swapped.
+    /// `Arc` that remains valid even if the overlay is later swapped, but
+    /// no longer takes writes then: a caller that writes, commits or rolls
+    /// back through the overlay asks for it again for each such step.
     #[must_use]
     pub fn overlay_store(&self) -> Arc<LpgStore> {
         self.overlay.load_full()
@@ -320,15 +416,17 @@ impl LayeredStore {
         self.base.load().memory_bytes() + self.overlay_memory_bytes()
     }
 
-    /// Replaces the overlay with a fresh empty `LpgStore` and clears
-    /// dirty/deleted bookkeeping (Phase 5c).
+    /// Replaces the overlay with an empty `LpgStore` that carries on the old
+    /// one (see [`LpgStore::successor`]: named graphs, epoch, id allocators
+    /// and index definitions stay) and clears dirty/deleted bookkeeping
+    /// (Phase 5c).
     ///
     /// Atomic: in-flight readers holding an `Arc<LpgStore>` snapshot
     /// continue against the old overlay; subsequent reads pick up the
     /// fresh empty one.
     ///
-    /// The new overlay's id allocators are seeded from the *current*
-    /// base so freshly created nodes/edges don't collide with base ids.
+    /// The new overlay's node id allocator is past every id of the *current*
+    /// base, so freshly created nodes don't collide with base ids.
     ///
     /// # Panics
     ///
@@ -346,11 +444,12 @@ impl LayeredStore {
         drop(retired);
     }
 
-    /// Swaps in `base` (when given) and a fresh empty overlay whose id
-    /// allocators are seeded from that base (the old overlay's tombstones of
-    /// base deletes go with it), and clears the dirty bookkeeping, as one
-    /// publish: `publish_generation` is odd while it writes, so no read
-    /// combines one side of it with the other (see
+    /// Swaps in `base` (when given) and a fresh empty overlay that carries on
+    /// the old one (see [`LpgStore::successor`]), with its node id allocator
+    /// past that base (the old overlay's tombstones of base deletes go with
+    /// it), and clears the dirty bookkeeping, as one publish:
+    /// `publish_generation` is odd while it writes, so no read combines one
+    /// side of it with the other (see
     /// [`read_consistent`](Self::read_consistent)). The caller holds the
     /// write side of `merge_guard`, so no writer changes the overlay.
     ///
@@ -364,8 +463,29 @@ impl LayeredStore {
     /// `LpgStore`.
     #[must_use = "the retired layers are dropped by the caller, after it released the merge guard"]
     fn publish(&self, base: Option<Arc<CompactStore>>) -> RetiredLayers {
-        let fresh = Arc::new(LpgStore::new().expect("LpgStore allocation"));
-        // Seed allocators from the base so new ids don't collide.
+        // The new overlay carries on the old one (named graphs, epoch, id
+        // allocators, index definitions), so the sessions and the database,
+        // which follow the published overlay, keep all of it. A merged base
+        // leaves out the base nodes whose delete is committed, which no
+        // tombstone hides any longer: the shared text and vector indexes
+        // drop them.
+        let gone: Vec<NodeId> = if base.is_some() {
+            self.overlay
+                .load()
+                .base_tombstones()
+                .deleted_nodes()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let fresh = Arc::new(
+            self.overlay
+                .load()
+                .successor(&gone)
+                .expect("LpgStore allocation"),
+        );
+        // New ids never collide with the base's: the old overlay's
+        // allocators are at least past them, unless they were never seeded.
         let max_nid = base
             .as_deref()
             .map_or_else(
@@ -376,11 +496,7 @@ impl LayeredStore {
             .map(|id| id.as_u64())
             .max()
             .unwrap_or(0);
-        // Edge ids are not directly enumerable from CompactStore; use
-        // the current overlay's allocator as a conservative lower bound.
-        let max_eid = self.overlay.load().next_edge_id().saturating_sub(1);
-        fresh.set_next_node_id(max_nid + 1);
-        fresh.set_next_edge_id(max_eid + 1);
+        fresh.set_next_node_id(fresh.next_node_id().max(max_nid + 1));
 
         // Odd while the writes below are in progress. As in a textbook
         // sequence lock, a release fence follows the increment and pairs
@@ -494,6 +610,33 @@ impl LayeredStore {
         self.overlay.load().seed_base_tombstones(nodes, edges);
     }
 
+    /// Drops the compacted base, for a restore that replaces the whole
+    /// state: an empty base takes its place, and the tombstones of base
+    /// deletes and the ids of the base nodes and edges the overlay holds
+    /// copies of go with it, as one publish (readers see all of it or none,
+    /// as for a merge). The overlay stays as it is; the caller clears and
+    /// refills it.
+    ///
+    /// Returns the empty base, for the caller's tier wrapper.
+    pub fn drop_base(&self) -> Arc<CompactStore> {
+        let empty = Arc::new(CompactStore::empty());
+        let retired = {
+            let _guard = self.merge_guard.write();
+            let publishing = PublishInProgress::begin(&self.publish_generation);
+            let retired = self.base.swap(Arc::clone(&empty));
+            self.overlay
+                .load()
+                .seed_base_tombstones(std::iter::empty(), std::iter::empty());
+            self.dirty_node_ids.write().clear();
+            self.dirty_edge_ids.write().clear();
+            drop(publishing);
+            retired
+        };
+        // The old base is freed here, after the publish and the guard.
+        drop(retired);
+        empty
+    }
+
     /// Whether a committed delete was added since the last
     /// [`mark_deletions_clean`](Self::mark_deletions_clean) call. Used by
     /// the `OverlayDeletionsSection` to decide whether a periodic
@@ -513,8 +656,14 @@ impl LayeredStore {
     /// the base, and clears the overlay (Phase 5c).
     ///
     /// After this call: all previously-visible data is in the base; the
-    /// overlay is empty. Used by `OverlayConsumer` to release overlay
+    /// overlay is empty, and carries on the old one (see
+    /// [`LpgStore::successor`]). Used by `OverlayConsumer` to release overlay
     /// memory under pressure.
+    ///
+    /// The merge reads the current state, and the base has no versions: the
+    /// caller makes sure no transaction is open (an open transaction's
+    /// changes and snapshot would not survive it) and no commit is in
+    /// progress, as the engine's `OverlayConsumer` does.
     ///
     /// # Errors
     ///
@@ -672,6 +821,14 @@ impl LayeredStore {
             .load()
             .base_tombstones()
             .edge_deleted_for(id, epoch, transaction_id)
+    }
+}
+
+/// The current base lends its vectors to the overlay's vector indexes.
+#[cfg(feature = "vector-index")]
+impl BaseVectors for ArcSwap<CompactStore> {
+    fn with_base_vector(&self, id: NodeId, key: &PropertyKey, f: &mut dyn FnMut(&[f32])) -> bool {
+        self.load().with_node_vector(id, key, f)
     }
 }
 
@@ -1569,7 +1726,9 @@ impl GraphStoreSearch for LayeredStore {
     // nodes that overlay holds a committed tombstone for. A publish swaps the
     // overlay and its tombstones together, so a search never pairs an
     // overlay's index with the tombstones of another and never finds a
-    // deleted base node.
+    // deleted base node. A vector search without an index scans both layers
+    // through this store's reads, each of which leaves the deleted base nodes
+    // out.
     #[cfg(feature = "text-index")]
     fn text_search(
         &self,
@@ -1627,9 +1786,18 @@ impl GraphStoreSearch for LayeredStore {
         k: usize,
         metric: DistanceMetric,
     ) -> Vec<(NodeId, f64)> {
-        // Forward to overlay, then filter nodes deleted from base so stale hits
-        // from the underlying index do not leak through the layered view.
         let overlay = self.overlay_layer();
+        // The overlay's index holds the base's nodes beside its own and
+        // measures with the vectors of both. Without an index of the metric,
+        // the overlay's own scan would see only its nodes: scan both layers.
+        let indexed = label
+            .and_then(|label| overlay.vector_index_config(label, property))
+            .is_some_and(|config| config.metric == metric);
+        if !indexed {
+            return crate::index::vector::scan_nearest(self, label, property, query, k, metric);
+        }
+        // Filter nodes deleted from base so stale hits from the index do not
+        // leak through the layered view.
         let deleted = overlay.base_tombstones().deleted_nodes().count();
         let mut results = overlay.vector_search(label, property, query, k + deleted, metric);
         let tombstones = overlay.base_tombstones();
@@ -1638,7 +1806,8 @@ impl GraphStoreSearch for LayeredStore {
         results
     }
 
-    // Not under `read_consistent`: see `text_search`.
+    // A threshold search scans both layers (an index has none), through this
+    // store's reads, each under `read_consistent` (see `text_search`).
     #[cfg(feature = "vector-index")]
     fn vector_search_with_threshold(
         &self,
@@ -1648,12 +1817,7 @@ impl GraphStoreSearch for LayeredStore {
         threshold: f64,
         metric: DistanceMetric,
     ) -> Vec<(NodeId, f64)> {
-        let overlay = self.overlay_layer();
-        let mut results =
-            overlay.vector_search_with_threshold(label, property, query, threshold, metric);
-        let tombstones = overlay.base_tombstones();
-        results.retain(|&(id, _)| !tombstones.node_deleted(id));
-        results
+        crate::index::vector::scan_within(self, label, property, query, threshold, metric)
     }
 }
 
@@ -1682,6 +1846,10 @@ impl GraphStoreMut for LayeredStore {
         id
     }
 
+    // The endpoints are the caller's to check (see the trait); a base
+    // endpoint with a tombstone is not copied, and the edge is created all
+    // the same. The engine creates edges with `create_edge_versioned`, which
+    // refuses one.
     fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> EdgeId {
         let _guard = self.merge_guard.read();
         // Promote base-only endpoints into the overlay.
@@ -1692,6 +1860,13 @@ impl GraphStoreMut for LayeredStore {
         id
     }
 
+    /// Refuses an edge with a base endpoint that has a tombstone, which
+    /// `ensure_in_overlay` does not copy: the endpoint is deleted, or being
+    /// deleted by a transaction, and the edge would be a dangling one that
+    /// `edges_from` hides and `edge_count` counts. The engine's writer checks
+    /// that its transaction sees the endpoints and claims them first, so for
+    /// it this is a delete that another transaction committed after it
+    /// began: a write conflict, which its commit would report too.
     fn create_edge_versioned(
         &self,
         src: NodeId,
@@ -1699,16 +1874,24 @@ impl GraphStoreMut for LayeredStore {
         edge_type: &str,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> EdgeId {
+    ) -> grafeo_common::utils::error::Result<EdgeId> {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(src);
-        self.ensure_in_overlay(dst);
+        for endpoint in [src, dst] {
+            if !self.ensure_in_overlay(endpoint) {
+                return Err(grafeo_common::utils::error::Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::WriteConflict(format!(
+                        "cannot create a {edge_type} edge to node {}: it is deleted",
+                        endpoint.as_u64()
+                    )),
+                ));
+            }
+        }
         let id =
             self.overlay
                 .load()
                 .create_edge_versioned(src, dst, edge_type, epoch, transaction_id);
         self.dirty_edge_ids.write().insert(id);
-        id
+        Ok(id)
     }
 
     fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
@@ -1751,6 +1934,10 @@ impl GraphStoreMut for LayeredStore {
     // transaction deletes each edge with `delete_edge_versioned` instead.
     fn delete_node_edges(&self, node_id: NodeId) {
         let _guard = self.merge_guard.read();
+        // A write that copies one of the base edges at the same time comes
+        // first, and its copy is deleted below, or finds the tombstone (see
+        // `copies`).
+        let _copies = self.copies.lock();
         let overlay = self.overlay.load();
         // The overlay's edges of the node: its own, and the copies of base
         // edges that writes made. The node need not be dirty: after a reopen
@@ -1935,6 +2122,10 @@ impl LayeredStore {
     /// also after a reopen, whose overlay has no copy. A base node with a
     /// tombstone already is deleted, or being deleted by another transaction
     /// (whose delete took the copy too): the call returns `false` then.
+    ///
+    /// The check for a copy and the tombstone hold `copies`, so a write that
+    /// copies the node at the same time either comes first, and its copy is
+    /// deleted here, or comes after the tombstone and copies nothing.
     fn delete_node_from_layers(
         &self,
         id: NodeId,
@@ -1946,9 +2137,12 @@ impl LayeredStore {
         if self.base.load().get_node(id).is_none() {
             return delete_in_overlay(&overlay);
         }
+        let _copies = self.copies.lock();
         if self.is_node_dirty(id) {
             delete_in_overlay(&overlay)?;
         }
+        #[cfg(test)]
+        self.run_copy_hook(CopyStep::NodeDelete);
         Ok(overlay.tombstone_base_node(id, epoch, transaction_id))
     }
 
@@ -1965,6 +2159,7 @@ impl LayeredStore {
         if self.base.load().get_edge(id).is_none() {
             return delete_in_overlay(&overlay);
         }
+        let _copies = self.copies.lock();
         if self.is_edge_dirty(id) {
             delete_in_overlay(&overlay);
         }
@@ -1972,86 +2167,92 @@ impl LayeredStore {
     }
 
     /// Ensures a node exists in the overlay. If the node is base-only,
-    /// copies its labels and properties into the overlay and marks it dirty.
+    /// copies it with its labels and properties into the overlay and marks
+    /// it dirty.
+    ///
+    /// The copy is adopted (see `LpgStore::adopt_node`): created at the
+    /// initial epoch, so a transaction whose snapshot is older than this
+    /// write still sees the node, its labels and values, as it saw the base
+    /// node; in one step, so a reader of the overlay (a checkpoint too) sees
+    /// all of it or none, and a write that copies the node at the same time
+    /// finds it there instead of adding a second copy; and without the
+    /// overlay's id allocator, so a node created at the same time never gets
+    /// a base id.
     ///
     /// Returns `false` for a base node with a tombstone, which is not copied:
     /// a write must not bring a deleted node back, nor copy one another
     /// transaction is deleting (a copy that outlived the delete would be a
     /// live overlay node for a deleted base id). The caller then writes
     /// nothing.
+    ///
+    /// The tombstone check, the copy and its dirty mark hold `copies`, so a
+    /// delete of the node at the same time either comes first, and its
+    /// tombstone is found here, or comes after the dirty mark and deletes
+    /// the copy with the base node.
     fn ensure_in_overlay(&self, id: NodeId) -> bool {
         if self.is_node_dirty(id) {
             return true; // already in overlay
         }
-        if self.overlay.load().base_tombstones().has_node(id) {
-            return false;
-        }
         let Some(base_node) = self.base.load().get_node(id) else {
             return true; // not in base either (new node case handled by caller)
         };
-
-        // Copy the node into the overlay at the same ID.
-        // We temporarily lower the ID counter, create the node, then restore it.
-        let saved_next = self.overlay.load().next_node_id();
-        self.overlay.load().set_next_node_id(id.as_u64());
-        let labels: Vec<&str> = base_node.labels.iter().map(|l| l.as_str()).collect();
-        let promoted_id = self.overlay.load().create_node(&labels);
-        debug_assert_eq!(
-            promoted_id, id,
-            "promoted node should reuse the original ID"
-        );
-        self.overlay.load().set_next_node_id(saved_next);
-
-        // Copy properties.
-        for (key, value) in base_node.properties.iter() {
-            self.overlay
-                .load()
-                .set_node_property(id, key.as_str(), value.clone());
+        let _copies = self.copies.lock();
+        if self.is_node_dirty(id) {
+            return true; // copied meanwhile
         }
-
+        let overlay = self.overlay.load();
+        if overlay.base_tombstones().has_node(id) {
+            return false;
+        }
+        #[cfg(test)]
+        self.run_copy_hook(CopyStep::NodeCopy);
+        let labels: Vec<&str> = base_node.labels.iter().map(ArcStr::as_str).collect();
+        // `false` when a concurrent write adopted it first: the copy is
+        // there either way.
+        overlay.adopt_node(id, &labels, base_node.properties);
         self.dirty_node_ids.write().insert(id);
         true
     }
 
     /// Ensures an edge exists in the overlay, as
-    /// [`ensure_in_overlay`](Self::ensure_in_overlay) does a node; `false`
-    /// for a base edge with a tombstone.
+    /// [`ensure_in_overlay`](Self::ensure_in_overlay) does a node (its
+    /// endpoints first, then the edge, adopted in one step at the initial
+    /// epoch without the id allocator, under `copies`); `false` for a base
+    /// edge with a tombstone, or with an endpoint that has one (the copy
+    /// would be a live edge of a deleted node).
     fn ensure_edge_in_overlay(&self, id: EdgeId) -> bool {
         if self.is_edge_dirty(id) {
             return true;
         }
-        if self.overlay.load().base_tombstones().has_edge(id) {
+        let overlay = self.overlay.load();
+        if overlay.base_tombstones().has_edge(id) {
             return false;
         }
         let Some(base_edge) = self.base.load().get_edge(id) else {
             return true;
         };
 
-        // Ensure endpoints are in the overlay first.
-        self.ensure_in_overlay(base_edge.src);
-        self.ensure_in_overlay(base_edge.dst);
+        // The endpoints first: each copy takes `copies` itself.
+        if !self.ensure_in_overlay(base_edge.src) || !self.ensure_in_overlay(base_edge.dst) {
+            return false;
+        }
 
-        // Create the edge at the same ID.
-        let saved_next = self.overlay.load().next_edge_id();
-        self.overlay.load().set_next_edge_id(id.as_u64());
-        let promoted_id = self.overlay.load().create_edge(
+        let _copies = self.copies.lock();
+        if self.is_edge_dirty(id) {
+            return true; // copied meanwhile
+        }
+        if overlay.base_tombstones().has_edge(id) {
+            return false;
+        }
+        #[cfg(test)]
+        self.run_copy_hook(CopyStep::EdgeCopy);
+        overlay.adopt_edge(
+            id,
             base_edge.src,
             base_edge.dst,
             base_edge.edge_type.as_str(),
+            base_edge.properties,
         );
-        debug_assert_eq!(
-            promoted_id, id,
-            "promoted edge should reuse the original ID"
-        );
-        self.overlay.load().set_next_edge_id(saved_next);
-
-        // Copy properties.
-        for (key, value) in base_edge.properties.iter() {
-            self.overlay
-                .load()
-                .set_edge_property(id, key.as_str(), value.clone());
-        }
-
         self.dirty_edge_ids.write().insert(id);
         true
     }
@@ -2924,8 +3125,9 @@ mod tests {
 
         // Overlay edge is readable
         let barcelona = layered.create_node(&["City"]);
-        let overlay_eid =
-            layered.create_edge_versioned(persons[0], barcelona, "VISITS", epoch, txn_id);
+        let overlay_eid = layered
+            .create_edge_versioned(persons[0], barcelona, "VISITS", epoch, txn_id)
+            .unwrap();
         let edge = layered
             .get_edge_versioned(overlay_eid, epoch, txn_id)
             .unwrap();
@@ -5059,7 +5261,7 @@ mod tests {
         }
     }
 
-    /// The ids each search read of `store` finds, and Gus if his text score
+    /// The ids each index search of `store` finds, and Gus if his text score
     /// is given.
     #[cfg(any(feature = "text-index", feature = "vector-index"))]
     fn search_hits(store: &dyn GraphStoreSearch, gus: NodeId) -> Vec<(&'static str, Vec<NodeId>)> {
@@ -5071,8 +5273,17 @@ mod tests {
         let mut hits = Vec::new();
         #[cfg(feature = "text-index")]
         {
+            // A store scores any node once it has the index: a node the
+            // index does not hold scores 0.
             let scored = store.score_text(gus, "Person", "bio", "graph");
-            hits.push(("score_text", scored.map(|_| gus).into_iter().collect()));
+            hits.push((
+                "score_text",
+                scored
+                    .filter(|&score| score > 0.0)
+                    .map(|_| gus)
+                    .into_iter()
+                    .collect(),
+            ));
             hits.push((
                 "text_search",
                 ids(store.text_search("Person", "bio", "graph", 10)),
@@ -5089,31 +5300,58 @@ mod tests {
                 "vector_search",
                 ids(store.vector_search(Some("Person"), "embedding", &query, 10, metric)),
             ));
-            hits.push((
+        }
+        #[cfg(not(feature = "text-index"))]
+        let _ = gus;
+        hits
+    }
+
+    /// The ids each vector scan of `store` finds: a threshold search, and a
+    /// search without an index of its metric.
+    #[cfg(feature = "vector-index")]
+    fn scan_hits(store: &dyn GraphStoreSearch) -> Vec<(&'static str, Vec<NodeId>)> {
+        let ids = |hits: Vec<(NodeId, f64)>| -> Vec<NodeId> {
+            let mut ids: Vec<NodeId> = hits.into_iter().map(|(id, _)| id).collect();
+            ids.sort_unstable();
+            ids
+        };
+        let query = [1.0, 0.0];
+        vec![
+            (
                 "vector_search_with_threshold",
                 ids(store.vector_search_with_threshold(
                     Some("Person"),
                     "embedding",
                     &query,
                     1.0,
-                    metric,
+                    DistanceMetric::Euclidean,
                 )),
-            ));
-        }
-        hits
+            ),
+            (
+                "vector_search without an index of its metric",
+                ids(store.vector_search(
+                    Some("Person"),
+                    "embedding",
+                    &query,
+                    10,
+                    DistanceMetric::Manhattan,
+                )),
+            ),
+        ]
     }
 
-    /// The search reads run outside `read_consistent` and drop the overlay
+    /// The index searches run outside `read_consistent` and drop the overlay
     /// index's hits for base nodes deleted since the last merge. The overlay
     /// keeps the tombstones, so a publish swaps them with its index and a
     /// search in its middle never pairs the old overlay's index with the new
     /// overlay's (empty) tombstones: Gus, deleted from the base, is never
-    /// found, before the merge, inside its publish or after it. The text
-    /// index holds him as the engine builds one over the base, and his
-    /// embedding copies him into the overlay for the vector search to find;
-    /// the tombstone is written after the copy, beside it, as a delete never
-    /// leaves one (it deletes the copy too), so the overlay's own searches
-    /// still find him.
+    /// found, before the merge, inside its publish or after it. The indexes
+    /// hold him as the engine builds them over the base (his embedding copies
+    /// him into the overlay and its vector index); the tombstone is written
+    /// after the copy, beside it, as a delete never leaves one (it deletes
+    /// the copy too), so the overlay's own searches still find him. The
+    /// vector scans of both layers read through `read_consistent`, which
+    /// waits out a publish: they miss him before the merge and after it.
     #[cfg(any(feature = "text-index", feature = "vector-index"))]
     #[test]
     fn a_search_inside_a_publish_never_finds_a_deleted_base_node() {
@@ -5129,6 +5367,16 @@ mod tests {
             layered
                 .overlay_store()
                 .add_text_index("Person", "bio", Arc::new(RwLock::new(index)));
+        }
+        #[cfg(feature = "vector-index")]
+        {
+            use crate::index::vector::{HnswConfig, HnswIndex, VectorIndexKind};
+            let index = HnswIndex::new(HnswConfig::new(2, DistanceMetric::Euclidean));
+            layered.overlay_store().add_vector_index(
+                "Person",
+                "embedding",
+                Arc::new(VectorIndexKind::Hnsw(index)),
+            );
         }
         for id in [alix, gus] {
             layered.set_node_property(id, "embedding", Value::Vector(vec![1.0, 0.0].into()));
@@ -5149,6 +5397,20 @@ mod tests {
             before.iter().all(|(_, ids)| !ids.contains(&gus)),
             "before the merge: {before:?}"
         );
+        #[cfg(feature = "vector-index")]
+        let scanned_before = {
+            let overlay = scan_hits(&*overlay_store);
+            assert!(
+                overlay.iter().all(|(_, ids)| ids.contains(&gus)),
+                "the overlay's own scans find Gus: {overlay:?}"
+            );
+            let scanned = scan_hits(&layered);
+            assert!(
+                scanned.iter().all(|(_, ids)| ids == &vec![alix]),
+                "the scans before the merge: {scanned:?}"
+            );
+            scanned
+        };
 
         let inside: Arc<parking_lot::Mutex<Option<Vec<(&'static str, Vec<NodeId>)>>>> =
             Arc::new(parking_lot::Mutex::new(None));
@@ -5169,6 +5431,83 @@ mod tests {
         assert_eq!(
             inside, after,
             "a search inside the publish finds what one after it does"
+        );
+        #[cfg(feature = "vector-index")]
+        assert_eq!(
+            scan_hits(&layered),
+            scanned_before,
+            "the scans after the merge"
+        );
+    }
+
+    /// A merge's new overlay carries on the old one: the same named graphs,
+    /// the epoch, an id allocator that hands out no id twice, the property
+    /// index keys (with no entries: the old overlay's nodes are in the base
+    /// now), and the text index, without the base node whose delete the
+    /// merge applied.
+    #[test]
+    fn a_merge_carries_on_the_overlay() {
+        let layered = build_test_layered();
+        let persons = layered.nodes_by_label("Person");
+        let (alix, gus) = (persons[0], persons[1]);
+        let old = layered.overlay_store();
+        let model = old.graph_or_create("model").unwrap();
+        old.sync_epoch(EpochId::new(19));
+        old.create_property_index("name");
+        #[cfg(feature = "text-index")]
+        {
+            use crate::index::text::{BM25Config, InvertedIndex};
+            let mut index = InvertedIndex::new(BM25Config::default());
+            index.insert(alix, "graph notes");
+            index.insert(gus, "graph notes");
+            old.add_text_index("Person", "bio", Arc::new(RwLock::new(index)));
+        }
+        let vincent = layered.create_node(&["Person"]);
+        layered.set_node_property(vincent, "name", Value::from("Vincent"));
+        let jules = layered.create_node(&["Person"]);
+        assert!(layered.delete_node(jules));
+        assert!(
+            layered.delete_node(gus),
+            "a committed delete of a base node"
+        );
+
+        layered.merge_overlay_in_place().unwrap();
+        let new = layered.overlay_store();
+        assert!(!Arc::ptr_eq(&new, &old), "the merge starts a new overlay");
+        assert!(
+            Arc::ptr_eq(&new.graph("model").unwrap(), &model),
+            "the named graph is the same store"
+        );
+        assert_eq!(new.current_epoch(), EpochId::new(19));
+        assert!(new.has_property_index("name"));
+        assert!(
+            new.find_nodes_by_property("name", &Value::from("Vincent"))
+                .is_empty(),
+            "Vincent is in the base now, not in the new overlay's index"
+        );
+        assert_eq!(
+            layered.find_nodes_by_property("name", &Value::from("Vincent")),
+            vec![vincent],
+            "the layered store finds him once"
+        );
+        let mia = layered.create_node(&["Person"]);
+        assert!(
+            mia.as_u64() > jules.as_u64(),
+            "no id is handed out twice: {mia:?} after {jules:?}"
+        );
+        #[cfg(feature = "text-index")]
+        assert_eq!(
+            layered.text_search("Person", "bio", "graph", 10),
+            new.text_search("Person", "bio", "graph", 10),
+        );
+        #[cfg(feature = "text-index")]
+        assert_eq!(
+            new.text_search("Person", "bio", "graph", 10)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![alix],
+            "the text index keeps Alix and drops Gus, whose delete was merged"
         );
     }
 
@@ -5526,16 +5865,17 @@ mod tests {
         for _ in 0..3 {
             store.create_node(&["Repository"]);
         }
-        // A node with both labels is in a base table of its own.
+        // A node with both labels is in a base table of its own, which both
+        // labels read.
         store.create_node(&["Graph", "Repository"]);
         let max_node_id = store.node_ids().iter().map(|id| id.as_u64()).max().unwrap();
         let compact = from_graph_store_preserving_ids(&store).unwrap();
         let layered = change_layers(LayeredStore::new(compact, max_node_id, 0).unwrap());
-        // Graph: 19 in the base less the deleted one, with the copies and the
-        // new Tag node in the overlay. Repository: 3 in the base less the one
+        // Graph: 20 in the base less the deleted one, with the copies and the
+        // new Tag node in the overlay. Repository: 4 in the base less the one
         // that lost it, plus the one that gained it and the new one.
-        assert_eq!(layered.nodes_by_label_count("Graph"), 19);
-        assert_eq!(layered.nodes_by_label_count("Repository"), 4);
+        assert_eq!(layered.nodes_by_label_count("Graph"), 20);
+        assert_eq!(layered.nodes_by_label_count("Repository"), 5);
 
         // The overlay of a reopened database, whose copies are found again.
         let reopened =
@@ -5896,5 +6236,555 @@ mod tests {
         assert!(layered.get_node(gus).is_none());
         assert_eq!(layered.nodes_by_label("Director"), Vec::<NodeId>::new());
         assert_eq!(layered.node_count(), 2);
+    }
+
+    // ── Copies of base entities: at the initial epoch, atomic ─────────
+
+    /// The labels of `node`, as text.
+    fn label_names(node: &Node) -> Vec<&str> {
+        node.labels.iter().map(ArcStr::as_str).collect()
+    }
+
+    /// A base node or edge that a write copies into the overlay is there for
+    /// a reader whose snapshot is older than the copy, with its labels and
+    /// values: the copy is created at the initial epoch, as the base entity
+    /// it copies is there at every epoch (guarantee 10, N2).
+    #[test]
+    fn a_copy_is_there_for_a_reader_older_than_the_copy() {
+        let layered = build_test_layered();
+        let (alix, gus, _, alix_edge) = fixture_ids(&layered);
+        let older = layered.current_epoch();
+        // Commits after the reader began move the overlay's epoch on; then
+        // a new edge copies Gus, and a new value copies Alix's edge (and
+        // Alix).
+        layered
+            .overlay_store()
+            .sync_epoch(EpochId::new(older.as_u64() + 3));
+        let vincent = layered.create_node(&["Person"]);
+        layered.create_edge(vincent, gus, "KNOWS");
+        layered.set_edge_property(alix_edge, "note", Value::from("Paris"));
+        assert!(layered.is_node_dirty(gus) && layered.is_node_dirty(alix));
+        assert!(layered.is_edge_dirty(alix_edge));
+
+        for (reader, node) in [
+            (
+                "a transaction",
+                layered.get_node_versioned(gus, older, READER),
+            ),
+            ("a read at the epoch", layered.get_node_at_epoch(gus, older)),
+        ] {
+            let node = node.unwrap_or_else(|| panic!("{reader} older than the copy misses Gus"));
+            assert_eq!(label_names(&node), ["Person"], "{reader}: his label");
+            assert_eq!(
+                node.get_property("name"),
+                Some(&Value::from("Gus")),
+                "{reader}: his name"
+            );
+            assert_eq!(
+                node.get_property("age"),
+                Some(&Value::Int64(25)),
+                "{reader}: his age"
+            );
+        }
+        assert!(layered.is_node_visible_versioned(gus, older, READER));
+        assert!(layered.is_node_visible_at_epoch(gus, older));
+        assert_eq!(
+            layered.filter_visible_node_ids_versioned(&[alix, gus, vincent], older, READER),
+            vec![alix, gus],
+            "the copies are there, the node created after the reader began is not"
+        );
+        for (reader, edge) in [
+            (
+                "a transaction",
+                layered.get_edge_versioned(alix_edge, older, READER),
+            ),
+            (
+                "a read at the epoch",
+                layered.get_edge_at_epoch(alix_edge, older),
+            ),
+        ] {
+            let edge =
+                edge.unwrap_or_else(|| panic!("{reader} older than the copy misses Alix's edge"));
+            assert_eq!(
+                edge.get_property("since"),
+                Some(&Value::Int64(2020)),
+                "{reader}: its value"
+            );
+        }
+        assert!(layered.is_edge_visible_versioned(alix_edge, older, READER));
+        assert!(layered.is_edge_visible_at_epoch(alix_edge, older));
+        assert_eq!(
+            layered
+                .edge_type_versioned(alix_edge, older, READER)
+                .as_deref(),
+            Some("LIVES_IN")
+        );
+    }
+
+    /// A copy takes no id from the overlay's allocator: the next node and
+    /// edge ids stay where they were, and the next create gets them.
+    #[test]
+    fn a_copy_takes_no_id_from_the_allocator() {
+        let layered = build_test_layered();
+        let (alix, gus, _, alix_edge) = fixture_ids(&layered);
+        let overlay = layered.overlay_store();
+        let (next_node, next_edge) = (overlay.next_node_id(), overlay.next_edge_id());
+        layered.set_node_property(gus, "age", Value::Int64(19));
+        layered.set_edge_property(alix_edge, "since", Value::Int64(1988));
+        assert!(
+            layered.is_node_dirty(alix),
+            "the edge copied its source too"
+        );
+        assert_eq!(
+            (overlay.next_node_id(), overlay.next_edge_id()),
+            (next_node, next_edge),
+            "the copies left the allocator alone"
+        );
+        let vincent = layered.create_node(&["Person"]);
+        let knows = layered.create_edge(vincent, gus, "KNOWS");
+        assert_eq!(
+            (vincent.as_u64(), knows.as_u64()),
+            (next_node, next_edge),
+            "the next creates get the next ids"
+        );
+    }
+
+    /// A layered store whose base holds `count` people (`Person`, with a
+    /// name and an age) and a `KNOWS` edge (with `since`) from each to the
+    /// next, for the copy races.
+    fn layered_people(count: usize) -> (Arc<LayeredStore>, Vec<NodeId>, Vec<EdgeId>) {
+        let store = LpgStore::new().unwrap();
+        let people: Vec<NodeId> = (0..count)
+            .map(|i| {
+                store.create_node_with_props(
+                    &["Person"],
+                    [
+                        ("name", Value::from(format!("Gus {i}"))),
+                        ("age", Value::Int64(i64::try_from(i).unwrap())),
+                    ],
+                )
+            })
+            .collect();
+        let knows: Vec<EdgeId> = people
+            .windows(2)
+            .map(|pair| {
+                store.create_edge_with_props(
+                    pair[0],
+                    pair[1],
+                    "KNOWS",
+                    [("since", Value::Int64(1988))],
+                )
+            })
+            .collect();
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+        let (max_node, max_edge) = (
+            people.last().unwrap().as_u64(),
+            knows.last().unwrap().as_u64(),
+        );
+        let layered = LayeredStore::new(compact, max_node, max_edge).unwrap();
+        (Arc::new(layered), people, knows)
+    }
+
+    /// Sets a flag when dropped, also when its thread panics, so a loop that
+    /// waits for the thread ends either way.
+    struct DoneOnDrop(Arc<AtomicBool>);
+
+    impl Drop for DoneOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    /// Two writes that copy the same base node, or the same base edge, at
+    /// the same time leave one copy: the overlay holds each once, with its
+    /// values and one adjacency entry, and the counts of the overlay (its
+    /// live counters too) and of the layered store stay right (N3).
+    #[test]
+    fn two_concurrent_copies_of_one_entity_leave_one_copy() {
+        use std::sync::Barrier;
+
+        const PEOPLE: usize = 388;
+        let (layered, people, knows) = layered_people(PEOPLE);
+        let start = Arc::new(Barrier::new(2));
+        let writers: Vec<_> = (0..2)
+            .map(|_| {
+                let (layered, people, knows, start) = (
+                    Arc::clone(&layered),
+                    people.clone(),
+                    knows.clone(),
+                    Arc::clone(&start),
+                );
+                std::thread::spawn(move || {
+                    for &person in &people {
+                        start.wait();
+                        layered.add_label(person, "Director");
+                    }
+                    for &edge in &knows {
+                        start.wait();
+                        layered.set_edge_property(edge, "note", Value::from("Paris"));
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("a writer panicked");
+        }
+
+        let overlay = layered.overlay_store();
+        assert_eq!(overlay.node_count(), PEOPLE, "one copy per person");
+        assert_eq!(overlay.edge_count(), PEOPLE - 1, "one copy per edge");
+        overlay.compute_statistics();
+        let statistics = overlay.statistics();
+        assert_eq!(
+            (statistics.total_nodes, statistics.total_edges),
+            (
+                u64::try_from(PEOPLE).unwrap(),
+                u64::try_from(PEOPLE - 1).unwrap()
+            ),
+            "the overlay's live counters"
+        );
+        assert_eq!(
+            statistics
+                .edge_types
+                .get("KNOWS")
+                .map(|knows| knows.edge_count),
+            Some(u64::try_from(PEOPLE - 1).unwrap()),
+            "the overlay's live count of KNOWS edges"
+        );
+        assert_eq!(layered.node_count(), PEOPLE);
+        assert_eq!(layered.edge_count(), PEOPLE - 1);
+        assert_eq!(layered.nodes_by_label_count("Person"), PEOPLE);
+        assert_eq!(layered.nodes_by_label_count("Director"), PEOPLE);
+        for (i, &person) in people.iter().enumerate() {
+            let node = layered.get_node(person).unwrap();
+            assert_eq!(
+                node.get_property("name"),
+                Some(&Value::from(format!("Gus {i}"))),
+                "person {i} keeps the name"
+            );
+            assert_eq!(
+                overlay.edges_from(person, Direction::Outgoing).count(),
+                usize::from(i + 1 < PEOPLE),
+                "person {i}: one adjacency entry per copied edge"
+            );
+        }
+    }
+
+    /// Copies of base nodes and edges never touch the overlay's id
+    /// allocator: nodes and edges created at the same time never get a base
+    /// id, which would shadow the base entity, and the next ids never drop
+    /// below where they were (N3).
+    #[test]
+    fn copies_never_hand_a_base_id_to_a_concurrent_create() {
+        use std::sync::Barrier;
+
+        const PEOPLE: usize = 388;
+        const CREATES: usize = 1988;
+        let (layered, people, knows) = layered_people(PEOPLE);
+        let overlay = layered.overlay_store();
+        let (first_node, first_edge) = (overlay.next_node_id(), overlay.next_edge_id());
+        let start = Arc::new(Barrier::new(2));
+        let copier = {
+            let (layered, people, start) =
+                (Arc::clone(&layered), people.clone(), Arc::clone(&start));
+            std::thread::spawn(move || {
+                start.wait();
+                for &person in &people {
+                    layered.add_label(person, "Director");
+                }
+                for &edge in &knows {
+                    layered.set_edge_property(edge, "note", Value::from("Paris"));
+                }
+            })
+        };
+        let creator = {
+            let layered = Arc::clone(&layered);
+            std::thread::spawn(move || {
+                let overlay = layered.overlay_store();
+                let mut created = Vec::with_capacity(CREATES);
+                let mut lowest_next = (u64::MAX, u64::MAX);
+                start.wait();
+                for _ in 0..CREATES {
+                    let city = layered.create_node(&["City"]);
+                    let near = layered.create_edge(city, city, "NEAR");
+                    created.push((city, near));
+                    lowest_next.0 = lowest_next.0.min(overlay.next_node_id());
+                    lowest_next.1 = lowest_next.1.min(overlay.next_edge_id());
+                }
+                (created, lowest_next)
+            })
+        };
+        copier.join().expect("the copier panicked");
+        let (created, lowest_next) = creator.join().expect("the creator panicked");
+
+        for &(city, near) in &created {
+            assert!(
+                city.as_u64() >= first_node && near.as_u64() >= first_edge,
+                "a create got a base id: node {city:?}, edge {near:?}"
+            );
+        }
+        assert!(
+            lowest_next.0 > first_node && lowest_next.1 > first_edge,
+            "the next ids dropped to {lowest_next:?} from ({first_node}, {first_edge})"
+        );
+        assert_eq!(layered.node_count(), PEOPLE + CREATES);
+        assert_eq!(layered.edge_count(), PEOPLE - 1 + CREATES);
+        assert_eq!(layered.nodes_by_label_count("City"), CREATES);
+        for (i, &person) in people.iter().enumerate() {
+            let node = layered.get_node(person).unwrap();
+            assert_eq!(
+                node.get_property("name"),
+                Some(&Value::from(format!("Gus {i}"))),
+                "person {i} is not shadowed by a created node"
+            );
+        }
+    }
+
+    /// A reader of the overlay, as a checkpoint is, sees a copied base node
+    /// or edge whole or not at all: never without the labels and values it
+    /// copies (N4).
+    #[test]
+    fn a_reader_of_the_overlay_never_sees_part_of_a_copy() {
+        let (layered, people, knows) = layered_people(388);
+        let overlay = layered.overlay_store();
+        let done = Arc::new(AtomicBool::new(false));
+        let copier = {
+            let (layered, people, knows, done) = (
+                Arc::clone(&layered),
+                people.clone(),
+                knows.clone(),
+                Arc::clone(&done),
+            );
+            std::thread::spawn(move || {
+                let _done = DoneOnDrop(done);
+                for &person in &people {
+                    layered.add_label(person, "Director");
+                }
+                for &edge in &knows {
+                    layered.set_edge_property(edge, "note", Value::from("Paris"));
+                }
+            })
+        };
+        while !done.load(Ordering::Acquire) {
+            for &person in &people {
+                if let Some(node) = overlay.get_node(person) {
+                    assert!(
+                        label_names(&node).contains(&"Person")
+                            && node.get_property("name").is_some()
+                            && node.get_property("age").is_some(),
+                        "part of a copy: {node:?}"
+                    );
+                }
+            }
+            for &edge in &knows {
+                if let Some(copy) = overlay.get_edge(edge) {
+                    assert!(
+                        copy.get_property("since").is_some(),
+                        "part of a copy: {copy:?}"
+                    );
+                }
+            }
+        }
+        copier.join().expect("the copier panicked");
+        assert_eq!(overlay.node_count(), people.len(), "every person copied");
+    }
+
+    // ── Copies racing deletes of the same base entity ────────────────
+
+    /// How long the second write of a race gets to finish while the first
+    /// waits at its step: without the copy lock it runs to its end in that
+    /// time; with it, it waits for the first.
+    const RACE_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+    /// Runs `first` here; when it reaches `step`, runs `second` on another
+    /// thread and gives it [`RACE_WINDOW`] before `first` goes on. Returns
+    /// once both are done.
+    fn race_at(
+        layered: &Arc<LayeredStore>,
+        step: CopyStep,
+        first: impl FnOnce(&LayeredStore),
+        second: impl FnOnce(&LayeredStore) + Send + 'static,
+    ) {
+        let other = Arc::clone(layered);
+        let thread: Arc<parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        let started = Arc::clone(&thread);
+        layered.set_copy_hook(step, move |_| {
+            let (done, finished) = std::sync::mpsc::channel();
+            *started.lock() = Some(std::thread::spawn(move || {
+                second(&other);
+                let _ = done.send(());
+            }));
+            let _ = finished.recv_timeout(RACE_WINDOW);
+        });
+        first(layered);
+        let second = thread
+            .lock()
+            .take()
+            .expect("the first write reached its step");
+        second.join().expect("the second write panicked");
+    }
+
+    /// Commits the deleting transaction of the tombstone tests.
+    fn commit_deleter(layered: &LayeredStore) {
+        let overlay = layered.overlay_store();
+        let commit = EpochId::new(layered.current_epoch().as_u64() + 1);
+        overlay.finalize_version_epochs(DELETER, commit);
+        overlay.commit_transaction_properties(DELETER);
+        overlay.sync_epoch(commit);
+    }
+
+    /// Gus is deleted, and the overlay holds no live copy of him: every
+    /// read and count misses him.
+    fn assert_gus_is_gone(layered: &LayeredStore, gus: NodeId) {
+        assert!(layered.get_node(gus).is_none(), "Gus is deleted");
+        assert_eq!(layered.node_count(), 2, "Alix and Amsterdam");
+        assert_eq!(layered.nodes_by_label_count("Person"), 1, "Alix");
+        assert!(!layered.node_ids().contains(&gus));
+        assert!(
+            layered.overlay_store().get_node(gus).is_none(),
+            "no live copy of the deleted Gus in the overlay"
+        );
+    }
+
+    /// A write that copies Gus while a transaction deletes him: the copy
+    /// found no tombstone, then the delete found no copy and wrote one. The
+    /// delete waits for the copy, then deletes it too, so no live copy of
+    /// the deleted node is left.
+    #[test]
+    fn a_copy_racing_a_delete_of_its_node_leaves_no_live_copy() {
+        let layered = Arc::new(build_test_layered());
+        let (gus, _, epoch) = gus_and_his_edge(&layered);
+        race_at(
+            &layered,
+            CopyStep::NodeCopy,
+            |layered| layered.set_node_property(gus, "age", Value::Int64(19)),
+            move |layered| {
+                assert!(layered.delete_node_versioned(gus, epoch, DELETER).unwrap());
+            },
+        );
+        commit_deleter(&layered);
+        assert_gus_is_gone(&layered, gus);
+    }
+
+    /// The other order: the delete found no copy, then a write copies Gus
+    /// before the tombstone is there. The copy waits for the delete, then
+    /// finds the tombstone and copies nothing.
+    #[test]
+    fn a_delete_racing_a_copy_of_its_node_leaves_no_live_copy() {
+        let layered = Arc::new(build_test_layered());
+        let (gus, _, epoch) = gus_and_his_edge(&layered);
+        race_at(
+            &layered,
+            CopyStep::NodeDelete,
+            |layered| assert!(layered.delete_node_versioned(gus, epoch, DELETER).unwrap()),
+            move |layered| layered.set_node_property(gus, "age", Value::Int64(19)),
+        );
+        commit_deleter(&layered);
+        assert_gus_is_gone(&layered, gus);
+    }
+
+    /// The base edge is deleted, and the overlay holds no live copy of it.
+    fn assert_edge_is_gone(layered: &LayeredStore, edge: EdgeId) {
+        assert!(layered.get_edge(edge).is_none(), "the edge is deleted");
+        assert_eq!(layered.edge_count(), 1, "Alix's edge");
+        assert!(
+            layered.overlay_store().get_edge(edge).is_none(),
+            "no live copy of the deleted edge in the overlay"
+        );
+    }
+
+    /// A write that copies Gus's edge while a transaction deletes the edge:
+    /// the delete waits for the copy and deletes it too.
+    #[test]
+    fn a_copy_racing_a_delete_of_its_edge_leaves_no_live_copy() {
+        let layered = Arc::new(build_test_layered());
+        let (_, edge, epoch) = gus_and_his_edge(&layered);
+        race_at(
+            &layered,
+            CopyStep::EdgeCopy,
+            |layered| layered.set_edge_property(edge, "since", Value::Int64(1988)),
+            move |layered| assert!(layered.delete_edge_versioned(edge, epoch, DELETER)),
+        );
+        commit_deleter(&layered);
+        assert_edge_is_gone(&layered, edge);
+    }
+
+    /// An edge to a base node whose delete is in progress in another
+    /// transaction, or committed, is refused as a write conflict, and
+    /// nothing is written: no dangling edge that `edges_from` hides and
+    /// `edge_count` counts.
+    #[test]
+    fn an_edge_to_a_deleted_base_node_is_refused() {
+        use grafeo_common::utils::error::{Error, TransactionError};
+
+        let layered = build_test_layered();
+        let (alix, ..) = fixture_ids(&layered);
+        let (gus, edge, epoch) = gus_and_his_edge(&layered);
+        let vincent = layered.create_node(&["Person"]);
+        delete_gus_in_a_transaction(&layered, gus, edge);
+        let edges_before = layered.overlay_store().edge_count();
+
+        let while_deleting = layered.create_edge_versioned(vincent, gus, "KNOWS", epoch, READER);
+        commit_deleter(&layered);
+        let after_the_commit = layered.create_edge_versioned(
+            gus,
+            alix,
+            "KNOWS",
+            layered.current_epoch(),
+            TransactionId::SYSTEM,
+        );
+        for (when, created) in [
+            ("while the delete is in progress", while_deleting),
+            ("after its commit", after_the_commit),
+        ] {
+            assert!(
+                matches!(
+                    created,
+                    Err(Error::Transaction(TransactionError::WriteConflict(_)))
+                ),
+                "{when}: got {created:?}"
+            );
+        }
+        assert_eq!(
+            layered.overlay_store().edge_count(),
+            edges_before,
+            "no edge written"
+        );
+        assert_eq!(layered.edge_count(), 1, "Alix's edge");
+        assert_eq!(
+            layered.edges_from(vincent, Direction::Outgoing),
+            Vec::<(NodeId, EdgeId)>::new()
+        );
+        assert!(!layered.is_node_dirty(gus), "Gus is not copied");
+    }
+
+    /// A write to a base edge whose endpoint is deleted copies nothing: the
+    /// copy would be a live edge of a deleted node.
+    #[test]
+    fn an_edge_of_a_deleted_base_node_is_not_copied() {
+        let layered = build_test_layered();
+        let (gus, edge, _) = gus_and_his_edge(&layered);
+        // The node alone: its edge stays in the base.
+        assert!(layered.delete_node(gus));
+        layered.set_edge_property(edge, "since", Value::Int64(1988));
+
+        assert!(!layered.is_edge_dirty(edge));
+        assert!(layered.overlay_store().get_edge(edge).is_none());
+        assert_eq!(layered.overlay_store().edge_count(), 0);
+    }
+
+    /// The same for the edges of a node deleted outside a transaction
+    /// (`delete_node_edges`, as a `DETACH DELETE` there does).
+    #[test]
+    fn a_copy_racing_a_delete_of_its_node_edges_leaves_no_live_copy() {
+        let layered = Arc::new(build_test_layered());
+        let (gus, edge, _) = gus_and_his_edge(&layered);
+        race_at(
+            &layered,
+            CopyStep::EdgeCopy,
+            |layered| layered.set_edge_property(edge, "since", Value::Int64(1988)),
+            move |layered| layered.delete_node_edges(gus),
+        );
+        assert_edge_is_gone(&layered, edge);
     }
 }

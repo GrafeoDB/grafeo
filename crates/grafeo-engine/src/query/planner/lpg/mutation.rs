@@ -208,17 +208,8 @@ impl super::Planner {
         &self,
         left_join: &LeftJoinOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Handle Empty left input (OPTIONAL MATCH as first clause):
-        // substitute a SingleRowOperator so the left side produces one row.
-        let (left_op, left_columns): (Box<dyn Operator>, Vec<String>) =
-            if matches!(left_join.left.as_ref(), LogicalOperator::Empty) {
-                let single_row: Box<dyn Operator> = Box::new(
-                    grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
-                );
-                (single_row, Vec::new())
-            } else {
-                self.plan_operator(&left_join.left)?
-            };
+        // An OPTIONAL MATCH that comes first matches from one empty row.
+        let (left_op, left_columns) = self.plan_input(&left_join.left)?;
         let (right_op, right_columns) = self.plan_operator(&left_join.right)?;
         let left_types = self.derive_schema_from_columns(&left_columns);
         let right_types = self.derive_schema_from_columns(&right_columns);
@@ -248,6 +239,10 @@ impl super::Planner {
             }
             None => None,
         };
+        // After a write (`... CREATE ... WITH i OPTIONAL MATCH (t {k: 301 - i})`)
+        // the left side is read first, so that the right side sees what every
+        // left row wrote; the hash join reads its right side first otherwise.
+        let left_writes = left_join.left.has_mutations();
         let (join_op, join_columns, _join_types) = super::common::build_left_join(
             left_op,
             right_op,
@@ -255,7 +250,15 @@ impl super::Planner {
             &right_columns,
             &left_types,
             &right_types,
-            residual,
+            |mut join| {
+                if let Some(residual) = residual {
+                    join = join.with_residual(residual);
+                }
+                if left_writes {
+                    join = join.with_probe_first();
+                }
+                join
+            },
         );
 
         Ok((join_op, join_columns))
@@ -283,50 +286,29 @@ impl super::Planner {
         &self,
         unwind: &UnwindOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Plan the input operator first
-        // Handle Empty specially - use a single-row operator
+        // An UNWIND that comes first unwinds a list it computes once, in a
+        // column of its own on the one empty row (see `plan_input`).
         let unwinds_a_constant = matches!(&*unwind.input, LogicalOperator::Empty);
-        let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) =
-            if matches!(&*unwind.input, LogicalOperator::Empty) {
-                // For UNWIND without prior MATCH, create a single-row input
-                // We need an operator that produces one row with the list to unwind
-                // For now, use EmptyScan which produces no rows - we'll handle the literal
-                // list in the unwind operator itself
-                let literal_list = self.convert_expression(&unwind.expression)?;
-
-                // Create a project operator that produces a single row with the list
-                let single_row_op: Box<dyn Operator> = Box::new(
-                    grafeo_core::execution::operators::single_row::SingleRowOperator::new(),
-                );
-                let project_op: Box<dyn Operator> = Box::new(
-                    ProjectOperator::with_store(
-                        single_row_op,
-                        vec![ProjectExpr::Expression {
-                            expr: literal_list,
-                            variable_columns: HashMap::new(),
-                        }],
-                        vec![LogicalType::Any],
-                        Arc::clone(&self.store),
-                    )
-                    .with_transaction_context(self.viewing_epoch, self.transaction_id)
-                    .with_session_context(self.session_context.clone()),
-                );
-
-                // The logical tree still contains Unwind(Empty), so under
-                // PROFILE, build_profile_tree will walk into Empty and expect
-                // an entry. plan_operator(&Empty) returns Err and is bypassed
-                // here, so push a synthetic entry attributed to Empty.
-                if self.profiling.get() {
-                    let (entry, _stats) = crate::query::profile::ProfileEntry::new(
-                        "Empty",
-                        LogicalOperator::Empty.display_label(),
-                    );
-                    self.profile_entries.borrow_mut().push(entry);
-                }
-                (project_op, vec!["__list__".to_string()])
-            } else {
-                self.plan_operator(&unwind.input)?
-            };
+        let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) = if unwinds_a_constant {
+            let literal_list = self.convert_expression(&unwind.expression)?;
+            let (single_row_op, _) = self.plan_input(&unwind.input)?;
+            let project_op: Box<dyn Operator> = Box::new(
+                ProjectOperator::with_store(
+                    single_row_op,
+                    vec![ProjectExpr::Expression {
+                        expr: literal_list,
+                        variable_columns: HashMap::new(),
+                    }],
+                    vec![LogicalType::Any],
+                    Arc::clone(&self.store),
+                )
+                .with_transaction_context(self.viewing_epoch, self.transaction_id)
+                .with_session_context(self.session_context.clone()),
+            );
+            (project_op, vec!["__list__".to_string()])
+        } else {
+            self.plan_operator(&unwind.input)?
+        };
 
         // The list is a column of the input (the one row of a constant list, or
         // a variable), or an expression evaluated per row in a column of its
@@ -426,9 +408,10 @@ impl super::Planner {
 
     /// Plans a MERGE operator.
     pub(super) fn plan_merge(&self, merge: &MergeOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Plan the input operator if present (skip if Empty)
-        let (mut input_op, mut columns) = if matches!(merge.input.as_ref(), LogicalOperator::Empty)
-        {
+        // A MERGE that comes first runs once without an input, or on the one
+        // empty row when it computes a property (below).
+        let starts_the_query = matches!(merge.input.as_ref(), LogicalOperator::Empty);
+        let (mut input_op, mut columns) = if starts_the_query {
             (None, Vec::new())
         } else {
             let (op, cols) = self.plan_operator(&merge.input)?;
@@ -438,8 +421,13 @@ impl super::Planner {
         // Match properties cannot reference the MERGE variable (ISO §15.5).
         // Computed values (`toString(i)`) are evaluated per input row.
         let match_properties = self.row_property_sources(&merge.match_properties, &columns)?;
-        if input_op.is_none() && has_computed_source(&match_properties) {
-            input_op = Some(single_row_input());
+        if starts_the_query {
+            if has_computed_source(&match_properties) {
+                input_op = Some(self.plan_input(&merge.input)?.0);
+            } else {
+                // PROFILE walks `Empty` too, which no operator reads here.
+                self.record_absorbed_scan_entry("Empty", &merge.input);
+            }
         }
 
         // ON CREATE / ON MATCH expressions are evaluated against an augmented row

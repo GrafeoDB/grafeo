@@ -44,24 +44,112 @@ use grafeo_common::utils::hash::FxHashMap;
 use self::node_table::NodeTable;
 use self::rel_table::RelTable;
 use crate::graph::Direction;
-use crate::statistics::Statistics;
+use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
+
+/// The key of the node table holding the nodes whose labels are `labels`:
+/// the labels in name order without repeats, each with `\` and `|` escaped
+/// by a `\`, joined with `|`. A single label without either character is its
+/// own key.
+///
+/// A file names each node table by its key, and [`labels_of_key`] reads the
+/// labels back from it, whatever they hold: a label `In|Out` and the labels
+/// `In` and `Out` get different keys. The nodes without labels have the
+/// empty key, so the empty label alone is keyed `|` (two empty labels, which
+/// read back as one).
+#[must_use]
+pub(crate) fn label_set_key<S: AsRef<str>>(labels: &[S]) -> ArcStr {
+    let mut sorted: Vec<&str> = labels.iter().map(AsRef::as_ref).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    if sorted == [""] {
+        return ArcStr::from("|");
+    }
+    let mut key = String::new();
+    for (index, label) in sorted.iter().enumerate() {
+        if index > 0 {
+            key.push('|');
+        }
+        for character in label.chars() {
+            if matches!(character, '\\' | '|') {
+                key.push('\\');
+            }
+            key.push(character);
+        }
+    }
+    ArcStr::from(key)
+}
+
+/// The labels of a node table's key as [`label_set_key`] writes it, in name
+/// order; none for the empty key. A `\` before anything but `\` or `|` is a
+/// backslash of the label: builds before 0.6.0 wrote keys without escapes
+/// (see [`labels_of_unescaped_key`]).
+#[must_use]
+pub(crate) fn labels_of_key(key: &str) -> Vec<ArcStr> {
+    if key.is_empty() {
+        return Vec::new();
+    }
+    let mut labels = Vec::new();
+    let mut label = String::new();
+    let mut characters = key.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => match characters.next() {
+                Some(escaped @ ('\\' | '|')) => label.push(escaped),
+                Some(other) => {
+                    label.push('\\');
+                    label.push(other);
+                }
+                None => label.push('\\'),
+            },
+            '|' => labels.push(ArcStr::from(std::mem::take(&mut label))),
+            other => label.push(other),
+        }
+    }
+    labels.push(ArcStr::from(label));
+    in_label_order(labels)
+}
+
+/// The labels of a node table's key as 0.5.x wrote it (the version 1, 2 and
+/// 3 encodings): the node's labels joined with `|`, without escapes. A label
+/// that held a `|` cannot be told from two labels there; it reads as two.
+#[must_use]
+pub(crate) fn labels_of_unescaped_key(key: &str) -> Vec<ArcStr> {
+    if key.is_empty() {
+        return Vec::new();
+    }
+    in_label_order(key.split('|').map(ArcStr::from).collect())
+}
+
+/// `labels` in name order without repeats.
+fn in_label_order(mut labels: Vec<ArcStr>) -> Vec<ArcStr> {
+    labels.sort_unstable();
+    labels.dedup();
+    labels
+}
 
 /// A read-only columnar graph store.
 ///
-/// Node data is stored in per-label [`NodeTable`]s and edge data in per-type
+/// Node data is stored in [`NodeTable`]s, one per label set: a node with the
+/// labels `Person` and `Actor` is a row of the table of that set, which every
+/// read of either label reads. Edge data is stored in per-type
 /// [`RelTable`]s. The store is immutable after construction: use
 /// [`CompactStoreBuilder`] to populate it from raw data.
 pub struct CompactStore {
     /// Node tables indexed by table_id for O(1) lookup from NodeId.
     node_tables_by_id: Vec<NodeTable>,
-    /// table_id lookup from label string (for nodes_by_label).
+    /// table_id lookup from a table's key (see [`label_set_key`]).
     label_to_table_id: FxHashMap<ArcStr, u16>,
+    /// The labels of each table's nodes, by table_id, in name order.
+    table_labels: Vec<Vec<ArcStr>>,
+    /// The tables whose nodes have a label, in table order (for
+    /// `nodes_by_label`).
+    label_to_table_ids: FxHashMap<ArcStr, Vec<u16>>,
     /// Relationship tables indexed by rel_table_id for O(1) lookup from EdgeId.
     rel_tables_by_id: Vec<RelTable>,
     /// rel_table_id lookup from edge type string (one edge type may span
     /// multiple src/dst label combinations, so the value is a Vec).
     edge_type_to_rel_id: FxHashMap<ArcStr, Vec<u16>>,
-    /// Lookup: table ID -> label.
+    /// Lookup: table ID -> the table's key.
     table_id_to_label: Vec<ArcStr>,
     /// Lookup: rel table ID -> edge type.
     rel_table_id_to_type: Vec<ArcStr>,
@@ -96,21 +184,62 @@ impl std::fmt::Debug for CompactStore {
 }
 
 impl CompactStore {
-    /// Creates a new `CompactStore` from pre-built components.
+    /// Creates a new `CompactStore` from pre-built components:
+    /// `table_labels` holds the labels of each node table's nodes, by table
+    /// id, in name order. Derives the lookups and the statistics.
     ///
-    /// Prefer using [`CompactStoreBuilder`] which validates schemas and
-    /// computes statistics automatically. This constructor is `pub(crate)`
-    /// because it assumes all invariants are already satisfied.
+    /// Prefer using [`CompactStoreBuilder`] which validates schemas. This
+    /// constructor is `pub(crate)` because it assumes all invariants are
+    /// already satisfied.
     #[must_use]
     pub(crate) fn new(
         node_tables_by_id: Vec<NodeTable>,
-        label_to_table_id: FxHashMap<ArcStr, u16>,
+        table_labels: Vec<Vec<ArcStr>>,
         rel_tables_by_id: Vec<RelTable>,
         edge_type_to_rel_id: FxHashMap<ArcStr, Vec<u16>>,
-        table_id_to_label: Vec<ArcStr>,
         rel_table_id_to_type: Vec<ArcStr>,
-        statistics: Statistics,
     ) -> Self {
+        debug_assert_eq!(
+            table_labels.len(),
+            node_tables_by_id.len(),
+            "one label set per node table"
+        );
+        let table_id_to_label: Vec<ArcStr> = node_tables_by_id
+            .iter()
+            .map(|table| ArcStr::from(table.label()))
+            .collect();
+        let mut label_to_table_id: FxHashMap<ArcStr, u16> = FxHashMap::default();
+        let mut label_to_table_ids: FxHashMap<ArcStr, Vec<u16>> = FxHashMap::default();
+        let mut label_counts: FxHashMap<&str, u64> = FxHashMap::default();
+        for (table, (key, labels)) in node_tables_by_id
+            .iter()
+            .zip(table_id_to_label.iter().zip(&table_labels))
+        {
+            let table_id = table.table_id();
+            label_to_table_id.insert(key.clone(), table_id);
+            for label in labels {
+                label_to_table_ids
+                    .entry(label.clone())
+                    .or_default()
+                    .push(table_id);
+                *label_counts.entry(label.as_str()).or_default() += table.len() as u64;
+            }
+        }
+
+        let mut statistics = Statistics::new();
+        for (label, count) in label_counts {
+            statistics.update_label(label, LabelStatistics::new(count));
+        }
+        let mut edge_counts: FxHashMap<&str, u64> = FxHashMap::default();
+        for (table, edge_type) in rel_tables_by_id.iter().zip(&rel_table_id_to_type) {
+            *edge_counts.entry(edge_type.as_str()).or_default() += table.num_edges() as u64;
+        }
+        for (edge_type, count) in edge_counts {
+            statistics.update_edge_type(edge_type, EdgeTypeStatistics::new(count, 0.0, 0.0));
+        }
+        statistics.total_nodes = node_tables_by_id.iter().map(|t| t.len() as u64).sum();
+        statistics.total_edges = rel_tables_by_id.iter().map(|t| t.num_edges() as u64).sum();
+
         // Pre-compute src/dst rel_table_id mappings per node table_id.
         let node_table_count = node_tables_by_id.len();
         let mut src_rel_table_ids = vec![Vec::new(); node_table_count];
@@ -138,6 +267,8 @@ impl CompactStore {
         Self {
             node_tables_by_id,
             label_to_table_id,
+            table_labels,
+            label_to_table_ids,
             rel_tables_by_id,
             edge_type_to_rel_id,
             table_id_to_label,
@@ -152,6 +283,26 @@ impl CompactStore {
         }
     }
 
+    /// A store without nodes or edges that preserves ids (with empty id
+    /// maps), as a compacted base that holds nothing.
+    #[must_use]
+    pub fn empty() -> Self {
+        let mut store = Self::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            FxHashMap::default(),
+            Vec::new(),
+        );
+        store.set_id_maps(
+            FxHashMap::default(),
+            FxHashMap::default(),
+            Vec::new(),
+            Vec::new(),
+        );
+        store
+    }
+
     /// Resolves a table_id to its [`NodeTable`].
     #[inline]
     fn resolve_node_table(&self, table_id: u16) -> Option<&NodeTable> {
@@ -164,10 +315,29 @@ impl CompactStore {
         self.rel_tables_by_id.get(rel_table_id as usize)
     }
 
-    /// Returns a reference to the node table for the given label, if any.
+    /// The labels of the nodes of table `table_id`, in name order (empty for
+    /// a table that does not exist).
+    #[inline]
+    fn labels_of_table(&self, table_id: u16) -> &[ArcStr] {
+        self.table_labels
+            .get(usize::from(table_id))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The ids of the tables whose nodes have `label`, in table order.
+    #[inline]
+    fn tables_with_label(&self, label: &str) -> &[u16] {
+        self.label_to_table_ids
+            .get(label)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Returns the node table of the nodes whose only label is `label`, if
+    /// any. Nodes that have `label` beside other labels are rows of the
+    /// tables of their label sets.
     #[must_use]
     pub fn node_table(&self, label: &str) -> Option<&NodeTable> {
-        let &tid = self.label_to_table_id.get(label)?;
+        let &tid = self.label_to_table_id.get(&label_set_key(&[label]))?;
         self.node_tables_by_id.get(tid as usize)
     }
 
@@ -195,16 +365,14 @@ impl CompactStore {
             .unwrap_or_default()
     }
 
-    /// Whether `nodes_by_label(label)` holds `id`: the node is a row of the
-    /// table of `label` (a node with several labels is in the table of their
-    /// combined key, not in those of each label).
+    /// Whether `nodes_by_label(label)` holds `id`: the node is a row of a
+    /// table whose label set has `label`.
     #[must_use]
     pub(crate) fn node_in_label(&self, id: NodeId, label: &str) -> bool {
-        let Some(&table_id) = self.label_to_table_id.get(label) else {
-            return false;
-        };
         self.resolve_node(id).is_some_and(|(table, offset)| {
-            table == table_id
+            self.labels_of_table(table)
+                .binary_search_by(|held| held.as_str().cmp(label))
+                .is_ok()
                 && self
                     .resolve_node_table(table)
                     .zip(usize::try_from(offset).ok())
@@ -212,7 +380,9 @@ impl CompactStore {
         })
     }
 
-    /// Returns the label for a given table ID, if valid.
+    /// Returns the key of a table ID, if valid: the labels of its nodes in
+    /// name order, joined with `|` (and `\` and `|` in a label escaped by a
+    /// `\`); a table of single-label nodes has their label as its key.
     #[must_use]
     pub fn label_for_table_id(&self, table_id: u16) -> Option<&ArcStr> {
         self.table_id_to_label.get(table_id as usize)

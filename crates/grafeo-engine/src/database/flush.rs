@@ -191,7 +191,7 @@ impl CheckpointSources {
             .last_assigned_transaction_id()
             .map_or(0, |t| t.0);
         #[cfg(feature = "lpg")]
-        if let Some(store) = &self.store {
+        if let Some(store) = &self.root_store() {
             // After `compact()` the store is the overlay: count the base too.
             #[cfg(feature = "compact-store")]
             if let Some(layered) = &self.layered {

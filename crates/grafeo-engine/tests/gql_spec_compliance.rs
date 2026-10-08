@@ -2724,7 +2724,7 @@ fn test_property_data_type_typed_list() {
     use grafeo_engine::catalog::PropertyDataType;
 
     // LIST<STRING> should parse from type name
-    let t = PropertyDataType::from_type_name("LIST<STRING>");
+    let t = PropertyDataType::from_type_name("LIST<STRING>").unwrap();
     assert_eq!(t.to_string(), "LIST<STRING>");
 
     // Should match a list of strings
@@ -2736,12 +2736,12 @@ fn test_property_data_type_typed_list() {
     assert!(!t.matches(&mixed));
 
     // Untyped LIST should match any list
-    let untyped = PropertyDataType::from_type_name("LIST");
+    let untyped = PropertyDataType::from_type_name("LIST").unwrap();
     assert!(untyped.matches(&list));
     assert!(untyped.matches(&mixed));
 
     // Nested: LIST<LIST<INT64>>
-    let nested = PropertyDataType::from_type_name("LIST<LIST>");
+    let nested = PropertyDataType::from_type_name("LIST<LIST>").unwrap();
     assert_eq!(nested.to_string(), "LIST<LIST>");
 }
 
@@ -2749,13 +2749,13 @@ fn test_property_data_type_typed_list() {
 fn test_property_data_type_node_edge() {
     use grafeo_engine::catalog::PropertyDataType;
 
-    let node_type = PropertyDataType::from_type_name("NODE");
+    let node_type = PropertyDataType::from_type_name("NODE").unwrap();
     assert_eq!(node_type.to_string(), "NODE");
 
-    let edge_type = PropertyDataType::from_type_name("EDGE");
+    let edge_type = PropertyDataType::from_type_name("EDGE").unwrap();
     assert_eq!(edge_type.to_string(), "EDGE");
 
-    let edge_type2 = PropertyDataType::from_type_name("RELATIONSHIP");
+    let edge_type2 = PropertyDataType::from_type_name("RELATIONSHIP").unwrap();
     assert_eq!(edge_type2.to_string(), "EDGE");
 }
 

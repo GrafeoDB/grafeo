@@ -163,7 +163,7 @@ block.
 
 | Value | Name | Version | Description |
 |-------|------|---------|-------------|
-| 1 | `CATALOG` | 1 | Schema definitions, index definitions, epoch |
+| 1 | `CATALOG` | 2 | Schema definitions, index definitions and index names, as [records](#catalog-records) |
 | 2 | `LPG_STORE` | 3 | Nodes, edges, properties, named graphs |
 | 3 | `RDF_STORE` | 3 | RDF triples, named graphs |
 | 4 | `COMPACT_STORE` | 5 | Columnar base of the layered compact store |
@@ -202,18 +202,17 @@ A section is written as a stream of chunks, which the reader gathers back by
 section type. The chunk fields (graph, column, rows, codec) let a section split
 its data into many independently addressable chunks. Every section of a
 checkpoint writes a metadata chunk (`chunk_kind` 1), first (in `LPG_STORE`
-last), and its data in chunks of their own, except the `CATALOG` section,
-which is still written as one raw chunk (`chunk_kind` 0) holding its
-serialized bytes. A file written by 0.5.x holds every section as one raw
-chunk, which the section's 0.5.x reader reads.
+last), and its data in chunks of their own. A file written by 0.5.x holds
+every section as one raw chunk (`chunk_kind` 0) of its serialized bytes,
+which the section's 0.5.x reader reads.
 
 | Kind | Name | Holds | Written by |
 |------|------|-------|------------|
-| 0 | `Raw` | A section's bytes, whole | `CATALOG`, and every section of a 0.5.x file |
-| 1 | `Meta` | The section's metadata: a layout byte, the caps it was written with, and its graphs, columns or streams | Every other section, once |
+| 0 | `Raw` | A section's bytes, whole | Every section of a 0.5.x file |
+| 1 | `Meta` | The section's metadata: a layout byte, the caps it was written with, and its graphs, columns or streams | Every section, once |
 | 2 | `Column` | The values of one column over a range of rows | `LPG_STORE` and `RDF_STORE` |
 | 3 | `History` | The older versions of one property column's values over a range of rows | `LPG_STORE`, in builds with the `temporal` feature |
-| 4 | `Stream` | A piece of a byte stream | The [stream sections](#stream-sections) |
+| 4 | `Stream` | A piece of a byte stream | The [stream sections](#stream-sections), `CATALOG` included |
 
 A raw or metadata chunk has every other field of its directory entry set to 0.
 All chunks of a section carry the same `section_version`, and no two of them
@@ -228,8 +227,9 @@ last holds exactly 1 MiB. A section's metadata chunk records the caps it was
 written with, and its reader checks the chunks against those. The row cap is
 also the format's: a reader refuses caps of more than 65,536 rows and a column
 chunk of more rows, so what a chunk decodes into stays bounded. The metadata
-chunks and the raw `CATALOG` chunk are not cut: they hold as many names,
-graphs and definitions as the database has.
+chunks are not cut: they hold as many names and graphs as the database has.
+The catalog's records are a stream, cut wherever the byte cap falls, so a
+record can span pieces.
 
 **No 4 GiB limit** ([#392](https://github.com/GrafeoDB/grafeo/issues/392)).
 Chunk offsets, chunk lengths and first rows are 64-bit, and the 32-bit counts
@@ -240,8 +240,10 @@ counts of at most 2^32 - 1, nesting of at most 128 levels, see
 [Value Encoding](#value-encoding)), and the encodings inside two stream
 sections: the compacted base in `COMPACT_STORE` keeps its 32-bit counts and
 lengths (see [Stream Sections](#stream-sections)), and the RDF ring index
-holds at most 2^32 - 1 terms and triples. A checkpoint that meets a value past
-these limits fails and keeps the WAL.
+holds at most 2^32 - 1 terms and triples. Each schema entry is one catalog
+record of at most 2 MiB (see [Catalog Records](#catalog-records)). A
+checkpoint that meets a value or an entry past these limits fails, names it
+and keeps the WAL.
 
 ### Column Chunks
 
@@ -444,9 +446,10 @@ its number of triples.
 
 ### Stream Sections
 
-The index sections (`VECTOR_STORE`, `TEXT_INDEX`, `RDF_RING`), `COMPACT_STORE`
-and `OVERLAY_DELETIONS` hold their data as byte streams. Such a section is its
-metadata chunk, then the pieces of its streams, stream after stream:
+The index sections (`VECTOR_STORE`, `TEXT_INDEX`, `RDF_RING`), `COMPACT_STORE`,
+`OVERLAY_DELETIONS` and `CATALOG` hold their data as byte streams. Such a
+section is its metadata chunk, then the pieces of its streams, stream after
+stream:
 
 - The metadata chunk (`chunk_kind` 1, every other field 0) is the bincode
   encoding (bincode 2, standard configuration: variable-length little-endian
@@ -510,9 +513,91 @@ base nodes and edges. Stream 0 holds the node ids and stream 1 the edge ids,
 each a `u64`, strictly increasing; a stream that holds another number of ids
 than the metadata counts is refused.
 
+**`CATALOG` (version 2).** The metadata holds the byte cap. Stream 0 holds the
+[catalog records](#catalog-records). A catalog without entries is its metadata
+chunk alone.
+
 An index section that can be read but does not decode is no error: a warning
 is logged and the index is built from the data. A chunk that cannot be read
 (a checksum mismatch, an I/O error) fails the open, as in any other section.
+A `CATALOG` section that does not decode fails the open.
+
+### Catalog Records
+
+The `CATALOG` section holds the schema as a stream of records, one per entry:
+the schemas, the node and edge types, the graph types and the graphs bound to
+them, the named constraints, the definitions of every graph's indexes and the
+names `CREATE INDEX` gave them, and the stored procedures. Each record is
+framed, little-endian:
+
+| Field | Size | Meaning |
+|-------|------|---------|
+| `kind` | `u8` | What the record holds (below); `0` is never written |
+| `flags` | `u8` | Bit 0: required (see below). A reader refuses any other bit |
+| `length` | `u32` | Length of the payload, at most 2 MiB (2,097,152 bytes) |
+| payload | `length` bytes | The kind's record in bincode (bincode 2, standard configuration: variable-length little-endian integers) |
+
+| Kind | Record | Fields, in order |
+|------|--------|------------------|
+| 1 | Schema | Name |
+| 2 | Node type | Name, properties, type constraints, parent types, `KEY` labels |
+| 3 | Edge type | Name, properties, type constraints, endpoint pairs, `KEY` labels |
+| 4 | Graph type | Name, node types, edge types, whether it is open |
+| 5 | Graph type binding | Graph, graph type |
+| 6 | Named constraint | Name, label, properties, kind (`0` unique, `1` node key, `2` not null, `3` exists) |
+| 7 | Index definition | Graph (none for the default graph), then the index: `0` a property index and its key; `1` a vector index and its label, property, dimensions, metric (`0` cosine, `1` Euclidean, `2` dot product, `3` Manhattan), `m`, `ef_construction` and quantization (`0` none, `1` scalar, `2` binary, `3` product and its number of subvectors); or `2` a text index and its label and property |
+| 8 | Index name | Name, label, property, kind (`0` hash, `1` B-tree, `2` full text) |
+| 9 | Procedure | Name, parameters and result columns (each a list of name and type), body |
+
+A property of a node or edge type is its name, its type, whether it may be
+null, and its default value (none, or a byte string holding the value in the
+[value encoding](#value-encoding), so it reads back exactly). A type
+constraint is `0` a primary key or `1` a unique constraint (each a list of
+properties), `2` a not-null property, or `3` a check (an optional name and the
+expression). An edge type's endpoints are pairs of a source and a target node
+type, either of them none for any node type: the cross product of the types
+`CONNECTING (...) TO (...)` lists, and no pairs for an edge type that connects
+any nodes. A property type is two `u32`: the number of `LIST<...>` levels
+around it (at most 128) and the code of the type inside them:
+
+| Code | Type | Code | Type |
+|------|------|------|------|
+| 0 | `STRING` | 8 | `ZONED DATETIME` |
+| 1 | `INT64` | 9 | `DURATION` |
+| 2 | `FLOAT64` | 10 | `LIST` (of any values) |
+| 3 | `BOOLEAN` | 11 | `MAP` |
+| 4 | `DATE` | 12 | `BYTES` |
+| 5 | `TIME` | 13 | `NODE` |
+| 6 | `TIMESTAMP` | 14 | `EDGE` |
+| 7 | `LOCAL DATETIME` | 15 | `ANY` |
+
+The records come in the order of their kinds, and the records of one kind in
+increasing order of their key, so the same catalog is written to the same
+bytes: schemas, types and procedures by name, bindings by graph, constraints
+by name, index definitions by graph (the default graph first), then property,
+vector and text indexes, each by key or by label and property, and index
+names by name, label, property and kind. A binding to a graph type that was
+dropped binds nothing and is left out.
+
+**Newer records.** A later version can add kinds. Its writer clears the
+required flag of a record an older reader may skip, and an older reader skips
+a record of a kind it does not know when the flag is clear and refuses the
+catalog when it is set. Every kind of this release is written required. A
+kind's fields do not change: a version that needs other fields adds a kind.
+
+A reader refuses, naming the chunk or the record (by its entry, or by its
+position and the byte it starts at): a first chunk other than the metadata
+chunk, another layout, bytes after the metadata, a chunk other than a piece
+of stream 0 of graph 0; kind 0, a flag bit other than bit 0, or an unknown
+kind with the required flag; a length over 2 MiB (before it reads the
+payload, which it reads into a buffer that grows with the bytes present); a
+stream that ends inside a record; a payload that does not decode as its
+kind's record or has bytes left over, a property type nested more than 128
+levels or of an unknown code; a record that repeats or comes before the
+record of its kind before it (only an index name may repeat); endpoint pairs
+that are not a cross product; and a record the catalog refuses, such as a
+binding to a graph type no record defines. A schema record also creates the
+schema's default graph.
 
 ### Memory
 
@@ -525,6 +610,7 @@ proportion to their data:
 
 | Section | Writing | Reading |
 |---------|---------|---------|
+| `CATALOG` | A sorted copy of every entry, and the record being written | The record being read, and the named constraints, index definitions and index names until the last record |
 | `LPG_STORE` | The sorted ids of the table being written (8 bytes per node or edge) and, without `temporal`, of each of its property columns (8 bytes per value) | |
 | `RDF_STORE` | A reference to every triple, sorted (8 bytes per triple) | |
 | `VECTOR_STORE` | A reference to every node of an in-memory topology, sorted by id (16 bytes per node) | |
@@ -662,7 +748,7 @@ is stopped before the final checkpoint to prevent races.
 |-----------|------|
 | Fixed overhead (file header and database headers) | 12 KiB |
 | New database | 16 KiB (the headers and one directory block page) |
-| Empty database after its first checkpoint | 28 KiB: a page each for the `CATALOG` chunk, the `LPG_STORE` metadata chunk and the directory block, and the page of the image before |
+| Empty database after its first checkpoint | 28 KiB: a page each for the `CATALOG` and `LPG_STORE` metadata chunks and the directory block, and the page of the image before |
 | Per chunk | 48 bytes (directory entry) plus padding to a page boundary; 28 bytes more when encrypted |
 | Per column chunk | A 12-byte header, a presence bitmap (8 bytes per 64 rows) when some rows have no value, a zone map, and the codec body: for example 1 bit per `Bool`, 8 bytes per `Float64`, the bit width of the largest value per non-negative `Int64`, a 4-byte code per `String` plus each distinct string of the chunk once |
 | Per directory block | 32-byte header, up to 1,364 entries (64 KiB) |
@@ -714,4 +800,4 @@ for what users need to do.
 |---------|--------|------------|-------|
 | v1 | Monolithic blob after the headers | 0.5.21 to 0.5.34 | Single bincode snapshot; read by 0.6 only to migrate |
 | v2 | Section directory at `0x3000` | 0.5.35 to 0.5.44 | Independent sections; read by 0.6 only to migrate |
-| v3 | Copy-on-write pages, chained directory | 0.6.0 and later | Checksummed chunks of at most 64Ki rows and 1 MiB, 64-bit offsets (no 4 GiB limit), per-chunk encryption |
+| v3 | Copy-on-write pages, chained directory | 0.6.0 and later | Checksummed chunks of at most 64Ki rows and 1 MiB, 64-bit offsets (no 4 GiB limit), per-chunk encryption, the catalog as typed records |

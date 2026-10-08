@@ -551,9 +551,23 @@ pub trait GraphStoreMut: GraphStoreSearch {
     // --- Edge creation ---
 
     /// Creates a new edge between two nodes.
+    ///
+    /// The store does not check the endpoints: the caller makes sure both
+    /// exist (the engine's writes go through
+    /// [`create_edge_versioned`](Self::create_edge_versioned)).
     fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> EdgeId;
 
-    /// Creates a new edge within a transaction context.
+    /// Creates a new edge within a transaction context
+    /// (`TransactionId::SYSTEM` outside one).
+    ///
+    /// The caller checks that its transaction sees both endpoints, and claims
+    /// them against a concurrent delete (as `GraphWriter` does).
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict, and creates nothing, when the store knows an
+    /// endpoint is deleted, by a committed delete or one in progress: a
+    /// compacted store's base node with a tombstone.
     fn create_edge_versioned(
         &self,
         src: NodeId,
@@ -561,9 +575,10 @@ pub trait GraphStoreMut: GraphStoreSearch {
         edge_type: &str,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> EdgeId;
+    ) -> Result<EdgeId>;
 
-    /// Creates multiple edges in batch (single lock acquisition).
+    /// Creates multiple edges in batch (single lock acquisition). The
+    /// endpoints are not checked, as for [`create_edge`](Self::create_edge).
     fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId>;
 
     // --- Deletion ---
@@ -1282,8 +1297,8 @@ mod tests {
             edge_type: &str,
             _: EpochId,
             _: TransactionId,
-        ) -> EdgeId {
-            self.create_edge(src, dst, edge_type)
+        ) -> Result<EdgeId> {
+            Ok(self.create_edge(src, dst, edge_type))
         }
         fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
             edges

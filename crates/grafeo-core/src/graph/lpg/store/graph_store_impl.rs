@@ -10,9 +10,7 @@ use crate::graph::lpg::CompareOp;
 use crate::graph::lpg::{Edge, Node};
 use crate::graph::traits::{GraphStore, GraphStoreMut, GraphStoreSearch};
 #[cfg(feature = "vector-index")]
-use crate::index::vector::{
-    DistanceMetric, PropertyVectorAccessor, brute_force_knn, compute_distance,
-};
+use crate::index::vector::DistanceMetric;
 use crate::statistics::Statistics;
 use arcstr::ArcStr;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
@@ -340,13 +338,13 @@ impl GraphStoreSearch for LpgStore {
         k: usize,
         metric: DistanceMetric,
     ) -> Vec<(NodeId, f64)> {
-        // HNSW path: matching index + matching metric.
+        // HNSW path: matching index + matching metric. The index measures
+        // with the vectors its upkeep reads, a compacted base's too.
         if let Some(label_name) = label
             && let Some(index) = self.get_vector_index(label_name, property)
             && index.config().metric == metric
         {
-            let store_ref: &dyn GraphStore = self;
-            let accessor = PropertyVectorAccessor::new(store_ref, property);
+            let accessor = self.index_vectors(property);
             return index
                 .search_with_ef(query, k, 64, &accessor)
                 .into_iter()
@@ -354,32 +352,7 @@ impl GraphStoreSearch for LpgStore {
                 .collect();
         }
 
-        // Brute-force fallback: scan nodes, compute distance, take top-k.
-        // Keep `Arc<[f32]>` from `Value::Vector` instead of copying each vector
-        // into an owned `Vec<f32>`: `brute_force_knn` only needs `&[f32]` and
-        // the store already owns the embedding data behind an Arc.
-        let node_ids = match label {
-            Some(l) => <Self as GraphStore>::nodes_by_label(self, l),
-            None => <Self as GraphStore>::node_ids(self),
-        };
-        let property_key = PropertyKey::new(property);
-        let vectors: Vec<(NodeId, Arc<[f32]>)> = node_ids
-            .into_iter()
-            .filter_map(|id| {
-                <Self as GraphStore>::get_node_property(self, id, &property_key).and_then(|v| {
-                    if let Value::Vector(arc) = v {
-                        Some((id, arc))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-        let iter = vectors.iter().map(|(id, arc)| (*id, arc.as_ref()));
-        brute_force_knn(iter, query, k, metric)
-            .into_iter()
-            .map(|(id, d)| (id, f64::from(d)))
-            .collect()
+        crate::index::vector::scan_nearest(self, label, property, query, k, metric)
     }
 
     #[cfg(feature = "vector-index")]
@@ -391,29 +364,7 @@ impl GraphStoreSearch for LpgStore {
         threshold: f64,
         metric: DistanceMetric,
     ) -> Vec<(NodeId, f64)> {
-        // Threshold mode always scans: HNSW has no threshold API. Iterate all
-        // candidates, compute exact distance, keep those under the threshold,
-        // then sort nearest-first.
-        let node_ids = match label {
-            Some(l) => <Self as GraphStore>::nodes_by_label(self, l),
-            None => <Self as GraphStore>::node_ids(self),
-        };
-        let property_key = PropertyKey::new(property);
-        let mut results: Vec<(NodeId, f64)> = node_ids
-            .into_iter()
-            .filter_map(|id| {
-                <Self as GraphStore>::get_node_property(self, id, &property_key).and_then(|v| {
-                    if let Value::Vector(vec) = v {
-                        let d = f64::from(compute_distance(query, &vec, metric));
-                        (d <= threshold).then_some((id, d))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        results
+        crate::index::vector::scan_within(self, label, property, query, threshold, metric)
     }
 }
 
@@ -442,8 +393,15 @@ impl GraphStoreMut for LpgStore {
         edge_type: &str,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> EdgeId {
-        LpgStore::create_edge_versioned(self, src, dst, edge_type, epoch, transaction_id)
+    ) -> grafeo_common::utils::error::Result<EdgeId> {
+        Ok(LpgStore::create_edge_versioned(
+            self,
+            src,
+            dst,
+            edge_type,
+            epoch,
+            transaction_id,
+        ))
     }
 
     fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {

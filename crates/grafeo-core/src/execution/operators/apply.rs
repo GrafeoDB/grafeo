@@ -8,6 +8,7 @@
 //! - GQL: `VALUE { subquery }`
 //! - Pattern comprehensions (with a Collect aggregate wrapper)
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use grafeo_common::types::{LogicalType, Value};
@@ -48,6 +49,10 @@ pub struct ApplyOperator {
     /// indicating whether the inner plan produced results. All outer rows
     /// are preserved. Used for EXISTS inside OR predicates.
     exists_flag: bool,
+    /// Whether the whole outer input is read before the inner plan runs.
+    outer_first: bool,
+    /// The outer input's chunks, when it is read first.
+    outer_chunks: Option<VecDeque<DataChunk>>,
     /// Buffered outer rows waiting to be combined with inner results.
     state: ApplyState,
 }
@@ -81,6 +86,8 @@ impl ApplyOperator {
             inner_column_count: 0,
             exists_mode: None,
             exists_flag: false,
+            outer_first: false,
+            outer_chunks: None,
             state: ApplyState::Init,
         }
     }
@@ -104,6 +111,8 @@ impl ApplyOperator {
             inner_column_count: 0,
             exists_mode: None,
             exists_flag: false,
+            outer_first: false,
+            outer_chunks: None,
             state: ApplyState::Init,
         }
     }
@@ -132,6 +141,25 @@ impl ApplyOperator {
     pub fn with_exists_flag(mut self) -> Self {
         self.exists_flag = true;
         self
+    }
+
+    /// Reads the whole outer input before the inner plan runs, so that the
+    /// inner plan sees what the outer input writes: in `UNWIND ... CREATE
+    /// (:N {k: i}) WITH i CALL { WITH i MATCH (t:N {k: 3001 - i}) ... }` the
+    /// first rows look for nodes that later rows create.
+    #[must_use]
+    pub fn with_outer_first(mut self) -> Self {
+        self.outer_first = true;
+        self
+    }
+
+    /// The next outer chunk, from the buffer when the outer input was read
+    /// first.
+    fn next_outer(&mut self) -> OperatorResult {
+        match &mut self.outer_chunks {
+            Some(chunks) => Ok(chunks.pop_front()),
+            None => self.outer.next(),
+        }
     }
 
     /// Extracts all values from a single row of a DataChunk.
@@ -191,9 +219,16 @@ impl ApplyOperator {
 
 impl Operator for ApplyOperator {
     fn next(&mut self) -> OperatorResult {
+        if self.outer_first && self.outer_chunks.is_none() {
+            let mut chunks = VecDeque::new();
+            while let Some(chunk) = self.outer.next()? {
+                chunks.push_back(chunk);
+            }
+            self.outer_chunks = Some(chunks);
+        }
         loop {
             match &mut self.state {
-                ApplyState::Init => match self.outer.next()? {
+                ApplyState::Init => match self.next_outer()? {
                     Some(chunk) => {
                         self.state = ApplyState::Processing {
                             outer_chunk: chunk,
@@ -319,6 +354,7 @@ impl Operator for ApplyOperator {
     fn reset(&mut self) {
         self.outer.reset();
         self.inner.reset();
+        self.outer_chunks = None;
         self.state = ApplyState::Init;
     }
 
@@ -414,6 +450,127 @@ mod tests {
         assert_eq!(
             chunk.column(1).unwrap().get_value(0),
             Some(Value::Bool(true))
+        );
+    }
+
+    /// An outer input that "writes" one unit per chunk it returns: three
+    /// chunks of one row each.
+    struct WritingOperator {
+        written: Arc<std::sync::atomic::AtomicI64>,
+        position: i64,
+    }
+
+    impl Operator for WritingOperator {
+        fn next(&mut self) -> OperatorResult {
+            if self.position == 3 {
+                return Ok(None);
+            }
+            self.position += 1;
+            self.written
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_value(Value::Int64(self.position));
+            builder.advance_row();
+            Ok(Some(builder.finish()))
+        }
+
+        fn reset(&mut self) {
+            self.position = 0;
+        }
+
+        fn name(&self) -> &'static str {
+            "Writing"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// An inner plan that reads what the outer input wrote so far: one row.
+    struct ReadingOperator {
+        written: Arc<std::sync::atomic::AtomicI64>,
+        done: bool,
+    }
+
+    impl Operator for ReadingOperator {
+        fn next(&mut self) -> OperatorResult {
+            if self.done {
+                return Ok(None);
+            }
+            self.done = true;
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
+            builder.column_mut(0).unwrap().push_value(Value::Int64(
+                self.written.load(std::sync::atomic::Ordering::SeqCst),
+            ));
+            builder.advance_row();
+            Ok(Some(builder.finish()))
+        }
+
+        fn reset(&mut self) {
+            self.done = false;
+        }
+
+        fn name(&self) -> &'static str {
+            "Reading"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// The (outer, seen) pairs `apply` returns: each outer row with what the
+    /// inner plan saw written when it ran for that row.
+    fn seen(apply: &mut ApplyOperator) -> Vec<(i64, i64)> {
+        let mut rows = Vec::new();
+        while let Some(chunk) = apply.next().unwrap() {
+            for row in chunk.selected_indices() {
+                let value = |column: usize| match chunk.column(column).unwrap().get_value(row) {
+                    Some(Value::Int64(value)) => value,
+                    other => panic!("expected an integer, got {other:?}"),
+                };
+                rows.push((value(0), value(1)));
+            }
+        }
+        rows
+    }
+
+    /// With the outer input read first, the inner plan of every row sees all
+    /// of what the outer input wrote; without, a row sees only what the rows
+    /// before it wrote. After a reset, the outer input is read again.
+    #[test]
+    fn reading_the_outer_input_first_shows_the_inner_plan_all_its_writes() {
+        let apply = |outer_first: bool| {
+            let written = Arc::new(std::sync::atomic::AtomicI64::new(0));
+            let outer = Box::new(WritingOperator {
+                written: Arc::clone(&written),
+                position: 0,
+            });
+            let inner = Box::new(ReadingOperator {
+                written,
+                done: false,
+            });
+            let apply = ApplyOperator::new(outer, inner);
+            if outer_first {
+                apply.with_outer_first()
+            } else {
+                apply
+            }
+        };
+
+        assert_eq!(seen(&mut apply(false)), [(1, 1), (2, 2), (3, 3)]);
+
+        let mut first = apply(true);
+        assert_eq!(seen(&mut first), [(1, 3), (2, 3), (3, 3)]);
+        first.reset();
+        assert_eq!(
+            seen(&mut first),
+            [(1, 6), (2, 6), (3, 6)],
+            "a reset reads the outer input again, before the inner plan"
         );
     }
 }

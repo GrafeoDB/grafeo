@@ -563,6 +563,17 @@ impl CompactStoreConsumer {
             .as_ref()
             .map(|dir| dir.join("compact_base.grafeo"))
     }
+
+    /// The tier wrapper, holding the layered store's current base: a merge
+    /// of the overlay replaces the base, and the wrapper follows it (see
+    /// [`CompactStoreTiered::follow`](super::compact_tiered::CompactStoreTiered::follow)).
+    fn live_tiered(&self) -> Option<Arc<super::compact_tiered::CompactStoreTiered>> {
+        let tiered = self.tiered.upgrade()?;
+        if let Some(layered) = self.layered.upgrade() {
+            tiered.follow(&layered.base_store_arc());
+        }
+        Some(tiered)
+    }
 }
 
 #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
@@ -575,7 +586,7 @@ impl MemoryConsumer for CompactStoreConsumer {
         // When OnDisk, the heap copy of CompactStore is still alive (we
         // deserialized from mmap eagerly). Report its heap bytes in both
         // states; the OS page cache that backs mmap lives outside the heap.
-        self.tiered.upgrade().map_or(0, |t| t.memory_bytes())
+        self.live_tiered().map_or(0, |t| t.memory_bytes())
     }
 
     fn eviction_priority(&self) -> u8 {
@@ -592,7 +603,7 @@ impl MemoryConsumer for CompactStoreConsumer {
     }
 
     fn can_spill(&self) -> bool {
-        let Some(tiered) = self.tiered.upgrade() else {
+        let Some(tiered) = self.live_tiered() else {
             return false;
         };
         self.spill_path.is_some() && !tiered.is_on_disk()
@@ -600,7 +611,7 @@ impl MemoryConsumer for CompactStoreConsumer {
 
     fn current_tier(&self) -> grafeo_common::memory::StorageTier {
         use grafeo_common::memory::StorageTier;
-        let Some(tiered) = self.tiered.upgrade() else {
+        let Some(tiered) = self.live_tiered() else {
             return StorageTier::Uninitialized;
         };
         if tiered.is_on_disk() {
@@ -614,8 +625,7 @@ impl MemoryConsumer for CompactStoreConsumer {
 
     fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
         let tiered = self
-            .tiered
-            .upgrade()
+            .live_tiered()
             .ok_or_else(|| SpillError::IoError("compact-store tiered dropped".to_string()))?;
 
         if tiered.is_on_disk() {
@@ -625,18 +635,18 @@ impl MemoryConsumer for CompactStoreConsumer {
         let path = self.spill_file().ok_or(SpillError::NoSpillDirectory)?;
 
         let before = tiered.memory_bytes();
+        let spilled = tiered.store();
         tiered
             .persist_to_mmap(&path)
             .map_err(|e| SpillError::IoError(e.to_string()))?;
 
         // Publish the fresh (mmap-backed) base to the LayeredStore so readers
-        // switch over and the old allocation can drop. If the LayeredStore has
-        // been reconstructed (e.g. recompact() between registration and this
-        // call), the weak ref returns None: the new LayeredStore already owns
-        // a matching base from the new tiered wrapper, so there's nothing to
-        // swap here.
+        // switch over and the old allocation can drop, unless a merge of the
+        // overlay replaced the base meanwhile: its base stays, and the wrapper
+        // follows it on the next call. If the LayeredStore is gone, the weak
+        // ref returns None and there's nothing to swap here.
         if let Some(layered) = self.layered.upgrade() {
-            layered.swap_base(tiered.store());
+            layered.swap_base_if(&spilled, tiered.store());
         }
 
         let after = tiered.memory_bytes();
@@ -645,19 +655,20 @@ impl MemoryConsumer for CompactStoreConsumer {
 
     fn reload(&self) -> Result<(), SpillError> {
         let tiered = self
-            .tiered
-            .upgrade()
+            .live_tiered()
             .ok_or_else(|| SpillError::IoError("compact-store tiered dropped".to_string()))?;
 
         if !tiered.is_on_disk() {
             return Ok(());
         }
 
+        let on_disk = tiered.store();
         tiered
             .reload_to_ram()
             .map_err(|e| SpillError::IoError(e.to_string()))?;
+        // As in `spill`: a merge that replaced the base meanwhile wins.
         if let Some(layered) = self.layered.upgrade() {
-            layered.swap_base(tiered.store());
+            layered.swap_base_if(&on_disk, tiered.store());
         }
         Ok(())
     }
@@ -682,13 +693,18 @@ impl MemoryConsumer for CompactStoreConsumer {
 /// failure under sustained mutation pressure.
 ///
 /// The merge runs with commits held off and the store frozen (see
-/// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager)):
-/// the base has no versions, so a commit in the middle of being written, or
-/// one that did not complete, would become visible in it, and a write of an
-/// open transaction must not change the overlay while it is merged. It does
-/// not wait: while a commit or such a write is in progress (possibly on the
-/// thread that asks for memory), nothing is merged, and after a commit that
-/// did not complete, the spill fails.
+/// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager)),
+/// and only while no transaction is open: the base has no versions, so a
+/// commit in the middle of being written, or one that did not complete,
+/// would become visible in it, an open transaction would lose its snapshot
+/// and its uncommitted changes would become everyone's or be lost, and a
+/// write of an open transaction must not change the overlay while it is
+/// merged. It does not wait: while a commit or such a write is in progress
+/// (possibly on the thread that asks for memory), or a transaction is open,
+/// nothing is merged, and after a commit that did not complete, the spill
+/// fails. Sessions and the database follow the new overlay (they ask the
+/// layered store for it), which carries on the old one's named graphs,
+/// epoch and index definitions.
 #[cfg(all(feature = "compact-store", feature = "lpg"))]
 pub struct OverlayConsumer {
     layered: Weak<grafeo_core::graph::compact::layered::LayeredStore>,
@@ -760,6 +776,15 @@ impl MemoryConsumer for OverlayConsumer {
             // merge later.
             return Ok(0);
         };
+        // The merge reads the current state into a base without versions:
+        // an open transaction's changes would become everyone's (or be left
+        // out), its pending deletes and undo log would go with the old
+        // overlay, and its snapshot would see what others committed after
+        // it began. Under the hold no transaction begins or commits, so
+        // none is open from here until the merge is published.
+        if self.transaction_manager.active_count() > 0 {
+            return Ok(0);
+        }
 
         let before = layered.overlay_memory_bytes();
         layered

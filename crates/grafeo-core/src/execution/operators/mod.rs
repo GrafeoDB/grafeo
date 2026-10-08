@@ -23,6 +23,7 @@ pub mod accumulator;
 mod aggregate;
 mod apply;
 mod distinct;
+mod eager;
 mod expand;
 mod factorized_aggregate;
 mod factorized_expand;
@@ -63,6 +64,7 @@ pub use accumulator::{AggregateExpr, AggregateFunction, HashableValue};
 pub use aggregate::{HashAggregateOperator, SimpleAggregateOperator};
 pub use apply::ApplyOperator;
 pub use distinct::DistinctOperator;
+pub use eager::EagerOperator;
 pub use expand::ExpandOperator;
 pub use factorized_aggregate::{
     FactorizedAggregate, FactorizedAggregateOperator, FactorizedOperator,
@@ -158,7 +160,8 @@ pub trait WriteTracker: Send + Sync {
     /// changes, and never twice on one thread (see [`WriteInProgress`]).
     fn write_in_progress(&self) -> WriteInProgress<'_>;
 
-    /// Records that a node was written (created, deleted, or modified).
+    /// Records that a node was written (created or modified; a delete is
+    /// recorded with [`record_node_delete`](Self::record_node_delete)).
     ///
     /// # Errors
     ///
@@ -167,6 +170,39 @@ pub trait WriteTracker: Send + Sync {
         &self,
         transaction_id: TransactionId,
         node_id: NodeId,
+    ) -> Result<(), OperatorError>;
+
+    /// Records that a node is deleted: a write, as
+    /// [`record_node_write`](Self::record_node_write) records one, that also
+    /// conflicts with another transaction's claim on the node as an endpoint
+    /// of an edge it creates (see
+    /// [`record_edge_endpoints`](Self::record_edge_endpoints)).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if another open transaction wrote the node or claimed it
+    /// (first-writer-wins).
+    fn record_node_delete(
+        &self,
+        transaction_id: TransactionId,
+        node_id: NodeId,
+    ) -> Result<(), OperatorError>;
+
+    /// Claims the endpoints of an edge the transaction is about to create:
+    /// another transaction that deletes one of them conflicts with this one,
+    /// the later of the two failing (first-writer-wins), and so does one that
+    /// deleted one and committed after this transaction began, at this
+    /// transaction's commit. Unlike a write, a claim does not conflict with
+    /// another transaction's writes of the node or claims on it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if another open transaction deletes either endpoint.
+    fn record_edge_endpoints(
+        &self,
+        transaction_id: TransactionId,
+        src: NodeId,
+        dst: NodeId,
     ) -> Result<(), OperatorError>;
 
     /// Records that an edge was written (created, deleted, or modified).

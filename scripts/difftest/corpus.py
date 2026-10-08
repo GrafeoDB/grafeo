@@ -118,12 +118,43 @@ def labels_indexed(grafeo):
     return labels(grafeo, indexed=True)
 
 
+def labels_compacted(grafeo):
+    """`labels` after `compact()`: a columnar table per label set, so `r0` to `r2` and
+    `t0` are rows of the tables of their two labels."""
+    db = labels(grafeo)
+    db.compact()
+    return db
+
+
+def search(grafeo):
+    """Files `a.rs` and `b.rs`, and four `Doc` nodes with a 2-dimensional `emb` and a
+    `body`: Amsterdam ([1, 0], 'graph database'), Berlin ([0, 1], 'rust compiler'), Paris
+    ([0.8, 0.6], 'graph theory') and Prague ([0.3, 0.95], 'query planner'). A cosine vector
+    index on `Doc.emb` and a text index on `Doc.body`."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:File {name: 'a.rs'}), (:File {name: 'b.rs'})")
+    for name, emb, body in [
+        ("Amsterdam", "[1.0, 0.0]", "graph database"),
+        ("Berlin", "[0.0, 1.0]", "rust compiler"),
+        ("Paris", "[0.8, 0.6]", "graph theory"),
+        ("Prague", "[0.3, 0.95]", "query planner"),
+    ]:
+        db.execute(
+            f"INSERT (:Doc {{name: '{name}', emb: vector({emb}), body: '{body}'}})"
+        )
+    db.execute("CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'")
+    db.execute("CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT")
+    return db
+
+
 FIXTURES = {
     "social": social,
     "chain": chain,
     "empty": empty,
     "labels": labels,
     "labels_indexed": labels_indexed,
+    "labels_compacted": labels_compacted,
+    "search": search,
 }
 
 CASES: list[Case] = []
@@ -736,5 +767,68 @@ for case_id, query, languages, fixture in [
 ]:
     case(case_id, query, languages, fixture)
 ordered("AJ9", "MATCH (a:N) MATCH (b:N) WHERE a.i < 3000 AND b.i = a.i * 2 RETURN a.i AS a, b.i AS b ORDER BY a DESC LIMIT 5", BOTH, "chain")
+
+# AK: a compacted database reads each label of a node with several: labels(n), scans
+#     and counts of each label, patterns with several labels, and a traversal from them
+for case_id, query in [
+    ("AK1", "MATCH (n {id: 'r1'}) RETURN labels(n) AS l"),
+    ("AK2", "MATCH (n:Repository) RETURN n.id AS id"),
+    ("AK3", "MATCH (n:Graph) RETURN count(n) AS c"),
+    ("AK4", "MATCH (n:Graph:Repository) RETURN n.id AS id"),
+    ("AK5", "MATCH (n:Repository:Graph)-[r:HAS]->(m) RETURN n.id AS n, r.w AS w, m.id AS m"),
+    ("AK6", "MATCH (n:Tag) RETURN n.id AS id"),
+    ("AK7", "MATCH (n:Topic:Tag) RETURN n.id AS id"),
+    ("AK8", "MATCH (n:Graph) WHERE NOT n:Repository RETURN count(n) AS c"),
+    ("AK9", "MATCH (n:Repository) WHERE n.n = 2 RETURN n.id AS id, n.w AS w"),
+]:
+    case(case_id, query, BOTH, "labels_compacted")
+
+# AM: a part of a later MATCH that reuses a node or edge an earlier clause bound goes on
+#     from it, whatever the order of the parts (AM3: the order that already worked), with a
+#     WHERE after either MATCH (AM5 in Cypher, AM10 its GQL form inside the pattern), in an
+#     OPTIONAL MATCH, in a CALL subquery (AM11: WITH *), with a third part joined on a
+#     variable of the second (AM9), and a part that reads an unwound value (AM12)
+for case_id, query, languages in [
+    ("AM1", "MATCH (a:Person) MATCH (c:City), (a)-[:LIVES_IN]->(c) RETURN a.name AS a, c.name AS c", BOTH),
+    ("AM2", "MATCH (a:Person) MATCH (c:City), (c)<-[:LIVES_IN]-(a) RETURN a.name AS a, c.name AS c", BOTH),
+    ("AM3", "MATCH (a:Person) MATCH (a)-[:LIVES_IN]->(c), (c:City) RETURN a.name AS a, c.name AS c", BOTH),
+    ("AM4", "MATCH (a:Person) MATCH (c:City), (a)-[:LIVES_IN]->(c) WHERE a.age > 26 RETURN a.name AS a, c.name AS c", BOTH),
+    ("AM5", "MATCH (a:Person) WHERE a.age < 30 MATCH (c:City), (a)-[:LIVES_IN]->(c) RETURN a.name AS a, c.name AS c", CYPHER),
+    ("AM6", "MATCH (a:Person) OPTIONAL MATCH (c:City), (a)-[:LIVES_IN]->(c) RETURN a.name AS a, c.name AS c", BOTH),
+    ("AM7", "MATCH (a:Person)-[r:KNOWS]->(b) MATCH (c:Person), (c)<-[r]-(x) RETURN x.name AS x, c.name AS c, r.w AS w", BOTH),
+    ("AM8", "MATCH (a:Person) CALL { WITH a MATCH (c:City), (a)-[:LIVES_IN]->(c) RETURN c.name AS c } RETURN a.name AS a, c", BOTH),
+    ("AM9", "MATCH (a:Person) MATCH (b:Person), (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c) RETURN a.name AS a, b.name AS b, c.name AS c", BOTH),
+    ("AM10", "MATCH (a:Person WHERE a.age < 30) MATCH (c:City), (a)-[:LIVES_IN]->(c) RETURN a.name AS a, c.name AS c", GQL),
+    ("AM11", "MATCH (a:Person) CALL { WITH * MATCH (c:City), (a)-[:LIVES_IN]->(c) RETURN c.name AS c } RETURN a.name AS a, c", BOTH),
+    ("AM12", "UNWIND [6, 8] AS w MATCH (a:Person) MATCH (c:City), (a)-[:LIVES_IN {w: w}]->(c) RETURN w, a.name AS a, c.name AS c", BOTH),
+]:
+    case(case_id, query, languages)
+
+# AN: a vector or text search on a scan that runs for each row of an earlier clause keeps
+#     those rows (it checks the condition per row): a second MATCH, a comma-separated part,
+#     AND and OR of both kinds, an UNWIND; AN9 and AN10 search without input (unchanged)
+for case_id, query in [
+    ("AN1", "MATCH (f:File) MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 RETURN f.name AS f, d.name AS d"),
+    ("AN2", "MATCH (f:File) MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 RETURN d.name AS d"),
+    ("AN3", "MATCH (f:File), (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) >= 0.75 RETURN f.name AS f, d.name AS d"),
+    ("AN4", "MATCH (f:File) MATCH (d:Doc) WHERE text_match(d.body, 'graph') RETURN f.name AS f, d.name AS d"),
+    ("AN5", "MATCH (f:File), (d:Doc) WHERE text_score(d.body, 'graph') > 0.0 RETURN f.name AS f, d.name AS d"),
+    ("AN6", "MATCH (f:File) MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 AND text_match(d.body, 'theory') RETURN f.name AS f, d.name AS d"),
+    ("AN7", "MATCH (f:File), (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.9 OR text_match(d.body, 'rust') RETURN f.name AS f, d.name AS d"),
+    ("AN8", "UNWIND [3, 19] AS n MATCH (d:Doc) WHERE text_match(d.body, 'graph') RETURN n, d.name AS d"),
+    ("AN9", "MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 RETURN d.name AS d"),
+    ("AN10", "MATCH (d:Doc) WHERE text_match(d.body, 'graph') RETURN d.name AS d"),
+]:
+    case(case_id, query, BOTH, "search")
+
+# AO: an aggregate without MATCH aggregates the one row a query starts from (it failed with
+#     "Empty plan")
+for case_id, query, languages in [
+    ("AO1", "RETURN count(*) AS c", BOTH),
+    ("AO2", "RETURN 3 AS x, count(*) AS c", BOTH),
+    ("AO3", "CALL { RETURN count(*) AS c } RETURN c", BOTH),
+    ("AO4", "WITH count(*) AS c WHERE c > 0 RETURN c", CYPHER),
+]:
+    case(case_id, query, languages)
 
 # fmt: on

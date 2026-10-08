@@ -47,6 +47,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use grafeo_common::storage::section::Section;
@@ -54,11 +55,54 @@ use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::graph::compact::CompactStore;
 use grafeo_core::graph::compact::section::CompactStoreSection;
 use memmap2::Mmap;
-use parking_lot::RwLock;
+#[cfg(feature = "lpg")]
+use parking_lot::MutexGuard;
+use parking_lot::{Mutex, RwLock};
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_MMAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_INSTALL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn set_before_install_hook(hook: impl FnOnce() + 'static) {
+    BEFORE_INSTALL.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_before_mmap_hook() {
+    let hook = BEFORE_MMAP.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn run_before_install_hook() {
+    let hook = BEFORE_INSTALL.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
 
 /// Two-state disk-backed wrapper around a [`CompactStore`].
 pub struct CompactStoreTiered {
     state: RwLock<TierState>,
+    transition: Mutex<()>,
+}
+
+/// A fully prepared tier change that has not replaced the live state.
+pub(super) struct PreparedTier {
+    state: TierState,
+    written: usize,
+}
+
+impl PreparedTier {
+    #[cfg(feature = "lpg")]
+    pub(super) fn store(&self) -> Arc<CompactStore> {
+        Arc::clone(self.state.store())
+    }
 }
 
 enum TierState {
@@ -78,12 +122,21 @@ enum TierState {
     },
 }
 
+impl TierState {
+    fn store(&self) -> &Arc<CompactStore> {
+        match self {
+            Self::InMemory(store) | Self::OnDisk { store, .. } => store,
+        }
+    }
+}
+
 impl CompactStoreTiered {
     /// Creates a tiered wrapper starting in the in-memory state.
     #[must_use]
     pub fn new_in_memory(store: Arc<CompactStore>) -> Self {
         Self {
             state: RwLock::new(TierState::InMemory(store)),
+            transition: Mutex::new(()),
         }
     }
 
@@ -92,9 +145,13 @@ impl CompactStoreTiered {
     /// Cheap `Arc::clone`, safe to call on the query hot path.
     #[must_use]
     pub fn store(&self) -> Arc<CompactStore> {
-        match &*self.state.read() {
-            TierState::InMemory(store) => Arc::clone(store),
-            TierState::OnDisk { store, .. } => Arc::clone(store),
+        Arc::clone(self.state.read().store())
+    }
+
+    pub(super) fn install_if_current(&self, expected: &Arc<CompactStore>, prepared: PreparedTier) {
+        let mut state = self.state.write();
+        if Arc::ptr_eq(state.store(), expected) {
+            *state = prepared.state;
         }
     }
 
@@ -122,6 +179,7 @@ impl CompactStoreTiered {
     ///
     /// Returns `Error::Internal` if serialization or the file write fails.
     pub fn persist(&self, path: &Path) -> Result<usize> {
+        let _transition = self.transition.lock();
         let store = self.store();
         let section = CompactStoreSection::new(store);
         let bytes = section.serialize()?;
@@ -142,21 +200,32 @@ impl CompactStoreTiered {
     /// Returns `Error::Internal` if serialization, the file write, or the
     /// subsequent mmap + deserialize cycle fails.
     pub fn persist_to_mmap(&self, path: &Path) -> Result<usize> {
-        let bytes = {
-            let store = self.store();
-            let section = CompactStoreSection::new(store);
-            section.serialize()?
-        };
-        write_atomically(path, &bytes)?;
-
-        let (mmap_bytes, store) = open_and_deserialize(path)?;
-        let written = bytes.len();
-        *self.state.write() = TierState::OnDisk {
-            path: path.to_path_buf(),
-            _mmap_bytes: mmap_bytes,
-            store,
-        };
+        let _transition = self.transition.lock();
+        let expected = self.store();
+        let prepared = Self::prepare_mmap(Arc::clone(&expected), path)?;
+        let written = prepared.written;
+        self.install_if_current(&expected, prepared);
         Ok(written)
+    }
+
+    pub(super) fn prepare_mmap(store: Arc<CompactStore>, path: &Path) -> Result<PreparedTier> {
+        let bytes = CompactStoreSection::new(store).serialize()?;
+        // Keep the exact file we wrote: another wrapper may replace the same
+        // path between our rename and mmap (for example after recompact).
+        let file = write_atomically(path, &bytes)?;
+        #[cfg(test)]
+        run_before_mmap_hook();
+        let (mmap_bytes, store) = deserialize_mmap(&file, path)?;
+        #[cfg(test)]
+        run_before_install_hook();
+        Ok(PreparedTier {
+            state: TierState::OnDisk {
+                path: path.to_path_buf(),
+                _mmap_bytes: mmap_bytes,
+                store,
+            },
+            written: bytes.len(),
+        })
     }
 
     /// Opens an existing on-disk store via mmap, without writing.
@@ -175,6 +244,7 @@ impl CompactStoreTiered {
                 _mmap_bytes: mmap_bytes,
                 store,
             }),
+            transition: Mutex::new(()),
         })
     }
 
@@ -196,19 +266,31 @@ impl CompactStoreTiered {
     /// Returns `Error::Internal` if serialization or deserialization
     /// fails.
     pub fn reload_to_ram(&self) -> Result<()> {
-        let mut guard = self.state.write();
-        let TierState::OnDisk { store, .. } = &*guard else {
-            return Ok(());
+        let _transition = self.transition.lock();
+        let expected = {
+            let state = self.state.read();
+            let TierState::OnDisk { store, .. } = &*state else {
+                return Ok(());
+            };
+            Arc::clone(store)
         };
-        let section = CompactStoreSection::new(Arc::clone(store));
+        let prepared = Self::prepare_ram(Arc::clone(&expected))?;
+        self.install_if_current(&expected, prepared);
+        Ok(())
+    }
+
+    pub(super) fn prepare_ram(store: Arc<CompactStore>) -> Result<PreparedTier> {
+        let section = CompactStoreSection::new(store);
         let bytes = section.serialize()?;
         let mut reloaded = CompactStoreSection::empty();
         reloaded.deserialize_from_bytes(Bytes::from(bytes))?;
         let new_store = reloaded.store().ok_or_else(|| {
             Error::Internal("empty CompactStoreSection after reload_to_ram".to_string())
         })?;
-        *guard = TierState::InMemory(new_store);
-        Ok(())
+        Ok(PreparedTier {
+            state: TierState::InMemory(new_store),
+            written: 0,
+        })
     }
 
     /// Makes `base` the wrapped store, in memory, unless the wrapper holds
@@ -249,35 +331,89 @@ impl CompactStoreTiered {
     }
 }
 
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+#[cfg(feature = "lpg")]
+impl CompactStoreTiered {
+    pub(super) fn try_transition(&self) -> Option<MutexGuard<'_, ()>> {
+        self.transition.try_lock()
+    }
+
+    pub(super) fn is_on_disk_for(&self, store: &Arc<CompactStore>) -> bool {
+        let state = self.state.read();
+        matches!(&*state, TierState::OnDisk { .. }) && Arc::ptr_eq(state.store(), store)
+    }
+
+    pub(super) fn memory_bytes_for(&self, store: &Arc<CompactStore>) -> usize {
+        let state = self.state.read();
+        let current = store.memory_bytes();
+        if Arc::ptr_eq(state.store(), store) {
+            current
+        } else {
+            // A contended reconciliation can temporarily retain the old base.
+            current.saturating_add(state.store().memory_bytes())
+        }
+    }
+}
+
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<std::fs::File> {
+    use std::io::Write;
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| Error::Internal(format!("create dir for {}: {e}", parent.display())))?;
     }
-    // Write to a sibling temp file, then rename for atomic replacement.
-    let tmp = path.with_extension("grafeo.tmp");
-    std::fs::write(&tmp, bytes)
-        .map_err(|e| Error::Internal(format!("write {}: {e}", tmp.display())))?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        Error::Internal(format!(
-            "rename {} -> {}: {e}",
+    // Distinct wrappers can spill concurrently to the same destination.
+    // A unique sibling and an open handle keep each prepared snapshot intact.
+    let (tmp, mut file) = loop {
+        let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("grafeo.{}.{sequence}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(Error::Internal(format!(
+                    "create {}: {error}",
+                    tmp.display()
+                )));
+            }
+        }
+    };
+    if let Err(error) = file.write_all(bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::Internal(format!("write {}: {error}", tmp.display())));
+    }
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::Internal(format!(
+            "rename {} -> {}: {error}",
             tmp.display(),
             path.display()
-        ))
-    })?;
-    Ok(())
+        )));
+    }
+    Ok(file)
 }
 
 fn open_and_deserialize(path: &Path) -> Result<(Bytes, Arc<CompactStore>)> {
     let file = std::fs::File::open(path)
         .map_err(|e| Error::Internal(format!("open {}: {e}", path.display())))?;
+    deserialize_mmap(&file, path)
+}
+
+fn deserialize_mmap(file: &std::fs::File, path: &Path) -> Result<(Bytes, Arc<CompactStore>)> {
     // SAFETY: we mmap a file that's owned by this process for the duration
     // of the `Mmap` lifetime. The file is read-only from Grafeo's side
     // (we never write through the mmap); external truncation or modification
     // while an `Mmap` is held is undefined per memmap2 docs, same caveat as
     // every other mmap call site in the project.
     #[allow(unsafe_code)]
-    let mmap = unsafe { Mmap::map(&file) }
+    let mmap = unsafe { Mmap::map(file) }
         .map_err(|e| Error::Internal(format!("mmap {}: {e}", path.display())))?;
 
     // Phase 3c: wrap the Mmap as a refcounted `Bytes` so column codec
@@ -316,6 +452,44 @@ mod tests {
         }
         let compact = from_graph_store(&lpg).expect("compact");
         Arc::new(compact)
+    }
+
+    #[test]
+    fn a_spill_maps_its_own_file_when_another_wrapper_replaces_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compact_base.grafeo");
+        let tiered = CompactStoreTiered::new_in_memory(build_sample_store());
+        let other = LpgStore::new().unwrap();
+        other.create_node(&["Replacement"]);
+        let other = CompactStoreTiered::new_in_memory(Arc::new(from_graph_store(&other).unwrap()));
+        let replacement_path = path.clone();
+        BEFORE_MMAP.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                other.persist_to_mmap(&replacement_path).unwrap();
+            }));
+        });
+        tiered.persist_to_mmap(&path).unwrap();
+        assert_eq!(tiered.store().node_count(), 16);
+        assert_eq!(open_and_deserialize(&path).unwrap().1.node_count(), 1);
+    }
+
+    #[test]
+    fn following_a_new_base_during_preparation_keeps_the_new_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let tiered = Arc::new(CompactStoreTiered::new_in_memory(build_sample_store()));
+        let replacement = LpgStore::new().unwrap();
+        replacement.create_node(&["Replacement"]);
+        let replacement = Arc::new(from_graph_store(&replacement).unwrap());
+        let following = Arc::clone(&tiered);
+        let new_base = Arc::clone(&replacement);
+        set_before_install_hook(move || {
+            assert!(following.follow(&new_base));
+        });
+        tiered
+            .persist_to_mmap(&dir.path().join("base.compact"))
+            .unwrap();
+        assert!(Arc::ptr_eq(&tiered.store(), &replacement));
+        assert!(!tiered.is_on_disk());
     }
 
     #[test]

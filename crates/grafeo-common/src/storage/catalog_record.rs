@@ -1901,6 +1901,10 @@ mod tests {
     /// holds: a list of empty string pairs claims the most of the limit per
     /// byte (8 bytes for each one-byte length).
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "a payload of 2 MiB, a million string pairs, takes hours under Miri; this module has no unsafe code"
+    )]
     fn the_largest_payload_decodes_whatever_it_holds_and_one_byte_more_is_refused() {
         let procedure = |pairs: usize| {
             CatalogRecord::Procedure(ProcedureRecord {
@@ -1986,6 +1990,10 @@ mod tests {
     /// bound, which it could not without the levels' own term: their memory
     /// does not grow with the payload.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "a record of 32,768 LIST levels takes a minute under Miri; this module has no unsafe code"
+    )]
     fn a_payload_decodes_into_at_most_120_bytes_per_byte_and_1_mib_of_list_levels() {
         use std::mem::size_of;
 
@@ -2082,6 +2090,10 @@ mod tests {
     /// types at the cap round trip, and the writer refuses one level more,
     /// appending nothing.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "records of 32,768 LIST levels take minutes under Miri; this module has no unsafe code"
+    )]
     fn list_levels_past_the_record_cap_are_refused_by_the_writer() {
         for record in [
             node_type(deepest_properties()),
@@ -2120,6 +2132,10 @@ mod tests {
     /// that passes the cap is refused, even with a code no release knows.
     /// The count starts again with each record.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "records of 32,768 LIST levels take minutes under Miri; this module has no unsafe code"
+    )]
     fn list_levels_past_the_record_cap_are_refused_by_the_reader_before_they_are_built() {
         let at_cap = [
             framed(&node_type(deepest_properties())),

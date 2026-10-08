@@ -137,11 +137,19 @@ impl super::Planner {
             let mut projections = Vec::new();
             let mut output_types = Vec::new();
 
-            // First, pass through all existing columns (use Node type to preserve node IDs
-            // for subsequent property access - nodes need VectorData::NodeId for get_node_id())
-            for (i, _) in input_columns.iter().enumerate() {
+            // First, pass through every input column as it is, typed as the
+            // other pass-through projections type it: an edge column as
+            // edges, every other column `Any`, a copy that keeps the input's
+            // vector type (node IDs stay nodes) and copies strings, floats,
+            // booleans, lists, maps and paths unchanged. A copy typed `Node`
+            // turns every value that is not an integer into node 0.
+            for (i, column_type) in self
+                .derive_schema_from_columns(&input_columns)
+                .into_iter()
+                .enumerate()
+            {
                 projections.push(ProjectExpr::Column(i));
-                output_types.push(LogicalType::Node);
+                output_types.push(column_type);
             }
 
             // Add extra projections in the same order as index assignment

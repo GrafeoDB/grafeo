@@ -179,6 +179,65 @@ fn schema_constraints_can_be_enabled() {
     assert!(config.schema_constraints);
 }
 
+// --- CDC retention ---
+
+/// The retention set with `Config::with_cdc_retention` bounds the change
+/// history a database keeps: a garbage collection drops the oldest events
+/// beyond it, while the default retention keeps them all.
+#[cfg(all(feature = "cdc", feature = "gql"))]
+#[test]
+fn cdc_retention_from_the_config_bounds_the_history() {
+    use grafeo_common::types::{EpochId, Value};
+    use grafeo_engine::cdc::CdcRetentionConfig;
+
+    let ages = [19, 88, 33, 38, 83];
+    let history_after_gc = |config: Config| {
+        let db = GrafeoDB::with_config(config.with_cdc()).unwrap();
+        let session = db.session();
+        session
+            .execute("INSERT (:Person {name: 'Alix', age: 3})")
+            .unwrap();
+        for age in ages {
+            session
+                .execute(&format!("MATCH (p:Person) SET p.age = {age}"))
+                .unwrap();
+        }
+        db.gc();
+        db.changes_between(EpochId::new(0), EpochId::new(u64::MAX))
+            .unwrap()
+    };
+
+    let kept_by_default = history_after_gc(Config::in_memory());
+    assert_eq!(
+        kept_by_default.len(),
+        1 + ages.len(),
+        "the default retention keeps the insert and every update"
+    );
+
+    let bounded = history_after_gc(Config::in_memory().with_cdc_retention(CdcRetentionConfig {
+        max_epochs: None,
+        max_events: Some(3),
+    }));
+    let kept_ages: Vec<Option<Value>> = bounded
+        .iter()
+        .map(|event| {
+            event
+                .after
+                .as_ref()
+                .and_then(|after| after.get("age").cloned())
+        })
+        .collect();
+    assert_eq!(
+        kept_ages,
+        vec![
+            Some(Value::Int64(33)),
+            Some(Value::Int64(38)),
+            Some(Value::Int64(83)),
+        ],
+        "a retention of 3 events keeps the 3 newest"
+    );
+}
+
 // --- Session graph_model accessor ---
 
 #[test]

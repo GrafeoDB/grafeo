@@ -313,8 +313,9 @@ impl super::Planner {
         added: &AddedColumn<'_>,
         input_writes: bool,
     ) -> Result<Box<dyn Operator>> {
+        // After a write the subquery reads the store as the write left it.
         if shared.is_empty() {
-            let (inner, _) = self.plan_operator(inner)?;
+            let (inner, _) = self.plan_after_a_write(input_writes, inner)?;
             self.scalar_columns
                 .borrow_mut()
                 .insert(added.name.to_string());
@@ -342,7 +343,7 @@ impl super::Planner {
         let previous = self
             .correlated_param_state
             .replace(Some(Arc::clone(&state)));
-        let planned = self.plan_operator(inner);
+        let planned = self.plan_after_a_write(input_writes, inner);
         *self.correlated_param_state.borrow_mut() = previous;
         let (inner, _) = planned?;
         self.scalar_columns

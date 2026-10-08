@@ -210,7 +210,9 @@ impl super::Planner {
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // An OPTIONAL MATCH that comes first matches from one empty row.
         let (left_op, left_columns) = self.plan_input(&left_join.left)?;
-        let (right_op, right_columns) = self.plan_operator(&left_join.right)?;
+        // After a write the right side reads the store as the write left it.
+        let left_writes = super::after_write::right_side_runs_after_a_write(&left_join.left);
+        let (right_op, right_columns) = self.plan_after_a_write(left_writes, &left_join.right)?;
         let left_types = self.derive_schema_from_columns(&left_columns);
         let right_types = self.derive_schema_from_columns(&right_columns);
 
@@ -242,7 +244,6 @@ impl super::Planner {
         // After a write (`... CREATE ... WITH i OPTIONAL MATCH (t {k: 301 - i})`)
         // the left side is read first, so that the right side sees what every
         // left row wrote; the hash join reads its right side first otherwise.
-        let left_writes = left_join.left.has_mutations();
         let (join_op, join_columns, _join_types) = super::common::build_left_join(
             left_op,
             right_op,

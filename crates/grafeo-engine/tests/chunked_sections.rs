@@ -1203,10 +1203,7 @@ mod crash_during_close {
     /// A persistent configuration without a WAL: a reopen sees exactly the image
     /// on disk.
     fn wal_disabled_config(path: &Path) -> Config {
-        Config {
-            wal_enabled: false,
-            ..Config::persistent(path)
-        }
+        Config::persistent(path).without_wal()
     }
 
     /// Adds Persons `first` to `first + count - 1`, each with a name, in one
@@ -1352,11 +1349,10 @@ mod moved_chunks {
 
     use super::TINY;
 
-    fn with_key(mut config: Config, chain: &Arc<KeyChain>) -> Config {
-        config.encryption = Some(EncryptionConfig {
+    fn with_key(config: Config, chain: &Arc<KeyChain>) -> Config {
+        config.with_encryption(EncryptionConfig {
             key_chain: Arc::clone(chain),
-        });
-        config
+        })
     }
 
     /// Writes 30 Persons whose names have one length ("Alix 00" to "Alix

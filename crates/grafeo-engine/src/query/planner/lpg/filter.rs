@@ -15,7 +15,10 @@
 //!    an indexed key (the seek, `seek.rs`), or else joined to the input by
 //!    hash on equal values (`value_join.rs`). Property-index and
 //!    range-index attempts on a scan without input come next, before hybrid
-//!    pushdown because they are cheaper and strictly more specific.
+//!    pushdown because they are cheaper and strictly more specific. The
+//!    zone maps and the property-index path read the store while planning,
+//!    so a filter that runs after a write of its statement takes neither
+//!    (see `after_write`): the seek looks its constant key up when it runs.
 //! 4. Compound hybrid (`try_plan_filter_compound_hybrid`) is tried
 //!    before single-sided vector/text pushdown so an `AND` over both
 //!    kinds doesn't get torn apart into a scan + filter. These index
@@ -104,9 +107,11 @@ impl super::Planner {
 
         // Check zone maps for simple property predicates before scanning
         // If zone map says "definitely no matches", we can short-circuit.
-        // Not below a mutation: zone maps describe the store as it is before
-        // this query runs, not values the query writes first.
+        // Not below a mutation, nor after one (see `after_write`): zone maps
+        // describe the store as it is before this query runs, not values the
+        // query writes first.
         if !filter.input.has_mutations()
+            && self.reads_the_store_as_planned()
             && let Some(false) = self.check_zone_map_for_predicate(&filter.predicate, &filter.input)
         {
             // Zone map says no matches possible - return empty result
@@ -661,6 +666,10 @@ impl super::Planner {
     /// and the input is a simple NodeScan, we can use the index to look up
     /// matching nodes directly instead of scanning all nodes.
     ///
+    /// Not after a write of the statement (see
+    /// [`Self::reads_the_store_as_planned`]): the lookup, and the label-first
+    /// scan without an index, find the nodes while planning.
+    ///
     /// Returns `Ok(Some((operator, columns)))` if optimization was applied,
     /// `Ok(None)` if not applicable, or `Err` on error.
     pub(super) fn try_plan_filter_with_property_index(
@@ -669,7 +678,9 @@ impl super::Planner {
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
         // Only optimize if input is a simple NodeScan (not nested)
         let (scan_variable, scan_label) = match filter.input.as_ref() {
-            LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
+            LogicalOperator::NodeScan(scan)
+                if scan.input.is_none() && self.reads_the_store_as_planned() =>
+            {
                 (scan.variable.clone(), scan.label.clone())
             }
             _ => return Ok(None),

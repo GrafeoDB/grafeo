@@ -597,16 +597,42 @@ pub(crate) fn annotate_pushdown_hints(
     current: bool,
 ) {
     let writes = op.has_mutations();
-    annotate_hints(op, store, current, writes);
+    annotate_hints(op, store, current, writes, false);
 }
 
-/// [`annotate_pushdown_hints`] below the root of a statement that `writes`.
+/// [`annotate_pushdown_hints`] below the root of a statement that `writes`,
+/// in a part of it that runs `after_a_write` of the statement (see
+/// [`right_side_runs_after_a_write`](crate::query::planner::lpg::after_write::right_side_runs_after_a_write)
+/// and
+/// [`subquery_runs_after_a_write`](crate::query::planner::lpg::after_write::subquery_runs_after_a_write)),
+/// where the planner looks nothing up while planning.
 fn annotate_hints(
     op: &mut LogicalOperator,
     store: &dyn grafeo_core::graph::GraphStoreSearch,
     current: bool,
     writes: bool,
+    after_a_write: bool,
 ) {
+    use crate::query::planner::lpg::after_write::{
+        right_side_runs_after_a_write, subquery_runs_after_a_write,
+    };
+
+    match op {
+        LogicalOperator::Join(crate::query::plan::JoinOp { left, right, .. })
+        | LogicalOperator::LeftJoin(crate::query::plan::LeftJoinOp { left, right, .. }) => {
+            let later = after_a_write || right_side_runs_after_a_write(left);
+            annotate_hints(left, store, current, writes, after_a_write);
+            annotate_hints(right, store, current, writes, later);
+            return;
+        }
+        LogicalOperator::Apply(apply) => {
+            let later = after_a_write || subquery_runs_after_a_write(apply);
+            annotate_hints(&mut apply.input, store, current, writes, after_a_write);
+            annotate_hints(&mut apply.subplan, store, current, writes, later);
+            return;
+        }
+        _ => {}
+    }
     if let LogicalOperator::Filter(filter) = op {
         // The label the planner scans, chosen at the top of a chain of filters
         if current
@@ -616,11 +642,11 @@ fn annotate_hints(
             *filter = reordered;
         }
         // Recurse into children first
-        annotate_hints(&mut filter.input, store, current, writes);
+        annotate_hints(&mut filter.input, store, current, writes, after_a_write);
 
         // A seek or a hash join replaces the scan below the filter
         let replaced = crate::query::planner::lpg::seek::checked_scan(filter).and_then(|below| {
-            seek_hint(&filter.predicate, below.scan, store, current)
+            seek_hint(&filter.predicate, below.scan, store, current, after_a_write)
                 .or_else(|| value_join_hint(filter, writes))
         });
         if let Some(hint) = replaced {
@@ -644,19 +670,21 @@ fn annotate_hints(
     }
     let taken = std::mem::replace(op, LogicalOperator::Empty);
     *op = taken.map_children(|mut child| {
-        annotate_hints(&mut child, store, current, writes);
+        annotate_hints(&mut child, store, current, writes, after_a_write);
         child
     });
 }
 
 /// The seek the planner makes of a filter over `scan`: an ID, or an indexed
-/// property per input row (only with `current`). None after a write in the
-/// scan's input, which the scan reads whole first.
+/// property per input row (only with `current`), or once for a filter that
+/// runs `after_a_write` of the statement. None after a write in the scan's
+/// input, which the scan reads whole first.
 fn seek_hint(
     predicate: &LogicalExpression,
     scan: &crate::query::plan::NodeScanOp,
     store: &dyn grafeo_core::graph::GraphStore,
     current: bool,
+    after_a_write: bool,
 ) -> Option<crate::query::plan::PushdownHint> {
     use crate::query::plan::PushdownHint;
     use grafeo_core::execution::operators::SeekKey;
@@ -668,9 +696,12 @@ fn seek_hint(
     {
         return None;
     }
-    let seek = crate::query::planner::lpg::seek::choose_seek(predicate, scan, |p| {
-        current && store.has_property_index(p)
-    })?;
+    let seek = crate::query::planner::lpg::seek::choose_seek(
+        predicate,
+        scan,
+        |p| current && store.has_property_index(p),
+        after_a_write,
+    )?;
     Some(match seek.key {
         SeekKey::Id => PushdownHint::IdSeek,
         SeekKey::Property(property) => PushdownHint::IndexLookup { property },

@@ -42,11 +42,10 @@ fn key_chain(seed: u8) -> Arc<KeyChain> {
     Arc::new(KeyChain::new([seed; 32]))
 }
 
-fn with_key(mut config: Config, chain: &Arc<KeyChain>) -> Config {
-    config.encryption = Some(EncryptionConfig {
+fn with_key(config: Config, chain: &Arc<KeyChain>) -> Config {
+    config.with_encryption(EncryptionConfig {
         key_chain: Arc::clone(chain),
-    });
-    config
+    })
 }
 
 /// A read-write configuration of the database at `path` with `chain`.

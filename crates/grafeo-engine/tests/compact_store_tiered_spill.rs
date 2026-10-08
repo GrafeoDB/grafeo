@@ -10,6 +10,11 @@
 //! - Reads continue to work transparently across the tier transition.
 //! - `recompact()` rebuilds the tier wrapper so its `Weak` back-references
 //!   track the new base.
+//! - Spills and reloads on several threads, overlapping merges of the
+//!   overlay or the spills of another database into the same directory,
+//!   change nothing a database reads or keeps in its file (#596). The tests
+//!   in `section_consumer` pin each overlap with a test hook; these run them
+//!   at full speed.
 //!
 //! Requires: `compact-store`, `mmap`, `lpg` (all default-on).
 
@@ -17,7 +22,10 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 
+use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB};
 
 fn spill_dir(label: &str) -> PathBuf {
@@ -438,4 +446,163 @@ fn phase5_probe_recovery_rebuilds_overlay_after_on_disk_mutation() {
         "WAL replay must restore the overlay-during-OnDisk mutation"
     );
     assert_eq!(lookup.rows()[0][0], grafeo_common::types::Value::Int64(777));
+}
+
+// ── Concurrent spills and reloads (#596) ──────────────────────────────
+
+/// The name of the base's memory consumer.
+const BASE_CONSUMER: &str = "section:CompactStore";
+
+/// The name of the overlay's memory consumer.
+const OVERLAY_CONSUMER: &str = "overlay:LpgStore";
+
+/// Rounds of each concurrent test: enough for the threads to overlap many
+/// times, few enough to finish in seconds.
+const ROUNDS: usize = 88;
+
+/// The names of the people `db` reads, sorted.
+fn people(db: &GrafeoDB) -> Vec<Vec<Value>> {
+    db.execute("MATCH (p:Person) RETURN p.name AS name ORDER BY name")
+        .unwrap()
+        .rows()
+        .to_vec()
+}
+
+/// One row per name.
+fn names(names: &[&str]) -> Vec<Vec<Value>> {
+    names.iter().map(|name| vec![Value::from(*name)]).collect()
+}
+
+/// A database with `config` holding the people `insert` adds, compacted.
+fn compacted(config: Config, insert: &str) -> Arc<GrafeoDB> {
+    let mut db = GrafeoDB::with_config(config).unwrap();
+    db.execute(insert).unwrap();
+    db.compact().unwrap();
+    Arc::new(db)
+}
+
+/// Spills and reloads the base of `db` [`ROUNDS`] times on a new thread,
+/// which checks after each step that `db` reads `expected`.
+fn spill_and_reload(db: Arc<GrafeoDB>, expected: Vec<Vec<Value>>) -> JoinHandle<Arc<GrafeoDB>> {
+    std::thread::spawn(move || {
+        for round in 0..ROUNDS {
+            db.buffer_manager().spill_consumer_by_name(BASE_CONSUMER);
+            assert_eq!(people(&db), expected, "round {round}, after the spill");
+            db.buffer_manager().reload_eligible(1.0);
+            assert_eq!(people(&db), expected, "round {round}, after the reload");
+        }
+        db
+    })
+}
+
+/// Two databases spill and reload their bases into one directory at the
+/// same time, each on its own thread: each reads its own people throughout.
+#[test]
+fn two_databases_spilling_into_one_directory_concurrently_read_their_own_people() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = || Config::in_memory().with_spill_path(dir.path().to_path_buf());
+    let alix = compacted(config(), "INSERT (:Person {name: 'Alix'})");
+    let gus = compacted(
+        config(),
+        "INSERT (:Person {name: 'Gus'}), (:Person {name: 'Mia'})",
+    );
+
+    let alix = spill_and_reload(alix, names(&["Alix"]));
+    let gus = spill_and_reload(gus, names(&["Gus", "Mia"]));
+    alix.join().expect("Alix's database reads its own people");
+    gus.join().expect("Gus's database reads its own people");
+}
+
+/// Two file databases spill and reload their bases into one directory at
+/// the same time: after a write, a close and a reopen, each file holds its
+/// own people.
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+#[test]
+fn two_file_databases_spilling_into_one_directory_concurrently_keep_their_own_people() {
+    let dir = tempfile::tempdir().unwrap();
+    let spill = dir.path().join("spill");
+    let alix_path = dir.path().join("alix.grafeo");
+    let gus_path = dir.path().join("gus.grafeo");
+    let config = |path: &std::path::Path| Config::persistent(path).with_spill_path(spill.clone());
+    let alix = compacted(config(&alix_path), "INSERT (:Person {name: 'Alix'})");
+    let gus = compacted(
+        config(&gus_path),
+        "INSERT (:Person {name: 'Gus'}), (:Person {name: 'Mia'})",
+    );
+
+    let alix = spill_and_reload(alix, names(&["Alix"]));
+    let gus = spill_and_reload(gus, names(&["Gus", "Mia"]));
+    let alix = alix.join().expect("Alix's database reads its own people");
+    let gus = gus.join().expect("Gus's database reads its own people");
+    // A write each, so the close writes the base it reads.
+    alix.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
+    gus.execute("INSERT (:Person {name: 'Jules'})").unwrap();
+    alix.close().unwrap();
+    gus.close().unwrap();
+    drop((alix, gus));
+
+    let alix = GrafeoDB::open(&alix_path).unwrap();
+    assert_eq!(people(&alix), names(&["Alix", "Vincent"]), "Alix's file");
+    alix.close().unwrap();
+    let gus = GrafeoDB::open(&gus_path).unwrap();
+    assert_eq!(people(&gus), names(&["Gus", "Jules", "Mia"]), "Gus's file");
+    gus.close().unwrap();
+}
+
+/// Three threads spill and reload the base while the main thread commits
+/// and merges the overlay into the base after each commit: no commit is
+/// lost, and the base the database reads is the one the wrapper holds.
+#[test]
+fn spills_and_reloads_during_merges_lose_no_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = compacted(
+        Config::in_memory().with_spill_path(dir.path().to_path_buf()),
+        "UNWIND range(1, 88) AS number INSERT (:Person {name: 'Butch', number: number})",
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let spillers: Vec<_> = (0..3)
+        .map(|_| {
+            let db = Arc::clone(&db);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    db.buffer_manager().spill_consumer_by_name(BASE_CONSUMER);
+                    db.buffer_manager().reload_eligible(1.0);
+                }
+            })
+        })
+        .collect();
+
+    let count = || {
+        db.execute("MATCH (p:Person) RETURN count(p)")
+            .unwrap()
+            .rows()[0][0]
+            .clone()
+    };
+    let mut lost = None;
+    for number in 0..ROUNDS {
+        db.execute(&format!("INSERT (:Person {{name: 'Vincent {number}'}})"))
+            .unwrap();
+        db.buffer_manager().spill_consumer_by_name(OVERLAY_CONSUMER);
+        let expected = Value::Int64(i64::try_from(88 + number + 1).unwrap());
+        if count() != expected {
+            lost.get_or_insert((number, count()));
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    for spiller in spillers {
+        spiller.join().unwrap();
+    }
+
+    assert_eq!(lost, None, "(commit, people counted after its merge)");
+    assert_eq!(
+        count(),
+        Value::Int64(i64::try_from(88 + ROUNDS).unwrap()),
+        "after the spills"
+    );
+    db.buffer_manager().spill_consumer_by_name(BASE_CONSUMER);
+    assert!(Arc::ptr_eq(
+        &db.layered_store().unwrap().base_store_arc(),
+        &db.compact_tiered().unwrap().store()
+    ));
 }

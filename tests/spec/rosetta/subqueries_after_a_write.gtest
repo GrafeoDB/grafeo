@@ -172,3 +172,32 @@ tests:
         - [2, 1]
         - [3, 1]
         - [4, 0]
+
+  # ---------------------------------------------------------------------------
+  # A CALL that writes runs again for each row after its write for the rows
+  # before, and sees it: the row i looks for the nodes k: 88 and writes one
+  # more for each it finds (one for none), so it finds i - 1. It used to find
+  # none in any row (the planner looked them up while planning).
+  # ---------------------------------------------------------------------------
+
+  - name: a_writing_call_sees_what_it_wrote_for_the_rows_before
+    variants:
+      gql: "FOR i IN range(1, 3) CALL () { OPTIONAL MATCH (t:N {k: 88}) INSERT (:N {k: 88}) RETURN count(t) AS seen } RETURN i, seen"
+      cypher: "UNWIND range(1, 3) AS i CALL { OPTIONAL MATCH (t:N {k: 88}) CREATE (:N {k: 88}) RETURN count(t) AS seen } RETURN i, seen"
+    expect:
+      rows:
+        - [1, 0]
+        - [2, 1]
+        - [3, 2]
+
+  - name: a_writing_call_sees_what_it_wrote_for_the_rows_before_through_an_index
+    setup:
+      - "CREATE INDEX idx_k FOR (n:N) ON (n.k)"
+    variants:
+      gql: "FOR i IN range(1, 3) CALL () { OPTIONAL MATCH (t:N {k: 88}) INSERT (:N {k: 88}) RETURN count(t) AS seen } RETURN i, seen"
+      cypher: "UNWIND range(1, 3) AS i CALL { OPTIONAL MATCH (t:N {k: 88}) CREATE (:N {k: 88}) RETURN count(t) AS seen } RETURN i, seen"
+    expect:
+      rows:
+        - [1, 0]
+        - [2, 1]
+        - [3, 2]

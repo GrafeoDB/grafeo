@@ -180,3 +180,104 @@ tests:
     expect:
       rows:
         - [2]
+
+  # ---------------------------------------------------------------------------
+  # A filter on constants after a write: the row i sets c: i on the one hub, so
+  # every row finds the hub with c: 4, which the last row writes. These used to
+  # find it in no row: the planner looked the hub up while planning, before the
+  # write (by its label, an index on c, or the zone map of c).
+  # ---------------------------------------------------------------------------
+
+  - name: an_optional_match_on_a_constant_after_a_write_sees_the_whole_write
+    setup:
+      - "INSERT (:Hub)-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t:Hub {c: 4}) RETURN i, t.c AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t:Hub {c: 4}) RETURN i, t.c AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: an_optional_match_on_a_constant_after_a_write_sees_the_whole_write_through_an_index
+    setup:
+      - "CREATE INDEX idx_c FOR (n:Hub) ON (n.c)"
+      - "INSERT (:Hub)-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t {c: 4}) RETURN i, t.c AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t {c: 4}) RETURN i, t.c AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  # Before the query the hub has c: 3, the only value the zone map of c knows.
+  - name: an_optional_match_on_a_constant_after_a_write_sees_past_the_zone_map
+    setup:
+      - "INSERT (:Hub {c: 3})-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t WHERE t.c = 4) RETURN i, t.c AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t) WHERE t.c = 4 RETURN i, t.c AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: a_joined_part_with_a_constant_after_a_write_sees_the_whole_write
+    setup:
+      - "INSERT (:Hub)-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) RETURN i, t.c AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) RETURN i, t.c AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: a_count_subquery_on_a_constant_after_a_write_sees_the_whole_write
+    setup:
+      - "INSERT (:Hub)-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i RETURN i, COUNT { MATCH (t:Hub {c: 4}) } + 3 AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i RETURN i, COUNT { MATCH (t:Hub {c: 4}) } + 3 AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: an_exists_on_a_constant_after_a_write_sees_the_whole_write
+    setup:
+      - "INSERT (:Hub)-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) } RETURN i"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) } RETURN i"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+        - [4]
+
+  # GQL takes a CALL after a MERGE, not after a SET or a WITH.
+  - name: a_call_on_a_constant_after_a_write_sees_the_whole_write
+    setup:
+      - "INSERT (:Hub)-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) ON MATCH SET h.c = i CALL () { MATCH (t:Hub {c: 4}) RETURN t.c AS found } RETURN i, found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i CALL { MATCH (t:Hub {c: 4}) RETURN t.c AS found } RETURN i, found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]

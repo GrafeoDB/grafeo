@@ -505,6 +505,168 @@ fn a_match_after_a_write_of_more_rows_than_a_chunk_sees_them_all() {
     }
 }
 
+/// The write in which the row `i` sets `c: i` on the one hub, so that after
+/// it the hub has `c: 4`.
+fn hub_key_write(language: Language) -> &'static str {
+    match language {
+        Language::Gql => "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i",
+        Language::Cypher => "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i",
+    }
+}
+
+/// A pattern with a filter on constants after a write finds what the whole
+/// write left, as one that reads the row does: every row `i` finds the hub
+/// with `c: 4`, which the last row writes. An `OPTIONAL MATCH` (with a
+/// property map, a `WHERE` of an equality, an `IN` list or a range, with and
+/// without a label), the part of a `MATCH` joined to another on a shared
+/// variable, a `CALL` subquery and a `COUNT` or `EXISTS` subquery used to
+/// find it in none of the rows: the planner looked the hub up while
+/// planning, before the write (by its label, an index on `c`, or the zone
+/// map of `c`, which knew only `c: 3`). With and without an index on `c`,
+/// and with the hub without `c` or with `c: 3` before the query.
+#[test]
+fn a_constant_filter_after_a_write_sees_the_whole_write() {
+    let mut queries = Vec::new();
+    for language in LANGUAGES {
+        for rest in [
+            "OPTIONAL MATCH (t:Hub {c: 4}) RETURN i, t.c AS found ORDER BY i",
+            "OPTIONAL MATCH (t {c: 4}) RETURN i, t.c AS found ORDER BY i",
+            "MATCH (t:Hub {c: 4}) RETURN i, t.c AS found ORDER BY i",
+            "MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) RETURN i, t.c AS found ORDER BY i",
+            "RETURN i, COUNT { MATCH (t:Hub {c: 4}) } + 3 AS found ORDER BY i",
+            "WITH i WHERE EXISTS { MATCH (t:Hub {c: 4}) } RETURN i, 4 AS found ORDER BY i",
+            // A subquery tied to the row by `h`, whose part joined on `q`
+            // has the filter on constants.
+            "WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) } \
+             RETURN i, 4 AS found ORDER BY i",
+        ] {
+            queries.push((language, format!("{} {rest}", hub_key_write(language))));
+        }
+    }
+    for rest in [
+        "OPTIONAL MATCH (t:Hub) WHERE t.c = 4 RETURN i, t.c AS found ORDER BY i",
+        "OPTIONAL MATCH (t:Hub) WHERE t.c IN [4, 88] RETURN i, t.c AS found ORDER BY i",
+        "OPTIONAL MATCH (t:Hub) WHERE t.c > 3 RETURN i, t.c AS found ORDER BY i",
+        "CALL { MATCH (t:Hub {c: 4}) RETURN t.c AS found } RETURN i, found ORDER BY i",
+        "CALL { WITH h MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) RETURN t.c AS found } \
+         RETURN i, found ORDER BY i",
+    ] {
+        let write = hub_key_write(Language::Cypher);
+        queries.push((Language::Cypher, format!("{write} {rest}")));
+    }
+    for rest in [
+        "OPTIONAL MATCH (t:Hub WHERE t.c = 4) RETURN i, t.c AS found ORDER BY i",
+        "OPTIONAL MATCH (t:Hub WHERE t.c IN [4, 88]) RETURN i, t.c AS found ORDER BY i",
+        "OPTIONAL MATCH (t:Hub WHERE t.c > 3) RETURN i, t.c AS found ORDER BY i",
+    ] {
+        let write = hub_key_write(Language::Gql);
+        queries.push((Language::Gql, format!("{write} {rest}")));
+    }
+    // GQL takes a `CALL` after a `MERGE`, not after a `SET` or `WITH`.
+    queries.push((
+        Language::Gql,
+        concat!(
+            "FOR i IN range(1, 4) MERGE (h:Hub) ON MATCH SET h.c = i ",
+            "CALL () { MATCH (t:Hub {c: 4}) RETURN t.c AS found } RETURN i, found ORDER BY i"
+        )
+        .to_string(),
+    ));
+    let expected: Vec<Vec<Value>> = (1..=4).map(|i| vec![int(i), int(4)]).collect();
+    let mut wrong = Vec::new();
+    for (language, query) in &queries {
+        for setup in [
+            "CREATE (:Hub)-[:R]->(:Q)",
+            "CREATE (:Hub {c: 3})-[:R]->(:Q)",
+        ] {
+            for indexed in [false, true] {
+                let db = GrafeoDB::new_in_memory();
+                if indexed {
+                    db.create_property_index("c").unwrap();
+                }
+                let session = db.session();
+                session.execute_cypher(setup).unwrap();
+                let rows = run(&session, *language, query);
+                if rows != expected {
+                    wrong.push(format!(
+                        "{language:?} `{query}` after `{setup}` (index: {indexed}): {rows:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "expected {expected:?} from:
+{}",
+        wrong.join(
+            "
+"
+        )
+    );
+}
+
+/// With an index on the key, a filter on a constant key after a write still
+/// looks the key up in the index, when it runs instead of while planning:
+/// `PROFILE` shows a seek, which finds the hub for each of the four rows, and
+/// `EXPLAIN` the index on the filter, in an `OPTIONAL MATCH` and a `CALL`
+/// subquery. A key the planner does not look up while planning, a call of a
+/// function, takes the seek too.
+#[test]
+fn a_constant_key_after_a_write_is_looked_up_when_it_runs() {
+    for (language, rest) in [
+        (
+            Language::Gql,
+            "OPTIONAL MATCH (t:Hub {c: 4}) RETURN i, t.c AS found ORDER BY i",
+        ),
+        (
+            Language::Cypher,
+            "OPTIONAL MATCH (t:Hub {c: 4}) RETURN i, t.c AS found ORDER BY i",
+        ),
+        (
+            Language::Gql,
+            "OPTIONAL MATCH (t:Hub WHERE t.c = toInteger('4')) RETURN i, t.c AS found ORDER BY i",
+        ),
+        (
+            Language::Cypher,
+            "OPTIONAL MATCH (t:Hub) WHERE t.c = toInteger('4') RETURN i, t.c AS found ORDER BY i",
+        ),
+        (
+            Language::Cypher,
+            "CALL { MATCH (t:Hub) WHERE t.c = toInteger('4') RETURN t.c AS found } \
+             RETURN i, found ORDER BY i",
+        ),
+    ] {
+        let query = format!("{} {rest}", hub_key_write(language));
+        let session = |db: &GrafeoDB| {
+            db.create_property_index("c").unwrap();
+            let session = db.session();
+            session.execute_cypher("CREATE (:Hub)-[:R]->(:Q)").unwrap();
+            session
+        };
+        let db = GrafeoDB::new_in_memory();
+        let plan = run(&session(&db), language, &format!("EXPLAIN {query}"));
+        let Value::String(plan) = &plan[0][0] else {
+            panic!("{language:?} `EXPLAIN {query}` returned {plan:?}");
+        };
+        assert!(
+            plan.contains("[index: c]"),
+            "{language:?} `EXPLAIN {query}`:\n{plan}"
+        );
+        let db = GrafeoDB::new_in_memory();
+        let lines = profile(&session(&db), language, &query);
+        assert!(
+            lines.iter().any(|(name, _)| name == "NodeSeek"),
+            "{language:?} `PROFILE {query}`: {lines:?}"
+        );
+        let db = GrafeoDB::new_in_memory();
+        assert_eq!(
+            run(&session(&db), language, &query),
+            (1..=4).map(|i| vec![int(i), int(4)]).collect::<Vec<_>>(),
+            "{language:?} `{query}`"
+        );
+    }
+}
+
 /// `PROFILE` runs these plans too (each on a new database, as the query
 /// writes): every operator has its line, and the top line counts the rows the
 /// query returns, which are those it returns without `PROFILE`.

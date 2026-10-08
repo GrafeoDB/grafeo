@@ -220,12 +220,19 @@ impl ApplyOperator {
     }
 
     /// Builds a DataChunk from accumulated rows, in `types` (a column past
-    /// them, from inner chunks never seen, is of any type).
+    /// them, from inner chunks never seen, is of any type). Rows without
+    /// columns (the one empty row a query starts from, which a unit `CALL`
+    /// or `FOREACH` that starts it passes on) keep their count.
     fn build_chunk(rows: &[Vec<Value>], types: &[LogicalType]) -> DataChunk {
         if rows.is_empty() {
             return DataChunk::empty();
         }
         let num_cols = rows[0].len();
+        if num_cols == 0 {
+            let mut chunk = DataChunk::with_capacity(&[], rows.len());
+            chunk.set_count(rows.len());
+            return chunk;
+        }
         let mut columns: Vec<ValueVector> = (0..num_cols)
             .map(|i| {
                 let column_type = types.get(i).cloned().unwrap_or(LogicalType::Any);
@@ -705,5 +712,38 @@ mod tests {
             "without unit mode, a row per inner row"
         );
         assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Rows without columns (the one empty row a query starts from) come out
+    /// as rows: in unit mode each outer row once, in EXISTS mode each row the
+    /// inner plan has a row for, and joined to inner rows without columns.
+    /// A chunk built of no columns used to count no rows, which lost them.
+    #[test]
+    fn rows_without_columns_are_kept() {
+        let empty_rows = |count: usize| -> Box<dyn Operator> {
+            let mut chunk = DataChunk::with_capacity(&[], count);
+            chunk.set_count(count);
+            Box::new(MockOperator {
+                chunks: vec![chunk],
+                position: 0,
+            })
+        };
+        let rows = |mut apply: ApplyOperator| {
+            let mut rows = 0;
+            while let Some(chunk) = apply.next().unwrap() {
+                assert_eq!(chunk.column_count(), 0, "no columns");
+                rows += chunk.row_count();
+            }
+            rows
+        };
+        assert_eq!(
+            rows(ApplyOperator::new(empty_rows(3), empty_rows(2)).with_unit()),
+            3
+        );
+        assert_eq!(
+            rows(ApplyOperator::new(empty_rows(3), empty_rows(1)).with_exists_mode(true)),
+            3
+        );
+        assert_eq!(rows(ApplyOperator::new(empty_rows(3), empty_rows(2))), 6);
     }
 }

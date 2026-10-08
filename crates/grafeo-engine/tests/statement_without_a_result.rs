@@ -153,6 +153,28 @@ fn a_write_without_return_has_no_result() {
             [2, 0, 0, 0, 0, 2, 0],
         ),
         (Language::Gql, "MATCH (w:W) FINISH", [0; 7]),
+        // A GQL statement may end with a CALL that writes (it used to be
+        // refused for want of a RETURN), also one whose body returns rows.
+        (
+            Language::Gql,
+            "FOR i IN [1, 2] CALL (i) { INSERT (:V {i: i}) }",
+            [2, 0, 0, 0, 2, 2, 0],
+        ),
+        (
+            Language::Gql,
+            "MATCH (w:W) CALL { INSERT (:V) }",
+            [2, 0, 0, 0, 0, 2, 0],
+        ),
+        (
+            Language::Gql,
+            "MATCH (w:W) CALL (w) { SET w.k = 88 }",
+            [0, 0, 0, 0, 2, 0, 0],
+        ),
+        (
+            Language::Gql,
+            "MATCH (w:W) CALL (w) { INSERT (v:V) RETURN v }",
+            [2, 0, 0, 0, 0, 2, 0],
+        ),
     ] {
         let session = GrafeoDB::new_in_memory().session();
         execute(&session, Language::Gql, SETUP);

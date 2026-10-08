@@ -1233,10 +1233,9 @@ fn wal_disabled_single_file_persists_on_close() {
     let path = dir.path().join("no_wal.grafeo");
 
     {
-        let config = Config {
-            wal_enabled: false,
-            ..Config::persistent(&path).with_storage_format(StorageFormat::Auto)
-        };
+        let config = Config::persistent(&path)
+            .with_storage_format(StorageFormat::Auto)
+            .without_wal();
         let db = GrafeoDB::with_config(config).unwrap();
         let session = db.session();
         session
@@ -1266,10 +1265,9 @@ fn wal_disabled_single_file_persists_on_close() {
     assert!(path.exists() && path.is_file());
 
     {
-        let config = Config {
-            wal_enabled: false,
-            ..Config::persistent(&path).with_storage_format(StorageFormat::Auto)
-        };
+        let config = Config::persistent(&path)
+            .with_storage_format(StorageFormat::Auto)
+            .without_wal();
         let db = GrafeoDB::with_config(config).unwrap();
         assert_eq!(
             db.node_count(),

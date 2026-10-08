@@ -19,9 +19,17 @@
 //! without reading the graph (`WITH h, i`) leaves that to the clause after
 //! it. EXPLAIN marks the clauses [`reads_after_the_write`] picks with
 //! [`MARKER`] (see [`clauses_after_a_write`]).
+//!
+//! The right side of a join and a subquery read the store, not the rows of
+//! the write, so they see the write only if they read the store when they
+//! run: the planner looks nothing up for them while planning (see
+//! [`right_side_runs_after_a_write`] and [`subquery_runs_after_a_write`]).
 
+use grafeo_core::execution::operators::Operator;
+
+use super::Result;
 use crate::query::plan::{
-    AggregateOp, LogicalExpression, LogicalOperator, ProjectOp, ReturnOp, SortOp, UnwindOp,
+    AggregateOp, ApplyOp, LogicalExpression, LogicalOperator, ProjectOp, ReturnOp, SortOp, UnwindOp,
 };
 
 /// What EXPLAIN adds to a clause the planner reads after a write (see
@@ -94,6 +102,55 @@ pub(crate) fn reads_after_the_write(op: &LogicalOperator) -> bool {
         _ => return false,
     };
     reads && writes_pending(input)
+}
+
+/// Whether the right side of a join or an `OPTIONAL MATCH` with this `left`
+/// side runs after a write of the statement: when the left side writes,
+/// which the join reads whole first (see `plan_join` and `plan_left_join`).
+/// The right side does not read the left side's rows, so it reads the store
+/// as the write left it only if it reads the store when it runs (see
+/// [`Planner::reads_the_store_as_planned`](super::Planner::reads_the_store_as_planned)):
+/// `MATCH (h:Hub) SET h.c = 4 WITH h OPTIONAL MATCH (t:Hub {c: 4})` finds
+/// the hub, which no lookup before the `SET` finds.
+pub(crate) fn right_side_runs_after_a_write(left: &LogicalOperator) -> bool {
+    left.has_mutations()
+}
+
+/// Whether the subquery of `apply` runs after a write of the statement: when
+/// its input writes (read whole first, see `plan_apply`), or when it writes
+/// itself, as it runs again for the next row after the write of the row
+/// before (see [`right_side_runs_after_a_write`]).
+pub(crate) fn subquery_runs_after_a_write(apply: &ApplyOp) -> bool {
+    apply.input.has_mutations() || apply.subplan.has_mutations()
+}
+
+impl super::Planner {
+    /// Plans `op`, which runs after a write of its statement when
+    /// `after_a_write` (or when the operator being planned does): then
+    /// nothing in its plan is decided by what the planner reads of the store
+    /// while planning (see [`Self::reads_the_store_as_planned`]).
+    pub(super) fn plan_after_a_write(
+        &self,
+        after_a_write: bool,
+        op: &LogicalOperator,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let enclosing = self.after_a_write.get();
+        self.after_a_write.set(enclosing || after_a_write);
+        let planned = self.plan_operator(op);
+        self.after_a_write.set(enclosing);
+        planned
+    }
+
+    /// Whether the operator being planned reads the store as it is while the
+    /// plan is built: not when it runs after a write of its statement (the
+    /// right side of a join, see [`right_side_runs_after_a_write`], and a
+    /// subquery, see [`subquery_runs_after_a_write`], or one per row after a
+    /// write, see `lift_subqueries`). What the planner reads of the store
+    /// itself, instead of an operator that reads it when it runs (the nodes
+    /// of an index or label-first lookup, the zone maps), needs it.
+    pub(super) fn reads_the_store_as_planned(&self) -> bool {
+        !self.after_a_write.get()
+    }
 }
 
 /// The clauses in `root` the planner reads after a write (see

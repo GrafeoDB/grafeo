@@ -2,15 +2,15 @@
 
 use crate::execution::chunk::{ColumnTypes, DataChunk};
 use crate::execution::operators::OperatorError;
-use crate::execution::operators::accumulator::{AggregateExpr, AggregateFunction, AggregateState};
+use crate::execution::operators::accumulator::{AggregateExpr, AggregateState};
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 #[cfg(feature = "spill")]
 use crate::execution::spill::{PartitionedState, SpillManager};
 use crate::execution::vector::ValueVector;
 use grafeo_common::types::Value;
-use std::collections::HashMap;
 #[cfg(feature = "spill")]
-use std::io::{Read, Write};
+use spill_codec::{deserialize_group_state, serialize_group_state};
+use std::collections::HashMap;
 #[cfg(feature = "spill")]
 use std::sync::Arc;
 
@@ -25,7 +25,7 @@ fn state_for_expr(expr: &AggregateExpr) -> AggregateState {
 }
 
 /// Updates a single accumulator from a data chunk row, handling bivariate
-/// functions, `CountNonNull` null-skipping, and `COUNT(*)`.
+/// functions and `COUNT(*)`. The accumulator skips a null operand.
 fn update_accumulator(
     acc: &mut AggregateState,
     expr: &AggregateExpr,
@@ -45,14 +45,9 @@ fn update_accumulator(
     }
 
     if let Some(col) = expr.column {
+        // An operand: a missing value is a null too, not a row to count.
         let val = chunk.column(col).and_then(|c| c.get_value(row));
-        // CountNonNull must skip null values
-        if expr.function == AggregateFunction::CountNonNull
-            && matches!(val, None | Some(Value::Null))
-        {
-            return;
-        }
-        acc.update(val);
+        acc.update(Some(val.unwrap_or(Value::Null)));
     } else {
         // COUNT(*)
         acc.update(None);
@@ -355,235 +350,8 @@ pub const DEFAULT_AGGREGATE_SPILL_THRESHOLD: usize = 50_000;
 #[cfg(feature = "spill")]
 const AGGREGATE_MIN_BUFFER_GROUPS: usize = 500;
 
-/// Tag bytes for aggregate state variants used during spill serialization.
-///
-/// Each tag identifies both the aggregate function AND how to reconstruct
-/// the accumulator state so it can continue receiving updates after reload.
 #[cfg(feature = "spill")]
-mod spill_tag {
-    pub const COUNT: u8 = 0;
-    pub const SUM_INT: u8 = 1;
-    pub const SUM_FLOAT: u8 = 2;
-    pub const AVG: u8 = 3;
-    pub const MIN: u8 = 4;
-    pub const MAX: u8 = 5;
-    pub const FIRST: u8 = 6;
-    pub const LAST: u8 = 7;
-    pub const COLLECT: u8 = 8;
-    /// Fallback: stores finalized value only, cannot resume accumulation.
-    pub const FINALIZED: u8 = 255;
-}
-
-/// Serializes a `GroupState` to bytes.
-///
-/// Each accumulator is serialized with a tag byte indicating the state variant
-/// followed by the internal fields needed to reconstruct a resumable state.
-/// For complex variants (StdDev, percentiles, bivariate, etc.) the finalized
-/// value is stored instead, since those are rare in spill scenarios.
-#[cfg(feature = "spill")]
-fn serialize_group_state(state: &GroupState, w: &mut dyn Write) -> std::io::Result<()> {
-    use crate::execution::spill::serialize_value;
-
-    // Write key values
-    w.write_all(&(state.key_values.len() as u64).to_le_bytes())?;
-    for val in &state.key_values {
-        serialize_value(val, w)?;
-    }
-
-    // Write accumulators with tag bytes
-    w.write_all(&(state.accumulators.len() as u64).to_le_bytes())?;
-    for acc in &state.accumulators {
-        match acc {
-            AggregateState::Count(n) => {
-                w.write_all(&[spill_tag::COUNT])?;
-                w.write_all(&n.to_le_bytes())?;
-            }
-            AggregateState::SumInt(sum, count) => {
-                w.write_all(&[spill_tag::SUM_INT])?;
-                w.write_all(&sum.to_le_bytes())?;
-                w.write_all(&count.to_le_bytes())?;
-            }
-            AggregateState::SumFloat(sum, _comp, count) => {
-                w.write_all(&[spill_tag::SUM_FLOAT])?;
-                w.write_all(&sum.to_le_bytes())?;
-                w.write_all(&count.to_le_bytes())?;
-            }
-            AggregateState::Avg(sum, count) => {
-                w.write_all(&[spill_tag::AVG])?;
-                w.write_all(&sum.to_le_bytes())?;
-                w.write_all(&count.to_le_bytes())?;
-            }
-            // DISTINCT variants track a HashSet that can't be serialized compactly.
-            // Serialize as finalized to avoid dropping distinct semantics.
-            AggregateState::CountDistinct(..)
-            | AggregateState::SumIntDistinct(..)
-            | AggregateState::SumFloatDistinct(..)
-            | AggregateState::AvgDistinct(..)
-            | AggregateState::CollectDistinct(..)
-            | AggregateState::GroupConcatDistinct(..) => {
-                w.write_all(&[spill_tag::FINALIZED])?;
-                serialize_value(&acc.finalize(), w)?;
-            }
-            AggregateState::Min(val) => {
-                w.write_all(&[spill_tag::MIN])?;
-                serialize_value(&val.clone().unwrap_or(Value::Null), w)?;
-            }
-            AggregateState::Max(val) => {
-                w.write_all(&[spill_tag::MAX])?;
-                serialize_value(&val.clone().unwrap_or(Value::Null), w)?;
-            }
-            AggregateState::First(val) => {
-                w.write_all(&[spill_tag::FIRST])?;
-                serialize_value(&val.clone().unwrap_or(Value::Null), w)?;
-            }
-            AggregateState::Last(val) => {
-                w.write_all(&[spill_tag::LAST])?;
-                serialize_value(&val.clone().unwrap_or(Value::Null), w)?;
-            }
-            AggregateState::Collect(list) => {
-                w.write_all(&[spill_tag::COLLECT])?;
-                w.write_all(&(list.len() as u64).to_le_bytes())?;
-                for val in list {
-                    serialize_value(val, w)?;
-                }
-            }
-            // Complex states: serialize finalized value as fallback
-            _ => {
-                w.write_all(&[spill_tag::FINALIZED])?;
-                serialize_value(&acc.finalize(), w)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Deserializes a `GroupState` from bytes.
-///
-/// Reconstructs the correct `AggregateState` variant from the tag byte so that
-/// reloaded groups can continue accumulating rows. Common variants (Count,
-/// SumInt, SumFloat, Avg, Min, Max, First, Last, Collect) are fully resumable.
-/// Rare/complex variants fall back to `Frozen(val)`.
-#[cfg(feature = "spill")]
-fn deserialize_group_state(r: &mut dyn Read) -> std::io::Result<GroupState> {
-    use crate::execution::spill::deserialize_value;
-
-    // Read key values
-    let mut len_buf = [0u8; 8];
-    r.read_exact(&mut len_buf)?;
-    // reason: deserialized counts are bounded by available data
-    #[allow(clippy::cast_possible_truncation)]
-    let num_keys = u64::from_le_bytes(len_buf) as usize;
-
-    let mut key_values = Vec::with_capacity(num_keys);
-    for _ in 0..num_keys {
-        key_values.push(deserialize_value(r)?);
-    }
-
-    // Read accumulators with tag-based reconstruction
-    r.read_exact(&mut len_buf)?;
-    // reason: deserialized counts are bounded by available data
-    #[allow(clippy::cast_possible_truncation)]
-    let num_accumulators = u64::from_le_bytes(len_buf) as usize;
-
-    let mut accumulators = Vec::with_capacity(num_accumulators);
-    for _ in 0..num_accumulators {
-        let mut tag = [0u8; 1];
-        r.read_exact(&mut tag)?;
-
-        let state = match tag[0] {
-            spill_tag::COUNT => {
-                let mut buf = [0u8; 8];
-                r.read_exact(&mut buf)?;
-                AggregateState::Count(i64::from_le_bytes(buf))
-            }
-            spill_tag::SUM_INT => {
-                let mut buf = [0u8; 8];
-                r.read_exact(&mut buf)?;
-                let sum = i64::from_le_bytes(buf);
-                r.read_exact(&mut buf)?;
-                let count = i64::from_le_bytes(buf);
-                AggregateState::SumInt(sum, count)
-            }
-            spill_tag::SUM_FLOAT => {
-                let mut buf = [0u8; 8];
-                r.read_exact(&mut buf)?;
-                let sum = f64::from_le_bytes(buf);
-                r.read_exact(&mut buf)?;
-                let count = i64::from_le_bytes(buf);
-                // Reset Kahan compensation to zero; minor precision loss is acceptable
-                AggregateState::SumFloat(sum, 0.0, count)
-            }
-            spill_tag::AVG => {
-                let mut buf = [0u8; 8];
-                r.read_exact(&mut buf)?;
-                let sum = f64::from_le_bytes(buf);
-                r.read_exact(&mut buf)?;
-                let count = i64::from_le_bytes(buf);
-                AggregateState::Avg(sum, count)
-            }
-            spill_tag::MIN => {
-                let val = deserialize_value(r)?;
-                let opt = if matches!(val, Value::Null) {
-                    None
-                } else {
-                    Some(val)
-                };
-                AggregateState::Min(opt)
-            }
-            spill_tag::MAX => {
-                let val = deserialize_value(r)?;
-                let opt = if matches!(val, Value::Null) {
-                    None
-                } else {
-                    Some(val)
-                };
-                AggregateState::Max(opt)
-            }
-            spill_tag::FIRST => {
-                let val = deserialize_value(r)?;
-                let opt = if matches!(val, Value::Null) {
-                    None
-                } else {
-                    Some(val)
-                };
-                AggregateState::First(opt)
-            }
-            spill_tag::LAST => {
-                let val = deserialize_value(r)?;
-                let opt = if matches!(val, Value::Null) {
-                    None
-                } else {
-                    Some(val)
-                };
-                AggregateState::Last(opt)
-            }
-            spill_tag::COLLECT => {
-                let mut buf = [0u8; 8];
-                r.read_exact(&mut buf)?;
-                // reason: deserialized lengths are bounded by available data
-                #[allow(clippy::cast_possible_truncation)]
-                let len = u64::from_le_bytes(buf) as usize;
-                let mut list = Vec::with_capacity(len);
-                for _ in 0..len {
-                    list.push(deserialize_value(r)?);
-                }
-                AggregateState::Collect(list)
-            }
-            _ => {
-                let val = deserialize_value(r)?;
-                AggregateState::Frozen(val)
-            }
-        };
-
-        accumulators.push(state);
-    }
-
-    Ok(GroupState {
-        key_values,
-        accumulators,
-    })
-}
+mod spill_codec;
 
 /// Push-based aggregate operator with spilling support.
 ///
@@ -1434,17 +1202,16 @@ mod tests {
         assert_eq!(max.finalize(), Value::Null);
     }
 
+    /// `COUNT(x)` counts the non-null operands; `None` is a `COUNT(*)` row.
     #[test]
     fn aggregate_state_count_non_null_skips_nulls() {
-        // CountNonNull maps to the Count(0) state variant, which increments
-        // unconditionally. Callers (both push and pull operators) must filter
-        // null values before calling update. This test verifies the expected
-        // contract: only non-null values are fed to the accumulator.
         let mut state = AggregateState::new(AggregateFunction::CountNonNull, false, None, None);
-        // Simulate what the operator should do: skip nulls, update only non-nulls
-        // (Value::Null is skipped, Value::Int64(5) is the only non-null)
+        state.update(Some(Value::Null));
         state.update(Some(Value::Int64(5)));
+        state.update(Some(Value::Null));
         assert_eq!(state.finalize(), Value::Int64(1));
+        state.update(None);
+        assert_eq!(state.finalize(), Value::Int64(2));
     }
 
     #[test]
@@ -1649,7 +1416,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // DISTINCT variants serialize as FINALIZED
+    // DISTINCT variants retain their identities and current result.
     // ---------------------------------------------------------------
 
     #[test]
@@ -1669,7 +1436,6 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        // DISTINCT serializes as FINALIZED, deserialized as Frozen(val)
         assert_eq!(restored.accumulators[0].finalize(), Value::Int64(3));
     }
 
@@ -1711,13 +1477,12 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        // CollectDistinct finalizes to a List, deserialized via FINALIZED fallback
         let result = restored.accumulators[0].finalize();
         assert!(matches!(result, Value::List(_)));
     }
 
     // ---------------------------------------------------------------
-    // Complex variants (FINALIZED fallback)
+    // Statistical and collected states retain their current result.
     // ---------------------------------------------------------------
 
     #[test]
@@ -1737,7 +1502,6 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        // Complex variant stored as FINALIZED, restored as Frozen(val)
         assert_eq!(restored.accumulators[0].finalize(), expected);
     }
 
@@ -1934,6 +1698,82 @@ mod tests {
         );
     }
 
+    /// A group whose first operand is null aggregates its later operands:
+    /// `min`, `max` and `first` kept that null, and `collect` listed it.
+    #[test]
+    fn grouped_aggregates_skip_a_leading_null() {
+        let mut keys = ValueVector::new();
+        let mut operands = ValueVector::new();
+        for (key, operand) in [
+            (1, Value::Null),
+            (1, Value::Int64(19)),
+            (1, Value::Int64(3)),
+            (2, Value::Null),
+        ] {
+            keys.push(Value::Int64(key));
+            operands.push(operand);
+        }
+        let mut agg = AggregatePushOperator::new(
+            vec![0],
+            vec![
+                AggregateExpr::min(1),
+                AggregateExpr::max(1),
+                AggregateExpr::first(1),
+                AggregateExpr::collect(1),
+                AggregateExpr::count(1),
+                AggregateExpr::count_star(),
+            ],
+        );
+        let mut sink = CollectorSink::new();
+        agg.push(DataChunk::new(vec![keys, operands]), &mut sink)
+            .unwrap();
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        let mut rows: Vec<Vec<Value>> = chunks[0]
+            .selected_indices()
+            .map(|row| {
+                (0..7)
+                    .map(|column| chunks[0].column(column).unwrap().get_value(row).unwrap())
+                    .collect()
+            })
+            .collect();
+        rows.sort_by_key(|row| row[0].as_int64());
+        let list = |values: &[i64]| {
+            Value::List(
+                values
+                    .iter()
+                    .map(|&value| Value::Int64(value))
+                    .collect::<Vec<_>>()
+                    .into(),
+            )
+        };
+        assert_eq!(
+            rows,
+            [
+                vec![
+                    Value::Int64(1),
+                    Value::Int64(3),
+                    Value::Int64(19),
+                    Value::Int64(19),
+                    list(&[19, 3]),
+                    Value::Int64(2),
+                    Value::Int64(3),
+                ],
+                vec![
+                    Value::Int64(2),
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    list(&[]),
+                    Value::Int64(0),
+                    Value::Int64(1),
+                ],
+            ]
+        );
+    }
+
     #[test]
     fn test_grouped_aggregate_empty_groups() {
         // Grouped aggregate with empty input produces no output
@@ -1979,34 +1819,6 @@ mod tests {
         let chunks = sink.into_chunks();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].len(), 5);
-    }
-
-    #[test]
-    #[cfg(feature = "spill")]
-    fn spill_finalized_frozen_ignores_further_updates() {
-        let mut acc = AggregateState::new(AggregateFunction::StdDev, false, None, None);
-        acc.update(Some(Value::Float64(2.0)));
-        acc.update(Some(Value::Float64(4.0)));
-        acc.update(Some(Value::Float64(6.0)));
-        let expected = acc.finalize();
-
-        let state = GroupState {
-            key_values: vec![Value::Int64(1)],
-            accumulators: vec![acc],
-        };
-        let mut buf = Vec::new();
-        serialize_group_state(&state, &mut buf).unwrap();
-        let mut restored = deserialize_group_state(&mut &buf[..]).unwrap();
-
-        assert!(matches!(
-            restored.accumulators[0],
-            AggregateState::Frozen(_)
-        ));
-
-        restored.accumulators[0].update(Some(Value::Float64(100.0)));
-        restored.accumulators[0].update(Some(Value::Float64(200.0)));
-
-        assert_eq!(restored.accumulators[0].finalize(), expected);
     }
 
     // ---------------------------------------------------------------
@@ -2136,14 +1948,16 @@ mod tests {
         };
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
-        let restored = deserialize_group_state(&mut &buf[..]).unwrap();
+        let mut restored = deserialize_group_state(&mut &buf[..]).unwrap();
 
-        // CountDistinct serializes as FINALIZED, so deserialized as Frozen(Int64(3))
         assert_eq!(restored.accumulators[0].finalize(), Value::Int64(3));
         assert!(
-            matches!(restored.accumulators[0], AggregateState::Frozen(_)),
-            "DISTINCT should be deserialized as Frozen"
+            matches!(restored.accumulators[0], AggregateState::CountDistinct(..)),
+            "DISTINCT must retain its live accumulator"
         );
+        restored.accumulators[0].update(Some(Value::String("Paris".into())));
+        restored.accumulators[0].update(Some(Value::String("Berlin".into())));
+        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(4));
     }
 
     // ---------------------------------------------------------------
@@ -2177,6 +1991,300 @@ mod tests {
         assert_eq!(chunks[0].column(2).unwrap().get_value(0), Some(Value::Null));
         // MAX with no input should be Null
         assert_eq!(chunks[0].column(3).unwrap().get_value(0), Some(Value::Null));
+    }
+
+    #[cfg(feature = "spill")]
+    fn restore_spilled_accumulator(state: &AggregateState) -> AggregateState {
+        let group = GroupState {
+            key_values: vec![Value::String("continuation".into())],
+            accumulators: vec![state.clone()],
+        };
+        let mut bytes = Vec::new();
+        serialize_group_state(&group, &mut bytes).unwrap();
+        let mut restored = deserialize_group_state(&mut bytes.as_slice()).unwrap();
+        assert_eq!(restored.key_values, group.key_values);
+        restored.accumulators.remove(0)
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spill_every_live_variant_resumes() {
+        let functions = [
+            AggregateFunction::Count,
+            AggregateFunction::CountNonNull,
+            AggregateFunction::Sum,
+            AggregateFunction::Avg,
+            AggregateFunction::Min,
+            AggregateFunction::Max,
+            AggregateFunction::First,
+            AggregateFunction::Last,
+            AggregateFunction::Collect,
+            AggregateFunction::StdDev,
+            AggregateFunction::StdDevPop,
+            AggregateFunction::Variance,
+            AggregateFunction::VariancePop,
+            AggregateFunction::PercentileDisc,
+            AggregateFunction::PercentileCont,
+            AggregateFunction::GroupConcat,
+            AggregateFunction::Sample,
+            AggregateFunction::CovarSamp,
+            AggregateFunction::CovarPop,
+            AggregateFunction::Corr,
+            AggregateFunction::RegrSlope,
+            AggregateFunction::RegrIntercept,
+            AggregateFunction::RegrR2,
+            AggregateFunction::RegrCount,
+            AggregateFunction::RegrSxx,
+            AggregateFunction::RegrSyy,
+            AggregateFunction::RegrSxy,
+            AggregateFunction::RegrAvgx,
+            AggregateFunction::RegrAvgy,
+        ];
+        let update = |state: &mut AggregateState, y, x, floats| {
+            let operand = |n: i32| {
+                if floats {
+                    Value::Float64(f64::from(n))
+                } else {
+                    Value::Int64(i64::from(n))
+                }
+            };
+            if matches!(state, AggregateState::Bivariate { .. }) {
+                state.update_bivariate(Some(operand(y)), Some(operand(x)));
+            } else {
+                state.update(Some(operand(y)));
+            }
+        };
+        let mut failures = Vec::new();
+        for function in functions {
+            for distinct in [false, true] {
+                for floats in [false, true] {
+                    let mut uninterrupted =
+                        AggregateState::new(function, distinct, Some(0.25), Some("|"));
+                    update(&mut uninterrupted, 1, 2, floats);
+                    update(&mut uninterrupted, 3, 4, floats);
+                    let mut restored = restore_spilled_accumulator(&uninterrupted);
+                    if std::mem::discriminant(&restored) != std::mem::discriminant(&uninterrupted) {
+                        failures.push(format!(
+                            "{function:?}, distinct={distinct}, floats={floats}: lost live state"
+                        ));
+                    }
+                    // A duplicate tests retained DISTINCT identities; new values
+                    // require numerical/list states to continue accumulating.
+                    for (y, x) in [(3, 4), (5, 8), (9, 16)] {
+                        update(&mut uninterrupted, y, x, floats);
+                        update(&mut restored, y, x, floats);
+                        if restored.finalize() != uninterrupted.finalize() {
+                            failures.push(format!(
+                                "{function:?}, distinct={distinct}, floats={floats}, y={y}: \
+                                 {:?} != {:?}",
+                                restored.finalize(),
+                                uninterrupted.finalize()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Each kind of DISTINCT identity survives a spill; a null is no operand,
+    /// before the spill or after it.
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spill_distinct_identity_variants_resume() {
+        let other = Value::List(vec![Value::Int64(1)].into());
+        let identities = vec![
+            Value::Bool(true),
+            Value::Int64(1),
+            Value::Float64(1.0),
+            Value::String("seen".into()),
+            Value::String(format!("{other:?}").into()),
+            other,
+        ];
+        let operands: Vec<Value> = std::iter::once(Value::Null)
+            .chain(identities.iter().cloned())
+            .collect();
+        let mut count = AggregateState::new(AggregateFunction::Count, true, None, None);
+        let mut collect = AggregateState::new(AggregateFunction::Collect, true, None, None);
+        for value in &operands {
+            count.update(Some(value.clone()));
+            collect.update(Some(value.clone()));
+        }
+        assert_eq!(count.finalize(), Value::Int64(6));
+        let mut restored_count = restore_spilled_accumulator(&count);
+        let mut restored_collect = restore_spilled_accumulator(&collect);
+        for value in operands.iter().chain(std::iter::once(&Value::Int64(2))) {
+            restored_count.update(Some(value.clone()));
+            restored_collect.update(Some(value.clone()));
+        }
+        assert_eq!(restored_count.finalize(), Value::Int64(7));
+        let mut expected = identities;
+        expected.push(Value::Int64(2));
+        assert_eq!(restored_collect.finalize(), Value::List(expected.into()));
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spill_float_compensation_resumes() {
+        use crate::execution::operators::accumulator::HashableValue;
+        use std::collections::HashSet;
+
+        // A nonzero compensation is retained accumulator state, independently
+        // of the numerical policy used to produce it from input rows.
+        let sum = 9_007_199_254_740_992.0;
+        let compensation = -1.0;
+        let seen: HashSet<_> = [Value::Float64(sum), Value::Float64(1.0)]
+            .iter()
+            .map(HashableValue::from)
+            .collect();
+        for (mut state, next) in [
+            (AggregateState::SumFloat(sum, compensation, 2), 1.0),
+            (
+                AggregateState::SumFloatDistinct(sum, compensation, 2, seen),
+                2.0,
+            ),
+        ] {
+            let mut restored = restore_spilled_accumulator(&state);
+            let restored_compensation = match &restored {
+                AggregateState::SumFloat(_, value, _)
+                | AggregateState::SumFloatDistinct(_, value, _, _) => *value,
+                _ => panic!("floating sum restored as a different state"),
+            };
+            assert_eq!(restored_compensation.to_bits(), compensation.to_bits());
+            state.update(Some(Value::Float64(next)));
+            restored.update(Some(Value::Float64(next)));
+            assert_eq!(restored.finalize(), state.finalize());
+        }
+    }
+
+    /// An optional state that saw no operand, or only nulls, spills empty; the
+    /// reloaded state takes its next operand as its first and skips the nulls
+    /// after it.
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spill_empty_optional_states_resume() {
+        for (function, expected) in [
+            (AggregateFunction::Min, 3),
+            (AggregateFunction::Max, 19),
+            (AggregateFunction::First, 19),
+            (AggregateFunction::Last, 3),
+            (AggregateFunction::Sample, 19),
+        ] {
+            for null_seen in [false, true] {
+                let mut state = AggregateState::new(function, false, None, None);
+                if null_seen {
+                    state.update(Some(Value::Null));
+                }
+                let mut restored = restore_spilled_accumulator(&state);
+                assert_eq!(restored.finalize(), Value::Null, "{function:?}");
+                for value in [
+                    Value::Null,
+                    Value::Int64(19),
+                    Value::Null,
+                    Value::Int64(3),
+                    Value::Null,
+                ] {
+                    state.update(Some(value.clone()));
+                    restored.update(Some(value));
+                    assert_eq!(restored.finalize(), state.finalize(), "{function:?}");
+                }
+                assert_eq!(restored.finalize(), Value::Int64(expected), "{function:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spill_percentile_and_separator_configuration_resumes() {
+        for (function, distinct, expected) in [
+            (
+                AggregateFunction::PercentileDisc,
+                false,
+                Value::Float64(2.0),
+            ),
+            (
+                AggregateFunction::PercentileCont,
+                false,
+                Value::Float64(3.5),
+            ),
+            (
+                AggregateFunction::GroupConcat,
+                false,
+                Value::String("2|4|4|8".into()),
+            ),
+            (
+                AggregateFunction::GroupConcat,
+                true,
+                Value::String("2|4|8".into()),
+            ),
+        ] {
+            let mut state = AggregateState::new(function, distinct, Some(0.25), Some("|"));
+            for value in [2, 4] {
+                state.update(Some(Value::Int64(value)));
+            }
+            let mut restored = restore_spilled_accumulator(&state);
+            for value in [4, 8] {
+                restored.update(Some(Value::Int64(value)));
+            }
+            assert_eq!(restored.finalize(), expected, "{function:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spill_partition_count_distinct_resumes() {
+        use tempfile::TempDir;
+
+        let directory = TempDir::new().unwrap();
+        let manager = Arc::new(SpillManager::new(directory.path()).unwrap());
+        let mut aggregate = SpillableAggregatePushOperator::with_spilling(
+            vec![0],
+            vec![AggregateExpr::count(1).with_distinct()],
+            Arc::clone(&manager),
+            usize::MAX,
+        );
+        let mut sink = CollectorSink::new();
+        aggregate
+            .push(create_two_column_chunk(&[7, 7], &[10, 10]), &mut sink)
+            .unwrap();
+        let partitioned = aggregate.partitioned_groups.as_mut().unwrap();
+        let partition = partitioned.partition_for(&[Value::Int64(7)]);
+        partitioned.spill_partition(partition).unwrap();
+        assert!(!partitioned.is_in_memory(partition));
+        assert!(manager.spilled_bytes() > 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        // The ordinary push updater reloads the same partition, ignores old
+        // and new duplicates, and admits the new distinct operand once.
+        aggregate
+            .push(
+                create_two_column_chunk(&[7, 7, 7], &[10, 20, 20]),
+                &mut sink,
+            )
+            .unwrap();
+        assert!(
+            aggregate
+                .partitioned_groups
+                .as_ref()
+                .unwrap()
+                .is_in_memory(partition)
+        );
+        assert_eq!(manager.spilled_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        aggregate.finalize(&mut sink).unwrap();
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 1);
+        assert_eq!(
+            chunks[0].column(0).unwrap().get_value(0),
+            Some(Value::Int64(7))
+        );
+        assert_eq!(
+            chunks[0].column(1).unwrap().get_value(0),
+            Some(Value::Int64(2))
+        );
+        assert_eq!(manager.spilled_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     // ---------------------------------------------------------------

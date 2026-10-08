@@ -86,10 +86,6 @@ pub enum AggregateState {
         m2_y: f64,
         c_xy: f64,
     },
-    /// Immutable finalized value restored from spill. Ignores further updates
-    /// so that reloaded groups that were serialized via the FINALIZED fallback
-    /// do not silently corrupt their result when more rows arrive.
-    Frozen(Value),
 }
 
 impl AggregateState {
@@ -187,8 +183,12 @@ impl AggregateState {
     /// Updates the state with a new value.
     ///
     /// For `COUNT(*)`, pass `None` to count all rows. For column-specific
-    /// aggregates, pass `Some(value)` (nulls are skipped by most functions).
+    /// aggregates, pass `Some(value)`. A null operand leaves every state as it
+    /// was: aggregates skip nulls, also as the first operand of a group.
     pub fn update(&mut self, value: Option<Value>) {
+        if matches!(value, Some(Value::Null)) {
+            return;
+        }
         match self {
             AggregateState::Count(count) => {
                 *count += 1;
@@ -382,7 +382,6 @@ impl AggregateState {
                 // Bivariate functions require two values; use update_bivariate() instead.
                 // Single-value update is a no-op for bivariate state.
             }
-            AggregateState::Frozen(_) => {}
         }
     }
 
@@ -533,7 +532,6 @@ impl AggregateState {
             }
             // SAMPLE: return the first non-null value seen
             AggregateState::Sample(sample) => sample.clone().unwrap_or(Value::Null),
-            AggregateState::Frozen(val) => val.clone(),
             // Binary set functions: dispatch on kind
             AggregateState::Bivariate {
                 kind,
@@ -1782,6 +1780,63 @@ mod tests {
         let result = agg.next().unwrap().unwrap();
         // Sample should return the first non-null value (10)
         assert_eq!(result.column(0).unwrap().get_int64(0), Some(10));
+    }
+
+    /// A null operand leaves every state as it was, also as the first operand
+    /// of an empty state: each aggregate finalizes as if the nulls were never
+    /// there, and one that saw only nulls as if it saw nothing. (`None` is a
+    /// row for `COUNT(*)`, not an operand.)
+    #[test]
+    fn a_null_operand_leaves_every_state_unchanged() {
+        let functions = [
+            AggregateFunction::Count,
+            AggregateFunction::CountNonNull,
+            AggregateFunction::Sum,
+            AggregateFunction::Avg,
+            AggregateFunction::Min,
+            AggregateFunction::Max,
+            AggregateFunction::First,
+            AggregateFunction::Last,
+            AggregateFunction::Collect,
+            AggregateFunction::StdDev,
+            AggregateFunction::StdDevPop,
+            AggregateFunction::Variance,
+            AggregateFunction::VariancePop,
+            AggregateFunction::PercentileDisc,
+            AggregateFunction::PercentileCont,
+            AggregateFunction::GroupConcat,
+            AggregateFunction::Sample,
+            AggregateFunction::CovarSamp,
+            AggregateFunction::Corr,
+            AggregateFunction::RegrCount,
+        ];
+        let operands = [19, 3, 88, 3].map(Value::Int64);
+        for function in functions {
+            for distinct in [false, true] {
+                let new_state = || AggregateState::new(function, distinct, Some(0.5), Some("|"));
+                let update = |state: &mut AggregateState, operand: &Value| {
+                    if matches!(state, AggregateState::Bivariate { .. }) {
+                        state.update_bivariate(Some(operand.clone()), Some(Value::Int64(19)));
+                    } else {
+                        state.update(Some(operand.clone()));
+                    }
+                };
+                let mut without_nulls = new_state();
+                let mut with_nulls = new_state();
+                let mut only_nulls = new_state();
+                update(&mut with_nulls, &Value::Null);
+                update(&mut only_nulls, &Value::Null);
+                for operand in &operands {
+                    update(&mut without_nulls, operand);
+                    update(&mut with_nulls, operand);
+                    update(&mut with_nulls, &Value::Null);
+                    update(&mut only_nulls, &Value::Null);
+                }
+                let case = format!("{function:?}, distinct: {distinct}");
+                assert_eq!(with_nulls.finalize(), without_nulls.finalize(), "{case}");
+                assert_eq!(only_nulls.finalize(), new_state().finalize(), "{case}");
+            }
+        }
     }
 
     #[test]

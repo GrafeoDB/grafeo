@@ -86,9 +86,8 @@ pub enum AggregateState {
         m2_y: f64,
         c_xy: f64,
     },
-    /// Immutable finalized value restored from spill. Ignores further updates
-    /// so that reloaded groups that were serialized via the FINALIZED fallback
-    /// do not silently corrupt their result when more rows arrive.
+    /// Explicitly finalized value that ignores further updates.
+    /// Live accumulators retain their continuation state when spilled.
     Frozen(Value),
 }
 

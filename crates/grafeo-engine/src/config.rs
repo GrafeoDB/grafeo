@@ -243,8 +243,40 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 /// Database configuration.
+///
+/// Start from [`Config::in_memory()`], [`Config::persistent()`] or
+/// [`Config::read_only()`] and change settings with the `with_*` and
+/// `without_*` methods. The fields are public for reading. Later releases
+/// add settings, so outside this crate a `Config` cannot be built with a
+/// struct literal.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use grafeo_engine::Config;
+///
+/// let config = Config::persistent("amsterdam.grafeo")
+///     .with_memory_limit(88 * 1024 * 1024)
+///     .with_threads(3)
+///     .with_query_timeout(Duration::from_secs(19));
+/// assert_eq!(config.threads, 3);
+/// ```
+///
+/// A struct literal does not compile, as a later field would break it:
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::Config;
+///
+/// let config = Config {
+///     threads: 3,
+///     ..Config::in_memory()
+/// };
+/// ```
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)] // Config structs naturally have many boolean flags
+#[non_exhaustive]
 pub struct Config {
     /// Graph data model (LPG or RDF). Immutable after database creation.
     pub graph_model: GraphModel,
@@ -272,6 +304,9 @@ pub struct Config {
     /// commits to the file and removes the WAL before it returns, so no later
     /// crash can replay that WAL over newer data; a read-only open only
     /// replays them into memory.
+    ///
+    /// On for [`Config::persistent()`], off for [`Config::in_memory()`] and
+    /// [`Config::read_only()`]; [`Config::without_wal()`] turns it off.
     pub wal_enabled: bool,
 
     /// WAL flush interval in milliseconds.
@@ -372,7 +407,8 @@ pub struct Config {
     /// Controls how many events the CDC log retains in memory. By default,
     /// retains up to 1,000 epochs and 100,000 events. Set to unlimited
     /// (`max_epochs: None, max_events: None`) to disable pruning, but
-    /// beware of unbounded memory growth on long-running instances.
+    /// beware of unbounded memory growth on long-running instances. Set it
+    /// with [`Config::with_cdc_retention()`].
     #[cfg(feature = "cdc")]
     pub cdc_retention: crate::cdc::CdcRetentionConfig,
 
@@ -393,7 +429,7 @@ pub struct Config {
     /// only happen on explicit `wal_checkpoint()` or database close.
     pub checkpoint_interval: Option<Duration>,
 
-    /// Encryption at rest.
+    /// Encryption at rest, set with [`Config::with_encryption()`].
     ///
     /// When set, the database file (`.grafeo`) and its sidecar WAL are
     /// encrypted with AES-256-GCM, with keys the key chain derives for this
@@ -554,6 +590,17 @@ impl Config {
     #[must_use]
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads;
+        self
+    }
+
+    /// Turns the sidecar WAL off: a commit then reaches the file only at the
+    /// next checkpoint (`close()`, `wal_checkpoint()` or the periodic one),
+    /// so a crash loses the commits since the last one. An open still
+    /// replays a WAL that a writer left without `close()` (see
+    /// [`Config::wal_enabled`]).
+    #[must_use]
+    pub fn without_wal(mut self) -> Self {
+        self.wal_enabled = false;
         self
     }
 
@@ -723,6 +770,31 @@ impl Config {
         self
     }
 
+    /// Sets how many CDC events the change history keeps (see
+    /// [`Config::cdc_retention`]); garbage collection drops the oldest
+    /// events beyond it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::Config;
+    /// use grafeo_engine::cdc::CdcRetentionConfig;
+    ///
+    /// let config = Config::in_memory()
+    ///     .with_cdc()
+    ///     .with_cdc_retention(CdcRetentionConfig {
+    ///         max_epochs: None,
+    ///         max_events: Some(88_000),
+    ///     });
+    /// assert_eq!(config.cdc_retention.max_events, Some(88_000));
+    /// ```
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub fn with_cdc_retention(mut self, retention: crate::cdc::CdcRetentionConfig) -> Self {
+        self.cdc_retention = retention;
+        self
+    }
+
     /// Sets memory configuration for a specific section type.
     ///
     /// Use this to cap a section's RAM usage or pin it to a storage tier.
@@ -798,6 +870,33 @@ impl Config {
     #[must_use]
     pub fn with_checkpoint_interval(mut self, interval: Duration) -> Self {
         self.checkpoint_interval = Some(interval);
+        self
+    }
+
+    /// Encrypts the database at rest with the keys `encryption` derives (see
+    /// [`Config::encryption`] for what is encrypted and which settings it
+    /// refuses).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use grafeo_common::encryption::KeyChain;
+    /// use grafeo_engine::Config;
+    /// use grafeo_engine::config::EncryptionConfig;
+    ///
+    /// // 32 bytes from your key management (a KMS, a secrets manager, an HSM).
+    /// let master_key = [19; 32];
+    /// let config = Config::persistent("berlin.grafeo").with_encryption(EncryptionConfig {
+    ///     key_chain: Arc::new(KeyChain::new(master_key)),
+    /// });
+    /// assert!(config.validate().is_ok());
+    /// ```
+    #[cfg(feature = "encryption")]
+    #[must_use]
+    pub fn with_encryption(mut self, encryption: EncryptionConfig) -> Self {
+        self.encryption = Some(encryption);
         self
     }
 
@@ -1340,6 +1439,118 @@ mod tests {
         assert!(config.spill_path.is_some());
         assert_eq!(config.query_timeout, Some(Duration::from_mins(1)));
         assert!(config.validate().is_ok());
+    }
+
+    /// Every setting can be changed with a constructor or a `with_*` or
+    /// `without_*` method, so code outside this crate never needs a struct
+    /// literal. The pattern names every field: a new setting does not
+    /// compile here until it is listed with the method that sets it.
+    #[test]
+    fn every_setting_has_a_method() {
+        use grafeo_common::storage::{SectionType, TierOverride};
+
+        let config = Config::persistent("amsterdam.grafeo")
+            .with_graph_model(GraphModel::Rdf)
+            .with_memory_limit(88 * 1024 * 1024)
+            .with_spill_path("amsterdam.spill")
+            .with_threads(3)
+            .without_wal()
+            .without_backward_edges()
+            .with_query_logging()
+            .with_adaptive(AdaptiveConfig::default().with_threshold(19.0))
+            .without_factorized_execution()
+            .with_shuffle_unordered(true)
+            .with_wal_durability(DurabilityMode::Sync)
+            .with_storage_format(StorageFormat::Auto)
+            .with_schema_constraints()
+            .with_query_timeout(Duration::from_secs(19))
+            .with_max_property_size(88)
+            .with_gc_interval(3)
+            .with_access_mode(AccessMode::ReadOnly)
+            .with_cdc()
+            .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
+            .with_checkpoint_interval(Duration::from_secs(88));
+        #[cfg(feature = "cdc")]
+        let config = config.with_cdc_retention(crate::cdc::CdcRetentionConfig {
+            max_epochs: Some(19),
+            max_events: Some(88),
+        });
+        #[cfg(feature = "encryption")]
+        let config = config.with_encryption(EncryptionConfig {
+            key_chain: std::sync::Arc::new(grafeo_common::encryption::KeyChain::new([3; 32])),
+        });
+
+        let Config {
+            graph_model,
+            path,
+            memory_limit,
+            spill_path,
+            threads,
+            wal_enabled,
+            // No method: nothing reads this setting.
+            wal_flush_interval_ms: _,
+            backward_edges,
+            query_logging,
+            adaptive,
+            factorized_execution,
+            shuffle_unordered,
+            wal_durability,
+            storage_format,
+            schema_constraints,
+            query_timeout,
+            max_property_size,
+            gc_interval,
+            access_mode,
+            cdc_enabled,
+            #[cfg(feature = "cdc")]
+            cdc_retention,
+            section_configs,
+            checkpoint_interval,
+            #[cfg(feature = "encryption")]
+            encryption,
+        } = config;
+
+        assert_eq!(graph_model, GraphModel::Rdf);
+        assert_eq!(
+            path.as_deref(),
+            Some(std::path::Path::new("amsterdam.grafeo"))
+        );
+        assert_eq!(memory_limit, Some(88 * 1024 * 1024));
+        assert_eq!(
+            spill_path.as_deref(),
+            Some(std::path::Path::new("amsterdam.spill"))
+        );
+        assert_eq!(threads, 3);
+        assert!(!wal_enabled, "without_wal turns the WAL off");
+        assert!(!backward_edges);
+        assert!(query_logging);
+        assert!((adaptive.threshold - 19.0).abs() < f64::EPSILON);
+        assert!(!factorized_execution);
+        assert!(shuffle_unordered);
+        assert_eq!(wal_durability, DurabilityMode::Sync);
+        // The only storage format that is not deprecated is the default.
+        assert_eq!(storage_format, StorageFormat::Auto);
+        assert!(schema_constraints);
+        assert_eq!(query_timeout, Some(Duration::from_secs(19)));
+        assert_eq!(max_property_size, Some(88));
+        assert_eq!(gc_interval, 3);
+        assert_eq!(access_mode, AccessMode::ReadOnly);
+        assert!(cdc_enabled);
+        #[cfg(feature = "cdc")]
+        assert_eq!(
+            (cdc_retention.max_epochs, cdc_retention.max_events),
+            (Some(19), Some(88)),
+            "with_cdc_retention sets the retention"
+        );
+        assert_eq!(
+            section_configs
+                .get(&SectionType::VectorStore)
+                .map(|section| section.tier),
+            Some(TierOverride::ForceRam)
+        );
+        assert_eq!(checkpoint_interval, Some(Duration::from_secs(88)));
+        #[cfg(feature = "encryption")]
+        assert!(encryption.is_some(), "with_encryption sets the key chain");
     }
 
     // --- AccessMode tests ---

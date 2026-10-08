@@ -28,11 +28,15 @@ pub(crate) struct SeekChoice<'a> {
 /// `v.p = e` with `p` indexed, or the `IN` form of either, where `e` does not
 /// read `v` (it may read the scan's input, parameters and literals). An ID is
 /// preferred over a property. A scan without input with a constant property
-/// key is left to the plan-time index lookup, which resolves it once.
+/// key is left to the plan-time index lookup, which resolves it once, unless
+/// the filter runs `after_a_write` of its statement: that lookup would not
+/// see the write (see `Planner::reads_the_store_as_planned`), the seek looks
+/// the key up when its one input row arrives.
 pub(crate) fn choose_seek<'a>(
     predicate: &'a LogicalExpression,
     scan: &NodeScanOp,
     has_index: impl Fn(&str) -> bool,
+    after_a_write: bool,
 ) -> Option<SeekChoice<'a>> {
     let mut conjuncts = Vec::new();
     split_conjuncts(predicate, &mut conjuncts);
@@ -50,8 +54,8 @@ pub(crate) fn choose_seek<'a>(
         match choice.key {
             SeekKey::Id => return Some(choice),
             SeekKey::Property(_) => {
-                let constant = scan.input.is_none();
-                if !constant && by_property.is_none() {
+                let looked_up_while_planning = scan.input.is_none() && !after_a_write;
+                if !looked_up_while_planning && by_property.is_none() {
                     by_property = Some(choice);
                 }
             }
@@ -312,9 +316,13 @@ impl super::Planner {
         // A property index holds the values of now (see
         // `reads_the_current_store`); an ID is no index.
         let current = self.reads_the_current_store();
-        let Some(seek) = choose_seek(&filter.predicate, scan, |property| {
-            current && self.store.has_property_index(property)
-        }) else {
+        let after_a_write = !self.reads_the_store_as_planned();
+        let Some(seek) = choose_seek(
+            &filter.predicate,
+            scan,
+            |property| current && self.store.has_property_index(property),
+            after_a_write,
+        ) else {
             return Ok(None);
         };
 

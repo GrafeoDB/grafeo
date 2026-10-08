@@ -143,8 +143,10 @@ if [[ "$FEATURES" == *"full"* ]]; then
     FAIL_THRESHOLD=1468006   # 1.4 MB
     LABEL="full profile"
 else
-    WARN_THRESHOLD=757760    # 740 KB
-    FAIL_THRESHOLD=778240    # 760 KB
+    # Raised from 740 and 760 KB in 0.6.0, whose query fixes (clauses after a
+    # write, refusing data a build cannot read) brought the build to 760 KB.
+    WARN_THRESHOLD=798720    # 780 KB
+    FAIL_THRESHOLD=819200    # 800 KB
     LABEL="browser profile"
 fi
 

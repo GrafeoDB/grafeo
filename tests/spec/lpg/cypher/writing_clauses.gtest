@@ -361,6 +361,14 @@ tests:
     expect:
       error: "Undefined variable 'x'"
 
+  # A FOREACH that starts a query passes the one row a query starts from on
+  # (the clauses after it used to see no row).
+  - name: foreach_that_starts_a_query_keeps_its_one_row
+    query: "FOREACH (x IN [3, 19] | CREATE (:Z {x: x})) RETURN count(*) AS rows"
+    expect:
+      rows:
+        - [1]
+
   # ---------------------------------------------------------------------------
   # Computed property values in CREATE and MERGE (used to fail with an internal
   # error in CREATE, and silently became NULL in MERGE)

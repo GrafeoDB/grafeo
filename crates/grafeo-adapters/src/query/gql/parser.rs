@@ -615,6 +615,35 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Whether `clause` is an inline procedure call whose body modifies data
+    /// (ISO GQL's call data-modifying procedure statement), which a statement
+    /// may end with, as with any other data-modifying statement.
+    fn calls_a_data_modifying_procedure(clause: &QueryClause) -> bool {
+        match clause {
+            QueryClause::InlineCall {
+                subquery, combined, ..
+            } => {
+                Self::modifies_data(subquery)
+                    || combined.iter().any(|(_, part)| Self::modifies_data(part))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `query` modifies data: it has a data-modifying clause, or an
+    /// inline procedure call whose body does.
+    fn modifies_data(query: &QueryStatement) -> bool {
+        !query.set_clauses.is_empty()
+            || !query.remove_clauses.is_empty()
+            || !query.merge_clauses.is_empty()
+            || !query.create_clauses.is_empty()
+            || !query.delete_clauses.is_empty()
+            || query
+                .ordered_clauses
+                .iter()
+                .any(Self::calls_a_data_modifying_procedure)
+    }
+
     /// A query made of a single INSERT (or `CREATE (...)`) clause and nothing
     /// else is kept as a standalone INSERT statement, whose result returns the
     /// created entity as before; anything longer stays a query.
@@ -846,8 +875,12 @@ impl<'a> Parser<'a> {
             || !merge_clauses.is_empty()
             || !create_clauses.is_empty()
             || !delete_clauses.is_empty()
+            || ordered_clauses
+                .iter()
+                .any(Self::calls_a_data_modifying_procedure)
         {
-            // For mutation-only queries, return empty clause
+            // A statement that modifies data needs no result statement (ISO
+            // GQL's linear data-modifying statement): it has no result
             ReturnClause {
                 distinct: false,
                 items: Vec::new(),
@@ -11390,5 +11423,50 @@ mod tests {
             Parser::new("CALL db.labels()").parse().unwrap(),
             Statement::Call(_)
         ));
+    }
+
+    /// A statement that modifies data needs no result statement (ISO GQL's
+    /// linear data-modifying statement), and an inline CALL whose body
+    /// modifies data is such a statement (a call of a data-modifying
+    /// procedure): a query may end with it. A query that only reads still
+    /// needs one, also when it ends with a CALL that only reads.
+    #[test]
+    fn test_parse_query_ending_with_a_data_modifying_call() {
+        for query in [
+            "MATCH (n) CALL { INSERT (:X) }",
+            "MATCH (n) CALL (n) { SET n.k = 3 }",
+            "FOR i IN [3, 19] CALL (i) { FOR x IN [i] INSERT (:X {x: x}) }",
+            "MATCH (n) OPTIONAL CALL (n) { MATCH (n)-[e]->() DELETE e }",
+            "MATCH (n) CALL { CALL { INSERT (:X) } }",
+            "MATCH (n) CALL (n) { INSERT (x:X) RETURN x }",
+            "MATCH (n) CALL { INSERT (:X) } MATCH (m)",
+        ] {
+            let Statement::Query(statement) = Parser::new(query)
+                .parse()
+                .unwrap_or_else(|error| panic!("`{query}` must parse: {error}"))
+            else {
+                panic!("expected a query: {query}");
+            };
+            let result = &statement.return_clause;
+            assert!(
+                result.items.is_empty() && !result.is_wildcard && !result.is_finish,
+                "`{query}` has no result statement: {result:?}"
+            );
+        }
+        for query in [
+            "MATCH (n) CALL { MATCH (m) RETURN m }",
+            "MATCH (n) CALL (n) { MATCH (n)-[]->(m) FINISH }",
+            "MATCH (n) CALL { RETURN 1 AS x UNION RETURN 2 AS x }",
+        ] {
+            let error = Parser::new(query)
+                .parse()
+                .expect_err(&format!("`{query}` reads only and has no result"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("Expected RETURN, FINISH, or SELECT"),
+                "`{query}`: {error}"
+            );
+        }
     }
 }

@@ -218,17 +218,97 @@ fn a_unit_call_binds_nothing_after_it() {
     }
 }
 
-/// A Cypher query may end with a unit subquery: it runs the body for each
-/// row.
+/// A unit subquery can start a query: it runs once, for the one row a query
+/// starts from, and passes that row on, so the clauses after it see one row
+/// (they used to see none, and a `RETURN` returned nothing).
+#[test]
+fn a_unit_call_can_start_a_query() {
+    for (language, query, rows, nodes) in [
+        (
+            Language::Gql,
+            "CALL { INSERT (:W) } RETURN 1 AS one",
+            vec![vec![int(1)]],
+            1,
+        ),
+        (
+            Language::Cypher,
+            "CALL { CREATE (:W) } RETURN 1 AS one",
+            vec![vec![int(1)]],
+            1,
+        ),
+        (
+            Language::Gql,
+            "CALL { FOR x IN [3, 19] INSERT (:W {x: x}) } RETURN count(*) AS rows",
+            vec![vec![int(1)]],
+            2,
+        ),
+        (
+            Language::Cypher,
+            "CALL { UNWIND [3, 19] AS x CREATE (:W {x: x}) } RETURN count(*) AS rows",
+            vec![vec![int(1)]],
+            2,
+        ),
+        (
+            Language::Gql,
+            "CALL { INSERT (:W) } FOR x IN [3, 19, 88] RETURN x ORDER BY x",
+            vec![vec![int(3)], vec![int(19)], vec![int(88)]],
+            1,
+        ),
+        (
+            Language::Cypher,
+            "CALL { CREATE (:W) } UNWIND [3, 19, 88] AS x RETURN x ORDER BY x",
+            vec![vec![int(3)], vec![int(19)], vec![int(88)]],
+            1,
+        ),
+        // A subquery that makes no row keeps the one row too.
+        (
+            Language::Cypher,
+            "CALL { UNWIND [] AS x CREATE (:W) } RETURN count(*) AS rows",
+            vec![vec![int(1)]],
+            0,
+        ),
+    ] {
+        let session = GrafeoDB::new_in_memory().session();
+        assert_eq!(
+            run(&session, language, query),
+            rows,
+            "{language:?} `{query}`"
+        );
+        assert_eq!(
+            written(&session),
+            int(nodes),
+            "{language:?} the nodes `{query}` writes"
+        );
+    }
+}
+
+/// A query may end with a unit subquery that writes (GQL used to refuse it
+/// for want of a `RETURN`): it runs the body for each row, and has no
+/// result.
 #[test]
 fn a_query_can_end_with_a_unit_call() {
-    let session = GrafeoDB::new_in_memory().session();
-    run(
-        &session,
-        Language::Cypher,
-        "UNWIND [1, 2] AS i CALL { WITH i UNWIND [3, 19] AS x CREATE (:W {i: i, x: x}) }",
-    );
-    assert_eq!(written(&session), int(4));
+    for (language, query) in [
+        (
+            Language::Cypher,
+            "UNWIND [1, 2] AS i CALL { WITH i UNWIND [3, 19] AS x CREATE (:W {i: i, x: x}) }",
+        ),
+        (
+            Language::Gql,
+            "FOR i IN [1, 2] CALL (i) { FOR x IN [3, 19] INSERT (:W {i: i, x: x}) }",
+        ),
+    ] {
+        let session = GrafeoDB::new_in_memory().session();
+        assert_eq!(
+            run(&session, language, query),
+            &[] as &[Vec<Value>],
+            "{language:?} `{query}`"
+        );
+        assert_eq!(
+            written(&session),
+            int(4),
+            "{language:?} the nodes `{query}` writes"
+        );
+    }
 }
 
 /// A body with a final `RETURN` joins its rows to the row as before: one row

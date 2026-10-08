@@ -245,3 +245,26 @@ fn foreach_can_start_a_query() {
     run(&session, "FOREACH (x IN [3, 19] | CREATE (:Z {x: x}))");
     assert_eq!(written(&session), int(2));
 }
+
+/// A `FOREACH` that starts a query passes the one row a query starts from on
+/// to the clauses after it (they used to see none).
+#[test]
+fn foreach_that_starts_a_query_keeps_its_one_row() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    assert_eq!(
+        run(
+            &session,
+            "FOREACH (x IN [3, 19] | CREATE (:Z {x: x})) RETURN count(*) AS rows"
+        ),
+        [[int(1)]]
+    );
+    assert_eq!(
+        run(
+            &session,
+            "FOREACH (x IN [3] | CREATE (:Z {x: x})) UNWIND [19, 88] AS y RETURN y ORDER BY y"
+        ),
+        [[int(19)], [int(88)]]
+    );
+    assert_eq!(written(&session), int(3));
+}

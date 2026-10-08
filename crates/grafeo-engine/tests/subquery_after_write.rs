@@ -301,6 +301,49 @@ fn an_edge_check_sees_the_whole_write() {
     }
 }
 
+/// A `CALL` subquery that writes runs again for each row after its write for
+/// the rows before, and sees it: the row `i` looks for the nodes `k: 88`
+/// with a filter on constants and writes one more for each it finds (one for
+/// none), so the row `i` finds `i - 1` of them. The planner used to look them
+/// up while planning (by label, through the index on `k`, or by the zone map
+/// of `k`, which knew only `k: 3`), and found none in any row. With and
+/// without the index and the node `k: 3`.
+#[test]
+fn a_writing_subquery_sees_what_it_wrote_for_the_rows_before() {
+    for (language, query) in [
+        (
+            Language::Cypher,
+            "UNWIND range(1, 3) AS i CALL { OPTIONAL MATCH (t:N {k: 88}) CREATE (:N {k: 88}) \
+             RETURN count(t) AS seen } RETURN i, seen ORDER BY i",
+        ),
+        (
+            Language::Gql,
+            "FOR i IN range(1, 3) CALL () { OPTIONAL MATCH (t:N {k: 88}) INSERT (:N {k: 88}) \
+             RETURN count(t) AS seen } RETURN i, seen ORDER BY i",
+        ),
+    ] {
+        for setup in [None, Some("CREATE (:N {k: 3})")] {
+            for indexed in [false, true] {
+                let db = GrafeoDB::new_in_memory();
+                if indexed {
+                    db.create_property_index("k").unwrap();
+                }
+                let session = db.session();
+                if let Some(setup) = setup {
+                    session.execute_cypher(setup).unwrap();
+                }
+                assert_eq!(
+                    run(&session, language, query),
+                    (1..=3)
+                        .map(|i| vec![int(i), int(i - 1)])
+                        .collect::<Vec<_>>(),
+                    "{language:?} `{query}` after {setup:?} (index: {indexed})"
+                );
+            }
+        }
+    }
+}
+
 /// A Cypher pattern comprehension runs as a subquery per row too, and sees
 /// the whole write (the hubs of [`an_edge_check_sees_the_whole_write`]).
 #[test]

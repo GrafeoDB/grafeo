@@ -19,7 +19,9 @@ impl super::Planner {
     /// to the left-side copies due to the join condition).
     pub(super) fn plan_join(&self, join: &JoinOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (left_op, left_columns) = self.plan_operator(&join.left)?;
-        let (right_op, right_columns) = self.plan_operator(&join.right)?;
+        // After a write the right side reads the store as the write left it.
+        let left_writes = super::after_write::right_side_runs_after_a_write(&join.left);
+        let (right_op, right_columns) = self.plan_after_a_write(left_writes, &join.right)?;
 
         // Full column list before deduplication (HashJoin produces all columns)
         let mut all_columns = left_columns.clone();
@@ -67,7 +69,7 @@ impl super::Planner {
         // After a write (`... CREATE ... WITH h MATCH (h)-[:R]->(q), (q)<-[:R]-(g)`)
         // the left side is read first, so that the right side sees what every
         // left row wrote; the hash join reads its right side first otherwise.
-        if join.left.has_mutations() {
+        if left_writes {
             hash_join = hash_join.with_probe_first();
         }
         let join_op: Box<dyn Operator> = Box::new(hash_join);
@@ -378,6 +380,8 @@ impl super::Planner {
         // An input a clause read whole already is not read again (see
         // `after_write`).
         let input_writes = super::after_write::writes_pending(&apply.input);
+        // After a write the subquery reads the store as the write left it.
+        let after_a_write = super::after_write::subquery_runs_after_a_write(apply);
         let output = subquery_output(&apply.subplan);
         let subplan = output.as_ref().unwrap_or(&apply.subplan);
         let configure = |mut op: ApplyOperator, inner_col_count: usize| {
@@ -395,7 +399,7 @@ impl super::Planner {
 
         if apply.shared_variables.is_empty() {
             // Uncorrelated Apply
-            let (inner_op, inner_columns) = self.plan_operator(subplan)?;
+            let (inner_op, inner_columns) = self.plan_after_a_write(after_a_write, subplan)?;
             // Any other subquery materializes values (PropertyAccess,
             // NodeResolve, aggregates, etc.), so its output columns are scalar.
             if output.is_none() && !apply.unit {
@@ -443,7 +447,7 @@ impl super::Planner {
         let previous = self
             .correlated_param_state
             .replace(Some(std::sync::Arc::clone(&param_state)));
-        let planned = self.plan_operator(subplan);
+        let planned = self.plan_after_a_write(after_a_write, subplan);
         *self.correlated_param_state.borrow_mut() = previous;
         let (inner_op, inner_columns) = planned?;
 

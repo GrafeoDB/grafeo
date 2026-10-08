@@ -70,11 +70,21 @@ tests:
     expect:
       empty: true
 
+  # GQL used to refuse a statement ending with a CALL for want of a RETURN.
   - name: a_unit_call_at_the_end_has_no_rows
     variants:
+      gql: "FOR i IN [1, 2] CALL (i) { INSERT (:W {i: i}) }"
       cypher: "UNWIND [1, 2] AS i CALL { WITH i CREATE (:W {i: i}) }"
     expect:
       empty: true
+
+  - name: a_unit_call_at_the_end_writes
+    statements:
+      - "FOR i IN [3, 19] CALL (i) { INSERT (:W {i: i}) }"
+      - "MATCH (w:W) RETURN count(w) AS nodes, sum(w.i) AS total"
+    expect:
+      rows:
+        - [2, 22]
 
   - name: finish_has_no_rows
     variants:

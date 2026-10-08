@@ -253,6 +253,13 @@ pub struct Planner {
     /// Whether the statement being planned writes, known while its root is
     /// planned (see [`value_join::StatementScope`]).
     pub(super) statement_writes: std::cell::Cell<Option<bool>>,
+    /// Whether the operator being planned runs after a write of its
+    /// statement that does not come to it through its input (the right side
+    /// of a join whose left side writes, a subquery, see
+    /// [`after_write::right_side_runs_after_a_write`] and
+    /// [`after_write::subquery_runs_after_a_write`]): it reads the store as
+    /// that write left it, not as it is while planning.
+    pub(super) after_a_write: std::cell::Cell<bool>,
     /// When true, each physical operator is wrapped in `ProfiledOperator`.
     profiling: std::cell::Cell<bool>,
     /// Profile entries collected during planning (post-order).
@@ -315,6 +322,7 @@ impl Planner {
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             statement_writes: std::cell::Cell::new(None),
+            after_a_write: std::cell::Cell::new(false),
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             write_tracker: None,
@@ -387,6 +395,7 @@ impl Planner {
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             statement_writes: std::cell::Cell::new(None),
+            after_a_write: std::cell::Cell::new(false),
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             write_tracker,

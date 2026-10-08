@@ -731,3 +731,32 @@ tests:
       cypher: "MATCH (p:Person) CALL { WITH p UNWIND [1, 2] AS x CREATE (w:W) } RETURN x"
     expect:
       error: "Undefined variable"
+
+  # A unit subquery can start a query: it runs once, for the one row a query
+  # starts from, and passes that row on (the clauses after it used to see no
+  # row, so a RETURN returned nothing).
+  - name: a_unit_subquery_can_start_a_query
+    variants:
+      gql: "CALL { FOR x IN [3, 19] INSERT (:W {x: x}) } RETURN count(*) AS rows"
+      cypher: "CALL { UNWIND [3, 19] AS x CREATE (:W {x: x}) } RETURN count(*) AS rows"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_unit_subquery_that_starts_a_query_writes
+    statements:
+      - "CALL { INSERT (:W {x: 3}) } RETURN 1 AS one"
+      - "MATCH (w:W) RETURN w.x AS x"
+    expect:
+      rows:
+        - [3]
+
+  - name: a_unit_subquery_that_starts_a_query_passes_its_row_on
+    variants:
+      gql: "CALL { INSERT (:W) } FOR x IN [3, 19, 88] RETURN x"
+      cypher: "CALL { CREATE (:W) } UNWIND [3, 19, 88] AS x RETURN x"
+    expect:
+      rows:
+        - [3]
+        - [19]
+        - [88]

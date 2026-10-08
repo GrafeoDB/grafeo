@@ -51,10 +51,31 @@
 //!
 //! A reader checks a payload's length against the maximum before it reads
 //! the payload, into a buffer that grows with the bytes present, and decodes
-//! it with a bincode limit of eight times the maximum: bincode claims at most
-//! 8 bytes of memory per byte it reads, so no payload the writer accepts
-//! reaches the limit, while a damaged length inside a payload cannot make the
-//! decode allocate more.
+//! it with a bincode limit of eight times the maximum. The limit counts what
+//! bincode charges: each number it reads at the size of its type (a one-byte
+//! length as the 8 bytes of a `usize`), at most 8 bytes per byte read, and
+//! each string at its length before the string is allocated. So no payload
+//! the writer accepts reaches the limit, and a damaged string length cannot
+//! allocate more than the limit. A damaged list length allocates at most
+//! 1 MiB ahead of the list's elements (serde's cap), and the value codec
+//! checks every count against the bytes left.
+//!
+//! The limit is not a memory ceiling: it does not count the lists, the
+//! `LIST<...>` levels of property types or the default values a payload
+//! decodes into. Their memory is proportional to the payload, at most 470
+//! bytes per payload byte while it decodes, before the allocator's own
+//! overhead: so at most 940 MiB for the largest payload. The densest records
+//! are node and edge types whose properties are typed 128 `LIST` levels
+//! deep: such a property takes 5 payload bytes (an empty name, the levels
+//! and the code, the nullable flag and no default) and 2,312 bytes of
+//! memory, a 16-byte box per level and three times its 88-byte entry while
+//! the list of properties grows (the old buffer and the new one, twice as
+//! large). Every other element takes at most 120 bytes per payload byte:
+//! three times 24 bytes for a list's empty string (1 payload byte), three
+//! times 48 for an empty string pair, two absent endpoints or an empty
+//! constraint (2 bytes), and, while the value codec builds a default value's
+//! list of nulls, three times the 40 bytes of each null (1 byte) as the list
+//! grows and becomes shared.
 //!
 //! The framing itself (`RecordFraming`, `encode_framed_record`,
 //! `read_framed_records`) knows nothing of the catalog: another family of
@@ -549,15 +570,16 @@ impl CatalogRecord {
         })
     }
 
-    /// Appends the record's payload, without its frame: bincode of the
+    /// Writes the record's payload, without its frame: bincode of the
     /// record type.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Serialization`] when a property type nests more than
-    /// [`MAX_LIST_TYPE_DEPTH`] `LIST` levels or the value codec refuses a
-    /// default value; `out` may then hold part of the payload.
-    pub(crate) fn encode_payload(&self, out: &mut Vec<u8>) -> Result<()> {
+    /// [`MAX_LIST_TYPE_DEPTH`] `LIST` levels, the value codec refuses a
+    /// default value or `out` refuses a write; `out` may then hold part of
+    /// the payload.
+    pub(crate) fn encode_payload(&self, out: &mut impl io::Write) -> Result<()> {
         match self {
             Self::Schema(record) => encode_bincode_payload(record, out),
             Self::NodeType(record) => encode_bincode_payload(record, out),
@@ -659,8 +681,37 @@ impl RecordFraming {
     }
 }
 
+/// The writer a payload is written through: it appends to the output and
+/// refuses a write that would take the payload past its maximum, before it
+/// copies a byte of that write.
+pub(crate) struct PayloadWriter<'a> {
+    out: &'a mut Vec<u8>,
+    /// The bytes the payload may still take.
+    room: usize,
+    /// Whether a write was refused for want of room.
+    overflowed: bool,
+}
+
+impl io::Write for PayloadWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.len() > self.room {
+            self.overflowed = true;
+            return Err(io::Error::other("the payload passes its maximum"));
+        }
+        self.room -= buf.len();
+        self.out.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Appends one record of `framing`: `kind`, `flags`, the payload's length
-/// (u32 little endian) and the payload `write_payload` appends.
+/// (u32 little endian) and the payload `write_payload` writes. The payload
+/// is refused as soon as a write would take it past the family's maximum,
+/// so a larger one is never copied whole.
 ///
 /// # Errors
 ///
@@ -672,7 +723,7 @@ pub(crate) fn encode_framed_record(
     kind: u8,
     flags: u8,
     out: &mut Vec<u8>,
-    write_payload: impl FnOnce(&mut Vec<u8>) -> Result<()>,
+    write_payload: impl FnOnce(&mut PayloadWriter<'_>) -> Result<()>,
 ) -> Result<()> {
     if kind == 0 || flags & !KNOWN_FLAGS != 0 {
         return Err(Error::Internal(format!(
@@ -683,17 +734,27 @@ pub(crate) fn encode_framed_record(
     }
     let start = out.len();
     out.extend_from_slice(&[kind, flags, 0, 0, 0, 0]);
-    let written = write_payload(out).and_then(|()| {
+    let mut writer = PayloadWriter {
+        out,
+        room: usize::try_from(framing.max_payload).unwrap_or(usize::MAX),
+        overflowed: false,
+    };
+    let written = match write_payload(&mut writer) {
+        Err(_) if writer.overflowed => Err(Error::Serialization(format!(
+            "a {} of kind {kind} would hold more than the {} bytes it may hold",
+            framing.what, framing.max_payload
+        ))),
+        written => written,
+    }
+    .and_then(|()| {
         let length = out.len() - start - RECORD_HEADER_BYTES;
-        let length = u32::try_from(length)
-            .ok()
-            .filter(|&length| length <= framing.max_payload)
-            .ok_or_else(|| {
-                Error::Serialization(format!(
-                    "a {} of kind {kind} would hold {length} bytes, more than the {} it may hold",
-                    framing.what, framing.max_payload
-                ))
-            })?;
+        // The writer kept the payload within the maximum, a u32.
+        let length = u32::try_from(length).map_err(|_| {
+            Error::Internal(format!(
+                "a {} of kind {kind} holds {length} bytes, past its maximum",
+                framing.what
+            ))
+        })?;
         out[start + 2..start + RECORD_HEADER_BYTES].copy_from_slice(&length.to_le_bytes());
         Ok(())
     });
@@ -707,8 +768,12 @@ pub(crate) fn encode_framed_record(
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] when `payload` refuses to serialize.
-pub(crate) fn encode_bincode_payload<T: Serialize>(payload: &T, out: &mut Vec<u8>) -> Result<()> {
+/// Returns [`Error::Serialization`] when `payload` refuses to serialize or
+/// `out` refuses a write.
+pub(crate) fn encode_bincode_payload<T: Serialize>(
+    payload: &T,
+    out: &mut impl io::Write,
+) -> Result<()> {
     bincode::serde::encode_into_std_write(payload, out, bincode::config::standard())
         .map(|_| ())
         .map_err(|error| Error::Serialization(format!("the payload does not encode: {error}")))
@@ -1595,8 +1660,8 @@ mod tests {
     }
 
     /// The decode limit covers a payload of the maximum length whatever it
-    /// holds: a list of empty string pairs claims the most memory per byte
-    /// (8 bytes for each one-byte length).
+    /// holds: a list of empty string pairs claims the most of the limit per
+    /// byte (8 bytes for each one-byte length).
     #[test]
     fn the_largest_payload_decodes_whatever_it_holds_and_one_byte_more_is_refused() {
         let procedure = |pairs: usize| {
@@ -1637,6 +1702,123 @@ mod tests {
         assert!(
             error.contains(&(maximum + 1).to_string()) && error.contains(&maximum.to_string()),
             "refused from the header: {error}"
+        );
+    }
+
+    /// The memory bound of the module documentation, at most 470 bytes per
+    /// payload byte while a payload decodes, from its parts: each element a
+    /// payload holds, encoded at its smallest, against the memory its types
+    /// take (three times an element while its list grows, and a 16-byte box
+    /// per `LIST` level), so a change to a record type that breaks the bound
+    /// fails here. The densest element, a property typed 128 `LIST` levels
+    /// deep, decodes to one box per level.
+    #[test]
+    fn a_payload_decodes_into_at_most_470_bytes_of_memory_per_byte() {
+        use std::mem::size_of;
+
+        const BOUND: usize = 470;
+        fn smallest<T: Serialize>(element: &T) -> usize {
+            let mut out = Vec::new();
+            encode_bincode_payload(element, &mut out).unwrap();
+            out.len()
+        }
+        let in_a_list = |size: usize| 3 * size;
+        let deepest = property(
+            "",
+            list_of(MAX_LIST_TYPE_DEPTH, PropertyTypeRecord::String),
+            true,
+            None,
+        );
+        let elements = [
+            (
+                "an empty string",
+                smallest(&String::new()),
+                in_a_list(size_of::<String>()),
+            ),
+            (
+                "an empty string pair",
+                smallest(&(String::new(), String::new())),
+                in_a_list(size_of::<(String, String)>()),
+            ),
+            (
+                "two absent endpoints",
+                smallest(&EndpointPair {
+                    source: None,
+                    target: None,
+                }),
+                in_a_list(size_of::<EndpointPair>()),
+            ),
+            (
+                "an empty key constraint",
+                smallest(&TypeConstraintRecord::PrimaryKey(Vec::new())),
+                in_a_list(size_of::<TypeConstraintRecord>()),
+            ),
+            (
+                "a property typed 128 LIST levels deep",
+                smallest(&deepest),
+                in_a_list(size_of::<PropertyRecord>())
+                    + MAX_LIST_TYPE_DEPTH * size_of::<PropertyTypeRecord>(),
+            ),
+            // A default value's list of nulls, one byte per null.
+            ("a null in a list", 1, in_a_list(size_of::<Value>())),
+        ];
+        for (element, bytes, memory) in elements {
+            assert!(
+                memory <= BOUND * bytes,
+                "{element}: {memory} bytes of memory from {bytes} payload bytes"
+            );
+        }
+        assert_eq!(smallest(&deepest), 5, "the densest element's bytes");
+        assert_eq!(
+            BOUND * usize::try_from(MAX_CATALOG_RECORD_PAYLOAD).unwrap(),
+            940 << 20,
+            "the bound for the largest payload"
+        );
+
+        let record = CatalogRecord::NodeType(NodeTypeRecord {
+            name: "Event".into(),
+            properties: vec![deepest; 3],
+            constraints: Vec::new(),
+            parent_types: Vec::new(),
+            key_labels: Vec::new(),
+        });
+        let [CatalogRecord::NodeType(read)] = &read_all(&framed(&record)).unwrap()[..] else {
+            panic!("one node type");
+        };
+        for property in &read.properties {
+            assert_eq!(
+                property.data_type.levels_and_code(),
+                (MAX_LIST_TYPE_DEPTH, 0),
+                "one box per level"
+            );
+        }
+    }
+
+    /// A record whose payload would pass the maximum is refused while it is
+    /// written: the writer stops at the maximum instead of copying the whole
+    /// payload (a procedure body of 22 MiB) and refusing it afterwards.
+    #[test]
+    fn an_oversized_payload_is_refused_without_copying_it() {
+        let maximum = usize::try_from(MAX_CATALOG_RECORD_PAYLOAD).unwrap();
+        let record = CatalogRecord::Procedure(ProcedureRecord {
+            name: "get_adults".into(),
+            params: Vec::new(),
+            returns: Vec::new(),
+            body: "RETURN 88;\n".repeat(1 << 21),
+        });
+        let mut out = vec![3, 19, 88];
+        let error = record.encode_framed(&mut out).unwrap_err();
+        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        let message = error.to_string();
+        assert!(
+            message.contains("catalog record of kind 9") && message.contains(&maximum.to_string()),
+            "{message}"
+        );
+        assert_eq!(out, [3, 19, 88], "a refused record appends nothing");
+        assert!(
+            out.capacity() <= RECORD_HEADER_BYTES + maximum + 3,
+            "the writer stopped at the maximum: the output grew to {} bytes",
+            out.capacity()
         );
     }
 
@@ -1854,8 +2036,7 @@ mod tests {
         let mut out = vec![3, 19, 88];
         for (kind, flags) in [(0, RECORD_REQUIRED), (1, 0x80), (1, 0x02)] {
             let error = encode_framed_record(&CATALOG_FRAMING, kind, flags, &mut out, |out| {
-                out.push(88);
-                Ok(())
+                Ok(io::Write::write_all(out, &[88])?)
             })
             .unwrap_err();
             assert!(
@@ -1865,8 +2046,7 @@ mod tests {
         }
         assert_eq!(out, [3, 19, 88], "a refused record appends nothing");
         encode_framed_record(&CATALOG_FRAMING, 99, 0, &mut out, |out| {
-            out.push(88);
-            Ok(())
+            Ok(io::Write::write_all(out, &[88])?)
         })
         .unwrap();
         assert_eq!(out, [3, 19, 88, 99, 0, 1, 0, 0, 0, 88]);

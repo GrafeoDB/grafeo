@@ -260,7 +260,8 @@ RETURN p.name, friend_count
 
 A variable scope clause limits what the subquery sees: `CALL (p) { ... }` sees only `p`, and `CALL () { ... }`
 sees no outer variable. A subquery returns new names only: returning an outer variable is an error, so rename it
-(`RETURN p AS person`). The body can order and cut its rows, for the top rows per input row, and combine queries
+(`RETURN p AS person`). A subquery without a result (no `RETURN`, or `FINISH`) runs for its writes and passes
+each row on once, as it came in: nothing it binds is visible after it. The body can order and cut its rows, for the top rows per input row, and combine queries
 with `UNION`, `EXCEPT`, `INTERSECT` or `OTHERWISE`:
 
 ```sql

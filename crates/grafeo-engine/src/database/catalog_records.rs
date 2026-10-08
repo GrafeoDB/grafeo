@@ -21,8 +21,8 @@ use std::collections::HashSet;
 use grafeo_common::storage::catalog_record::{
     CatalogRecord, ConstraintRecord, DistanceMetricRecord, EdgeTypeRecord, EndpointPair,
     GraphTypeRecord, IndexKindRecord, IndexNameKindRecord, IndexNameRecord, IndexRecord,
-    NamedConstraintKindRecord, NodeTypeRecord, ProcedureRecord, PropertyRecord, PropertyTypeRecord,
-    QuantizationRecord, TypeConstraintRecord,
+    MAX_CATALOG_RECORD_PAYLOAD, NamedConstraintKindRecord, NodeTypeRecord, ProcedureRecord,
+    PropertyRecord, PropertyTypeRecord, QuantizationRecord, TypeConstraintRecord,
 };
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::index::vector::{DistanceMetric, QuantizationType};
@@ -183,15 +183,19 @@ pub(crate) fn node_type_definition(record: NodeTypeRecord) -> NodeTypeDefinition
 
 /// The record of an edge type: its endpoint lists as single-type pairs
 /// ([`endpoint_pairs`]).
-#[must_use]
-pub(crate) fn edge_type_record(def: &EdgeTypeDefinition) -> EdgeTypeRecord {
-    EdgeTypeRecord {
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] naming the edge type when its pairs
+/// would not fit a catalog record, before a pair is built.
+pub(crate) fn edge_type_record(def: &EdgeTypeDefinition) -> Result<EdgeTypeRecord> {
+    Ok(EdgeTypeRecord {
         name: def.name.clone(),
         properties: def.properties.iter().map(property_record).collect(),
         constraints: def.constraints.iter().map(type_constraint_record).collect(),
-        endpoints: endpoint_pairs(&def.source_node_types, &def.target_node_types),
+        endpoints: endpoint_pairs(&def.name, &def.source_node_types, &def.target_node_types)?,
         key_labels: def.key_labels.clone(),
-    }
+    })
 }
 
 /// The edge type of a record.
@@ -220,14 +224,48 @@ pub(crate) fn edge_type_definition(record: EdgeTypeRecord) -> Result<EdgeTypeDef
 /// their cross product, sources outermost, with `None` (any node type) for
 /// an empty list. Two empty lists (any to any) are no pairs at all. A type
 /// listed twice is one endpoint.
-#[must_use]
-pub(crate) fn endpoint_pairs(sources: &[String], targets: &[String]) -> Vec<EndpointPair> {
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] naming the edge type `name` when the
+/// pairs would take more than the [`MAX_CATALOG_RECORD_PAYLOAD`] bytes of a
+/// catalog record, counted from the lists before a pair is built: each
+/// endpoint takes at least its option byte, and a type also its length (one
+/// byte or more) and its name.
+pub(crate) fn endpoint_pairs(
+    name: &str,
+    sources: &[String],
+    targets: &[String],
+) -> Result<Vec<EndpointPair>> {
     if sources.is_empty() && targets.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let sources = endpoints(sources);
     let targets = endpoints(targets);
-    sources
+    let fewest_bytes = |list: &[Option<String>]| {
+        list.iter().fold(0usize, |total, endpoint| {
+            total.saturating_add(
+                endpoint
+                    .as_ref()
+                    .map_or(1, |name| name.len().saturating_add(2)),
+            )
+        })
+    };
+    // Every source is paired with every target, and the other way round.
+    let bytes = fewest_bytes(&sources)
+        .saturating_mul(targets.len())
+        .saturating_add(fewest_bytes(&targets).saturating_mul(sources.len()));
+    let maximum = usize::try_from(MAX_CATALOG_RECORD_PAYLOAD).unwrap_or(usize::MAX);
+    if bytes > maximum {
+        return Err(Error::Serialization(format!(
+            "edge type '{name}': its {} source and {} target node types make {} endpoint pairs, \
+             at least {bytes} bytes, more than the {maximum} bytes a catalog record may hold",
+            sources.len(),
+            targets.len(),
+            sources.len().saturating_mul(targets.len())
+        )));
+    }
+    Ok(sources
         .iter()
         .flat_map(|source| {
             targets.iter().map(move |target| EndpointPair {
@@ -235,7 +273,7 @@ pub(crate) fn endpoint_pairs(sources: &[String], targets: &[String]) -> Vec<Endp
                 target: target.clone(),
             })
         })
-        .collect()
+        .collect())
 }
 
 /// One list's endpoints: each type once, in list order, or `None` alone (any
@@ -689,7 +727,7 @@ mod tests {
             (vec!["Person"], vec![], vec![pair(Some("Person"), None)]),
         ] {
             assert_eq!(
-                endpoint_pairs(&names(&sources), &names(&targets)),
+                endpoint_pairs("ROUTE", &names(&sources), &names(&targets)).unwrap(),
                 pairs,
                 "{sources:?} to {targets:?}"
             );
@@ -714,7 +752,12 @@ mod tests {
     /// and the lists come back with it once.
     #[test]
     fn a_type_listed_twice_is_one_endpoint() {
-        let pairs = endpoint_pairs(&names(&["City", "City"]), &names(&["Paris", "Paris"]));
+        let pairs = endpoint_pairs(
+            "ROUTE",
+            &names(&["City", "City"]),
+            &names(&["Paris", "Paris"]),
+        )
+        .unwrap();
         assert_eq!(pairs, [pair(Some("City"), Some("Paris"))]);
         assert_eq!(
             endpoint_lists("ROUTE", &pairs).unwrap(),
@@ -876,7 +919,7 @@ mod tests {
             target_node_types: names(&["City"]),
             key_labels: names(&["RouteKey"]),
         };
-        let record = edge_type_record(&route);
+        let record = edge_type_record(&route).unwrap();
         assert_eq!(
             record.endpoints,
             [
@@ -924,6 +967,44 @@ mod tests {
         assert_eq!(format!("{back:?}"), format!("{procedure:?}"));
     }
 
+    /// Endpoint lists whose pairs would not fit a catalog record are refused
+    /// from their sizes, naming the edge type; a product just below the
+    /// record's maximum is built and its record encodes. Each pair of two
+    /// eight-letter types takes 20 bytes.
+    #[test]
+    fn endpoint_pairs_past_a_record_are_refused_before_they_are_built() {
+        let cities =
+            |count: usize| -> Vec<String> { (0..count).map(|n| format!("City{n:04}")).collect() };
+        let fits = EdgeTypeDefinition {
+            name: "ROUTE".to_string(),
+            properties: Vec::new(),
+            constraints: Vec::new(),
+            source_node_types: cities(320),
+            target_node_types: cities(320),
+            key_labels: Vec::new(),
+        };
+        let record = edge_type_record(&fits).unwrap();
+        assert_eq!(record.endpoints.len(), 320 * 320);
+        let mut out = Vec::new();
+        CatalogRecord::EdgeType(record)
+            .encode_framed(&mut out)
+            .expect("102,400 pairs, 2,048,000 bytes, fit a record");
+
+        let past = EdgeTypeDefinition {
+            source_node_types: cities(330),
+            ..fits
+        };
+        let error = edge_type_record(&past).unwrap_err();
+        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        let error = error.to_string();
+        assert!(
+            error.contains("edge type 'ROUTE'")
+                && error.contains("105600 endpoint pairs")
+                && error.contains("2112000 bytes"),
+            "{error}"
+        );
+    }
+
     /// An edge type whose stored pairs are not a product fails to convert,
     /// naming it.
     #[test]
@@ -935,7 +1016,8 @@ mod tests {
             source_node_types: names(&["Person"]),
             target_node_types: names(&["City"]),
             key_labels: Vec::new(),
-        });
+        })
+        .unwrap();
         record.endpoints.push(pair(Some("Museum"), Some("Paris")));
         let error = edge_type_definition(record).unwrap_err().to_string();
         assert!(error.contains("VISITED"), "{error}");

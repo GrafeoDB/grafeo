@@ -7,7 +7,8 @@
 //! - Cypher: `CALL { subquery }`
 //! - GQL: `VALUE { subquery }`
 //! - Pattern comprehensions (with a Collect aggregate wrapper)
-//! - Cypher: `FOREACH`, in unit mode
+//! - Cypher: `FOREACH`, and a `CALL { subquery }` without a final `RETURN`,
+//!   in unit mode
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -157,10 +158,11 @@ impl ApplyOperator {
     }
 
     /// Enables unit mode, for an inner plan that runs only for its writes
-    /// (Cypher `FOREACH`): for each outer row the inner plan runs to its end,
-    /// whatever rows it produces are dropped, and the outer row comes out
-    /// once, as it came in. No inner columns are appended, so a row is neither
-    /// repeated for an inner plan of several rows nor dropped for one of none.
+    /// (Cypher `FOREACH`, a unit `CALL` subquery): for each outer row the
+    /// inner plan runs to its end, whatever rows it produces are dropped, and
+    /// the outer row comes out once, as it came in. No inner columns are
+    /// appended, so a row is neither repeated for an inner plan of several
+    /// rows nor dropped for one of none.
     #[must_use]
     pub fn with_unit(mut self) -> Self {
         self.mode = RowMode::Unit;

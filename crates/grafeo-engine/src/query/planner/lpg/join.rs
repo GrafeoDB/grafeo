@@ -375,7 +375,9 @@ impl super::Planner {
     pub(super) fn plan_apply(&self, apply: &ApplyOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // A subquery that comes first runs once, on one empty row.
         let (outer_op, outer_columns) = self.plan_input(&apply.input)?;
-        let input_writes = apply.input.has_mutations();
+        // An input a clause read whole already is not read again (see
+        // `after_write`).
+        let input_writes = super::after_write::writes_pending(&apply.input);
         let output = subquery_output(&apply.subplan);
         let subplan = output.as_ref().unwrap_or(&apply.subplan);
         let configure = |mut op: ApplyOperator, inner_col_count: usize| {

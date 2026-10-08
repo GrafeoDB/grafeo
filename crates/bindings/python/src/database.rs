@@ -2572,19 +2572,26 @@ impl PyGrafeoDB {
         self.inner.read().clear_plan_cache();
     }
 
-    /// Converts the database to a read-only CompactStore for faster queries.
+    /// Converts the default graph to a columnar CompactStore for faster queries.
     ///
-    /// Takes a snapshot of all nodes and edges, builds a columnar store with
-    /// CSR adjacency, and switches to read-only mode. The original store is
-    /// dropped to free memory, giving ~60x memory reduction and 100x+
-    /// traversal speedup for read-only workloads.
+    /// Builds a columnar store with CSR adjacency from all nodes and edges and
+    /// drops the original store to free memory, giving up to ~60x memory
+    /// reduction and 100x+ traversal speedup. The database stays writable:
+    /// later writes go to an overlay on top of the columnar base, which is
+    /// merged into the base under memory pressure or by calling ``compact()``
+    /// again (``recompact()`` in Rust). Named graphs and the property, text
+    /// and vector indexes stay. Compaction keeps no version history, so
+    /// point-in-time reads see the compacted data at every epoch.
     ///
-    /// After calling this, write queries will fail.
+    /// Raises:
+    ///     GrafeoError: While a transaction is open (commit or roll it back
+    ///         first), or if the conversion fails.
     ///
     /// Example:
     ///     db = GrafeoDB()
     ///     db.execute("INSERT (:Person {name: 'Alix', age: 30})")
     ///     db.compact()
+    ///     db.execute("INSERT (:Person {name: 'Gus', age: 25})")
     ///     result = db.execute("MATCH (p:Person) RETURN p.name")
     #[cfg(feature = "compact-store")]
     fn compact(&self) -> PyResult<()> {

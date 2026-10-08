@@ -5,6 +5,9 @@
 # second clause of `MATCH (a:Person) MATCH (b:City), (a)-[:VISITED]->(b)`
 # used to start its variables from its first part, not from the rows before
 # it, so `a` matched any person: every person came back with every visit.
+# A part that shares a node with an earlier part and reads, in its property
+# map, a value of the rows before it (an unwound value, a node of another
+# part) was matched on its own, without that value, and matched nothing.
 #
 # Setup (GQL, one statement): Alix (k 1), Gus (k 3), Vincent (k 19) and Mia
 # (k 88); Amsterdam, Berlin and Paris. VISITED Alix->Amsterdam (w 3),
@@ -129,6 +132,27 @@ tests:
       rows:
         - [3, Alix, Amsterdam]
         - [19, Gus, Berlin]
+
+  - name: joined_part_reads_an_unwound_value
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "UNWIND [3, 19] AS w MATCH (b:City), (b)<-[:VISITED {w: w}]-(a) RETURN w, a.name AS a, b.name AS b"
+      cypher: "UNWIND [3, 19] AS w MATCH (b:City), (b)<-[:VISITED {w: w}]-(a) RETURN w, a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [3, Alix, Amsterdam]
+        - [19, Gus, Berlin]
+
+  - name: joined_part_reads_a_node_of_another_part
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', k: 1}), (gus:Person {name: 'Gus', k: 3}), (vincent:Person {name: 'Vincent', k: 19}), (mia:Person {name: 'Mia', k: 88}), (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (alix)-[:VISITED {w: 3}]->(ams), (gus)-[:VISITED {w: 19}]->(ber), (gus)-[:VISITED {w: 88}]->(ams), (vincent)-[:VISITED {w: 33}]->(par), (vincent)-[:VISITED {w: 38}]->(mia)"
+    variants:
+      gql: "MATCH (x:Person {k: 3}), (b:City), (b)<-[:VISITED {w: x.k}]-(a) RETURN x.name AS x, a.name AS a, b.name AS b"
+      cypher: "MATCH (x:Person {k: 3}), (b:City), (b)<-[:VISITED {w: x.k}]-(a) RETURN x.name AS x, a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Gus, Alix, Amsterdam]
 
   - name: subquery_importing_everything_expands_from_the_outer_node
     setup:

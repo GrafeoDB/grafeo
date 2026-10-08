@@ -692,3 +692,42 @@ tests:
     expect:
       rows:
         - [Amsterdam, 1]
+
+  # ---------------------------------------------------------------------------
+  # A body without a final RETURN (a unit subquery) runs for its writes and
+  # passes each row on once, as it came in: however many rows the body makes,
+  # none included. Nothing it binds is a variable after it.
+  # ---------------------------------------------------------------------------
+
+  # The body makes two rows for each person: it writes twice per person, and
+  # each person goes on once.
+  - name: a_unit_subquery_keeps_each_row_once
+    variants:
+      gql: "MATCH (p:Person) CALL (p) { FOR x IN [1, 2] INSERT (:W {name: p.name}) } WITH count(*) AS people MATCH (w:W) RETURN people, count(w) AS written"
+      cypher: "MATCH (p:Person) CALL { WITH p UNWIND [1, 2] AS x CREATE (:W {name: p.name}) } WITH count(*) AS people MATCH (w:W) RETURN people, count(w) AS written"
+    expect:
+      rows:
+        - [5, 10]
+
+  # A body that makes no rows writes nothing and keeps every person.
+  - name: a_unit_subquery_without_rows_keeps_the_rows
+    variants:
+      gql: "MATCH (p:Person) CALL (p) { FOR x IN [] INSERT (:W) } RETURN count(*) AS people"
+      cypher: "MATCH (p:Person) CALL { WITH p UNWIND [] AS x CREATE (:W) } RETURN count(*) AS people"
+    expect:
+      rows:
+        - [5]
+
+  - name: a_unit_subquery_passes_only_the_outer_variables_on
+    variants:
+      gql: "MATCH (p:Person {name: 'Alix'}) CALL (p) { FOR x IN [1, 2] INSERT (w:W) } RETURN *"
+      cypher: "MATCH (p:Person {name: 'Alix'}) CALL { WITH p UNWIND [1, 2] AS x CREATE (w:W) } RETURN p.name AS name"
+    expect:
+      count: 1
+
+  - name: a_unit_subquery_binds_nothing_after_it
+    variants:
+      gql: "MATCH (p:Person) CALL (p) { FOR x IN [1, 2] INSERT (w:W) } RETURN w"
+      cypher: "MATCH (p:Person) CALL { WITH p UNWIND [1, 2] AS x CREATE (w:W) } RETURN x"
+    expect:
+      error: "Undefined variable"

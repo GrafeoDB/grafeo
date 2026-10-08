@@ -4,12 +4,13 @@
 //! After `compact()` the database reads a columnar base under an overlay that
 //! takes every write. Under memory pressure the overlay's memory consumer
 //! merges the overlay into a new base and starts an empty overlay. The base
-//! has no versions, so the merge waits until no transaction is open: a
-//! transaction open across it keeps its snapshot, its uncommitted changes
-//! (base deletes included) stay its own, and its commit or rollback still
-//! works. Sessions opened before a merge, and the database itself, read and
-//! write the new overlay afterwards, and named graphs stay, in memory and in
-//! the file.
+//! has no versions, so the merge waits until no transaction is open: memory
+//! pressure while one is open merges nothing, the transaction keeps its
+//! snapshot, its uncommitted changes (base deletes included) stay its own,
+//! and its commit or rollback still works; the next pressure after it closes
+//! merges, and the outcome stays. Sessions opened before a merge, and the
+//! database itself, read and write the new overlay afterwards, and named
+//! graphs stay, in memory and in the file.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test overlay_merge
@@ -108,10 +109,34 @@ fn gus_turns_three(db: &GrafeoDB) {
         .unwrap();
 }
 
-/// An update of a base node, open across a merge, stays with its
-/// transaction, and its rollback brings the old value back. (Other sessions
-/// see an uncommitted value today, merge or not: values are written in
-/// place.)
+/// Memory pressure while a transaction is open: the overlay's consumer
+/// merges nothing, as the base has no versions, and the overlay keeps its
+/// changes.
+fn pressure_defers_the_merge(db: &GrafeoDB) {
+    assert!(
+        !merge_under_pressure(db),
+        "memory pressure merges nothing while a transaction is open"
+    );
+}
+
+/// Memory pressure once no transaction is open: the merge the open
+/// transaction held back runs. A component, which no query here reads,
+/// gives the overlay a change to merge when a rollback left it none.
+fn the_deferred_merge_runs(db: &GrafeoDB) {
+    let layered = db.layered_store().expect("the database is compacted");
+    if layered.overlay_mutation_count() == 0 {
+        db.execute("INSERT (:Component {id: 'c3'})").unwrap();
+    }
+    assert!(
+        merge_under_pressure(db),
+        "the merge runs once the transaction closed"
+    );
+}
+
+/// An update of a base node, open while memory pressure asks for a merge,
+/// stays with its transaction, and its rollback brings the old value back;
+/// the merge after it keeps the old value. (Other sessions see an
+/// uncommitted value today, merge or not: values are written in place.)
 #[test]
 fn an_open_update_stays_with_its_transaction_across_a_merge_and_rolls_back() {
     let db = compacted_people();
@@ -121,15 +146,20 @@ fn an_open_update_stays_with_its_transaction_across_a_merge_and_rolls_back() {
         .execute("MATCH (g:Person {name: 'Gus'}) SET g.age = 3")
         .unwrap();
 
-    merge_under_pressure(&db);
+    pressure_defers_the_merge(&db);
     assert_eq!(session.rows(GUS_AGE), age(3), "the transaction's own view");
 
     session.rollback().unwrap();
     assert_eq!(db.rows(GUS_AGE), age(19), "after the rollback");
     assert_eq!(session.rows(GUS_AGE), age(19), "the session after it");
+
+    the_deferred_merge_runs(&db);
+    assert_eq!(db.rows(GUS_AGE), age(19), "after the merge");
+    assert_eq!(session.rows(GUS_AGE), age(19), "the session after it");
 }
 
-/// An update of a base node, open across a merge, commits after it.
+/// An update of a base node, open while memory pressure asks for a merge,
+/// commits, and the merge after the commit keeps it.
 #[test]
 fn an_open_update_commits_after_a_merge() {
     let db = compacted_people();
@@ -139,9 +169,12 @@ fn an_open_update_commits_after_a_merge() {
         .execute("MATCH (g:Person {name: 'Gus'}) SET g.age = 3")
         .unwrap();
 
-    merge_under_pressure(&db);
+    pressure_defers_the_merge(&db);
     session.commit().unwrap();
     assert_eq!(db.rows(GUS_AGE), age(3), "a session after the commit");
+
+    the_deferred_merge_runs(&db);
+    assert_eq!(db.rows(GUS_AGE), age(3), "after the merge");
     let mut newer = db.session();
     newer.begin_transaction().unwrap();
     assert_eq!(
@@ -152,8 +185,9 @@ fn an_open_update_commits_after_a_merge() {
     newer.rollback().unwrap();
 }
 
-/// A node created by a transaction open across a merge is the transaction's
-/// own until it commits, and everyone's after.
+/// A node created by a transaction open while memory pressure asks for a
+/// merge is the transaction's own until it commits, and everyone's after,
+/// also once the merge after the commit moved it into the base.
 #[test]
 fn an_open_insert_stays_private_across_a_merge_and_commits_after_it() {
     let db = compacted_people();
@@ -163,7 +197,7 @@ fn an_open_insert_stays_private_across_a_merge_and_commits_after_it() {
         .execute("INSERT (:Person {name: 'Vincent'})")
         .unwrap();
 
-    merge_under_pressure(&db);
+    pressure_defers_the_merge(&db);
     assert_eq!(
         session.rows(PEOPLE),
         names(&["Alix", "Gus", "Mia", "Vincent"]),
@@ -177,10 +211,17 @@ fn an_open_insert_stays_private_across_a_merge_and_commits_after_it() {
         names(&["Alix", "Gus", "Mia", "Vincent"]),
         "after the commit"
     );
+
+    the_deferred_merge_runs(&db);
+    assert_eq!(
+        db.rows(PEOPLE),
+        names(&["Alix", "Gus", "Mia", "Vincent"]),
+        "after the merge"
+    );
 }
 
-/// A node created by a transaction open across a merge goes with its
-/// rollback.
+/// A node created by a transaction open while memory pressure asks for a
+/// merge goes with its rollback, and stays gone after the merge.
 #[test]
 fn an_open_insert_rolls_back_after_a_merge() {
     let db = compacted_people();
@@ -190,16 +231,23 @@ fn an_open_insert_rolls_back_after_a_merge() {
         .execute("INSERT (:Person {name: 'Vincent'})")
         .unwrap();
 
-    merge_under_pressure(&db);
+    pressure_defers_the_merge(&db);
     session.rollback().unwrap();
     assert_eq!(db.rows(PEOPLE), names(&["Alix", "Gus", "Mia"]));
     assert_eq!(session.rows(PEOPLE), names(&["Alix", "Gus", "Mia"]));
+
+    the_deferred_merge_runs(&db);
+    assert_eq!(
+        db.rows(PEOPLE),
+        names(&["Alix", "Gus", "Mia"]),
+        "after the merge"
+    );
 }
 
 /// The delete of a node created after `compact()` (an overlay node), open
-/// across a merge, stays with its transaction, and its rollback keeps the
-/// node. (Other sessions miss a node whose delete is open today, merge or
-/// not.)
+/// while memory pressure asks for a merge, stays with its transaction, and
+/// its rollback keeps the node, also after the merge. (Other sessions miss a
+/// node whose delete is open today, merge or not.)
 #[test]
 fn an_open_delete_of_an_overlay_node_stays_with_its_transaction_across_a_merge_and_rolls_back() {
     let db = compacted_people();
@@ -210,7 +258,7 @@ fn an_open_delete_of_an_overlay_node_stays_with_its_transaction_across_a_merge_a
         .execute("MATCH (j:Person {name: 'Jules'}) DELETE j")
         .unwrap();
 
-    merge_under_pressure(&db);
+    pressure_defers_the_merge(&db);
     assert_eq!(
         session.rows(PEOPLE),
         names(&["Alix", "Gus", "Mia"]),
@@ -223,9 +271,17 @@ fn an_open_delete_of_an_overlay_node_stays_with_its_transaction_across_a_merge_a
         names(&["Alix", "Gus", "Jules", "Mia"]),
         "after the rollback"
     );
+
+    the_deferred_merge_runs(&db);
+    assert_eq!(
+        db.rows(PEOPLE),
+        names(&["Alix", "Gus", "Jules", "Mia"]),
+        "after the merge"
+    );
 }
 
-/// The delete of an overlay node, open across a merge, commits after it.
+/// The delete of an overlay node, open while memory pressure asks for a
+/// merge, commits, and the merge after the commit keeps the node gone.
 #[test]
 fn an_open_delete_of_an_overlay_node_commits_after_a_merge() {
     let db = compacted_people();
@@ -236,13 +292,21 @@ fn an_open_delete_of_an_overlay_node_commits_after_a_merge() {
         .execute("MATCH (j:Person {name: 'Jules'}) DELETE j")
         .unwrap();
 
-    merge_under_pressure(&db);
+    pressure_defers_the_merge(&db);
     session.commit().unwrap();
     assert_eq!(db.rows(PEOPLE), names(&["Alix", "Gus", "Mia"]));
+
+    the_deferred_merge_runs(&db);
+    assert_eq!(
+        db.rows(PEOPLE),
+        names(&["Alix", "Gus", "Mia"]),
+        "after the merge"
+    );
 }
 
-/// A base delete (a pending tombstone in the overlay), open across a merge,
-/// stays the transaction's own, and commits after the merge.
+/// A base delete (a pending tombstone in the overlay), open while memory
+/// pressure asks for a merge, stays the transaction's own, commits, and the
+/// merge after the commit leaves the node and its edges out of the base.
 #[test]
 fn an_open_base_delete_stays_private_across_a_merge_and_commits_after_it() {
     let db = compacted_people();
@@ -252,7 +316,7 @@ fn an_open_base_delete_stays_private_across_a_merge_and_commits_after_it() {
         .execute("MATCH (g:Person {name: 'Gus'}) DETACH DELETE g")
         .unwrap();
 
-    merge_under_pressure(&db);
+    pressure_defers_the_merge(&db);
     assert_eq!(
         session.rows(PEOPLE),
         names(&["Alix", "Mia"]),
@@ -269,9 +333,14 @@ fn an_open_base_delete_stays_private_across_a_merge_and_commits_after_it() {
     session.commit().unwrap();
     assert_eq!(db.rows(PEOPLE), names(&["Alix", "Mia"]), "after the commit");
     assert_eq!(db.rows(KNOWS), Vec::<Vec<Value>>::new(), "after the commit");
+
+    the_deferred_merge_runs(&db);
+    assert_eq!(db.rows(PEOPLE), names(&["Alix", "Mia"]), "after the merge");
+    assert_eq!(db.rows(KNOWS), Vec::<Vec<Value>>::new(), "after the merge");
 }
 
-/// A base delete, open across a merge, rolls back after it.
+/// A base delete, open while memory pressure asks for a merge, rolls back,
+/// and the merge after the rollback keeps the node and its edges.
 #[test]
 fn an_open_base_delete_rolls_back_after_a_merge() {
     let db = compacted_people();
@@ -281,16 +350,25 @@ fn an_open_base_delete_rolls_back_after_a_merge() {
         .execute("MATCH (g:Person {name: 'Gus'}) DETACH DELETE g")
         .unwrap();
 
-    merge_under_pressure(&db);
+    pressure_defers_the_merge(&db);
     session.rollback().unwrap();
     assert_eq!(db.rows(PEOPLE), names(&["Alix", "Gus", "Mia"]));
     assert_eq!(db.rows(KNOWS), everyone_knows());
     assert_eq!(session.rows(PEOPLE), names(&["Alix", "Gus", "Mia"]));
+
+    the_deferred_merge_runs(&db);
+    assert_eq!(
+        db.rows(PEOPLE),
+        names(&["Alix", "Gus", "Mia"]),
+        "after the merge"
+    );
+    assert_eq!(db.rows(KNOWS), everyone_knows(), "after the merge");
 }
 
-/// A transaction open across a merge keeps its snapshot: it misses a node
-/// another session created after it began, also once the merge would have
-/// moved the node into the base, which has no versions.
+/// A transaction open while memory pressure asks for a merge keeps its
+/// snapshot: it misses a node another session created after it began, as
+/// the merge, which would move the node into the base (which has no
+/// versions), waits until it closes.
 #[test]
 fn a_transaction_open_across_a_merge_keeps_its_snapshot() {
     let db = compacted_people();
@@ -303,14 +381,21 @@ fn a_transaction_open_across_a_merge_keeps_its_snapshot() {
         "the reader's snapshot before the merge"
     );
 
-    merge_under_pressure(&db);
+    pressure_defers_the_merge(&db);
     assert_eq!(
         reader.rows(PEOPLE),
         names(&["Alix", "Gus", "Mia"]),
-        "the reader's snapshot after it"
+        "the reader's snapshot after the pressure"
     );
     reader.rollback().unwrap();
     assert_eq!(db.rows(PEOPLE), names(&["Alix", "Gus", "Mia", "Vincent"]));
+
+    the_deferred_merge_runs(&db);
+    assert_eq!(
+        db.rows(PEOPLE),
+        names(&["Alix", "Gus", "Mia", "Vincent"]),
+        "after the merge"
+    );
 }
 
 /// With no transaction open, the merge runs and frees the overlay's memory:

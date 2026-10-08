@@ -724,7 +724,8 @@ pub(crate) fn collect_operator_variables(op: &LogicalOperator, vars: &mut HashSe
 /// bound already binds a fresh variable checked against it (`close_cycles`).
 /// Any other part is matched on its own and joined on every variable it
 /// shares with the earlier parts or with the input, so that a part like
-/// `(a)<-[:R]-(b)` after `(b:C)` still meets the `a` of the input.
+/// `(a)<-[:R]-(b)` after `(b:C)` still meets the `a` of the input, unless it
+/// reads a value of those rows (see [`comma_part_reads_earlier_rows`]).
 #[cfg(any(feature = "gql", feature = "cypher"))]
 pub(crate) fn comma_part_join_variables(
     part: &HashSet<String>,
@@ -742,6 +743,39 @@ pub(crate) fn comma_part_join_variables(
         .collect();
     shared.sort();
     shared
+}
+
+/// Whether `part`, a comma-separated part of a MATCH translated on its own
+/// (as one joined to the parts before it is), reads in its filters (its
+/// property maps and inline WHERE clauses) a variable that the earlier parts
+/// (`clause`) or the input bind and the part itself (`part_vars`) does not:
+/// an unwound value, or a node of another part, as in `UNWIND [3, 19] AS w
+/// MATCH (b:City), (b)<-[:VISITED {w: w}]-(a)`. On its own the part has no
+/// such value and matches nothing, so it goes on from the rows before it
+/// instead, like a part that shares no variable with them.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn comma_part_reads_earlier_rows(
+    part: &LogicalOperator,
+    part_vars: &HashSet<String>,
+    clause: &HashSet<String>,
+    input: &HashSet<String>,
+) -> bool {
+    let mut read = HashSet::new();
+    collect_filter_reads(part, &mut read);
+    read.iter()
+        .any(|name| !part_vars.contains(name) && (clause.contains(name) || input.contains(name)))
+}
+
+/// Adds the variables the filters of `op`, and of every operator below it,
+/// read.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+fn collect_filter_reads(op: &LogicalOperator, read: &mut HashSet<String>) {
+    if let LogicalOperator::Filter(filter) = op {
+        collect_expression_variables(&filter.predicate, read);
+    }
+    for child in op.children() {
+        collect_filter_reads(child, read);
+    }
 }
 
 /// The left join of an OPTIONAL MATCH: `right` matched for each row of

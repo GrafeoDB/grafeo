@@ -16,6 +16,8 @@
 pub(crate) mod block;
 #[cfg(feature = "lpg")]
 mod chunked;
+#[cfg(feature = "lpg")]
+mod committed;
 mod edge;
 mod node;
 pub mod overlay;

@@ -51,7 +51,7 @@ use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, Result};
 
 use super::{RdfStore, Term, Triple};
-use crate::codec::column_chunk::decode_column_chunk;
+use crate::codec::column_chunk::decode_column_chunk_bytes;
 use crate::codec::{ChunkColumn, RowsChunker};
 
 /// The RDF section's version: chunks, as this module writes them.
@@ -610,7 +610,7 @@ fn read_range(
             )));
         }
         let bytes = source.fetch(index + offset)?;
-        let decoded = decode_column_chunk(&bytes, chunk.codec, chunk.row_count)
+        let decoded = decode_column_chunk_bytes(&bytes, chunk.codec, chunk.row_count)
             .map_err(|error| place.error(format!("the {column} chunk: {error}")))?;
         if decoded.epochs.is_some() {
             return Err(place.error(format!(

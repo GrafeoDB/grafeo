@@ -3,8 +3,8 @@
 //!
 //! The [`LayeredStore`](crate::graph::compact::layered::LayeredStore)
 //! tracks deletions of base-store entities as tombstones in its overlay:
-//! a transaction's are pending until its commit stamps them, and a
-//! rollback removes them. Without this section, the committed ones are
+//! a transaction's deletes remain pending until its commit stamps them, and
+//! a rollback removes them. Without this section, the committed ones are
 //! lost across a close/reopen cycle: the overlay scan in
 //! `LayeredStore::with_overlay` cannot distinguish a deleted base node
 //! (which has no overlay entry) from a base node that was never modified,

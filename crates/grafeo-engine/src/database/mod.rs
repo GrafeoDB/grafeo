@@ -412,7 +412,11 @@ impl GrafeoDB {
     ///
     /// Returns an error if the database doesn't exist or can't be read, and,
     /// in a build without the `wal` feature, if its sidecar WAL holds commits
-    /// to replay (a non-empty log file; for a 0.5.x file, any file).
+    /// to replay (a non-empty log file; for a 0.5.x file, any file); also
+    /// if the database holds data this build cannot read (by 0.5.x too): a
+    /// compacted base without the `compact-store` feature, RDF triples
+    /// without `triple-store`, vector or text indexes without `vector-index`
+    /// or `text-index`.
     ///
     /// # Examples
     ///
@@ -452,7 +456,12 @@ impl GrafeoDB {
     /// with another one, or an unencrypted one is opened with a key; in a
     /// build without the `wal` feature, also if the sidecar WAL of the
     /// database file holds commits only a build with `wal` can replay (a
-    /// non-empty log file; for a 0.5.x file, any file).
+    /// non-empty log file; for a 0.5.x file, any file); and if the database
+    /// holds data this build cannot read, which it would open without and
+    /// its next checkpoint drop (by 0.5.x too): a compacted base (written
+    /// after `compact()`) without the `compact-store` feature, RDF triples
+    /// (in the file or its WAL) without `triple-store`, vector or text
+    /// indexes without `vector-index` or `text-index`.
     ///
     /// # Examples
     ///
@@ -654,9 +663,12 @@ impl GrafeoDB {
                     Self::refuse_unreplayable_sidecar_wal(db_path)?;
                     #[cfg(feature = "lpg")]
                     {
+                        // Refused when it holds data this build cannot
+                        // read: it would show the database without it.
                         loaded_sections = fm.read_image(|image| {
                             sections::load_sections(
                                 image,
+                                Some(db_path),
                                 &store,
                                 &catalog,
                                 #[cfg(feature = "triple-store")]
@@ -679,6 +691,7 @@ impl GrafeoDB {
                         )
                         .recover_with_tail()?;
                         Self::apply_wal_records(
+                            &fm.sidecar_wal_path(),
                             &store,
                             &catalog,
                             #[cfg(feature = "triple-store")]
@@ -768,9 +781,12 @@ impl GrafeoDB {
 
             #[cfg(feature = "lpg")]
             {
+                // Refused when it holds data this build cannot read: the
+                // next checkpoint would write the file without it.
                 loaded_sections = fm.read_image(|image| {
                     sections::load_sections(
                         image,
+                        Some(db_path),
                         &store,
                         &catalog,
                         #[cfg(feature = "triple-store")]
@@ -792,6 +808,7 @@ impl GrafeoDB {
                 );
                 let recovered = recovery.recover_with_tail()?;
                 Self::apply_wal_records(
+                    &fm.sidecar_wal_path(),
                     &store,
                     &catalog,
                     #[cfg(feature = "triple-store")]
@@ -1466,13 +1483,28 @@ impl GrafeoDB {
             .unwrap_or(false)
     }
 
-    /// Applies WAL records to restore the database state.
+    /// Applies WAL records, those of the WAL `wal`, to restore the database
+    /// state.
     ///
     /// Data mutation records are routed through a graph cursor that tracks
     /// `SwitchGraph` context markers, replaying mutations into the correct
     /// named graph (or the default graph when cursor is `None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a record cannot be applied, and, in a build
+    /// without the `triple-store` feature, at an RDF record, naming the WAL:
+    /// the triples would be lost (see [`sections::FeatureData`]).
     #[cfg(all(feature = "wal", feature = "lpg"))]
+    #[cfg_attr(
+        feature = "triple-store",
+        expect(
+            unused_variables,
+            reason = "only a build without `triple-store` refuses records, naming the WAL"
+        )
+    )]
     fn apply_wal_records(
+        wal: &std::path::Path,
         store: &Arc<LpgStore>,
         catalog: &Catalog,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
@@ -1589,12 +1621,19 @@ impl GrafeoDB {
                 | WalRecord::DropRdfGraph { .. } => {
                     rdf_ops::replay_rdf_wal_record(rdf_store, record)?;
                 }
+                // This build cannot replay them: the next checkpoint would
+                // write the file without the triples, and remove the WAL.
                 #[cfg(not(feature = "triple-store"))]
                 WalRecord::InsertRdfTriple { .. }
                 | WalRecord::DeleteRdfTriple { .. }
                 | WalRecord::ClearRdfGraph { .. }
                 | WalRecord::CreateRdfGraph { .. }
-                | WalRecord::DropRdfGraph { .. } => {}
+                | WalRecord::DropRdfGraph { .. } => {
+                    return Err(sections::refusal(
+                        wal,
+                        &[(&sections::RDF_TRIPLES, "WAL records".to_string())],
+                    ));
+                }
 
                 WalRecord::TransactionCommit { .. } => {
                     // In temporal mode, advance the store epoch on each committed
@@ -1743,8 +1782,9 @@ impl GrafeoDB {
     ///
     /// Returns an error if `wal/` cannot be listed or a WAL file cannot be
     /// read, if the directory was migrated while it was read, or if a record
-    /// cannot be replayed; in a build without the `wal` feature, always (it
-    /// cannot replay a WAL).
+    /// cannot be replayed (an RDF record in a build without the
+    /// `triple-store` feature); in a build without the `wal` feature, always
+    /// (it cannot replay a WAL).
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     fn load_legacy_directory(
         path: &std::path::Path,
@@ -1770,6 +1810,7 @@ impl GrafeoDB {
             // moving away while it was read.
             Self::refuse_migrated_while_read(path, OnDisk::WalDirectory)?;
             Self::apply_wal_records(
+                &path.join("wal"),
                 store,
                 catalog,
                 #[cfg(feature = "triple-store")]
@@ -1810,9 +1851,10 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the file cannot be locked or read, lists a section
-    /// twice, a section or the snapshot cannot be decoded, or the WAL cannot
-    /// be recovered; in a build without the `wal` feature, also if the
-    /// sidecar WAL holds files.
+    /// twice, a section or the snapshot cannot be decoded, the WAL cannot be
+    /// recovered, or the file or its WAL holds data this build cannot read
+    /// (see [`sections::FeatureData`]); in a build without the `wal`
+    /// feature, also if the sidecar WAL holds files.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     fn load_legacy_file(
         path: &std::path::Path,
@@ -1831,6 +1873,7 @@ impl GrafeoDB {
         match file.contents()? {
             LegacyContents::Empty => {}
             LegacyContents::Snapshot(data) => Self::apply_snapshot_data(
+                path,
                 store,
                 catalog,
                 #[cfg(feature = "triple-store")]
@@ -1841,8 +1884,12 @@ impl GrafeoDB {
             // loaded: a migration of a large 0.5.x file does not hold the
             // whole file's sections until the load returns.
             LegacyContents::Sections(stored) => {
+                // A file with data this build cannot read (a compacted
+                // base, triples, vector or text indexes) is neither read
+                // nor migrated.
                 *loaded = sections::load_sections(
                     &ServedOnce::new(MemoryImage::from_raw(stored)?),
+                    Some(path),
                     store,
                     catalog,
                     #[cfg(feature = "triple-store")]
@@ -1864,6 +1911,7 @@ impl GrafeoDB {
             Self::refuse_migrated_while_read(path, OnDisk::LegacyFile)?;
             if let Some(recovered) = recovered? {
                 Self::apply_wal_records(
+                    &wal_path,
                     store,
                     catalog,
                     #[cfg(feature = "triple-store")]
@@ -1875,10 +1923,11 @@ impl GrafeoDB {
         Ok(())
     }
 
-    /// Applies the snapshot blob of a 0.5.x container v1 file to restore the
-    /// store and catalog.
+    /// Applies the snapshot blob of the 0.5.x container v1 file `path` to
+    /// restore the store and catalog.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     fn apply_snapshot_data(
+        path: &std::path::Path,
         store: &Arc<LpgStore>,
         catalog: &Arc<crate::catalog::Catalog>,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
@@ -1886,6 +1935,7 @@ impl GrafeoDB {
     ) -> Result<()> {
         // v1 blob format: pass through to legacy loader
         persistence::load_snapshot_into_store(
+            path,
             store,
             catalog,
             #[cfg(feature = "triple-store")]
@@ -3890,7 +3940,22 @@ mod tests {
         )
         .unwrap();
         db.create_node(&["Person"]).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Waits for a flush, with a deadline long enough for a loaded
+        // machine or an instrumented build (one fixed short sleep made this
+        // test fail under load).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while db
+            .wal_flusher
+            .lock()
+            .as_ref()
+            .expect("a flusher runs")
+            .stats()
+            .flush_count
+            == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         let mut flusher = db.wal_flusher.lock().take().expect("a flusher runs");
         let stats = flusher.shutdown().unwrap();

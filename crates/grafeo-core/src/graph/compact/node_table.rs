@@ -95,9 +95,12 @@ impl NodeTable {
         self.schema.table_id
     }
 
-    /// Returns the table's key: the labels of its nodes in name order,
-    /// joined with `|` (a `\` escapes a `\` or `|` in a label). A table of
-    /// single-label nodes has their label as its key.
+    /// Returns the table's key, not a label: the labels of its nodes in name
+    /// order, each with a `\` before every `\` and `|` it holds, joined with
+    /// `|`. A table of single-label nodes has their label as its key only
+    /// when the label holds neither character (the label `In|Out` is keyed
+    /// `In\|Out`). The nodes without labels have the empty key, and the
+    /// nodes whose one label is the empty label have the key `|`.
     #[must_use]
     pub fn label(&self) -> &str {
         self.schema.label.as_str()

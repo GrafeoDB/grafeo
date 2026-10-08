@@ -20,6 +20,33 @@ fn unreadable_edge_record(id: EdgeId) -> grafeo_common::utils::error::Error {
     ))
 }
 
+#[cfg(all(test, feature = "compact-store"))]
+thread_local! {
+    /// What an edge adoption on this thread runs between its steps, for the
+    /// tests that read the store there.
+    static ADOPT_EDGE_STEP: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, feature = "compact-store"))]
+impl LpgStore {
+    /// Sets what each edge adoption on this thread runs between its steps
+    /// (`None` runs nothing).
+    pub(crate) fn set_adopt_edge_step_hook(hook: Option<Box<dyn Fn()>>) {
+        ADOPT_EDGE_STEP.with(|step| *step.borrow_mut() = hook);
+    }
+}
+
+/// Runs the hook of `LpgStore::set_adopt_edge_step_hook`, if one is set.
+#[cfg(all(test, feature = "compact-store"))]
+fn run_adopt_edge_step() {
+    ADOPT_EDGE_STEP.with(|step| {
+        if let Some(hook) = step.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
 impl LpgStore {
     /// Builds an `Edge` from a record, resolving the type name and loading properties.
     fn build_edge(&self, id: EdgeId, record: &EdgeRecord) -> Option<Edge> {
@@ -719,9 +746,40 @@ impl LpgStore {
         Ok(ids)
     }
 
+    /// The ids of the edges with a version visible now, in id order, found
+    /// without reading a record (a tiered store's cold records are decoded
+    /// only where they are read). For a checkpoint, which reads each edge's
+    /// record once, in
+    /// [`try_edge_without_properties`](Self::try_edge_without_properties):
+    /// that leaves out a record marked deleted and refuses one it cannot
+    /// read, so the rows are those of [`try_edge_ids`](Self::try_edge_ids),
+    /// which reads every record to filter the ids.
+    pub(crate) fn edge_ids_with_a_visible_version(&self) -> Vec<EdgeId> {
+        let epoch = self.current_epoch();
+        #[cfg(not(feature = "tiered-storage"))]
+        let mut ids: Vec<EdgeId> = self
+            .edges
+            .read()
+            .iter()
+            .filter(|(_, chain)| chain.visible_at(epoch).is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        #[cfg(feature = "tiered-storage")]
+        let mut ids: Vec<EdgeId> = self
+            .edge_versions
+            .read()
+            .iter()
+            .filter(|(_, index)| index.visible_at(epoch).is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// The edge `id` as it is now, with its endpoints and type and without
     /// its property values (a checkpoint reads those column by column), or
-    /// `None` when no version of it is visible now.
+    /// `None` when no version of it is visible now or the visible one is
+    /// deleted. Reads the edge's record once.
     ///
     /// # Errors
     ///
@@ -1133,9 +1191,12 @@ impl LpgStore {
         true
     }
 
-    /// Puts an edge being adopted in the adjacency lists, gives it its
-    /// values at the initial epoch and counts it live. The caller holds the
-    /// edge lock, which comes before every lock this takes.
+    /// Gives an edge being adopted its values at the initial epoch, counts
+    /// it live, and then puts it in both adjacency lists at once. The caller
+    /// holds the edge lock, which comes before every lock this takes: a
+    /// reader of the edge's record waits for the whole copy, and a reader of
+    /// the adjacency lists, which takes no edge lock, finds the edge in both
+    /// lists with its values, or in neither.
     fn fill_adopted_edge(
         &self,
         id: EdgeId,
@@ -1144,10 +1205,6 @@ impl LpgStore {
         type_id: u32,
         properties: impl IntoIterator<Item = (PropertyKey, Value)>,
     ) {
-        self.forward_adj.add_edge(src, dst, id);
-        if let Some(ref backward) = self.backward_adj {
-            backward.add_edge(dst, src, id);
-        }
         for (key, value) in properties {
             #[cfg(not(feature = "temporal"))]
             self.edge_properties.set(id, key, value);
@@ -1156,6 +1213,14 @@ impl LpgStore {
         }
         self.live_edge_count.fetch_add(1, Ordering::Relaxed);
         self.increment_edge_type_count(type_id);
+        #[cfg(test)]
+        run_adopt_edge_step();
+        // Last, and into both lists at once: the adjacency readers take no
+        // edge lock, so they find the edge only once it is whole.
+        self.forward_adj
+            .add_edge_both_ways(self.backward_adj.as_ref(), src, dst, id);
+        #[cfg(test)]
+        run_adopt_edge_step();
     }
 }
 

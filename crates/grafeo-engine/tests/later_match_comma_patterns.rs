@@ -292,6 +292,70 @@ fn the_input_rows_keep_their_values() {
     );
 }
 
+/// A part that shares a node with an earlier part of its MATCH, and whose
+/// property map or inline WHERE reads a value only the rows before it hold
+/// (an unwound value, a node of another part), goes on from those rows: on
+/// its own it has no such value, and used to match nothing.
+#[test]
+fn a_part_joined_to_the_parts_before_reads_their_values() {
+    let db = graph();
+    let by_unwound_w: &[&[&str]] = &[&["19", "Gus", "Berlin"], &["3", "Alix", "Amsterdam"]];
+    // The part starts from the shared city
+    assert_both(
+        &db,
+        "UNWIND [3, 19] AS w MATCH (b:City), (b)<-[:VISITED {w: w}]-(a) \
+         RETURN w, a.name, b.name",
+        by_unwound_w,
+    );
+    // The shared city is the far end of the part
+    assert_both(
+        &db,
+        "UNWIND [3, 19] AS w MATCH (b:City), (a)-[:VISITED {w: w}]->(b) \
+         RETURN w, a.name, b.name",
+        by_unwound_w,
+    );
+    // A node's property map reads the unwound value
+    assert_both(
+        &db,
+        "UNWIND [3, 19] AS k MATCH (b:City), (b)<-[:VISITED]-(a {k: k}) \
+         RETURN k, a.name, b.name",
+        &[
+            &["19", "Vincent", "Paris"],
+            &["3", "Gus", "Amsterdam"],
+            &["3", "Gus", "Berlin"],
+        ],
+    );
+    // The value is a property of a node another part of the MATCH binds
+    assert_both(
+        &db,
+        "MATCH (x:Person {k: 3}), (b:City), (b)<-[:VISITED {w: x.k}]-(a) \
+         RETURN x.name, a.name, b.name",
+        &[&["Gus", "Alix", "Amsterdam"]],
+    );
+    // An OPTIONAL MATCH reads the unwound value in its join condition
+    assert_both(
+        &db,
+        "UNWIND [3, 19, 88] AS w OPTIONAL MATCH (b:City {name: 'Berlin'}), \
+         (b)<-[:VISITED {w: w}]-(a) RETURN w, a.name",
+        &[&["19", "Gus"], &["3", "null"], &["88", "null"]],
+    );
+    // GQL: an inline WHERE of the edge, and of the node
+    let query = "UNWIND [3, 19] AS w MATCH (b:City), (b)<-[e:VISITED WHERE e.w = w]-(a) \
+                 RETURN w, a.name, b.name";
+    assert_eq!(
+        rows(db.execute(query)),
+        expected(by_unwound_w),
+        "GQL: {query}"
+    );
+    let query = "UNWIND [1, 19] AS k MATCH (b:City), (b)<-[:VISITED]-(a WHERE a.k = k) \
+                 RETURN k, a.name, b.name";
+    assert_eq!(
+        rows(db.execute(query)),
+        expected(&[&["1", "Alix", "Amsterdam"], &["19", "Vincent", "Paris"]]),
+        "GQL: {query}"
+    );
+}
+
 /// The MATCH of a CALL subquery goes on from the node the subquery imports.
 #[test]
 fn a_subquery_pattern_part_expands_from_the_imported_node() {

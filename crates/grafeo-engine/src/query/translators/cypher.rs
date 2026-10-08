@@ -5,9 +5,10 @@
 
 use super::common::{
     build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
-    combine_with_and, comma_part_join_variables, expand_subquery_return_star, has_all_labels,
-    is_aggregate_function, optional_join, to_aggregate_function, wrap_distinct, wrap_filter,
-    wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    combine_with_and, comma_part_join_variables, comma_part_reads_earlier_rows,
+    expand_subquery_return_star, has_all_labels, is_aggregate_function, optional_join,
+    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
+    wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
@@ -190,10 +191,7 @@ impl CypherTranslator {
         // As in Neo4j, the rows of a CALL subquery that returns some are not
         // the result of a query: a RETURN after it says what is.
         if let Some(ast::Clause::CallSubquery { query: inner, .. }) = query.clauses.last()
-            && inner
-                .clauses
-                .iter()
-                .any(|clause| matches!(clause, ast::Clause::Return(_)))
+            && returns_rows(inner)
         {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
@@ -341,13 +339,15 @@ impl CypherTranslator {
             }
         };
 
-        // A CALL that comes first runs once, on one empty row.
+        // A CALL that comes first runs once, on one empty row. A body
+        // without a final RETURN (a unit subquery) runs for its writes and
+        // passes each row on once, as it came in (openCypher).
         Ok(LogicalOperator::Apply(ApplyOp {
             input: Box::new(input.unwrap_or(LogicalOperator::Empty)),
             subplan: Box::new(subplan),
             shared_variables,
             optional: false,
-            unit: false,
+            unit: !returns_rows(inner),
         }))
     }
 
@@ -618,13 +618,17 @@ impl CypherTranslator {
                 &input_vars,
             );
 
-            if shared.is_empty() {
-                // Go on from the rows before: a cross product, or an expand
-                // from the bound start
-                plan = self.translate_pattern(pattern, Some(plan))?;
+            // Shared variables: translate independently and inner join,
+            // unless the part reads a value of the rows before it
+            let right = if shared.is_empty() {
+                None
             } else {
-                // Shared variables: translate independently and inner join
-                let right = self.translate_pattern(pattern, None)?;
+                Some(self.translate_pattern(pattern, None)?).filter(|right| {
+                    !comma_part_reads_earlier_rows(right, current_vars, &bound_vars, &input_vars)
+                })
+            };
+
+            if let Some(right) = right {
                 let conditions = shared
                     .iter()
                     .map(|var| JoinCondition {
@@ -638,6 +642,10 @@ impl CypherTranslator {
                     join_type: JoinType::Inner,
                     conditions,
                 });
+            } else {
+                // Go on from the rows before: a cross product, or an expand
+                // from the bound start
+                plan = self.translate_pattern(pattern, Some(plan))?;
             }
 
             bound_vars.extend(current_vars.iter().cloned());
@@ -2892,6 +2900,15 @@ impl CypherTranslator {
 
         Ok((current_input, rewritten_items))
     }
+}
+
+/// Whether a `CALL` subquery's body ends with a `RETURN` (an `ORDER BY`,
+/// `SKIP` or `LIMIT` may follow it): one without is a unit subquery, which
+/// runs for its writes and returns no rows of its own.
+fn returns_rows(body: &ast::Query) -> bool {
+    body.clauses
+        .iter()
+        .any(|clause| matches!(clause, ast::Clause::Return(_)))
 }
 
 /// The labels of a node pattern after the first. A `NodeScan` checks the first

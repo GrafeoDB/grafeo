@@ -201,8 +201,9 @@ stores: vector/text scan and search now fall through both layers.
   the labels of a node with several as one name (`"Actor|Person"`). Since 0.6.0 each label
   reads such a node again (`MATCH (n:Person)` and `MATCH (n:Actor)` both find it), but a
   single label that holds a `|` reads as two labels in those files.
-- **No disk serialization**: `compact()` operates in memory. To persist a compacted database,
-  use snapshot export (WASM) or save before compacting.
+- **Persistence needs the feature**: a persistent database writes its compacted base to its
+  file, and `save()` copies it, so only a build with the `compact-store` feature opens such a
+  file (see [Feature Flag](#feature-flag)).
 - **Databases compacted by 0.5.44 or older**: those versions stored a property that a node or
   edge lacked as the column's empty value (`''`, `0`, `0.0` or `false`), and such files keep those
   values. Since 0.6.0 a missing property stays missing after `compact()`
@@ -220,3 +221,5 @@ CompactStore requires the `compact-store` feature flag. It is **not** included i
 | WASM (`grafeo-wasm`) | `edge` | Yes |
 
 For custom Rust builds: `cargo build --features compact-store`.
+
+A persistent database keeps its compacted base in its file. A build without the feature cannot read that base, so it refuses such a file: a read-write open, a read-only open and `open_in_memory()` fail with an error that names the `compact-store` feature, and nothing on disk changes. This includes a 0.5.x file compacted by 0.5.44 or older, which such a build neither reads nor migrates. The `grafeo` Rust crate (unless you add the `compact-store` feature) and the `grafeo` command line tool are such builds: open these files with the Python, Node.js or C bindings, or with a Rust build that has the feature. Before 0.6.0 such a build opened the file without its compacted base, and its next checkpoint lost the base for good.

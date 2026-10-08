@@ -477,9 +477,25 @@ fn populate_rdf_store(store: &grafeo_core::graph::rdf::RdfStore, graphs: RdfSnap
 // Snapshot deserialization helpers (used by single-file format)
 // =========================================================================
 
-/// Decodes snapshot bytes and populates a store and catalog.
+/// Decodes snapshot bytes, the snapshot of the 0.5.x container v1 file
+/// `path`, and populates a store and catalog.
+///
+/// # Errors
+///
+/// Returns an error if the snapshot does not decode or a term of its triples
+/// does not parse; in a build without the `triple-store` feature, if it holds
+/// RDF triples or graphs, which the database would be loaded (and migrated)
+/// without.
 #[cfg(feature = "grafeo-file")]
+#[cfg_attr(
+    feature = "triple-store",
+    expect(
+        unused_variables,
+        reason = "only a build without `triple-store` refuses the snapshot, naming the file"
+    )
+)]
 pub(super) fn load_snapshot_into_store(
+    path: &Path,
     store: &std::sync::Arc<grafeo_core::graph::lpg::LpgStore>,
     catalog: &std::sync::Arc<crate::catalog::Catalog>,
     #[cfg(feature = "triple-store")] rdf_store: &std::sync::Arc<grafeo_core::graph::rdf::RdfStore>,
@@ -494,6 +510,16 @@ pub(super) fn load_snapshot_into_store(
         })?;
     #[cfg(feature = "triple-store")]
     let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;
+    #[cfg(not(feature = "triple-store"))]
+    if !snapshot.rdf_triples.is_empty() || !snapshot.rdf_named_graphs.is_empty() {
+        return Err(super::sections::refusal(
+            path,
+            &[(
+                &super::sections::RDF_TRIPLES,
+                "the snapshot of a 0.5.x file".to_string(),
+            )],
+        ));
+    }
 
     populate_store_from_snapshot_ref(store, &snapshot.nodes, &snapshot.edges)?;
 
@@ -887,6 +913,7 @@ impl super::GrafeoDB {
         let image = grafeo_common::storage::ServedOnce::new(self.copy_into(&target)?);
         let loaded = super::sections::load_sections(
             &image,
+            None,
             &target.lpg_store(),
             &target.catalog,
             #[cfg(feature = "triple-store")]

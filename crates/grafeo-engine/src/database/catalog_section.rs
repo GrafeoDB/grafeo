@@ -478,7 +478,8 @@ impl CatalogSection {
             writer.write(&CatalogRecord::NodeType(node_type_record(def)))?;
         }
         for def in &schema.edge_types {
-            writer.write(&CatalogRecord::EdgeType(edge_type_record(def)))?;
+            let record = edge_type_record(def).map_err(in_section)?;
+            writer.write(&CatalogRecord::EdgeType(record))?;
         }
         for def in &schema.graph_types {
             writer.write(&CatalogRecord::GraphType(graph_type_record(def)))?;
@@ -2166,6 +2167,35 @@ mod tests {
             .to_string();
         assert!(
             error.contains("Catalog") && error.contains("cities_near"),
+            "{error}"
+        );
+    }
+
+    /// An edge type whose endpoint lists make more (source, target) pairs
+    /// than a catalog record holds fails the checkpoint naming it, from the
+    /// lists' sizes, before a pair is built: 1,000 types on each side would
+    /// make a million pairs.
+    #[test]
+    fn an_edge_type_with_too_many_endpoint_pairs_fails_the_write_naming_it() {
+        let section = make_section();
+        let cities: Vec<String> = (0..1_000).map(|n| format!("City{n:04}")).collect();
+        section
+            .catalog
+            .register_or_replace_edge_type_def(EdgeTypeDefinition {
+                name: "ROUTE".to_string(),
+                properties: vec![],
+                constraints: vec![],
+                source_node_types: cities.clone(),
+                target_node_types: cities,
+                key_labels: vec![],
+            });
+        let error = MemoryImage::from_sections(&[&section])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Catalog")
+                && error.contains("edge type 'ROUTE'")
+                && error.contains("1000000 endpoint pairs"),
             "{error}"
         );
     }

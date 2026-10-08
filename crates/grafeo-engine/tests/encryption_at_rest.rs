@@ -1085,6 +1085,12 @@ fn the_keyed_restore_refuses_another_key_and_an_unencrypted_backup() {
 }
 
 // --- Databases written by 0.5.x ------------------------------------------------
+//
+// The released fixtures hold RDF triples (the file and the WAL directory) and
+// vector and text indexes (the file), which a build without `triple-store`,
+// `vector-index` and `text-index` refuses (see `rdf_file_without_triple_store`
+// and `search_indexes_without_their_features`): their migrations run in
+// builds with these features.
 
 /// The 0.5.44 database whose second session is only in its sidecar WAL.
 fn fixture() -> PathBuf {
@@ -1098,6 +1104,7 @@ fn copy_fixture(to: &Path) {
 }
 
 /// The people and the sorted named graphs of `db`, as queries see them.
+#[cfg(feature = "triple-store")]
 fn summary(db: &GrafeoDB) -> (Vec<Vec<Value>>, Vec<String>) {
     let mut graphs = db.list_graphs();
     graphs.sort();
@@ -1110,6 +1117,11 @@ fn summary(db: &GrafeoDB) -> (Vec<Vec<Value>>, Vec<String>) {
     )
 }
 
+#[cfg(all(
+    feature = "triple-store",
+    feature = "vector-index",
+    feature = "text-index"
+))]
 #[test]
 fn a_05x_database_opened_with_a_key_is_migrated_into_an_encrypted_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -1224,6 +1236,7 @@ fn directory_fixture() -> PathBuf {
 /// `<path>.pre-0.6/` byte for byte (it is the user's 0.5.x data, never
 /// encrypted), and no other file next to the database holds its values in
 /// plaintext.
+#[cfg(feature = "triple-store")]
 #[test]
 fn a_05x_wal_directory_opened_with_a_key_is_migrated_into_an_encrypted_file() {
     let dir = tempfile::tempdir().unwrap();

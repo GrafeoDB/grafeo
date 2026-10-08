@@ -207,8 +207,8 @@ for (const filePath of gtestFiles) {
             if (tc.skip) return ctx.skip()
             const db = new Database()
             if (!isAvailable(db, lang)) return ctx.skip()
-            // Check per-test requires
-            for (const req of (tc.requires || [])) {
+            // Check the file's and the test's requires, as single tests do
+            for (const req of [...(meta.requires || []), ...(tc.requires || [])]) {
               if (!isAvailable(db, req)) return ctx.skip()
             }
             const effectiveDataset = tc.dataset || meta.dataset

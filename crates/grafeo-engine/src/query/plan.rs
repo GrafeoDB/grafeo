@@ -1039,14 +1039,16 @@ impl LogicalOperator {
     }
 }
 
-/// The text of an EXPLAIN plan, and the expands the planner runs as a
-/// reachability search, which it marks.
+/// The text of an EXPLAIN plan, the expands the planner runs as a
+/// reachability search, and the clauses it reads after a write, which it
+/// marks.
 struct ExplainText<'a> {
     text: String,
     reachability: Vec<(
         &'a ExpandOp,
         crate::query::planner::lpg::reachability::ReachabilityMode,
     )>,
+    after_write: Vec<&'a LogicalOperator>,
 }
 
 impl fmt::Write for ExplainText<'_> {
@@ -1062,6 +1064,7 @@ impl LogicalOperator {
         let mut output = ExplainText {
             text: String::new(),
             reachability: crate::query::planner::lpg::reachability::reachability_expands(self),
+            after_write: crate::query::planner::lpg::after_write::clauses_after_a_write(self),
         };
         self.fmt_tree(&mut output, 0);
         output.text
@@ -1071,6 +1074,12 @@ impl LogicalOperator {
         use std::fmt::Write;
 
         let indent = "  ".repeat(depth);
+        // A clause the planner reads after a write in the statement.
+        let after = if out.after_write.iter().any(|op| std::ptr::eq(*op, self)) {
+            format!(" {}", crate::query::planner::lpg::after_write::MARKER)
+        } else {
+            String::new()
+        };
         match self {
             Self::NodeScan(op) => {
                 let label = op.label.as_deref().unwrap_or("*");
@@ -1132,7 +1141,7 @@ impl LogicalOperator {
                 };
                 let _ = writeln!(
                     out,
-                    "{indent}Filter ({expr}){hint}",
+                    "{indent}Filter ({expr}){hint}{after}",
                     expr = fmt_expr(&op.predicate)
                 );
                 op.input.fmt_tree(out, depth + 1);
@@ -1149,7 +1158,11 @@ impl LogicalOperator {
                         }
                     })
                     .collect();
-                let _ = writeln!(out, "{indent}Project ({cols})", cols = cols.join(", "));
+                let _ = writeln!(
+                    out,
+                    "{indent}Project ({cols}){after}",
+                    cols = cols.join(", ")
+                );
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Join(op) => {
@@ -1172,14 +1185,14 @@ impl LogicalOperator {
                     .collect();
                 let _ = writeln!(
                     out,
-                    "{indent}Aggregate (group: [{groups}], aggs: [{aggs}])",
+                    "{indent}Aggregate (group: [{groups}], aggs: [{aggs}]){after}",
                     groups = groups.join(", "),
                     aggs = aggs.join(", "),
                 );
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Limit(op) => {
-                let _ = writeln!(out, "{indent}Limit ({})", op.count);
+                let _ = writeln!(out, "{indent}Limit ({}){after}", op.count);
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Skip(op) => {
@@ -1198,7 +1211,7 @@ impl LogicalOperator {
                         format!("{} {dir}", fmt_expr(&k.expression))
                     })
                     .collect();
-                let _ = writeln!(out, "{indent}Sort ({keys})", keys = keys.join(", "));
+                let _ = writeln!(out, "{indent}Sort ({keys}){after}", keys = keys.join(", "));
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Distinct(op) => {
@@ -1220,7 +1233,7 @@ impl LogicalOperator {
                 let distinct = if op.distinct { " DISTINCT" } else { "" };
                 let _ = writeln!(
                     out,
-                    "{indent}Return{distinct} ({items})",
+                    "{indent}Return{distinct} ({items}){after}",
                     items = items.join(", ")
                 );
                 op.input.fmt_tree(out, depth + 1);
@@ -1257,7 +1270,7 @@ impl LogicalOperator {
                 op.right.fmt_tree(out, depth + 1);
             }
             Self::Unwind(op) => {
-                let _ = writeln!(out, "{indent}Unwind ({var})", var = op.variable);
+                let _ = writeln!(out, "{indent}Unwind ({var}){after}", var = op.variable);
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Bind(op) => {
@@ -1306,11 +1319,15 @@ impl LogicalOperator {
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Merge(op) => {
-                let _ = writeln!(out, "{indent}Merge ({var})", var = op.variable);
+                let _ = writeln!(out, "{indent}Merge ({var}){after}", var = op.variable);
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::MergeRelationship(op) => {
-                let _ = writeln!(out, "{indent}MergeRelationship ({var})", var = op.variable);
+                let _ = writeln!(
+                    out,
+                    "{indent}MergeRelationship ({var}){after}",
+                    var = op.variable
+                );
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::CreateNode(op) => {
@@ -2121,7 +2138,8 @@ pub struct ApplyOp {
     /// When true, the subplan runs only for its writes: each outer row comes
     /// out once, as it came in, however many rows the subplan produces for it
     /// (none included), and none of the subplan's columns are added. This is
-    /// how a Cypher `FOREACH` runs its updates.
+    /// how a Cypher `FOREACH` runs its updates, and a `CALL` subquery without
+    /// a final `RETURN` (a unit subquery; GQL: without a result) its body.
     pub unit: bool,
 }
 

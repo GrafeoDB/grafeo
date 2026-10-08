@@ -10,10 +10,11 @@ use std::collections::{HashMap, HashSet};
 
 use super::common::{
     build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
-    combine_with_and, comma_part_join_variables, expand_subquery_return_star,
-    flatten_and_conjuncts, has_all_labels, is_aggregate_function, is_binary_set_function,
-    join_and_conjuncts, optional_join, references_any, to_aggregate_function, wrap_distinct,
-    wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    combine_with_and, comma_part_join_variables, comma_part_reads_earlier_rows,
+    expand_subquery_return_star, flatten_and_conjuncts, has_all_labels, is_aggregate_function,
+    is_binary_set_function, join_and_conjuncts, optional_join, references_any,
+    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
+    wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
@@ -207,6 +208,14 @@ fn keys_before_return(keys: &[SortKey], ret: &ReturnOp) -> Option<Vec<SortKey>> 
             })
         })
         .collect()
+}
+
+/// Whether a query ends with a result: a `RETURN` with items or `RETURN *`.
+/// A `CALL` body without one (no `RETURN`, or `FINISH`) runs for its writes
+/// and passes each row on once, as it came in.
+fn returns_rows(query: &ast::QueryStatement) -> bool {
+    let result = &query.return_clause;
+    !result.is_finish && (result.is_wildcard || !result.items.is_empty())
 }
 
 /// Combines two queries with a set operator, or with `NEXT` (the right one
@@ -1257,17 +1266,12 @@ impl GqlTranslator {
 
         for (index, aliased_pattern) in match_clause.patterns.iter().enumerate() {
             let current_vars = &pattern_vars[index];
-            let shared = comma_part_join_variables(
+            let mut shared = comma_part_join_variables(
                 current_vars,
                 Self::pattern_start(&aliased_pattern.pattern),
                 &bound_vars,
                 &input_vars,
             );
-
-            // Determine the input for this pattern: if shared variables exist,
-            // translate independently and join; otherwise go on from the rows
-            // before (a cross product, or an expand from the bound start).
-            let pattern_input = if shared.is_empty() { plan.take() } else { None };
 
             // Check per-pattern search prefix (e.g., p = ANY SHORTEST (...))
             let per_pattern_shortest = matches!(
@@ -1280,36 +1284,59 @@ impl GqlTranslator {
                 )
             );
 
-            let pattern_plan = if let Some(path_function) = &aliased_pattern.path_function {
-                self.translate_shortest_path(
-                    &aliased_pattern.pattern,
-                    aliased_pattern.alias.as_deref(),
-                    *path_function,
-                    pattern_input,
-                )?
-            } else if use_shortest || per_pattern_shortest {
-                let prefix = aliased_pattern
-                    .search_prefix
-                    .as_ref()
-                    .or(match_clause.search_prefix.as_ref());
-                let pf = match prefix {
-                    Some(ast::PathSearchPrefix::AllShortest) => ast::PathFunction::AllShortestPaths,
-                    _ => ast::PathFunction::ShortestPath,
-                };
-                self.translate_shortest_path(
-                    &aliased_pattern.pattern,
-                    aliased_pattern.alias.as_deref(),
-                    pf,
-                    pattern_input,
-                )?
-            } else {
-                self.translate_pattern_with_alias(
-                    &aliased_pattern.pattern,
-                    pattern_input,
-                    aliased_pattern.alias.as_deref(),
-                    path_mode,
-                )?
+            // The part, going on from `pattern_input` when there is one.
+            let translate_part = |pattern_input: Option<LogicalOperator>| {
+                if let Some(path_function) = &aliased_pattern.path_function {
+                    self.translate_shortest_path(
+                        &aliased_pattern.pattern,
+                        aliased_pattern.alias.as_deref(),
+                        *path_function,
+                        pattern_input,
+                    )
+                } else if use_shortest || per_pattern_shortest {
+                    let prefix = aliased_pattern
+                        .search_prefix
+                        .as_ref()
+                        .or(match_clause.search_prefix.as_ref());
+                    let pf = match prefix {
+                        Some(ast::PathSearchPrefix::AllShortest) => {
+                            ast::PathFunction::AllShortestPaths
+                        }
+                        _ => ast::PathFunction::ShortestPath,
+                    };
+                    self.translate_shortest_path(
+                        &aliased_pattern.pattern,
+                        aliased_pattern.alias.as_deref(),
+                        pf,
+                        pattern_input,
+                    )
+                } else {
+                    self.translate_pattern_with_alias(
+                        &aliased_pattern.pattern,
+                        pattern_input,
+                        aliased_pattern.alias.as_deref(),
+                        path_mode,
+                    )
+                }
             };
+
+            // Determine the input for this pattern: if shared variables exist,
+            // translate independently and join; otherwise go on from the rows
+            // before (a cross product, or an expand from the bound start). A
+            // part that reads a value of those rows goes on from them too.
+            let pattern_input = if shared.is_empty() { plan.take() } else { None };
+            let mut pattern_plan = translate_part(pattern_input)?;
+            if !shared.is_empty()
+                && comma_part_reads_earlier_rows(
+                    &pattern_plan,
+                    current_vars,
+                    &bound_vars,
+                    &input_vars,
+                )
+            {
+                shared.clear();
+                pattern_plan = translate_part(plan.take())?;
+            }
 
             if !shared.is_empty() {
                 // Join on shared variables
@@ -1577,12 +1604,15 @@ impl GqlTranslator {
         });
         self.call_scope.replace(enclosing);
         let inner_plan = inner?;
+        // A body that ends without a result (no RETURN, or FINISH) runs for
+        // its writes and passes each row on once, as it came in.
+        let last = combined.last().map_or(subquery, |(_, part)| part);
         Ok(LogicalOperator::Apply(ApplyOp {
             input: Box::new(outer),
             subplan: Box::new(inner_plan),
             shared_variables,
             optional,
-            unit: false,
+            unit: !returns_rows(last),
         }))
     }
 

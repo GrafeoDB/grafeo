@@ -291,14 +291,14 @@ impl GraphWriter {
         Ok(())
     }
 
-    /// Checks that this writer's transaction sees both endpoints of an edge
-    /// it is about to create, and claims them, so a transaction that deletes
-    /// one of them conflicts with this one (see
+    /// Claims the endpoints of an edge this writer's transaction is about to
+    /// create, so a transaction that deletes one of them conflicts with this
+    /// one (see
     /// [`WriteTracker::record_edge_endpoints`](super::WriteTracker::record_edge_endpoints)):
-    /// no committed edge ends at a deleted node.
+    /// no committed edge ends at a deleted node. Called once the edge passed
+    /// its checks, right before it is written: an edge refused claims
+    /// nothing, so it holds off no delete.
     fn claim_endpoints(&self, src: NodeId, dst: NodeId) -> Result<(), OperatorError> {
-        self.require_node(src)?;
-        self.require_node(dst)?;
         if let (Some(tracker), Some(transaction_id)) = (&self.write_tracker, self.transaction_id) {
             tracker.record_edge_endpoints(transaction_id, src, dst)?;
         }
@@ -334,12 +334,10 @@ impl GraphWriter {
     pub fn create_node(
         &self,
         labels: &[String],
-        mut properties: Vec<(String, Value)>,
+        properties: Vec<(String, Value)>,
     ) -> Result<NodeId, OperatorError> {
-        refuse_too_deep(plain_values(&properties))?;
+        let properties = self.new_node_properties(labels, properties)?;
         if let Some(validator) = &self.validator {
-            validator.validate_node_labels_allowed(labels)?;
-            validator.inject_defaults(labels, &mut properties);
             self.check_node_values(validator.as_ref(), labels, &properties, None)?;
             validator.validate_node_complete(labels, &properties)?;
             validator.check_unique_node(labels, &properties, None)?;
@@ -362,13 +360,11 @@ impl GraphWriter {
     pub fn create_node_with(
         &self,
         labels: &[String],
-        mut properties: Vec<(String, Value)>,
+        properties: Vec<(String, Value)>,
         derive: impl FnOnce(NodeId) -> Result<Vec<(String, Value)>, OperatorError>,
     ) -> Result<NodeId, OperatorError> {
-        refuse_too_deep(plain_values(&properties))?;
+        let properties = self.new_node_properties(labels, properties)?;
         if let Some(validator) = &self.validator {
-            validator.validate_node_labels_allowed(labels)?;
-            validator.inject_defaults(labels, &mut properties);
             self.check_node_values(validator.as_ref(), labels, &properties, None)?;
         }
         let id = {
@@ -589,16 +585,17 @@ impl GraphWriter {
     // === Edges ===
 
     /// Creates an edge after checking that the transaction sees both
-    /// endpoints, which it claims against a concurrent delete, and checking
-    /// the edge against the schema: allowed type, endpoint labels, property
-    /// types and required properties.
+    /// endpoints and checking the edge against the schema: allowed type,
+    /// endpoint labels, property types and required properties. Then it
+    /// claims the endpoints against a concurrent delete, so an edge refused
+    /// claims nothing.
     ///
     /// # Errors
     ///
     /// Returns an error for an endpoint the transaction does not see (one it
-    /// deleted, or that does not exist), a write conflict with a transaction
-    /// that deletes an endpoint, or the first constraint the edge would
-    /// violate; nothing is written then.
+    /// deleted, or that does not exist), the first constraint the edge would
+    /// violate, or a write conflict with a transaction that deletes an
+    /// endpoint; nothing is written then.
     pub fn create_edge(
         &self,
         src: NodeId,
@@ -607,7 +604,8 @@ impl GraphWriter {
         properties: Vec<(String, Value)>,
     ) -> Result<EdgeId, OperatorError> {
         refuse_too_deep(plain_values(&properties))?;
-        self.claim_endpoints(src, dst)?;
+        self.require_node(src)?;
+        self.require_node(dst)?;
         if let Some(validator) = &self.validator {
             self.check_new_edge(validator.as_ref(), src, dst, edge_type)?;
             for (name, value) in &properties {
@@ -615,6 +613,7 @@ impl GraphWriter {
             }
             validator.validate_edge_complete(edge_type, &properties)?;
         }
+        self.claim_endpoints(src, dst)?;
         let _writing = self.write_in_progress();
         let id = self.insert_edge(src, dst, edge_type)?;
         self.write_values(Entity::Edge(id), &properties)?;
@@ -639,13 +638,15 @@ impl GraphWriter {
         derive: impl FnOnce(EdgeId) -> Result<Vec<(String, Value)>, OperatorError>,
     ) -> Result<EdgeId, OperatorError> {
         refuse_too_deep(plain_values(&properties))?;
-        self.claim_endpoints(src, dst)?;
+        self.require_node(src)?;
+        self.require_node(dst)?;
         if let Some(validator) = &self.validator {
             self.check_new_edge(validator.as_ref(), src, dst, edge_type)?;
             for (name, value) in &properties {
                 validator.validate_edge_property(edge_type, name, value)?;
             }
         }
+        self.claim_endpoints(src, dst)?;
         let id = {
             let _writing = self.write_in_progress();
             let id = self.insert_edge(src, dst, edge_type)?;
@@ -742,6 +743,23 @@ impl GraphWriter {
     }
 
     // === Checks ===
+
+    /// The properties a new node with `labels` gets: `properties` with the
+    /// validator's type defaults added, once the labels are allowed. No
+    /// value may nest too deep, a default included: a custom validator's
+    /// default is written like any other value.
+    fn new_node_properties(
+        &self,
+        labels: &[String],
+        mut properties: Vec<(String, Value)>,
+    ) -> Result<Vec<(String, Value)>, OperatorError> {
+        if let Some(validator) = &self.validator {
+            validator.validate_node_labels_allowed(labels)?;
+            validator.inject_defaults(labels, &mut properties);
+        }
+        refuse_too_deep(plain_values(&properties))?;
+        Ok(properties)
+    }
 
     /// Checks property values for a node with `labels`: types, NOT NULL and
     /// single-property UNIQUE. `own` is the node when it exists already: a
@@ -1175,6 +1193,91 @@ mod tests {
         );
     }
 
+    /// A validator that accepts every value, gives every node a `trips`
+    /// default nested deeper than a database can store, as a custom
+    /// [`ConstraintValidator`](super::ConstraintValidator) may, and refuses
+    /// edges of type `HATES` and edge properties named `grudge`.
+    struct CustomRules;
+
+    impl super::ConstraintValidator for CustomRules {
+        fn validate_node_property(
+            &self,
+            _: &[String],
+            _: &str,
+            _: &Value,
+        ) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
+        fn validate_node_complete(
+            &self,
+            _: &[String],
+            _: &[(String, Value)],
+        ) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
+        fn check_unique_node_property(
+            &self,
+            _: &[String],
+            _: &str,
+            _: &Value,
+        ) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
+        fn validate_edge_property(
+            &self,
+            _: &str,
+            key: &str,
+            _: &Value,
+        ) -> Result<(), OperatorError> {
+            if key == "grudge" {
+                return Err(OperatorError::ConstraintViolation("no grudges".to_string()));
+            }
+            Ok(())
+        }
+
+        fn validate_edge_complete(
+            &self,
+            _: &str,
+            _: &[(String, Value)],
+        ) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
+        fn validate_edge_type_allowed(&self, edge_type: &str) -> Result<(), OperatorError> {
+            if edge_type == "HATES" {
+                return Err(OperatorError::ConstraintViolation("no hate".to_string()));
+            }
+            Ok(())
+        }
+
+        fn inject_defaults(&self, _: &[String], properties: &mut Vec<(String, Value)>) {
+            properties.push(("trips".to_string(), nested(MAX_PROPERTY_VALUE_DEPTH + 1)));
+        }
+    }
+
+    /// A default the validator adds is checked as a value the caller gives
+    /// is: one nested too deep is refused before the node is written.
+    #[test]
+    fn a_default_nested_deeper_than_a_file_holds_is_refused_before_any_write() {
+        let (store, writer) = writer();
+        let writer = writer.with_validator(Arc::new(CustomRules));
+        let refused_trips = |result: &Result<NodeId, OperatorError>| {
+            matches!(result, Err(OperatorError::ConstraintViolation(message))
+                if message.contains("\"trips\""))
+        };
+
+        let created = writer.create_node(&labels(&["Person"]), pairs("name", &Value::from("Alix")));
+        assert!(refused_trips(&created), "create_node: {created:?}");
+        let merged = writer.create_node_with(&labels(&["Person"]), Vec::new(), |_| {
+            Ok(pairs("name", &Value::from("Gus")))
+        });
+        assert!(refused_trips(&merged), "create_node_with: {merged:?}");
+        assert_eq!(store.node_count(), 0, "no node with the default is written");
+    }
+
     // === Writes in progress ===
 
     /// How long a write that should wait gets to finish anyway.
@@ -1536,6 +1639,52 @@ mod tests {
                 format!("delete node {vincent}"),
                 format!("write edge {}", knows.as_u64()),
             ]
+        );
+    }
+
+    /// An edge the validator refuses claims no endpoint: a transaction that
+    /// deletes one of them later does not conflict with it.
+    #[test]
+    fn an_edge_the_validator_refuses_claims_no_endpoint() {
+        let (store, claims, writer, people) = claiming_writer();
+        let writer = writer.with_validator(Arc::new(CustomRules));
+        let edges = store.edge_count();
+        let grudge = || pairs("grudge", &Value::from("Paris"));
+
+        let refused = [
+            writer.create_edge(people.alix, people.vincent, "HATES", Vec::new()),
+            writer.create_edge(people.alix, people.vincent, "KNOWS", grudge()),
+            writer.create_edge_with(people.alix, people.vincent, "HATES", Vec::new(), |_| {
+                Ok(Vec::new())
+            }),
+            writer.create_edge_with(people.alix, people.vincent, "KNOWS", grudge(), |_| {
+                Ok(Vec::new())
+            }),
+        ];
+        for (index, result) in refused.iter().enumerate() {
+            assert!(
+                matches!(result, Err(OperatorError::ConstraintViolation(_))),
+                "edge {index}: {result:?}"
+            );
+        }
+        assert_eq!(store.edge_count(), edges, "no edge written");
+        assert!(
+            claims.recorded.lock().is_empty(),
+            "a refused edge claims nothing: {:?}",
+            claims.recorded.lock()
+        );
+
+        let knows = writer
+            .create_edge(people.alix, people.vincent, "KNOWS", Vec::new())
+            .unwrap();
+        let (alix, vincent) = (people.alix.as_u64(), people.vincent.as_u64());
+        assert_eq!(
+            *claims.recorded.lock(),
+            [
+                format!("endpoints {alix} {vincent}"),
+                format!("write edge {}", knows.as_u64()),
+            ],
+            "an edge the validator accepts claims its endpoints"
         );
     }
 

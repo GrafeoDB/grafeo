@@ -307,7 +307,14 @@ impl super::Planner {
             );
             (project_op, vec!["__list__".to_string()])
         } else {
-            self.plan_operator(&unwind.input)?
+            let (op, columns) = self.plan_operator(&unwind.input)?;
+            // A list that reads the graph after a write (`SET n.list = ...
+            // UNWIND n.list AS x`) reads what the whole write left.
+            if super::after_write::unwind_reads(unwind) {
+                (read_first_after_a_write(op, &unwind.input), columns)
+            } else {
+                (op, columns)
+            }
         };
 
         // The list is a column of the input (the one row of a constant list, or
@@ -1391,14 +1398,21 @@ fn single_row_input() -> Box<dyn Operator> {
     Box::new(grafeo_core::execution::operators::single_row::SingleRowOperator::new())
 }
 
-/// The planned input `op` of a MERGE, read whole before the first row comes
-/// out when its plan `input` writes: a MERGE after a write (`UNWIND ... CREATE
-/// (:P {k: i}) WITH i MERGE (:P {k: 301 - i})`) then finds what every row of
-/// the earlier clauses wrote, not only what the rows before its own did, as
-/// a MATCH there does (see `plan_node_scan`). The MERGE itself still runs row
-/// by row, so a row sees what the MERGE created for the rows before it.
-fn read_first_after_a_write(op: Box<dyn Operator>, input: &LogicalOperator) -> Box<dyn Operator> {
-    if input.has_mutations() {
+/// The planned input `op` of a clause that reads after a write (see
+/// [`after_write`](super::after_write)), read whole before the first row
+/// comes out while its plan `input` still writes as its rows come out: a
+/// MERGE after a write (`UNWIND ... CREATE (:P {k: i}) WITH i MERGE (:P {k:
+/// 301 - i})`) then finds what every row of the earlier clauses wrote, not
+/// only what the rows before its own did, as a MATCH there does (see
+/// `plan_node_scan`), and a RETURN after a SET reads what the whole SET left.
+/// An input read whole already (by a MATCH after the write) is not read again.
+/// The MERGE itself still runs row by row, so a row sees what the MERGE
+/// created for the rows before it.
+pub(super) fn read_first_after_a_write(
+    op: Box<dyn Operator>,
+    input: &LogicalOperator,
+) -> Box<dyn Operator> {
+    if super::after_write::writes_pending(input) {
         Box::new(EagerOperator::new(op))
     } else {
         op

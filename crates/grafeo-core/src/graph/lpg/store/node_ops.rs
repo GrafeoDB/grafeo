@@ -163,20 +163,9 @@ impl LpgStore {
     /// correct historical property values instead of current ones.
     #[cfg(feature = "temporal")]
     fn build_node_at(&self, id: NodeId, epoch: EpochId) -> Node {
-        let mut node = Node::new(id);
-
-        let registry = self.label_registry.read();
-        let node_labels = self.node_labels.read();
-        if let Some(log) = node_labels.get(&id)
-            && let Some(label_ids) = log.at(epoch)
-        {
-            for &label_id in label_ids {
-                if let Some(label) = registry.get_name(label_id) {
-                    node.labels.push(label.clone());
-                }
-            }
-        }
-
+        // The labels as every read at `epoch` resolves them (a checkpoint's
+        // too), so a historical read and a chunked section cannot disagree.
+        let mut node = self.node_with_labels_at(id, epoch);
         node.properties = self
             .node_properties
             .get_all_at(id, epoch)
@@ -1300,12 +1289,20 @@ impl LpgStore {
     /// excludes deleted nodes. Results are sorted by NodeId for deterministic
     /// iteration order.
     #[must_use]
-    #[cfg(not(feature = "tiered-storage"))]
     pub fn node_ids(&self) -> Vec<NodeId> {
+        self.with_node_ids_held(|ids| ids)
+    }
+
+    /// Calls `f` with [`node_ids`](Self::node_ids) while the node lock is
+    /// held for a read, so no node is created, adopted or deleted until `f`
+    /// returns. `f` may take only the locks that come after the node lock
+    /// in the store's lock order.
+    pub(super) fn with_node_ids_held<R>(&self, f: impl FnOnce(Vec<NodeId>) -> R) -> R {
         let epoch = self.current_epoch();
-        let mut ids: Vec<NodeId> = self
-            .nodes
-            .read()
+        #[cfg(not(feature = "tiered-storage"))]
+        let nodes = self.nodes.read();
+        #[cfg(not(feature = "tiered-storage"))]
+        let mut ids: Vec<NodeId> = nodes
             .iter()
             .filter_map(|(id, chain)| {
                 chain
@@ -1313,18 +1310,10 @@ impl LpgStore {
                     .and_then(|r| if !r.is_deleted() { Some(*id) } else { None })
             })
             .collect();
-        ids.sort_unstable();
-        ids
-    }
-
-    /// Returns all node IDs in the store.
-    /// (Tiered storage version)
-    #[must_use]
-    #[cfg(feature = "tiered-storage")]
-    pub fn node_ids(&self) -> Vec<NodeId> {
-        let epoch = self.current_epoch();
-        let versions = self.node_versions.read();
-        let mut ids: Vec<NodeId> = versions
+        #[cfg(feature = "tiered-storage")]
+        let nodes = self.node_versions.read();
+        #[cfg(feature = "tiered-storage")]
+        let mut ids: Vec<NodeId> = nodes
             .iter()
             .filter_map(|(id, index)| {
                 index.visible_at(epoch).and_then(|vref| {
@@ -1334,7 +1323,9 @@ impl LpgStore {
             })
             .collect();
         ids.sort_unstable();
-        ids
+        let result = f(ids);
+        drop(nodes);
+        result
     }
 
     /// [`node_ids`](Self::node_ids) for the readers that must not lose a
@@ -1417,7 +1408,9 @@ impl LpgStore {
     /// until the copy is complete, so a reader (a checkpoint too) sees the
     /// whole copy or none of it, and of two adoptions of one id only the
     /// first inserts. Every lock the copy takes comes after the node lock
-    /// in the store's lock order.
+    /// in the store's lock order. The vector indexes, which held the base
+    /// node with the vector the copy holds, are synced after the node lock
+    /// is released, as their vector reads take it.
     ///
     /// Returns `false`, changing nothing, when the store holds `id` already
     /// (another write adopted it first).
@@ -1437,8 +1430,9 @@ impl LpgStore {
             id,
             VersionChain::with_initial(record, EpochId::INITIAL, TransactionId::SYSTEM),
         );
-        self.fill_adopted_node(id, labels, properties);
+        let keys = self.fill_adopted_node(id, labels, properties);
         drop(nodes);
+        self.sync_adopted_vectors(id, &keys);
         true
     }
 
@@ -1472,38 +1466,69 @@ impl LpgStore {
         let hot_ref =
             HotVersionRef::new(EpochId::INITIAL, arena_epoch, offset, TransactionId::SYSTEM);
         versions.insert(id, VersionIndex::with_initial(hot_ref));
-        self.fill_adopted_node(id, labels, properties);
+        let keys = self.fill_adopted_node(id, labels, properties);
         drop(versions);
+        self.sync_adopted_vectors(id, &keys);
         true
     }
 
     /// Gives a node being adopted its labels and values at the initial
-    /// epoch, with the indexes they belong in, and counts it live. The
-    /// caller holds the node lock, which comes before every lock this takes.
+    /// epoch, with the label, property and text indexes they belong in, and
+    /// counts it live; returns the keys of its values, whose vector indexes
+    /// [`sync_adopted_vectors`](Self::sync_adopted_vectors) brings in line.
+    /// The caller holds the node lock, which comes before every lock this
+    /// takes.
     fn fill_adopted_node(
         &self,
         id: NodeId,
         labels: &[&str],
         properties: impl IntoIterator<Item = (PropertyKey, Value)>,
-    ) {
+    ) -> Vec<PropertyKey> {
         #[cfg(not(feature = "temporal"))]
         self.register_node_labels(id, labels);
         #[cfg(feature = "temporal")]
         self.register_node_labels(id, labels, EpochId::INITIAL);
+        let mut keys = Vec::new();
         for (key, value) in properties {
             self.update_property_index_on_set(id, &key, &value);
             #[cfg(feature = "text-index")]
             self.update_text_index_on_set(id, key.as_str(), &value);
-            #[cfg(feature = "vector-index")]
-            let synced = key.clone();
+            keys.push(key.clone());
             #[cfg(not(feature = "temporal"))]
             self.node_properties.set(id, key, value);
             #[cfg(feature = "temporal")]
             self.node_properties.set(id, key, value, EpochId::INITIAL);
-            #[cfg(feature = "vector-index")]
-            self.sync_vector_indexes_for_property(id, synced.as_str());
         }
         self.live_node_count.fetch_add(1, Ordering::Relaxed);
+        keys
+    }
+
+    /// Brings the vector indexes in line with the values `keys` of node
+    /// `id`, just adopted. Called once the node lock is released: an index
+    /// reads vectors through `IndexVectors`, which takes that lock to tell a
+    /// copy from a node the store does not hold. The indexes held the base node with the vector the copy now
+    /// holds, so a search between the release and this sees no difference.
+    fn sync_adopted_vectors(&self, id: NodeId, keys: &[PropertyKey]) {
+        #[cfg(feature = "vector-index")]
+        for key in keys {
+            self.sync_vector_indexes_for_property(id, key.as_str());
+        }
+        #[cfg(not(feature = "vector-index"))]
+        let _ = (id, keys);
+    }
+
+    /// Whether the store holds a record of node `id`, deleted or not: its
+    /// own node, or a copy of a base node. Takes the node lock for a read.
+    #[cfg(feature = "vector-index")]
+    pub(crate) fn holds_node_record(&self, id: NodeId) -> bool {
+        #[cfg(not(feature = "tiered-storage"))]
+        {
+            self.nodes.read().contains_key(&id)
+        }
+        #[cfg(feature = "tiered-storage")]
+        {
+            self.node_versions.read().contains_key(&id)
+        }
     }
 }
 
@@ -1681,5 +1706,64 @@ mod adopt_tests {
         assert_eq!(store.nodes_by_label_count("Person"), 88);
         store.compute_statistics();
         assert_eq!(store.statistics().total_nodes, 88, "the live count");
+    }
+
+    /// An adoption holds the node lock while it adds the copy to the
+    /// property indexes, and building a property index scans the nodes: the
+    /// build takes the node lock first too, so the two never wait on each
+    /// other, and the new indexes hold every adopted node.
+    #[test]
+    fn adopting_while_property_indexes_are_built_never_deadlocks() {
+        const NODES: u64 = 3_000;
+        const INDEXES: usize = 88;
+        let store = Arc::new(LpgStore::new().unwrap());
+        // Nodes for the index builds to scan, so each holds its locks a while.
+        for _ in 0..NODES {
+            store.create_node_with_props(&["Person"], [("key0", Value::Int64(3))]);
+        }
+        let start = Arc::new(Barrier::new(2));
+        let (done, finished) = std::sync::mpsc::channel();
+        let adopter = {
+            let (store, start, done) = (Arc::clone(&store), Arc::clone(&start), done.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                for offset in 0..NODES {
+                    let values = (0..INDEXES)
+                        .map(|key| (PropertyKey::new(format!("key{key}")), Value::Int64(19)));
+                    assert!(store.adopt_node(NodeId::new(NODES + offset), &["Person"], values));
+                }
+                done.send("the adopter").unwrap();
+            })
+        };
+        let builder = {
+            let (store, start) = (Arc::clone(&store), Arc::clone(&start));
+            std::thread::spawn(move || {
+                start.wait();
+                for key in 0..INDEXES {
+                    store.create_property_index(&format!("key{key}"));
+                }
+                done.send("the index builder").unwrap();
+            })
+        };
+        let mut done_by: Vec<&str> = (0..2)
+            .map(|_| {
+                finished
+                    .recv_timeout(std::time::Duration::from_secs(88))
+                    .expect("an adoption and an index build deadlocked")
+            })
+            .collect();
+        done_by.sort_unstable();
+        assert_eq!(done_by, ["the adopter", "the index builder"]);
+        adopter.join().unwrap();
+        builder.join().unwrap();
+        for key in 0..INDEXES {
+            assert_eq!(
+                store
+                    .find_nodes_by_property(&format!("key{key}"), &Value::Int64(19))
+                    .len(),
+                usize::try_from(NODES).unwrap(),
+                "the index on key{key} holds every adopted node"
+            );
+        }
     }
 }

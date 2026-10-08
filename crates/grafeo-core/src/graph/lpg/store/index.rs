@@ -23,14 +23,21 @@ pub(crate) trait BaseVectors: Send + Sync {
 
 /// The vectors the vector indexes of a store read: the store's own, and,
 /// when the store is the overlay of a compacted base, the base's for a node
-/// the store holds no vector of the property for. An index of an overlay
-/// holds base and overlay nodes in one HNSW graph, so the upkeep links a new
-/// vector to its nearest neighbors among both, and a search measures both.
+/// the store does not hold. An index of an overlay holds base and overlay
+/// nodes in one HNSW graph, so the upkeep links a new vector to its nearest
+/// neighbors among both, and a search measures both.
 ///
-/// The overlay holds the vector of every base node it holds a copy of (a
-/// copy takes all of a node's values), and an index drops a node whose value
-/// is removed or is not a vector: so for a node an index holds, the base's
-/// vector is the node's own.
+/// A copy of a base node takes all of the node's values, so the store's
+/// values are the node's own from then on: a vector the copy removed, or
+/// replaced by a value that is not a vector, is gone, and the base's old one
+/// is never lent for it. The base lends only for the nodes the store holds
+/// no record of.
+///
+/// Lock order: the check that the store holds a node takes the store's node
+/// lock (level 1) for a read, inside whatever lock the index holds while it
+/// reads a vector. No caller holds the node lock while it calls into a vector
+/// index (`LpgStore::adopt_node` syncs the vector indexes after it releases
+/// it).
 #[cfg(feature = "vector-index")]
 pub(crate) struct IndexVectors<'a> {
     store: &'a LpgStore,
@@ -61,14 +68,15 @@ impl crate::index::vector::VectorAccessor for IndexVectors<'_> {
 
 #[cfg(feature = "vector-index")]
 impl IndexVectors<'_> {
-    /// Lends the base's vector of `id`, when the store is an overlay and
-    /// holds no vector of its own for it.
+    /// Lends the base's vector of `id`, when the store is an overlay that
+    /// holds no record of `id`: a copy of a base node, whatever its values,
+    /// never lends the base's.
     fn with_base_vector(&self, id: NodeId, f: &mut dyn FnMut(&[f32])) -> bool {
         #[cfg(feature = "compact-store")]
         {
-            self.base
-                .as_ref()
-                .is_some_and(|base| base.with_base_vector(id, &self.key, f))
+            self.base.as_ref().is_some_and(|base| {
+                !self.store.holds_node_record(id) && base.with_base_vector(id, &self.key, f)
+            })
         }
         #[cfg(not(feature = "compact-store"))]
         {
@@ -127,24 +135,32 @@ impl LpgStore {
     /// ```
     pub fn create_property_index(&self, property: &str) {
         let key = PropertyKey::new(property);
-
-        let mut indexes = self.property_indexes.write();
-        if indexes.contains_key(&key) {
+        if self.property_indexes.read().contains_key(&key) {
             return; // Already indexed
         }
 
-        // Create the index and populate it with existing data
-        let index: DashMap<HashableValue, FxHashSet<NodeId>> = DashMap::new();
-
-        // Scan all nodes to build the index
-        for node_id in self.node_ids() {
-            if let Some(value) = self.node_properties.get(node_id, &key) {
-                let hv = HashableValue::new(value);
-                index.entry(hv).or_default().insert(node_id);
+        // The node lock first, then the index lock, as the store's lock order
+        // has them: an adoption holds the node lock while it adds its copy to
+        // the property indexes, so a build holding the index lock while it
+        // waits for the node lock would wait on it forever. Under both, no
+        // node is created, adopted or deleted during the scan.
+        self.with_node_ids_held(|node_ids| {
+            let mut indexes = self.property_indexes.write();
+            if indexes.contains_key(&key) {
+                return; // Indexed since the check above
             }
-        }
 
-        indexes.insert(key, index);
+            // Create the index and populate it with existing data
+            let index: DashMap<HashableValue, FxHashSet<NodeId>> = DashMap::new();
+            for node_id in node_ids {
+                if let Some(value) = self.node_properties.get(node_id, &key) {
+                    let hv = HashableValue::new(value);
+                    index.entry(hv).or_default().insert(node_id);
+                }
+            }
+
+            indexes.insert(key, index);
+        });
     }
 
     /// Drops an index on a node property.
@@ -656,6 +672,77 @@ impl LpgStore {
         }
         for (_, index) in text_indexes.iter() {
             index.write().remove(id);
+        }
+    }
+}
+
+/// The searches of the text and vector indexes, which leave out the nodes
+/// that are gone.
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+impl LpgStore {
+    /// The first `k` hits of a search of one of this store's text or vector
+    /// indexes that are still in the graph, best first.
+    ///
+    /// The indexes of a compacted database's overlay hold the nodes of the
+    /// compacted base (see [`successor`](Self::successor)), and a delete of
+    /// one leaves its entries there until the next merge of the overlay
+    /// drops them: the hits of the base nodes whose delete is committed are
+    /// dropped (see [`retain_live_index_hits`](Self::retain_live_index_hits)).
+    ///
+    /// `search` returns the hits of the index, best first, for the number
+    /// of them it is given. It is called with `k`, and again with twice as
+    /// many while it returned as many as it was asked for and hits were
+    /// dropped, so the result has `k` hits whenever the index finds `k`
+    /// nodes that are still there. Every search of these indexes with a
+    /// number of hits goes through here: this store's, the layered store's
+    /// and the database's.
+    pub fn live_index_hits<S>(
+        &self,
+        k: usize,
+        mut search: impl FnMut(usize) -> Vec<(NodeId, S)>,
+    ) -> Vec<(NodeId, S)> {
+        let mut fetch = k;
+        loop {
+            let mut hits = search(fetch);
+            let found = hits.len();
+            self.retain_live_index_hits(&mut hits);
+            // At most `found` were dropped, so twice the hits replace them.
+            if hits.len() >= k || found < fetch {
+                hits.truncate(k);
+                return hits;
+            }
+            fetch = fetch.saturating_mul(2);
+        }
+    }
+
+    /// Drops from `hits`, of a search of one of this store's text or vector
+    /// indexes, the nodes that are gone: the base nodes of the compacted
+    /// base this store is the overlay of whose delete is committed. A delete
+    /// that is not committed yet hides nothing, as for every current read of
+    /// the layered store. A search with a threshold uses this as it is; a
+    /// search for the best `k` uses [`live_index_hits`](Self::live_index_hits).
+    pub fn retain_live_index_hits<S>(&self, hits: &mut Vec<(NodeId, S)>) {
+        #[cfg(feature = "compact-store")]
+        {
+            let tombstones = self.base_tombstones();
+            hits.retain(|(id, _)| !tombstones.node_deleted(*id));
+        }
+        #[cfg(not(feature = "compact-store"))]
+        let _ = hits;
+    }
+
+    /// Whether node `id`, which a text index of this store may hold, is gone
+    /// (see [`retain_live_index_hits`](Self::retain_live_index_hits)).
+    #[cfg(feature = "text-index")]
+    pub(crate) fn is_gone_from_indexes(&self, id: NodeId) -> bool {
+        #[cfg(feature = "compact-store")]
+        {
+            self.base_tombstones().node_deleted(id)
+        }
+        #[cfg(not(feature = "compact-store"))]
+        {
+            let _ = id;
+            false
         }
     }
 }

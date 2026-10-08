@@ -171,7 +171,9 @@ Run a subquery for each input row. The subquery sees the outer variables its imp
 a variable scope clause names (`CALL (p) { ... }`, `CALL (*) { ... }` for all of them, `CALL () { ... }` for
 none). An importing `WITH` only lists variables: a `WHERE`, `DISTINCT`, alias or expression in it, or an
 `ORDER BY`, `SKIP` or `LIMIT` right after it, is an error (a second `WITH` can do those). A subquery returns new
-names only, so rename an imported variable to return it (`RETURN p AS person`).
+names only, so rename an imported variable to return it (`RETURN p AS person`). A subquery without a final
+`RETURN` (a unit subquery) runs for its writes and passes each row on once, as it came in, as `FOREACH` does:
+nothing it binds is visible after it.
 
 ```cypher
 -- Per-person friend count via subquery

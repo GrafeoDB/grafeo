@@ -95,6 +95,7 @@
 //! at every hop: see [`crate::transaction`] for the epoch/visibility
 //! rules.
 
+pub(crate) mod after_write;
 mod aggregate;
 mod expand;
 mod expression;

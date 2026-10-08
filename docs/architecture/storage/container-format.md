@@ -599,18 +599,35 @@ that are not a cross product; and a record the catalog refuses, such as a
 binding to a graph type no record defines. A schema record also creates the
 schema's default graph.
 
+A payload decodes into memory in proportion to its bytes: at most 470 bytes
+per payload byte while it decodes, before the allocator's own overhead, so at
+most 940 MiB for a payload of 2 MiB. The densest is a node or edge type whose
+properties are typed 128 `LIST` levels deep: each such property takes 5
+payload bytes and 2,312 bytes of memory, a 16-byte box per level and three
+times its 88-byte entry while the list of properties grows. Any other list
+element, and a default value's list of nulls, takes at most 120 bytes per
+payload byte. A damaged length inside a payload allocates no more than that:
+a string's length counts against a decode limit of 16 MiB before the string
+is allocated (which no payload of 2 MiB reaches), a list allocates at most
+1 MiB ahead of its elements, and a default value's counts are checked against
+the bytes left.
+
 ### Memory
 
 A checkpoint writes one section at a time and holds, besides the database,
 about one chunk per column of a table's row group, or one piece of a stream,
-plus the 48-byte directory entries of the chunks written so far. An open reads
-one chunk at a time (the three chunks of one range for the columns that come
-together) and holds what it builds from them. These sections hold more, in
-proportion to their data:
+plus the 48-byte directory entries of the chunks written so far. An open chunk
+holds its rows as decoded values until it is cut, so a column of small values
+(such as node labels) fills at the 65,536-row cap rather than the 1 MiB byte
+cap: at the default caps a checkpoint of a large store holds about 14 MiB above
+the database, bounded by the caps, not by the database. An open reads one chunk
+at a time (the three chunks of one range for the columns that come together),
+holds what it builds from them, and reads the same 48-byte directory entries.
+These sections hold more, in proportion to their data:
 
 | Section | Writing | Reading |
 |---------|---------|---------|
-| `CATALOG` | A sorted copy of every entry, and the record being written | The record being read, and the named constraints, index definitions and index names until the last record |
+| `CATALOG` | A sorted copy of every entry, and the record being written | The record being read (at most 470 bytes per payload byte, see [Catalog Records](#catalog-records)), and the named constraints, index definitions and index names until the last record |
 | `LPG_STORE` | The sorted ids of the table being written (8 bytes per node or edge) and, without `temporal`, of each of its property columns (8 bytes per value) | |
 | `RDF_STORE` | A reference to every triple, sorted (8 bytes per triple) | |
 | `VECTOR_STORE` | A reference to every node of an in-memory topology, sorted by id (16 bytes per node) | |
@@ -714,7 +731,16 @@ the next read-write open. With the WAL enabled, that open seals the tail before 
 logs anything new; with `wal_enabled` off, it writes the replayed changes to the file
 and removes the WAL, the torn tail with it. A build without the `wal` feature cannot
 replay: it refuses to open a database whose sidecar WAL holds commits (a non-empty log
-file), read-only or not, and leaves the WAL as it is.
+file), read-only or not, and leaves the WAL as it is. Likewise a build refuses a file
+that holds data only a feature it lacks reads, which it would load without and its next
+checkpoint drop: without `compact-store` a compacted base (a `CompactStore` or
+`OverlayDeletions` section), without `triple-store` RDF triples (an `RdfStore` or
+`RdfRing` section, or RDF records in the sidecar WAL), without `vector-index` or
+`text-index` the definition of such an index in the catalog; a 0.5.x database (also a
+WAL directory or a container v1 snapshot) the same way. It refuses them read-only or
+not, and changes nothing: it looks at the sections of the image and at the catalog
+before it loads any other section, and at the records of a WAL as it replays them into
+memory.
 
 ---
 

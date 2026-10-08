@@ -387,7 +387,8 @@ impl Procedure for SearchVectorProcedure {
             ctx.store as &dyn grafeo_core::graph::GraphStore,
             property,
         ));
-        let results = index.search(&query, k, &accessor);
+        // The index may hold nodes that are gone: see `live_index_hits`.
+        let results = lpg.live_index_hits(k, |fetch| index.search(&query, fetch, &accessor));
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "distance".into()]);
         for (node_id, distance) in results {
@@ -517,7 +518,8 @@ impl Procedure for SearchMmrProcedure {
             ctx.store as &dyn grafeo_core::graph::GraphStore,
             property,
         ));
-        let initial = index.search(&query, fetch_k, &accessor);
+        // The index may hold nodes that are gone: see `live_index_hits`.
+        let initial = lpg.live_index_hits(fetch_k, |fetch| index.search(&query, fetch, &accessor));
         if initial.is_empty() {
             return Ok(AlgorithmResult::new(vec![
                 "node_id".into(),
@@ -641,7 +643,8 @@ impl Procedure for SearchTextProcedure {
             ))
         })?;
 
-        let results = index.read().search(query, k);
+        // The index may hold nodes that are gone: see `live_index_hits`.
+        let results = lpg.live_index_hits(k, |fetch| index.read().search(query, fetch));
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "score".into()]);
         for (node_id, score) in results {

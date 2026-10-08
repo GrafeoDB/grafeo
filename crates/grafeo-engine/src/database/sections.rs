@@ -211,37 +211,27 @@ impl CheckpointSources {
     /// The LPG data as committed, for a copy that reads the stores
     /// themselves instead of the sections (`export_snapshot`): the stores as
     /// they are when no open transaction has changed them, else a store of
-    /// its own loaded from the LPG section, which writes the committed state
+    /// its own holding their committed state, as the LPG section writes it
     /// (what open transactions deleted, the values and labels they changed
-    /// as committed, nothing they created), with the compacted base under it.
-    /// `None` for a database without the built-in LPG store.
+    /// as committed, nothing they created; see [`LpgStore::committed_copy`],
+    /// which copies it without the section's codec), with the compacted base
+    /// under it. `None` for a database without the built-in LPG store.
     ///
-    /// The committed copy costs as much memory as the store (more while the
-    /// section is decoded); it is only made while a transaction is open.
+    /// The committed copy costs as much memory as the committed data; it is
+    /// only made while a transaction is open.
     ///
     /// # Errors
     ///
-    /// Returns an error if the LPG section cannot be written or read back.
+    /// Returns an error if a node or edge record or a spilled value cannot
+    /// be read for the copy.
     #[cfg(feature = "lpg")]
     pub fn committed(&self, commits: &CommitsHeld<'_>) -> Result<Option<CommittedLpg>> {
-        use grafeo_common::storage::MemoryImage;
-        use grafeo_core::graph::lpg::LpgStoreSection;
-
         let Some(store) = &self.root_store() else {
             return Ok(None);
         };
         let open = self.has_open_changes(commits);
         let store = if open {
-            let section = LpgStoreSection::new(Arc::clone(store));
-            let image = MemoryImage::from_sections(&[&section as &dyn Section])?;
-            let copy = Arc::new(LpgStore::new()?);
-            let source = image.section_source(SectionType::LpgStore).ok_or_else(|| {
-                grafeo_common::utils::error::Error::Internal(
-                    "the committed copy of the LPG store has no LPG section".to_string(),
-                )
-            })?;
-            LpgStoreSection::new(Arc::clone(&copy)).read_from(&*source)?;
-            copy
+            Arc::new(store.committed_copy()?)
         } else {
             Arc::clone(store)
         };
@@ -301,33 +291,226 @@ pub(super) struct LoadedSections {
     unbuilt: Vec<GraphIndexes>,
 }
 
+/// Data a database can hold that a build reads only with a feature. A build
+/// without the feature would open the database without it, and its next
+/// checkpoint would write the file without it, losing it for good (also
+/// when it migrates a 0.5.x database). So every open of a database refuses
+/// such data, before it changes anything on disk: [`load_sections`] for the
+/// image of a file ([`FEATURE_DATA`] says where it holds what), the replay of
+/// a WAL for its records, and the load of a 0.5.x snapshot for the snapshot.
+#[cfg(feature = "lpg")]
+pub(super) struct FeatureData {
+    /// What the data is, as the error names it.
+    what: &'static str,
+    /// The feature a build needs to read it.
+    feature: &'static str,
+    /// Whether this build has the feature.
+    in_build: bool,
+    /// Where the image of a file holds it.
+    held_in: HeldIn,
+}
+
+/// Where the image of a database file holds the data of a [`FeatureData`].
+#[cfg(feature = "lpg")]
+enum HeldIn {
+    /// Sections of these types.
+    Sections(&'static [SectionType]),
+    /// Vector index definitions in the catalog. The default graph's indexes
+    /// are also in the `VectorStore` section, which only mirrors the data;
+    /// the definition is what a build without the feature drops.
+    VectorIndexDefinitions,
+    /// Text index definitions in the catalog (the default graph's indexes
+    /// also in the `TextIndex` section).
+    TextIndexDefinitions,
+}
+
+/// A compacted database (written after `compact()`, also by 0.5.x): its base
+/// and the deletes of base nodes and edges since. Without them the database
+/// is the overlay alone, without every node and edge only the base holds.
+#[cfg(feature = "lpg")]
+const COMPACTED: FeatureData = FeatureData {
+    what: "a compacted database",
+    feature: "compact-store",
+    in_build: cfg!(feature = "compact-store"),
+    held_in: HeldIn::Sections(&[SectionType::CompactStore, SectionType::OverlayDeletions]),
+};
+
+/// RDF triples, and the Ring index over them. A WAL holds them as records
+/// and a 0.5.x container v1 file in its snapshot.
+#[cfg(feature = "lpg")]
+pub(super) const RDF_TRIPLES: FeatureData = FeatureData {
+    what: "RDF triples",
+    feature: "triple-store",
+    in_build: cfg!(feature = "triple-store"),
+    held_in: HeldIn::Sections(&[SectionType::RdfStore, SectionType::RdfRing]),
+};
+
+/// Vector indexes: a build without the feature cannot build them, and its
+/// checkpoint writes the catalog without their definitions.
+#[cfg(feature = "lpg")]
+const VECTOR_INDEXES: FeatureData = FeatureData {
+    what: "vector indexes",
+    feature: "vector-index",
+    in_build: cfg!(feature = "vector-index"),
+    held_in: HeldIn::VectorIndexDefinitions,
+};
+
+/// Text indexes, as [`VECTOR_INDEXES`].
+#[cfg(feature = "lpg")]
+const TEXT_INDEXES: FeatureData = FeatureData {
+    what: "text indexes",
+    feature: "text-index",
+    in_build: cfg!(feature = "text-index"),
+    held_in: HeldIn::TextIndexDefinitions,
+};
+
+/// Every kind of data a build reads only with a feature.
+#[cfg(feature = "lpg")]
+const FEATURE_DATA: [&FeatureData; 4] = [&COMPACTED, &RDF_TRIPLES, &VECTOR_INDEXES, &TEXT_INDEXES];
+
+#[cfg(feature = "lpg")]
+impl FeatureData {
+    /// Where the image holds this data, or `None` when it holds none:
+    /// `sections RdfStore, RdfRing` (only which sections the image holds is
+    /// looked at), or `on :Document(embedding), ...` for the indexes of this
+    /// kind that `indexes`, the image's catalog, defines.
+    fn held(&self, image: &dyn ImageSource, indexes: &[GraphIndexes]) -> Option<String> {
+        let on = |graph: &Option<String>, label: &str, property: &str| match graph {
+            None => format!(":{label}({property})"),
+            Some(graph) => format!(":{label}({property}) in graph {graph}"),
+        };
+        let (kind, found): (&str, Vec<String>) = match self.held_in {
+            HeldIn::Sections(section_types) => (
+                "sections",
+                section_types
+                    .iter()
+                    .filter(|section_type| image.section_source(**section_type).is_some())
+                    .map(|section_type| format!("{section_type:?}"))
+                    .collect(),
+            ),
+            HeldIn::VectorIndexDefinitions => (
+                "on",
+                indexes
+                    .iter()
+                    .flat_map(|graph| {
+                        graph
+                            .vector
+                            .iter()
+                            .map(|def| on(&graph.graph, &def.label, &def.property))
+                    })
+                    .collect(),
+            ),
+            HeldIn::TextIndexDefinitions => (
+                "on",
+                indexes
+                    .iter()
+                    .flat_map(|graph| {
+                        graph
+                            .text
+                            .iter()
+                            .map(|(label, property)| on(&graph.graph, label, property))
+                    })
+                    .collect(),
+            ),
+        };
+        (!found.is_empty()).then(|| format!("{kind} {}", found.join(", ")))
+    }
+}
+
+/// The error that refuses `path` (a database file, or its WAL) for the data
+/// in `found` this build cannot read, each with where `path` holds it.
+#[cfg(feature = "lpg")]
+pub(super) fn refusal(
+    path: &std::path::Path,
+    found: &[(&FeatureData, String)],
+) -> grafeo_common::utils::error::Error {
+    let parts: Vec<String> = found
+        .iter()
+        .map(|(data, held)| {
+            format!(
+                "{} ({held}), data that only a build with the `{}` feature can read",
+                data.what, data.feature
+            )
+        })
+        .collect();
+    let (holds, open) = match parts.split_last() {
+        Some((last, before)) if !before.is_empty() => (
+            format!("{}; and {last}", before.join("; ")),
+            "open it with a build that has these features",
+        ),
+        _ => (parts.concat(), "open it with such a build"),
+    };
+    grafeo_common::utils::error::Error::InvalidValue(format!(
+        "{} holds {holds}: {open}",
+        path.display()
+    ))
+}
+
+/// Refuses the image of the database file at `path` when it holds data this
+/// build cannot read (see [`FeatureData`]): sections of a type it does not
+/// load, or definitions of indexes it cannot build among `indexes`, those
+/// the image's catalog defines.
+///
+/// # Errors
+///
+/// Returns an error naming the database, what it holds and where, and the
+/// features, in that case.
+#[cfg(feature = "lpg")]
+fn refuse_unreadable(
+    image: &dyn ImageSource,
+    indexes: &[GraphIndexes],
+    path: &std::path::Path,
+) -> Result<()> {
+    let found: Vec<(&FeatureData, String)> = FEATURE_DATA
+        .into_iter()
+        .filter(|data| !data.in_build)
+        .filter_map(|data| data.held(image, indexes).map(|held| (data, held)))
+        .collect();
+    if found.is_empty() {
+        Ok(())
+    } else {
+        Err(refusal(path, &found))
+    }
+}
+
 /// Loads the sections of `image` into the stores and the catalog, and puts
 /// the indexes back: property indexes from the data, the default graph's
 /// vector and text indexes from their own sections.
 ///
 /// The image is the active checkpoint of a `.grafeo` file (served by
-/// `GrafeoFileManager::read_image`), the sections of a 0.5.x file, or a copy
-/// in memory. `read_image` holds the file manager's file lock while it runs
-/// this, so nothing here, nor anything it calls, may break the rule in
-/// `read_image`'s doc: no file manager method that takes the file lock, and
-/// no lock a checkpoint holds while it waits for it (`checkpoint_guard`, the
-/// commit hold).
+/// `GrafeoFileManager::read_image`) or the sections of a 0.5.x file, and
+/// `file` names that database file; or it is a copy in memory, which this
+/// build wrote (`file` is `None`). `read_image` holds the file manager's
+/// file lock while it runs this, so nothing here, nor anything it calls, may
+/// break the rule in `read_image`'s doc: no file manager method that takes
+/// the file lock, and no lock a checkpoint holds while it waits for it
+/// (`checkpoint_guard`, the commit hold).
 ///
-/// Each section type is asked for once, so an image that serves each
-/// section once (`ServedOnce`, which frees a section once it is loaded)
-/// serves them all.
+/// Each section type is asked for once (a section this build cannot read
+/// only by the refusal), so an image that serves each section once
+/// (`ServedOnce`, which frees a section once it is loaded) serves them all.
 ///
 /// The indexes exist before WAL recovery, which keeps them current. What is
 /// left (see [`LoadedSections`]) is finished by `GrafeoDB::finish_load`.
 ///
+/// A build leaves out what it cannot read (a compacted base without the
+/// `compact-store` feature, the triples without `triple-store`, the vector
+/// and text index definitions without `vector-index` and `text-index`). So
+/// the image of a database file is refused when it holds any of that (see
+/// [`FeatureData`]), right after the catalog, which holds the index
+/// definitions, and before any other section is read: a refused open has
+/// changed nothing on disk.
+///
 /// # Errors
 ///
-/// Returns an error if a section cannot be read or decoded. A vector, text
-/// or ring index section that can be read but not decoded is no error: its
-/// indexes are built from the data, which they only mirror.
+/// Returns an error if a section cannot be read or decoded, or if the image
+/// of `file` holds data this build cannot read. A vector, text or ring
+/// index section that can be read but not decoded is no error: its indexes
+/// are built from the data, which they only mirror.
 #[cfg(feature = "lpg")]
 pub(super) fn load_sections(
     image: &dyn ImageSource,
+    file: Option<&std::path::Path>,
     store: &Arc<LpgStore>,
     catalog: &Arc<crate::catalog::Catalog>,
     #[cfg(feature = "triple-store")] rdf_store: &Arc<grafeo_core::graph::rdf::RdfStore>,
@@ -343,6 +526,9 @@ pub(super) fn load_sections(
         });
         section.read_from(&*source)?;
         indexes = section.take_loaded_indexes();
+    }
+    if let Some(path) = file {
+        refuse_unreadable(image, &indexes, path)?;
     }
 
     // With a compacted base, this is the overlay.
@@ -740,6 +926,7 @@ mod tests {
         let store = Arc::new(LpgStore::new().unwrap());
         let loaded = load_sections(
             &image,
+            None,
             &store,
             &Arc::new(crate::catalog::Catalog::new()),
             #[cfg(feature = "triple-store")]
@@ -789,6 +976,7 @@ mod tests {
         let catalog = Arc::new(crate::catalog::Catalog::new());
         load_sections(
             &MemoryImage::from_raw(raw).unwrap(),
+            None,
             &store,
             &catalog,
             #[cfg(feature = "triple-store")]
@@ -974,6 +1162,7 @@ mod tests {
     fn load(image: &dyn ImageSource, store: &Arc<LpgStore>) -> Result<LoadedSections> {
         load_sections(
             image,
+            None,
             store,
             &Arc::new(crate::catalog::Catalog::new()),
             #[cfg(feature = "triple-store")]
@@ -1003,6 +1192,7 @@ mod tests {
         let rdf_store = Arc::new(grafeo_core::graph::rdf::RdfStore::new());
         load_sections(
             &image,
+            None,
             &Arc::new(LpgStore::new().unwrap()),
             &Arc::new(crate::catalog::Catalog::new()),
             &rdf_store,
@@ -1092,6 +1282,7 @@ mod tests {
         let rdf_store = Arc::new(RdfStore::new());
         load_sections(
             &image,
+            None,
             &Arc::new(LpgStore::new().unwrap()),
             &Arc::new(crate::catalog::Catalog::new()),
             &rdf_store,
@@ -1144,6 +1335,7 @@ mod tests {
         let rdf_store = Arc::new(RdfStore::new());
         load_sections(
             &MemoryImage::from_raw(raw).unwrap(),
+            None,
             &Arc::new(LpgStore::new().unwrap()),
             &Arc::new(crate::catalog::Catalog::new()),
             &rdf_store,
@@ -1196,6 +1388,7 @@ mod tests {
         let rdf_store = Arc::new(RdfStore::new());
         load_sections(
             &image,
+            None,
             &Arc::new(LpgStore::new().unwrap()),
             &Arc::new(crate::catalog::Catalog::new()),
             &rdf_store,

@@ -1165,16 +1165,18 @@ impl Database {
         serde_wasm_bindgen::to_value(&info).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Converts the database to a read-only CompactStore for faster queries.
+    /// Converts the default graph to a columnar CompactStore for faster queries.
     ///
-    /// Takes a snapshot of all nodes and edges, builds a columnar store with
-    /// CSR adjacency, and switches to read-only mode. After this call, write
-    /// operations will fail. Gives ~60x memory reduction and 100x+ traversal
-    /// speedup for read-only workloads.
+    /// Builds a columnar store with CSR adjacency from all nodes and edges,
+    /// giving up to ~60x memory reduction and 100x+ traversal speedup. The
+    /// database stays writable: later writes go to an overlay on top of the
+    /// columnar base, which is merged into the base under memory pressure or
+    /// by calling `compact()` again. Named graphs and indexes stay.
     ///
     /// # Errors
     ///
-    /// Returns `JsError` if compaction fails (e.g., the database is already in compact mode).
+    /// Returns `JsError` while a transaction is open (commit or roll it back
+    /// first), or if the conversion fails.
     #[cfg(feature = "compact-store")]
     pub fn compact(&mut self) -> Result<(), JsError> {
         self.inner

@@ -978,11 +978,14 @@ impl JsGrafeoDB {
 #[cfg(feature = "compact-store")]
 #[napi]
 impl JsGrafeoDB {
-    /// Converts the database to a read-only CompactStore for faster queries.
+    /// Converts the default graph to a columnar CompactStore for faster queries.
     ///
-    /// Takes a snapshot of all nodes and edges, builds a columnar store with
-    /// CSR adjacency, and switches to read-only mode. After this call, write
-    /// operations will fail.
+    /// Builds a columnar store with CSR adjacency from all nodes and edges and
+    /// drops the original store to free memory. The database stays writable:
+    /// later writes go to an overlay on top of the columnar base, which is
+    /// merged into the base under memory pressure or by calling `compact()`
+    /// again. Named graphs and the property, text and vector indexes stay.
+    /// Throws while a transaction is open (commit or roll it back first).
     #[napi]
     pub fn compact(&self) -> Result<()> {
         let mut db = self.inner.write();

@@ -86,23 +86,28 @@ pub struct LayeredStore {
     /// [`read_consistent`](Self::read_consistent), which waits for it only
     /// while a merge publishes its result.
     merge_guard: RwLock<()>,
-    /// Keeps a copy of a base node or edge and a delete of it apart: held
-    /// by a copy (`ensure_in_overlay`, `ensure_edge_in_overlay`) from its
-    /// tombstone check to its dirty mark, and by a delete of a base entity
-    /// (`delete_node_from_layers`, `delete_edge_from_layers`,
-    /// `delete_node_edges`) from its dirty check to its tombstone. A copy
-    /// that comes second finds the tombstone and copies nothing; a delete
-    /// that comes second finds the copy and deletes it with the base entity.
-    /// Without it, a copy that checked for a tombstone before a delete wrote
-    /// one, and a delete that checked for a copy before the copy was made,
-    /// left a live copy of a deleted id.
+    /// Keeps the copies of a base node or edge, the writes to them and the
+    /// deletes of them apart. Held exclusively by a copy (`ensure_in_overlay`,
+    /// and `write_node` and `write_edge` when they copy) from its tombstone
+    /// check to its dirty mark, and through the write that made it copy; by
+    /// a delete of a base entity (`delete_node_from_layers`,
+    /// `delete_edge_from_layers`, `delete_node_edges`) from its dirty check
+    /// to its tombstone. Held shared by a write to a copy made already, from
+    /// its tombstone check through the write. A copy or a write that comes
+    /// second finds the tombstone and writes nothing; a delete that comes
+    /// second finds the copy and deletes it with the base entity and the
+    /// values written. Without it, a copy that checked for a tombstone before
+    /// a delete wrote one, and a delete that checked for a copy before the
+    /// copy was made, left a live copy of a deleted id, and a write that
+    /// followed another transaction's delete of the copy put a committed
+    /// value behind the delete's pending one.
     ///
     /// Lock order: after `merge_guard` (every mutation holds it shared, and
     /// a merge, which holds it exclusively, never takes this one). Reads
     /// never take it. A holder takes it once (a copy of an edge copies its
     /// endpoints before it), and takes the dirty sets and the overlay's
-    /// locks one at a time while it holds it.
-    copies: parking_lot::Mutex<()>,
+    /// locks while it holds it, never this store's other locks.
+    copies: parking_lot::RwLock<()>,
     /// Counts the publishes of merges and overlay resets: odd while one
     /// swaps the base and the overlay and clears the dirty and deleted sets,
     /// even otherwise. See [`read_consistent`](Self::read_consistent).
@@ -273,7 +278,7 @@ impl LayeredStore {
             dirty_node_ids: RwLock::new(dirty_nodes),
             dirty_edge_ids: RwLock::new(dirty_edges),
             merge_guard: RwLock::new(()),
-            copies: parking_lot::Mutex::new(()),
+            copies: parking_lot::RwLock::new(()),
             publish_generation: AtomicU64::new(0),
             #[cfg(test)]
             read_hook: parking_lot::Mutex::new(None),
@@ -293,7 +298,7 @@ impl LayeredStore {
             dirty_node_ids: RwLock::new(FxHashSet::default()),
             dirty_edge_ids: RwLock::new(FxHashSet::default()),
             merge_guard: RwLock::new(()),
-            copies: parking_lot::Mutex::new(()),
+            copies: parking_lot::RwLock::new(()),
             publish_generation: AtomicU64::new(0),
             #[cfg(test)]
             read_hook: parking_lot::Mutex::new(None),
@@ -1746,22 +1751,19 @@ impl GraphStoreSearch for LayeredStore {
     // Not under `read_consistent`: see `text_search`.
     #[cfg(feature = "text-index")]
     fn score_text(&self, node_id: NodeId, label: &str, property: &str, query: &str) -> Option<f64> {
-        let overlay = self.overlay_layer();
-        if overlay.base_tombstones().node_deleted(node_id) {
-            return None;
-        }
-        overlay.score_text(node_id, label, property, query)
+        self.overlay_layer()
+            .score_text(node_id, label, property, query)
     }
 
     // The search reads (this one, `text_search_with_threshold`, `score_text`,
     // `vector_search` and `vector_search_with_threshold`) are not under
-    // `read_consistent`: they read one overlay's index and drop the base
-    // nodes that overlay holds a committed tombstone for. A publish swaps the
-    // overlay and its tombstones together, so a search never pairs an
-    // overlay's index with the tombstones of another and never finds a
-    // deleted base node. A vector search without an index scans both layers
-    // through this store's reads, each of which leaves the deleted base nodes
-    // out.
+    // `read_consistent`: they search one overlay's index, which drops the
+    // base nodes that overlay holds a committed tombstone for (see
+    // `LpgStore::live_index_hits`). A publish swaps the overlay and its
+    // tombstones together, so a search never pairs an overlay's index with
+    // the tombstones of another and never finds a deleted base node. A
+    // vector search without an index scans both layers through this store's
+    // reads, each of which leaves the deleted base nodes out.
     #[cfg(feature = "text-index")]
     fn text_search(
         &self,
@@ -1770,13 +1772,7 @@ impl GraphStoreSearch for LayeredStore {
         query: &str,
         k: usize,
     ) -> Vec<(NodeId, f64)> {
-        let overlay = self.overlay_layer();
-        let deleted = overlay.base_tombstones().deleted_nodes().count();
-        let mut results = overlay.text_search(label, property, query, k + deleted);
-        let tombstones = overlay.base_tombstones();
-        results.retain(|&(id, _)| !tombstones.node_deleted(id));
-        results.truncate(k);
-        results
+        self.overlay_layer().text_search(label, property, query, k)
     }
 
     // Not under `read_consistent`: see `text_search`.
@@ -1788,11 +1784,8 @@ impl GraphStoreSearch for LayeredStore {
         query: &str,
         threshold: f64,
     ) -> Vec<(NodeId, f64)> {
-        let overlay = self.overlay_layer();
-        let mut results = overlay.text_search_with_threshold(label, property, query, threshold);
-        let tombstones = overlay.base_tombstones();
-        results.retain(|&(id, _)| !tombstones.node_deleted(id));
-        results
+        self.overlay_layer()
+            .text_search_with_threshold(label, property, query, threshold)
     }
 
     #[cfg(feature = "vector-index")]
@@ -1829,14 +1822,7 @@ impl GraphStoreSearch for LayeredStore {
         if !indexed {
             return crate::index::vector::scan_nearest(self, label, property, query, k, metric);
         }
-        // Filter nodes deleted from base so stale hits from the index do not
-        // leak through the layered view.
-        let deleted = overlay.base_tombstones().deleted_nodes().count();
-        let mut results = overlay.vector_search(label, property, query, k + deleted, metric);
-        let tombstones = overlay.base_tombstones();
-        results.retain(|&(id, _)| !tombstones.node_deleted(id));
-        results.truncate(k);
-        results
+        overlay.vector_search(label, property, query, k, metric)
     }
 
     // A threshold search scans both layers (an index has none), through this
@@ -1970,7 +1956,7 @@ impl GraphStoreMut for LayeredStore {
         // A write that copies one of the base edges at the same time comes
         // first, and its copy is deleted below, or finds the tombstone (see
         // `copies`).
-        let _copies = self.copies.lock();
+        let _copies = self.copies.write();
         let overlay = self.overlay.load();
         // The overlay's edges of the node: its own, and the copies of base
         // edges that writes made. The node need not be dirty: after a reopen
@@ -2004,9 +1990,7 @@ impl GraphStoreMut for LayeredStore {
 
     fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
         let _guard = self.merge_guard.read();
-        if self.ensure_in_overlay(id) {
-            self.overlay.load().set_node_property(id, key, value);
-        }
+        self.write_node(id, |overlay| overlay.set_node_property(id, key, value));
     }
 
     fn set_node_property_versioned(
@@ -2017,19 +2001,15 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> grafeo_common::utils::error::Result<()> {
         let _guard = self.merge_guard.read();
-        if !self.ensure_in_overlay(id) {
-            return Ok(());
-        }
-        self.overlay
-            .load()
-            .set_node_property_versioned(id, key, value, transaction_id)
+        self.write_node(id, |overlay| {
+            overlay.set_node_property_versioned(id, key, value, transaction_id)
+        })
+        .unwrap_or(Ok(()))
     }
 
     fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) {
         let _guard = self.merge_guard.read();
-        if self.ensure_edge_in_overlay(id) {
-            self.overlay.load().set_edge_property(id, key, value);
-        }
+        self.write_edge(id, |overlay| overlay.set_edge_property(id, key, value));
     }
 
     fn set_edge_property_versioned(
@@ -2040,11 +2020,9 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) {
         let _guard = self.merge_guard.read();
-        if self.ensure_edge_in_overlay(id) {
-            self.overlay
-                .load()
-                .set_edge_property_versioned(id, key, value, transaction_id);
-        }
+        self.write_edge(id, |overlay| {
+            overlay.set_edge_property_versioned(id, key, value, transaction_id);
+        });
     }
 
     fn remove_node_property(
@@ -2053,10 +2031,8 @@ impl GraphStoreMut for LayeredStore {
         key: &str,
     ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
-        if !self.ensure_in_overlay(id) {
-            return Ok(None);
-        }
-        self.overlay.load().remove_node_property(id, key)
+        self.write_node(id, |overlay| overlay.remove_node_property(id, key))
+            .unwrap_or(Ok(None))
     }
 
     fn remove_node_property_versioned(
@@ -2066,12 +2042,10 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
-        if !self.ensure_in_overlay(id) {
-            return Ok(None);
-        }
-        self.overlay
-            .load()
-            .remove_node_property_versioned(id, key, transaction_id)
+        self.write_node(id, |overlay| {
+            overlay.remove_node_property_versioned(id, key, transaction_id)
+        })
+        .unwrap_or(Ok(None))
     }
 
     fn remove_edge_property(
@@ -2080,10 +2054,8 @@ impl GraphStoreMut for LayeredStore {
         key: &str,
     ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
-        if !self.ensure_edge_in_overlay(id) {
-            return Ok(None);
-        }
-        self.overlay.load().remove_edge_property(id, key)
+        self.write_edge(id, |overlay| overlay.remove_edge_property(id, key))
+            .unwrap_or(Ok(None))
     }
 
     fn remove_edge_property_versioned(
@@ -2093,17 +2065,16 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> grafeo_common::utils::error::Result<Option<Value>> {
         let _guard = self.merge_guard.read();
-        if !self.ensure_edge_in_overlay(id) {
-            return Ok(None);
-        }
-        self.overlay
-            .load()
-            .remove_edge_property_versioned(id, key, transaction_id)
+        self.write_edge(id, |overlay| {
+            overlay.remove_edge_property_versioned(id, key, transaction_id)
+        })
+        .unwrap_or(Ok(None))
     }
 
     fn add_label(&self, node_id: NodeId, label: &str) -> bool {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(node_id) && self.overlay.load().add_label(node_id, label)
+        self.write_node(node_id, |overlay| overlay.add_label(node_id, label))
+            .unwrap_or(false)
     }
 
     fn add_label_versioned(
@@ -2113,16 +2084,16 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> bool {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(node_id)
-            && self
-                .overlay
-                .load()
-                .add_label_versioned(node_id, label, transaction_id)
+        self.write_node(node_id, |overlay| {
+            overlay.add_label_versioned(node_id, label, transaction_id)
+        })
+        .unwrap_or(false)
     }
 
     fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(node_id) && self.overlay.load().remove_label(node_id, label)
+        self.write_node(node_id, |overlay| overlay.remove_label(node_id, label))
+            .unwrap_or(false)
     }
 
     fn remove_label_versioned(
@@ -2132,11 +2103,10 @@ impl GraphStoreMut for LayeredStore {
         transaction_id: TransactionId,
     ) -> bool {
         let _guard = self.merge_guard.read();
-        self.ensure_in_overlay(node_id)
-            && self
-                .overlay
-                .load()
-                .remove_label_versioned(node_id, label, transaction_id)
+        self.write_node(node_id, |overlay| {
+            overlay.remove_label_versioned(node_id, label, transaction_id)
+        })
+        .unwrap_or(false)
     }
 }
 
@@ -2170,7 +2140,7 @@ impl LayeredStore {
         if self.base.load().get_node(id).is_none() {
             return delete_in_overlay(&overlay);
         }
-        let _copies = self.copies.lock();
+        let _copies = self.copies.write();
         if self.is_node_dirty(id) {
             delete_in_overlay(&overlay)?;
         }
@@ -2192,7 +2162,7 @@ impl LayeredStore {
         if self.base.load().get_edge(id).is_none() {
             return delete_in_overlay(&overlay);
         }
-        let _copies = self.copies.lock();
+        let _copies = self.copies.write();
         if self.is_edge_dirty(id) {
             delete_in_overlay(&overlay);
         }
@@ -2221,7 +2191,9 @@ impl LayeredStore {
     /// The tombstone check, the copy and its dirty mark hold `copies`, so a
     /// delete of the node at the same time either comes first, and its
     /// tombstone is found here, or comes after the dirty mark and deletes
-    /// the copy with the base node.
+    /// the copy with the base node. A write to the copy goes through
+    /// [`write_node`](Self::write_node), which holds `copies` through the
+    /// write too.
     fn ensure_in_overlay(&self, id: NodeId) -> bool {
         if self.is_node_dirty(id) {
             return true; // already in overlay
@@ -2229,11 +2201,18 @@ impl LayeredStore {
         let Some(base_node) = self.base.load().get_node(id) else {
             return true; // not in base either (new node case handled by caller)
         };
-        let _copies = self.copies.lock();
+        let _copies = self.copies.write();
+        self.copy_node_held(id, base_node, &self.overlay.load())
+    }
+
+    /// The copy of [`ensure_in_overlay`](Self::ensure_in_overlay), of base
+    /// node `id`, whose base version is `base_node`, into `overlay`: `true`
+    /// when the node is copied (or was copied meanwhile), `false` for a base
+    /// node with a tombstone. The caller holds `copies` exclusively.
+    fn copy_node_held(&self, id: NodeId, base_node: Node, overlay: &LpgStore) -> bool {
         if self.is_node_dirty(id) {
             return true; // copied meanwhile
         }
-        let overlay = self.overlay.load();
         if overlay.base_tombstones().has_node(id) {
             return false;
         }
@@ -2247,47 +2226,91 @@ impl LayeredStore {
         true
     }
 
-    /// Ensures an edge exists in the overlay, as
-    /// [`ensure_in_overlay`](Self::ensure_in_overlay) does a node (its
-    /// endpoints first, then the edge, adopted in one step at the initial
-    /// epoch without the id allocator, under `copies`); `false` for a base
-    /// edge with a tombstone, or with an endpoint that has one (the copy
-    /// would be a live edge of a deleted node).
-    fn ensure_edge_in_overlay(&self, id: EdgeId) -> bool {
-        if self.is_edge_dirty(id) {
-            return true;
+    /// Runs `write` on the overlay for node `id` and returns its result:
+    /// `None`, writing nothing, for a base node with a tombstone (deleted,
+    /// or being deleted by a transaction), as
+    /// [`ensure_in_overlay`](Self::ensure_in_overlay) copies none.
+    ///
+    /// A base node is copied first. The tombstone check, any copy and the
+    /// write hold `copies` (exclusively to copy the node, shared to write a
+    /// copy made already), and a delete of a base node holds it exclusively:
+    /// so a delete comes before the write, which finds its tombstone, or
+    /// after it, and deletes the copy with the values written. A write never
+    /// follows another transaction's delete of the copy with a committed
+    /// value behind the delete's pending one.
+    fn write_node<R>(&self, id: NodeId, write: impl FnOnce(&LpgStore) -> R) -> Option<R> {
+        {
+            let _copies = self.copies.read();
+            if self.is_node_dirty(id) {
+                let overlay = self.overlay.load();
+                if overlay.base_tombstones().has_node(id) {
+                    return None;
+                }
+                return Some(write(&overlay));
+            }
         }
+        let Some(base_node) = self.base.load().get_node(id) else {
+            // A node of the overlay's own, which no tombstone names.
+            return Some(write(&self.overlay.load()));
+        };
+        let _copies = self.copies.write();
         let overlay = self.overlay.load();
-        if overlay.base_tombstones().has_edge(id) {
-            return false;
+        // A copy made meanwhile may have been deleted meanwhile too.
+        if !self.copy_node_held(id, base_node, &overlay) || overlay.base_tombstones().has_node(id) {
+            return None;
+        }
+        Some(write(&overlay))
+    }
+
+    /// Runs `write` on the overlay for edge `id`, as
+    /// [`write_node`](Self::write_node) does for a node: a base edge is
+    /// copied first (its endpoints, then the edge, adopted in one step at
+    /// the initial epoch without the id allocator), and `None`, writing
+    /// nothing, for a base edge with a tombstone or with an endpoint that has
+    /// one (the copy would be a live edge of a deleted node).
+    fn write_edge<R>(&self, id: EdgeId, write: impl FnOnce(&LpgStore) -> R) -> Option<R> {
+        {
+            let _copies = self.copies.read();
+            if self.is_edge_dirty(id) {
+                let overlay = self.overlay.load();
+                if overlay.base_tombstones().has_edge(id) {
+                    return None;
+                }
+                return Some(write(&overlay));
+            }
+        }
+        if self.overlay.load().base_tombstones().has_edge(id) {
+            return None;
         }
         let Some(base_edge) = self.base.load().get_edge(id) else {
-            return true;
+            return Some(write(&self.overlay.load()));
         };
 
         // The endpoints first: each copy takes `copies` itself.
         if !self.ensure_in_overlay(base_edge.src) || !self.ensure_in_overlay(base_edge.dst) {
-            return false;
+            return None;
         }
 
-        let _copies = self.copies.lock();
-        if self.is_edge_dirty(id) {
-            return true; // copied meanwhile
+        let _copies = self.copies.write();
+        let overlay = self.overlay.load();
+        if !self.is_edge_dirty(id) {
+            if overlay.base_tombstones().has_edge(id) {
+                return None;
+            }
+            #[cfg(test)]
+            self.run_copy_hook(CopyStep::EdgeCopy);
+            overlay.adopt_edge(
+                id,
+                base_edge.src,
+                base_edge.dst,
+                base_edge.edge_type.as_str(),
+                base_edge.properties,
+            );
+            self.dirty_edge_ids.write().insert(id);
+        } else if overlay.base_tombstones().has_edge(id) {
+            return None; // copied, then deleted, meanwhile
         }
-        if overlay.base_tombstones().has_edge(id) {
-            return false;
-        }
-        #[cfg(test)]
-        self.run_copy_hook(CopyStep::EdgeCopy);
-        overlay.adopt_edge(
-            id,
-            base_edge.src,
-            base_edge.dst,
-            base_edge.edge_type.as_str(),
-            base_edge.properties,
-        );
-        self.dirty_edge_ids.write().insert(id);
-        true
+        Some(write(&overlay))
     }
 }
 
@@ -3585,7 +3608,7 @@ mod tests {
 
     /// Mutating a base-only edge promotes the edge into the overlay together
     /// with both its endpoints, and its properties are preserved. Covers
-    /// `ensure_edge_in_overlay` including its cascade into
+    /// `write_edge` including its cascade into
     /// `ensure_in_overlay` for src and dst.
     #[test]
     fn test_layered_promote_edge_on_mutation() {
@@ -4306,7 +4329,7 @@ mod tests {
         assert!(!labels.contains(&"Employee"));
     }
 
-    // ── Q. ensure_in_overlay / ensure_edge_in_overlay edge cases ─────
+    // ── Q. ensure_in_overlay / write_edge edge cases ─────
 
     #[test]
     fn test_ensure_in_overlay_noop_for_nonexistent_node() {
@@ -5373,6 +5396,150 @@ mod tests {
         ]
     }
 
+    /// A base node the overlay holds a copy of has its values in the overlay
+    /// only: once the copy's vector is removed, or replaced by a value that
+    /// is not a vector, the overlay's vector index neither keeps the node
+    /// (its upkeep reads no vector) nor measures it with the base's old
+    /// vector, and the vectors the index reads lend none for it. A base
+    /// node without a copy still lends the base's vector.
+    #[cfg(feature = "vector-index")]
+    #[test]
+    fn a_copied_node_never_falls_back_to_its_base_vector() {
+        use crate::index::vector::{HnswConfig, HnswIndex, VectorAccessor, VectorIndexKind};
+
+        let store = LpgStore::new().unwrap();
+        let person = |name: &str, embedding: [f32; 2]| {
+            let id = store.create_node(&["Person"]);
+            store.set_node_property(id, "name", Value::from(name));
+            store.set_node_property(id, "embedding", Value::Vector(Arc::from(embedding)));
+            id
+        };
+        let alix = person("Alix", [0.0, 1.0]);
+        let gus = person("Gus", [1.0, 0.0]);
+        let mia = person("Mia", [0.88, 0.19]);
+        let vincent = person("Vincent", [0.19, 0.88]);
+        let max_node_id = vincent.as_u64();
+        let layered = LayeredStore::new(
+            from_graph_store_preserving_ids(&store).unwrap(),
+            max_node_id,
+            0,
+        )
+        .unwrap();
+
+        let overlay = layered.overlay_store();
+        let index = Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(HnswConfig::new(
+            2,
+            DistanceMetric::Euclidean,
+        ))));
+        overlay.add_vector_index("Person", "embedding", Arc::clone(&index));
+        let key = PropertyKey::new("embedding");
+        for id in [alix, gus, mia, vincent] {
+            let Some(Value::Vector(vector)) = layered.get_node_property(id, &key) else {
+                panic!("node {id:?} has a vector in the base");
+            };
+            index.insert(id, &vector, &overlay.index_vectors("embedding"));
+        }
+        let nearest = |k: usize| -> Vec<NodeId> {
+            layered
+                .vector_search(
+                    Some("Person"),
+                    "embedding",
+                    &[1.0, 0.0],
+                    k,
+                    DistanceMetric::Euclidean,
+                )
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        };
+        assert_eq!(nearest(1), vec![gus], "Gus is nearest before the writes");
+
+        layered
+            .remove_node_property(gus, "embedding")
+            .expect("the removal");
+        layered.set_node_property(mia, "embedding", Value::from("Paris"));
+        assert!(layered.is_node_dirty(gus) && layered.is_node_dirty(mia));
+
+        let vectors = overlay.index_vectors("embedding");
+        assert_eq!(vectors.get_vector(gus), None, "Gus's vector is removed");
+        assert_eq!(vectors.get_vector(mia), None, "Mia's is a string now");
+        assert!(!vectors.with_vector(gus, &mut |_| {}));
+        assert!(!vectors.with_vector(mia, &mut |_| {}));
+        assert_eq!(
+            vectors.get_vector(alix).as_deref(),
+            Some(&[0.0, 1.0][..]),
+            "Alix, never copied, lends the base's vector"
+        );
+        assert!(!index.contains(gus), "the upkeep takes Gus out");
+        assert!(!index.contains(mia), "and Mia");
+        let mut found = nearest(4);
+        found.sort_unstable();
+        assert_eq!(found, vec![alix, vincent], "the search finds no other");
+
+        // An insert links the new vector among the index's nodes: Gus and
+        // Mia are not among them, so it reads no vector of theirs either.
+        layered.set_node_property(
+            vincent,
+            "embedding",
+            Value::Vector(Arc::from([0.88_f32, 0.0])),
+        );
+        assert_eq!(nearest(1), vec![vincent], "Vincent is nearest now");
+        assert!(!index.contains(gus) && !index.contains(mia));
+    }
+
+    /// A base edge copied into the overlay appears whole to the overlay's
+    /// adjacency readers, which take no entity lock: a reader on another
+    /// thread, reading the overlay between any two steps of the copy, finds
+    /// the edge in both of its endpoints' lists, with its value, or in
+    /// neither. (The value may come first: only a reader that knows the id
+    /// reads it, and the base still answers for the edge then.)
+    #[test]
+    fn an_edge_copy_appears_whole_to_the_overlays_adjacency_readers() {
+        let set_adopt_edge_step_hook = LpgStore::set_adopt_edge_step_hook;
+        let layered = build_test_layered();
+        let (gus, lives_in, _) = gus_and_his_edge(&layered);
+        let (_, _, amsterdam, _) = fixture_ids(&layered);
+        let overlay = layered.overlay_store();
+        let seen: Arc<parking_lot::Mutex<Vec<(bool, bool, bool)>>> = Arc::default();
+        set_adopt_edge_step_hook(Some(Box::new({
+            let (overlay, seen) = (Arc::clone(&overlay), Arc::clone(&seen));
+            move || {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let overlay = Arc::clone(&overlay);
+                std::thread::spawn(move || {
+                    let outgoing = overlay
+                        .edges_from(gus, Direction::Outgoing)
+                        .any(|entry| entry == (amsterdam, lives_in));
+                    let incoming = overlay.edges_to(amsterdam).contains(&(gus, lives_in));
+                    let valued = overlay
+                        .get_edge_property(lives_in, &PropertyKey::new("since"))
+                        .is_some();
+                    let _ = sender.send((outgoing, incoming, valued));
+                });
+                // A reader a lock of the copy holds back reads after the copy.
+                if let Ok(read) = receiver.recv_timeout(std::time::Duration::from_secs(3)) {
+                    seen.lock().push(read);
+                }
+            }
+        })));
+        layered.set_edge_property(lives_in, "since", Value::Int64(2019));
+        set_adopt_edge_step_hook(None);
+
+        let seen = seen.lock();
+        assert!(!seen.is_empty(), "the copy ran its steps");
+        for &(outgoing, incoming, valued) in seen.iter() {
+            assert!(
+                outgoing == incoming && (valued || !outgoing),
+                "a reader between two steps of the copy found the edge outgoing: {outgoing}, \
+                 incoming: {incoming}, with its value: {valued}"
+            );
+        }
+        assert_eq!(
+            overlay.get_edge_property(lives_in, &PropertyKey::new("since")),
+            Some(Value::Int64(2019))
+        );
+    }
+
     /// The index searches run outside `read_consistent` and drop the overlay
     /// index's hits for base nodes deleted since the last merge. The overlay
     /// keeps the tombstones, so a publish swaps them with its index and a
@@ -5382,9 +5549,10 @@ mod tests {
     /// hold him as the engine builds them over the base (his embedding copies
     /// him into the overlay and its vector index); the tombstone is written
     /// after the copy, beside it, as a delete never leaves one (it deletes
-    /// the copy too), so the overlay's own searches still find him. The
-    /// vector scans of both layers read through `read_consistent`, which
-    /// waits out a publish: they miss him before the merge and after it.
+    /// the copy too), so the overlay's own scans still find him, and its
+    /// index searches drop him as the layered store's do. The vector scans
+    /// of both layers read through `read_consistent`, which waits out a
+    /// publish: they miss him before the merge and after it.
     #[cfg(any(feature = "text-index", feature = "vector-index"))]
     #[test]
     fn a_search_inside_a_publish_never_finds_a_deleted_base_node() {
@@ -5420,10 +5588,24 @@ mod tests {
             overlay_store.current_epoch(),
             TransactionId::SYSTEM
         ));
+        #[cfg(feature = "text-index")]
+        assert!(
+            overlay_store
+                .get_text_index("Person", "bio")
+                .is_some_and(|index| index.read().contains(gus)),
+            "the overlay's text index holds Gus"
+        );
+        #[cfg(feature = "vector-index")]
+        assert!(
+            overlay_store
+                .get_vector_index("Person", "embedding")
+                .is_some_and(|index| index.contains(gus)),
+            "the overlay's vector index holds Gus"
+        );
         let overlay = search_hits(&*overlay_store, gus);
         assert!(
-            overlay.iter().all(|(_, ids)| ids.contains(&gus)),
-            "the overlay's own searches find Gus: {overlay:?}"
+            overlay.iter().all(|(_, ids)| !ids.contains(&gus)),
+            "the overlay's own searches drop Gus: {overlay:?}"
         );
         let before = search_hits(&layered, gus);
         assert!(
@@ -6142,6 +6324,45 @@ mod tests {
         assert!(layered.deletions_dirty());
     }
 
+    /// A delete outside a transaction is a committed tombstone written by
+    /// the system: a read by the system (a statement outside a transaction)
+    /// at an epoch before the delete still sees the entity, as a read at
+    /// that epoch does. Only the system's pending tombstones, which no
+    /// delete outside a transaction writes, would be its own.
+    #[test]
+    fn a_system_read_before_a_delete_outside_a_transaction_sees_the_entity() {
+        let layered = build_test_layered();
+        let (gus, edge, _) = gus_and_his_edge(&layered);
+        layered.overlay_store().sync_epoch(EpochId::new(3));
+        assert!(layered.delete_edge(edge));
+        assert!(layered.delete_node(gus));
+
+        let system = TransactionId::SYSTEM;
+        for epoch in [EpochId::INITIAL, EpochId::new(2)] {
+            assert!(
+                layered.get_node_versioned(gus, epoch, system).is_some(),
+                "the node, read by the system at {epoch:?}"
+            );
+            assert!(layered.is_node_visible_versioned(gus, epoch, system));
+            assert!(
+                layered.get_edge_versioned(edge, epoch, system).is_some(),
+                "the edge, read by the system at {epoch:?}"
+            );
+            assert!(layered.is_edge_visible_versioned(edge, epoch, system));
+            assert!(layered.get_node_at_epoch(gus, epoch).is_some());
+            assert!(layered.is_edge_visible_at_epoch(edge, epoch));
+        }
+        for epoch in [EpochId::new(3), EpochId::new(19)] {
+            assert!(
+                layered.get_node_versioned(gus, epoch, system).is_none(),
+                "deleted for the system at {epoch:?}"
+            );
+            assert!(!layered.is_edge_visible_versioned(edge, epoch, system));
+            assert!(layered.get_node_at_epoch(gus, epoch).is_none());
+            assert!(!layered.is_edge_visible_at_epoch(edge, epoch));
+        }
+    }
+
     /// Tombstones seeded from a file hide the entity at every epoch and
     /// count as written.
     #[test]
@@ -6714,6 +6935,51 @@ mod tests {
         );
         commit_deleter(&layered);
         assert_gus_is_gone(&layered, gus);
+    }
+
+    /// A write to a copied node or edge that another transaction is deleting
+    /// writes nothing: it finds the delete's tombstone, as a copy does,
+    /// instead of writing a value behind the delete's pending one. After the
+    /// commit nothing of the write is left; a rollback brings the node and
+    /// the edge back as the delete found them.
+    #[test]
+    fn a_write_to_a_copy_being_deleted_writes_nothing() {
+        let age = PropertyKey::new("age");
+        let since = PropertyKey::new("since");
+        for commit in [true, false] {
+            let layered = build_test_layered();
+            let (gus, edge, _) = gus_and_his_edge(&layered);
+            layered.set_node_property(gus, "age", Value::Int64(3));
+            layered.set_edge_property(edge, "since", Value::Int64(3));
+            assert!(layered.is_node_dirty(gus) && layered.is_edge_dirty(edge));
+            delete_gus_in_a_transaction(&layered, gus, edge);
+
+            layered.set_node_property(gus, "age", Value::Int64(19));
+            layered.set_edge_property(edge, "since", Value::Int64(19));
+            assert!(!layered.add_label(gus, "Employee"), "no label either");
+            assert_eq!(
+                layered
+                    .remove_node_property(gus, "age")
+                    .expect("a removal that removes nothing"),
+                None
+            );
+
+            if commit {
+                commit_deleter(&layered);
+                assert_gus_is_gone(&layered, gus);
+                assert!(layered.get_edge(edge).is_none());
+            } else {
+                layered
+                    .overlay_store()
+                    .rollback_transaction_properties(DELETER);
+                assert_eq!(layered.get_node_property(gus, &age), Some(Value::Int64(3)));
+                assert_eq!(
+                    layered.get_edge_property(edge, &since),
+                    Some(Value::Int64(3))
+                );
+                assert!(!layered.get_node(gus).unwrap().has_label("Employee"));
+            }
+        }
     }
 
     /// The base edge is deleted, and the overlay holds no live copy of it.

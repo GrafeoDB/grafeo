@@ -9,7 +9,7 @@
 //! edge ever ends at a deleted node, in a plain store or a compacted one.
 //! Claims conflict with deletes only: two transactions that create edges to
 //! one node, or one that creates an edge to a node while another sets its
-//! properties, both commit.
+//! properties, both commit. An edge the schema refuses claims nothing.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test edge_endpoint_conflicts
@@ -256,6 +256,10 @@ fn an_edge_to_a_node_the_transaction_deleted_is_refused() {
                  DETACH DELETE g INSERT (a)-[:KNOWS]->(g)",
             )
             .map(|_| ());
+        assert!(
+            sees_gus(&session),
+            "{kind}: the failed statement deletes nothing, got {in_one_statement:?}"
+        );
         session.execute(DELETE_GUS).unwrap();
         let later = session.create_edge(alix, gus, "KNOWS");
         session.commit().unwrap();
@@ -265,6 +269,39 @@ fn an_edge_to_a_node_the_transaction_deleted_is_refused() {
              deleting statement and {later:?} later, which left {:?}",
             state(&db)
         );
+        assert_eq!(state(&db), without_gus(), "{kind}");
+    }
+}
+
+/// An edge the schema refuses claims nothing: while the transaction that
+/// tried to create it is still open, another one deletes the endpoint
+/// without a conflict.
+#[test]
+fn a_refused_edge_leaves_its_endpoints_unclaimed() {
+    for (kind, db) in databases() {
+        db.execute("CREATE EDGE TYPE KNOWS (since INT64)").unwrap();
+        let mut linker = db.session();
+        linker.begin_transaction().unwrap();
+        let refused = linker
+            .execute(
+                "MATCH (a:Person {name: 'Alix'}), (g:Person {name: 'Gus'}) \
+                 INSERT (a)-[:KNOWS {since: 'yesterday'}]->(g)",
+            )
+            .map(|_| ());
+        assert!(
+            refused.as_ref().is_err_and(|error| !is_conflict(error)),
+            "{kind}: the schema refuses the edge, got {refused:?}"
+        );
+
+        let mut deleter = db.session();
+        deleter.begin_transaction().unwrap();
+        let deleted = deleter.execute(DELETE_GUS).map(|_| ());
+        assert!(
+            deleted.is_ok(),
+            "{kind}: no edge claims Gus, got {deleted:?}"
+        );
+        deleter.commit().unwrap();
+        linker.commit().unwrap();
         assert_eq!(state(&db), without_gus(), "{kind}");
     }
 }

@@ -244,8 +244,11 @@ pub fn encode_column_chunk(
 /// Decodes a chunk whose directory entry says `codec` and `row_count`;
 /// refuses any mismatch.
 ///
-/// Every count is checked against the bytes left before anything is
-/// allocated, and the chunk must be read to its last byte.
+/// The decoded values share one copy of the chunk, made once its header
+/// checks pass (a chunk held in `Bytes` decodes without a copy through
+/// [`decode_column_chunk_bytes`]). Every count is checked against the bytes
+/// left before anything it sizes is allocated, and the chunk must be read
+/// to its last byte.
 ///
 /// # Errors
 ///
@@ -259,6 +262,7 @@ pub fn encode_column_chunk(
 /// that does not hold the header's number of values of the codec's kind,
 /// truncated input, or bytes after the body.
 pub fn decode_column_chunk(bytes: &[u8], codec: u8, row_count: u32) -> Result<ColumnChunk> {
+    checked_header(bytes, codec, row_count)?;
     decode_column_chunk_bytes(&Bytes::copy_from_slice(bytes), codec, row_count)
 }
 
@@ -270,7 +274,79 @@ pub fn decode_column_chunk(bytes: &[u8], codec: u8, row_count: u32) -> Result<Co
 /// As [`decode_column_chunk`].
 pub fn decode_column_chunk_bytes(data: &Bytes, codec: u8, row_count: u32) -> Result<ColumnChunk> {
     let bytes: &[u8] = data;
-    let entry_codec = codec;
+    let ChunkHeader {
+        codec,
+        flags,
+        value_count,
+        sparse,
+    } = checked_header(bytes, codec, row_count)?;
+    let mut pos = HEADER_LEN;
+    let rows = if sparse {
+        Some(read_presence(bytes, &mut pos, row_count, value_count)?)
+    } else {
+        None
+    };
+    let zone_start = pos;
+    if flags & FLAG_ZONE_MAP != 0 {
+        for _ in 0..2 {
+            decode_value(bytes, &mut pos)
+                .map_err(|error| corrupt(zone_start, format!("zone map: {error}")))?;
+        }
+    }
+    let zone_end = pos;
+    let epochs = if flags & FLAG_EPOCHS == 0 {
+        None
+    } else {
+        Some(read_epochs(data, &mut pos, value_count as usize)?)
+    };
+    let values = read_values(codec, data, &mut pos, value_count as usize)?;
+    if pos != bytes.len() {
+        return Err(corrupt(
+            pos,
+            format!("{} bytes after the end of the values", bytes.len() - pos),
+        ));
+    }
+    let zone_map = zone_map(codec, values.iter());
+    let mut expected = Vec::new();
+    if let Some((min, max)) = &zone_map {
+        encode_value(min, &mut expected)?;
+        encode_value(max, &mut expected)?;
+    }
+    if bytes[zone_start..zone_end] != expected[..] {
+        return Err(corrupt(
+            zone_start,
+            format!("the zone map is not the values' minimum and maximum {zone_map:?}"),
+        ));
+    }
+    let values = match rows {
+        Some(rows) => rows.into_iter().zip(values).collect(),
+        None => (0u32..).zip(values).collect(),
+    };
+    Ok(ColumnChunk {
+        row_count,
+        values,
+        epochs,
+        zone_map,
+    })
+}
+
+/// What a chunk's header says, once [`checked_header`] has checked it.
+struct ChunkHeader {
+    /// The codec of the directory entry, which the header repeats.
+    codec: ChunkCodec,
+    /// The flag bits, all known.
+    flags: u8,
+    /// The number of values: at least one, at most the row count.
+    value_count: u32,
+    /// Whether some rows have no value, so a presence bitmap follows.
+    sparse: bool,
+}
+
+/// Checks the header of a chunk whose directory entry says `entry_codec` and
+/// `row_count`, reading only its first [`HEADER_LEN`] bytes: the codec and
+/// row count against the entry's, the row cap, the flag bits, the value
+/// count, and the presence flag against the counts.
+fn checked_header(bytes: &[u8], entry_codec: u8, row_count: u32) -> Result<ChunkHeader> {
     let codec = ChunkCodec::from_byte(entry_codec)
         .ok_or_else(|| corrupt(0, format!("unknown codec {entry_codec}")))?;
     let header: [u8; HEADER_LEN] = bytes
@@ -333,53 +409,11 @@ pub fn decode_column_chunk_bytes(data: &Bytes, codec: u8, row_count: u32) -> Res
         };
         return Err(corrupt(1, what));
     }
-    let mut pos = HEADER_LEN;
-    let rows = if sparse {
-        Some(read_presence(bytes, &mut pos, row_count, value_count)?)
-    } else {
-        None
-    };
-    let zone_start = pos;
-    if flags & FLAG_ZONE_MAP != 0 {
-        for _ in 0..2 {
-            decode_value(bytes, &mut pos)
-                .map_err(|error| corrupt(zone_start, format!("zone map: {error}")))?;
-        }
-    }
-    let zone_end = pos;
-    let epochs = if flags & FLAG_EPOCHS == 0 {
-        None
-    } else {
-        Some(read_epochs(data, &mut pos, value_count as usize)?)
-    };
-    let values = read_values(codec, data, &mut pos, value_count as usize)?;
-    if pos != bytes.len() {
-        return Err(corrupt(
-            pos,
-            format!("{} bytes after the end of the values", bytes.len() - pos),
-        ));
-    }
-    let zone_map = zone_map(codec, values.iter());
-    let mut expected = Vec::new();
-    if let Some((min, max)) = &zone_map {
-        encode_value(min, &mut expected)?;
-        encode_value(max, &mut expected)?;
-    }
-    if bytes[zone_start..zone_end] != expected[..] {
-        return Err(corrupt(
-            zone_start,
-            format!("the zone map is not the values' minimum and maximum {zone_map:?}"),
-        ));
-    }
-    let values = match rows {
-        Some(rows) => rows.into_iter().zip(values).collect(),
-        None => (0u32..).zip(values).collect(),
-    };
-    Ok(ColumnChunk {
-        row_count,
-        values,
-        epochs,
-        zone_map,
+    Ok(ChunkHeader {
+        codec,
+        flags,
+        value_count,
+        sparse,
     })
 }
 

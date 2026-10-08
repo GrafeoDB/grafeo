@@ -21,8 +21,12 @@ impl super::Planner {
         // 2. Input is an expand chain (multi-hop)
         // 3. No GROUP BY
         // 4. All aggregates are simple (COUNT, SUM, AVG, MIN, MAX)
+        // 5. It does not read after a write (the regular path reads the
+        //    writing input whole first, see `after_write`)
         if self.factorized_execution
             && agg.group_by.is_empty()
+            && !(super::after_write::aggregate_reads(agg)
+                && super::after_write::writes_pending(&agg.input))
             && Self::count_expand_chain(&agg.input).0 >= 2
             && self.is_simple_aggregate(agg)
             && let Ok((op, cols)) = self.plan_factorized_aggregate(agg)
@@ -34,6 +38,11 @@ impl super::Planner {
         // An aggregate that comes first (`RETURN count(*)`) aggregates the
         // one empty row.
         let (mut input_op, input_columns) = self.plan_input(&agg.input)?;
+        // Values that read the graph after a write (`... SET h.c = i RETURN
+        // sum(h.c)`) read what the whole write left (see `after_write`).
+        if super::after_write::aggregate_reads(agg) {
+            input_op = super::mutation::read_first_after_a_write(input_op, &agg.input);
+        }
 
         // Build variable to column index mapping
         let mut variable_columns: HashMap<String, usize> = input_columns

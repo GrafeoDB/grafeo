@@ -1311,16 +1311,13 @@ mod tests {
             let count = triples.len();
             let store = Arc::new(RdfStore::new());
             store.bulk_load(triples);
-            let terms = store.ring().map(|ring| ring.num_terms());
+            let original = store.ring().expect(case);
+            assert_eq!(original.len(), count, "{case}: the ring holds every triple");
             let image = image_of(&RdfRingSection::with_caps(store, TINY));
             let restored = read_back(&image).unwrap_or_else(|error| panic!("{case}: {error}"));
-            let ring = restored.ring().expect(case);
-            assert_eq!(ring.len(), count, "{case}: every triple comes back");
-            assert_eq!(
-                Some(ring.num_terms()),
-                terms,
-                "{case}: no two terms collapse"
-            );
+            // Every term is compared, not counted: a term that comes back
+            // changed (a trimmed language tag) keeps both counts.
+            assert_same_ring(&original, &restored.ring().expect(case));
         }
     }
 

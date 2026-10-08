@@ -164,8 +164,13 @@ impl super::Planner {
             return Ok(result);
         }
 
-        // Plan the input operator first
-        let (input_op, columns) = self.plan_input(&filter.input)?;
+        // Plan the input operator first. A predicate that reads the graph
+        // after a write (`... SET h.c = i WITH h WHERE h.c = 4`) reads what
+        // the whole write left (see `after_write`).
+        let (mut input_op, columns) = self.plan_input(&filter.input)?;
+        if super::after_write::reads_the_graph(&filter.predicate) {
+            input_op = super::mutation::read_first_after_a_write(input_op, &filter.input);
+        }
 
         // Build variable to column index mapping
         let variable_columns: HashMap<String, usize> = columns
@@ -207,9 +212,15 @@ impl super::Planner {
             .bound_variables(None)
             .map(|names| names.into_iter().collect());
         let input_writes = filter.input.has_mutations();
+        // Right after a write the plain conjuncts filter after the
+        // subqueries, whose joins read the whole input first: a filter of
+        // their own below would read the rows as the write passes them on
+        // (or need a second read of the whole input, see `after_write`).
+        let pending = super::after_write::writes_pending(&filter.input);
         let (with_subqueries, plain): (Vec<_>, Vec<_>) =
             conjuncts.into_iter().partition(|conjunct| {
-                self.has_subquery_to_lift(conjunct, input_columns.as_deref(), input_writes)
+                pending
+                    || self.has_subquery_to_lift(conjunct, input_columns.as_deref(), input_writes)
             });
         let (input_op, columns) = match join_conjuncts(plain) {
             Some(predicate) => self.plan_filter(&FilterOp {

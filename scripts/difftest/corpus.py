@@ -831,4 +831,18 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages)
 
+# AP: a part of a MATCH that shares a node with an earlier part goes on from the rows
+#     before it when its property map or inline WHERE reads one of their values: an unwound
+#     value (AP1 to AP3, AP5 in GQL), or a node of another part (AP4); it was matched on its
+#     own without that value and found nothing. AP6: OPTIONAL MATCH, which already worked
+for case_id, query, languages in [
+    ("AP1", "UNWIND [6, 8] AS w MATCH (c:City), (c)<-[:LIVES_IN {w: w}]-(a) RETURN w, a.name AS a, c.name AS c", BOTH),
+    ("AP2", "UNWIND [6, 8] AS w MATCH (c:City), (a)-[:LIVES_IN {w: w}]->(c) RETURN w, a.name AS a, c.name AS c", BOTH),
+    ("AP3", "UNWIND [25, 28] AS g MATCH (c:City), (c)<-[:LIVES_IN]-(a {age: g}) RETURN g, a.name AS a, c.name AS c", BOTH),
+    ("AP4", "MATCH (x:Person {name: 'Gus'}), (c:City), (c)<-[:LIVES_IN {years: x.age - 22}]-(a) RETURN x.name AS x, a.name AS a, c.name AS c", BOTH),
+    ("AP5", "UNWIND [6, 8] AS w MATCH (c:City), (c)<-[r:LIVES_IN WHERE r.w = w]-(a) RETURN w, a.name AS a, c.name AS c", GQL),
+    ("AP6", "UNWIND [6, 7, 9] AS w OPTIONAL MATCH (c:City {name: 'Berlin'}), (c)<-[:LIVES_IN {w: w}]-(a) RETURN w, a.name AS a", BOTH),
+]:
+    case(case_id, query, languages)
+
 # fmt: on

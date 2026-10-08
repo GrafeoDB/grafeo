@@ -49,6 +49,14 @@ impl super::Planner {
         // first (see `subquery.rs`); the items read their counts.
         let (lifted_items, input_op, input_columns) =
             self.lift_return_items(items, input_op, input_columns, ret.input.has_mutations())?;
+        // After a write (`... SET h.c = i RETURN h.c`) every row reads what
+        // the whole write left (see `after_write`). Subqueries lifted after a
+        // write read the whole input first already.
+        let input_op = if lifted_items.is_none() && super::after_write::return_reads(ret) {
+            super::mutation::read_first_after_a_write(input_op, &ret.input)
+        } else {
+            input_op
+        };
         let items = lifted_items.as_deref().unwrap_or(items);
 
         // Build variable to column index mapping
@@ -386,6 +394,16 @@ impl super::Planner {
             input_columns,
             project.input.has_mutations(),
         )?;
+        // After a write (`... SET h.c = i WITH h.c AS c`) every row reads
+        // what the whole write left (see `after_write`); a WITH of variables
+        // only passes the rows on. Subqueries lifted after a write read the
+        // whole input first already.
+        let input_op =
+            if lifted_projections.is_none() && super::after_write::projection_reads(project) {
+                super::mutation::read_first_after_a_write(input_op, &project.input)
+            } else {
+                input_op
+            };
         let project_projections = lifted_projections
             .as_deref()
             .unwrap_or(&project.projections);
@@ -628,6 +646,10 @@ impl super::Planner {
         }
 
         let (input_op, columns) = plan_result?;
+        // After a write the LIMIT cuts the rows, not the write: the whole
+        // input is read first, so the rows after the limit are written too
+        // (see `after_write`).
+        let input_op = super::mutation::read_first_after_a_write(input_op, &limit.input);
         Ok(crate::query::planner::common::build_limit(
             input_op,
             columns,
@@ -776,7 +798,19 @@ impl super::Planner {
             sort_extra_count = extra_columns.len();
             (op, columns)
         } else {
-            self.plan_operator(&sort.input)?
+            let (op, columns) = self.plan_operator(&sort.input)?;
+            // Sort keys that read the graph after a write (`... SET h.c = i
+            // WITH h ORDER BY h.c`) read what the whole write left (see
+            // `after_write`); the augmented RETURN above reads its input
+            // whole itself.
+            if super::after_write::sort_reads(sort) {
+                (
+                    super::mutation::read_first_after_a_write(op, &sort.input),
+                    columns,
+                )
+            } else {
+                (op, columns)
+            }
         };
 
         // Build variable to column index mapping

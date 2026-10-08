@@ -353,10 +353,14 @@ jobs:
   # Tests that need a minimal feature set, so they are covered outside
   # --all-features too: encryption at rest with only the features it needs,
   # the migration of 0.5.x files in a build without `wal` (the default
-  # `embedded` profile of the Node.js, C, Go, C# and Dart bindings), and the
-  # refusal of 0.5.x files in a build without `lpg` (the `rdf` profile). A job of
-  # its own: the rust-test runners are near their disk limit, and these are
-  # extra engine builds.
+  # `embedded` profile of the Node.js, C, Go, C# and Dart bindings), the
+  # refusal of 0.5.x files in a build without `lpg` (the `rdf` profile), and the
+  # refusal of files with data a build cannot read: compacted files without
+  # `compact-store` (the `grafeo` crate, the CLI), triples without
+  # `triple-store` (in the file, its WAL or a 0.5.x WAL directory, so also with
+  # `wal`) and vector and text indexes without `vector-index` and `text-index`
+  # (the engine's default build, the CLI). A job of its own: the rust-test
+  # runners are near their disk limit, and these are extra engine builds.
   minimal-features:
     name: Minimal Features
     needs: [rust-check]
@@ -383,15 +387,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
 
-      - name: Test encryption at rest
-        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,wal,grafeo-file,encryption --test encryption_at_rest
+      - name: Test encryption at rest, triples in a WAL without triple-store
+        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,wal,grafeo-file,encryption --test encryption_at_rest --test rdf_file_without_triple_store
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
-      - name: Test migration and close without the wal feature
-        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close
+      - name: Test migration and close without the wal feature, files with data this build cannot read
+        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close --test compacted_file_without_compact_store --test rdf_file_without_triple_store --test search_indexes_without_their_features
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"

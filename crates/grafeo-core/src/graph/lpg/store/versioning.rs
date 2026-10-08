@@ -914,13 +914,19 @@ impl BaseTombstone {
         self.is_committed() && self.epoch <= epoch
     }
 
-    /// Whether `transaction_id`, reading at `epoch`, misses the entity: it
-    /// deleted the entity itself, or the delete is committed at or before
+    /// Whether `transaction_id`, reading at `epoch`, misses the entity: its
+    /// own delete is still pending, or the delete is committed at or before
     /// `epoch` (as a version deleted by the reading transaction is invisible
     /// to it, see `VersionInfo::is_visible_to`).
+    ///
+    /// Only a pending tombstone goes by who wrote it: a committed one goes
+    /// by its epoch for every reader, its writer too. A delete outside a
+    /// transaction is committed at once by [`TransactionId::SYSTEM`], which
+    /// also reads every statement outside a transaction, so a read at an
+    /// epoch before that delete still sees the entity.
     #[must_use]
     fn hides_from(self, epoch: EpochId, transaction_id: TransactionId) -> bool {
-        self.by == transaction_id || self.hides_at(epoch)
+        (!self.is_committed() && self.by == transaction_id) || self.hides_at(epoch)
     }
 }
 

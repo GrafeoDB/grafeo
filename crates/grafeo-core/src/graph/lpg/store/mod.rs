@@ -27,7 +27,7 @@ mod tests;
 
 #[cfg(all(feature = "compact-store", feature = "vector-index"))]
 pub(crate) use index::BaseVectors;
-pub(crate) use open_changes::OpenChanges;
+pub(crate) use open_changes::{Labels, OpenChanges};
 
 use super::PropertyStorage;
 #[cfg(not(feature = "tiered-storage"))]
@@ -488,7 +488,10 @@ pub struct LpgStore {
     ///
     /// When a property is indexed, lookups by value are O(1) instead of O(n).
     /// Use [`create_property_index`] to enable indexing for a property.
-    /// Lock order: 7
+    /// Lock order: 7, after the node lock (1): an adoption of a base node
+    /// holds the node lock while it adds the copy here, so a reader that
+    /// needs the node lock too (`create_property_index`, whose scan reads
+    /// the node ids) takes it first, never while it holds this one.
     pub(super) property_indexes:
         RwLock<FxHashMap<PropertyKey, DashMap<HashableValue, FxHashSet<NodeId>>>>,
 
@@ -813,25 +816,6 @@ impl LpgStore {
     #[must_use]
     pub fn graph_names(&self) -> Vec<String> {
         self.named_graphs.read().keys().cloned().collect()
-    }
-
-    /// Drains the named-graph map, leaving it empty.
-    ///
-    /// Used by the engine's `compact()` / `recompact()` to carry named graphs
-    /// across a store rebuild. Named graphs are LPG-specific and outside the
-    /// `GraphStore` trait, so the columnar base cannot preserve them; the
-    /// engine moves them across the pre- and post-compact overlays with this.
-    #[must_use]
-    pub fn take_named_graphs(&self) -> FxHashMap<String, Arc<LpgStore>> {
-        std::mem::take(&mut *self.named_graphs.write())
-    }
-
-    /// Replaces the named-graph map, overwriting any existing entries.
-    ///
-    /// Paired with [`take_named_graphs`](Self::take_named_graphs) to transfer
-    /// named graphs across a compact rebuild.
-    pub fn install_named_graphs(&self, graphs: FxHashMap<String, Arc<LpgStore>>) {
-        *self.named_graphs.write() = graphs;
     }
 
     /// A new, empty store that carries on this one once its default graph's

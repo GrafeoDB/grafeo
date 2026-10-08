@@ -276,9 +276,11 @@ impl super::Planner {
             // After a write (`... CREATE (h)-[:R]->() WITH h MATCH (h)-[:R]->(q)`)
             // the whole input is read first, so that the pattern from the
             // bound node (its labels and properties, the expands and paths
-            // from it) sees what every row wrote, as the scan below does.
+            // from it) sees what every row wrote, as the scan below does;
+            // an input a clause read whole already is not read again (see
+            // `after_write`).
             if input_columns.contains(&scan.variable) {
-                if input.has_mutations() {
+                if super::after_write::writes_pending(input) {
                     input_op = Box::new(EagerOperator::new(input_op));
                 }
                 // If the second MATCH clause has a label constraint, enforce it

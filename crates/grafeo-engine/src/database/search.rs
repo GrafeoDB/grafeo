@@ -122,28 +122,20 @@ impl super::GrafeoDB {
         ef: Option<usize>,
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
-        let index = self.lpg_store().get_vector_index(label, property).ok_or_else(|| {
+        let store = self.lpg_store();
+        let index = store.get_vector_index(label, property).ok_or_else(|| {
             grafeo_common::utils::error::Error::Internal(format!(
                 "No vector index found for :{label}({property}). Call create_vector_index() first."
             ))
         })?;
 
         let accessor = self.make_vector_accessor(property);
+        let allowlist = self.compute_filter_allowlist(label, filters);
 
-        let results = match self.compute_filter_allowlist(label, filters) {
-            Some(allowlist) => match ef {
-                Some(ef_val) => {
-                    index.search_with_ef_and_filter(query, k, ef_val, &allowlist, &accessor)
-                }
-                None => index.search_with_filter(query, k, &allowlist, &accessor),
-            },
-            None => match ef {
-                Some(ef_val) => index.search_with_ef(query, k, ef_val, &accessor),
-                None => index.search(query, k, &accessor),
-            },
-        };
-
-        Ok(results)
+        // The index may hold nodes that are gone: see `live_index_hits`.
+        Ok(store.live_index_hits(k, |fetch| {
+            search_vector_index(&index, query, fetch, ef, allowlist.as_ref(), &accessor)
+        }))
     }
 
     /// Searches for nearest neighbors for multiple query vectors in parallel.
@@ -172,28 +164,41 @@ impl super::GrafeoDB {
         ef: Option<usize>,
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<Vec<(grafeo_common::types::NodeId, f32)>>> {
-        let index = self.lpg_store().get_vector_index(label, property).ok_or_else(|| {
+        let store = self.lpg_store();
+        let index = store.get_vector_index(label, property).ok_or_else(|| {
             grafeo_common::utils::error::Error::Internal(format!(
                 "No vector index found for :{label}({property}). Call create_vector_index() first."
             ))
         })?;
 
         let accessor = self.make_vector_accessor(property);
+        let allowlist = self.compute_filter_allowlist(label, filters);
 
-        let results = match self.compute_filter_allowlist(label, filters) {
-            Some(allowlist) => match ef {
-                Some(ef_val) => {
-                    index.batch_search_with_ef_and_filter(queries, k, ef_val, &allowlist, &accessor)
-                }
-                None => index.batch_search_with_filter(queries, k, &allowlist, &accessor),
-            },
-            None => match ef {
-                Some(ef_val) => index.batch_search_with_ef(queries, k, ef_val, &accessor),
-                None => index.batch_search(queries, k, &accessor),
-            },
+        let batch = match (&allowlist, ef) {
+            (Some(allowlist), Some(ef_val)) => {
+                index.batch_search_with_ef_and_filter(queries, k, ef_val, allowlist, &accessor)
+            }
+            (Some(allowlist), None) => {
+                index.batch_search_with_filter(queries, k, allowlist, &accessor)
+            }
+            (None, Some(ef_val)) => index.batch_search_with_ef(queries, k, ef_val, &accessor),
+            (None, None) => index.batch_search(queries, k, &accessor),
         };
-
-        Ok(results)
+        // The index may hold nodes that are gone (see `live_index_hits`):
+        // the batch is each query's first search, and a query whose hits
+        // had such nodes searches again on its own.
+        Ok(batch
+            .into_iter()
+            .zip(queries)
+            .map(|(hits, query)| {
+                let mut first = Some(hits);
+                store.live_index_hits(k, |fetch| {
+                    first.take().unwrap_or_else(|| {
+                        search_vector_index(&index, query, fetch, ef, allowlist.as_ref(), &accessor)
+                    })
+                })
+            })
+            .collect())
     }
 
     /// Searches for diverse nearest neighbors using Maximal Marginal Relevance (MMR).
@@ -237,7 +242,8 @@ impl super::GrafeoDB {
     ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
         use grafeo_core::index::vector::mmr_select;
 
-        let index = self.lpg_store().get_vector_index(label, property).ok_or_else(|| {
+        let store = self.lpg_store();
+        let index = store.get_vector_index(label, property).ok_or_else(|| {
             grafeo_common::utils::error::Error::Internal(format!(
                 "No vector index found for :{label}({property}). Call create_vector_index() first."
             ))
@@ -248,19 +254,12 @@ impl super::GrafeoDB {
         let fetch_k = fetch_k.unwrap_or(k.saturating_mul(4).max(k));
         let lambda = lambda.unwrap_or(0.5);
 
-        // Step 1: Fetch candidates from HNSW (with optional filter)
-        let initial_results = match self.compute_filter_allowlist(label, filters) {
-            Some(allowlist) => match ef {
-                Some(ef_val) => {
-                    index.search_with_ef_and_filter(query, fetch_k, ef_val, &allowlist, &accessor)
-                }
-                None => index.search_with_filter(query, fetch_k, &allowlist, &accessor),
-            },
-            None => match ef {
-                Some(ef_val) => index.search_with_ef(query, fetch_k, ef_val, &accessor),
-                None => index.search(query, fetch_k, &accessor),
-            },
-        };
+        // Step 1: Fetch candidates from HNSW (with optional filter), which
+        // leave out the nodes that are gone (see `live_index_hits`)
+        let allowlist = self.compute_filter_allowlist(label, filters);
+        let initial_results = store.live_index_hits(fetch_k, |fetch| {
+            search_vector_index(&index, query, fetch, ef, allowlist.as_ref(), &accessor)
+        });
 
         if initial_results.is_empty() {
             return Ok(Vec::new());
@@ -303,16 +302,15 @@ impl super::GrafeoDB {
         query: &str,
         k: usize,
     ) -> Result<Vec<(NodeId, f64)>> {
-        let index = self
-            .lpg_store()
-            .get_text_index(label, property)
-            .ok_or_else(|| {
-                Error::Internal(format!(
-                    "No text index found for :{label}({property}). Call create_text_index() first."
-                ))
-            })?;
+        let store = self.lpg_store();
+        let index = store.get_text_index(label, property).ok_or_else(|| {
+            Error::Internal(format!(
+                "No text index found for :{label}({property}). Call create_text_index() first."
+            ))
+        })?;
 
-        Ok(index.read().search(query, k))
+        // The index may hold nodes that are gone: see `live_index_hits`.
+        Ok(store.live_index_hits(k, |fetch| index.read().search(query, fetch)))
     }
 
     /// Performs hybrid search combining text (BM25) and vector similarity.
@@ -365,10 +363,14 @@ impl super::GrafeoDB {
 
         let fusion_method = fusion.unwrap_or_default();
         let mut sources: Vec<Vec<(NodeId, f64)>> = Vec::new();
+        // Both indexes may hold nodes that are gone: see `live_index_hits`.
+        let store = self.lpg_store();
+        let fetch = k.saturating_mul(2);
 
         // Text search
-        if let Some(text_index) = self.lpg_store().get_text_index(label, text_property) {
-            let text_results = text_index.read().search(query_text, k * 2);
+        if let Some(text_index) = store.get_text_index(label, text_property) {
+            let text_results =
+                store.live_index_hits(fetch, |fetch| text_index.read().search(query_text, fetch));
             if !text_results.is_empty() {
                 sources.push(text_results);
             }
@@ -376,10 +378,12 @@ impl super::GrafeoDB {
 
         // Vector search (if query vector provided)
         if let Some(query_vec) = query_vector
-            && let Some(vector_index) = self.lpg_store().get_vector_index(label, vector_property)
+            && let Some(vector_index) = store.get_vector_index(label, vector_property)
         {
             let accessor = self.make_vector_accessor(vector_property);
-            let vector_results = vector_index.search(query_vec, k * 2, &accessor);
+            let vector_results = store.live_index_hits(fetch, |fetch| {
+                vector_index.search(query_vec, fetch, &accessor)
+            });
             if !vector_results.is_empty() {
                 // Negate distances so that "closer = higher score", matching
                 // the text source convention (higher = better). This is
@@ -400,5 +404,27 @@ impl super::GrafeoDB {
         }
 
         Ok(fuse_results(&sources, &fusion_method, k))
+    }
+}
+
+/// One search of `index` for the `fetch` nodes nearest to `query`: with the
+/// beam width `ef` (the index's own when `None`), and among the nodes of
+/// `allowlist` only, when given.
+#[cfg(feature = "vector-index")]
+fn search_vector_index(
+    index: &grafeo_core::index::vector::VectorIndexKind,
+    query: &[f32],
+    fetch: usize,
+    ef: Option<usize>,
+    allowlist: Option<&std::collections::HashSet<NodeId>>,
+    accessor: &impl grafeo_core::index::vector::VectorAccessor,
+) -> Vec<(NodeId, f32)> {
+    match (allowlist, ef) {
+        (Some(allowlist), Some(ef)) => {
+            index.search_with_ef_and_filter(query, fetch, ef, allowlist, accessor)
+        }
+        (Some(allowlist), None) => index.search_with_filter(query, fetch, allowlist, accessor),
+        (None, Some(ef)) => index.search_with_ef(query, fetch, ef, accessor),
+        (None, None) => index.search(query, fetch, accessor),
     }
 }

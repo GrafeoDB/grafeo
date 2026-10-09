@@ -9,7 +9,7 @@
 //! cargo test -p grafeo-engine --features full --test expression_and_projection
 //! ```
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 
 // ============================================================================
@@ -1899,8 +1899,13 @@ fn test_start_node_end_node_gql() {
         .execute("MATCH ()-[r:KNOWS]->() RETURN startNode(r) AS sn, endNode(r) AS en")
         .unwrap();
     assert_eq!(r.row_count(), 1);
-    assert!(matches!(&r.rows()[0][0], Value::Int64(_)));
-    assert!(matches!(&r.rows()[0][1], Value::Int64(_)));
+    // The nodes themselves (openCypher), not their IDs.
+    let name = |value: &Value| match value {
+        Value::Map(map) => map.get(&PropertyKey::new("name")).cloned(),
+        other => panic!("expected a node, got {other:?}"),
+    };
+    assert_eq!(name(&r.rows()[0][0]), Some(Value::from("Alix")));
+    assert_eq!(name(&r.rows()[0][1]), Some(Value::from("Gus")));
 }
 
 #[test]

@@ -150,3 +150,55 @@ tests:
     expect:
       rows:
         - [Berlin, 1]
+
+  # ---------------------------------------------------------------------------
+  # The path and the edge variable (#572): the path variable binds the path
+  # found, its nodes and edges, and the variable of a quantified edge pattern
+  # is a group variable, the list of the path's edges. The edge pattern's
+  # property map holds for every edge of a path before the shortest is picked
+  # (ISO/IEC 39075:2024 16.6).
+  #
+  # Setup: Alix -> Gus -> Vincent -> Mia (KNOWS, w 3, 19, 88, kind 'road')
+  # and the shortcut Alix -> Vincent (w 38, kind 'air').
+  # ---------------------------------------------------------------------------
+
+  - name: edge_variable_binds_the_edges_of_the_path
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[e:KNOWS]->{1,4}(b:Person {name: 'Mia'}) RETURN size(e) AS n, [x IN e | x.w] AS ws, [v IN nodes(p) | v.name] AS names"
+      cypher: "MATCH p = shortestPath((a:Person {name: 'Alix'})-[e:KNOWS*1..4]->(b:Person {name: 'Mia'})) RETURN size(e) AS n, [x IN e | x.w] AS ws, [v IN nodes(p) | v.name] AS names"
+    expect:
+      rows:
+        - [2, "[38, 88]", "[Alix, Vincent, Mia]"]
+
+  - name: edge_property_map_holds_for_every_edge_of_the_search
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[e:KNOWS {kind: 'road'}]->{1,4}(b:Person {name: 'Mia'}) RETURN length(p) AS len, [x IN e | x.w] AS ws"
+      cypher: "MATCH p = shortestPath((a:Person {name: 'Alix'})-[e:KNOWS* {kind: 'road'}]->(b:Person {name: 'Mia'})) RETURN length(p) AS len, [x IN e | x.w] AS ws"
+    expect:
+      rows:
+        - [3, "[3, 19, 88]"]
+
+  - name: shortest_path_is_not_null
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    variants:
+      gql: "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[:KNOWS]->+(b:Person {name: 'Mia'}) RETURN p IS NULL AS missing, [r IN edges(p) | r.w] AS ws"
+      cypher: "MATCH p = shortestPath((a:Person {name: 'Alix'})-[:KNOWS*]->(b:Person {name: 'Mia'})) RETURN p IS NULL AS missing, [r IN relationships(p) | r.w] AS ws"
+    expect:
+      rows:
+        - [false, "[38, 88]"]
+
+  - name: all_shortest_binds_each_path
+    setup:
+      - "INSERT (ams:City {name: 'Amsterdam'}), (ber:City {name: 'Berlin'}), (par:City {name: 'Paris'}), (pra:City {name: 'Prague'}), (ams)-[:ROUTE {w: 3}]->(ber), (ber)-[:ROUTE {w: 19}]->(pra), (ams)-[:ROUTE {w: 88}]->(par), (par)-[:ROUTE {w: 38}]->(pra)"
+    variants:
+      gql: "MATCH p = ALL SHORTEST (a:City {name: 'Amsterdam'})-[r:ROUTE]->+(b:City {name: 'Prague'}) RETURN [n IN nodes(p) | n.name] AS names, [x IN r | x.w] AS ws"
+      cypher: "MATCH p = allShortestPaths((a:City {name: 'Amsterdam'})-[r:ROUTE*]->(b:City {name: 'Prague'})) RETURN [n IN nodes(p) | n.name] AS names, [x IN r | x.w] AS ws"
+    expect:
+      rows:
+        - ["[Amsterdam, Berlin, Prague]", "[3, 19]"]
+        - ["[Amsterdam, Paris, Prague]", "[88, 38]"]

@@ -4,8 +4,15 @@
 # `grafeo-core/src/index/vector/simd.rs`, giving ~4-5x vector-search speedup
 # in the browser. Supported on Chrome 91+, Firefox 89+, Safari 16.4+
 # (universal on active browsers as of 2026).
+#
+# `-zstack-size` gives the module an 8 MiB stack instead of the default 1 MiB.
+# wasm32 has no guard page: a stack overflow writes over memory and leaves the
+# module broken (#573). The statement limits keep queries well below 1 MiB;
+# the larger stack is the margin for everything else. It is part of the linear
+# memory, which browsers commit only as pages are touched.
 [target.wasm32-unknown-unknown]
 rustflags = [
     '--cfg', 'getrandom_backend="wasm_js"',
     '-C', 'target-feature=+simd128',
+    '-C', 'link-arg=-zstack-size=8388608',
 ]

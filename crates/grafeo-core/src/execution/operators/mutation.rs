@@ -160,6 +160,13 @@ pub trait ConstraintValidator: Send + Sync {
     fn inject_defaults(&self, labels: &[String], properties: &mut Vec<(String, Value)>) {
         let _ = (labels, properties);
     }
+
+    /// Injects the default values of the edge type `edge_type` for the
+    /// properties a new edge is not given, like
+    /// [`inject_defaults`](Self::inject_defaults) for a node.
+    fn inject_edge_defaults(&self, edge_type: &str, properties: &mut Vec<(String, Value)>) {
+        let _ = (edge_type, properties);
+    }
 }
 
 /// Operator that creates new nodes.
@@ -331,11 +338,16 @@ impl PropertySource {
                         .edge(edge_id)
                         .and_then(|edge| edge.get_property(property).cloned())
                         .unwrap_or(Value::Null)
-                } else if let Some(Value::Map(map)) = col.get_value(row) {
-                    let key = PropertyKey::new(property);
-                    map.get(&key).cloned().unwrap_or(Value::Null)
                 } else {
-                    Value::Null
+                    match col.get_value(row) {
+                        Some(Value::Map(map)) => map
+                            .get(&PropertyKey::new(property))
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        // A component of a temporal value (`d.month`)
+                        Some(value) => value.temporal_component(property).unwrap_or(Value::Null),
+                        None => Value::Null,
+                    }
                 }
             }
             // Expression sources require an augmented row built by the producer.

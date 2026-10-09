@@ -515,6 +515,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            rdf_literals: false,
         }];
         let agg: Box<dyn Operator> = Box::new(HashAggregateOperator::new(
             scan,

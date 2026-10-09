@@ -5,20 +5,20 @@
 #[allow(clippy::wildcard_imports)]
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
+use crate::query::limits::{Nesting, nesting_error_message};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, Result};
-
-/// Maximum nesting depth for recursive parsing constructs (nested traversals
-/// such as `.where()`, `.local()`, `.union()`, `.choose()`).
-const MAX_NESTING_DEPTH: u32 = 128;
 
 /// Gremlin parser.
 pub struct Parser<'a> {
     tokens: Vec<Token>,
     position: usize,
     source: &'a str,
-    /// Current nesting depth for recursive parsing constructs.
-    nesting_depth: u32,
+    /// How deep the traversal parsed so far nests (see
+    /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)):
+    /// nested traversals such as `.where()`, `.local()`, `.union()`,
+    /// `.choose()`.
+    nesting: Nesting,
 }
 
 impl<'a> Parser<'a> {
@@ -30,24 +30,25 @@ impl<'a> Parser<'a> {
             tokens,
             position: 0,
             source,
-            nesting_depth: 0,
+            nesting: Nesting::default(),
         }
     }
 
-    /// Increments the nesting depth and returns an error if the limit is exceeded.
+    /// Enters a nested traversal, which nests two levels: translating and
+    /// planning one takes as much stack as a subquery. Fails past the nesting
+    /// limit.
     fn enter_nesting(&mut self) -> Result<()> {
-        self.nesting_depth += 1;
-        if self.nesting_depth > MAX_NESTING_DEPTH {
-            return Err(self.error(&format!(
-                "Maximum nesting depth of {MAX_NESTING_DEPTH} exceeded"
-            )));
+        if self.nesting.enter() && self.nesting.enter() {
+            Ok(())
+        } else {
+            Err(self.error(&nesting_error_message()))
         }
-        Ok(())
     }
 
-    /// Decrements the nesting depth.
+    /// Leaves the levels [`Self::enter_nesting`] entered.
     fn exit_nesting(&mut self) {
-        self.nesting_depth = self.nesting_depth.saturating_sub(1);
+        self.nesting.exit();
+        self.nesting.exit();
     }
 
     /// Parses the query into a statement.

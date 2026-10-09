@@ -94,7 +94,7 @@ if (Should-Run "node") {
     Pop-Location
     if ($LASTEXITCODE -eq 0) {
         Push-Location $root
-        npx vitest run tests/spec/runners/node/spec-runner.test.mjs 2>&1 | Tee-Object -Variable nodeOut
+        npx vitest run --dir tests/spec/runners/node spec-runner.test.mjs 2>&1 | Tee-Object -Variable nodeOut
         if ($LASTEXITCODE -eq 0) { $passed += "node" } else { $failures += "node" }
         Pop-Location
     } else {

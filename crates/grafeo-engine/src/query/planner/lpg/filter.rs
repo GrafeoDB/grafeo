@@ -47,15 +47,6 @@ use super::{
 };
 use crate::query::plan::PushdownHint;
 
-/// Cross-type equality comparison with Int64/Float64 coercion.
-fn values_equal_coerced(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64 - b).abs() < f64::EPSILON,
-        (Value::Float64(a), Value::Int64(b)) => (a - *b as f64).abs() < f64::EPSILON,
-        _ => a == b,
-    }
-}
-
 impl super::Planner {
     /// Whether node `id` is visible to this query and, when `label` is given,
     /// carries it. An index lookup checks its few results this way, instead of
@@ -690,56 +681,27 @@ impl super::Planner {
         // Handles both simple (n.prop = val) and compound (n.a = 1 AND n.b = 2)
         let conditions = Self::extract_equality_conditions(&filter.predicate, &scan_variable);
 
-        if conditions.is_empty() {
-            return Ok(None);
+        // The nodes an index finds may be equal to a condition's value under
+        // `=` (#535), the smallest set of any indexed condition (an index that
+        // holds the values the query reads, see `reads_the_current_store`).
+        // Without one the scan and the filter run as planned.
+        let mut candidates: Option<Vec<NodeId>> = None;
+        if self.reads_the_current_store() {
+            for (property, value) in &conditions {
+                if !self.store.has_property_index(property) {
+                    continue;
+                }
+                if let Some(found) = self.store.find_nodes_maybe_equal(property, value)
+                    && candidates
+                        .as_ref()
+                        .is_none_or(|best| found.len() < best.len())
+                {
+                    candidates = Some(found);
+                }
+            }
         }
-
-        // Check if at least one condition has an index (one that holds the
-        // values the query reads, see `reads_the_current_store`)
-        let has_indexed_condition = self.reads_the_current_store()
-            && conditions
-                .iter()
-                .any(|(prop, _)| self.store.has_property_index(prop));
-
-        // Without an index we can still optimize when there's a label constraint:
-        // label-first scan + property check avoids DataChunk/expression overhead.
-        if !has_indexed_condition && scan_label.is_none() {
+        let Some(mut matching_nodes) = candidates else {
             return Ok(None);
-        }
-
-        let mut matching_nodes = if has_indexed_condition {
-            // Use index-based batch lookup
-            let conditions_ref: Vec<(&str, Value)> = conditions
-                .iter()
-                .map(|(p, v)| (p.as_str(), v.clone()))
-                .collect();
-            // The scan's label is checked on each found node below.
-            self.store.find_nodes_by_properties(&conditions_ref)
-        } else {
-            // No index but we have a label: scan label first, then check properties.
-            // This is more efficient than ScanOperator → DataChunk → FilterOperator
-            // because it avoids DataChunk materialization and expression evaluation.
-            let label = scan_label.as_ref().expect("label checked above");
-            let label_nodes = self.store.nodes_by_label(label);
-            let epoch = self.viewing_epoch;
-            let tx_id = self.transaction_id;
-            label_nodes
-                .into_iter()
-                .filter(|&node_id| {
-                    // Use versioned/epoch-aware node access for correct properties
-                    let node = if let Some(tx) = tx_id {
-                        self.store.get_node_versioned(node_id, epoch, tx)
-                    } else {
-                        self.store.get_node_at_epoch(node_id, epoch)
-                    };
-                    node.is_some_and(|n| {
-                        conditions.iter().all(|(prop, val)| {
-                            n.get_property(prop)
-                                .is_some_and(|v| values_equal_coerced(v, val))
-                        })
-                    })
-                })
-                .collect()
         };
 
         // MVCC visibility: filter out nodes not visible at the current epoch/tx
@@ -747,35 +709,42 @@ impl super::Planner {
         // nodes without the scan's label.
         matching_nodes.retain(|&id| self.visible_with_label(id, scan_label.as_deref()));
 
-        let columns = vec![scan_variable.clone()];
-        let node_list_op: Box<dyn Operator> = Box::new(NodeListOperator::new(matching_nodes, 2048));
+        let columns = vec![scan_variable];
 
         // Absorbed-scan PROFILE entry: see `record_absorbed_scan_entry`.
         self.record_absorbed_scan_entry("NodeScan", &filter.input);
 
-        // Check for remaining predicate parts that weren't pushed down
-        // (e.g., range conditions in a compound predicate like `n.name = 'Alix' AND n.age > 30`)
-        if let Some(remaining) =
-            Self::extract_remaining_predicate(&filter.predicate, &scan_variable, &conditions)
-        {
-            let variable_columns: HashMap<String, usize> = columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let filter_expr = self.convert_expression(&remaining)?;
-            let predicate = ExpressionPredicate::new(
-                filter_expr,
-                variable_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_session_context(self.session_context.clone());
-            let filtered = Box::new(FilterOperator::new(node_list_op, Box::new(predicate)));
-            Ok(Some((filtered, columns)))
-        } else {
-            Ok(Some((node_list_op, columns)))
-        }
+        // The index finds candidates: the whole predicate decides each, with
+        // the same `=` as a scan.
+        let found = self.found_nodes(matching_nodes, &columns, &filter.predicate)?;
+        Ok(Some((found, columns)))
+    }
+
+    /// The nodes an index lookup found that meet `predicate`, as the single
+    /// column `columns`: the lookup finds every node `=` may find equal, the
+    /// predicate decides.
+    fn found_nodes(
+        &self,
+        nodes: Vec<NodeId>,
+        columns: &[String],
+        predicate: &LogicalExpression,
+    ) -> Result<Box<dyn Operator>> {
+        let variable_columns: HashMap<String, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+        let filter_expr = self.convert_expression(predicate)?;
+        let predicate = ExpressionPredicate::new(
+            filter_expr,
+            variable_columns,
+            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+        )
+        .with_transaction_context(self.viewing_epoch, self.transaction_id)
+        .with_session_context(self.session_context.clone());
+        Ok(Box::new(
+            NodeListOperator::new(nodes, 2048).with_predicate(Box::new(predicate)),
+        ))
     }
 
     /// Tries to optimize a filter shaped as `var.prop IN [literals]` using
@@ -829,12 +798,16 @@ impl super::Planner {
             return Ok(Some((empty, columns)));
         }
 
-        // Per-value index lookup, deduplicate (the same node could match
-        // duplicate values, and we don't want to emit it twice).
+        // Per-value index lookup of the nodes `=` may find equal (#535),
+        // deduplicate (the same node could match duplicate values, and we
+        // don't want to emit it twice).
         let mut seen: GrafeoSet<_> = GrafeoSet::default();
         let mut matching_nodes = Vec::new();
         for value in &values {
-            for node_id in self.store.find_nodes_by_property(property, value) {
+            let Some(found) = self.store.find_nodes_maybe_equal(property, value) else {
+                return Ok(None);
+            };
+            for node_id in found {
                 if seen.insert(node_id) {
                     matching_nodes.push(node_id);
                 }
@@ -848,60 +821,10 @@ impl super::Planner {
         self.record_absorbed_scan_entry("NodeScan", &filter.input);
 
         let columns = vec![scan_variable];
-        let node_list_op: Box<dyn Operator> = Box::new(NodeListOperator::new(matching_nodes, 2048));
-        Ok(Some((node_list_op, columns)))
-    }
-
-    /// Extracts the remaining predicate after removing pushed-down equality conditions.
-    ///
-    /// Given `n.name = 'Alix' AND n.age > 30` with pushed conditions `[("name", "Alix")]`,
-    /// returns `Some(n.age > 30)`. Returns `None` when all conditions were pushed down.
-    pub(super) fn extract_remaining_predicate(
-        predicate: &LogicalExpression,
-        target_variable: &str,
-        pushed_conditions: &[(String, Value)],
-    ) -> Option<LogicalExpression> {
-        match predicate {
-            LogicalExpression::Binary {
-                left,
-                op: BinaryOp::And,
-                right,
-            } => {
-                let left_remaining =
-                    Self::extract_remaining_predicate(left, target_variable, pushed_conditions);
-                let right_remaining =
-                    Self::extract_remaining_predicate(right, target_variable, pushed_conditions);
-
-                match (left_remaining, right_remaining) {
-                    (Some(l), Some(r)) => Some(LogicalExpression::Binary {
-                        left: Box::new(l),
-                        op: BinaryOp::And,
-                        right: Box::new(r),
-                    }),
-                    (Some(l), None) => Some(l),
-                    (None, Some(r)) => Some(r),
-                    (None, None) => None,
-                }
-            }
-            LogicalExpression::Binary {
-                left,
-                op: BinaryOp::Eq,
-                right,
-            } => {
-                // Check if this equality was pushed down
-                if let Some((var, prop, val)) = Self::extract_property_equality(left, right)
-                    && var == target_variable
-                    && pushed_conditions
-                        .iter()
-                        .any(|(p, v)| *p == prop && *v == val)
-                {
-                    None // Already handled at the store level
-                } else {
-                    Some(predicate.clone())
-                }
-            }
-            _ => Some(predicate.clone()),
-        }
+        // The lookup finds candidates: `IN` decides each, with the same `=`
+        // as a scan.
+        let found = self.found_nodes(matching_nodes, &columns, &filter.predicate)?;
+        Ok(Some((found, columns)))
     }
 
     /// Extracts equality conditions (property = literal) from a predicate.

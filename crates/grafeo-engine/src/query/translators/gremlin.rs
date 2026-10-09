@@ -48,7 +48,8 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 
     let statement = gremlin::parse(actual_query)?;
     let translator = GremlinTranslator::new();
-    let mut plan = translator.translate_statement(&statement)?;
+    let plan = translator.translate_statement(&statement)?;
+    let mut plan = crate::query::limits::check_plan_depth(plan)?;
     plan.explain = explain;
     plan.profile = profile;
     Ok(plan)

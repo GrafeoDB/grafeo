@@ -11,9 +11,10 @@ use grafeo_common::types::{HashableValue as GroupValueKey, LogicalType, Value};
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
-use super::accumulator::{AggregateExpr, AggregateFunction, HashableValue};
+use grafeo_common::types::{LogicalType, Value};
+
+use super::accumulator::{AggregateExpr, AggregateFunction, HashableValue, RowKey};
 use super::{Operator, OperatorError, OperatorResult};
-use crate::execution::DataChunk;
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder, copied_column_type};
 
 /// State for a single aggregation computation.
@@ -42,10 +43,16 @@ pub enum AggregateState {
     Avg(f64, i64),
     /// Average distinct state (sum, count, seen values).
     AvgDistinct(f64, i64, HashSet<HashableValue>),
-    /// Min state.
+    /// Min state: the least value, in the order of ORDER BY (openCypher
+    /// orderability), whatever the types of the values.
     Min(Option<Value>),
-    /// Max state.
+    /// Max state: the greatest value, in the order of ORDER BY.
     Max(Option<Value>),
+    /// SPARQL MIN state: RDF literals held as text, where two that read as
+    /// numbers compare by those numbers (see [`AggregateExpr::rdf_literals`]).
+    MinOfRdfLiterals(Option<Value>),
+    /// SPARQL MAX state, see [`AggregateState::MinOfRdfLiterals`].
+    MaxOfRdfLiterals(Option<Value>),
     /// First state.
     First(Option<Value>),
     /// Last state.
@@ -83,11 +90,71 @@ pub enum AggregateState {
         m2_y: f64,
         c_xy: f64,
     },
+    /// DISTINCT for an aggregate without a distinct state of its own (the
+    /// statistical and binary set functions): `inner` sees each operand, or
+    /// each `(y, x)` pair, once.
+    Distinct {
+        /// The identities of the operands passed on so far.
+        seen: HashSet<HashableValue>,
+        /// The state of the aggregate itself; never another `Distinct`.
+        inner: Box<AggregateState>,
+    },
 }
 
 impl AggregateState {
+    /// Creates the initial state of `expr`'s aggregate: [`new`](Self::new)
+    /// with its parameters, and MIN and MAX of RDF literals for SPARQL.
+    #[must_use]
+    pub fn for_expr(expr: &AggregateExpr) -> Self {
+        let state = Self::new(
+            expr.function,
+            expr.distinct,
+            expr.percentile,
+            expr.separator.as_deref(),
+        );
+        match state {
+            AggregateState::Min(min) if expr.rdf_literals => AggregateState::MinOfRdfLiterals(min),
+            AggregateState::Max(max) if expr.rdf_literals => AggregateState::MaxOfRdfLiterals(max),
+            state => state,
+        }
+    }
+
     /// Creates initial state for an aggregation function.
     pub fn new(
+        function: AggregateFunction,
+        distinct: bool,
+        percentile: Option<f64>,
+        separator: Option<&str>,
+    ) -> Self {
+        let state = Self::new_counting_copies(function, distinct, percentile, separator);
+        // The statistical and binary set functions keep no identities of
+        // their own: DISTINCT drops the copies before they see them.
+        if distinct
+            && matches!(
+                state,
+                AggregateState::StdDev { .. }
+                    | AggregateState::StdDevPop { .. }
+                    | AggregateState::Variance { .. }
+                    | AggregateState::VariancePop { .. }
+                    | AggregateState::PercentileDisc { .. }
+                    | AggregateState::PercentileCont { .. }
+                    | AggregateState::Bivariate { .. }
+            )
+        {
+            AggregateState::Distinct {
+                seen: HashSet::new(),
+                inner: Box::new(state),
+            }
+        } else {
+            state
+        }
+    }
+
+    /// The state of `function`, with the identities DISTINCT needs for the
+    /// functions that track them themselves (count, sum, avg, collect and
+    /// group_concat). MIN, MAX and SAMPLE give the same result for any
+    /// number of copies of a value; FIRST and LAST follow the input order.
+    fn new_counting_copies(
         function: AggregateFunction,
         distinct: bool,
         percentile: Option<f64>,
@@ -287,28 +354,43 @@ impl AggregateState {
                     }
                 }
             }
+            // MIN and MAX order values as ORDER BY does, a total order over
+            // values of every type, so the result does not depend on the
+            // order of the input (a value never replaced one of another type).
             AggregateState::Min(min) => {
-                if let Some(v) = value {
-                    match min {
-                        None => *min = Some(v),
-                        Some(current) => {
-                            if compare_values(&v, current) == Some(std::cmp::Ordering::Less) {
-                                *min = Some(v);
-                            }
-                        }
-                    }
+                if let Some(v) = value
+                    && min
+                        .as_ref()
+                        .is_none_or(|current| compare_values_total(&v, current).is_lt())
+                {
+                    *min = Some(v);
                 }
             }
             AggregateState::Max(max) => {
-                if let Some(v) = value {
-                    match max {
-                        None => *max = Some(v),
-                        Some(current) => {
-                            if compare_values(&v, current) == Some(std::cmp::Ordering::Greater) {
-                                *max = Some(v);
-                            }
-                        }
-                    }
+                if let Some(v) = value
+                    && max
+                        .as_ref()
+                        .is_none_or(|current| compare_values_total(&v, current).is_gt())
+                {
+                    *max = Some(v);
+                }
+            }
+            AggregateState::MinOfRdfLiterals(min) => {
+                if let Some(v) = value
+                    && min.as_ref().is_none_or(|current| {
+                        compare_values(&v, current) == Some(std::cmp::Ordering::Less)
+                    })
+                {
+                    *min = Some(v);
+                }
+            }
+            AggregateState::MaxOfRdfLiterals(max) => {
+                if let Some(v) = value
+                    && max.as_ref().is_none_or(|current| {
+                        compare_values(&v, current) == Some(std::cmp::Ordering::Greater)
+                    })
+                {
+                    *max = Some(v);
                 }
             }
             AggregateState::First(first) => {
@@ -379,6 +461,14 @@ impl AggregateState {
                 // Bivariate functions require two values; use update_bivariate() instead.
                 // Single-value update is a no-op for bivariate state.
             }
+            AggregateState::Distinct { seen, inner } => match &value {
+                Some(operand) => {
+                    if seen.insert(HashableValue::from(operand)) {
+                        inner.update(value);
+                    }
+                }
+                None => inner.update(None),
+            },
         }
     }
 
@@ -387,6 +477,20 @@ impl AggregateState {
     /// Uses the two-variable Welford online algorithm for numerically stable computation
     /// of covariance and related statistics. Skips the update if either value is null.
     pub fn update_bivariate(&mut self, y_val: Option<Value>, x_val: Option<Value>) {
+        // DISTINCT counts each (y, x) pair once; a pair with a null is no
+        // pair (see below), so it is no identity either.
+        if let AggregateState::Distinct { seen, inner } = self {
+            if let (Some(y), Some(x)) = (&y_val, &x_val)
+                && !y.is_null()
+                && !x.is_null()
+                && seen.insert(HashableValue::from(&Value::List(
+                    vec![y.clone(), x.clone()].into(),
+                )))
+            {
+                inner.update_bivariate(y_val, x_val);
+            }
+            return;
+        }
         if let AggregateState::Bivariate {
             count,
             mean_x,
@@ -444,8 +548,10 @@ impl AggregateState {
                     Value::Float64(*sum / *count as f64)
                 }
             }
-            AggregateState::Min(min) => min.clone().unwrap_or(Value::Null),
-            AggregateState::Max(max) => max.clone().unwrap_or(Value::Null),
+            AggregateState::Min(extreme)
+            | AggregateState::Max(extreme)
+            | AggregateState::MinOfRdfLiterals(extreme)
+            | AggregateState::MaxOfRdfLiterals(extreme) => extreme.clone().unwrap_or(Value::Null),
             AggregateState::First(first) => first.clone().unwrap_or(Value::Null),
             AggregateState::Last(last) => last.clone().unwrap_or(Value::Null),
             AggregateState::Collect(list) | AggregateState::CollectDistinct(list, _) => {
@@ -623,11 +729,24 @@ impl AggregateState {
                     _ => Value::Null, // non-bivariate functions never reach here
                 }
             }
+            AggregateState::Distinct { inner, .. } => inner.finalize(),
+        }
+    }
+
+    /// Whether this state takes `(y, x)` pairs through
+    /// [`update_bivariate`](Self::update_bivariate): a binary set function,
+    /// with or without DISTINCT.
+    #[must_use]
+    pub fn is_bivariate(&self) -> bool {
+        match self {
+            AggregateState::Bivariate { .. } => true,
+            AggregateState::Distinct { inner, .. } => inner.is_bivariate(),
+            _ => false,
         }
     }
 }
 
-use super::value_utils::{compare_floats, compare_values, value_to_f64};
+use super::value_utils::{compare_floats, compare_values, compare_values_total, value_to_f64};
 
 /// Converts a Value to its string representation for GROUP_CONCAT.
 fn agg_value_to_string(val: &Value) -> String {
@@ -641,30 +760,12 @@ fn agg_value_to_string(val: &Value) -> String {
     }
 }
 
-/// A group key for hash-based aggregation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct GroupKey(Vec<GroupValueKey>);
-
-impl GroupKey {
-    /// Creates a group key from column values.
-    fn from_row(chunk: &DataChunk, row: usize, group_columns: &[usize]) -> Self {
-        let parts: Vec<GroupValueKey> = group_columns
-            .iter()
-            .map(|&col_idx| {
-                chunk
-                    .column(col_idx)
-                    .and_then(|col| col.get_value(row))
-                    .unwrap_or(Value::Null)
-                    .into()
-            })
-            .collect();
-        GroupKey(parts)
-    }
-
-    /// Converts the group key back to values.
-    fn to_values(&self) -> Vec<Value> {
-        self.0.iter().map(|value| value.0.clone()).collect()
-    }
+/// A group of the hash aggregate: the values of its grouping keys, as the
+/// group's first row has them (a key keeps its value in its own type), and
+/// the states of its aggregates.
+struct Group {
+    key_values: Vec<Value>,
+    states: Vec<AggregateState>,
 }
 
 /// Hash-based aggregate operator.
@@ -682,12 +783,14 @@ pub struct HashAggregateOperator {
     output_schema: Vec<LogicalType>,
     /// The column types of the input chunks.
     input_types: ColumnTypes,
-    /// Ordered map: group key -> aggregate states (IndexMap for deterministic iteration order).
-    groups: IndexMap<GroupKey, Vec<AggregateState>>,
+    /// The groups by their key (IndexMap for deterministic iteration order).
+    /// Keys whose values are the same values (`3` and `3.0`) are one key,
+    /// see [`RowKey`].
+    groups: IndexMap<RowKey, Group>,
     /// Whether aggregation is complete.
     aggregation_complete: bool,
     /// Results iterator.
-    results: Option<std::vec::IntoIter<(GroupKey, Vec<AggregateState>)>>,
+    results: Option<std::vec::IntoIter<(RowKey, Group)>>,
 }
 
 impl HashAggregateOperator {
@@ -740,22 +843,18 @@ impl HashAggregateOperator {
         while let Some(chunk) = self.child.next()? {
             self.input_types.add(&chunk);
             for row in chunk.selected_indices() {
-                let key = GroupKey::from_row(&chunk, row, &self.group_columns);
-
-                // Get or create aggregate states for this group
-                let states = self.groups.entry(key).or_insert_with(|| {
-                    self.aggregates
-                        .iter()
-                        .map(|agg| {
-                            AggregateState::new(
-                                agg.function,
-                                agg.distinct,
-                                agg.percentile,
-                                agg.separator.as_deref(),
-                            )
-                        })
-                        .collect()
-                });
+                // Get or create aggregate states for this group; a new group
+                // keeps the key values of its first row.
+                let group_columns = &self.group_columns;
+                let aggregates = &self.aggregates;
+                let states = &mut self
+                    .groups
+                    .entry(RowKey::from_row(&chunk, row, group_columns))
+                    .or_insert_with(|| Group {
+                        key_values: RowKey::values_of(&chunk, row, group_columns),
+                        states: aggregates.iter().map(AggregateState::for_expr).collect(),
+                    })
+                    .states;
 
                 // Update each aggregate
                 for (i, agg) in self.aggregates.iter().enumerate() {
@@ -830,13 +929,7 @@ impl Operator for HashAggregateOperator {
             let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
 
             for agg in &self.aggregates {
-                let state = AggregateState::new(
-                    agg.function,
-                    agg.distinct,
-                    agg.percentile,
-                    agg.separator.as_deref(),
-                );
-                let value = state.finalize();
+                let value = AggregateState::for_expr(agg).finalize();
                 if let Some(col) = builder.column_mut(self.group_columns.len()) {
                     col.push_value(value);
                 }
@@ -854,17 +947,16 @@ impl Operator for HashAggregateOperator {
 
         let mut builder = DataChunkBuilder::with_capacity(&types, 2048);
 
-        for (key, states) in results.by_ref() {
+        for (_, group) in results.by_ref() {
             // Output group key columns
-            let key_values = key.to_values();
-            for (i, value) in key_values.into_iter().enumerate() {
+            for (i, value) in group.key_values.into_iter().enumerate() {
                 if let Some(col) = builder.column_mut(i) {
                     col.push_value(value);
                 }
             }
 
             // Output aggregate results
-            for (i, state) in states.iter().enumerate() {
+            for (i, state) in group.states.iter().enumerate() {
                 let col_idx = self.group_columns.len() + i;
                 if let Some(col) = builder.column_mut(col_idx) {
                     col.push_value(state.finalize());
@@ -925,17 +1017,7 @@ impl SimpleAggregateOperator {
         aggregates: Vec<AggregateExpr>,
         output_schema: Vec<LogicalType>,
     ) -> Self {
-        let states = aggregates
-            .iter()
-            .map(|agg| {
-                AggregateState::new(
-                    agg.function,
-                    agg.distinct,
-                    agg.percentile,
-                    agg.separator.as_deref(),
-                )
-            })
-            .collect();
+        let states = aggregates.iter().map(AggregateState::for_expr).collect();
 
         Self {
             child,
@@ -1023,14 +1105,7 @@ impl Operator for SimpleAggregateOperator {
         self.states = self
             .aggregates
             .iter()
-            .map(|agg| {
-                AggregateState::new(
-                    agg.function,
-                    agg.distinct,
-                    agg.percentile,
-                    agg.separator.as_deref(),
-                )
-            })
+            .map(AggregateState::for_expr)
             .collect();
         self.done = false;
     }
@@ -1047,6 +1122,7 @@ impl Operator for SimpleAggregateOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
     use arcstr::ArcStr;
     use std::sync::Arc;
@@ -1722,6 +1798,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            rdf_literals: false,
         };
 
         let mut agg =
@@ -1744,6 +1821,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            rdf_literals: false,
         };
 
         let mut agg =
@@ -1787,7 +1865,7 @@ mod tests {
             for distinct in [false, true] {
                 let new_state = || AggregateState::new(function, distinct, Some(0.5), Some("|"));
                 let update = |state: &mut AggregateState, operand: &Value| {
-                    if matches!(state, AggregateState::Bivariate { .. }) {
+                    if state.is_bivariate() {
                         state.update_bivariate(Some(operand.clone()), Some(Value::Int64(19)));
                     } else {
                         state.update(Some(operand.clone()));
@@ -1811,6 +1889,66 @@ mod tests {
         }
     }
 
+    /// With DISTINCT a statistical aggregate sees each value once, and a
+    /// binary set function each `(y, x)` pair once: over values with copies
+    /// it gives what the plain aggregate gives over each value once.
+    #[test]
+    fn distinct_statistical_and_binary_set_functions_see_each_value_once() {
+        let functions = [
+            AggregateFunction::StdDev,
+            AggregateFunction::StdDevPop,
+            AggregateFunction::Variance,
+            AggregateFunction::VariancePop,
+            AggregateFunction::PercentileDisc,
+            AggregateFunction::PercentileCont,
+            AggregateFunction::CovarSamp,
+            AggregateFunction::CovarPop,
+            AggregateFunction::Corr,
+            AggregateFunction::RegrSlope,
+            AggregateFunction::RegrIntercept,
+            AggregateFunction::RegrR2,
+            AggregateFunction::RegrCount,
+            AggregateFunction::RegrSxx,
+            AggregateFunction::RegrSyy,
+            AggregateFunction::RegrSxy,
+            AggregateFunction::RegrAvgx,
+            AggregateFunction::RegrAvgy,
+        ];
+        for function in functions {
+            let aggregate = |distinct: bool, xs: &[i64]| {
+                let mut state = AggregateState::new(function, distinct, Some(0.5), None);
+                for &x in xs {
+                    if state.is_bivariate() {
+                        let y = 2 * x + x % 19;
+                        state.update_bivariate(Some(Value::Int64(y)), Some(Value::Int64(x)));
+                    } else {
+                        state.update(Some(Value::Int64(x)));
+                    }
+                }
+                state.finalize()
+            };
+            let with_copies = [3, 3, 19, 3, 88];
+            let once = [3, 19, 88];
+            assert_ne!(
+                aggregate(false, &with_copies),
+                aggregate(false, &once),
+                "{function:?}: the copies must change the plain aggregate"
+            );
+            assert_eq!(
+                aggregate(true, &with_copies),
+                aggregate(false, &once),
+                "{function:?} with DISTINCT"
+            );
+        }
+
+        // Pairs that share a y or an x are different pairs
+        let mut count = AggregateState::new(AggregateFunction::RegrCount, true, None, None);
+        for (y, x) in [(19, 3), (19, 3), (88, 3), (19, 88)] {
+            count.update_bivariate(Some(Value::Int64(y)), Some(Value::Int64(x)));
+        }
+        assert_eq!(count.finalize(), Value::Int64(3));
+    }
+
     #[test]
     fn test_variance_sample() {
         let mock = MockOperator::new(vec![create_statistical_test_chunk()]);
@@ -1823,6 +1961,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            rdf_literals: false,
         };
 
         let mut agg = SimpleAggregateOperator::new(
@@ -1849,6 +1988,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            rdf_literals: false,
         };
 
         let mut agg = SimpleAggregateOperator::new(
@@ -1879,6 +2019,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            rdf_literals: false,
         };
 
         let mut agg = SimpleAggregateOperator::new(
@@ -2000,5 +2141,189 @@ mod tests {
         assert_eq!(group_columns, vec![0, 2]);
         assert_eq!(aggregates.len(), 2);
         assert!(child.next().unwrap().is_none());
+    }
+
+    /// One chunk of one column of any value per value of `values`.
+    fn values_chunk(values: &[Value]) -> DataChunk {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+        for value in values {
+            builder.column_mut(0).unwrap().push_value(value.clone());
+            builder.advance_row();
+        }
+        builder.finish()
+    }
+
+    /// The `(key, count(*))` rows of grouping `values` by themselves.
+    fn grouped_counts(values: &[Value]) -> Vec<(Value, Value)> {
+        let mut aggregate = HashAggregateOperator::new(
+            Box::new(MockOperator::new(vec![values_chunk(values)])),
+            vec![0],
+            vec![AggregateExpr::count_star()],
+            vec![LogicalType::Any, LogicalType::Int64],
+        );
+        let mut rows = Vec::new();
+        while let Some(chunk) = aggregate.next().unwrap() {
+            for row in chunk.selected_indices() {
+                rows.push((
+                    chunk.column(0).unwrap().get_value(row).unwrap(),
+                    chunk.column(1).unwrap().get_value(row).unwrap(),
+                ));
+            }
+        }
+        rows
+    }
+
+    /// A grouping key keeps its value in its own type (a float key came back
+    /// as the integer of its bits), and keys that are the same value (`3`
+    /// and `3.0`, `-0.0` and `0.0`, two NaN) are one group, which keeps the
+    /// value of its first row.
+    #[test]
+    fn group_keys_are_equivalent_values_and_keep_the_first() {
+        let nan = Value::Float64(f64::NAN);
+        let rows = grouped_counts(&[
+            Value::Float64(1.5),
+            Value::Float64(3.0),
+            Value::Int64(3),
+            Value::Float64(-0.0),
+            Value::Float64(0.0),
+            nan.clone(),
+            Value::Float64(f64::from_bits(f64::NAN.to_bits() | 1)),
+            Value::Float64(1.5),
+        ]);
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert_eq!(rows[0], (Value::Float64(1.5), Value::Int64(2)));
+        assert_eq!(rows[1], (Value::Float64(3.0), Value::Int64(2)));
+        assert_eq!(rows[2].1, Value::Int64(2));
+        assert!(
+            matches!(rows[2].0, Value::Float64(zero) if zero == 0.0 && zero.is_sign_negative()),
+            "{rows:?}"
+        );
+        assert!(
+            matches!(rows[3], (Value::Float64(n), Value::Int64(2)) if n.is_nan()),
+            "{rows:?}"
+        );
+    }
+
+    /// Lists, vectors and paths group by all their items: a vector key stays
+    /// a vector (it became text, one group per first item and length), and
+    /// paths of one length are not one group.
+    #[test]
+    fn composite_group_keys_compare_every_item() {
+        let path = |middle: i64| Value::Path {
+            nodes: vec![Value::Int64(1), Value::Int64(middle), Value::Int64(9)].into(),
+            edges: vec![Value::Int64(10 + middle), Value::Int64(20 + middle)].into(),
+        };
+        let rows = grouped_counts(&[
+            Value::Vector(vec![1.0_f32, 2.0].into()),
+            Value::Vector(vec![1.0_f32, 3.0].into()),
+            path(2),
+            path(3),
+            Value::List(vec![Value::Int64(3)].into()),
+            Value::List(vec![Value::Float64(3.0)].into()),
+        ]);
+        assert_eq!(
+            rows,
+            [
+                (Value::Vector(vec![1.0_f32, 2.0].into()), Value::Int64(1)),
+                (Value::Vector(vec![1.0_f32, 3.0].into()), Value::Int64(1)),
+                (path(2), Value::Int64(1)),
+                (path(3), Value::Int64(1)),
+                (Value::List(vec![Value::Int64(3)].into()), Value::Int64(2)),
+            ]
+        );
+    }
+
+    /// The `[min, max]` of `values`, through the aggregate states.
+    fn extremes(values: &[Value], rdf_literals: bool) -> [Value; 2] {
+        [AggregateExpr::min(0), AggregateExpr::max(0)].map(|mut expr| {
+            expr.rdf_literals = rdf_literals;
+            let mut state = AggregateState::for_expr(&expr);
+            for value in values {
+                state.update(Some(value.clone()));
+            }
+            state.finalize()
+        })
+    }
+
+    /// MIN and MAX order values as ORDER BY does (openCypher orderability),
+    /// so mixed types give the same result in any input order: a string
+    /// before numbers, lists item by item with a prefix first, NaN after
+    /// every number; nulls are skipped. A value never replaced one of another
+    /// type, so `['a', 3, 1]` gave `'a'` for both.
+    #[test]
+    fn min_and_max_use_the_order_of_order_by() {
+        let a = Value::String("a".into());
+        for values in [
+            [Value::Int64(3), a.clone(), Value::Int64(1)],
+            [a.clone(), Value::Int64(3), Value::Int64(1)],
+            [Value::Int64(1), Value::Int64(3), a.clone()],
+        ] {
+            assert_eq!(
+                extremes(&values, false),
+                [a.clone(), Value::Int64(3)],
+                "{values:?}"
+            );
+        }
+        let short = Value::List(vec![Value::Int64(1)].into());
+        let long = Value::List(vec![Value::Int64(1), Value::Int64(2)].into());
+        assert_eq!(
+            extremes(&[long.clone(), short.clone()], false),
+            [short, long]
+        );
+        let [min, max] = extremes(
+            &[Value::Int64(3), Value::Float64(f64::NAN), Value::Null],
+            false,
+        );
+        assert_eq!(min, Value::Int64(3));
+        assert!(matches!(max, Value::Float64(n) if n.is_nan()), "{max:?}");
+        // Strings by code point, also when they read as numbers.
+        assert_eq!(
+            extremes(
+                &[Value::String("9".into()), Value::String("10".into())],
+                false
+            ),
+            [Value::String("10".into()), Value::String("9".into())]
+        );
+    }
+
+    /// SPARQL's MIN and MAX compare RDF literals held as text by their
+    /// numbers when both read as numbers.
+    #[test]
+    fn min_and_max_of_rdf_literals_compare_numbers_in_text() {
+        assert_eq!(
+            extremes(
+                &[Value::String("9".into()), Value::String("10".into())],
+                true
+            ),
+            [Value::String("9".into()), Value::String("10".into())]
+        );
+    }
+
+    /// COUNT(DISTINCT) and COLLECT(DISTINCT) take every value once by its
+    /// identity: paths of one length are different values, `3` and `3.0` one.
+    #[test]
+    fn distinct_aggregates_take_each_value_once_by_identity() {
+        let path = |middle: i64| Value::Path {
+            nodes: vec![Value::Int64(1), Value::Int64(middle)].into(),
+            edges: vec![Value::Int64(10 + middle)].into(),
+        };
+        let values = [
+            path(2),
+            path(3),
+            path(2),
+            Value::Int64(3),
+            Value::Float64(3.0),
+        ];
+        let mut count = AggregateState::new(AggregateFunction::Count, true, None, None);
+        let mut collect = AggregateState::new(AggregateFunction::Collect, true, None, None);
+        for value in values {
+            count.update(Some(value.clone()));
+            collect.update(Some(value));
+        }
+        assert_eq!(count.finalize(), Value::Int64(3));
+        assert_eq!(
+            collect.finalize(),
+            Value::List(vec![path(2), path(3), Value::Int64(3)].into())
+        );
     }
 }

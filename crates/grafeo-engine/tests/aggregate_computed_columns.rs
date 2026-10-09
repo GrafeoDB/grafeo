@@ -255,9 +255,13 @@ fn paths_beside_a_computed_operand_stay_paths() {
         &people(),
         "MATCH p = (a:Person)-[:KNOWS]->(b:Person) \
          RETURN a.age % 2 AS odd, collect(p) AS ps, collect(length(p)) AS lengths",
-        // A path holds node and edge IDs: Alix (node 0) KNOWS (edge 0) Gus
-        // (node 1), and Gus (node 1) KNOWS (edge 1) Mia (node 2).
-        &[&["1", "[<0 0 1>, <1 1 2>]", "[1, 1]"]],
+        // A path holds its nodes and edges: Alix KNOWS (w 3) Gus, and Gus
+        // KNOWS (w 19) Mia.
+        &[&[
+            "1",
+            "[<('Alix') [KNOWS 3] ('Gus')>, <('Gus') [KNOWS 19] ('Mia')>]",
+            "[1, 1]",
+        ]],
     );
 }
 

@@ -7,36 +7,9 @@ use indexmap::IndexSet;
 
 use grafeo_common::types::{HashableValue, Value};
 
+use super::accumulator::RowKey;
 use super::{Operator, OperatorResult};
-use crate::execution::DataChunk;
 use crate::execution::chunk::DataChunkBuilder;
-
-/// A row key for duplicate detection.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RowKey(Vec<HashableValue>);
-
-impl RowKey {
-    /// Creates a row key from specified columns.
-    fn from_row(chunk: &DataChunk, row: usize, columns: &[usize]) -> Self {
-        let parts = columns
-            .iter()
-            .map(|&col_idx| {
-                chunk
-                    .column(col_idx)
-                    .and_then(|col| col.get_value(row))
-                    .unwrap_or(Value::Null)
-                    .into()
-            })
-            .collect();
-        RowKey(parts)
-    }
-
-    /// Creates a row key from all columns.
-    fn from_all_columns(chunk: &DataChunk, row: usize) -> Self {
-        let columns: Vec<usize> = (0..chunk.column_count()).collect();
-        Self::from_row(chunk, row, &columns)
-    }
-}
 
 /// Distinct operator.
 ///
@@ -86,6 +59,8 @@ impl Operator for DistinctOperator {
             let mut builder = DataChunkBuilder::with_capacity(&chunk.column_types(), 2048);
 
             for row in chunk.selected_indices() {
+                // Rows whose values are the same values (`3` and `3.0`, two
+                // NaN, paths with the same nodes and edges) are duplicates.
                 let key = match &self.distinct_columns {
                     Some(cols) => RowKey::from_row(&chunk, row, cols),
                     None => RowKey::from_all_columns(&chunk, row),
@@ -136,6 +111,7 @@ impl Operator for DistinctOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
     use crate::execution::vector::ValueVector;
     use grafeo_common::types::{EdgeId, LogicalType, NodeId};
@@ -519,5 +495,42 @@ mod tests {
         let op = DistinctOperator::new(Box::new(mock));
         let (_child, distinct_columns) = op.into_parts();
         assert!(distinct_columns.is_none());
+    }
+
+    /// DISTINCT compares values by their identity: `3` and `3.0` are one
+    /// value (the first row stays), and paths of one length are not (it took
+    /// their text, `Path(2 nodes, 1 edges)`, for the path).
+    #[test]
+    fn distinct_rows_are_different_values() {
+        let path = |middle: i64| Value::Path {
+            nodes: vec![Value::Int64(1), Value::Int64(middle)].into(),
+            edges: vec![Value::Int64(10 + middle)].into(),
+        };
+        let input = || {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+            for value in [
+                Value::Int64(3),
+                Value::Float64(3.0),
+                path(2),
+                path(3),
+                path(2),
+            ] {
+                builder.column_mut(0).unwrap().push_value(value);
+                builder.advance_row();
+            }
+            Box::new(MockOperator::new(vec![builder.finish()]))
+        };
+        for mut distinct in [
+            DistinctOperator::new(input()),
+            DistinctOperator::on_columns(input(), vec![0]),
+        ] {
+            let mut values = Vec::new();
+            while let Some(chunk) = distinct.next().unwrap() {
+                for row in chunk.selected_indices() {
+                    values.push(chunk.column(0).unwrap().get_value(row).unwrap());
+                }
+            }
+            assert_eq!(values, [Value::Int64(3), path(2), path(3)]);
+        }
     }
 }

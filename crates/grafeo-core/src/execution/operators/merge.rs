@@ -26,6 +26,10 @@ pub struct MergeConfig {
     pub on_create_properties: Vec<(String, PropertySource)>,
     /// Properties to set on MATCH.
     pub on_match_properties: Vec<(String, PropertySource)>,
+    /// Labels a created node gets besides `labels` (`ON CREATE SET n:Label`).
+    pub on_create_labels: Vec<String>,
+    /// Labels added to each matched node (`ON MATCH SET n:Label`).
+    pub on_match_labels: Vec<String>,
     /// Output schema (input columns + node column).
     pub output_schema: Vec<LogicalType>,
     /// Column index where the merged node ID is placed.
@@ -70,6 +74,9 @@ pub struct MergeOperator {
     input: Option<Box<dyn Operator>>,
     /// Merge configuration.
     config: MergeConfig,
+    /// The labels of a created node: the pattern's, then the ON CREATE ones
+    /// it does not have yet.
+    created_labels: Vec<String>,
     /// Whether we've already executed (standalone mode only).
     executed: bool,
     /// Search-store handle used to evaluate `PropertySource::Expression`
@@ -89,10 +96,17 @@ impl MergeOperator {
         input: Option<Box<dyn Operator>>,
         config: MergeConfig,
     ) -> Self {
+        let mut created_labels = config.labels.clone();
+        for label in &config.on_create_labels {
+            if !created_labels.contains(label) {
+                created_labels.push(label.clone());
+            }
+        }
         Self {
             writer: writer.into(),
             input,
             config,
+            created_labels,
             executed: false,
             search_store: None,
             match_expressions: None,
@@ -377,6 +391,10 @@ impl MergeOperator {
                 )?;
                 self.writer
                     .set_node_properties(existing_id, &resolved_on_match, false)?;
+                if !self.config.on_match_labels.is_empty() {
+                    self.writer
+                        .add_labels(existing_id, &self.config.on_match_labels)?;
+                }
             }
             Ok(matches)
         } else if Self::has_expression_source(&self.config.on_create_properties) {
@@ -384,7 +402,7 @@ impl MergeOperator {
             // the match properties first; the whole property set is checked
             // before the ON CREATE values are written.
             self.writer
-                .create_node_with(&self.config.labels, resolved_match, |new_id| {
+                .create_node_with(&self.created_labels, resolved_match, |new_id| {
                     self.resolve_action_properties(
                         &self.config.on_create_properties,
                         chunk,
@@ -403,7 +421,7 @@ impl MergeOperator {
             );
             self.writer
                 .create_node(
-                    &self.config.labels,
+                    &self.created_labels,
                     Self::merge_node_props(&resolved_match, &resolved_on_create),
                 )
                 .map(|created| vec![created])
@@ -525,6 +543,9 @@ pub struct MergeRelationshipConfig {
     pub source_variable: String,
     /// Variable name for the target node (for error messages).
     pub target_variable: String,
+    /// Whether a relationship from target to source matches too (a pattern
+    /// without a direction). One is created from source to target.
+    pub undirected: bool,
     /// Relationship type to match/create.
     pub edge_type: String,
     /// Properties that must match (also used for creation).
@@ -675,7 +696,9 @@ impl MergeRelationshipOperator {
     }
 
     /// The relationships between source and target that match (every one,
-    /// as in openCypher, where MERGE binds each match).
+    /// as in openCypher, where MERGE binds each match): from source to
+    /// target, and the other way round too for a pattern without a direction
+    /// (a relationship from a node to itself counts once).
     fn find_matching_edges(
         &self,
         src: NodeId,
@@ -684,12 +707,23 @@ impl MergeRelationshipOperator {
     ) -> Vec<EdgeId> {
         use crate::graph::Direction;
 
-        let mut matches = Vec::new();
-        for (target, edge_id) in self.writer.store().edges_from(src, Direction::Outgoing) {
-            if target != dst {
-                continue;
+        let store = self.writer.store();
+        let mut candidates: Vec<EdgeId> = store
+            .edges_from(src, Direction::Outgoing)
+            .into_iter()
+            .filter(|&(target, _)| target == dst)
+            .map(|(_, edge_id)| edge_id)
+            .collect();
+        if self.config.undirected {
+            for (source, edge_id) in store.edges_from(src, Direction::Incoming) {
+                if source == dst && !candidates.contains(&edge_id) {
+                    candidates.push(edge_id);
+                }
             }
+        }
 
+        let mut matches = Vec::new();
+        for edge_id in candidates {
             // Same as `find_matching_node`: edges this transaction created
             // earlier in the statement sit at `EpochId::PENDING`, so the
             // unversioned read would hide them and every repeated row would
@@ -932,6 +966,8 @@ mod tests {
                 match_properties: const_props(vec![("name", Value::String("Alix".into()))]),
                 on_create_properties: vec![],
                 on_match_properties: vec![],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -973,6 +1009,8 @@ mod tests {
                 match_properties: const_props(vec![("name", Value::String("Gus".into()))]),
                 on_create_properties: vec![],
                 on_match_properties: vec![],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -1001,6 +1039,8 @@ mod tests {
                 match_properties: const_props(vec![("name", Value::String("Vincent".into()))]),
                 on_create_properties: const_props(vec![("created", Value::Bool(true))]),
                 on_match_properties: vec![],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -1042,6 +1082,8 @@ mod tests {
                 match_properties: const_props(vec![("name", Value::String("Jules".into()))]),
                 on_create_properties: vec![],
                 on_match_properties: const_props(vec![("updated", Value::Bool(true))]),
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -1092,6 +1134,8 @@ mod tests {
                 match_properties: const_props(vec![("name", Value::String("Beatrix".into()))]),
                 on_create_properties: vec![],
                 on_match_properties: const_props(vec![("found", Value::Bool(true))]),
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -1135,6 +1179,8 @@ mod tests {
                 match_properties: const_props(vec![("name", Value::String("Shosanna".into()))]),
                 on_create_properties: const_props(vec![("created", Value::Bool(true))]),
                 on_match_properties: vec![],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -1214,6 +1260,8 @@ mod tests {
                         variable_columns,
                     },
                 )],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -1271,6 +1319,8 @@ mod tests {
                     },
                 )],
                 on_match_properties: vec![],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -1464,6 +1514,8 @@ mod tests {
                     },
                 )],
                 on_match_properties: vec![],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -1519,6 +1571,8 @@ mod tests {
                     },
                 )],
                 on_match_properties: vec![],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -1605,6 +1659,7 @@ mod tests {
                 target_column: 1,
                 source_variable: "a".to_string(),
                 target_variable: "b".to_string(),
+                undirected: false,
                 edge_type: "KNOWS".to_string(),
                 match_properties: vec![],
                 on_create_properties: vec![(
@@ -1687,6 +1742,8 @@ mod tests {
                 match_properties: vec![("val".to_string(), PropertySource::Column(0))],
                 on_create_properties: vec![],
                 on_match_properties: vec![],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Int64, LogicalType::Node],
                 output_column: 1,
                 bound_variable_column: None,
@@ -1721,6 +1778,8 @@ mod tests {
                 match_properties: vec![],
                 on_create_properties: vec![],
                 on_match_properties: vec![],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 output_schema: vec![LogicalType::Node],
                 output_column: 0,
                 bound_variable_column: None,
@@ -1755,6 +1814,8 @@ mod tests {
                     match_properties: const_props(vec![("id", Value::from("r1"))]),
                     on_create_properties: vec![],
                     on_match_properties: vec![],
+                    on_create_labels: Vec::new(),
+                    on_match_labels: Vec::new(),
                     output_schema: vec![LogicalType::Node],
                     output_column: 0,
                     bound_variable_column: None,

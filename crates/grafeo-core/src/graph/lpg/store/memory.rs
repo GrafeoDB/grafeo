@@ -181,9 +181,9 @@ impl LpgStore {
         let prop_indexes = self.property_indexes.read();
         let property_index_bytes: usize = prop_indexes
             .values()
-            .map(|dmap| {
+            .map(|index| {
                 // DashMap: approximate as capacity * entry size
-                dmap.len()
+                index.len()
                     * (size_of::<grafeo_common::types::HashableValue>()
                         + size_of::<
                             grafeo_common::utils::hash::FxHashSet<grafeo_common::types::NodeId>,

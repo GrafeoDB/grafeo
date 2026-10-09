@@ -24,9 +24,10 @@ pub use cost::{Cost, CostModel};
 pub use join_order::{BitSet, DPccp, JoinGraph, JoinGraphBuilder, JoinPlan};
 
 use crate::query::plan::{
-    BinaryOp, FilterOp, JoinCondition, JoinType, LogicalExpression, LogicalOperator, LogicalPlan,
-    MultiWayJoinOp,
+    BinaryOp, ExpandDirection, ExpandOp, FilterOp, JoinCondition, JoinType, LogicalExpression,
+    LogicalOperator, LogicalPlan, MultiWayJoinOp, NodeScanOp,
 };
+use crate::query::planner::lpg::seek;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::utils::error::Result;
 use std::collections::HashSet;
@@ -66,6 +67,32 @@ pub struct Optimizer {
     card_estimator: CardinalityEstimator,
     /// How cyclic joins of three or more relations are planned.
     cyclic_joins: CyclicJoins,
+    /// The node properties with a property index: a filter on one of them
+    /// pins a node like `id()` does (see `start_at_the_sought_end`).
+    indexed_properties: HashSet<String>,
+    /// Whether the store keeps the incoming edges of each node.
+    incoming_edges: IncomingEdges,
+}
+
+/// Whether a store keeps the incoming edges of each node (its backward
+/// adjacency), which an expand that follows edges backward reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IncomingEdges {
+    /// Kept with each node, like the outgoing ones.
+    Kept,
+    /// Not kept: following edges backward is slow.
+    NotKept,
+}
+
+impl IncomingEdges {
+    /// The incoming edges of `store`.
+    fn of(store: &dyn grafeo_core::graph::GraphStore) -> Self {
+        if store.has_backward_adjacency() {
+            Self::Kept
+        } else {
+            Self::NotKept
+        }
+    }
 }
 
 /// How the optimizer plans a cyclic join of three or more relations.
@@ -89,6 +116,8 @@ impl Optimizer {
             cost_model: CostModel::new(),
             card_estimator: CardinalityEstimator::new(),
             cyclic_joins: CyclicJoins::Binary,
+            indexed_properties: HashSet::new(),
+            incoming_edges: IncomingEdges::Kept,
         }
     }
 
@@ -102,7 +131,11 @@ impl Optimizer {
     pub fn from_store(store: &grafeo_core::graph::lpg::LpgStore) -> Self {
         store.ensure_statistics_fresh();
         let stats = store.statistics();
-        Self::from_statistics(&stats)
+        Self {
+            indexed_properties: store.property_index_keys().into_iter().collect(),
+            incoming_edges: IncomingEdges::of(store),
+            ..Self::from_statistics(&stats)
+        }
     }
 
     /// Creates an optimizer from any GraphStore implementation.
@@ -114,7 +147,16 @@ impl Optimizer {
     #[must_use]
     pub fn from_graph_store(store: &dyn grafeo_core::graph::GraphStore) -> Self {
         let stats = store.statistics();
-        Self::from_statistics(&stats)
+        let indexed_properties = store
+            .all_property_keys()
+            .into_iter()
+            .filter(|key| store.has_property_index(key))
+            .collect();
+        Self {
+            indexed_properties,
+            incoming_edges: IncomingEdges::of(store),
+            ..Self::from_statistics(&stats)
+        }
     }
 
     /// Creates an optimizer from RDF statistics.
@@ -133,6 +175,8 @@ impl Optimizer {
             cost_model: CostModel::new().with_graph_totals(total, total),
             card_estimator: estimator,
             cyclic_joins: CyclicJoins::MultiWay,
+            indexed_properties: HashSet::new(),
+            incoming_edges: IncomingEdges::NotKept,
         }
     }
 
@@ -173,6 +217,8 @@ impl Optimizer {
                 .with_graph_totals(stats.total_nodes, stats.total_edges),
             card_estimator: estimator,
             cyclic_joins: CyclicJoins::Binary,
+            indexed_properties: HashSet::new(),
+            incoming_edges: IncomingEdges::Kept,
         }
     }
 
@@ -257,6 +303,9 @@ impl Optimizer {
             // chance is gone.
             root = self.propagate_join_predicates(root);
             root = self.push_filters_down(root);
+            // With each filter right above what it reads, an expand whose
+            // target a filter pins starts there.
+            root = self.start_at_the_sought_end(root, false);
         }
 
         if self.enable_join_reorder {
@@ -695,9 +744,23 @@ impl Optimizer {
                 relations.push((scan.variable.clone(), op.clone()));
                 true
             }
+            // A filter on a base relation is part of that relation: the
+            // reordered plan is built from the relations, so the filter goes
+            // with it. A filter over a join reads more than one relation and
+            // no relation can take it: the tree is not reordered then.
             LogicalOperator::Filter(filter) => {
-                // A filter on a base relation is still part of the join tree
-                self.collect_join_tree(&filter.input, relations, conditions)
+                let mut below = Vec::new();
+                let mut below_conditions = Vec::new();
+                if !self.collect_join_tree(&filter.input, &mut below, &mut below_conditions) {
+                    return false;
+                }
+                match below.pop() {
+                    Some((name, _)) if below.is_empty() && below_conditions.is_empty() => {
+                        relations.push((name, op.clone()));
+                        true
+                    }
+                    _ => false,
+                }
             }
             LogicalOperator::Expand(expand) => {
                 // Expand is a special case - it's like a join with the adjacency
@@ -1025,8 +1088,10 @@ impl Optimizer {
                     .collect();
                 LogicalOperator::MultiWayJoin(mwj)
             }
-            // Leaf operators and unsupported operators are returned as-is
-            other => other,
+            // The filters inside the input of any other operator move down
+            // within it: below a write (`... WHERE id(s) = row.src AND
+            // id(d) = row.dst MERGE (s)-[:T]->(d)`) as anywhere else.
+            other => other.map_children(|child| self.push_filters_down(child)),
         }
     }
 
@@ -1096,7 +1161,7 @@ impl Optimizer {
                 let path_columns: Vec<String> = expand
                     .path_alias
                     .iter()
-                    .flat_map(|path| path_columns(path, true))
+                    .flat_map(|path| path_columns(path))
                     .collect();
                 let mut introduced_vars = vec![&expand.to_variable];
                 if let Some(ref edge_var) = expand.edge_variable {
@@ -1218,49 +1283,61 @@ impl Optimizer {
             // side: anything that filters out a left row also filters out
             // every (left, NULL) pair the join would have emitted. Pushing
             // to the right side is unsafe because OPTIONAL MATCH must keep
-            // left rows that have no right match. As for a join, a side gets
-            // the predicate only when it binds every variable it reads.
+            // left rows that have no right match. Each conjunct is routed on
+            // its own. One that reads only columns the left side binds (see
+            // `bound_columns`) filters the left side: a row of the join holds
+            // the left row's values for them, a name both sides bind being a
+            // join key. The other conjuncts stay above the left join.
             LogicalOperator::LeftJoin(mut left_join) => {
-                let predicate_vars = self.extract_variables(&predicate);
                 let sides = bound_columns(&left_join.left).zip(bound_columns(&left_join.right));
-                let left_only = sides.as_ref().is_some_and(|(left_vars, right_vars)| {
-                    predicate_vars.is_subset(left_vars) && predicate_vars.is_disjoint(right_vars)
-                });
-                let on_both = sides.as_ref().is_some_and(|(left_vars, right_vars)| {
-                    !predicate_vars.is_empty()
-                        && predicate_vars.is_subset(left_vars)
-                        && predicate_vars.is_subset(right_vars)
-                });
-
-                if left_only {
+                let (mut to_left, mut to_right, mut above) = (Vec::new(), Vec::new(), Vec::new());
+                for conjunct in conjuncts(predicate) {
+                    let vars = self.extract_variables(&conjunct);
+                    let (in_left, in_right) =
+                        sides
+                            .as_ref()
+                            .map_or((false, false), |(left_vars, right_vars)| {
+                                (vars.is_subset(left_vars), vars.is_subset(right_vars))
+                            });
+                    match (in_left, in_right) {
+                        // A conjunct on join-key variables alone also
+                        // filters the right side. The OPTIONAL MATCH
+                        // compiles to a LeftJoin where the right subtree
+                        // independently re-binds the shared variable
+                        // (typically via its own NodeScan), so the right
+                        // side can balloon to the full table even when the
+                        // left side is bound to a tiny set. Duplicating the
+                        // conjunct to both sides is safe: matched pairs
+                        // satisfy left.x == right.x, so a right row that
+                        // fails it either has no left match or pairs with a
+                        // left row that also fails. Unmatched (OPTIONAL)
+                        // left rows are unaffected. This is what collapses
+                        // hydrate's three independent 30k-row scans into
+                        // 6-id index lookups.
+                        (true, true) if !vars.is_empty() => {
+                            to_left.push(conjunct.clone());
+                            to_right.push(conjunct);
+                        }
+                        (true, _) => to_left.push(conjunct),
+                        (false, _) => above.push(conjunct),
+                    }
+                }
+                if let Some(predicate) = conjunction(to_left) {
                     left_join.left =
                         Box::new(self.try_push_filter_into(predicate, *left_join.left));
-                    LogicalOperator::LeftJoin(left_join)
-                } else if on_both {
-                    // Predicate references only variables that are bound on
-                    // both sides (i.e. join-key variables). The OPTIONAL
-                    // MATCH compiles to a LeftJoin where the right subtree
-                    // independently re-binds the shared variable (typically
-                    // via its own NodeScan), so the right side can balloon
-                    // to the full table even when the left side is bound
-                    // to a tiny set. Duplicating the predicate to both
-                    // sides is safe: matched pairs satisfy left.x == right.x,
-                    // so a right row that fails the predicate either has
-                    // no left match or pairs with a left row that also
-                    // fails. Unmatched (OPTIONAL) left rows are unaffected.
-                    // This is what collapses hydrate's three independent
-                    // 30k-row scans into 6-id index lookups.
-                    left_join.left =
-                        Box::new(self.try_push_filter_into(predicate.clone(), *left_join.left));
+                }
+                if let Some(predicate) = conjunction(to_right) {
                     left_join.right =
                         Box::new(self.try_push_filter_into(predicate, *left_join.right));
-                    LogicalOperator::LeftJoin(left_join)
-                } else {
-                    LogicalOperator::Filter(FilterOp {
+                }
+                let left_join = LogicalOperator::LeftJoin(left_join);
+                match conjunction(above) {
+                    Some(predicate) => LogicalOperator::Filter(FilterOp {
                         predicate,
                         pushdown_hint: None,
-                        input: Box::new(LogicalOperator::LeftJoin(left_join)),
-                    })
+                        input: Box::new(left_join),
+                    }),
+                    None => left_join,
                 }
             }
 
@@ -1371,6 +1448,206 @@ impl Optimizer {
                 input: Box::new(other),
             }),
         }
+    }
+
+    /// Starts each single-hop expand whose target a filter pins by a key,
+    /// from a source nothing pins, at that target (see
+    /// [`Self::turn_at_the_sought_end`]): `MATCH (src)-[r]->(tgt) WHERE
+    /// id(tgt) IN $ids` then seeks the few targets and follows their
+    /// incoming edges, instead of expanding every edge of every node. The
+    /// turned expand binds the same rows, with its columns in another order,
+    /// so it is made only where the order of the columns is `free`: below an
+    /// operator that names the columns it passes on (a `RETURN` without `*`,
+    /// a `WITH`, an aggregation). A `RETURN *` reads them in their order, and
+    /// so do the set operations that line their inputs up.
+    fn start_at_the_sought_end(&self, op: LogicalOperator, free: bool) -> LogicalOperator {
+        match op {
+            LogicalOperator::Filter(_) => self.turn_at_the_sought_end(op, free),
+            LogicalOperator::Return(mut ret) => {
+                let star = ret.items.iter().any(
+                    |item| matches!(&item.expression, LogicalExpression::Variable(name) if name == "*"),
+                );
+                ret.input = Box::new(self.start_at_the_sought_end(*ret.input, !star));
+                LogicalOperator::Return(ret)
+            }
+            LogicalOperator::Project(mut project) => {
+                let free = free || !project.pass_through_input;
+                project.input = Box::new(self.start_at_the_sought_end(*project.input, free));
+                LogicalOperator::Project(project)
+            }
+            LogicalOperator::Aggregate(mut aggregate) => {
+                aggregate.input = Box::new(self.start_at_the_sought_end(*aggregate.input, true));
+                LogicalOperator::Aggregate(aggregate)
+            }
+            op @ (LogicalOperator::Union(_)
+            | LogicalOperator::Except(_)
+            | LogicalOperator::Intersect(_)
+            | LogicalOperator::Otherwise(_)) => {
+                op.map_children(|child| self.start_at_the_sought_end(child, false))
+            }
+            other => other.map_children(|child| self.start_at_the_sought_end(child, free)),
+        }
+    }
+
+    /// `Filter(P, Expand(src -> tgt, checks of src over NodeScan(src)))`
+    /// turned around, when the order of the columns is `free` and
+    /// [`Self::turned_direction`] allows it: the conjuncts of `P` on `tgt`
+    /// alone (with the values of the scan's input rows) filter a scan of
+    /// `tgt`, which the planner turns into a seek; the expand follows the
+    /// edges from `tgt` back to `src`; the checks of `src`, then the other
+    /// conjuncts of `P`, filter its rows. Each row has the same values as
+    /// before: the expand matches the same edges from either end, a
+    /// self-loop as often from each. Otherwise `op` stays as it is, and its
+    /// input goes on to [`Self::start_at_the_sought_end`].
+    fn turn_at_the_sought_end(&self, op: LogicalOperator, free: bool) -> LogicalOperator {
+        let unturned = |op: LogicalOperator| {
+            op.map_children(|child| self.start_at_the_sought_end(child, free))
+        };
+        if !free {
+            return unturned(op);
+        }
+        let (filters, below) = peel_filters(op);
+        let LogicalOperator::Expand(mut expand) = below else {
+            return unturned(wrap_filters(filters, below));
+        };
+        let (checks, source) = peel_filters(std::mem::replace(
+            expand.input.as_mut(),
+            LogicalOperator::Empty,
+        ));
+        let LogicalOperator::NodeScan(scan) = source else {
+            *expand.input = wrap_filters(checks, source);
+            return unturned(wrap_filters(filters, LogicalOperator::Expand(expand)));
+        };
+        // The conjuncts of the filters and of the checks, each in the order
+        // they run: from the bottom filter up.
+        let in_order = |filters: &[FilterOp]| -> Vec<LogicalExpression> {
+            filters
+                .iter()
+                .rev()
+                .flat_map(|filter| conjuncts(filter.predicate.clone()))
+                .collect()
+        };
+        let (written, checked) = (in_order(&filters), in_order(&checks));
+        let Some((direction, input_vars)) =
+            self.turned_direction(&written, &checked, &expand, &scan)
+        else {
+            *expand.input = wrap_filters(checks, LogicalOperator::NodeScan(scan));
+            return unturned(wrap_filters(filters, LogicalOperator::Expand(expand)));
+        };
+
+        let (source, target) = (expand.from_variable, expand.to_variable);
+        let (on_target, rest): (Vec<_>, Vec<_>) = written.into_iter().partition(|conjunct| {
+            movable_variables(conjunct).is_some_and(|vars| {
+                vars.contains(&target)
+                    && vars
+                        .iter()
+                        .all(|var| *var == target || input_vars.contains(var))
+            })
+        });
+        let sought = LogicalOperator::NodeScan(NodeScanOp {
+            variable: target.clone(),
+            label: None,
+            input: scan
+                .input
+                .map(|input| Box::new(self.start_at_the_sought_end(*input, true))),
+        });
+        let sought = match conjunction(on_target) {
+            Some(predicate) => LogicalOperator::Filter(FilterOp {
+                predicate,
+                pushdown_hint: None,
+                input: Box::new(sought),
+            }),
+            None => sought,
+        };
+        let turned = LogicalOperator::Expand(ExpandOp {
+            from_variable: target,
+            to_variable: source,
+            edge_variable: expand.edge_variable,
+            direction,
+            edge_types: expand.edge_types,
+            min_hops: 1,
+            max_hops: Some(1),
+            input: Box::new(sought),
+            path_alias: None,
+            path_mode: expand.path_mode,
+            quantified: false,
+        });
+        match conjunction(checked.into_iter().chain(rest).collect()) {
+            Some(predicate) => LogicalOperator::Filter(FilterOp {
+                predicate,
+                pushdown_hint: None,
+                input: Box::new(turned),
+            }),
+            None => turned,
+        }
+    }
+
+    /// The direction of `expand` started at its target, and the variables
+    /// of the rows its source's scan runs for, when turning it seeks the
+    /// target and keeps every row: `written` (the conjuncts of the filters
+    /// above it) pins the target by a key (see [`seek::pins`]) and
+    /// `checked` (the conjuncts of the checks between it and the scan of
+    /// its source) does not pin the source, which the planner would seek
+    /// then.
+    ///
+    /// The expand is a single hop without a named path (a path, or the list
+    /// of a quantified edge, would come out reversed). Its source is a scan
+    /// without a label: a label scan finds the nodes that have the label
+    /// now, while a check would read the labels of a past epoch (see
+    /// `may_choose_scan_label`). The checks move above the turned expand,
+    /// so they read only the source and the scan's input, and may move (see
+    /// [`movable_variables`]). The scan's input, whose rows the turned plan
+    /// scans the target for, binds none of the expand's variables and does
+    /// not write: a seek would not see what it writes for later rows.
+    /// Starting an outgoing expand at its target follows incoming edges,
+    /// which needs the store's backward edges.
+    fn turned_direction(
+        &self,
+        written: &[LogicalExpression],
+        checked: &[LogicalExpression],
+        expand: &ExpandOp,
+        scan: &NodeScanOp,
+    ) -> Option<(ExpandDirection, HashSet<String>)> {
+        let (source, target) = (&expand.from_variable, &expand.to_variable);
+        if expand.is_variable_length()
+            || expand.path_alias.is_some()
+            || source == target
+            || scan.variable != *source
+            || scan.label.is_some()
+        {
+            return None;
+        }
+        let direction = match expand.direction {
+            ExpandDirection::Outgoing if self.incoming_edges == IncomingEdges::Kept => {
+                ExpandDirection::Incoming
+            }
+            ExpandDirection::Outgoing => return None,
+            ExpandDirection::Incoming => ExpandDirection::Outgoing,
+            ExpandDirection::Both => ExpandDirection::Both,
+        };
+        let input_vars = match scan.input.as_deref() {
+            Some(input) if input.has_mutations() => return None,
+            Some(input) => bound_columns(input)?,
+            None => HashSet::new(),
+        };
+        if [source, target]
+            .into_iter()
+            .chain(&expand.edge_variable)
+            .any(|var| input_vars.contains(var))
+        {
+            return None;
+        }
+        let has_index = |property: &str| self.indexed_properties.contains(property);
+        let checks_hold_after = checked.iter().all(|check| {
+            movable_variables(check).is_some_and(|vars| {
+                vars.iter()
+                    .all(|var| var == source || input_vars.contains(var))
+            }) && !seek::pins(check, source, has_index, &input_vars)
+        });
+        let sought = written
+            .iter()
+            .any(|conjunct| seek::pins(conjunct, target, has_index, &input_vars));
+        (checks_hold_after && sought).then_some((direction, input_vars))
     }
 
     // NOTE: Filter-into-TripleScan pushdown is intentionally not implemented.
@@ -1714,22 +1991,20 @@ fn bound_columns(op: &LogicalOperator) -> Option<HashSet<String>> {
     let mut bound = op.bound_variables(None)?;
     let mut paths = Vec::new();
     named_paths(op, &mut paths);
-    for (path, all_columns) in paths {
+    for path in paths {
         if bound.contains(&path) {
-            bound.extend(path_columns(&path, all_columns));
+            bound.extend(path_columns(&path));
         }
     }
     Some(bound)
 }
 
-/// The named paths of `op` and its inputs, each with whether it has all the
-/// path columns (an expand) or only its length (a shortest path).
-fn named_paths(op: &LogicalOperator, out: &mut Vec<(String, bool)>) {
+/// The named paths of the expands and shortest-path searches of `op` and its
+/// inputs.
+fn named_paths(op: &LogicalOperator, out: &mut Vec<String>) {
     match op {
-        LogicalOperator::Expand(expand) => {
-            out.extend(expand.path_alias.iter().map(|path| (path.clone(), true)));
-        }
-        LogicalOperator::ShortestPath(path) => out.push((path.path_alias.clone(), false)),
+        LogicalOperator::Expand(expand) => out.extend(expand.path_alias.iter().cloned()),
+        LogicalOperator::ShortestPath(path) => out.push(path.path_alias.clone()),
         _ => {}
     }
     for child in op.children() {
@@ -1737,15 +2012,14 @@ fn named_paths(op: &LogicalOperator, out: &mut Vec<(String, bool)>) {
     }
 }
 
-/// The columns the planner adds for the named path `path`: its length, and
-/// with `all_columns` its nodes and edges.
-fn path_columns(path: &str, all_columns: bool) -> Vec<String> {
-    let mut columns = vec![format!("_path_length_{path}")];
-    if all_columns {
-        columns.push(format!("_path_nodes_{path}"));
-        columns.push(format!("_path_edges_{path}"));
-    }
-    columns
+/// The columns the planner adds for the named path `path`: its length, its
+/// nodes and its edges.
+fn path_columns(path: &str) -> Vec<String> {
+    vec![
+        format!("_path_length_{path}"),
+        format!("_path_nodes_{path}"),
+        format!("_path_edges_{path}"),
+    ]
 }
 
 /// The variables `expr` reads, when it may move away from where it is
@@ -1773,6 +2047,26 @@ fn conjuncts(predicate: LogicalExpression) -> Vec<LogicalExpression> {
         }
         other => vec![other],
     }
+}
+
+/// The filters right above each other at the top of `op`, from the top down
+/// (each without its input), and the operator below them.
+fn peel_filters(op: LogicalOperator) -> (Vec<FilterOp>, LogicalOperator) {
+    let mut filters = Vec::new();
+    let mut below = op;
+    while let LogicalOperator::Filter(mut filter) = below {
+        below = std::mem::replace(filter.input.as_mut(), LogicalOperator::Empty);
+        filters.push(filter);
+    }
+    (filters, below)
+}
+
+/// `op` below the `filters` [`peel_filters`] took off it.
+fn wrap_filters(filters: Vec<FilterOp>, op: LogicalOperator) -> LogicalOperator {
+    filters.into_iter().rev().fold(op, |input, mut filter| {
+        *filter.input = input;
+        LogicalOperator::Filter(filter)
+    })
 }
 
 /// The `AND` of the conjuncts, or `None` when there are none.
@@ -3109,6 +3403,56 @@ mod tests {
             assert_eq!(optimized(written), expected.explain_tree());
         }
 
+        /// `UNWIND $rows AS item MATCH (s), (d) WHERE id(s) = item.src AND
+        /// id(d) = item.dst` with the rows written to: the filter below the
+        /// write is pushed down like any other, each conjunct onto the scan of
+        /// its node, where the planner seeks it. Left above both scans, it
+        /// pinned only `d` and scanned every `s` for each row.
+        #[test]
+        fn a_filter_below_a_write_moves_onto_the_scans_of_its_nodes() {
+            let rows = || {
+                LogicalOperator::Unwind(crate::query::plan::UnwindOp {
+                    expression: LogicalExpression::Parameter("rows".to_string()),
+                    variable: "item".to_string(),
+                    ordinality_var: None,
+                    offset_var: None,
+                    input: Box::new(LogicalOperator::Empty),
+                })
+            };
+            let pinned = |node: &str, key: &str| {
+                equals(
+                    LogicalExpression::Id(node.to_string()),
+                    property("item", key),
+                )
+            };
+            let merge = |input: LogicalOperator| {
+                LogicalOperator::MergeRelationship(crate::query::plan::MergeRelationshipOp {
+                    variable: "r".to_string(),
+                    source_variable: "s".to_string(),
+                    target_variable: "d".to_string(),
+                    undirected: false,
+                    edge_type: "LINK".to_string(),
+                    match_properties: Vec::new(),
+                    on_create: Vec::new(),
+                    on_match: Vec::new(),
+                    input: Box::new(input),
+                })
+            };
+            let written = merge(filter(
+                and(vec![pinned("s", "src"), pinned("d", "dst")]),
+                scan("d", None, Some(scan("s", None, Some(rows())))),
+            ));
+            let expected = merge(filter(
+                pinned("d", "dst"),
+                scan(
+                    "d",
+                    None,
+                    Some(filter(pinned("s", "src"), scan("s", None, Some(rows())))),
+                ),
+            ));
+            assert_eq!(optimized(written), expected.explain_tree());
+        }
+
         /// A scan without input has no rows to filter first: the filter stays
         /// above it, whatever its conjuncts read.
         #[test]
@@ -3394,6 +3738,68 @@ mod tests {
             assert_eq!(pushed(written), expected);
         }
 
+        fn left_join(left: LogicalOperator, right: LogicalOperator) -> LogicalOperator {
+            LogicalOperator::LeftJoin(crate::query::plan::LeftJoinOp {
+                left: Box::new(left),
+                right: Box::new(right),
+                condition: None,
+            })
+        }
+
+        /// A `WHERE` after `MATCH (b:B), (a:A) OPTIONAL MATCH (a)-[:R]->(c)
+        /// WITH *`: each conjunct goes where its variables are bound. One on
+        /// the left side alone (`b`, or `b` with the shared `a`) filters the
+        /// left side, one on the shared `a` alone both sides (a pair matches
+        /// on `a`, so the left row fails it too), and one on `c`, which only
+        /// the optional side binds, stays above the left join: moved into it,
+        /// it would turn a row the `WHERE` drops into one with nulls.
+        #[test]
+        fn each_conjunct_above_a_left_join_goes_to_the_sides_that_bind_it() {
+            let on_b = equals(property("b", "k"), literal(1));
+            let on_c = equals(property("c", "k"), literal(3));
+            let on_a_and_b = equals(property("a", "k"), property("b", "k"));
+            let on_key = equals(property("a", "k"), literal(2));
+            let written = filter(
+                and(vec![
+                    on_b.clone(),
+                    on_c.clone(),
+                    on_a_and_b.clone(),
+                    on_key.clone(),
+                ]),
+                left_join(left_side(), expand(scan("a", None, None), false)),
+            );
+            let expected = filter(
+                on_c,
+                left_join(
+                    filter(
+                        and(vec![on_a_and_b, on_key.clone()]),
+                        scan(
+                            "a",
+                            Some("A"),
+                            Some(filter(on_b, scan("b", Some("B"), None))),
+                        ),
+                    ),
+                    expand(filter(on_key, scan("a", None, None)), false),
+                ),
+            );
+            assert_eq!(pushed(written), expected.explain_tree());
+        }
+
+        /// A conjunct on the optional side alone stays above the left join,
+        /// also when it is the only one.
+        #[test]
+        fn a_conjunct_on_the_optional_side_stays_above_the_left_join() {
+            let written = filter(
+                LogicalExpression::Unary {
+                    op: UnaryOp::IsNull,
+                    operand: Box::new(variable("c")),
+                },
+                left_join(left_side(), expand(scan("a", None, None), false)),
+            );
+            let expected = written.explain_tree();
+            assert_eq!(pushed(written), expected);
+        }
+
         /// The filter of an earlier `MATCH` inside the input of a later scan
         /// is pushed down too.
         #[test]
@@ -3417,6 +3823,478 @@ mod tests {
                 )),
             );
             assert_eq!(pushed(written), expected.explain_tree());
+        }
+    }
+
+    /// Join reordering builds its plan from the relations it collects: a
+    /// filter collected with them must come back with its relation.
+    mod join_tree {
+        use super::scan_with_input::{equals, filter, property, scan};
+        use super::*;
+        use crate::query::plan::JoinCondition;
+
+        fn literal(value: i64) -> LogicalExpression {
+            LogicalExpression::Literal(Value::Int64(value))
+        }
+
+        /// An inner join of `left` and `right` on `left_key = right_key`.
+        fn join(
+            left: LogicalOperator,
+            right: LogicalOperator,
+            left_key: LogicalExpression,
+            right_key: LogicalExpression,
+        ) -> LogicalOperator {
+            LogicalOperator::Join(JoinOp {
+                left: Box::new(left),
+                right: Box::new(right),
+                join_type: JoinType::Inner,
+                conditions: vec![JoinCondition {
+                    left: left_key,
+                    right: right_key,
+                }],
+            })
+        }
+
+        /// The predicates of the filters of `op`, each with the operator
+        /// right below it, as plan text.
+        fn filters(op: &LogicalOperator, out: &mut Vec<String>) {
+            if let LogicalOperator::Filter(filter) = op {
+                out.push(format!(
+                    "{:?} over {}",
+                    filter.predicate,
+                    filter.input.explain_tree().lines().next().unwrap_or("")
+                ));
+            }
+            for child in op.children() {
+                filters(child, out);
+            }
+        }
+
+        fn filters_of(op: &LogicalOperator) -> Vec<String> {
+            let mut out = Vec::new();
+            filters(op, &mut out);
+            out.sort();
+            out
+        }
+
+        /// `MATCH (a), (b) WHERE a.k = 3 AND a.id = b.ref`, with the filter on
+        /// `a` below the join: a reordered plan keeps it on the scan of `a`.
+        #[test]
+        fn a_filter_on_a_relation_stays_with_it_when_joins_are_reordered() {
+            let on_a = equals(property("a", "k"), literal(3));
+            let plan = join(
+                filter(on_a, scan("a", None, None)),
+                scan("b", None, None),
+                property("a", "id"),
+                property("b", "ref"),
+            );
+            let before = filters_of(&plan);
+            let reordered = Optimizer::new().reorder_joins(plan);
+            assert_eq!(
+                filters_of(&reordered),
+                before,
+                "{}",
+                reordered.explain_tree()
+            );
+        }
+
+        /// A filter over a join of two relations, inside a join with a third:
+        /// it reads both, so no relation can take it, and it stays.
+        #[test]
+        fn a_filter_over_a_join_in_a_join_tree_stays() {
+            let across = equals(property("a", "k"), property("b", "k"));
+            let plan = join(
+                filter(
+                    across,
+                    join(
+                        scan("a", None, None),
+                        scan("b", None, None),
+                        property("a", "id"),
+                        property("b", "ref"),
+                    ),
+                ),
+                scan("c", None, None),
+                property("b", "id"),
+                property("c", "ref"),
+            );
+            let before = filters_of(&plan);
+            let reordered = Optimizer::new().reorder_joins(plan);
+            assert_eq!(
+                filters_of(&reordered),
+                before,
+                "{}",
+                reordered.explain_tree()
+            );
+        }
+    }
+
+    /// A single-hop expand whose target a filter pins by ID or by an indexed
+    /// property, from a source nothing pins, starts at the target and
+    /// follows the edges the other way: the planner then seeks the few
+    /// targets instead of expanding every edge of every node.
+    mod sought_end {
+        use super::scan_with_input::{and, compare, equals, filter, property, scan};
+        use super::*;
+        use crate::query::plan::UnwindOp;
+
+        fn ids() -> LogicalExpression {
+            LogicalExpression::List(vec![
+                LogicalExpression::Literal(Value::Int64(3)),
+                LogicalExpression::Literal(Value::Int64(19)),
+            ])
+        }
+
+        /// `id(variable) IN [3, 19]`.
+        fn in_ids(variable: &str) -> LogicalExpression {
+            compare(
+                LogicalExpression::Id(variable.to_string()),
+                BinaryOp::In,
+                ids(),
+            )
+        }
+
+        fn has_label(variable: &str, label: &str) -> LogicalExpression {
+            LogicalExpression::FunctionCall {
+                name: "hasLabel".to_string(),
+                args: vec![
+                    LogicalExpression::Variable(variable.to_string()),
+                    LogicalExpression::Literal(Value::from(label)),
+                ],
+                distinct: false,
+            }
+        }
+
+        /// `(from)-[r:R]->(to)` in `direction`, over `input`.
+        fn hop(
+            from: &str,
+            to: &str,
+            direction: ExpandDirection,
+            input: LogicalOperator,
+        ) -> ExpandOp {
+            ExpandOp {
+                quantified: false,
+                from_variable: from.to_string(),
+                to_variable: to.to_string(),
+                edge_variable: Some("r".to_string()),
+                direction,
+                edge_types: vec!["R".to_string()],
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(input),
+                path_alias: None,
+                path_mode: PathMode::Walk,
+            }
+        }
+
+        fn expand(
+            from: &str,
+            to: &str,
+            direction: ExpandDirection,
+            input: LogicalOperator,
+        ) -> LogicalOperator {
+            LogicalOperator::Expand(hop(from, to, direction, input))
+        }
+
+        /// `RETURN r, src, tgt`: names its columns, so their order is free.
+        fn returned(input: LogicalOperator) -> LogicalOperator {
+            LogicalOperator::Return(ReturnOp {
+                items: ["r", "src", "tgt"]
+                    .into_iter()
+                    .map(|name| ReturnItem {
+                        expression: LogicalExpression::Variable(name.to_string()),
+                        alias: None,
+                    })
+                    .collect(),
+                distinct: false,
+                input: Box::new(input),
+            })
+        }
+
+        fn optimized_by(optimizer: &Optimizer, root: LogicalOperator) -> String {
+            optimizer
+                .optimize(LogicalPlan::new(root))
+                .unwrap()
+                .root
+                .explain_tree()
+        }
+
+        fn optimized(root: LogicalOperator) -> String {
+            optimized_by(&Optimizer::new(), root)
+        }
+
+        /// `MATCH (src)-[r:R]->(tgt) WHERE id(tgt) IN [3, 19]`, written each
+        /// way round and undirected: the expand starts at the sought `tgt`.
+        #[test]
+        fn a_target_pinned_by_id_starts_the_expand() {
+            for (written, turned) in [
+                (ExpandDirection::Outgoing, ExpandDirection::Incoming),
+                (ExpandDirection::Incoming, ExpandDirection::Outgoing),
+                (ExpandDirection::Both, ExpandDirection::Both),
+            ] {
+                let plan = returned(filter(
+                    in_ids("tgt"),
+                    expand("src", "tgt", written, scan("src", None, None)),
+                ));
+                let expected = returned(expand(
+                    "tgt",
+                    "src",
+                    turned,
+                    filter(in_ids("tgt"), scan("tgt", None, None)),
+                ));
+                assert_eq!(optimized(plan), expected.explain_tree(), "{written:?}");
+            }
+        }
+
+        /// The conjuncts on the target alone go with the seek; a check of
+        /// the source and a conjunct that reads both filter the rows the
+        /// turned expand makes, the source's first, as they ran before.
+        #[test]
+        fn the_other_conjuncts_filter_after_the_turned_expand() {
+            let on_source = equals(
+                property("src", "k"),
+                LogicalExpression::Literal(Value::Int64(88)),
+            );
+            let across = compare(property("tgt", "k"), BinaryOp::Gt, property("src", "k"));
+            let plan = returned(filter(
+                and(vec![
+                    in_ids("tgt"),
+                    across.clone(),
+                    on_source.clone(),
+                    has_label("tgt", "Person"),
+                ]),
+                expand(
+                    "src",
+                    "tgt",
+                    ExpandDirection::Outgoing,
+                    scan("src", None, None),
+                ),
+            ));
+            let expected = returned(filter(
+                and(vec![on_source, across]),
+                expand(
+                    "tgt",
+                    "src",
+                    ExpandDirection::Incoming,
+                    filter(
+                        and(vec![in_ids("tgt"), has_label("tgt", "Person")]),
+                        scan("tgt", None, None),
+                    ),
+                ),
+            ));
+            assert_eq!(optimized(plan), expected.explain_tree());
+        }
+
+        /// The plans that keep their expand as written, each with the reason.
+        #[test]
+        fn an_expand_keeps_its_start_when_turning_would_not_seek_or_not_hold() {
+            let outgoing =
+                |source: LogicalOperator| expand("src", "tgt", ExpandDirection::Outgoing, source);
+            let pinned_source = equals(
+                LogicalExpression::Id("src".to_string()),
+                LogicalExpression::Literal(Value::Int64(88)),
+            );
+            let random = compare(
+                LogicalExpression::FunctionCall {
+                    name: "rand".to_string(),
+                    args: Vec::new(),
+                    distinct: false,
+                },
+                BinaryOp::Lt,
+                LogicalExpression::Literal(Value::Float64(0.5)),
+            );
+            let mut named_path = hop(
+                "src",
+                "tgt",
+                ExpandDirection::Outgoing,
+                scan("src", None, None),
+            );
+            named_path.path_alias = Some("p".to_string());
+            let mut quantified = hop(
+                "src",
+                "tgt",
+                ExpandDirection::Outgoing,
+                scan("src", None, None),
+            );
+            quantified.quantified = true;
+            let mut longer = hop(
+                "src",
+                "tgt",
+                ExpandDirection::Outgoing,
+                scan("src", None, None),
+            );
+            longer.max_hops = Some(3);
+            let star = |input: LogicalOperator| {
+                LogicalOperator::Return(ReturnOp {
+                    items: vec![ReturnItem {
+                        expression: LogicalExpression::Variable("*".to_string()),
+                        alias: None,
+                    }],
+                    distinct: false,
+                    input: Box::new(input),
+                })
+            };
+            let kept: Vec<(&str, LogicalOperator)> = vec![
+                (
+                    "the source is sought by ID",
+                    returned(filter(
+                        and(vec![pinned_source, in_ids("tgt")]),
+                        outgoing(scan("src", None, None)),
+                    )),
+                ),
+                (
+                    "the source scans a label, which a check would read at the epoch",
+                    returned(filter(
+                        in_ids("tgt"),
+                        outgoing(scan("src", Some("Person"), None)),
+                    )),
+                ),
+                (
+                    "a check of the source calls a volatile function",
+                    returned(filter(
+                        in_ids("tgt"),
+                        outgoing(filter(random, scan("src", None, None))),
+                    )),
+                ),
+                (
+                    "the key reads the source",
+                    returned(filter(
+                        equals(
+                            LogicalExpression::Id("tgt".to_string()),
+                            property("src", "next"),
+                        ),
+                        outgoing(scan("src", None, None)),
+                    )),
+                ),
+                (
+                    "a property that is not indexed",
+                    returned(filter(
+                        equals(
+                            property("tgt", "key"),
+                            LogicalExpression::Literal(Value::from("Amsterdam")),
+                        ),
+                        outgoing(scan("src", None, None)),
+                    )),
+                ),
+                (
+                    "a named path",
+                    returned(filter(in_ids("tgt"), LogicalOperator::Expand(named_path))),
+                ),
+                (
+                    "a quantified edge",
+                    returned(filter(in_ids("tgt"), LogicalOperator::Expand(quantified))),
+                ),
+                (
+                    "more than one hop",
+                    returned(filter(in_ids("tgt"), LogicalOperator::Expand(longer))),
+                ),
+                (
+                    "the input binds the source (a correlated subquery)",
+                    returned(filter(
+                        in_ids("tgt"),
+                        outgoing(scan("src", None, Some(scan("src", None, None)))),
+                    )),
+                ),
+                (
+                    "RETURN * reads the columns in their order",
+                    star(filter(in_ids("tgt"), outgoing(scan("src", None, None)))),
+                ),
+            ];
+            for (reason, plan) in kept {
+                let pushed_only = Optimizer::new().push_filters_down(plan.clone());
+                assert_eq!(optimized(plan), pushed_only.explain_tree(), "{reason}");
+            }
+        }
+
+        /// An indexed property of the target pins it like an ID does.
+        #[test]
+        fn an_indexed_property_of_the_target_starts_the_expand() {
+            let keyed = equals(
+                property("tgt", "key"),
+                LogicalExpression::Literal(Value::from("Amsterdam")),
+            );
+            let plan = returned(filter(
+                keyed.clone(),
+                expand(
+                    "src",
+                    "tgt",
+                    ExpandDirection::Outgoing,
+                    scan("src", None, None),
+                ),
+            ));
+            let mut optimizer = Optimizer::new();
+            optimizer.indexed_properties.insert("key".to_string());
+            let expected = returned(expand(
+                "tgt",
+                "src",
+                ExpandDirection::Incoming,
+                filter(keyed, scan("tgt", None, None)),
+            ));
+            assert_eq!(optimized_by(&optimizer, plan), expected.explain_tree());
+        }
+
+        /// Without backward edges an incoming expand is slow: an outgoing
+        /// expand keeps its start, an incoming one still turns.
+        #[test]
+        fn without_backward_edges_only_an_incoming_expand_turns() {
+            let mut optimizer = Optimizer::new();
+            optimizer.incoming_edges = IncomingEdges::NotKept;
+            let written = |direction| {
+                returned(filter(
+                    in_ids("tgt"),
+                    expand("src", "tgt", direction, scan("src", None, None)),
+                ))
+            };
+            let outgoing = written(ExpandDirection::Outgoing);
+            let pushed_only = Optimizer::new().push_filters_down(outgoing.clone());
+            assert_eq!(
+                optimized_by(&optimizer, outgoing),
+                pushed_only.explain_tree()
+            );
+            let expected = returned(expand(
+                "tgt",
+                "src",
+                ExpandDirection::Outgoing,
+                filter(in_ids("tgt"), scan("tgt", None, None)),
+            ));
+            assert_eq!(
+                optimized_by(&optimizer, written(ExpandDirection::Incoming)),
+                expected.explain_tree()
+            );
+        }
+
+        /// `UNWIND $keys AS k MATCH (src)-[r:R]->(tgt) WHERE id(tgt) = k`:
+        /// the target is sought for each row of the scan's input.
+        #[test]
+        fn a_key_from_the_input_row_starts_the_expand() {
+            let keys = || {
+                LogicalOperator::Unwind(UnwindOp {
+                    expression: LogicalExpression::Parameter("keys".to_string()),
+                    variable: "k".to_string(),
+                    ordinality_var: None,
+                    offset_var: None,
+                    input: Box::new(LogicalOperator::Empty),
+                })
+            };
+            let pinned = equals(
+                LogicalExpression::Id("tgt".to_string()),
+                LogicalExpression::Variable("k".to_string()),
+            );
+            let plan = returned(filter(
+                pinned.clone(),
+                expand(
+                    "src",
+                    "tgt",
+                    ExpandDirection::Outgoing,
+                    scan("src", None, Some(keys())),
+                ),
+            ));
+            let expected = returned(expand(
+                "tgt",
+                "src",
+                ExpandDirection::Incoming,
+                filter(pinned, scan("tgt", None, Some(keys()))),
+            ));
+            assert_eq!(optimized(plan), expected.explain_tree());
         }
     }
 }

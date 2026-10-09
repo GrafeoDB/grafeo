@@ -67,6 +67,12 @@ pub enum LogicalType {
     /// Homogeneous list of elements
     List(Box<LogicalType>),
 
+    /// A list with one type per item, by position: the list literal
+    /// `[n, 1]` is a node, then an integer. The query planner uses it to
+    /// know which items of a list are nodes or edges; GQL types such a list
+    /// as a list of any values.
+    Tuple(Vec<LogicalType>),
+
     /// Key-value map
     Map {
         /// Type of map keys (usually String)
@@ -288,6 +294,16 @@ impl fmt::Display for LogicalType {
             LogicalType::ZonedTime => write!(f, "ZONED TIME"),
             LogicalType::ZonedDatetime => write!(f, "ZONED DATETIME"),
             LogicalType::List(elem) => write!(f, "LIST<{elem}>"),
+            LogicalType::Tuple(items) => {
+                write!(f, "TUPLE<")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, ">")
+            }
             LogicalType::Map { key, value } => write!(f, "MAP<{key}, {value}>"),
             LogicalType::Struct(fields) => {
                 write!(f, "STRUCT<")?;
@@ -394,6 +410,10 @@ mod tests {
             }
             .to_string(),
             "MAP<STRING, INT64>"
+        );
+        assert_eq!(
+            LogicalType::Tuple(vec![LogicalType::Node, LogicalType::Any]).to_string(),
+            "TUPLE<NODE, ANY>"
         );
     }
 

@@ -1,0 +1,60 @@
+# Rosetta: UNWIND (GQL FOR) keeps the variable that holds its list
+#
+# UNWIND adds a variable for each item and keeps every variable in scope
+# (openCypher UNWIND; ISO/IEC 39075:2024 <for statement>), the one that holds
+# the list too. That variable used to read null after the UNWIND.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: UNWIND keeps the variable that holds its list
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: the_list_variable_after_unwind
+    variants:
+      gql: "LET l = [3, 19] FOR x IN l RETURN l, x"
+      cypher: "WITH [3, 19] AS l UNWIND l AS x RETURN l, x"
+    expect:
+      rows:
+        - ["[3, 19]", 3]
+        - ["[3, 19]", 19]
+
+  - name: the_list_variable_after_gql_unwind
+    variants:
+      gql: "LET l = [3, 19] UNWIND l AS x RETURN l, x"
+    expect:
+      rows:
+        - ["[3, 19]", 3]
+        - ["[3, 19]", 19]
+
+  - name: the_list_variable_in_expressions_after_unwind
+    variants:
+      gql: "LET l = [3, 19, 88] FOR x IN l RETURN x, size(l) AS n, l[0] AS first"
+      cypher: "WITH [3, 19, 88] AS l UNWIND l AS x RETURN x, size(l) AS n, l[0] AS first"
+    expect:
+      rows:
+        - [3, 3, 3]
+        - [19, 3, 3]
+        - [88, 3, 3]
+
+  - name: a_collected_list_after_unwind
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (n:Person) WITH collect(n.name) AS names UNWIND names AS x RETURN size(names) AS s, x"
+      cypher: "MATCH (n:Person) WITH collect(n.name) AS names UNWIND names AS x RETURN size(names) AS s, x"
+    expect:
+      rows:
+        - [2, Alix]
+        - [2, Gus]
+
+  - name: the_list_variable_with_ordinality
+    variants:
+      gql: "LET l = [3, 19] FOR x IN l WITH ORDINALITY i RETURN l, x, i"
+    expect:
+      rows:
+        - ["[3, 19]", 3, 1]
+        - ["[3, 19]", 19, 2]

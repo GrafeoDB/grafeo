@@ -1,9 +1,8 @@
 //! Index management methods for [`LpgStore`].
 
 use super::LpgStore;
-use dashmap::DashMap;
+use super::property_index::PropertyIndex;
 use grafeo_common::types::{HashableValue, NodeId, PropertyKey, Value};
-use grafeo_common::utils::hash::FxHashSet;
 #[cfg(feature = "text-index")]
 use parking_lot::RwLock;
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -151,11 +150,10 @@ impl LpgStore {
             }
 
             // Create the index and populate it with existing data
-            let index: DashMap<HashableValue, FxHashSet<NodeId>> = DashMap::new();
+            let index = PropertyIndex::default();
             for node_id in node_ids {
                 if let Some(value) = self.node_properties.get(node_id, &key) {
-                    let hv = HashableValue::new(value);
-                    index.entry(hv).or_default().insert(node_id);
+                    index.insert(HashableValue::new(value), node_id);
                 }
             }
 
@@ -199,15 +197,11 @@ impl LpgStore {
         if let Some(index) = indexes.get(key) {
             // Get old value to remove from index
             if let Some(old_value) = self.node_properties.get(node_id, key) {
-                Self::remove_index_entry(index, &HashableValue::new(old_value), node_id);
+                index.remove(&HashableValue::new(old_value), node_id);
             }
 
             // Add new value to index
-            let new_hv = HashableValue::new(new_value.clone());
-            index
-                .entry(new_hv)
-                .or_insert_with(FxHashSet::default)
-                .insert(node_id);
+            index.insert(HashableValue::new(new_value.clone()), node_id);
         }
     }
 
@@ -431,23 +425,9 @@ impl LpgStore {
         let indexes = self.property_indexes.read();
         for (key, index) in indexes.iter() {
             if let Some(value) = self.node_properties.get(node_id, key) {
-                Self::remove_index_entry(index, &HashableValue::new(value), node_id);
+                index.remove(&HashableValue::new(value), node_id);
             }
         }
-    }
-
-    /// Removes `node_id` from the set of `value`, dropping the set when empty.
-    fn remove_index_entry(
-        index: &DashMap<HashableValue, FxHashSet<NodeId>>,
-        value: &HashableValue,
-        node_id: NodeId,
-    ) {
-        if let Some(mut nodes) = index.get_mut(value) {
-            nodes.remove(&node_id);
-        }
-        // Checked again under the shard lock: between releasing the bucket and
-        // removing it, another writer may have added a node to it.
-        index.remove_if(value, |_, nodes| nodes.is_empty());
     }
 
     /// The current values of the indexed `(node, key)` pairs, taken before a
@@ -489,13 +469,10 @@ impl LpgStore {
                 continue;
             }
             if let Some(old_value) = old_value {
-                Self::remove_index_entry(index, &HashableValue::new(old_value), node_id);
+                index.remove(&HashableValue::new(old_value), node_id);
             }
             if let Some(new_value) = new_value {
-                index
-                    .entry(HashableValue::new(new_value))
-                    .or_insert_with(FxHashSet::default)
-                    .insert(node_id);
+                index.insert(HashableValue::new(new_value), node_id);
             }
         }
     }
@@ -510,8 +487,21 @@ impl LpgStore {
     ) {
         let indexes = self.property_indexes.read();
         if let Some(index) = indexes.get(key) {
-            Self::remove_index_entry(index, &HashableValue::new(old_value.clone()), node_id);
+            index.remove(&HashableValue::new(old_value.clone()), node_id);
         }
+    }
+
+    /// The nodes whose `property` may be equal to `key` under `=` (see
+    /// [`GraphStore::find_nodes_maybe_equal`](crate::graph::GraphStore::find_nodes_maybe_equal)),
+    /// found through the property's index: every node `=` finds equal, and
+    /// maybe others, for a filter to decide. `None` when the property has no
+    /// index.
+    #[must_use]
+    pub fn find_nodes_maybe_equal(&self, property: &str, key: &Value) -> Option<Vec<NodeId>> {
+        let indexes = self.property_indexes.read();
+        indexes
+            .get(&PropertyKey::new(property))
+            .map(|index| index.nodes_maybe_equal(key))
     }
 
     /// Stores a vector index for a label+property pair.

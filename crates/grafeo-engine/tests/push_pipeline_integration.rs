@@ -973,7 +973,11 @@ fn grouped_distinct_keeps_later_rows_after_pressure_spill() {
     let db = GrafeoDB::with_config(
         Config::in_memory()
             .with_memory_limit(64 * 1024 * 1024)
-            .with_spill_path(spill_root.path()),
+            .with_spill_path(spill_root.path())
+            // Under pressure every partition spills and reloads; on a busy
+            // Windows runner that took 16 to 47 s, past the 30 s default.
+            // The test checks the results, not the speed.
+            .without_query_timeout(),
     )
     .unwrap();
     let manager = db.buffer_manager();

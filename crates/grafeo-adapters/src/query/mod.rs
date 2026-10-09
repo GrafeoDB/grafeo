@@ -13,6 +13,7 @@
 //! | SQL/PGQ | SQL:2023 (ISO 9075-16) | `sql-pgq` | SQL-native graph queries via GRAPH_TABLE |
 
 pub mod keywords;
+pub mod limits;
 pub mod schema;
 
 #[cfg(feature = "gql")]

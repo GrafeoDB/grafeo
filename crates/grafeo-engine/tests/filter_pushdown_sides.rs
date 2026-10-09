@@ -180,8 +180,8 @@ fn a_predicate_on_both_sides_stays_above_the_join() {
     ]);
 }
 
-/// `length(p)` reads a column of the expand that binds `p`: a filter on it
-/// stays above that expand.
+/// `length(p)` reads the path `p` the expand binds: a filter on it stays
+/// above that expand.
 #[test]
 fn a_filter_on_a_path_length_stays_above_its_expand() {
     let paths = rows(&[&["Alix", "Django"], &["Gus", "Django"], &["Gus", "Hans"]]);
@@ -219,7 +219,7 @@ fn a_filter_on_a_path_length_stays_above_its_expand() {
         assert!(
             sits_on(
                 &plan,
-                "Filter (_path_length_p Ge 1)",
+                "Filter (length(p) Ge 1)",
                 "Expand (a)->[:R*1..2]->(c)"
             ) && sits_on(&plan, "Filter (a.k Eq 2)", "NodeScan (a:A)"),
             "{language:?}:\n{plan}"

@@ -984,6 +984,9 @@ impl RdfPlanner {
                     alias: agg_expr.alias.clone(),
                     percentile: agg_expr.percentile,
                     separator: agg_expr.separator.clone(),
+                    // SPARQL rows hold RDF literals as text: MIN and MAX compare
+                    // those that read as numbers by their numbers.
+                    rdf_literals: true,
                 })
             })
             .collect::<Result<Vec<_>>>()?;

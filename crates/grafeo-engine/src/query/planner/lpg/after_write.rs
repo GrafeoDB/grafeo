@@ -451,6 +451,8 @@ mod tests {
             match_properties: Vec::new(),
             on_create: Vec::new(),
             on_match: Vec::new(),
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(project(vec![variable("i")], set())),
         });
         assert!(reads_after_the_write(&merged));

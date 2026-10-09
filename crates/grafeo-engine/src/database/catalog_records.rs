@@ -867,14 +867,15 @@ mod tests {
     }
 
     /// The memory bound of the catalog records counts 32 bytes per `LIST`
-    /// level: a 16-byte box in the record and another in the property type
-    /// `property_data_type` builds from it.
+    /// level: a box of at most 16 bytes in the record and another in the
+    /// property type `property_data_type` builds from it (16 bytes each on a
+    /// 64-bit target, fewer on a 32-bit one such as `wasm32`).
     #[test]
     fn a_list_level_takes_a_16_byte_box_here_as_in_the_record() {
         use std::mem::size_of;
 
-        assert_eq!(size_of::<PropertyDataType>(), 16);
-        assert_eq!(size_of::<PropertyTypeRecord>(), 16);
+        assert!(size_of::<PropertyDataType>() <= 16);
+        assert!(size_of::<PropertyTypeRecord>() <= 16);
         let record = PropertyTypeRecord::ListOf(Box::new(PropertyTypeRecord::ListOf(Box::new(
             PropertyTypeRecord::Int64,
         ))));

@@ -109,6 +109,7 @@ Each property of a node or edge type has one of these types. A value written to 
 | `BYTES` | `BINARY`, `BLOB` | Byte strings |
 | `LIST` | `ARRAY` | Lists of any values |
 | `LIST<type>` | | Lists whose elements all have `type`, such as `LIST<STRING>` or `LIST<ZONED DATETIME>`; they nest up to 128 levels, as in `LIST<LIST<INT64>>` |
+| `MAP` | `RECORD` | Maps, such as `{mode: 'fast', level: 3}` |
 | `ANY` | | Any value |
 
 ```sql
@@ -121,6 +122,13 @@ CREATE NODE TYPE Event (
 ```
 
 `SHOW NODE TYPES` and `SHOW EDGE TYPES` list each property with its type, in the first spelling of the table.
+
+A property of a node or edge type can have a default value, a literal after `DEFAULT`: a node or edge created without the property gets it.
+
+```sql
+CREATE NODE TYPE City (name STRING NOT NULL, country STRING DEFAULT 'NL')
+CREATE EDGE TYPE ROUTE (km INT64 DEFAULT 88)
+```
 
 ### Altering Types
 
@@ -181,6 +189,15 @@ CREATE GRAPH TYPE labeled_type (
     NODE TYPE Person KEY (PersonLabel) (name STRING NOT NULL, age INTEGER),
     EDGE TYPE KNOWS
 )
+```
+
+The element types can also be written as patterns, in braces as ISO GQL writes them or in parentheses. An edge pattern declares its edge type with the node types at its ends as the only sources and targets:
+
+```sql
+CREATE GRAPH TYPE routes {
+    (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City),
+    (:Country {code STRING})
+}
 ```
 
 ### Graph Type from Existing Graph (LIKE)

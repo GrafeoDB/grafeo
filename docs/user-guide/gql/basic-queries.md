@@ -210,6 +210,38 @@ RETURN p.name, friend.name
 An expression in `WITH` needs a name (`WITH p.name AS name`), and a variable a `WITH` leaves out is not visible
 after it.
 
+## Statement Order
+
+A query is a sequence of statements (`MATCH`, `OPTIONAL MATCH`, `FILTER`, `LET`, `FOR`, `CALL`, `WITH`, an
+`ORDER BY` with `OFFSET` and `LIMIT`, and the writes `INSERT`, `SET`, `REMOVE` and `DELETE`) in any order, ending
+in `RETURN`, `SELECT` or `FINISH`, or in nothing when it writes. Each statement reads the rows the ones before it
+leave: a `WHERE` or `FILTER` filters the rows so far, and an `ORDER BY` and `LIMIT` before the end cut the rows the
+statements after them see. A `WHERE` right after an `OPTIONAL MATCH` belongs to it, so a row without a match keeps
+`null`; a `FILTER` there filters every row, those without a match included.
+
+A `WHERE` or `FILTER` right after `INSERT`, `CREATE`, `MERGE` or `DELETE` is an error, because before 0.6.0 it
+filtered the rows before the write: put the condition before the write, or filter the rows after it with
+`WITH ... WHERE ...`. After `SET` or `REMOVE`, `FILTER` filters the rows after the write.
+
+```sql
+-- The three oldest people, then where they live
+MATCH (p:Person)
+ORDER BY p.age DESC LIMIT 3
+MATCH (p)-[:LIVES_IN]->(c:City)
+RETURN p.name, c.name
+
+-- A WHERE between two MATCH statements
+MATCH (a:Person) WHERE a.age > 30
+MATCH (a)-[:KNOWS]->(b)
+RETURN a.name, b.name
+
+-- Write after WITH, then read what was written
+MATCH (p:Person)
+WITH p WHERE p.age > 65
+SET p.retired = true
+RETURN p.name, p.retired
+```
+
 ## LET (Variable Binding)
 
 `LET` assigns computed values to variables for use in subsequent clauses.

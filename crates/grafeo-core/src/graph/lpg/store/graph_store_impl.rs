@@ -165,6 +165,10 @@ impl GraphStore for LpgStore {
         LpgStore::find_nodes_by_properties(self, conditions)
     }
 
+    fn find_nodes_maybe_equal(&self, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+        LpgStore::find_nodes_maybe_equal(self, property, value)
+    }
+
     fn find_nodes_in_range(
         &self,
         property: &str,

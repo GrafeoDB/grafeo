@@ -214,43 +214,58 @@ RETURN p.name, team.name
 
 ## Path Search Prefixes
 
-Path search prefixes control how many matching paths are returned.
+Path search prefixes control how many matching paths are returned. They select per pair of endpoints: the paths of a pattern are grouped by their first and last node (for each row the pattern starts from), and each group keeps its own selection.
 
 ```sql
--- ANY: return any single matching path
+-- ANY: one path for each pair of endpoints
 MATCH ANY (a:Person)-[:KNOWS*]->(b:Person)
-WHERE a.name = 'Alix' AND b.name = 'Dave'
-RETURN a, b
+WHERE a.name = 'Alix'
+RETURN b.name
 
--- ANY k: return up to k paths
+-- ANY k: up to k paths for each pair
 MATCH ANY 3 (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix'
 RETURN b.name
 
 -- ALL SHORTEST: all paths of minimum length
 MATCH ALL SHORTEST (a:Person)-[:KNOWS*]->(b:Person)
-WHERE a.name = 'Alix' AND b.name = 'Dave'
+WHERE a.name = 'Alix' AND b.name = 'Mia'
 RETURN a, b
 
 -- ANY SHORTEST: any one shortest path
 MATCH ANY SHORTEST (a:Person)-[:KNOWS*]->(b:Person)
-WHERE a.name = 'Alix' AND b.name = 'Dave'
+WHERE a.name = 'Alix' AND b.name = 'Mia'
 RETURN a, b
 
 -- SHORTEST k: the k shortest paths
 MATCH SHORTEST 3 (a:Person)-[:KNOWS*]->(b:Person)
-WHERE a.name = 'Alix' AND b.name = 'Dave'
+WHERE a.name = 'Alix' AND b.name = 'Mia'
 RETURN a, b
 
--- SHORTEST k GROUPS: k groups of equal-length shortest paths
+-- SHORTEST k GROUPS: every path of the k shortest lengths
 MATCH SHORTEST 2 GROUPS (a:Person)-[:KNOWS*]->(b:Person)
-WHERE a.name = 'Alix' AND b.name = 'Dave'
+WHERE a.name = 'Alix' AND b.name = 'Mia'
 RETURN a, b
 ```
 
+Which paths `ANY` keeps is up to the implementation: Grafeo keeps the shortest ones. A prefix can carry a path mode, which restricts the paths it selects among, and `PATH` or `PATHS` may follow it:
+
+```sql
+-- The shortest trail: no edge twice, even when a walk back would be shorter
+MATCH p = ANY SHORTEST TRAIL (a:Person)-[:KNOWS]-{2,}(b:Person)
+WHERE a.name = 'Jules' AND b.name = 'Mia'
+RETURN length(p)
+
+-- Two acyclic paths to each node
+MATCH p = ANY 2 ACYCLIC PATHS (a:Person {name: 'Alix'})-[:KNOWS]-{1,4}(b)
+RETURN b.name, length(p)
+```
+
+A prefix after the path variable (`p = ANY SHORTEST (...)`), or before a later pattern of the MATCH, holds for that pattern; one right after `MATCH` holds for every pattern of the clause without its own. The conditions of the edge pattern (its property map and `WHERE`) hold for every edge before the selection, while a `WHERE` after the pattern is checked on the paths selected. A selective search runs over one edge pattern between two node patterns.
+
 ## Path Modes
 
-Path modes restrict which paths are valid during traversal. Place the mode keyword before the pattern.
+Path modes restrict which paths are valid during traversal. Place the mode keyword after `MATCH` for every pattern of the clause, or after the path variable for one pattern (`MATCH p = TRAIL (...)`).
 
 | Mode | Rule |
 |------|------|
@@ -281,20 +296,25 @@ WHERE a.name = 'Alix'
 RETURN b.name
 ```
 
+A path mode holds for the whole path of a pattern, over all of its edges: `MATCH TRAIL (a)-[:KNOWS]-(b)-[:KNOWS]-(c)` never goes back over the edge it came on.
+
 ## Match Modes
 
-Match modes control uniqueness across multiple patterns in the same `MATCH`.
+Match modes control whether the edges of a `MATCH` may repeat, across all of its patterns.
 
 ```sql
--- DIFFERENT EDGES: no edge can appear in more than one pattern binding
+-- DIFFERENT EDGES: no edge is bound twice, by any two edge patterns of the MATCH
+-- (named or not, and every edge of a quantified one)
 MATCH DIFFERENT EDGES
     (a)-[r1:KNOWS]->(b),
     (c)-[r2:KNOWS]->(d)
 RETURN a.name, b.name, c.name, d.name
 
--- REPEATABLE ELEMENTS: relax the default uniqueness constraint
+-- REPEATABLE ELEMENTS (the default): edges and nodes may repeat
 MATCH REPEATABLE ELEMENTS
     (a)-[:KNOWS]->(b),
     (a)-[:WORKS_WITH]->(b)
 RETURN a.name, b.name
 ```
+
+A match mode and a path mode combine: `MATCH DIFFERENT EDGES ACYCLIC (a)-[:KNOWS]-(b)-[:KNOWS]-(c)`. `KEEP DIFFERENT EDGES` after a pattern asks the same of the edges of that one pattern.

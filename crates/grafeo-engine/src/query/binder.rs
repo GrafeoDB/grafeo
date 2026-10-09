@@ -553,12 +553,38 @@ impl Binder {
                         " (source in shortestPath)",
                     ));
                 }
-                if !self.context.contains(&sp.target_var) {
+                // A search to every node binds the target itself
+                if sp.binds_target {
+                    self.bind_element(&sp.target_var, Element::Node)?;
+                } else if !self.context.contains(&sp.target_var) {
                     return Err(undefined_variable_error(
                         &sp.target_var,
                         &self.context,
                         " (target in shortestPath)",
                     ));
+                }
+                // The edge condition reads the candidate edge and the input row
+                if let Some(condition) = &sp.edge_condition {
+                    self.bind_element(&condition.variable, Element::Edge)?;
+                    self.validate_expression(&condition.predicate)?;
+                }
+                if let Some(edge_variable) = &sp.edge_variable {
+                    self.bind_element(edge_variable, Element::Edge)?;
+                }
+                // nodes(p) and edges(p) read these columns
+                for column in [
+                    format!("_path_nodes_{}", sp.path_alias),
+                    format!("_path_edges_{}", sp.path_alias),
+                ] {
+                    self.context.add_variable(
+                        column.clone(),
+                        VariableInfo {
+                            name: column,
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
                 }
                 // Add the path alias variable to the context
                 self.context.add_variable(
@@ -606,8 +632,29 @@ impl Binder {
             | LogicalOperator::LoadGraph(_)
             | LogicalOperator::CopyGraph(_)
             | LogicalOperator::MoveGraph(_)
-            | LogicalOperator::AddGraph(_)
-            | LogicalOperator::HorizontalAggregate(_) => Ok(()),
+            | LogicalOperator::AddGraph(_) => Ok(()),
+            // A horizontal aggregate passes its input's rows on with the
+            // value it computes over the list column of each row.
+            LogicalOperator::HorizontalAggregate(aggregate) => {
+                self.bind_operator(&aggregate.input)?;
+                if !self.context.contains(&aggregate.list_column) {
+                    return Err(undefined_variable_error(
+                        &aggregate.list_column,
+                        &self.context,
+                        " in a horizontal aggregate",
+                    ));
+                }
+                self.context.add_variable(
+                    aggregate.alias.clone(),
+                    VariableInfo {
+                        name: aggregate.alias.clone(),
+                        data_type: LogicalType::Any,
+                        is_node: false,
+                        is_edge: false,
+                    },
+                );
+                Ok(())
+            }
             LogicalOperator::VectorScan(scan) => {
                 // VectorScan introduces a variable for matched nodes
                 if let Some(ref input) = scan.input {
@@ -2321,6 +2368,8 @@ mod tests {
                     "updated".to_string(),
                     LogicalExpression::Literal(grafeo_common::types::Value::Bool(true)),
                 )],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 input: Box::new(LogicalOperator::Empty),
             })),
         }));
@@ -2350,6 +2399,8 @@ mod tests {
                 },
             )],
             on_match: vec![],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(LogicalOperator::Empty),
         }));
 
@@ -2385,6 +2436,8 @@ mod tests {
                 },
             )],
             on_match: vec![],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(LogicalOperator::Empty),
         }));
 
@@ -2413,6 +2466,8 @@ mod tests {
                     property: "x".to_string(),
                 },
             )],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(LogicalOperator::Empty),
         }));
 
@@ -2441,6 +2496,8 @@ mod tests {
             )],
             on_create: vec![],
             on_match: vec![],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(LogicalOperator::Empty),
         }));
 
@@ -2456,7 +2513,7 @@ mod tests {
 
     #[test]
     fn test_shortest_path_rejects_undefined_source() {
-        use crate::query::plan::{ExpandDirection, ShortestPathOp};
+        use crate::query::plan::{ExpandDirection, PathMode, PathSelection, ShortestPathOp};
 
         let plan = LogicalPlan::new(LogicalOperator::ShortestPath(ShortestPathOp {
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
@@ -2469,9 +2526,14 @@ mod tests {
             edge_types: vec![],
             direction: ExpandDirection::Both,
             path_alias: "p".to_string(),
-            all_paths: false,
+            selection: PathSelection::Shortest(1),
+            path_mode: PathMode::Walk,
+            binds_target: false,
             min_hops: 1,
             max_hops: None,
+            edge_variable: None,
+            quantified: true,
+            edge_condition: None,
         }));
 
         let mut binder = Binder::new();
@@ -2484,7 +2546,9 @@ mod tests {
 
     #[test]
     fn test_shortest_path_adds_path_and_length_variables() {
-        use crate::query::plan::{ExpandDirection, JoinOp, JoinType, ShortestPathOp};
+        use crate::query::plan::{
+            ExpandDirection, JoinOp, JoinType, PathMode, PathSelection, ShortestPathOp,
+        };
 
         let plan = LogicalPlan::new(LogicalOperator::ShortestPath(ShortestPathOp {
             input: Box::new(LogicalOperator::Join(JoinOp {
@@ -2506,9 +2570,14 @@ mod tests {
             edge_types: vec!["ROAD".to_string()],
             direction: ExpandDirection::Outgoing,
             path_alias: "p".to_string(),
-            all_paths: false,
+            selection: PathSelection::Shortest(1),
+            path_mode: PathMode::Walk,
+            binds_target: false,
             min_hops: 1,
             max_hops: None,
+            edge_variable: None,
+            quantified: true,
+            edge_condition: None,
         }));
 
         let mut binder = Binder::new();
@@ -2984,6 +3053,7 @@ mod tests {
             )],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: Box::new(LogicalOperator::Join(JoinOp {
                 left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "a".to_string(),
@@ -3025,6 +3095,7 @@ mod tests {
             )],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: Box::new(LogicalOperator::Join(JoinOp {
                 left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "a".to_string(),
@@ -3842,6 +3913,7 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "b".to_string(),
                 label: None,
@@ -3860,6 +3932,7 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "a".to_string(),
                 label: None,
@@ -3891,6 +3964,7 @@ mod tests {
                 "updated_at".to_string(),
                 LogicalExpression::Literal(grafeo_common::types::Value::Int64(2)),
             )],
+            undirected: false,
             input: Box::new(LogicalOperator::Join(JoinOp {
                 left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "a".to_string(),
@@ -4683,22 +4757,39 @@ mod tests {
         assert!(ctx.contains("n.name"));
     }
 
+    /// A horizontal aggregate keeps the variables of its input, adds its
+    /// result, and needs its list column to be bound.
     #[test]
-    fn test_horizontal_aggregate_is_noop_in_binder() {
+    fn test_horizontal_aggregate_binds_its_input_and_result() {
         use crate::query::plan::{AggregateFunction, EntityKind, HorizontalAggregateOp};
 
-        let plan = LogicalPlan::new(LogicalOperator::HorizontalAggregate(
-            HorizontalAggregateOp {
-                list_column: "_path_edges_p".to_string(),
-                entity_kind: EntityKind::Edge,
-                function: AggregateFunction::Sum,
-                property: "weight".to_string(),
-                alias: "total".to_string(),
-                input: Box::new(LogicalOperator::Empty),
-            },
-        ));
-        let mut binder = Binder::new();
-        assert!(binder.bind(&plan).is_ok());
+        let aggregate = |list_column: &str| {
+            LogicalPlan::new(LogicalOperator::HorizontalAggregate(
+                HorizontalAggregateOp {
+                    list_column: list_column.to_string(),
+                    entity_kind: EntityKind::Edge,
+                    function: AggregateFunction::Sum,
+                    distinct: false,
+                    percentile: None,
+                    separator: None,
+                    property: "weight".to_string(),
+                    alias: "total".to_string(),
+                    input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "e".to_string(),
+                        label: None,
+                        input: None,
+                    })),
+                },
+            ))
+        };
+        let ctx = Binder::new().bind(&aggregate("e")).unwrap();
+        assert!(ctx.contains("e"), "the input's variable stays bound");
+        assert!(ctx.contains("total"), "the result is bound");
+        let error = Binder::new().bind(&aggregate("missing")).unwrap_err();
+        assert!(
+            error.to_string().contains("missing"),
+            "an unbound list column is an error: {error}"
+        );
     }
 
     // ========================================================================

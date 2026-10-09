@@ -2,6 +2,7 @@
 
 use crate::execution::chunk::{ColumnTypes, DataChunk};
 use crate::execution::operators::OperatorError;
+use crate::execution::operators::accumulator::RowKey;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 use crate::execution::vector::ValueVector;
 use grafeo_common::types::{HashableValue, Value};
@@ -84,7 +85,7 @@ fn hash_value_into(value: &HashableValue, hasher: &mut impl std::hash::Hasher) {
 pub struct DistinctPushOperator {
     /// Columns to check for distinctness (None = all columns).
     columns: Option<Vec<usize>>,
-    /// Set of seen row keys.
+    /// The keys of the rows seen (see `RowKey`).
     seen: HashSet<RowKey>,
 }
 
@@ -184,7 +185,7 @@ pub struct DistinctMaterializingOperator {
     columns: Option<Vec<usize>>,
     /// Buffered unique rows.
     rows: Vec<Vec<Value>>,
-    /// Set of seen row keys.
+    /// The keys of the rows seen (see `RowKey`).
     seen: HashSet<RowKey>,
     /// Types of the buffered input columns.
     column_types: ColumnTypes,
@@ -788,12 +789,13 @@ mod tests {
         assert_eq!(distinct.unique_count(), 2);
     }
 
+    /// Values of different types are distinct, but numbers compare by their
+    /// value (openCypher equivalence): `1` and `1.0` are one value.
     #[test]
-    fn test_distinct_mixed_types_are_distinct() {
+    fn values_of_different_types_are_distinct_but_equal_numbers_are_one() {
         let mut distinct = DistinctPushOperator::new();
         let mut sink = CollectorSink::new();
 
-        // Different types with "similar" content should be distinct
         let chunk = create_mixed_chunk(&[
             Value::Int64(1),
             Value::Float64(1.0),
@@ -802,18 +804,23 @@ mod tests {
         ]);
         distinct.push(chunk, &mut sink).unwrap();
         distinct.finalize(&mut sink).unwrap();
-        assert_eq!(distinct.unique_count(), 4);
+        assert_eq!(distinct.unique_count(), 3);
     }
 
+    /// `-0.0` is `0.0`, and every NaN is one value, whatever its bits.
     #[test]
-    fn test_hash_value_deterministic() {
-        // Same value should always produce the same hash
-        let v1 = HashableValue::from(Value::from("test"));
-        let v2 = HashableValue::from(Value::from("test"));
-        assert_eq!(hash_value(&v1), hash_value(&v2));
+    fn negative_zero_is_zero_and_nan_is_nan() {
+        let mut distinct = DistinctPushOperator::new();
+        let mut sink = CollectorSink::new();
 
-        // Different values should (almost certainly) produce different hashes
-        let v3 = HashableValue::from(Value::from("other"));
-        assert_ne!(hash_value(&v1), hash_value(&v3));
+        let chunk = create_mixed_chunk(&[
+            Value::Float64(0.0),
+            Value::Float64(-0.0),
+            Value::Float64(f64::NAN),
+            Value::Float64(f64::from_bits(f64::NAN.to_bits() | 1)),
+        ]);
+        distinct.push(chunk, &mut sink).unwrap();
+        distinct.finalize(&mut sink).unwrap();
+        assert_eq!(distinct.unique_count(), 2);
     }
 }

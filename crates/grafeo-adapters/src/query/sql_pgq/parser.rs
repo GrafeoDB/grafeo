@@ -7,11 +7,8 @@
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
+use crate::query::limits::{Chain, Nesting, nesting_error_message};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind, Result};
-
-/// Maximum nesting depth for recursive parsing constructs (parenthesized
-/// expressions, CASE, subqueries).
-const MAX_NESTING_DEPTH: u32 = 128;
 
 /// SQL/PGQ query parser.
 pub struct Parser<'a> {
@@ -19,8 +16,9 @@ pub struct Parser<'a> {
     current: Token,
     previous: Token,
     source: &'a str,
-    /// Current nesting depth for recursive parsing constructs.
-    nesting_depth: u32,
+    /// How deep the query parsed so far nests (see
+    /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)).
+    nesting: Nesting,
 }
 
 impl<'a> Parser<'a> {
@@ -38,7 +36,7 @@ impl<'a> Parser<'a> {
             current,
             previous,
             source: query,
-            nesting_depth: 0,
+            nesting: Nesting::default(),
         }
     }
 
@@ -278,6 +276,7 @@ impl<'a> Parser<'a> {
             let expression = self.parse_expression()?;
             Some(WhereClause {
                 expression,
+                filter: false,
                 span: None,
             })
         } else {
@@ -503,6 +502,7 @@ impl<'a> Parser<'a> {
             alias: None,
             path_function: None,
             search_prefix: None,
+            path_mode: None,
             keep: None,
             pattern,
         })
@@ -758,30 +758,36 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_or_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_and_expression()?;
         while self.current.kind == TokenKind::Or {
             self.advance();
             let right = self.parse_and_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op: BinaryOp::Or,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
         Ok(left)
     }
 
     fn parse_and_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_not_expression()?;
         while self.current.kind == TokenKind::And {
             self.advance();
             let right = self.parse_not_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op: BinaryOp::And,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
         Ok(left)
     }
 
@@ -802,6 +808,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comparison_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
+        let expression = self.parse_comparison_chain()?;
+        self.end_chain(chain);
+        Ok(expression)
+    }
+
+    /// The operands and operators of a chain of comparisons, each operator
+    /// nesting one level (see [`Self::parse_comparison_expression`]).
+    fn parse_comparison_chain(&mut self) -> Result<Expression> {
         let mut left = self.parse_additive_expression()?;
 
         loop {
@@ -821,6 +836,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                     }
                     self.expect(TokenKind::Null)?;
+                    self.link_chain()?;
                     left = Expression::Unary {
                         op: if not {
                             UnaryOp::IsNotNull
@@ -832,11 +848,14 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 TokenKind::Between => {
-                    // BETWEEN low AND high → left >= low AND left <= high
+                    // BETWEEN low AND high → left >= low AND left <= high,
+                    // two levels above its operands
                     self.advance();
                     let low = self.parse_additive_expression()?;
                     self.expect(TokenKind::And)?;
                     let high = self.parse_additive_expression()?;
+                    self.link_chain()?;
+                    self.link_chain()?;
                     left = Expression::Binary {
                         left: Box::new(Expression::Binary {
                             left: Box::new(left.clone()),
@@ -858,6 +877,7 @@ impl<'a> Parser<'a> {
 
             self.advance();
             let right = self.parse_additive_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op,
@@ -869,6 +889,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_additive_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_multiplicative_expression()?;
 
         loop {
@@ -880,17 +901,20 @@ impl<'a> Parser<'a> {
 
             self.advance();
             let right = self.parse_multiplicative_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
 
         Ok(left)
     }
 
     fn parse_multiplicative_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_unary_expression()?;
 
         loop {
@@ -903,12 +927,14 @@ impl<'a> Parser<'a> {
 
             self.advance();
             let right = self.parse_unary_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
 
         Ok(left)
     }
@@ -932,7 +958,14 @@ impl<'a> Parser<'a> {
 
     fn parse_primary_expression(&mut self) -> Result<Expression> {
         match self.current.kind {
-            TokenKind::Case => self.parse_case_expression(),
+            // A CASE nests one level more than its operands: parsing and
+            // planning one takes more stack.
+            TokenKind::Case => {
+                self.enter_nesting()?;
+                let case = self.parse_case_expression();
+                self.exit_nesting();
+                case
+            }
             TokenKind::Null => {
                 self.advance();
                 Ok(Expression::Literal(Literal::Null))
@@ -988,36 +1021,15 @@ impl<'a> Parser<'a> {
                 let name = self.get_identifier_text();
                 self.advance();
 
-                // Check for function call
+                // Check for function call: its arguments nest one level more
+                // than an expression in parentheses, as the call keeps the
+                // large frame of this parser on the stack.
                 if self.current.kind == TokenKind::LParen {
                     self.advance();
-
-                    let distinct = if self.current.kind == TokenKind::Distinct {
-                        self.advance();
-                        true
-                    } else {
-                        false
-                    };
-
-                    let mut args = Vec::new();
-                    if self.current.kind == TokenKind::Star {
-                        // Handle COUNT(*)
-                        self.advance();
-                        args.push(Expression::Variable("*".to_string()));
-                    } else if self.current.kind != TokenKind::RParen {
-                        args.push(self.parse_expression()?);
-                        while self.current.kind == TokenKind::Comma {
-                            self.advance();
-                            args.push(self.parse_expression()?);
-                        }
-                    }
-                    self.expect(TokenKind::RParen)?;
-
-                    Ok(Expression::FunctionCall {
-                        name,
-                        distinct,
-                        args,
-                    })
+                    self.enter_nesting()?;
+                    let call = self.parse_function_arguments(name);
+                    self.exit_nesting();
+                    call
                 } else if self.current.kind == TokenKind::Dot {
                     // Property access: name.property
                     self.advance();
@@ -1030,12 +1042,11 @@ impl<'a> Parser<'a> {
                     Ok(Expression::Variable(name))
                 }
             }
+            // The expression nests one level deeper (see `parse_expression`).
             TokenKind::LParen => {
-                self.enter_nesting()?;
                 self.advance();
                 let expr = self.parse_expression()?;
                 self.expect(TokenKind::RParen)?;
-                self.exit_nesting();
                 Ok(expr)
             }
             TokenKind::LBracket => {
@@ -1070,6 +1081,36 @@ impl<'a> Parser<'a> {
     ///
     /// Simple:   `CASE expr WHEN val THEN result [ELSE default] END`
     /// Searched: `CASE WHEN condition THEN result [ELSE default] END`
+    /// Parses the arguments of a call of the function `name`, after its `(`.
+    fn parse_function_arguments(&mut self, name: String) -> Result<Expression> {
+        let distinct = if self.current.kind == TokenKind::Distinct {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        let mut args = Vec::new();
+        if self.current.kind == TokenKind::Star {
+            // Handle COUNT(*)
+            self.advance();
+            args.push(Expression::Variable("*".to_string()));
+        } else if self.current.kind != TokenKind::RParen {
+            args.push(self.parse_expression()?);
+            while self.current.kind == TokenKind::Comma {
+                self.advance();
+                args.push(self.parse_expression()?);
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+
+        Ok(Expression::FunctionCall {
+            name,
+            distinct,
+            args,
+        })
+    }
+
     fn parse_case_expression(&mut self) -> Result<Expression> {
         self.expect(TokenKind::Case)?;
 
@@ -1243,20 +1284,37 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// Increments the nesting depth and returns an error if the limit is exceeded.
+    /// Enters one level of nesting, or fails past the nesting limit.
     fn enter_nesting(&mut self) -> Result<()> {
-        self.nesting_depth += 1;
-        if self.nesting_depth > MAX_NESTING_DEPTH {
-            return Err(self.error(&format!(
-                "Maximum nesting depth of {MAX_NESTING_DEPTH} exceeded"
-            )));
+        if self.nesting.enter() {
+            Ok(())
+        } else {
+            Err(self.error(&nesting_error_message()))
         }
-        Ok(())
     }
 
-    /// Decrements the nesting depth.
+    /// Leaves the level [`Self::enter_nesting`] entered.
     fn exit_nesting(&mut self) {
-        self.nesting_depth = self.nesting_depth.saturating_sub(1);
+        self.nesting.exit();
+    }
+
+    /// Begins a chain of binary operators (see [`Nesting::begin_chain`]).
+    fn begin_chain(&mut self) -> Chain {
+        self.nesting.begin_chain()
+    }
+
+    /// Counts one operator of a chain, or fails past the nesting limit.
+    fn link_chain(&mut self) -> Result<()> {
+        if self.nesting.link() {
+            Ok(())
+        } else {
+            Err(self.error(&nesting_error_message()))
+        }
+    }
+
+    /// Ends a chain of binary operators.
+    fn end_chain(&mut self, chain: Chain) {
+        self.nesting.end_chain(chain);
     }
 
     fn error(&self, message: &str) -> grafeo_common::utils::error::Error {

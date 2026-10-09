@@ -32,7 +32,8 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 pub fn translate(query: &str, namespace: &str) -> Result<LogicalPlan> {
     let doc = graphql::parse(query)?;
     let translator = GraphQLRdfTranslator::new(namespace);
-    translator.translate_document(&doc)
+    let plan = translator.translate_document(&doc)?;
+    crate::query::limits::check_plan_depth(plan)
 }
 
 /// Translator from GraphQL AST to RDF LogicalPlan.

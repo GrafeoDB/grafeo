@@ -1,0 +1,154 @@
+# Rosetta: values of earlier clauses inside an OPTIONAL MATCH and a comma MATCH
+#
+# An OPTIONAL MATCH keeps every row it goes on from, with nulls where nothing
+# matches, and its WHERE is part of its pattern: a condition that reads an
+# earlier value (an unwound value, a node or a list of a WITH, a node both
+# sides name, or no variable at all) decides which matches count and never
+# removes a row. Such conditions used to filter the rows instead (LDBC IC5
+# lost every forum without a post), a property map that read an imported
+# value in a CALL subquery or the start of a shortest path matched nothing,
+# and a name that a WITH dropped and the OPTIONAL MATCH bound again counted
+# as the earlier variable. GQL's FILTER is a statement of its own and filters
+# every row. A later part of a comma-separated MATCH reads a value of the WITH
+# before it in its property map (LDBC IC6).
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Alix (30),
+# Gus (25), Vincent (40), Jules (35) and Mia (28); KNOWS Alix->Gus (since
+# 2010), Gus->Vincent (2012), Vincent->Alix (2015), Jules->Mia (2020) and
+# Alix->Jules (2018); LIVES_IN Alix->Amsterdam, Gus->Berlin, Mia->Paris.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Earlier values inside OPTIONAL MATCH and comma MATCH patterns
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL MATCH: a property map that reads an earlier value
+  # ---------------------------------------------------------------------------
+
+  - name: an_optional_property_map_reads_an_unwound_value
+    variants:
+      gql: "UNWIND [25, 40, 88] AS x OPTIONAL MATCH (p:Person {age: x}) RETURN x, p.name AS p"
+      cypher: "UNWIND [25, 40, 88] AS x OPTIONAL MATCH (p:Person {age: x}) RETURN x, p.name AS p"
+    expect:
+      rows:
+        - [25, Gus]
+        - [40, Vincent]
+        - [88, null]
+
+  - name: an_optional_property_map_in_a_subquery_reads_the_imported_value
+    variants:
+      gql: "UNWIND [25, 88] AS x CALL (x) { OPTIONAL MATCH (p:Person {age: x}) RETURN p.name AS p } RETURN x, p"
+      cypher: "UNWIND [25, 88] AS x CALL (x) { OPTIONAL MATCH (p:Person {age: x}) RETURN p.name AS p } RETURN x, p"
+    expect:
+      rows:
+        - [25, Gus]
+        - [88, null]
+
+  - name: an_optional_where_in_a_subquery_reads_the_value_imported_with_star
+    variants:
+      gql: "UNWIND [25, 88] AS x CALL { WITH * OPTIONAL MATCH (p:Person WHERE p.age = x) RETURN p.name AS p } RETURN x, p"
+      cypher: "UNWIND [25, 88] AS x CALL { WITH * OPTIONAL MATCH (p:Person) WHERE p.age = x RETURN p.name AS p } RETURN x, p"
+    expect:
+      rows:
+        - [25, Gus]
+        - [88, null]
+
+  # Alix reaches Vincent through Gus; Jules knows only Mia, who knows nobody.
+  - name: an_optional_shortest_path_starts_from_an_unwound_value
+    variants:
+      gql: "UNWIND ['Alix', 'Jules'] AS n OPTIONAL MATCH p = ANY SHORTEST (a:Person {name: n})-[:KNOWS]->+(b:Person {name: 'Vincent'}) RETURN n, length(p) AS hops"
+      cypher: "UNWIND ['Alix', 'Jules'] AS n OPTIONAL MATCH p = shortestPath((a:Person {name: n})-[:KNOWS*]->(b:Person {name: 'Vincent'})) RETURN n, length(p) AS hops"
+    expect:
+      rows:
+        - [Alix, 2]
+        - [Jules, null]
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL MATCH: a condition on earlier values keeps every row
+  # ---------------------------------------------------------------------------
+
+  # LDBC IC5's shape: `friend` after the WITH is a new variable of the
+  # optional part, and the list of the WITH decides which matches count. GQL
+  # writes the condition in the element pattern (a WHERE on a MATCH after WITH
+  # does not parse yet, #483).
+  - name: an_optional_condition_on_a_list_of_the_with_keeps_every_row
+    variants:
+      gql: "MATCH (c:City) MATCH (friend:Person {name: 'Gus'}) WITH c, collect(friend) AS friends OPTIONAL MATCH (friend WHERE friend IN friends)-[:LIVES_IN]->(c) RETURN c.name AS c, count(friend) AS n"
+      cypher: "MATCH (c:City) MATCH (friend:Person {name: 'Gus'}) WITH c, collect(friend) AS friends OPTIONAL MATCH (friend)-[:LIVES_IN]->(c) WHERE friend IN friends RETURN c.name AS c, count(friend) AS n"
+    expect:
+      rows:
+        - [Amsterdam, 0]
+        - [Berlin, 1]
+        - [Paris, 0]
+
+  - name: an_optional_where_on_a_node_both_sides_name_keeps_every_row
+    variants:
+      gql: "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) WHERE c.name = 'Berlin' RETURN c.name AS c, p.name AS p"
+      cypher: "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) WHERE c.name = 'Berlin' RETURN c.name AS c, p.name AS p"
+    expect:
+      rows:
+        - [Amsterdam, null]
+        - [Berlin, Gus]
+        - [Paris, null]
+
+  - name: an_optional_where_only_on_an_earlier_node_keeps_every_row
+    variants:
+      gql: "MATCH (c:City) OPTIONAL MATCH (p:Person {name: 'Mia'}) WHERE c.name = 'Paris' RETURN c.name AS c, p.name AS p"
+      cypher: "MATCH (c:City) OPTIONAL MATCH (p:Person {name: 'Mia'}) WHERE c.name = 'Paris' RETURN c.name AS c, p.name AS p"
+    expect:
+      rows:
+        - [Amsterdam, null]
+        - [Berlin, null]
+        - [Paris, Mia]
+
+  - name: an_optional_where_without_variables_keeps_every_row
+    variants:
+      gql: "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) WHERE 3 = 19 RETURN c.name AS c, p.name AS p"
+      cypher: "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) WHERE 3 = 19 RETURN c.name AS c, p.name AS p"
+    expect:
+      rows:
+        - [Amsterdam, null]
+        - [Berlin, null]
+        - [Paris, null]
+
+  # FILTER filters every row, also after an OPTIONAL MATCH.
+  - name: a_filter_after_an_optional_match_filters_every_row
+    variants:
+      gql: "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) FILTER c.name = 'Berlin' RETURN c.name AS c, p.name AS p"
+    expect:
+      rows:
+        - [Berlin, Gus]
+
+  # ---------------------------------------------------------------------------
+  # Comma-separated MATCH: a later part reads a value of the WITH before it
+  # ---------------------------------------------------------------------------
+
+  - name: a_second_part_property_map_reads_a_with_value
+    variants:
+      gql: "MATCH (v:Person {name: 'Vincent'}) WITH v.age AS age MATCH (a:Person {name: 'Gus'}), (a)-[:KNOWS]->(b:Person {age: age}) RETURN b.name AS b"
+      cypher: "MATCH (v:Person {name: 'Vincent'}) WITH v.age AS age MATCH (a:Person {name: 'Gus'}), (a)-[:KNOWS]->(b:Person {age: age}) RETURN b.name AS b"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_second_part_edge_property_map_reads_a_with_value
+    variants:
+      gql: "MATCH (:Person {name: 'Gus'})-[r:KNOWS]->() WITH r.since AS y MATCH (a:Person), (a)-[:KNOWS {since: y}]->(b) RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (:Person {name: 'Gus'})-[r:KNOWS]->() WITH r.since AS y MATCH (a:Person), (a)-[:KNOWS {since: y}]->(b) RETURN a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Gus, Vincent]
+
+  # Alix knows Gus, who lives in Berlin; Alix herself lives in Amsterdam.
+  - name: a_third_part_property_map_reads_a_with_value
+    variants:
+      gql: "MATCH (k:City {name: 'Berlin'}) WITH k.name AS city MATCH (a:Person)-[:KNOWS]->(b:Person), (a)-[:LIVES_IN]->(d), (b)-[:LIVES_IN]->(c:City {name: city}) RETURN a.name AS a, d.name AS d"
+      cypher: "MATCH (k:City {name: 'Berlin'}) WITH k.name AS city MATCH (a:Person)-[:KNOWS]->(b:Person), (a)-[:LIVES_IN]->(d), (b)-[:LIVES_IN]->(c:City {name: city}) RETURN a.name AS a, d.name AS d"
+    expect:
+      rows:
+        - [Alix, Amsterdam]

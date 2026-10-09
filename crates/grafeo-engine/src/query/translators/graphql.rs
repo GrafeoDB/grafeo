@@ -57,7 +57,8 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 
     let doc = graphql::parse(actual_query)?;
     let translator = GraphQLTranslator::new();
-    let mut plan = translator.translate_document(&doc)?;
+    let plan = translator.translate_document(&doc)?;
+    let mut plan = crate::query::limits::check_plan_depth(plan)?;
     plan.explain = explain;
     plan.profile = profile;
     Ok(plan)
@@ -978,6 +979,11 @@ impl GraphQLTranslator {
                 QueryErrorKind::Semantic,
                 "No predicates",
             )));
+        }
+        // Each predicate nests one level of the chain: one far beyond the
+        // plan's limit is refused before it is built.
+        if predicates.len() > crate::query::limits::MAX_PLAN_DEPTH {
+            return Err(crate::query::limits::plan_depth_error());
         }
 
         let result = predicates

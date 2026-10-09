@@ -62,19 +62,37 @@ pub fn extract_and_map<N, E>(
 ///
 /// A map is treated as a **node** when it contains `_id` (Int64) and `_labels`
 /// (List). It is treated as an **edge** when it contains `_id`, `_type`
-/// (String), `_source` (Int64), and `_target` (Int64).
+/// (String), `_source` (Int64), and `_target` (Int64). Nodes and edges inside
+/// a returned list, map or path count too (`RETURN [a, r]`, `RETURN {k: a}`,
+/// `RETURN p`); the property values of a node or edge are not searched.
 ///
 /// Properties whose key starts with `_` are considered internal metadata and are
 /// excluded from the returned property maps.
 pub fn extract_entities(result: &QueryResult) -> (Vec<RawNode>, Vec<RawEdge>) {
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
-    let mut seen_node_ids = HashSet::new();
-    let mut seen_edge_ids = HashSet::new();
-
+    let mut found = Found::default();
     for row in result.rows() {
         for value in row {
-            if let Value::Map(map) = value {
+            found.visit(value);
+        }
+    }
+    (found.nodes, found.edges)
+}
+
+/// The nodes and edges found so far, each once.
+#[derive(Default)]
+struct Found {
+    nodes: Vec<RawNode>,
+    edges: Vec<RawEdge>,
+    seen_node_ids: HashSet<NodeId>,
+    seen_edge_ids: HashSet<EdgeId>,
+}
+
+impl Found {
+    /// Takes the node or edge `value` is, or the ones in the list, map or
+    /// path it is.
+    fn visit(&mut self, value: &Value) {
+        match value {
+            Value::Map(map) => {
                 // Check for node: has _id and _labels
                 if let (Some(Value::Int64(id)), Some(Value::List(labels))) =
                     (map.get("_id"), map.get("_labels"))
@@ -82,7 +100,7 @@ pub fn extract_entities(result: &QueryResult) -> (Vec<RawNode>, Vec<RawEdge>) {
                     // reason: ID encoding: i64 <-> u64 round-trip
                     #[allow(clippy::cast_sign_loss)]
                     let node_id = NodeId(*id as u64);
-                    if seen_node_ids.insert(node_id) {
+                    if self.seen_node_ids.insert(node_id) {
                         let label_strings: Vec<String> = labels
                             .iter()
                             .filter_map(|v| {
@@ -93,15 +111,10 @@ pub fn extract_entities(result: &QueryResult) -> (Vec<RawNode>, Vec<RawEdge>) {
                                 }
                             })
                             .collect();
-                        let properties: HashMap<PropertyKey, Value> = map
-                            .iter()
-                            .filter(|(k, _)| !k.as_str().starts_with('_'))
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        nodes.push(RawNode {
+                        self.nodes.push(RawNode {
                             id: node_id,
                             labels: label_strings,
-                            properties,
+                            properties: user_properties(map),
                         });
                     }
                 }
@@ -120,28 +133,49 @@ pub fn extract_entities(result: &QueryResult) -> (Vec<RawNode>, Vec<RawEdge>) {
                     // reason: IDs originate as u64 counters stored in i64; roundtrip is lossless
                     #[allow(clippy::cast_sign_loss)]
                     let edge_id = EdgeId(*id as u64);
-                    if seen_edge_ids.insert(edge_id) {
-                        let properties: HashMap<PropertyKey, Value> = map
-                            .iter()
-                            .filter(|(k, _)| !k.as_str().starts_with('_'))
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
+                    if self.seen_edge_ids.insert(edge_id) {
                         // reason: value is non-negative by preceding validation
                         #[allow(clippy::cast_sign_loss)]
-                        edges.push(RawEdge {
+                        self.edges.push(RawEdge {
                             id: edge_id,
                             edge_type: edge_type.to_string(),
                             source_id: NodeId(*src as u64),
                             target_id: NodeId(*dst as u64),
-                            properties,
+                            properties: user_properties(map),
                         });
                     }
                 }
+                // Any other map: the nodes and edges among its values
+                else {
+                    for value in map.values() {
+                        self.visit(value);
+                    }
+                }
             }
+            Value::List(items) => {
+                for item in items.iter() {
+                    self.visit(item);
+                }
+            }
+            Value::Path { nodes, edges } => {
+                for item in nodes.iter().chain(edges.iter()) {
+                    self.visit(item);
+                }
+            }
+            _ => {}
         }
     }
+}
 
-    (nodes, edges)
+/// The properties of a node or edge map, without the metadata keys that
+/// start with `_`.
+fn user_properties(
+    map: &std::collections::BTreeMap<PropertyKey, Value>,
+) -> HashMap<PropertyKey, Value> {
+    map.iter()
+        .filter(|(k, _)| !k.as_str().starts_with('_'))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -213,6 +247,44 @@ mod tests {
 
         let (nodes, _) = extract_entities(&result);
         assert_eq!(nodes.len(), 1);
+    }
+
+    /// Nodes and edges inside a returned list, map or path are the result's
+    /// nodes and edges too (`RETURN [a, r]`, `RETURN {k: a}`, `RETURN p`);
+    /// the properties of a node are not searched for more.
+    #[test]
+    fn extracts_nodes_and_edges_inside_lists_maps_and_paths() {
+        let alix = node_map(1, &["Person"], &[("name", Value::String("Alix".into()))]);
+        let gus = node_map(2, &["Person"], &[("name", Value::String("Gus".into()))]);
+        let vincent = node_map(
+            3,
+            &["Person"],
+            &[(
+                "friend",
+                node_map(19, &["Person"], &[("name", Value::String("Mia".into()))]),
+            )],
+        );
+        let knows = edge_map(10, "KNOWS", 1, 2, &[("since", Value::Int64(2019))]);
+        let mut wrapper = BTreeMap::new();
+        wrapper.insert(PropertyKey::new("k"), vincent);
+        let mut result = QueryResult::new(vec!["l".into(), "m".into(), "p".into()]).unwrap();
+        result.push_row(vec![
+            Value::List(vec![alix.clone(), Value::Int64(88)].into()),
+            Value::Map(Arc::new(wrapper)),
+            Value::Path {
+                nodes: vec![alix, gus].into(),
+                edges: vec![knows].into(),
+            },
+        ]);
+
+        let (nodes, edges) = extract_entities(&result);
+
+        let mut node_ids: Vec<u64> = nodes.iter().map(|node| node.id.0).collect();
+        node_ids.sort_unstable();
+        assert_eq!(node_ids, [1, 2, 3], "Mia is a property value, not a node");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].edge_type, "KNOWS");
+        assert_eq!(edges[0].source_id, NodeId(1));
     }
 
     #[test]

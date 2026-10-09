@@ -128,19 +128,20 @@ struct OutputRow {
 /// Instead of cloning entire `Vec<NodeId>` / `Vec<EdgeId>` at each BFS expansion
 /// step (O(depth) per clone), segments form an `Rc`-linked list that shares common
 /// prefixes. Expansion costs O(1) (one `Rc::clone` + one allocation). Full paths
-/// are only materialized when emitting output rows.
-struct PathSegment {
+/// are only materialized when emitting output rows. The shortest-path search
+/// follows the paths of a restrictive path mode with it too.
+pub(super) struct PathSegment {
     /// The node at this position in the path.
-    node: NodeId,
+    pub(super) node: NodeId,
     /// The edge taken to reach this node. `None` for the source/root node.
-    edge: Option<EdgeId>,
+    pub(super) edge: Option<EdgeId>,
     /// Parent segment, or `None` for the root.
-    parent: Option<Rc<PathSegment>>,
+    pub(super) parent: Option<Rc<PathSegment>>,
 }
 
 impl PathSegment {
     /// Materializes the full node path from root to this segment.
-    fn collect_nodes(&self, depth: u32) -> Vec<NodeId> {
+    pub(super) fn collect_nodes(&self, depth: u32) -> Vec<NodeId> {
         let mut nodes = Vec::with_capacity(depth as usize + 1);
         self.collect_nodes_into(&mut nodes);
         nodes
@@ -154,7 +155,7 @@ impl PathSegment {
     }
 
     /// Materializes the full edge path from root to this segment.
-    fn collect_edges(&self, depth: u32) -> Vec<EdgeId> {
+    pub(super) fn collect_edges(&self, depth: u32) -> Vec<EdgeId> {
         let mut edges = Vec::with_capacity(depth as usize);
         self.collect_edges_into(&mut edges);
         edges
@@ -170,7 +171,7 @@ impl PathSegment {
     }
 
     /// Checks whether a node already appears in this path segment chain.
-    fn contains_node(&self, target: NodeId) -> bool {
+    pub(super) fn contains_node(&self, target: NodeId) -> bool {
         if self.node == target {
             return true;
         }
@@ -181,7 +182,7 @@ impl PathSegment {
     }
 
     /// Checks whether an edge already appears in this path segment chain.
-    fn contains_edge(&self, target: EdgeId) -> bool {
+    pub(super) fn contains_edge(&self, target: EdgeId) -> bool {
         if self.edge == Some(target) {
             return true;
         }
@@ -399,8 +400,11 @@ impl VariableLengthExpandOperator {
             PathMode::Walk => true,
             PathMode::Trail => !segment.contains_edge(edge_id),
             PathMode::Simple => {
-                // No repeated nodes except the start may equal the end
-                target == source_node || !segment.contains_node(target)
+                // No repeated nodes, except that the path may end where it
+                // started (ISO/IEC 39075:2024 16.6): once it is back at the
+                // start, it goes no further.
+                let closed = segment.parent.is_some() && segment.node == source_node;
+                !closed && (target == source_node || !segment.contains_node(target))
             }
             PathMode::Acyclic => !segment.contains_node(target),
         }
@@ -1550,6 +1554,65 @@ mod tests {
             vincent_results.len(),
             3,
             "Simple: Vincent -> Jules, Mia, back to Vincent (start=end allowed)"
+        );
+    }
+
+    /// A simple path that is back at its start ends there: it does not go on
+    /// to a node it has not visited (ISO/IEC 39075:2024 16.6).
+    #[test]
+    fn test_simple_mode_stops_at_the_start() {
+        let store = Arc::new(LpgStore::new().unwrap());
+
+        // Triangle Vincent -> Jules -> Mia -> Vincent, and Vincent -> Butch
+        let vincent = store.create_node(&["Start"]);
+        let jules = store.create_node(&["Person"]);
+        let mia = store.create_node(&["Person"]);
+        let butch = store.create_node(&["Person"]);
+        store.create_edge(vincent, jules, "KNOWS");
+        store.create_edge(jules, mia, "KNOWS");
+        store.create_edge(mia, vincent, "KNOWS");
+        store.create_edge(vincent, butch, "KNOWS");
+
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            "Start",
+        ));
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            1,
+            5,
+        )
+        .with_path_mode(PathMode::Simple)
+        .with_path_length_output();
+
+        let mut results = Vec::new();
+        while let Ok(Some(chunk)) = expand.next() {
+            for i in 0..chunk.row_count() {
+                let target = chunk.column(2).unwrap().get_node_id(i).unwrap();
+                let length = chunk.column(3).unwrap().get_value(i).unwrap();
+                results.push((target, length));
+            }
+        }
+        results.sort_by_key(|(target, _)| target.0);
+
+        // Jules (1), Mia (2), Vincent (3, back at the start), Butch (1); not
+        // Butch again at 4 hops, after the path returned to Vincent
+        let one = grafeo_common::types::Value::Int64(1);
+        let two = grafeo_common::types::Value::Int64(2);
+        let three = grafeo_common::types::Value::Int64(3);
+        assert_eq!(
+            results,
+            vec![
+                (vincent, three),
+                (jules, one.clone()),
+                (mia, two),
+                (butch, one)
+            ],
+            "Simple: the path back at Vincent goes no further"
         );
     }
 

@@ -1,0 +1,315 @@
+# GQL statements in any order: ISO/IEC 39075:2024 linear query and data-modifying statements
+#
+# A <simple linear query statement> is a sequence of <simple query statement>s (<match statement>,
+# <let statement>, <for statement>, <filter statement>, <order by and page statement>, <call query
+# statement>) in any order, ending in a <primitive result statement>. A <linear data-modifying statement>
+# mixes them with <simple data-modifying statement>s (<insert statement>, <set statement>, <remove
+# statement>, <delete statement>) and may end without a result. Each statement reads the rows the ones
+# before it leave. Grafeo's WITH (an extension) and a WHERE between statements (a filter of the rows so
+# far; right after a MATCH it is that MATCH's graph pattern WHERE clause) are statements of the same
+# sequence (#483).
+
+meta:
+  language: gql
+  model: lpg
+  section: "14.3"
+  title: Statements in any order
+  dataset: social_network
+  iso: [GQ08, GQ09, GQ12, GQ13]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # <order by and page statement> before the result statement
+  # ---------------------------------------------------------------------------
+
+  # The oldest person (Vincent), then who knows them.
+  - name: order_by_limit_then_match
+    query: |
+      MATCH (p:Person) ORDER BY p.age DESC LIMIT 1
+      MATCH (q:Person)-[:KNOWS]->(p)
+      RETURN q.name
+    expect:
+      rows:
+        - [Gus]
+
+  # The two oldest (Vincent and Alix): Vincent knows nobody.
+  - name: with_order_by_limit_then_optional_match
+    query: |
+      MATCH (p:Person) WITH p ORDER BY p.age DESC LIMIT 2
+      OPTIONAL MATCH (p)-[:KNOWS]->(f)
+      RETURN p.name, f.name
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Vincent, null]
+
+  - name: with_limit_then_count
+    query: MATCH (p:Person) WITH p LIMIT 2 RETURN count(*)
+    expect:
+      rows:
+        - [2]
+
+  - name: offset_between_statements
+    query: MATCH (p:Person) ORDER BY p.name OFFSET 1 RETURN p.name
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  # By age 25, 30, 35: SKIP 1 LIMIT 1 keeps Alix only.
+  - name: skip_limit_then_aggregate
+    query: MATCH (p:Person) ORDER BY p.age SKIP 1 LIMIT 1 RETURN sum(p.age)
+    expect:
+      rows:
+        - [30]
+
+  # The youngest person only is written.
+  - name: limit_then_set
+    statements:
+      - "MATCH (p:Person) ORDER BY p.age LIMIT 1 SET p.youngest = true"
+      - "MATCH (p:Person) WHERE p.youngest = true RETURN p.name"
+    expect:
+      rows:
+        - [Gus]
+
+  # ---------------------------------------------------------------------------
+  # WHERE and FILTER between MATCH statements
+  # ---------------------------------------------------------------------------
+
+  - name: where_between_matches
+    query: |
+      MATCH (a:Person) WHERE a.age >= 30
+      MATCH (a)-[:KNOWS]->(b)
+      RETURN a.name, b.name
+    expect:
+      rows:
+        - [Alix, Gus]
+
+  - name: filter_between_matches
+    query: |
+      MATCH (a:Person) FILTER a.city = 'Berlin'
+      MATCH (a)-[:KNOWS]->(b)
+      RETURN b.name
+    expect:
+      rows:
+        - [Vincent]
+
+  # The OPTIONAL MATCH keeps the filtered rows without a match.
+  - name: where_then_optional_match
+    query: |
+      MATCH (a:Person) WHERE a.age > 26
+      OPTIONAL MATCH (a)-[:WORKS_AT]->(c)
+      RETURN a.name, c.name
+    expect:
+      rows:
+        - [Alix, Grafeo OSS]
+        - [Vincent, null]
+
+  - name: with_match_where
+    query: |
+      MATCH (a:Person {name: 'Gus'}) WITH a
+      MATCH (b:Person) WHERE b.age > a.age
+      RETURN b.name
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: where_then_let
+    query: "MATCH (p:Person) WHERE p.city IN ['Paris'] LET x = p.name RETURN x"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: filter_then_let
+    query: "MATCH (p:Person) FILTER p.city IN ['Paris'] LET x = p.name RETURN x"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: where_then_call
+    query: |
+      MATCH (a:Person) WHERE a.age < 30
+      CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS friend }
+      RETURN a.name, friend
+    expect:
+      rows:
+        - [Gus, Vincent]
+
+  - name: double_where_is_an_error
+    query: MATCH (p:Person) WHERE p.age > 3 WHERE p.age < 88 RETURN p.name
+    expect:
+      error: "combine the conditions with AND"
+
+  # A WHERE or FILTER right after INSERT, CREATE, MERGE or DELETE would filter the rows after the write (it
+  # used to filter the rows before it): an error, so nothing is deleted.
+  - name: where_after_delete_is_an_error
+    query: MATCH (p:Person) DETACH DELETE p WHERE p.age > 30
+    expect:
+      error: "a WHERE or FILTER cannot follow INSERT, CREATE, MERGE or DELETE"
+
+  - name: filter_after_delete_is_an_error
+    query: MATCH (p:Person) DETACH DELETE p FILTER p.age > 30
+    expect:
+      error: "a WHERE or FILTER cannot follow INSERT, CREATE, MERGE or DELETE"
+
+  # A WITH between makes the order plain: every person gets the edge, the WHERE filters the rows after it.
+  - name: with_where_after_insert
+    statements:
+      - "MATCH (p:Person) INSERT (p)-[:VISITED]->(:City {name: 'Prague'}) WITH p WHERE p.age > 30 RETURN p.name"
+      - "MATCH (p:Person)-[:VISITED]->(c:City) RETURN count(*)"
+    expect:
+      rows:
+        - [3]
+
+  # A FILTER after SET filters the rows after the write.
+  - name: set_then_filter_reads_the_write
+    query: "MATCH (p:Person) SET p.senior = p.age > 26 FILTER p.senior RETURN p.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: where_reads_only_earlier_variables
+    query: MATCH (a:Person) WHERE b.age > 3 MATCH (b:Person) RETURN a.name
+    expect:
+      error: "Undefined variable 'b'"
+
+  # ---------------------------------------------------------------------------
+  # A statement that starts with LET or FILTER, a WITH after FOR
+  # ---------------------------------------------------------------------------
+
+  - name: leading_let
+    query: LET x = 19 RETURN x + 3
+    expect:
+      rows:
+        - [22]
+
+  - name: leading_let_then_match
+    query: "LET who = 'Gus' MATCH (p:Person {name: who}) RETURN p.city"
+    expect:
+      rows:
+        - [Berlin]
+
+  - name: leading_let_then_failing_filter
+    query: LET x = 3 FILTER x > 19 RETURN x
+    expect:
+      empty: true
+
+  - name: leading_filter
+    query: FILTER 3 < 19 RETURN 88
+    expect:
+      rows:
+        - [88]
+
+  - name: for_then_with
+    query: FOR x IN [3, 19, 88] WITH x WHERE x > 3 RETURN x
+    expect:
+      rows:
+        - [19]
+        - [88]
+
+  # ---------------------------------------------------------------------------
+  # Data-modifying statements after WITH, SET and REMOVE, and statements after them
+  # ---------------------------------------------------------------------------
+
+  - name: with_set_return
+    query: "MATCH (p:Person) WITH p WHERE p.age < 30 SET p.junior = true RETURN p.name, p.junior"
+    expect:
+      rows:
+        - [Gus, true]
+
+  - name: with_remove_return
+    query: "MATCH (p:Person) WITH p WHERE p.city = 'Paris' REMOVE p.city RETURN p.name, p.city"
+    expect:
+      rows:
+        - [Vincent, null]
+
+  - name: with_delete
+    statements:
+      - "MATCH (p:Person {name: 'Vincent'}) WITH p DETACH DELETE p"
+      - "MATCH (p:Person) RETURN p.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: with_insert
+    statements:
+      - "MATCH (p:Person {name: 'Gus'}) WITH p INSERT (p)-[:WORKS_AT]->(:Company {name: 'Prague Labs'})"
+      - "MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.name, c.name"
+    expect:
+      rows:
+        - [Alix, Grafeo OSS]
+        - [Gus, Prague Labs]
+
+  - name: with_call
+    query: |
+      MATCH (p:Person) WITH p WHERE p.age > 26
+      CALL (p) { OPTIONAL MATCH (p)-[:KNOWS]->(f) RETURN f.name AS friend }
+      RETURN p.name, friend
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Vincent, null]
+
+  - name: set_then_delete
+    statements:
+      - "MATCH (p:Person {name: 'Gus'}) SET p.age = 3 DETACH DELETE p"
+      - "MATCH (p:Person) RETURN p.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  # The MATCH after the SET sees what the SET wrote.
+  - name: set_then_match
+    query: |
+      MATCH (p:Person {name: 'Alix'}) SET p.age = 88
+      MATCH (q:Person) WHERE q.age > 80
+      RETURN q.name
+    expect:
+      rows:
+        - [Alix]
+
+  - name: set_then_filter
+    query: "MATCH (p:Person) SET p.decade = p.age / 10 FILTER p.decade = 3 RETURN p.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  # The CALL after the SET sees the whole SET, not only the rows before its own.
+  - name: set_then_call
+    query: |
+      MATCH (p:Person) SET p.flag = 19
+      CALL () { MATCH (q:Person) WHERE q.flag = 19 RETURN count(q) AS flagged }
+      RETURN p.name, flagged
+    expect:
+      rows:
+        - [Alix, 3]
+        - [Gus, 3]
+        - [Vincent, 3]
+
+  - name: remove_then_set
+    query: "MATCH (p:Person {name: 'Alix'}) REMOVE p.city SET p.city = 'Prague' RETURN p.city"
+    expect:
+      rows:
+        - [Prague]
+
+  - name: set_then_remove
+    query: "MATCH (p:Person {name: 'Alix'}) SET p.city = 'Prague' REMOVE p.city RETURN p.city"
+    expect:
+      rows:
+        - [null]
+
+  - name: insert_then_with_match
+    query: |
+      INSERT (m:Person {name: 'Mia', age: 19}) WITH m
+      MATCH (p:Person) WHERE p.age < 26
+      RETURN p.name
+    expect:
+      rows:
+        - [Gus]
+        - [Mia]

@@ -489,3 +489,99 @@ tests:
     expect:
       rows:
         - [0]
+
+  # ---------------------------------------------------------------------------
+  # Brace-form graph types (ISO <nested graph type specification>), MAP
+  # properties, edge type defaults
+  # ---------------------------------------------------------------------------
+
+  - name: brace_form_graph_type_declares_property_types
+    setup:
+      - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+    query: "INSERT (:City {name: 'Paris', population: 'many'})"
+    expect:
+      error: population
+
+  - name: brace_form_graph_type_declares_not_null
+    setup:
+      - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+    query: "INSERT (:City {population: 3})"
+    expect:
+      error: "missing required property 'name'"
+
+  - name: brace_form_graph_type_declares_edge_property_types
+    setup:
+      - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+    query: "INSERT (:City {name: 'Paris'})-[:ROUTE {km: 'far'}]->(:City {name: 'Prague'})"
+    expect:
+      error: km
+
+  - name: brace_form_graph_type_declares_edge_endpoints
+    setup:
+      - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL})-[:ROUTE]->(:City), (:Country {code STRING}) }"
+    query: "INSERT (:Country {code: 'NL'})-[:ROUTE]->(:City {name: 'Berlin'})"
+    expect:
+      error: ROUTE
+
+  - name: brace_form_graph_type_accepts_what_it_declares
+    statements:
+      - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+      - "INSERT (:City {name: 'Amsterdam', population: 19})-[:ROUTE {km: 88}]->(:City {name: 'Barcelona'})"
+      - "MATCH (a:City)-[r:ROUTE]->(b:City) RETURN a.name, r.km, b.name"
+    expect:
+      rows:
+        - [Amsterdam, 88, Barcelona]
+
+  - name: map_property_takes_a_map
+    statements:
+      - "CREATE NODE TYPE Config (settings MAP NOT NULL)"
+      - "INSERT (:Config {settings: {mode: 'fast', level: 3}})"
+      - "MATCH (c:Config) SET c.settings = {mode: 'slow', level: 19}"
+      - "MATCH (c:Config) RETURN c.settings.mode, c.settings.level"
+    expect:
+      rows:
+        - [slow, 19]
+
+  - name: map_property_refuses_a_string
+    setup:
+      - "CREATE NODE TYPE Config (settings MAP)"
+    query: "INSERT (:Config {settings: 'fast'})"
+    expect:
+      error: settings
+
+  - name: map_edge_property_takes_a_map
+    statements:
+      - "CREATE EDGE TYPE TUNED (changes MAP)"
+      - "INSERT (:Config)-[:TUNED {changes: {level: 88}}]->(:Config)"
+      - "MATCH ()-[t:TUNED]->() RETURN t.changes.level"
+    expect:
+      rows:
+        - [88]
+
+  - name: edge_type_default_fills_a_missing_property
+    statements:
+      - "CREATE NODE TYPE City (name STRING, country STRING DEFAULT 'NL')"
+      - "CREATE EDGE TYPE ROUTE CONNECTING (City) TO (City) (km INT64 DEFAULT 88)"
+      - "INSERT (:City {name: 'Paris'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (a:City)-[r:ROUTE]->(b:City) RETURN a.country, r.km, b.country"
+    expect:
+      rows:
+        - [NL, 88, NL]
+
+  - name: edge_type_default_keeps_a_given_value
+    statements:
+      - "CREATE EDGE TYPE ROUTE (km INT64 DEFAULT 88)"
+      - "INSERT (:City {name: 'Paris'})-[:ROUTE {km: 3}]->(:City {name: 'Prague'})"
+      - "MATCH ()-[r:ROUTE]->() RETURN r.km"
+    expect:
+      rows:
+        - [3]
+
+  - name: not_null_edge_property_with_a_default_gets_the_default
+    statements:
+      - "CREATE EDGE TYPE LEG (minutes INT64 NOT NULL DEFAULT 19)"
+      - "INSERT (:Stop)-[:LEG]->(:Stop)"
+      - "MATCH ()-[l:LEG]->() RETURN l.minutes"
+    expect:
+      rows:
+        - [19]

@@ -1,6 +1,7 @@
 //! Projection, RETURN, sort, limit, and skip planning.
 
 use grafeo_common::collections::GrafeoSet;
+use grafeo_common::types::Value;
 use grafeo_core::execution::operators::{EntityValue, LimitOperator};
 
 use super::{
@@ -101,7 +102,7 @@ impl super::Planner {
                             Error::Internal(format!("Variable '{}' not found in input", name))
                         })?;
                         // Path detail variables and UNWIND/FOR scalar variables pass through as-is
-                        if let Some(kind) = self.entity_list_columns.borrow().get(name).copied() {
+                        if let Some(kind) = self.entity_list_columns.borrow().get(name).cloned() {
                             projections.push(ProjectExpr::Entities {
                                 expr: FilterExpression::Variable(name.clone()),
                                 variable_columns: variable_columns.clone(),
@@ -127,10 +128,18 @@ impl super::Planner {
                         let col_idx = *variable_columns.get(variable).ok_or_else(|| {
                             Error::Internal(format!("Variable '{}' not found in input", variable))
                         })?;
-                        projections.push(ProjectExpr::PropertyAccess {
-                            column: col_idx,
-                            property: property.clone(),
-                        });
+                        // A key of a map that holds a node or edge there
+                        // (`x.msg` of `{msg: m}`) returns the node or edge.
+                        if self.entity_value(&item.expression).is_some() {
+                            projections.push(
+                                self.expression_projection(&item.expression, &variable_columns)?,
+                            );
+                        } else {
+                            projections.push(ProjectExpr::PropertyAccess {
+                                column: col_idx,
+                                property: property.clone(),
+                            });
+                        }
                         // Property could be any type - use Any/Generic to preserve type
                         output_types.push(LogicalType::Any);
                     }
@@ -159,9 +168,14 @@ impl super::Planner {
                                     projections.push(ProjectExpr::EdgeType { column: col_idx });
                                     output_types.push(LogicalType::String);
                                 } else {
-                                    return Err(Error::Internal(
-                                        "type() argument must be a variable".to_string(),
-                                    ));
+                                    // An edge taken from a list or a map
+                                    // (`type(head(rs))`, `type(x.e)`): the
+                                    // evaluator finds the edge.
+                                    projections.push(self.expression_projection(
+                                        &item.expression,
+                                        &variable_columns,
+                                    )?);
+                                    output_types.push(LogicalType::Any);
                                 }
                             }
                             "length" => {
@@ -173,23 +187,20 @@ impl super::Planner {
                                         "length() requires exactly one argument".to_string(),
                                     ));
                                 }
-                                if let LogicalExpression::Variable(var_name) = &args[0] {
-                                    // Try direct column first, then path detail column
-                                    let path_col = format!("_path_length_{var_name}");
-                                    let col_idx = variable_columns
-                                        .get(&path_col)
-                                        .or_else(|| variable_columns.get(var_name))
-                                        .ok_or_else(|| {
-                                            Error::Internal(format!(
-                                                "Variable '{}' not found in input",
-                                                var_name
-                                            ))
-                                        })?;
+                                // The length column of a path its pattern
+                                // binds; any other path (passed on by a
+                                // WITH, unwound from a list), string or list
+                                // is measured by the expression evaluator.
+                                let path_column = match &args[0] {
+                                    LogicalExpression::Variable(var_name) => {
+                                        variable_columns.get(&format!("_path_length_{var_name}"))
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(col_idx) = path_column {
                                     projections.push(ProjectExpr::Column(*col_idx));
                                     output_types.push(LogicalType::Int64);
                                 } else {
-                                    // Non-variable argument (e.g. property access):
-                                    // fall through to expression evaluation
                                     let filter_expr = self.convert_expression(&item.expression)?;
                                     projections.push(ProjectExpr::Expression {
                                         expr: filter_expr,
@@ -339,7 +350,7 @@ impl super::Planner {
                     let col_idx = *variable_columns.get(name).ok_or_else(|| {
                         Error::Internal(format!("Variable '{}' not found in input", name))
                     })?;
-                    if let Some(kind) = self.entity_list_columns.borrow().get(name).copied() {
+                    if let Some(kind) = self.entity_list_columns.borrow().get(name).cloned() {
                         projections.push(ProjectExpr::Entities {
                             expr: FilterExpression::Variable(name.clone()),
                             variable_columns: variable_columns.clone(),
@@ -459,9 +470,9 @@ impl super::Planner {
                     projections.push(ProjectExpr::Column(col_idx));
                     // Use Any for scalar variables so string/numeric values
                     // are not coerced to NodeId by the typed vector push.
-                    let list_kind = self.entity_list_columns.borrow().get(name).copied();
+                    let list_kind = self.entity_list_columns.borrow().get(name).cloned();
                     if let Some(kind) = list_kind {
-                        output_types.push(entity_list_type(kind));
+                        output_types.push(kind.logical_type());
                         self.entity_list_columns
                             .borrow_mut()
                             .insert(col_name.clone(), kind);
@@ -483,9 +494,15 @@ impl super::Planner {
                         column: col_idx,
                         property: property.clone(),
                     });
-                    output_types.push(LogicalType::Any);
-                    // Property access produces a scalar value
-                    self.scalar_columns.borrow_mut().insert(col_name.clone());
+                    // A key of a map that holds a node or edge there (`x.msg`
+                    // of `{msg: m}`) is that node or edge; any other property
+                    // access produces a scalar value.
+                    let kind = self.entity_value(&projection.expression);
+                    output_types.push(
+                        kind.as_ref()
+                            .map_or(LogicalType::Any, |kind| kind.logical_type()),
+                    );
+                    self.set_column_entity(&col_name, kind);
                 }
                 LogicalExpression::Literal(value) => {
                     projections.push(ProjectExpr::Constant(value.clone()));
@@ -500,28 +517,18 @@ impl super::Planner {
                         expr: filter_expr,
                         variable_columns: variable_columns.clone(),
                     });
-                    match self.entity_value(&projection.expression) {
-                        // A node or edge list stays one, so a later list
-                        // comprehension sees nodes or edges and RETURN maps.
-                        Some(kind @ (EntityValue::Nodes | EntityValue::Edges)) => {
-                            output_types.push(entity_list_type(kind));
-                            self.entity_list_columns
-                                .borrow_mut()
-                                .insert(col_name.clone(), kind);
-                        }
-                        // One item of such a list (`head(r)`, `last(nodes(p))`)
-                        // stays a node or an edge, like a pattern variable.
-                        Some(EntityValue::Edge) => {
-                            output_types.push(LogicalType::Edge);
-                            self.edge_columns.borrow_mut().insert(col_name.clone());
-                        }
-                        Some(EntityValue::Node) => output_types.push(LogicalType::Node),
-                        _ => {
-                            output_types.push(LogicalType::Any);
-                            // Expression results are scalar values
-                            self.scalar_columns.borrow_mut().insert(col_name.clone());
-                        }
-                    }
+                    // A node or edge list stays one, so a later list
+                    // comprehension sees nodes or edges and RETURN maps; one
+                    // item of such a list (`head(r)`, `last(nodes(p))`) stays
+                    // a node or an edge, like a pattern variable; a map, list
+                    // literal or path keeps the nodes and edges in it. Other
+                    // expression results are scalar values.
+                    let kind = self.entity_value(&projection.expression);
+                    output_types.push(
+                        kind.as_ref()
+                            .map_or(LogicalType::Any, EntityValue::logical_type),
+                    );
+                    self.set_column_entity(&col_name, kind);
                 }
             }
 
@@ -565,36 +572,106 @@ impl super::Planner {
         })
     }
 
-    /// What `expression` yields when that is a node, an edge or a list of
-    /// them (as ids): `relationships(p)`, `nodes(p)` and list columns (the
-    /// variable of a variable-length edge pattern), also through `reverse`,
-    /// `tail` and slices, and one item of such a list (`head`, `last`, `[i]`).
+    /// What `expression` yields when that is a node, an edge, a list of them
+    /// or a value with them inside (as ids): `relationships(p)`, `nodes(p)`,
+    /// `startNode(r)`, `endNode(r)`, a whole path, list columns (the variable
+    /// of a variable-length edge pattern) and columns that hold such values,
+    /// a list or map literal with a node or edge in it (`[n, 1]`, `{msg:
+    /// m}`), also through `reverse`, `tail` and slices, one item of a list
+    /// (`head`, `last`, `[i]`) and one key of a map (`x.msg`).
+    ///
+    /// A bare node or edge variable is not counted here (callers treat a
+    /// variable on its own), but a list or map literal counts one in it.
     pub(super) fn entity_value(&self, expression: &LogicalExpression) -> Option<EntityValue> {
-        let item = |kind: EntityValue| match kind {
-            EntityValue::Nodes => Some(EntityValue::Node),
-            EntityValue::Edges => Some(EntityValue::Edge),
-            _ => None,
-        };
-        let list = |kind: EntityValue| match kind {
-            EntityValue::Nodes | EntityValue::Edges => Some(kind),
-            _ => None,
-        };
         match expression {
             LogicalExpression::Variable(name) => {
-                self.entity_list_columns.borrow().get(name).copied()
+                self.entity_list_columns.borrow().get(name).cloned()
             }
+            LogicalExpression::Property { variable, property } => self
+                .entity_list_columns
+                .borrow()
+                .get(variable)
+                .and_then(|kind| kind.field(property)),
+            LogicalExpression::MapAccess { base, key } => self.entity_value(base)?.field(key),
             LogicalExpression::FunctionCall { name, args, .. } => {
                 match (name.to_lowercase().as_str(), args.as_slice()) {
                     ("relationships" | "edges", [_]) => Some(EntityValue::Edges),
                     ("nodes", [_]) => Some(EntityValue::Nodes),
-                    ("reverse" | "tail", [inner]) => self.entity_value(inner).and_then(list),
-                    ("head" | "last", [inner]) => self.entity_value(inner).and_then(item),
+                    ("startnode" | "start_node" | "endnode" | "end_node", [_]) => {
+                        Some(EntityValue::Node)
+                    }
+                    // The path of a path pattern with more than one edge
+                    // pattern (see `translators::common::whole_path`).
+                    ("path", [_, _]) => Some(EntityValue::Nested(LogicalType::Path)),
+                    ("reverse", [inner]) => self.entity_value(inner)?.reversed(),
+                    ("tail", [inner]) => self.entity_value(inner)?.slice(1, None),
+                    ("head", [inner]) => self.entity_value(inner)?.item_at(0),
+                    ("last", [inner]) => self.entity_value(inner)?.item_at(-1),
                     _ => None,
                 }
             }
-            LogicalExpression::IndexAccess { base, .. } => self.entity_value(base).and_then(item),
-            LogicalExpression::SliceAccess { base, .. } => self.entity_value(base).and_then(list),
+            LogicalExpression::IndexAccess { base, index } => {
+                let base = self.entity_value(base)?;
+                match index.as_ref() {
+                    LogicalExpression::Literal(Value::Int64(position)) => base.item_at(*position),
+                    LogicalExpression::Literal(Value::String(key)) => base.field(key),
+                    _ => base.item(),
+                }
+            }
+            LogicalExpression::SliceAccess { base, start, end } => {
+                // A bound the query gives as a number (`Some(Some(i))`) or
+                // leaves out (`Some(None)`); `None` when it is not known
+                // before the query runs.
+                let bound = |bound: &Option<Box<LogicalExpression>>| match bound.as_deref() {
+                    Some(LogicalExpression::Literal(Value::Int64(i))) => {
+                        usize::try_from(*i).ok().map(Some)
+                    }
+                    None => Some(None),
+                    _ => None,
+                };
+                let base = self.entity_value(base)?;
+                match (bound(start), bound(end)) {
+                    (Some(start), Some(end)) => base.slice(start.unwrap_or(0), end),
+                    // Bounds known only when the query runs: the items'
+                    // common kind, if they share one.
+                    _ => base.item().map(|item| item.list()),
+                }
+            }
+            LogicalExpression::List(items) => EntityValue::list_of(
+                &items
+                    .iter()
+                    .map(|item| self.held_entity(item))
+                    .collect::<Vec<_>>(),
+            ),
+            LogicalExpression::Map(pairs) => EntityValue::map_of(
+                &pairs
+                    .iter()
+                    .map(|(key, value)| (key.clone(), self.held_entity(value)))
+                    .collect::<Vec<_>>(),
+            ),
+            LogicalExpression::MapProjection { entries, .. } => EntityValue::map_of(
+                &entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        crate::query::plan::MapProjectionEntry::LiteralEntry(key, value) => {
+                            Some((key.clone(), self.held_entity(value)))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
             _ => None,
+        }
+    }
+
+    /// What a value put into a list or map literal, a group key or `collect`
+    /// holds: a node or edge variable is a node or an edge (see
+    /// [`column_entity`](Self::column_entity)), anything else holds what
+    /// [`entity_value`](Self::entity_value) says.
+    pub(super) fn held_entity(&self, expression: &LogicalExpression) -> Option<EntityValue> {
+        match expression {
+            LogicalExpression::Variable(name) => self.column_entity(name),
+            other => self.entity_value(other),
         }
     }
 
@@ -1757,13 +1834,4 @@ pub(super) fn text_score_column_name(
         variable,
         score_query_hash(query)
     )
-}
-
-/// The column type of a node or edge list (`List(Node)` or `List(Edge)`), which
-/// tells the expression evaluator what the items are.
-fn entity_list_type(kind: EntityValue) -> LogicalType {
-    LogicalType::List(Box::new(match kind {
-        EntityValue::Nodes | EntityValue::Node => LogicalType::Node,
-        _ => LogicalType::Edge,
-    }))
 }

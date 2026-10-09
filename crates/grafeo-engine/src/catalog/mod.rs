@@ -1334,6 +1334,7 @@ impl PropertyDataType {
             (Self::ListTyped(elem_type), Value::List(items)) => {
                 items.iter().all(|item| elem_type.matches(item))
             }
+            (Self::Map, Value::Map(_)) => true,
             (Self::Bytes, Value::Bytes(_)) => true,
             // Node/Edge reference types match Map values (graph elements are
             // represented as maps with _id, _labels/_type, and properties)
@@ -2854,6 +2855,19 @@ impl ConstraintValidator for CatalogConstraintValidator {
             }
         }
     }
+
+    fn inject_edge_defaults(&self, edge_type: &str, properties: &mut Vec<(String, Value)>) {
+        let Some(type_def) = self.catalog.get_edge_type_def(edge_type) else {
+            return;
+        };
+        for typed_prop in &type_def.properties {
+            if let Some(default) = &typed_prop.default_value
+                && !properties.iter().any(|(name, _)| name == &typed_prop.name)
+            {
+                properties.push((typed_prop.name.clone(), default.clone()));
+            }
+        }
+    }
 }
 
 /// The error for a property value over the size limit.
@@ -3590,5 +3604,42 @@ mod tests {
         let zoned_list = PropertyDataType::ListTyped(Box::new(zoned_type));
         assert!(zoned_list.matches(&Value::List(vec![zoned.clone(), Value::Null].into())));
         assert!(!zoned_list.matches(&Value::List(vec![zoned, local].into())));
+    }
+
+    /// `MAP` (and its spelling `RECORD`) holds every map, the empty one and
+    /// nested ones included, and nothing else; a `LIST<MAP>` holds lists of
+    /// maps.
+    #[test]
+    fn a_map_type_matches_maps_only() {
+        use grafeo_common::types::PropertyKey;
+        use std::collections::BTreeMap;
+
+        let map = |entries: &[(&str, Value)]| {
+            Value::Map(std::sync::Arc::new(
+                entries
+                    .iter()
+                    .map(|(key, value)| (PropertyKey::from(*key), value.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+            ))
+        };
+        let settings = map(&[("mode", Value::from("fast")), ("level", Value::Int64(3))]);
+        let nested = map(&[("inner", settings.clone())]);
+        for name in ["MAP", "map", "RECORD"] {
+            let map_type = PropertyDataType::from_type_name(name).unwrap();
+            assert_eq!(map_type, PropertyDataType::Map, "{name}");
+            for value in [&settings, &nested, &map(&[]), &Value::Null] {
+                assert!(map_type.matches(value), "{name} takes {value:?}");
+            }
+            for value in [
+                Value::from("fast"),
+                Value::Int64(19),
+                Value::List(vec![settings.clone()].into()),
+            ] {
+                assert!(!map_type.matches(&value), "{name} refuses {value:?}");
+            }
+        }
+        let maps = PropertyDataType::from_type_name("LIST<MAP>").unwrap();
+        assert!(maps.matches(&Value::List(vec![settings.clone(), nested].into())));
+        assert!(!maps.matches(&Value::List(vec![settings, Value::Int64(88)].into())));
     }
 }

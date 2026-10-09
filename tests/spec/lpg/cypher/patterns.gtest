@@ -234,3 +234,146 @@ tests:
     expect:
       rows:
         - [Alix]
+
+  # ---------------------------------------------------------------------------
+  # Pattern comprehensions read the row (openCypher 9 TCK Pattern2): the
+  # variables of the row a comprehension names, at either end of its pattern
+  # or in its WHERE and projection, are the row's; the others are its own.
+  # A comprehension used to import only its first node, so one that starts
+  # from a new node failed, and a bound node later in its pattern matched any
+  # node.
+  # ---------------------------------------------------------------------------
+
+  - name: pattern_comprehension_without_a_match
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: "RETURN [(a:Person {name: 'Alix'})-[:KNOWS]->(b) | b.name] AS names, size([(a:Person)-[:KNOWS]->(b) | b]) AS links"
+    expect:
+      rows:
+        - ["[Gus]", 2]
+
+  - name: pattern_comprehension_without_a_row_anchor
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: "UNWIND [3, 19] AS i RETURN i, size([(w:Person) | w]) AS people ORDER BY i"
+    expect:
+      ordered: true
+      rows:
+        - [3, 4]
+        - [19, 4]
+
+  - name: pattern_comprehension_reads_a_value_of_the_row
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: |
+      UNWIND ['Gus', 'Jules'] AS wanted
+      RETURN wanted, [(a:Person)-[:KNOWS]->(b:Person {name: wanted}) | a.name] AS who
+      ORDER BY wanted
+    expect:
+      ordered: true
+      rows:
+        - [Gus, "[Alix]"]
+        - [Jules, "[Mia]"]
+
+  - name: pattern_comprehension_from_a_bound_node_reads_a_value_of_the_row
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus', k: 3}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules', k: 88})"
+    query: |
+      UNWIND [3, 88] AS k
+      MATCH (a:Person {name: 'Alix'})
+      RETURN k, [(a)-[:KNOWS]->(b) WHERE b.k = k | b.name + '/' + toString(k)] AS hits
+      ORDER BY k
+    expect:
+      ordered: true
+      rows:
+        - [3, "[Gus/3]"]
+        - [88, "[]"]
+
+  - name: pattern_comprehension_between_two_bound_nodes
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: |
+      MATCH (a:Person), (b:Person)
+      WHERE a.name IN ['Alix', 'Mia'] AND b.name IN ['Gus', 'Jules']
+      RETURN a.name, b.name, size([(a)-[:KNOWS]->(b) | 1]) AS links
+      ORDER BY a.name, b.name
+    expect:
+      ordered: true
+      rows:
+        - [Alix, Gus, 1]
+        - [Alix, Jules, 0]
+        - [Mia, Gus, 0]
+        - [Mia, Jules, 1]
+
+  - name: pattern_comprehension_to_a_bound_node
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: "MATCH (b:Person {name: 'Gus'}) RETURN [(x)-[:KNOWS]->(b) | x.name] AS who"
+    expect:
+      rows:
+        - ["[Alix]"]
+
+  # The label of a bound first node still holds: Mia is no :Admin.
+  - name: pattern_comprehension_checks_the_label_of_a_bound_node
+    setup:
+      - "CREATE (:Person:Admin {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: |
+      MATCH (n:Person) WHERE n.name IN ['Alix', 'Mia']
+      RETURN n.name, [(n:Admin)-[:KNOWS]->(b) | b.name] AS names
+      ORDER BY n.name
+    expect:
+      ordered: true
+      rows:
+        - [Alix, "[Gus]"]
+        - [Mia, "[]"]
+
+  # ---------------------------------------------------------------------------
+  # Variables named like the ones the translator makes up for anonymous
+  # nodes, relationships and MERGE elements are the user's own: they used to
+  # alias the first anonymous element, so `(_anon_0)-->()` matched only
+  # self-loops and a MERGE rebound the user's `_merge_0`.
+  # ---------------------------------------------------------------------------
+
+  - name: user_variable_spelled_like_an_anonymous_node
+    setup:
+      - "CREATE (:N {id: 3})-[:T]->(:N {id: 19}), (:N {id: 88})-[:T]->(:N {id: 1})"
+    query: "MATCH (_anon_0)-->() RETURN _anon_0.id AS id ORDER BY id"
+    expect:
+      ordered: true
+      rows:
+        - [3]
+        - [88]
+
+  - name: user_variables_spelled_like_two_anonymous_nodes
+    setup:
+      - "CREATE (:N {id: 3})-[:T]->(:N {id: 19})-[:T]->(:N {id: 88})"
+    query: "MATCH ()-->(_anon_1)-->(_anon_0) RETURN _anon_1.id AS mid, _anon_0.id AS last"
+    expect:
+      rows:
+        - [19, 88]
+
+  - name: user_variable_spelled_like_a_merged_node
+    setup:
+      - "CREATE (:N {id: 3})"
+    query: "MATCH (_merge_0:N) MERGE (:M {id: 19}) RETURN _merge_0.id AS id"
+    expect:
+      rows:
+        - [3]
+
+  # The key used to share its column with the aggregate under `> 0`, so
+  # every row showed the first key.
+  - name: grouping_key_spelled_like_an_aggregate_column
+    query: "UNWIND [3, 19] AS _agg_0 RETURN _agg_0, count(*) > 0 AS any ORDER BY _agg_0"
+    expect:
+      ordered: true
+      rows:
+        - [3, true]
+        - [19, true]
+
+  - name: user_variable_spelled_like_a_merged_relationship
+    setup:
+      - "CREATE (:N {id: 3}), (:N {id: 19})"
+    query: "MATCH (_merge_rel_0:N {id: 3}), (b:N {id: 19}) MERGE (_merge_rel_0)-[:T]->(b) RETURN _merge_rel_0.id AS id"
+    expect:
+      rows:
+        - [3]

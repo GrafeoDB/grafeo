@@ -3,9 +3,9 @@
 //! This module provides:
 //! - `DistinctOperator`: Removes duplicate rows based on all or specified columns
 
-use std::collections::HashSet;
+use indexmap::IndexSet;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{HashableValue, Value};
 
 use super::accumulator::RowKey;
 use super::{Operator, OperatorResult};
@@ -21,7 +21,7 @@ pub struct DistinctOperator {
     /// Columns to consider for uniqueness (None = all columns).
     distinct_columns: Option<Vec<usize>>,
     /// Set of seen row keys.
-    seen: HashSet<RowKey>,
+    seen: IndexSet<RowKey>,
 }
 
 impl DistinctOperator {
@@ -30,7 +30,7 @@ impl DistinctOperator {
         Self {
             child,
             distinct_columns: None,
-            seen: HashSet::new(),
+            seen: IndexSet::new(),
         }
     }
 
@@ -44,7 +44,7 @@ impl DistinctOperator {
         Self {
             child,
             distinct_columns: Some(columns),
-            seen: HashSet::new(),
+            seen: IndexSet::new(),
         }
     }
 }
@@ -113,7 +113,8 @@ mod tests {
     use super::*;
     use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
-    use grafeo_common::types::LogicalType;
+    use crate::execution::vector::ValueVector;
+    use grafeo_common::types::{EdgeId, LogicalType, NodeId};
 
     struct MockOperator {
         chunks: Vec<DataChunk>,
@@ -132,7 +133,8 @@ mod tests {
     impl Operator for MockOperator {
         fn next(&mut self) -> OperatorResult {
             if self.position < self.chunks.len() {
-                let chunk = std::mem::replace(&mut self.chunks[self.position], DataChunk::empty());
+                // Keep the fixture available so reset can replay the same input.
+                let chunk = self.chunks[self.position].clone();
                 self.position += 1;
                 Ok(Some(chunk))
             } else {
@@ -172,6 +174,216 @@ mod tests {
         }
 
         builder.finish()
+    }
+
+    fn value_rows_chunk(rows: &[Vec<Value>]) -> DataChunk {
+        let columns = (0..rows[0].len())
+            .map(|column| {
+                ValueVector::from_values(
+                    &rows
+                        .iter()
+                        .map(|row| row[column].clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        DataChunk::new(columns)
+    }
+
+    fn collect_value_rows(operator: &mut DistinctOperator) -> Vec<Vec<Value>> {
+        let mut rows = Vec::new();
+        while let Some(chunk) = operator.next().unwrap() {
+            for row in chunk.selected_indices() {
+                rows.push(
+                    chunk
+                        .columns()
+                        .iter()
+                        .map(|column| column.get_value(row).unwrap())
+                        .collect(),
+                );
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn test_distinct_preserves_scalar_type_identity() {
+        let expected = vec![vec![Value::Int64(0)], vec![Value::Float64(0.0)]];
+        let input = MockOperator::new(vec![
+            value_rows_chunk(&[expected[0].clone(), expected[1].clone()]),
+            value_rows_chunk(&[expected[1].clone(), expected[0].clone()]),
+        ]);
+        let mut distinct = DistinctOperator::new(Box::new(input));
+
+        assert_eq!(collect_value_rows(&mut distinct), expected);
+    }
+
+    #[test]
+    fn test_distinct_preserves_nested_value_identity() {
+        let nested = |value| Value::List(vec![Value::List(vec![value].into())].into());
+        let expected = vec![
+            vec![nested(Value::Int64(0))],
+            vec![nested(Value::Float64(0.0))],
+            vec![nested(Value::Bytes(vec![7, 1, 2].into()))],
+            vec![nested(Value::Bytes(vec![7, 3, 4].into()))],
+        ];
+        let input = MockOperator::new(vec![
+            value_rows_chunk(&expected),
+            value_rows_chunk(&[expected[3].clone(), expected[0].clone()]),
+        ]);
+        let mut distinct = DistinctOperator::new(Box::new(input));
+
+        assert_eq!(collect_value_rows(&mut distinct), expected);
+    }
+
+    #[test]
+    fn test_distinct_selected_columns_preserve_full_rows() {
+        let expected = vec![
+            vec![Value::Int64(0), Value::from("integer")],
+            vec![Value::Float64(0.0), Value::from("float")],
+            vec![Value::Null, Value::from("null")],
+        ];
+        let input = MockOperator::new(vec![
+            value_rows_chunk(&expected),
+            value_rows_chunk(&[
+                vec![Value::Int64(0), Value::from("ignored integer payload")],
+                vec![Value::Float64(0.0), Value::from("ignored float payload")],
+                vec![Value::Null, Value::from("ignored null payload")],
+            ]),
+        ]);
+        let mut distinct = DistinctOperator::on_columns(Box::new(input), vec![0]);
+
+        assert_eq!(collect_value_rows(&mut distinct), expected);
+    }
+
+    #[test]
+    fn test_distinct_reset_replays_typed_rows() {
+        let expected = vec![
+            vec![Value::Int64(0)],
+            vec![Value::Float64(0.0)],
+            vec![Value::Null],
+        ];
+        let input = MockOperator::new(vec![value_rows_chunk(&expected)]);
+        let mut distinct = DistinctOperator::new(Box::new(input));
+
+        assert_eq!(collect_value_rows(&mut distinct), expected);
+        distinct.reset();
+        assert_eq!(collect_value_rows(&mut distinct), expected);
+    }
+
+    #[test]
+    fn test_distinct_preserves_counter_identity_across_growth_and_reset() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let counter = |id: usize, reverse: bool| {
+            let mut entries: Vec<_> = (0..8_u64)
+                .map(|replica| (format!("actor-{id}-{replica}"), replica + 1))
+                .collect();
+            if reverse {
+                entries.reverse();
+            }
+            Value::GCounter(Arc::new(entries.into_iter().collect()))
+        };
+        let signed_counter = |positive: bool, reverse: bool| {
+            let mut entries = [("left".to_owned(), 4), ("right".to_owned(), 6)];
+            if reverse {
+                entries.reverse();
+            }
+            let counts = Arc::new(entries.into_iter().collect::<HashMap<_, _>>());
+            let empty = Arc::new(HashMap::new());
+            let (pos, neg) = if positive {
+                (counts, empty)
+            } else {
+                (empty, counts)
+            };
+            Value::OnCounter { pos, neg }
+        };
+        // These equally sized maps all have total 36, but different actors.
+        // Retaining 512 keys makes the operator grow its initially empty set.
+        let mut expected: Vec<_> = (0..512)
+            .map(|id| vec![counter(id, false), Value::from(format!("first-{id}"))])
+            .collect();
+        expected.extend([
+            vec![signed_counter(true, false), Value::from("first positive")],
+            vec![signed_counter(false, false), Value::from("first negative")],
+        ]);
+
+        let mut rows = expected.clone();
+        // Reconstruct equal maps in reverse insertion order, with a changed
+        // payload to prove DISTINCT retains each complete first input row.
+        rows.extend((0..512).map(|id| vec![counter(id, true), Value::from("duplicate")]));
+        rows.extend([
+            vec![
+                signed_counter(false, true),
+                Value::from("duplicate negative"),
+            ],
+            vec![
+                signed_counter(true, true),
+                Value::from("duplicate positive"),
+            ],
+        ]);
+        let input = MockOperator::new(rows.chunks(128).map(value_rows_chunk).collect());
+        let mut distinct = DistinctOperator::on_columns(Box::new(input), vec![0]);
+
+        assert_eq!(collect_value_rows(&mut distinct), expected);
+        distinct.reset();
+        assert_eq!(collect_value_rows(&mut distinct), expected);
+    }
+
+    #[test]
+    fn test_distinct_preserves_raw_float_bits() {
+        let expected_bits = [
+            0,
+            (-0.0_f64).to_bits(),
+            0x7ff8_0000_0000_0001,
+            0x7ff8_0000_0000_0002,
+        ];
+        let expected: Vec<_> = expected_bits
+            .iter()
+            .map(|&bits| vec![Value::Float64(f64::from_bits(bits))])
+            .collect();
+        let input = MockOperator::new(vec![
+            value_rows_chunk(&expected),
+            value_rows_chunk(&expected),
+        ]);
+        let mut distinct = DistinctOperator::new(Box::new(input));
+        let actual: Vec<_> = collect_value_rows(&mut distinct)
+            .iter()
+            .map(|row| match row.as_slice() {
+                [Value::Float64(value)] => value.to_bits(),
+                other => panic!("expected one unchanged float, got {other:?}"),
+            })
+            .collect();
+
+        assert_eq!(actual, expected_bits);
+    }
+
+    #[test]
+    fn test_distinct_preserves_node_edge_columns() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node, LogicalType::Edge]);
+        for id in [1, 1, 2] {
+            builder.column_mut(0).unwrap().push_node_id(NodeId::new(id));
+            builder.column_mut(1).unwrap().push_edge_id(EdgeId::new(id));
+            builder.advance_row();
+        }
+        let input = MockOperator::new(vec![builder.finish()]);
+        let mut distinct = DistinctOperator::new(Box::new(input));
+        let chunk = distinct.next().unwrap().unwrap();
+
+        assert_eq!(chunk.column_types(), [LogicalType::Node, LogicalType::Edge]);
+        assert_eq!(chunk.row_count(), 2);
+        for (row, id) in [1, 2].into_iter().enumerate() {
+            assert_eq!(
+                chunk.column(0).unwrap().get_node_id(row),
+                Some(NodeId::new(id))
+            );
+            assert_eq!(
+                chunk.column(1).unwrap().get_edge_id(row),
+                Some(EdgeId::new(id))
+            );
+        }
+        assert!(distinct.next().unwrap().is_none());
     }
 
     #[test]

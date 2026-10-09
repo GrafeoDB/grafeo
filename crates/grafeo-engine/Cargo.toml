@@ -149,3 +149,8 @@ harness = false
 [[bench]]
 name = "topk_e2e"
 harness = false
+
+[[bench]]
+name = "persistent_direct_bench"
+harness = false
+required-features = ["wal", "grafeo-file", "lpg"]

@@ -4,13 +4,14 @@
 //! While no transaction is open, a call runs without a session or a
 //! transaction-manager transaction. It holds the manager's idle gate, so no
 //! transaction can begin meanwhile and there is nothing it could conflict
-//! with, and it writes as the system, stamped at its new epoch, which it
-//! publishes when done. Every check of a single call runs before it writes,
-//! so the call cannot half-apply; a batch writes as a private transaction
-//! instead, which is undone when a later row fails. A call that fails still
-//! uses up its epoch: the stores take it before the write, to stamp what they
-//! record themselves, and it is not handed out twice. The gap it leaves holds
-//! no data. While a transaction is open, the call runs as an implicit
+//! with. A single call without a WAL writes as the system, stamped at its
+//! new epoch, which it publishes when done. A batch or a WAL-backed call
+//! stages a private transaction, retaining undo until the call and any WAL
+//! group succeed.
+//! A failed group is undone without publishing its epoch; an unknown outcome
+//! fences later writes until reopening resolves the WAL. A call that fails
+//! still uses up its reserved epoch, which is not handed out twice. While a
+//! transaction is open, the call runs as an implicit
 //! transaction of a session and is checked for conflicts with the open one.
 //!
 //! This keeps a direct call close to the cost of the store write itself. Once
@@ -21,7 +22,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
+use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
+#[cfg(feature = "wal")]
+use grafeo_common::utils::error::TransactionError;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::operators::{GraphWriter, OperatorError};
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
@@ -30,6 +33,9 @@ use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
 use super::GrafeoDB;
 use crate::catalog::CatalogConstraintValidator;
 use crate::session::graph_storage_key;
+use crate::transaction::CommitsHeld;
+#[cfg(feature = "wal")]
+use crate::transaction::wal_buffer::WalCommitFailure;
 
 /// The graph a direct call works in.
 #[derive(Clone, Copy)]
@@ -103,6 +109,27 @@ impl BatchEdge {
 pub(crate) struct DirectCalls<'a> {
     db: &'a GrafeoDB,
     target: DirectTarget<'a>,
+}
+
+/// Fences a staged direct call that unwinds without a complete undo or
+/// publication. It drops while the caller still holds the commit lock.
+struct DirectWriteCompletion<'held, 'manager> {
+    commits: &'held CommitsHeld<'manager>,
+    armed: bool,
+}
+
+impl DirectWriteCompletion<'_, '_> {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DirectWriteCompletion<'_, '_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.commits.mark_incomplete();
+        }
+    }
 }
 
 impl GrafeoDB {
@@ -208,11 +235,15 @@ impl GrafeoDB {
         let commits = self.transaction_manager.hold_commits_for_change()?;
         let root = self.lpg_store();
         let read_epoch = self.transaction_manager.current_epoch();
-        let epoch = EpochId::new(read_epoch.as_u64() + 1);
-        // A batch versions its writes so it can undo them; a single call
-        // writes as the system at the new epoch, which the stores use for
-        // what they stamp themselves (property and label history, CDC).
-        let transaction = batch.then(|| self.transaction_manager.reserve_transaction_id());
+        let epoch = commits.reserve_epoch();
+        // Retain the batch's undo path for WAL-backed single calls too:
+        // their writes cannot become permanent until the group succeeds.
+        // A single call without a WAL keeps its in-place system fast path.
+        #[cfg(feature = "wal")]
+        let staged = batch || self.wal.is_some();
+        #[cfg(not(feature = "wal"))]
+        let staged = batch;
+        let transaction = staged.then(|| self.transaction_manager.reserve_transaction_id());
         let view = if transaction.is_some() {
             read_epoch
         } else {
@@ -220,8 +251,8 @@ impl GrafeoDB {
             store.sync_epoch(epoch);
             epoch
         };
-        // Tests start a checkpoint or `close()` here (a single call's epoch
-        // has moved, nothing is published yet), which must wait.
+        // Tests start a checkpoint or `close()` here (the epoch is reserved,
+        // nothing is published yet), which must wait.
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_held_change();
 
@@ -277,6 +308,10 @@ impl GrafeoDB {
         let writer = GraphWriter::new(target)
             .with_transaction_context(view, transaction)
             .with_validator(Arc::new(validator));
+        let completion = DirectWriteCompletion {
+            commits: &commits,
+            armed: transaction.is_some(),
+        };
         // A panic in the call is handled like an error, then raised again:
         // left alone, its records and events would stay in the buffers for
         // the next call to commit.
@@ -293,29 +328,24 @@ impl GrafeoDB {
             ),
         };
 
-        match (&result, transaction) {
-            (Err(_), Some(transaction)) => {
+        let discard_staged = || {
+            if let Some(transaction) = transaction {
                 store.discard_uncommitted_versions(transaction);
-                #[cfg(feature = "wal")]
-                if let Some(buffer) = &wal {
-                    buffer.clear();
-                }
-                #[cfg(feature = "cdc")]
-                self.implicit_writes.cdc_events.lock().clear();
-                if let Some(panic) = panic {
-                    std::panic::resume_unwind(panic);
-                }
-                return result;
             }
-            (Ok(_), Some(transaction)) => {
-                store.finalize_version_epochs(transaction, epoch);
-                store.commit_transaction_properties(transaction);
-                root.sync_epoch(epoch);
-                store.sync_epoch(epoch);
+            #[cfg(feature = "wal")]
+            if let Some(buffer) = &wal {
+                buffer.clear();
             }
-            // A single call fails before it writes; should it ever fail
-            // later, what it wrote is committed so the WAL matches memory.
-            (_, None) => {}
+            #[cfg(feature = "cdc")]
+            self.implicit_writes.cdc_events.lock().clear();
+        };
+        if result.is_err() && transaction.is_some() {
+            discard_staged();
+            completion.disarm();
+            if let Some(panic) = panic {
+                std::panic::resume_unwind(panic);
+            }
+            return result;
         }
 
         #[cfg(feature = "wal")]
@@ -323,18 +353,48 @@ impl GrafeoDB {
             && buffer.len() > 0
         {
             use grafeo_storage::wal::WalRecord;
-            if let Err(e) = buffer.flush(&[
+            if let Err(failure) = buffer.flush_commit(&[
                 WalRecord::TransactionCommit {
+                    // A single call's local staging identity must not
+                    // change its existing SYSTEM WAL delimiter.
                     transaction_id: transaction
+                        .filter(|_| batch)
                         .unwrap_or(grafeo_common::types::TransactionId::SYSTEM),
                 },
                 WalRecord::EpochAdvance { epoch },
             ]) {
-                grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
+                let error = match failure {
+                    WalCommitFailure::NotWritten(error) => {
+                        discard_staged();
+                        completion.disarm();
+                        return Err(error);
+                    }
+                    WalCommitFailure::OutcomeUnknown(error) => {
+                        commits.mark_incomplete();
+                        grafeo_common::grafeo_warn!(
+                            "The direct write's WAL outcome is unknown: {}",
+                            error
+                        );
+                        Error::Transaction(TransactionError::IncompleteCommit)
+                    }
+                    WalCommitFailure::Unavailable(error) => {
+                        commits.mark_incomplete();
+                        grafeo_common::grafeo_warn!(
+                            "The direct write's WAL is unavailable: {}",
+                            error
+                        );
+                        error
+                    }
+                };
+                discard_staged();
+                return Err(error);
             }
         }
-        self.transaction_manager.sync_epoch(epoch);
-        drop(commits);
+
+        if let Some(transaction) = transaction {
+            store.finalize_version_epochs(transaction, epoch);
+            store.commit_transaction_properties(transaction);
+        }
         #[cfg(feature = "cdc")]
         {
             let events = std::mem::take(&mut *self.implicit_writes.cdc_events.lock());
@@ -348,6 +408,13 @@ impl GrafeoDB {
                     ));
             }
         }
+        if transaction.is_some() {
+            root.sync_epoch(epoch);
+            store.sync_epoch(epoch);
+        }
+        self.transaction_manager.sync_epoch(epoch);
+        completion.disarm();
+        drop(commits);
 
         // Every gc_interval commits, prune versions no reader needs.
         if self.config.gc_interval > 0 {
@@ -668,11 +735,10 @@ mod tests {
     /// process, where its database is.
     const CHILD_PATH_VAR: &str = "GRAFEO_DIRECT_PANICKING_CALL_PATH";
 
-    /// A batch that panics leaves nothing: its versions are gone, and the
-    /// next call writes none of its WAL records or change events. A single
-    /// call writes in place, so what it wrote before the panic is committed,
-    /// as after an error: the WAL matches memory. The calls run in a child
-    /// process that exits without `close()`, so the reopen replays the WAL.
+    /// A WAL-backed call that panics leaves nothing, whether single or batch:
+    /// its versions are gone, and the next call writes none of its WAL records
+    /// or change events. The calls run in a child process that exits without
+    /// `close()`, so the reopen replays the WAL.
     #[test]
     fn a_panicking_call_leaves_nothing_for_the_next() {
         let config = |path: &std::path::Path| {
@@ -705,10 +771,7 @@ mod tests {
         let labels = db
             .execute("MATCH (n) RETURN labels(n)[0] AS label ORDER BY label")
             .unwrap();
-        assert_eq!(
-            labels.rows(),
-            [[Value::from("Person")], [Value::from("Single")]]
-        );
+        assert_eq!(labels.rows(), [[Value::from("Person")]]);
         db.close().unwrap();
     }
 
@@ -725,13 +788,16 @@ mod tests {
             db.get_node(batch).is_none(),
             "the batch's node is discarded"
         );
-        assert!(db.get_node(single).is_some());
+        assert!(
+            db.get_node(single).is_none(),
+            "the WAL-backed single call's node is discarded"
+        );
         let events: Vec<EntityId> = db
             .changes_between(EpochId::new(0), db.current_epoch())
             .unwrap()
             .into_iter()
             .map(|event| event.entity_id)
             .collect();
-        assert_eq!(events, [EntityId::Node(single), EntityId::Node(alix)]);
+        assert_eq!(events, [EntityId::Node(alix)]);
     }
 }

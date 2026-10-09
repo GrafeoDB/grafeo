@@ -306,6 +306,30 @@ pub(crate) struct CommitsHeld<'a> {
     // the reverse of the order they are taken in.
     _writes: Option<RwLockWriteGuard<'a, ()>>,
     _commit: MutexGuard<'a, ()>,
+    #[cfg(feature = "lpg")]
+    manager: &'a TransactionManager,
+}
+
+impl CommitsHeld<'_> {
+    /// Reserves an epoch without publishing it. Cancelled commits leave gaps.
+    #[cfg(feature = "lpg")]
+    pub(crate) fn reserve_epoch(&self) -> EpochId {
+        EpochId::new(self.manager.assigned_epoch.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    /// Fences an uncertain direct write before releasing its commit lock.
+    #[cfg(feature = "lpg")]
+    pub(crate) fn mark_incomplete(&self) {
+        self.manager.poisoned.store(true, Ordering::Release);
+    }
+}
+
+/// How a prepared commit releases its lock and transaction ownership.
+enum CommitDisposition {
+    Pending,
+    Committed,
+    #[cfg(all(feature = "lpg", feature = "wal"))]
+    Aborted,
 }
 
 /// A commit in progress, from [`TransactionManager::start_commit`] until
@@ -317,7 +341,7 @@ pub(crate) struct CommitsHeld<'a> {
 /// [`begin`](TransactionManager::begin) can run. Complete it once the
 /// commit's versions, events and WAL records are written.
 ///
-/// A guard dropped without `complete` (only when the commit code panics) does
+/// A guard dropped without completion or a safe cancellation does
 /// not report the transaction as committed and does not publish its epoch: it
 /// stays `Committing`, so its half-written entities stay locked against other
 /// writers, and only the commit lock is released. It also poisons the
@@ -330,7 +354,7 @@ pub(crate) struct CommitGuard<'a> {
     manager: &'a TransactionManager,
     transaction_id: TransactionId,
     epoch: EpochId,
-    completed: bool,
+    disposition: CommitDisposition,
     _commit: MutexGuard<'a, ()>,
 }
 
@@ -343,23 +367,50 @@ impl CommitGuard<'_> {
     /// Completes the commit: the transaction is committed, readers see its
     /// epoch, and what waited for it can run.
     pub(crate) fn complete(mut self) {
-        self.completed = true;
+        self.disposition = CommitDisposition::Committed;
+    }
+
+    /// Stops later mutations as soon as this commit's outcome is uncertain.
+    #[cfg(all(feature = "lpg", feature = "wal"))]
+    pub(crate) fn mark_incomplete(&self) {
+        self.manager.poisoned.store(true, Ordering::Release);
+    }
+
+    /// Cancels a prepared commit whose WAL group is known not to be durable.
+    /// The caller must first undo every staged store change while this guard
+    /// still holds the commit lock. An undo panic leaves the guard pending.
+    #[cfg(all(feature = "lpg", feature = "wal"))]
+    pub(crate) fn cancel_after_undo(mut self) {
+        let mut transactions = self.manager.transactions.write();
+        let mut committed = self.manager.committed_epochs.write();
+        let info = transactions
+            .get_mut(&self.transaction_id)
+            .expect("a prepared transaction remains owned by its commit guard");
+        info.state = TransactionState::Aborted;
+        committed.remove(&self.transaction_id);
+        self.manager.active_count.fetch_sub(1, Ordering::Release);
+        self.disposition = CommitDisposition::Aborted;
     }
 }
 
 impl Drop for CommitGuard<'_> {
     fn drop(&mut self) {
-        if !self.completed {
-            // Set while the commit lock is held: a commit waiting for the
-            // lock sees it.
-            self.manager.poisoned.store(true, Ordering::Release);
-            grafeo_common::grafeo_error!(
-                "commit of transaction {:?} at epoch {:?} did not complete; its writes stay \
+        match self.disposition {
+            #[cfg(all(feature = "lpg", feature = "wal"))]
+            CommitDisposition::Aborted => return,
+            CommitDisposition::Committed => {}
+            CommitDisposition::Pending => {
+                // Set while the commit lock is held: a commit waiting for the
+                // lock sees it.
+                self.manager.poisoned.store(true, Ordering::Release);
+                grafeo_common::grafeo_error!(
+                    "commit of transaction {:?} at epoch {:?} did not complete; its writes stay \
                  locked, and no transaction can commit until the database is reopened",
-                self.transaction_id,
-                self.epoch
-            );
-            return;
+                    self.transaction_id,
+                    self.epoch
+                );
+                return;
+            }
         }
         if let Some(info) = self
             .manager
@@ -763,7 +814,7 @@ impl TransactionManager {
             manager: self,
             transaction_id,
             epoch: commit_epoch,
-            completed: false,
+            disposition: CommitDisposition::Pending,
             _commit: commit_lock,
         })
     }
@@ -794,6 +845,8 @@ impl TransactionManager {
         Ok(CommitsHeld {
             _writes: Some(writes),
             _commit: commit,
+            #[cfg(feature = "lpg")]
+            manager: self,
         })
     }
 
@@ -819,6 +872,8 @@ impl TransactionManager {
         Ok(CommitsHeld {
             _writes: None,
             _commit: commit,
+            #[cfg(feature = "lpg")]
+            manager: self,
         })
     }
 
@@ -1842,6 +1897,46 @@ mod tests {
         assert_eq!(mgr.current_epoch(), before);
 
         commit.complete();
+        assert_eq!(mgr.current_epoch(), epoch);
+    }
+
+    /// Safe cancellation releases claims and the idle path, without making
+    /// the reserved epoch visible or reusing it for a later commit.
+    #[test]
+    #[cfg(all(feature = "lpg", feature = "wal"))]
+    fn a_cancelled_prepare_releases_claims_without_publishing() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        mgr.record_write(tx, NodeId::new(1)).unwrap();
+        let commit = mgr.start_commit(tx).unwrap();
+        assert_eq!(commit.epoch(), EpochId::new(1));
+        commit.cancel_after_undo();
+
+        assert_eq!(mgr.state(tx), Some(TransactionState::Aborted));
+        assert_eq!(mgr.current_epoch(), EpochId::new(0));
+        assert_eq!(mgr.active_count(), 0);
+        assert!(!mgr.has_incomplete_commit());
+        assert!(mgr.idle_gate().is_some());
+        let next = mgr.begin();
+        mgr.record_write(next, NodeId::new(1))
+            .expect("the cancelled transaction holds no write claim");
+        assert_eq!(mgr.commit(next).unwrap(), EpochId::new(2));
+    }
+
+    /// A direct write uses the assigned sequence, even when a cancelled
+    /// prepare left the published epoch behind it.
+    #[test]
+    #[cfg(all(feature = "lpg", feature = "wal"))]
+    fn a_direct_epoch_does_not_reuse_a_cancelled_prepare() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        mgr.start_commit(tx).unwrap().cancel_after_undo();
+        let held = mgr.hold_commits_for_change().unwrap();
+        let epoch = held.reserve_epoch();
+        assert_eq!(epoch, EpochId::new(2));
+        assert_eq!(mgr.current_epoch(), EpochId::new(0));
+        mgr.sync_epoch(epoch);
+        drop(held);
         assert_eq!(mgr.current_epoch(), epoch);
     }
 

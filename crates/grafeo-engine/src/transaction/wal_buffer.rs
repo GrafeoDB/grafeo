@@ -20,13 +20,50 @@
 use std::sync::Arc;
 
 use grafeo_common::types::TransactionId;
+#[cfg(feature = "lpg")]
+use grafeo_common::utils::error::Error;
 use grafeo_common::utils::error::Result;
+#[cfg(feature = "lpg")]
+use grafeo_storage::wal::GroupError;
 use grafeo_storage::wal::{LpgWal, WalRecord};
 use parking_lot::Mutex;
 
 /// A record waiting for its group, with the named graph it applies to
 /// (`None` = default graph).
 type PendingRecord = (Option<String>, WalRecord);
+
+/// Whether the caller can undo and continue, or must fence the database.
+#[cfg(feature = "lpg")]
+#[derive(Debug)]
+pub(crate) enum WalCommitFailure {
+    /// No commit marker can close this group, and the writer remains usable.
+    NotWritten(Error),
+    /// A marker may exist: recovery must determine the durable outcome.
+    OutcomeUnknown(Error),
+    /// The writer cannot safely accept another group before recovery.
+    Unavailable(Error),
+}
+
+#[cfg(feature = "lpg")]
+impl WalCommitFailure {
+    fn from_error(error: Error) -> Self {
+        if let Error::Io(source) = &error {
+            return match source
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<GroupError>())
+            {
+                Some(GroupError::NotWritten(_)) => Self::NotWritten(error),
+                Some(GroupError::OutcomeUnknown(_)) => Self::OutcomeUnknown(error),
+                // Unknown future dispositions and unclassified I/O errors
+                // must not permit an unsafe subsequent commit.
+                _ => Self::Unavailable(error),
+            };
+        }
+        // Serialization and frame-size validation fail before the writer
+        // starts. Errors after writing have a typed I/O disposition.
+        Self::NotWritten(error)
+    }
+}
 
 /// Buffers one session's WAL records until they are written as a group.
 pub(crate) struct WalBuffer {
@@ -76,8 +113,19 @@ impl WalBuffer {
     ///
     /// Returns an error if the WAL write fails. The buffered records are
     /// dropped either way.
+    #[cfg(test)]
     pub(crate) fn flush(&self, markers: &[WalRecord]) -> Result<()> {
         self.write_group(&mut self.pending.lock(), markers)
+    }
+
+    /// Flushes a commit without losing its WAL failure disposition.
+    #[cfg(feature = "lpg")]
+    pub(crate) fn flush_commit(
+        &self,
+        markers: &[WalRecord],
+    ) -> std::result::Result<(), WalCommitFailure> {
+        self.write_group(&mut self.pending.lock(), markers)
+            .map_err(WalCommitFailure::from_error)
     }
 
     /// Writes buffered records from outside a transaction as an implicit

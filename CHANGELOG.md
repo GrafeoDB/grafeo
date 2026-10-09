@@ -53,6 +53,7 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Fixed
 
+- **LPG commit durability** ([#498](https://github.com/GrafeoDB/grafeo/issues/498)): commits and direct writes await WAL acknowledgement before publishing their commit epoch. Rejected groups return an error and undo changes; possibly durable markers return `GRAFEO-T008` (outcome unknown), block writes and checkpoints, and require reopening.
 - **`gc()` left the old versions of named graphs**: with property history kept (`temporal`), it collected only the default graph's versions. It now collects them in every graph, as `compact()` does.
 - **The bugs of 0.5.x's compacted store are gone with it** ([#542](https://github.com/GrafeoDB/grafeo/issues/542), [#596](https://github.com/GrafeoDB/grafeo/issues/596)): with one store (see Changed), writes after `compact()`, after a merge under memory pressure or after `recompact()` are no longer lost or undone; transactions, deletes, rollbacks and concurrent writes treat every node and edge alike; ids stay unique; and searches, `export_snapshot()`, `restore_snapshot()` and Arrow exports see the whole database. What 0.5.44's `compact()` wrote stays in its files as written, and an open folds it into the store as it is (see [Compact Store](https://grafeo.dev/user-guide/compact-store/)):
   - nodes without labels were dropped, and a node's labels were stored as one name (`"Actor|Person"`);

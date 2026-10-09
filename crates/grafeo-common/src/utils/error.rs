@@ -300,8 +300,8 @@ pub enum TransactionError {
     /// so it takes no more writes. Open it again to write.
     DatabaseClosed,
 
-    /// An earlier commit did not complete (it panicked between its commit
-    /// epoch and its completion), so the store may hold part of it: no
+    /// An earlier commit did not complete, for example after a panic or a
+    /// lost WAL acknowledgement. Its durable outcome may be unknown: no
     /// transaction commits and nothing is checkpointed, saved or copied
     /// until the database is reopened. Reads still see every commit
     /// published before it.
@@ -346,7 +346,7 @@ impl fmt::Display for TransactionError {
             ),
             TransactionError::IncompleteCommit => write!(
                 f,
-                "an earlier commit did not complete, so no transaction can commit and nothing \
+                "an earlier commit did not complete; its outcome may be unknown, so no transaction can commit and nothing \
                  can be checkpointed, saved or copied: reopen the database (reads still see \
                  every commit published before it)"
             ),
@@ -645,8 +645,8 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "GRAFEO-T008: an earlier commit did not complete, so no transaction can commit and \
-             nothing can be checkpointed, saved or copied: reopen the database (reads still see \
+            "GRAFEO-T008: an earlier commit did not complete; its outcome may be unknown, so no transaction can commit and nothing \
+             can be checkpointed, saved or copied: reopen the database (reads still see \
              every commit published before it)"
         );
     }

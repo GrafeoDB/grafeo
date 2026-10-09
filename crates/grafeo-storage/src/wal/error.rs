@@ -197,20 +197,21 @@ impl WalError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum GroupError {
-    /// The group has no LAST frame in the log, so it is never replayed: the
-    /// transaction can be rolled back. The writer cut the log back to where
+    /// The group has no commit marker (a LAST frame in WAL v2), so it is
+    /// never replayed: the transaction can be rolled back. The writer cut
+    /// the log back to where
     /// the group started; when that cut failed too, the writer is poisoned
     /// (see [`Wal::is_poisoned`](super::Wal::is_poisoned)) and the partial
     /// group stays as a torn tail that the next open cuts.
     #[error("the log group of the transaction was not written: {0}")]
     NotWritten(#[source] WalError),
 
-    /// The LAST frame was written but syncing it failed, so whether the
-    /// group is durable is unknown. The writer is poisoned; the next open
-    /// decides from what the log holds.
+    /// A commit marker may have been written, but completion was not
+    /// acknowledged, so whether the group is durable is unknown. The writer
+    /// is poisoned; the next open decides from what the log holds.
     #[error(
-        "the log group of the transaction was written, but syncing it failed, so whether it \
-         is durable is unknown: {0}"
+        "the log group of the transaction may have been written, but completion was not \
+         acknowledged, so its outcome is unknown: {0}"
     )]
     OutcomeUnknown(#[source] WalError),
 
@@ -254,17 +255,20 @@ impl From<WalError> for Error {
 
 impl From<GroupError> for Error {
     fn from(error: GroupError) -> Self {
-        match error {
-            GroupError::NotWritten(inner) => {
-                let message = format!("the log group of the transaction was not written: {inner}");
-                match Error::from(inner) {
-                    Error::Io(source) => Error::Io(std::io::Error::new(source.kind(), message)),
-                    Error::InvalidValue(_) => Error::InvalidValue(message),
-                    _ => Error::Internal(message),
-                }
+        match &error {
+            GroupError::NotWritten(WalError::Io { source, .. }) => {
+                let kind = source.kind();
+                Error::Io(std::io::Error::new(kind, error))
             }
+            GroupError::NotWritten(WalError::Unavailable { .. }) => {
+                Error::Io(std::io::Error::other(error))
+            }
+            GroupError::NotWritten(WalError::RecordTooLarge { .. }) => {
+                Error::InvalidValue(error.to_string())
+            }
+            GroupError::NotWritten(_) => Error::Internal(error.to_string()),
             GroupError::OutcomeUnknown(_) | GroupError::Unavailable { .. } => {
-                Error::Io(std::io::Error::other(error.to_string()))
+                Error::Io(std::io::Error::other(error))
             }
         }
     }

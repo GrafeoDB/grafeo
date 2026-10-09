@@ -65,7 +65,7 @@ fn database_with_alix(path: &Path) {
 
 /// A checkpoint started inside a commit that then fails (after its versions
 /// are stamped) waits for the commit, gets its error, and writes nothing: a
-/// reopen shows the database without the commit.
+/// reopen replays the commit's complete WAL group, written before stamping.
 #[test]
 fn a_checkpoint_during_a_failing_commit_gets_its_error_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -104,7 +104,11 @@ fn a_checkpoint_during_a_failing_commit_gets_its_error_and_writes_nothing() {
         "the file is byte for byte the last checkpoint"
     );
     let db = GrafeoDB::open(&path).unwrap();
-    assert_eq!(people(&db), [Value::from("Alix")]);
+    assert_eq!(
+        people(&db),
+        [Value::from("Alix"), Value::from("Gus")],
+        "the reopen replays the stamped commit's complete WAL group"
+    );
 }
 
 /// A checkpoint started inside a commit that completes waits for it, and
@@ -399,9 +403,12 @@ fn checkpoint_child() {
         // The process ends inside the commit, before its WAL records are
         // written, with a checkpoint started meanwhile.
         "failing" => {
-            after_next_commit_stamped(move || {
+            after_next_commit_epoch(move || {
                 let checkpoint = Started::spawn(move || checkpointer.wal_checkpoint().is_ok());
-                let _ = checkpoint.finishes_briefly();
+                assert!(
+                    !checkpoint.finishes_briefly(),
+                    "the checkpoint waits for the commit before its WAL records"
+                );
                 std::process::exit(EXITED);
             });
             let _ = session.commit();
@@ -717,15 +724,21 @@ fn checkpoints_among_open_transactions_always_leave_a_file_that_opens() {
     }
 }
 
-/// A process that ends inside a commit, with a checkpoint started in it,
-/// leaves no part of the commit: the checkpoint waited for the commit, which
-/// never completed.
+/// A process that ends inside a commit before its WAL records are written,
+/// with a checkpoint started in it, leaves no part of the commit: the
+/// checkpoint waited for the commit, which never completed.
 #[test]
 fn a_crash_inside_a_commit_with_a_checkpoint_started_leaves_none_of_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prague.grafeo");
     database_with_alix(&path);
+    let checkpointed = std::fs::read(&path).unwrap();
     run_child("failing", &path);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        checkpointed,
+        "the waiting checkpoint wrote no image before the crash"
+    );
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
         people(&db),

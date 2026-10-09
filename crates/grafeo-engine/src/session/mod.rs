@@ -907,6 +907,7 @@ impl Session {
         // After `close()` the commit would fail (see
         // `TransactionManager::check_open`): fail before writing, also a
         // write outside a transaction, which has no commit.
+        self.transaction_manager.check_no_incomplete_commit()?;
         self.transaction_manager.check_open()
     }
 
@@ -4374,6 +4375,55 @@ impl Session {
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_epoch();
 
+        // Keep staged versions and undo until the complete WAL group meets
+        // its durability mode. A synced marker with a lost acknowledgement
+        // must never become a reported rollback or a published live commit.
+        #[cfg(feature = "wal")]
+        if let Some(wal) = self.wal() {
+            use crate::transaction::wal_buffer::WalCommitFailure;
+            use grafeo_storage::wal::WalRecord;
+            if let Err(failure) = wal.flush_commit(&[
+                WalRecord::TransactionCommit { transaction_id },
+                WalRecord::EpochAdvance {
+                    epoch: commit_epoch,
+                },
+            ]) {
+                if !matches!(&failure, WalCommitFailure::NotWritten(_)) {
+                    commit.mark_incomplete();
+                }
+                // This restores volatile state only. The WAL determines an
+                // uncertain commit's durable outcome when the database reopens.
+                self.discard_transaction_changes(transaction_id, &touched);
+                match failure {
+                    WalCommitFailure::NotWritten(error) => {
+                        commit.cancel_after_undo();
+                        #[cfg(feature = "metrics")]
+                        {
+                            crate::metrics::record_metric!(self.metrics, tx_active, dec);
+                            crate::metrics::record_metric!(self.metrics, tx_rolled_back, inc);
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if let Some(start) = self.tx_start_time.lock().take() {
+                                crate::metrics::record_metric!(
+                                    self.metrics, tx_duration, observe start.elapsed().as_secs_f64() * 1000.0
+                                );
+                            }
+                        }
+                        return Err(error);
+                    }
+                    WalCommitFailure::OutcomeUnknown(error) => {
+                        grafeo_common::grafeo_error!(
+                            "Commit outcome unknown after WAL failure: {}",
+                            error
+                        );
+                        return Err(grafeo_common::utils::error::Error::Transaction(
+                            grafeo_common::utils::error::TransactionError::IncompleteCommit,
+                        ));
+                    }
+                    WalCommitFailure::Unavailable(error) => return Err(error),
+                }
+            }
+        }
+
         // Finalize PENDING epochs: make uncommitted versions visible at the commit epoch.
         for graph_name in &touched {
             let store = self.resolve_store(graph_name);
@@ -4404,22 +4454,6 @@ impl Session {
             }));
         }
 
-        // Write the transaction's records to the WAL as one group, closed by
-        // the commit marker and the epoch advance, so crash recovery can
-        // identify committed transactions and their epoch boundaries (#252)
-        // and no other session's records can land inside the group (#411).
-        #[cfg(feature = "wal")]
-        if let Some(wal) = self.wal() {
-            use grafeo_storage::wal::WalRecord;
-            if let Err(e) = wal.flush(&[
-                WalRecord::TransactionCommit { transaction_id },
-                WalRecord::EpochAdvance {
-                    epoch: commit_epoch,
-                },
-            ]) {
-                grafeo_common::grafeo_warn!("Failed to write transaction to WAL: {}", e);
-            }
-        }
         unwritten.written();
 
         #[cfg(feature = "testing-statement-injection")]
@@ -4561,8 +4595,8 @@ impl Session {
 
     /// Aborts a transaction that has already been taken out of
     /// `current_transaction`: discards its versions in every touched graph,
-    /// its RDF changes and buffered CDC events, marks it aborted in the
-    /// transaction manager and logs the abort to the WAL.
+    /// its RDF changes and buffered CDC events, and marks it aborted in the
+    /// transaction manager. Its buffered WAL records are discarded.
     ///
     /// Shared by rollback and by a commit that fails validation, so a failed
     /// commit leaves no active transaction holding its entities.
@@ -4572,6 +4606,18 @@ impl Session {
         transaction_id: TransactionId,
         touched: &[Option<String>],
     ) -> Result<()> {
+        self.discard_transaction_changes(transaction_id, touched);
+        self.transaction_manager.abort(transaction_id)
+    }
+
+    /// Restores staged state without asserting a durable transaction outcome.
+    /// In particular, an uncertain commit must not append an abort marker.
+    #[cfg(feature = "lpg")]
+    fn discard_transaction_changes(
+        &self,
+        transaction_id: TransactionId,
+        touched: &[Option<String>],
+    ) {
         *self.read_only_tx.lock() = self.db_read_only;
 
         // Discard uncommitted versions in ALL touched LPG stores (cross-graph
@@ -4596,16 +4642,13 @@ impl Session {
         self.savepoints.lock().clear();
         self.touched_graphs.lock().clear();
 
-        let result = self.transaction_manager.abort(transaction_id);
-
-        // The transaction's WAL records were only buffered: drop them. Nothing
-        // of it reached the WAL, so there is nothing to undo on replay.
+        // Never let a later flush append this transaction's pending records.
+        // For a failed prepared commit, the live WAL writer already resolved
+        // or fenced its partial group before returning to the session.
         #[cfg(feature = "wal")]
         if let Some(wal) = self.wal() {
             wal.clear();
         }
-
-        result
     }
 
     /// Creates a named savepoint within the current transaction.

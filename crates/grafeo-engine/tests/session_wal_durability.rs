@@ -330,4 +330,389 @@ mod session_wal_durability {
             "rolled-back node was resurrected by a later commit (TransactionAbort missing from rollback path)"
         );
     }
+
+    /// Issue #498: a failed WAL acknowledgement must reach the real caller
+    /// without publishing the failed commit's epoch.
+    #[cfg(all(
+        feature = "wal",
+        feature = "grafeo-file",
+        feature = "lpg",
+        feature = "gql",
+        feature = "testing-crash-injection"
+    ))]
+    mod wal_group_failures {
+        use super::{only_id, reopened_after_crash};
+        use grafeo_common::testing::crash::{maybe_fail, with_failure_at};
+        use grafeo_common::types::EpochId;
+        use grafeo_common::utils::error::{Error, Result, TransactionError};
+        use grafeo_engine::config::{DurabilityMode, StorageFormat};
+        use grafeo_engine::{Config, GrafeoDB};
+        use grafeo_storage::file::detect::sidecar_wal_path;
+        use std::ffi::OsString;
+        use std::path::Path;
+
+        type Write = fn(&GrafeoDB, &str) -> Result<()>;
+
+        fn open_sync(path: &Path) -> GrafeoDB {
+            let db = GrafeoDB::with_config(
+                Config::persistent(path)
+                    .with_storage_format(StorageFormat::Auto)
+                    .with_wal_durability(DurabilityMode::Sync),
+            )
+            .expect("open with synchronous WAL durability");
+            #[cfg(feature = "cdc")]
+            db.set_cdc_enabled(true);
+            db
+        }
+
+        fn explicit_query_commit(db: &GrafeoDB, label: &str) -> Result<()> {
+            let mut session = db.session();
+            session.begin_transaction()?;
+            session.execute(&format!("INSERT (:{label})"))?;
+            session.commit()
+        }
+
+        fn default_query_autocommit(db: &GrafeoDB, label: &str) -> Result<()> {
+            db.execute(&format!("INSERT (:{label})")).map(|_| ())
+        }
+
+        fn database_create_node(db: &GrafeoDB, label: &str) -> Result<()> {
+            db.create_node(&[label]).map(|_| ())
+        }
+
+        fn assert_live_empty(db: &GrafeoDB, epoch: EpochId) {
+            #[cfg(feature = "cdc")]
+            assert_eq!(
+                db.changes_between(EpochId::new(0), EpochId::new(u64::MAX))
+                    .unwrap()
+                    .len(),
+                0,
+                "a failed acknowledgement must not publish CDC events",
+            );
+            assert_eq!(
+                db.node_count(),
+                0,
+                "direct reads must not publish the failed write"
+            );
+            assert_eq!(
+                only_id(db, "MATCH (n) RETURN count(n)"),
+                0,
+                "queries must not publish the failed write"
+            );
+            assert_eq!(
+                db.current_epoch(),
+                epoch,
+                "the published epoch must not advance"
+            );
+        }
+
+        fn assert_incomplete(error: Error, operation: &str) {
+            assert!(
+                matches!(
+                    &error,
+                    Error::Transaction(TransactionError::IncompleteCommit)
+                ),
+                "{operation}: expected IncompleteCommit, got {error:?}"
+            );
+            assert_eq!(error.error_code().as_str(), "GRAFEO-T008", "{operation}");
+        }
+
+        /// Closing an incomplete commit must preserve the complete WAL group,
+        /// including its bytes, rather than checkpointing or removing it.
+        fn wal_log_bytes(db: &GrafeoDB) -> Vec<(OsString, Vec<u8>)> {
+            let sidecar = sidecar_wal_path(db.path().expect("a persistent database path"));
+            let mut files: Vec<_> = std::fs::read_dir(&sidecar)
+                .expect("the sidecar WAL must exist")
+                .map(|entry| entry.expect("read WAL directory entry").path())
+                .filter(|path| path.extension().is_some_and(|extension| extension == "log"))
+                .map(|path| {
+                    (
+                        path.file_name().expect("a WAL file name").to_os_string(),
+                        std::fs::read(&path).expect("read WAL bytes"),
+                    )
+                })
+                .collect();
+            files.sort_by(|left, right| left.0.cmp(&right.0));
+            assert!(
+                !files.is_empty(),
+                "the complete WAL group must remain on disk"
+            );
+            files
+        }
+
+        /// The caller's result is meaningful only if the armed I/O failure
+        /// fired inside it, rather than remaining armed after it returned.
+        fn with_wal_failure(count: u64, write: impl FnOnce() -> Result<()>) -> Result<()> {
+            with_failure_at(count, || {
+                let result = write();
+                for _ in 0..count {
+                    assert!(
+                        maybe_fail("unreached_wal_failure_witness").is_ok(),
+                        "the write must consume its armed WAL failure before returning"
+                    );
+                }
+                result
+            })
+        }
+
+        fn rejection_before_group_write(test: &str, write: Write) {
+            let (_dir, db) = reopened_after_crash(test, open_sync, |db| {
+                let epoch = db.current_epoch();
+                let error = with_wal_failure(1, || write(db, "Rejected"))
+                    .expect_err("a failure before the WAL group write must reach the caller");
+                assert!(
+                    error.to_string().contains("wal_before_group_write"),
+                    "the write must fail at the pre-group seam: {error}"
+                );
+                assert_live_empty(db, epoch);
+
+                write(db, "Durable").expect("a later write through the same caller must succeed");
+                assert_eq!(
+                    db.node_count(),
+                    1,
+                    "only the later write is visible directly"
+                );
+                assert_eq!(only_id(db, "MATCH (n) RETURN count(n)"), 1);
+                assert_eq!(only_id(db, "MATCH (n:Rejected) RETURN count(n)"), 0);
+            });
+            assert_eq!(
+                db.node_count(),
+                1,
+                "only the later write survives WAL replay"
+            );
+            assert_eq!(only_id(&db, "MATCH (n) RETURN count(n)"), 1);
+            assert_eq!(only_id(&db, "MATCH (n:Durable) RETURN count(n)"), 1);
+            assert_eq!(
+                only_id(&db, "MATCH (n:Rejected) RETURN count(n)"),
+                0,
+                "the rejected write must not be resurrected by a later commit"
+            );
+        }
+
+        fn unknown_after_group_sync(test: &str, write: Write) {
+            let (_dir, db) = reopened_after_crash(test, open_sync, |db| {
+                let epoch = db.current_epoch();
+                let error = with_wal_failure(2, || write(db, "Unknown"))
+                    .expect_err("a lost acknowledgement after WAL sync must reach the caller");
+                let message = error.to_string().to_ascii_lowercase();
+                assert_incomplete(error, "the initial post-sync write");
+                assert!(
+                    message.contains("unknown") && message.contains("reopen"),
+                    "the caller must learn that the outcome is unknown and requires reopening: {message}"
+                );
+                assert_live_empty(db, epoch);
+
+                assert_incomplete(
+                    db.create_node(&["FencedDirect"])
+                        .expect_err("later direct writes must be fenced"),
+                    "a later direct write",
+                );
+                assert_incomplete(
+                    db.execute("INSERT (:FencedQuery)")
+                        .expect_err("later query writes must be fenced"),
+                    "a later query write",
+                );
+                assert_live_empty(db, epoch);
+
+                let wal_before_close = wal_log_bytes(db);
+                assert_incomplete(
+                    db.close()
+                        .expect_err("close must report the incomplete commit"),
+                    "close",
+                );
+                assert_eq!(
+                    wal_log_bytes(db),
+                    wal_before_close,
+                    "close must preserve the WAL group for replay"
+                );
+            });
+            assert_eq!(
+                db.node_count(),
+                1,
+                "the synced write survives WAL replay exactly once"
+            );
+            assert_eq!(only_id(&db, "MATCH (n) RETURN count(n)"), 1);
+            assert_eq!(only_id(&db, "MATCH (n:Unknown) RETURN count(n)"), 1);
+            assert_eq!(only_id(&db, "MATCH (n:FencedDirect) RETURN count(n)"), 0);
+            assert_eq!(only_id(&db, "MATCH (n:FencedQuery) RETURN count(n)"), 0);
+        }
+
+        #[derive(Clone, Copy)]
+        enum PropertyCaller {
+            Explicit,
+            Autocommit,
+            Direct,
+        }
+
+        fn update_property(db: &GrafeoDB, caller: PropertyCaller, value: &str) -> Result<()> {
+            use grafeo_common::types::Value;
+            let node = db.iter_nodes().next().expect("the seed node").id;
+            match caller {
+                PropertyCaller::Explicit => {
+                    let mut session = db.session();
+                    session.begin_transaction()?;
+                    session.set_node_property(node, "revision", Value::from(value))?;
+                    session.commit()
+                }
+                PropertyCaller::Autocommit => db
+                    .execute(&format!("MATCH (n:Probe) SET n.revision = '{value}'"))
+                    .map(drop),
+                PropertyCaller::Direct => {
+                    db.set_node_property(node, "revision", Value::from(value))
+                }
+            }
+        }
+
+        fn assert_revision(db: &GrafeoDB, expected: &str) {
+            use grafeo_common::types::Value;
+            assert_eq!(db.node_count(), 1, "updates must not add nodes");
+            let node = db.iter_nodes().next().expect("the seed node");
+            assert_eq!(node.get_property("revision"), Some(&Value::from(expected)));
+            let result = db.execute("MATCH (n:Probe) RETURN n.revision").unwrap();
+            assert_eq!(result.rows(), &[vec![Value::from(expected)]]);
+        }
+
+        /// Undo must restore an existing property, not just remove new nodes.
+        fn property_failure(test: &str, caller: PropertyCaller, failure: u64) {
+            use grafeo_common::types::Value;
+            let (_dir, db) = reopened_after_crash(test, open_sync, |db| {
+                db.create_node_with_props(&["Probe"], [("revision", Value::from("before"))])
+                    .unwrap();
+                let epoch = db.current_epoch();
+                let error = with_wal_failure(failure, || update_property(db, caller, "attempted"))
+                    .expect_err("the property update must report its WAL failure");
+                assert_revision(db, "before");
+                #[cfg(feature = "cdc")]
+                assert_eq!(
+                    db.changes_between(EpochId::new(0), EpochId::new(u64::MAX))
+                        .unwrap()
+                        .len(),
+                    1,
+                    "only the seed creation is published to CDC",
+                );
+                assert_eq!(db.current_epoch(), epoch);
+                if failure == 1 {
+                    assert!(
+                        error.to_string().contains("wal_before_group_write"),
+                        "{error}"
+                    );
+                    update_property(db, caller, "retry").unwrap();
+                    assert_revision(db, "retry");
+                } else {
+                    assert_incomplete(error, "the lost property-update acknowledgement");
+                    assert_incomplete(
+                        update_property(db, caller, "fenced")
+                            .expect_err("later updates are fenced"),
+                        "the later update",
+                    );
+                    let bytes = wal_log_bytes(db);
+                    assert_incomplete(db.close().expect_err("close refuses"), "close");
+                    assert_eq!(wal_log_bytes(db), bytes);
+                }
+            });
+            assert_revision(&db, if failure == 1 { "retry" } else { "attempted" });
+        }
+
+        #[test]
+        fn explicit_property_before_write_is_undone_and_retryable() {
+            property_failure(
+                "session_wal_durability::wal_group_failures::explicit_property_before_write_is_undone_and_retryable",
+                PropertyCaller::Explicit,
+                1,
+            );
+        }
+
+        #[test]
+        fn explicit_property_lost_ack_is_unknown_and_recovers() {
+            property_failure(
+                "session_wal_durability::wal_group_failures::explicit_property_lost_ack_is_unknown_and_recovers",
+                PropertyCaller::Explicit,
+                2,
+            );
+        }
+
+        #[test]
+        fn autocommit_property_before_write_is_undone_and_retryable() {
+            property_failure(
+                "session_wal_durability::wal_group_failures::autocommit_property_before_write_is_undone_and_retryable",
+                PropertyCaller::Autocommit,
+                1,
+            );
+        }
+
+        #[test]
+        fn autocommit_property_lost_ack_is_unknown_and_recovers() {
+            property_failure(
+                "session_wal_durability::wal_group_failures::autocommit_property_lost_ack_is_unknown_and_recovers",
+                PropertyCaller::Autocommit,
+                2,
+            );
+        }
+
+        #[test]
+        fn direct_property_before_write_is_undone_and_retryable() {
+            property_failure(
+                "session_wal_durability::wal_group_failures::direct_property_before_write_is_undone_and_retryable",
+                PropertyCaller::Direct,
+                1,
+            );
+        }
+
+        #[test]
+        fn direct_property_lost_ack_is_unknown_and_recovers() {
+            property_failure(
+                "session_wal_durability::wal_group_failures::direct_property_lost_ack_is_unknown_and_recovers",
+                PropertyCaller::Direct,
+                2,
+            );
+        }
+
+        #[test]
+        fn explicit_query_commit_failure_before_group_write_is_rejected_and_retryable() {
+            rejection_before_group_write(
+                "session_wal_durability::wal_group_failures::explicit_query_commit_failure_before_group_write_is_rejected_and_retryable",
+                explicit_query_commit,
+            );
+        }
+
+        #[test]
+        fn default_query_autocommit_failure_before_group_write_is_rejected_and_retryable() {
+            rejection_before_group_write(
+                "session_wal_durability::wal_group_failures::default_query_autocommit_failure_before_group_write_is_rejected_and_retryable",
+                default_query_autocommit,
+            );
+        }
+
+        #[test]
+        fn database_create_node_failure_before_group_write_is_rejected_and_retryable() {
+            rejection_before_group_write(
+                "session_wal_durability::wal_group_failures::database_create_node_failure_before_group_write_is_rejected_and_retryable",
+                database_create_node,
+            );
+        }
+
+        #[test]
+        fn explicit_query_commit_failure_after_group_sync_is_unknown_and_recovers() {
+            unknown_after_group_sync(
+                "session_wal_durability::wal_group_failures::explicit_query_commit_failure_after_group_sync_is_unknown_and_recovers",
+                explicit_query_commit,
+            );
+        }
+
+        #[test]
+        fn default_query_autocommit_failure_after_group_sync_is_unknown_and_recovers() {
+            unknown_after_group_sync(
+                "session_wal_durability::wal_group_failures::default_query_autocommit_failure_after_group_sync_is_unknown_and_recovers",
+                default_query_autocommit,
+            );
+        }
+
+        #[test]
+        fn database_create_node_failure_after_group_sync_is_unknown_and_recovers() {
+            unknown_after_group_sync(
+                "session_wal_durability::wal_group_failures::database_create_node_failure_after_group_sync_is_unknown_and_recovers",
+                database_create_node,
+            );
+        }
+    }
 }

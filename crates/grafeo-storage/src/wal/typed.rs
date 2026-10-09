@@ -100,7 +100,8 @@ impl<R: WalEntry> TypedWal<R> {
         let data = bincode::serde::encode_to_vec(record, bincode::config::standard())
             .map_err(|e| Error::Serialization(e.to_string()))?;
         let force_sync = record.requires_sync();
-        self.manager.write_frame(&data, force_sync)
+        self.manager
+            .write_frame(&data, force_sync, record.is_commit())
     }
 
     /// Logs typed records as one contiguous group.
@@ -121,7 +122,9 @@ impl<R: WalEntry> TypedWal<R> {
             .collect::<Result<Vec<_>>>()?;
         let frame_refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
         let force_sync = records.iter().any(WalEntry::requires_sync);
-        self.manager.write_frames(&frame_refs, force_sync)
+        let commit_frame = records.iter().position(WalEntry::is_commit);
+        self.manager
+            .write_frames(&frame_refs, force_sync, commit_frame)
     }
 
     /// Writes a checkpoint marker and persists checkpoint metadata.

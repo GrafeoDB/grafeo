@@ -1,16 +1,16 @@
 //! WAL log file management.
 
-use super::WalRecord;
+use super::{GroupError, WalEntry, WalError, WalRecord};
 use grafeo_common::types::{EpochId, TransactionId};
 use grafeo_common::utils::error::{Error, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "encryption")]
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Checkpoint metadata stored in a separate file.
@@ -112,6 +112,10 @@ pub struct WalManager {
     config: WalConfig,
     /// Active log file.
     active_log: Mutex<Option<LogFile>>,
+    /// An uncertain group or failed tail repair prevents further appends.
+    unavailable: AtomicBool,
+    /// The first failure, retained for subsequent rejected writes.
+    unavailable_reason: Mutex<Option<String>>,
     /// Total number of records written across all log files.
     total_record_count: AtomicU64,
     /// Records since last sync (for batch mode).
@@ -207,6 +211,8 @@ impl WalManager {
             dir,
             config,
             active_log: Mutex::new(None),
+            unavailable: AtomicBool::new(false),
+            unavailable_reason: Mutex::new(None),
             total_record_count: AtomicU64::new(0),
             records_since_sync: AtomicU64::new(0),
             last_sync: Mutex::new(Instant::now()),
@@ -278,7 +284,7 @@ impl WalManager {
         let data = bincode::serde::encode_to_vec(record, bincode::config::standard())
             .map_err(|e| Error::Serialization(e.to_string()))?;
         let force_sync = matches!(record, WalRecord::TransactionCommit { .. });
-        self.write_frame(&data, force_sync)
+        self.write_frame(&data, force_sync, record.is_commit())
     }
 
     /// Logs records as one contiguous group: no other writer's records can
@@ -299,7 +305,8 @@ impl WalManager {
         let force_sync = records
             .iter()
             .any(|record| matches!(record, WalRecord::TransactionCommit { .. }));
-        self.write_frames(&frame_refs, force_sync)
+        let commit_frame = records.iter().position(WalEntry::is_commit);
+        self.write_frames(&frame_refs, force_sync, commit_frame)
     }
 
     /// Writes a pre-serialized frame to the active WAL log.
@@ -309,8 +316,8 @@ impl WalManager {
     ///
     /// `force_sync` controls whether an fsync is performed in Sync durability
     /// mode. Callers typically set this to `true` for commit markers.
-    pub(crate) fn write_frame(&self, data: &[u8], force_sync: bool) -> Result<()> {
-        self.write_frames(&[data], force_sync)
+    pub(crate) fn write_frame(&self, data: &[u8], force_sync: bool, is_commit: bool) -> Result<()> {
+        self.write_frames(&[data], force_sync, is_commit.then_some(0))
     }
 
     /// Writes pre-serialized frames as one contiguous group.
@@ -319,72 +326,106 @@ impl WalManager {
     /// from other writers cannot interleave with them, and rotation only
     /// happens after the whole group. Durability handling runs once for the
     /// group, as for a single frame.
-    pub(crate) fn write_frames(&self, frames: &[&[u8]], force_sync: bool) -> Result<()> {
-        use grafeo_common::testing::crash::maybe_crash;
+    pub(crate) fn write_frames(
+        &self,
+        frames: &[&[u8]],
+        force_sync: bool,
+        commit_frame: Option<usize>,
+    ) -> Result<()> {
+        use grafeo_common::testing::crash::{maybe_crash, maybe_fail};
 
-        // A frame too long for its length prefix fails before any frame of
-        // the group is written.
+        self.check_available()?;
+        // Keep these two frontend failure calls stable: before any group
+        // bytes, and after the group has actually been synced.
+        if let Err(error) = maybe_fail("wal_before_group_write") {
+            return Err(Self::not_written(self.path(), error));
+        }
+
+        // Validate every length before any frame of this group is written.
         #[cfg(feature = "encryption")]
-        let overhead = if self.encryptor.is_some() {
-            grafeo_common::encryption::ENCRYPTION_OVERHEAD
-        } else {
-            0
-        };
+        let overhead = self
+            .encryptor
+            .as_ref()
+            .map_or(0, |_| grafeo_common::encryption::ENCRYPTION_OVERHEAD);
         #[cfg(not(feature = "encryption"))]
         let overhead = 0;
         for data in frames {
             frame_length(data.len().saturating_add(overhead))?;
         }
+        if let Err(error) = self.ensure_active_log() {
+            // An existing fence must not be turned into an abortable error.
+            self.check_available()?;
+            return Err(Self::not_written(self.path(), error));
+        }
 
-        self.ensure_active_log()?;
+        let mut guard = self.active_log.lock();
+        self.check_available()?;
+        let log_file = guard
+            .as_mut()
+            .ok_or_else(|| Error::Internal("WAL writer not available".to_string()))?;
+        let start_size = log_file.size;
+        let path = log_file.path.clone();
+        let mut bytes_attempted = false;
+        let mut marker_attempted = false;
+        let mut added_records = 0;
 
-        // Phase 1: write frame data and flush buffer while holding the lock.
-        // Determine whether an fsync is needed, and if so clone the file handle
-        // so we can release the lock before the (potentially slow) sync_all().
-        let (needs_rotation, sync_file, synced_records) = {
-            let mut guard = self.active_log.lock();
-            let log_file = guard
-                .as_mut()
-                .ok_or_else(|| Error::Internal("WAL writer not available".to_string()))?;
-
-            for &data in frames {
+        // Each successful preceding group flushed its buffer, so size is
+        // the exact file boundary to restore under this same lock.
+        let written: Result<bool> = (|| {
+            for (frame_index, &data) in frames.iter().enumerate() {
                 maybe_crash("wal_before_write");
-
-                // Encrypted frame: [len:4][nonce(12) || ciphertext || tag(16)]
-                // Plaintext frame: [len:4][data][crc32:4]
                 #[cfg(feature = "encryption")]
                 let encrypted = self.encrypt(data)?;
                 #[cfg(not(feature = "encryption"))]
                 let encrypted: Option<Vec<u8>> = None;
+
+                // A failed write may have accepted the marker's bytes even
+                // when it returned Err. Enter uncertainty before trying it.
+                marker_attempted |= commit_frame == Some(frame_index);
+                #[cfg(all(test, feature = "testing-crash-injection"))]
+                legacy_commit_tests::maybe_fail(
+                    "wal_group_frame_write",
+                    frame_index,
+                    log_file.writer.get_ref(),
+                )?;
+                bytes_attempted = true;
                 let record_size = match encrypted {
                     Some(encrypted) => {
                         let length = frame_length(encrypted.len())?;
                         log_file.writer.write_all(&length.to_le_bytes())?;
                         log_file.writer.write_all(&encrypted)?;
+                        #[cfg(all(test, feature = "testing-crash-injection"))]
+                        legacy_commit_tests::maybe_fail(
+                            "wal_group_payload_write",
+                            frame_index,
+                            log_file.writer.get_ref(),
+                        )?;
                         4 + u64::from(length)
                     }
                     None => {
                         let length = frame_length(data.len())?;
                         log_file.writer.write_all(&length.to_le_bytes())?;
                         log_file.writer.write_all(data)?;
+                        #[cfg(all(test, feature = "testing-crash-injection"))]
+                        legacy_commit_tests::maybe_fail(
+                            "wal_group_payload_write",
+                            frame_index,
+                            log_file.writer.get_ref(),
+                        )?;
                         log_file
                             .writer
                             .write_all(&crc32fast::hash(data).to_le_bytes())?;
                         4 + u64::from(length) + 4
                     }
                 };
-
                 maybe_crash("wal_after_write");
-
                 log_file.size += record_size;
                 self.total_record_count.fetch_add(1, Ordering::Relaxed);
                 self.records_since_sync.fetch_add(1, Ordering::Relaxed);
+                added_records += 1;
             }
 
             let needs_rotation = log_file.size >= self.config.max_log_size;
-
-            // Decide whether we need to fsync based on durability mode.
-            // Always flush the BufWriter so data reaches the OS page cache.
             let needs_sync = match &self.config.durability {
                 DurabilityMode::Sync => {
                     if force_sync {
@@ -396,49 +437,133 @@ impl WalManager {
                     max_delay_ms,
                     max_records,
                 } => {
-                    let records = self.records_since_sync.load(Ordering::Relaxed);
-                    let elapsed = self.last_sync.lock().elapsed();
-                    records >= *max_records || elapsed >= Duration::from_millis(*max_delay_ms)
+                    self.records_since_sync.load(Ordering::Relaxed) >= *max_records
+                        || self.last_sync.lock().elapsed() >= Duration::from_millis(*max_delay_ms)
                 }
                 DurabilityMode::Adaptive { .. } | DurabilityMode::NoSync => false,
             };
-
-            // Flush the BufWriter while holding the lock (pushes data to OS).
             log_file.writer.flush()?;
-
-            // Snapshot the record count while holding the lock so we can
-            // subtract exactly this amount after sync, preserving any
-            // concurrent increments that arrive between lock release and sync.
-            let synced_records = if needs_sync {
-                self.records_since_sync.load(Ordering::Relaxed)
-            } else {
-                0
-            };
-
-            // Clone the file handle for out-of-lock sync if needed.
-            let sync_file = if needs_sync {
-                Some(log_file.writer.get_ref().try_clone()?)
-            } else {
-                None
-            };
-
-            (needs_rotation, sync_file, synced_records)
-            // guard dropped here: active_log lock released
-        };
-
-        // Phase 2: fsync outside the lock so other threads can write concurrently.
-        if let Some(file) = sync_file {
-            file.sync_all()?;
-            self.records_since_sync
-                .fetch_sub(synced_records, Ordering::Relaxed);
-            *self.last_sync.lock() = Instant::now();
+            if needs_sync {
+                let synced_records = self.records_since_sync.load(Ordering::Relaxed);
+                // Hold writer serialization through sync and acknowledgement:
+                // a failure must fence the log before another group starts.
+                log_file.writer.get_ref().sync_all()?;
+                self.subtract_pending_records(synced_records);
+                *self.last_sync.lock() = Instant::now();
+                maybe_fail("wal_after_group_sync")?;
+            }
+            Ok(needs_rotation)
+        })();
+        let written = written.and_then(|needs_rotation| {
+            if needs_rotation {
+                #[cfg(all(test, feature = "testing-crash-injection"))]
+                if let Some(log_file) = guard.as_ref() {
+                    legacy_commit_tests::maybe_fail(
+                        "wal_group_rotate",
+                        0,
+                        log_file.writer.get_ref(),
+                    )?;
+                }
+                self.rotate_under_lock(&mut guard)?;
+            }
+            Ok(())
+        });
+        match written {
+            Ok(()) => Ok(()),
+            Err(error) if marker_attempted => Err(self.unknown(path, error)),
+            Err(error) => {
+                if bytes_attempted
+                    && let Err(repair) = self.restore_group(&mut guard, start_size, added_records)
+                {
+                    return Err(self.make_unavailable(format!(
+                        "{error}; the pre-marker WAL tail could not be restored: {repair}"
+                    )));
+                }
+                Err(Self::not_written(path, error))
+            }
         }
+    }
 
-        // Rotate if needed
-        if needs_rotation {
-            self.rotate()?;
+    /// Restores a proven pre-marker tail without flushing rejected bytes.
+    /// The caller holds active_log throughout removal and replacement.
+    fn restore_group(
+        &self,
+        active: &mut Option<LogFile>,
+        start_size: u64,
+        added_records: u64,
+    ) -> Result<()> {
+        let log_file = active
+            .take()
+            .ok_or_else(|| Error::Internal("WAL writer not available for repair".to_string()))?;
+        let (mut file, pending) = log_file.writer.into_parts();
+        // into_parts, unlike into_inner or Drop, never tries to flush.
+        let pending = pending
+            .map_err(|_| Error::Internal("WAL buffer panicked and cannot be reused".to_string()))?;
+        drop(pending);
+        #[cfg(all(test, feature = "testing-crash-injection"))]
+        legacy_commit_tests::maybe_fail("wal_group_repair_truncate", 0, &file)?;
+        file.set_len(start_size)?;
+        file.seek(SeekFrom::Start(start_size))?;
+        #[cfg(all(test, feature = "testing-crash-injection"))]
+        legacy_commit_tests::maybe_fail("wal_group_repair_sync", 0, &file)?;
+        file.sync_all()?;
+        *active = Some(LogFile {
+            writer: BufWriter::new(file),
+            size: start_size,
+            path: log_file.path,
+        });
+        self.total_record_count
+            .fetch_sub(added_records, Ordering::Relaxed);
+        self.subtract_pending_records(added_records);
+        Ok(())
+    }
+
+    fn subtract_pending_records(&self, records: u64) {
+        // A background sync may have cleared this count in the meantime.
+        self.records_since_sync
+            .update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+                pending.saturating_sub(records)
+            });
+    }
+
+    fn not_written(path: PathBuf, error: Error) -> Error {
+        match error {
+            Error::Io(source) => GroupError::NotWritten(WalError::io(path, source)).into(),
+            // Preserve validation/serialization classes before any marker.
+            other => other,
         }
+    }
 
+    fn unknown(&self, path: PathBuf, error: Error) -> Error {
+        self.poison(error.to_string());
+        GroupError::OutcomeUnknown(WalError::injected(path, error)).into()
+    }
+
+    fn poison(&self, reason: String) -> String {
+        let mut first = self.unavailable_reason.lock();
+        let first = first.get_or_insert(reason).clone();
+        self.unavailable.store(true, Ordering::Release);
+        first
+    }
+
+    fn make_unavailable(&self, reason: String) -> Error {
+        GroupError::Unavailable {
+            reason: self.poison(reason),
+        }
+        .into()
+    }
+
+    fn check_available(&self) -> Result<()> {
+        if self.unavailable.load(Ordering::Acquire) {
+            return Err(GroupError::Unavailable {
+                reason: self
+                    .unavailable_reason
+                    .lock()
+                    .clone()
+                    .unwrap_or_else(|| "an earlier WAL group did not complete".to_string()),
+            }
+            .into());
+        }
         Ok(())
     }
 
@@ -619,29 +744,35 @@ impl WalManager {
     ///
     /// Returns an error if rotation fails.
     pub fn rotate(&self) -> Result<()> {
-        let new_sequence = self.current_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-        let new_path = self.log_path(new_sequence);
+        let mut active = self.active_log.lock();
+        self.check_available()?;
+        self.rotate_under_lock(&mut active)
+            .map_err(|error| self.make_unavailable(error.to_string()))
+    }
 
+    /// The caller holds active_log until a rotation failure is classified.
+    fn rotate_under_lock(&self, active: &mut Option<LogFile>) -> Result<()> {
+        self.check_available()?;
+        if let Some(old_log) = active.as_mut() {
+            old_log.writer.flush()?;
+            old_log.writer.get_ref().sync_all()?;
+        }
+        let new_sequence = self.current_sequence.load(Ordering::SeqCst) + 1;
+        let new_path = self.log_path(new_sequence);
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .open(&new_path)?;
-
-        let new_log = LogFile {
+        let size = file.metadata()?.len();
+        // Keep the old handle and sequence intact if opening the new file
+        // fails; a pre-marker group can still restore its original tail.
+        *active = Some(LogFile {
             writer: BufWriter::new(file),
-            size: 0,
+            size,
             path: new_path,
-        };
-
-        // Replace active log, syncing the old one to ensure durability
-        let mut guard = self.active_log.lock();
-        if let Some(mut old_log) = guard.take() {
-            old_log.writer.flush()?;
-            old_log.writer.get_ref().sync_all()?;
-        }
-        *guard = Some(new_log);
-
+        });
+        self.current_sequence.store(new_sequence, Ordering::SeqCst);
         Ok(())
     }
 
@@ -791,6 +922,7 @@ impl WalManager {
 
     fn ensure_active_log(&self) -> Result<()> {
         let mut guard = self.active_log.lock();
+        self.check_available()?;
         if guard.is_none() {
             let sequence = self.current_sequence.load(Ordering::Relaxed);
             let path = self.log_path(sequence);
@@ -1048,5 +1180,310 @@ mod tests {
             nonces[0], nonces[1],
             "the log started over reused the nonce of its first record"
         );
+    }
+}
+
+#[cfg(all(test, feature = "testing-crash-injection"))]
+mod legacy_commit_tests {
+    use super::*;
+    use crate::wal::{GroupError, LpgWal, WalRecovery};
+    use grafeo_common::testing::crash::with_failure_at;
+    use grafeo_common::types::NodeId;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use tempfile::tempdir;
+
+    type Fault = (&'static str, usize);
+    type Hit = (&'static str, u64);
+
+    thread_local! {
+        static FAULTS: RefCell<VecDeque<Fault>> = const { RefCell::new(VecDeque::new()) };
+        static HITS: RefCell<Vec<Hit>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Unit-only named faults do not consume the two frontend failure calls.
+    pub(super) fn maybe_fail(point: &'static str, frame: usize, file: &File) -> Result<()> {
+        let selected = FAULTS.with(|faults| {
+            let mut faults = faults.borrow_mut();
+            if faults.front() == Some(&(point, frame)) {
+                faults.pop_front();
+                true
+            } else {
+                false
+            }
+        });
+        if !selected {
+            return Ok(());
+        }
+        HITS.with(|hits| {
+            hits.borrow_mut()
+                .push((point, file.metadata().unwrap().len()))
+        });
+        with_failure_at(1, || grafeo_common::testing::crash::maybe_fail(point))
+    }
+
+    fn with_faults<T>(faults: &[Fault], body: impl FnOnce() -> T) -> (T, Vec<Hit>) {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                FAULTS.with(|faults| faults.borrow_mut().clear());
+                HITS.with(|hits| hits.borrow_mut().clear());
+            }
+        }
+        FAULTS.with(|pending| pending.borrow_mut().extend(faults.iter().copied()));
+        let _reset = Reset;
+        let result = body();
+        let hits = HITS.with(|hits| std::mem::take(&mut *hits.borrow_mut()));
+        (result, hits)
+    }
+
+    fn open_sync(path: &Path) -> LpgWal {
+        LpgWal::with_config(
+            path,
+            WalConfig {
+                durability: DurabilityMode::Sync,
+                ..WalConfig::default()
+            },
+        )
+        .unwrap()
+    }
+
+    fn records(id: u64, large: bool) -> Vec<WalRecord> {
+        vec![
+            WalRecord::CreateNode {
+                id: NodeId::new(id),
+                labels: vec![if large {
+                    "x".repeat(20_000)
+                } else {
+                    "Probe".to_owned()
+                }],
+            },
+            WalRecord::TransactionCommit {
+                transaction_id: TransactionId::new(id + 10),
+            },
+            WalRecord::EpochAdvance {
+                epoch: EpochId::new(id + 1),
+            },
+        ]
+    }
+
+    fn disposition(error: &Error) -> &GroupError {
+        let Error::Io(source) = error else {
+            panic!("expected typed WAL I/O error, got {error:?}");
+        };
+        source
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<GroupError>())
+            .unwrap_or_else(|| panic!("WAL error lost its group disposition: {error:?}"))
+    }
+
+    fn recovered_ids(path: &Path) -> Vec<u64> {
+        WalRecovery::new(path)
+            .recover()
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| match record {
+                WalRecord::CreateNode { id, .. } => Some(id.as_u64()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn legacy_commit_no_bytes_failure_is_abortable_and_reusable() {
+        let dir = tempdir().unwrap();
+        let wal = open_sync(dir.path());
+        wal.log_batch(&records(1, false)).unwrap();
+        let before = fs::read(wal.path()).unwrap();
+        let error = with_failure_at(1, || wal.log_batch(&records(2, false))).unwrap_err();
+        assert!(
+            error.to_string().contains("wal_before_group_write"),
+            "{error}"
+        );
+        assert!(matches!(disposition(&error), GroupError::NotWritten(_)));
+        assert_eq!(fs::read(wal.path()).unwrap(), before);
+        wal.log_batch(&records(3, false)).unwrap();
+        drop(wal);
+        assert_eq!(recovered_ids(dir.path()), vec![1, 3]);
+    }
+
+    #[test]
+    fn legacy_commit_partial_payload_is_removed_before_next_marker() {
+        let dir = tempdir().unwrap();
+        let wal = open_sync(dir.path());
+        wal.log_batch(&records(1, false)).unwrap();
+        let before = fs::read(wal.path()).unwrap();
+        let count = wal.record_count();
+        let (result, hits) = with_faults(&[("wal_group_payload_write", 0)], || {
+            wal.log_batch(&records(2, true))
+        });
+        let error = result.unwrap_err();
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].1 > before.len() as u64,
+            "no partial bytes reached the file"
+        );
+        assert!(
+            error.to_string().contains("wal_group_payload_write"),
+            "{error}"
+        );
+        assert!(matches!(disposition(&error), GroupError::NotWritten(_)));
+        assert_eq!(fs::read(wal.path()).unwrap(), before);
+        assert_eq!(wal.record_count(), count);
+        wal.log_batch(&records(3, false)).unwrap();
+        drop(wal);
+        assert_eq!(recovered_ids(dir.path()), vec![1, 3]);
+    }
+
+    #[test]
+    fn legacy_commit_failed_tail_repair_makes_writer_unavailable() {
+        for point in ["wal_group_repair_truncate", "wal_group_repair_sync"] {
+            let dir = tempdir().unwrap();
+            let wal = open_sync(dir.path());
+            wal.log_batch(&records(1, false)).unwrap();
+            let (result, hits) = with_faults(&[("wal_group_payload_write", 0), (point, 0)], || {
+                wal.log_batch(&records(2, true))
+            });
+            let error = result.unwrap_err();
+            assert_eq!(
+                hits.iter().map(|hit| hit.0).collect::<Vec<_>>(),
+                vec!["wal_group_payload_write", point]
+            );
+            assert!(error.to_string().contains(point), "{error}");
+            assert!(matches!(
+                disposition(&error),
+                GroupError::Unavailable { .. }
+            ));
+            assert!(matches!(
+                disposition(&wal.log_batch(&records(3, false)).unwrap_err()),
+                GroupError::Unavailable { .. }
+            ));
+            assert!(matches!(
+                disposition(&wal.manager().rotate().unwrap_err()),
+                GroupError::Unavailable { .. }
+            ));
+            wal.close_active_log();
+            assert!(matches!(
+                disposition(&wal.log_batch(&records(4, false)).unwrap_err()),
+                GroupError::Unavailable { .. }
+            ));
+            drop(wal);
+            assert_eq!(recovered_ids(dir.path()), vec![1]);
+        }
+    }
+
+    #[test]
+    fn legacy_commit_marker_attempt_fences_without_repair() {
+        let dir = tempdir().unwrap();
+        let wal = open_sync(dir.path());
+        wal.log_batch(&records(1, false)).unwrap();
+        let count = wal.record_count();
+        let (result, hits) = with_faults(&[("wal_group_frame_write", 1)], || {
+            wal.log_batch(&records(2, false))
+        });
+        let error = result.unwrap_err();
+        assert_eq!(hits.len(), 1);
+        assert!(
+            error.to_string().contains("wal_group_frame_write"),
+            "{error}"
+        );
+        assert!(matches!(disposition(&error), GroupError::OutcomeUnknown(_)));
+        assert_eq!(
+            wal.record_count(),
+            count + 1,
+            "the data frame was not repaired away"
+        );
+        assert!(matches!(
+            disposition(&wal.log_batch(&records(3, false)).unwrap_err()),
+            GroupError::Unavailable { .. }
+        ));
+        drop(wal);
+        assert_eq!(recovered_ids(dir.path()), vec![1]);
+    }
+
+    #[test]
+    fn legacy_commit_epoch_frame_failure_is_outcome_unknown() {
+        let dir = tempdir().unwrap();
+        let wal = open_sync(dir.path());
+        wal.log_batch(&records(1, false)).unwrap();
+        let (result, hits) = with_faults(&[("wal_group_frame_write", 2)], || {
+            wal.log_batch(&records(2, false))
+        });
+        let error = result.unwrap_err();
+        assert_eq!(hits.len(), 1);
+        assert!(matches!(disposition(&error), GroupError::OutcomeUnknown(_)));
+        assert!(matches!(
+            disposition(&wal.log_batch(&records(3, false)).unwrap_err()),
+            GroupError::Unavailable { .. }
+        ));
+        drop(wal);
+        assert_eq!(recovered_ids(dir.path()), vec![1, 2]);
+    }
+
+    #[test]
+    fn legacy_commit_lost_synced_acknowledgement_is_replayed() {
+        let dir = tempdir().unwrap();
+        let wal = open_sync(dir.path());
+        wal.log_batch(&records(1, false)).unwrap();
+        let error = with_failure_at(2, || wal.log_batch(&records(2, false))).unwrap_err();
+        assert!(
+            error.to_string().contains("wal_after_group_sync"),
+            "{error}"
+        );
+        assert!(matches!(disposition(&error), GroupError::OutcomeUnknown(_)));
+        let before = fs::read(wal.path()).unwrap();
+        assert!(matches!(
+            disposition(&wal.log_batch(&records(3, false)).unwrap_err()),
+            GroupError::Unavailable { .. }
+        ));
+        assert_eq!(fs::read(wal.path()).unwrap(), before);
+        drop(wal);
+        assert_eq!(recovered_ids(dir.path()), vec![1, 2]);
+    }
+
+    #[test]
+    fn legacy_commit_rotation_failure_preserves_synced_group() {
+        let dir = tempdir().unwrap();
+        let wal = LpgWal::with_config(
+            dir.path(),
+            WalConfig {
+                durability: DurabilityMode::Sync,
+                max_log_size: 1,
+                ..WalConfig::default()
+            },
+        )
+        .unwrap();
+        let (result, hits) = with_faults(&[("wal_group_rotate", 0)], || {
+            wal.log_batch(&records(1, false))
+        });
+        let error = result.unwrap_err();
+        assert_eq!(hits.len(), 1);
+        assert!(error.to_string().contains("wal_group_rotate"), "{error}");
+        assert!(matches!(disposition(&error), GroupError::OutcomeUnknown(_)));
+        assert!(matches!(
+            disposition(&wal.log_batch(&records(2, false)).unwrap_err()),
+            GroupError::Unavailable { .. }
+        ));
+        drop(wal);
+        assert_eq!(recovered_ids(dir.path()), vec![1]);
+    }
+
+    #[test]
+    fn legacy_commit_success_keeps_existing_frame_bytes_and_replay() {
+        let dir = tempdir().unwrap();
+        let wal = open_sync(dir.path());
+        let group = records(1, false);
+        wal.log_batch(&group).unwrap();
+        let mut expected = Vec::new();
+        for record in &group {
+            let payload =
+                bincode::serde::encode_to_vec(record, bincode::config::standard()).unwrap();
+            expected.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            expected.extend_from_slice(&payload);
+            expected.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+        }
+        assert_eq!(fs::read(wal.path()).unwrap(), expected);
+        drop(wal);
+        assert_eq!(recovered_ids(dir.path()), vec![1]);
     }
 }

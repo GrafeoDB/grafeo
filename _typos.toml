@@ -29,6 +29,8 @@ ue = "ue"
 nin = "nin"
 # "hel" = intentional property name for prefix-matching test (alongside "hello")
 hel = "hel"
+# "caf" = "café" written with a Unicode escape in tests (caf\u{e9}, café)
+caf = "caf"
 
 [default.extend-identifiers]
 abd = "abd"         # Levenshtein distance test input

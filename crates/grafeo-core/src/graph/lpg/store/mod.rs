@@ -15,6 +15,7 @@ mod index;
 mod memory;
 mod node_ops;
 mod open_changes;
+mod property_index;
 mod property_ops;
 mod schema;
 mod search;
@@ -35,12 +36,9 @@ use super::{EdgeRecord, NodeRecord};
 use crate::index::adjacency::ChunkedAdjacency;
 use crate::statistics::Statistics;
 use arcstr::ArcStr;
-use dashmap::DashMap;
 #[cfg(not(feature = "tiered-storage"))]
 use grafeo_common::mvcc::VersionChain;
-use grafeo_common::types::{
-    EdgeId, EpochId, HashableValue, NodeId, PropertyKey, TransactionId, Value,
-};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::RwLock;
 use std::cmp::Ordering as CmpOrdering;
@@ -484,7 +482,8 @@ pub struct LpgStore {
     #[cfg(feature = "temporal")]
     pub(super) node_labels: RwLock<FxHashMap<NodeId, VersionLog<FxHashSet<u32>>>>,
 
-    /// Property indexes: property_key -> (value -> set of node IDs).
+    /// Property indexes: property_key -> (value -> set of node IDs, see
+    /// [`PropertyIndex`](property_index::PropertyIndex)).
     ///
     /// When a property is indexed, lookups by value are O(1) instead of O(n).
     /// Use [`create_property_index`] to enable indexing for a property.
@@ -492,8 +491,7 @@ pub struct LpgStore {
     /// holds the node lock while it adds the copy here, so a reader that
     /// needs the node lock too (`create_property_index`, whose scan reads
     /// the node ids) takes it first, never while it holds this one.
-    pub(super) property_indexes:
-        RwLock<FxHashMap<PropertyKey, DashMap<HashableValue, FxHashSet<NodeId>>>>,
+    pub(super) property_indexes: RwLock<FxHashMap<PropertyKey, property_index::PropertyIndex>>,
 
     /// Vector indexes: "label:property" -> HNSW index.
     ///
@@ -854,7 +852,7 @@ impl LpgStore {
             .property_indexes
             .read()
             .keys()
-            .map(|key| (key.clone(), DashMap::new()))
+            .map(|key| (key.clone(), property_index::PropertyIndex::default()))
             .collect();
         #[cfg(feature = "vector-index")]
         {

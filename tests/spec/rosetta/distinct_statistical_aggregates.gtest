@@ -1,0 +1,124 @@
+# Rosetta: DISTINCT in the statistical aggregates
+#
+# A set quantifier DISTINCT removes the duplicate values before the aggregate
+# is computed (ISO/IEC 39075:2024 <aggregate function>; ISO/IEC 9075-2 <set
+# function specification>; openCypher aggregating functions), for the
+# standard deviations, variances and percentiles as for count, sum and avg.
+# These used to ignore DISTINCT and count every copy.
+#
+# Setup (GQL): five N nodes with x = 3, 3, 3, 19, 88 (group g = 'g'). Over the
+# distinct values 3, 19, 88: sample stdev 45.170049..., population stdev
+# 36.881190..., sample variance 2040.333..., population variance 1360.222...,
+# percentile_disc(0.5) 19 and percentile_cont(0.25) 11. Over all five values
+# they are 36.880889..., 32.987270..., 1360.2, 1088.16, 3 and 3.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: DISTINCT in the statistical aggregates
+  dataset: empty
+  requires: [cypher, sql-pgq]
+
+tests:
+
+  - name: sample_standard_deviation_of_distinct_values
+    setup:
+      - "INSERT (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 19}), (:N {g: 'g', x: 88})"
+    variants:
+      gql: "MATCH (n:N) RETURN stddev_samp(DISTINCT n.x) AS v"
+      cypher: "MATCH (n:N) RETURN stDev(DISTINCT n.x) AS v"
+      sql-pgq: "SELECT STDDEV_SAMP(DISTINCT x) AS v FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.x AS x))"
+    expect:
+      precision: 9
+      rows:
+        - [45.17004907384243]
+
+  - name: population_standard_deviation_of_distinct_values
+    setup:
+      - "INSERT (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 19}), (:N {g: 'g', x: 88})"
+    variants:
+      gql: "MATCH (n:N) RETURN stddev_pop(DISTINCT n.x) AS v"
+      cypher: "MATCH (n:N) RETURN stDevP(DISTINCT n.x) AS v"
+      sql-pgq: "SELECT STDDEV_POP(DISTINCT x) AS v FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.x AS x))"
+    expect:
+      precision: 9
+      rows:
+        - [36.88119062912994]
+
+  - name: sample_variance_of_distinct_values
+    setup:
+      - "INSERT (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 19}), (:N {g: 'g', x: 88})"
+    variants:
+      gql: "MATCH (n:N) RETURN var_samp(DISTINCT n.x) AS v"
+      sql-pgq: "SELECT VAR_SAMP(DISTINCT x) AS v FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.x AS x))"
+    expect:
+      precision: 9
+      rows:
+        - [2040.3333333333333]
+
+  - name: population_variance_of_distinct_values
+    setup:
+      - "INSERT (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 19}), (:N {g: 'g', x: 88})"
+    variants:
+      gql: "MATCH (n:N) RETURN var_pop(DISTINCT n.x) AS v"
+      sql-pgq: "SELECT VAR_POP(DISTINCT x) AS v FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.x AS x))"
+    expect:
+      precision: 9
+      rows:
+        - [1360.2222222222222]
+
+  - name: discrete_percentile_of_distinct_values
+    setup:
+      - "INSERT (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 19}), (:N {g: 'g', x: 88})"
+    variants:
+      gql: "MATCH (n:N) RETURN percentile_disc(DISTINCT n.x, 0.5) AS v"
+      cypher: "MATCH (n:N) RETURN percentileDisc(DISTINCT n.x, 0.5) AS v"
+    expect:
+      rows:
+        - [19]
+
+  - name: continuous_percentile_of_distinct_values
+    setup:
+      - "INSERT (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 19}), (:N {g: 'g', x: 88})"
+    variants:
+      gql: "MATCH (n:N) RETURN percentile_cont(DISTINCT n.x, 0.25) AS v"
+      cypher: "MATCH (n:N) RETURN percentileCont(DISTINCT n.x, 0.25) AS v"
+    expect:
+      rows:
+        - [11]
+
+  # One group, so the grouped aggregation runs
+  - name: grouped_standard_deviation_of_distinct_values
+    setup:
+      - "INSERT (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 19}), (:N {g: 'g', x: 88})"
+    variants:
+      gql: "MATCH (n:N) RETURN n.g AS g, stddev_samp(DISTINCT n.x) AS v"
+      cypher: "MATCH (n:N) RETURN n.g AS g, stDev(DISTINCT n.x) AS v"
+      sql-pgq: "SELECT g, STDDEV_SAMP(DISTINCT x) AS v FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.g AS g, n.x AS x)) GROUP BY g"
+    expect:
+      precision: 9
+      rows:
+        - [g, 45.17004907384243]
+
+  - name: plain_standard_deviation_counts_every_copy
+    setup:
+      - "INSERT (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 3}), (:N {g: 'g', x: 19}), (:N {g: 'g', x: 88})"
+    variants:
+      gql: "MATCH (n:N) RETURN stddev_samp(n.x) AS v"
+      cypher: "MATCH (n:N) RETURN stDev(n.x) AS v"
+      sql-pgq: "SELECT STDDEV_SAMP(x) AS v FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.x AS x))"
+    expect:
+      precision: 9
+      rows:
+        - [36.88088936020931]
+
+  # Each (y, x) pair once: (6, 3), (38, 19), (176, 88), on the line y = 2x
+  - name: covariance_of_distinct_pairs
+    setup:
+      - "INSERT (:P {x: 3, y: 6}), (:P {x: 3, y: 6}), (:P {x: 19, y: 38}), (:P {x: 88, y: 176})"
+    variants:
+      gql: "MATCH (p:P) RETURN covar_samp(DISTINCT p.y, p.x) AS v, regr_count(DISTINCT p.y, p.x) AS n"
+    expect:
+      precision: 9
+      rows:
+        - [4080.6666666666665, 3]

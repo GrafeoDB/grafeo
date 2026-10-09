@@ -586,9 +586,9 @@ impl GraphWriter {
 
     /// Creates an edge after checking that the transaction sees both
     /// endpoints and checking the edge against the schema: allowed type,
-    /// endpoint labels, property types and required properties. Then it
-    /// claims the endpoints against a concurrent delete, so an edge refused
-    /// claims nothing.
+    /// endpoint labels, type defaults, property types and required
+    /// properties. Then it claims the endpoints against a concurrent delete,
+    /// so an edge refused claims nothing.
     ///
     /// # Errors
     ///
@@ -603,7 +603,7 @@ impl GraphWriter {
         edge_type: &str,
         properties: Vec<(String, Value)>,
     ) -> Result<EdgeId, OperatorError> {
-        refuse_too_deep(plain_values(&properties))?;
+        let properties = self.new_edge_properties(edge_type, properties)?;
         self.require_node(src)?;
         self.require_node(dst)?;
         if let Some(validator) = &self.validator {
@@ -637,7 +637,7 @@ impl GraphWriter {
         properties: Vec<(String, Value)>,
         derive: impl FnOnce(EdgeId) -> Result<Vec<(String, Value)>, OperatorError>,
     ) -> Result<EdgeId, OperatorError> {
-        refuse_too_deep(plain_values(&properties))?;
+        let properties = self.new_edge_properties(edge_type, properties)?;
         self.require_node(src)?;
         self.require_node(dst)?;
         if let Some(validator) = &self.validator {
@@ -756,6 +756,21 @@ impl GraphWriter {
         if let Some(validator) = &self.validator {
             validator.validate_node_labels_allowed(labels)?;
             validator.inject_defaults(labels, &mut properties);
+        }
+        refuse_too_deep(plain_values(&properties))?;
+        Ok(properties)
+    }
+
+    /// The properties a new edge of `edge_type` gets: `properties` with the
+    /// validator's type defaults added. No value may nest too deep, a
+    /// default included, as for a node.
+    fn new_edge_properties(
+        &self,
+        edge_type: &str,
+        mut properties: Vec<(String, Value)>,
+    ) -> Result<Vec<(String, Value)>, OperatorError> {
+        if let Some(validator) = &self.validator {
+            validator.inject_edge_defaults(edge_type, &mut properties);
         }
         refuse_too_deep(plain_values(&properties))?;
         Ok(properties)
@@ -1256,10 +1271,57 @@ mod tests {
         fn inject_defaults(&self, _: &[String], properties: &mut Vec<(String, Value)>) {
             properties.push(("trips".to_string(), nested(MAX_PROPERTY_VALUE_DEPTH + 1)));
         }
+
+        /// A `ROUTE` gets `km: 88` unless given one; a `TRAVELS` gets a
+        /// `legs` default nested deeper than a database can store.
+        fn inject_edge_defaults(&self, edge_type: &str, properties: &mut Vec<(String, Value)>) {
+            match edge_type {
+                "ROUTE" if !properties.iter().any(|(key, _)| key == "km") => {
+                    properties.push(("km".to_string(), Value::Int64(88)));
+                }
+                "TRAVELS" => {
+                    properties.push(("legs".to_string(), nested(MAX_PROPERTY_VALUE_DEPTH + 1)));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The validator's edge type defaults fill the properties a new edge is
+    /// not given, through `create_edge` and `create_edge_with`: a value the
+    /// caller gives or MERGE derives wins.
+    #[test]
+    fn edge_defaults_fill_what_the_caller_leaves_out() {
+        let (store, writer) = writer();
+        let writer = writer.with_validator(Arc::new(CustomRules));
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let km = PropertyKey::new("km");
+        let km_of = |edge| store.get_edge_property(edge, &km);
+
+        let route = writer.create_edge(alix, gus, "ROUTE", Vec::new()).unwrap();
+        assert_eq!(km_of(route), Some(Value::Int64(88)), "create_edge");
+        let given = writer
+            .create_edge(alix, gus, "ROUTE", pairs("km", &Value::Int64(3)))
+            .unwrap();
+        assert_eq!(km_of(given), Some(Value::Int64(3)), "a given value");
+        let merged = writer
+            .create_edge_with(alix, gus, "ROUTE", Vec::new(), |_| Ok(Vec::new()))
+            .unwrap();
+        assert_eq!(km_of(merged), Some(Value::Int64(88)), "create_edge_with");
+        let derived = writer
+            .create_edge_with(alix, gus, "ROUTE", Vec::new(), |_| {
+                Ok(pairs("km", &Value::Int64(19)))
+            })
+            .unwrap();
+        assert_eq!(km_of(derived), Some(Value::Int64(19)), "a derived value");
+        let knows = writer.create_edge(alix, gus, "KNOWS", Vec::new()).unwrap();
+        assert_eq!(km_of(knows), None, "another edge type has no default");
     }
 
     /// A default the validator adds is checked as a value the caller gives
-    /// is: one nested too deep is refused before the node is written.
+    /// is: one nested too deep is refused before the node or edge is
+    /// written.
     #[test]
     fn a_default_nested_deeper_than_a_file_holds_is_refused_before_any_write() {
         let (store, writer) = writer();
@@ -1276,6 +1338,18 @@ mod tests {
         });
         assert!(refused_trips(&merged), "create_node_with: {merged:?}");
         assert_eq!(store.node_count(), 0, "no node with the default is written");
+
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let refused_legs = |result: &Result<EdgeId, OperatorError>| {
+            matches!(result, Err(OperatorError::ConstraintViolation(message))
+                if message.contains("\"legs\""))
+        };
+        let created = writer.create_edge(alix, gus, "TRAVELS", Vec::new());
+        assert!(refused_legs(&created), "create_edge: {created:?}");
+        let merged = writer.create_edge_with(alix, gus, "TRAVELS", Vec::new(), |_| Ok(Vec::new()));
+        assert!(refused_legs(&merged), "create_edge_with: {merged:?}");
+        assert_eq!(store.edge_count(), 0, "no edge with the default is written");
     }
 
     // === Writes in progress ===

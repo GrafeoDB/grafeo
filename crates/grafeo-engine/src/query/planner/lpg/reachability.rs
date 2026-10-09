@@ -319,10 +319,11 @@ fn reads_path(path: &str, reads: &HashSet<String>) -> bool {
 }
 
 /// Whether `aggregate` gives the same result for any number of copies of a
-/// row: `min` and `max`, and the aggregates that honor `DISTINCT` (see
-/// `AggregateState::new`), over distinct values. The statistical ones
-/// (`stDev`, `variance`, the percentiles, the covariance and regression
-/// family) count every row even with `DISTINCT`, so they are left out.
+/// row: `min` and `max`, and count, sum, avg, collect and group_concat over
+/// distinct values. The statistical ones (`stDev`, `variance`, the
+/// percentiles, the covariance and regression family) honor `DISTINCT` too
+/// (see `AggregateState::new`) but are not on this list, so their walks
+/// stay enumerated.
 fn ignores_duplicates(aggregate: &AggregateExpr) -> bool {
     match aggregate.function {
         AggregateFunction::Min | AggregateFunction::Max => true,
@@ -941,7 +942,8 @@ mod tests {
 
     #[test]
     fn aggregates_that_count_copies_despite_distinct_keep_their_walks() {
-        // These aggregates ignore DISTINCT, so every walk counts
+        // These aggregates are not on the list of the ones that ignore
+        // copies (`ignores_duplicates`), so every walk is enumerated
         let db = people();
         let queries = [
             ("cypher", "stDev(DISTINCT m.id)"),

@@ -41,6 +41,9 @@ mod tags {
     pub const PERCENTILE_CONT: u8 = 21;
     pub const BIVARIATE: u8 = 22;
     pub const SAMPLE: u8 = 23;
+    pub const DISTINCT: u8 = 24;
+    pub const MIN_OF_RDF_LITERALS: u8 = 25;
+    pub const MAX_OF_RDF_LITERALS: u8 = 26;
 }
 
 fn invalid(message: &str) -> std::io::Error {
@@ -99,39 +102,14 @@ fn read_string(r: &mut dyn Read) -> std::io::Result<String> {
     String::from_utf8(bytes).map_err(|_| invalid("aggregate string is not UTF-8"))
 }
 
+/// Writes a DISTINCT identity as its representative value, which the
+/// identity is read back from.
 fn write_identity(w: &mut dyn Write, value: &HashableValue) -> std::io::Result<()> {
-    match value {
-        HashableValue::Null => w.write_all(&[0]),
-        HashableValue::Bool(value) => w.write_all(&[1, u8::from(*value)]),
-        HashableValue::Int64(value) => {
-            w.write_all(&[2])?;
-            w.write_all(&value.to_le_bytes())
-        }
-        HashableValue::Float64Bits(value) => {
-            w.write_all(&[3])?;
-            w.write_all(&value.to_le_bytes())
-        }
-        HashableValue::String(value) => {
-            w.write_all(&[4])?;
-            write_string(w, value)
-        }
-        HashableValue::Other(value) => {
-            w.write_all(&[5])?;
-            write_string(w, value)
-        }
-    }
+    serialize_value(value.representative(), w).map(|_| ())
 }
 
 fn read_identity(r: &mut dyn Read) -> std::io::Result<HashableValue> {
-    match read_tag(r)? {
-        0 => Ok(HashableValue::Null),
-        1 => Ok(HashableValue::Bool(read_flag(r)?)),
-        2 => Ok(HashableValue::Int64(read_i64(r)?)),
-        3 => Ok(HashableValue::Float64Bits(read_u64(r)?)),
-        4 => Ok(HashableValue::String(read_string(r)?)),
-        5 => Ok(HashableValue::Other(read_string(r)?)),
-        _ => Err(invalid("unknown aggregate DISTINCT identity tag")),
-    }
+    deserialize_value(r).map(HashableValue::from)
 }
 
 fn write_seen(w: &mut dyn Write, seen: &HashSet<HashableValue>) -> std::io::Result<()> {
@@ -196,116 +174,136 @@ pub(super) fn serialize_group_state(state: &GroupState, w: &mut dyn Write) -> st
     }
     write_len(w, state.accumulators.len())?;
     for accumulator in &state.accumulators {
-        let tag = match accumulator {
-            AggregateState::Count(_) => tags::COUNT,
-            AggregateState::CountDistinct(..) => tags::COUNT_DISTINCT,
-            AggregateState::SumInt(..) => tags::SUM_INT,
-            AggregateState::SumIntDistinct(..) => tags::SUM_INT_DISTINCT,
-            AggregateState::SumFloat(..) => tags::SUM_FLOAT,
-            AggregateState::SumFloatDistinct(..) => tags::SUM_FLOAT_DISTINCT,
-            AggregateState::Avg(..) => tags::AVG,
-            AggregateState::AvgDistinct(..) => tags::AVG_DISTINCT,
-            AggregateState::Min(_) => tags::MIN,
-            AggregateState::Max(_) => tags::MAX,
-            AggregateState::First(_) => tags::FIRST,
-            AggregateState::Last(_) => tags::LAST,
-            AggregateState::Collect(_) => tags::COLLECT,
-            AggregateState::CollectDistinct(..) => tags::COLLECT_DISTINCT,
-            AggregateState::StdDev { .. } => tags::STDDEV,
-            AggregateState::StdDevPop { .. } => tags::STDDEV_POP,
-            AggregateState::Variance { .. } => tags::VARIANCE,
-            AggregateState::VariancePop { .. } => tags::VARIANCE_POP,
-            AggregateState::PercentileDisc { .. } => tags::PERCENTILE_DISC,
-            AggregateState::PercentileCont { .. } => tags::PERCENTILE_CONT,
-            AggregateState::GroupConcat(..) => tags::GROUP_CONCAT,
-            AggregateState::GroupConcatDistinct(..) => tags::GROUP_CONCAT_DISTINCT,
-            AggregateState::Sample(_) => tags::SAMPLE,
-            AggregateState::Bivariate { .. } => tags::BIVARIATE,
-        };
-        w.write_all(&[tag])?;
-        match accumulator {
-            AggregateState::Count(count) | AggregateState::CountDistinct(count, _) => {
-                w.write_all(&count.to_le_bytes())?;
-            }
-            AggregateState::SumInt(sum, count) | AggregateState::SumIntDistinct(sum, count, _) => {
-                w.write_all(&sum.to_le_bytes())?;
-                w.write_all(&count.to_le_bytes())?;
-            }
-            AggregateState::SumFloat(sum, compensation, count)
-            | AggregateState::SumFloatDistinct(sum, compensation, count, _) => {
-                w.write_all(&sum.to_le_bytes())?;
-                w.write_all(&compensation.to_le_bytes())?;
-                w.write_all(&count.to_le_bytes())?;
-            }
-            AggregateState::Avg(sum, count) | AggregateState::AvgDistinct(sum, count, _) => {
-                w.write_all(&sum.to_le_bytes())?;
-                w.write_all(&count.to_le_bytes())?;
-            }
-            AggregateState::Min(value)
-            | AggregateState::Max(value)
-            | AggregateState::First(value)
-            | AggregateState::Last(value)
-            | AggregateState::Sample(value) => {
-                w.write_all(&[u8::from(value.is_some())])?;
-                if let Some(value) = value {
-                    serialize_value(value, w)?;
-                }
-            }
-            AggregateState::Collect(values) | AggregateState::CollectDistinct(values, _) => {
-                write_len(w, values.len())?;
-                for value in values {
-                    serialize_value(value, w)?;
-                }
-            }
-            AggregateState::GroupConcat(values, separator)
-            | AggregateState::GroupConcatDistinct(values, separator, _) => {
-                write_len(w, values.len())?;
-                for value in values {
-                    write_string(w, value)?;
-                }
-                write_string(w, separator)?;
-            }
-            AggregateState::StdDev { count, mean, m2 }
-            | AggregateState::StdDevPop { count, mean, m2 }
-            | AggregateState::Variance { count, mean, m2 }
-            | AggregateState::VariancePop { count, mean, m2 } => {
-                w.write_all(&count.to_le_bytes())?;
-                w.write_all(&mean.to_le_bytes())?;
-                w.write_all(&m2.to_le_bytes())?;
-            }
-            AggregateState::PercentileDisc { values, percentile }
-            | AggregateState::PercentileCont { values, percentile } => {
-                write_len(w, values.len())?;
-                for value in values {
-                    w.write_all(&value.to_le_bytes())?;
-                }
-                w.write_all(&percentile.to_le_bytes())?;
-            }
-            AggregateState::Bivariate {
-                kind,
-                count,
-                mean_x,
-                mean_y,
-                m2_x,
-                m2_y,
-                c_xy,
-            } => {
-                w.write_all(&[bivariate_tag(*kind)?])?;
-                w.write_all(&count.to_le_bytes())?;
-                for value in [mean_x, mean_y, m2_x, m2_y, c_xy] {
-                    w.write_all(&value.to_le_bytes())?;
-                }
+        write_accumulator(w, accumulator)?;
+    }
+    Ok(())
+}
+
+/// Writes one accumulator: its tag, its values, then the identities a
+/// DISTINCT state has seen. A `Distinct` wrapper writes the state it wraps
+/// as its values.
+fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io::Result<()> {
+    let tag = match accumulator {
+        AggregateState::Count(_) => tags::COUNT,
+        AggregateState::CountDistinct(..) => tags::COUNT_DISTINCT,
+        AggregateState::SumInt(..) => tags::SUM_INT,
+        AggregateState::SumIntDistinct(..) => tags::SUM_INT_DISTINCT,
+        AggregateState::SumFloat(..) => tags::SUM_FLOAT,
+        AggregateState::SumFloatDistinct(..) => tags::SUM_FLOAT_DISTINCT,
+        AggregateState::Avg(..) => tags::AVG,
+        AggregateState::AvgDistinct(..) => tags::AVG_DISTINCT,
+        AggregateState::Min(_) => tags::MIN,
+        AggregateState::Max(_) => tags::MAX,
+        AggregateState::MinOfRdfLiterals(_) => tags::MIN_OF_RDF_LITERALS,
+        AggregateState::MaxOfRdfLiterals(_) => tags::MAX_OF_RDF_LITERALS,
+        AggregateState::First(_) => tags::FIRST,
+        AggregateState::Last(_) => tags::LAST,
+        AggregateState::Collect(_) => tags::COLLECT,
+        AggregateState::CollectDistinct(..) => tags::COLLECT_DISTINCT,
+        AggregateState::StdDev { .. } => tags::STDDEV,
+        AggregateState::StdDevPop { .. } => tags::STDDEV_POP,
+        AggregateState::Variance { .. } => tags::VARIANCE,
+        AggregateState::VariancePop { .. } => tags::VARIANCE_POP,
+        AggregateState::PercentileDisc { .. } => tags::PERCENTILE_DISC,
+        AggregateState::PercentileCont { .. } => tags::PERCENTILE_CONT,
+        AggregateState::GroupConcat(..) => tags::GROUP_CONCAT,
+        AggregateState::GroupConcatDistinct(..) => tags::GROUP_CONCAT_DISTINCT,
+        AggregateState::Sample(_) => tags::SAMPLE,
+        AggregateState::Bivariate { .. } => tags::BIVARIATE,
+        AggregateState::Distinct { .. } => tags::DISTINCT,
+    };
+    w.write_all(&[tag])?;
+    match accumulator {
+        AggregateState::Count(count) | AggregateState::CountDistinct(count, _) => {
+            w.write_all(&count.to_le_bytes())?;
+        }
+        AggregateState::SumInt(sum, count) | AggregateState::SumIntDistinct(sum, count, _) => {
+            w.write_all(&sum.to_le_bytes())?;
+            w.write_all(&count.to_le_bytes())?;
+        }
+        AggregateState::SumFloat(sum, compensation, count)
+        | AggregateState::SumFloatDistinct(sum, compensation, count, _) => {
+            w.write_all(&sum.to_le_bytes())?;
+            w.write_all(&compensation.to_le_bytes())?;
+            w.write_all(&count.to_le_bytes())?;
+        }
+        AggregateState::Avg(sum, count) | AggregateState::AvgDistinct(sum, count, _) => {
+            w.write_all(&sum.to_le_bytes())?;
+            w.write_all(&count.to_le_bytes())?;
+        }
+        AggregateState::Min(value)
+        | AggregateState::Max(value)
+        | AggregateState::MinOfRdfLiterals(value)
+        | AggregateState::MaxOfRdfLiterals(value)
+        | AggregateState::First(value)
+        | AggregateState::Last(value)
+        | AggregateState::Sample(value) => {
+            w.write_all(&[u8::from(value.is_some())])?;
+            if let Some(value) = value {
+                serialize_value(value, w)?;
             }
         }
-        match accumulator {
-            AggregateState::CountDistinct(_, seen)
-            | AggregateState::SumIntDistinct(_, _, seen)
-            | AggregateState::SumFloatDistinct(_, _, _, seen)
-            | AggregateState::AvgDistinct(_, _, seen)
-            | AggregateState::CollectDistinct(_, seen)
-            | AggregateState::GroupConcatDistinct(_, _, seen) => write_seen(w, seen)?,
-            _ => {}
+        AggregateState::Collect(values) | AggregateState::CollectDistinct(values, _) => {
+            write_len(w, values.len())?;
+            for value in values {
+                serialize_value(value, w)?;
+            }
         }
+        AggregateState::GroupConcat(values, separator)
+        | AggregateState::GroupConcatDistinct(values, separator, _) => {
+            write_len(w, values.len())?;
+            for value in values {
+                write_string(w, value)?;
+            }
+            write_string(w, separator)?;
+        }
+        AggregateState::StdDev { count, mean, m2 }
+        | AggregateState::StdDevPop { count, mean, m2 }
+        | AggregateState::Variance { count, mean, m2 }
+        | AggregateState::VariancePop { count, mean, m2 } => {
+            w.write_all(&count.to_le_bytes())?;
+            w.write_all(&mean.to_le_bytes())?;
+            w.write_all(&m2.to_le_bytes())?;
+        }
+        AggregateState::PercentileDisc { values, percentile }
+        | AggregateState::PercentileCont { values, percentile } => {
+            write_len(w, values.len())?;
+            for value in values {
+                w.write_all(&value.to_le_bytes())?;
+            }
+            w.write_all(&percentile.to_le_bytes())?;
+        }
+        AggregateState::Bivariate {
+            kind,
+            count,
+            mean_x,
+            mean_y,
+            m2_x,
+            m2_y,
+            c_xy,
+        } => {
+            w.write_all(&[bivariate_tag(*kind)?])?;
+            w.write_all(&count.to_le_bytes())?;
+            for value in [mean_x, mean_y, m2_x, m2_y, c_xy] {
+                w.write_all(&value.to_le_bytes())?;
+            }
+        }
+        AggregateState::Distinct { inner, .. } => {
+            if matches!(**inner, AggregateState::Distinct { .. }) {
+                return Err(invalid("a DISTINCT aggregate state wraps another"));
+            }
+            write_accumulator(w, inner)?;
+        }
+    }
+    match accumulator {
+        AggregateState::CountDistinct(_, seen)
+        | AggregateState::SumIntDistinct(_, _, seen)
+        | AggregateState::SumFloatDistinct(_, _, _, seen)
+        | AggregateState::AvgDistinct(_, _, seen)
+        | AggregateState::CollectDistinct(_, seen)
+        | AggregateState::GroupConcatDistinct(_, _, seen)
+        | AggregateState::Distinct { seen, .. } => write_seen(w, seen)?,
+        _ => {}
     }
     Ok(())
 }
@@ -317,110 +315,173 @@ pub(super) fn deserialize_group_state(r: &mut dyn Read) -> std::io::Result<Group
     let num_accumulators = read_len(r)?;
     let mut accumulators = Vec::with_capacity(num_accumulators);
     for _ in 0..num_accumulators {
-        let tag = read_tag(r)?;
-        let accumulator = match tag {
-            tags::COUNT => AggregateState::Count(read_i64(r)?),
-            tags::COUNT_DISTINCT => AggregateState::CountDistinct(read_i64(r)?, read_seen(r)?),
-            tags::SUM_INT | tags::SUM_INT_DISTINCT => {
-                let sum = read_i64(r)?;
-                let count = read_i64(r)?;
-                if tag == tags::SUM_INT {
-                    AggregateState::SumInt(sum, count)
-                } else {
-                    AggregateState::SumIntDistinct(sum, count, read_seen(r)?)
-                }
-            }
-            tags::SUM_FLOAT | tags::SUM_FLOAT_DISTINCT => {
-                let sum = read_f64(r)?;
-                let compensation = read_f64(r)?;
-                let count = read_i64(r)?;
-                if tag == tags::SUM_FLOAT {
-                    AggregateState::SumFloat(sum, compensation, count)
-                } else {
-                    AggregateState::SumFloatDistinct(sum, compensation, count, read_seen(r)?)
-                }
-            }
-            tags::AVG | tags::AVG_DISTINCT => {
-                let sum = read_f64(r)?;
-                let count = read_i64(r)?;
-                if tag == tags::AVG {
-                    AggregateState::Avg(sum, count)
-                } else {
-                    AggregateState::AvgDistinct(sum, count, read_seen(r)?)
-                }
-            }
-            tags::MIN | tags::MAX | tags::FIRST | tags::LAST | tags::SAMPLE => {
-                let value = if read_flag(r)? {
-                    Some(deserialize_value(r)?)
-                } else {
-                    None
-                };
-                match tag {
-                    tags::MIN => AggregateState::Min(value),
-                    tags::MAX => AggregateState::Max(value),
-                    tags::FIRST => AggregateState::First(value),
-                    tags::LAST => AggregateState::Last(value),
-                    _ => AggregateState::Sample(value),
-                }
-            }
-            tags::COLLECT | tags::COLLECT_DISTINCT => {
-                let values = read_values(r)?;
-                if tag == tags::COLLECT {
-                    AggregateState::Collect(values)
-                } else {
-                    AggregateState::CollectDistinct(values, read_seen(r)?)
-                }
-            }
-            tags::GROUP_CONCAT | tags::GROUP_CONCAT_DISTINCT => {
-                let len = read_len(r)?;
-                let values = (0..len)
-                    .map(|_| read_string(r))
-                    .collect::<std::io::Result<Vec<_>>>()?;
-                let separator = read_string(r)?;
-                if tag == tags::GROUP_CONCAT {
-                    AggregateState::GroupConcat(values, separator)
-                } else {
-                    AggregateState::GroupConcatDistinct(values, separator, read_seen(r)?)
-                }
-            }
-            tags::STDDEV | tags::STDDEV_POP | tags::VARIANCE | tags::VARIANCE_POP => {
-                let count = read_i64(r)?;
-                let mean = read_f64(r)?;
-                let m2 = read_f64(r)?;
-                match tag {
-                    tags::STDDEV => AggregateState::StdDev { count, mean, m2 },
-                    tags::STDDEV_POP => AggregateState::StdDevPop { count, mean, m2 },
-                    tags::VARIANCE => AggregateState::Variance { count, mean, m2 },
-                    _ => AggregateState::VariancePop { count, mean, m2 },
-                }
-            }
-            tags::PERCENTILE_DISC | tags::PERCENTILE_CONT => {
-                let len = read_len(r)?;
-                let values = (0..len)
-                    .map(|_| read_f64(r))
-                    .collect::<std::io::Result<Vec<_>>>()?;
-                let percentile = read_f64(r)?;
-                if tag == tags::PERCENTILE_DISC {
-                    AggregateState::PercentileDisc { values, percentile }
-                } else {
-                    AggregateState::PercentileCont { values, percentile }
-                }
-            }
-            tags::BIVARIATE => AggregateState::Bivariate {
-                kind: read_bivariate_kind(r)?,
-                count: read_i64(r)?,
-                mean_x: read_f64(r)?,
-                mean_y: read_f64(r)?,
-                m2_x: read_f64(r)?,
-                m2_y: read_f64(r)?,
-                c_xy: read_f64(r)?,
-            },
-            _ => return Err(invalid("unknown aggregate state tag")),
-        };
-        accumulators.push(accumulator);
+        accumulators.push(read_accumulator(r)?);
     }
     Ok(GroupState {
         key_values,
         accumulators,
     })
+}
+
+/// Reads what [`write_accumulator`] wrote.
+fn read_accumulator(r: &mut dyn Read) -> std::io::Result<AggregateState> {
+    let tag = read_tag(r)?;
+    read_tagged_accumulator(r, tag)
+}
+
+/// Reads the rest of an accumulator whose tag is `tag`.
+fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<AggregateState> {
+    Ok(match tag {
+        tags::COUNT => AggregateState::Count(read_i64(r)?),
+        tags::COUNT_DISTINCT => AggregateState::CountDistinct(read_i64(r)?, read_seen(r)?),
+        tags::SUM_INT | tags::SUM_INT_DISTINCT => {
+            let sum = read_i64(r)?;
+            let count = read_i64(r)?;
+            if tag == tags::SUM_INT {
+                AggregateState::SumInt(sum, count)
+            } else {
+                AggregateState::SumIntDistinct(sum, count, read_seen(r)?)
+            }
+        }
+        tags::SUM_FLOAT | tags::SUM_FLOAT_DISTINCT => {
+            let sum = read_f64(r)?;
+            let compensation = read_f64(r)?;
+            let count = read_i64(r)?;
+            if tag == tags::SUM_FLOAT {
+                AggregateState::SumFloat(sum, compensation, count)
+            } else {
+                AggregateState::SumFloatDistinct(sum, compensation, count, read_seen(r)?)
+            }
+        }
+        tags::AVG | tags::AVG_DISTINCT => {
+            let sum = read_f64(r)?;
+            let count = read_i64(r)?;
+            if tag == tags::AVG {
+                AggregateState::Avg(sum, count)
+            } else {
+                AggregateState::AvgDistinct(sum, count, read_seen(r)?)
+            }
+        }
+        tags::MIN
+        | tags::MAX
+        | tags::MIN_OF_RDF_LITERALS
+        | tags::MAX_OF_RDF_LITERALS
+        | tags::FIRST
+        | tags::LAST
+        | tags::SAMPLE => {
+            let value = if read_flag(r)? {
+                Some(deserialize_value(r)?)
+            } else {
+                None
+            };
+            match tag {
+                tags::MIN => AggregateState::Min(value),
+                tags::MAX => AggregateState::Max(value),
+                tags::MIN_OF_RDF_LITERALS => AggregateState::MinOfRdfLiterals(value),
+                tags::MAX_OF_RDF_LITERALS => AggregateState::MaxOfRdfLiterals(value),
+                tags::FIRST => AggregateState::First(value),
+                tags::LAST => AggregateState::Last(value),
+                _ => AggregateState::Sample(value),
+            }
+        }
+        tags::COLLECT | tags::COLLECT_DISTINCT => {
+            let values = read_values(r)?;
+            if tag == tags::COLLECT {
+                AggregateState::Collect(values)
+            } else {
+                AggregateState::CollectDistinct(values, read_seen(r)?)
+            }
+        }
+        tags::GROUP_CONCAT | tags::GROUP_CONCAT_DISTINCT => {
+            let len = read_len(r)?;
+            let values = (0..len)
+                .map(|_| read_string(r))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            let separator = read_string(r)?;
+            if tag == tags::GROUP_CONCAT {
+                AggregateState::GroupConcat(values, separator)
+            } else {
+                AggregateState::GroupConcatDistinct(values, separator, read_seen(r)?)
+            }
+        }
+        tags::STDDEV | tags::STDDEV_POP | tags::VARIANCE | tags::VARIANCE_POP => {
+            let count = read_i64(r)?;
+            let mean = read_f64(r)?;
+            let m2 = read_f64(r)?;
+            match tag {
+                tags::STDDEV => AggregateState::StdDev { count, mean, m2 },
+                tags::STDDEV_POP => AggregateState::StdDevPop { count, mean, m2 },
+                tags::VARIANCE => AggregateState::Variance { count, mean, m2 },
+                _ => AggregateState::VariancePop { count, mean, m2 },
+            }
+        }
+        tags::PERCENTILE_DISC | tags::PERCENTILE_CONT => {
+            let len = read_len(r)?;
+            let values = (0..len)
+                .map(|_| read_f64(r))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            let percentile = read_f64(r)?;
+            if tag == tags::PERCENTILE_DISC {
+                AggregateState::PercentileDisc { values, percentile }
+            } else {
+                AggregateState::PercentileCont { values, percentile }
+            }
+        }
+        tags::BIVARIATE => AggregateState::Bivariate {
+            kind: read_bivariate_kind(r)?,
+            count: read_i64(r)?,
+            mean_x: read_f64(r)?,
+            mean_y: read_f64(r)?,
+            m2_x: read_f64(r)?,
+            m2_y: read_f64(r)?,
+            c_xy: read_f64(r)?,
+        },
+        tags::DISTINCT => {
+            let inner_tag = read_tag(r)?;
+            if inner_tag == tags::DISTINCT {
+                return Err(invalid("a DISTINCT aggregate state wraps another"));
+            }
+            AggregateState::Distinct {
+                inner: Box::new(read_tagged_accumulator(r, inner_tag)?),
+                seen: read_seen(r)?,
+            }
+        }
+        _ => return Err(invalid("unknown aggregate state tag")),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A DISTINCT state wraps the state of the aggregate itself, never
+    /// another DISTINCT state: a record that claims one is refused, without
+    /// following it (a run of DISTINCT tags would otherwise recurse), and
+    /// none is written.
+    #[test]
+    fn a_distinct_state_that_wraps_another_is_refused() {
+        let mut bytes = Vec::new();
+        write_len(&mut bytes, 0).unwrap(); // no key values
+        write_len(&mut bytes, 1).unwrap(); // one accumulator
+        bytes.extend([tags::DISTINCT; 64]);
+        let error = deserialize_group_state(&mut bytes.as_slice())
+            .err()
+            .expect("a DISTINCT state in a DISTINCT state is refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        let distinct = |inner| AggregateState::Distinct {
+            seen: HashSet::new(),
+            inner: Box::new(inner),
+        };
+        let group = GroupState {
+            key_values: Vec::new(),
+            accumulators: vec![distinct(distinct(AggregateState::new(
+                AggregateFunction::StdDev,
+                false,
+                None,
+                None,
+            )))],
+        };
+        assert!(serialize_group_state(&group, &mut Vec::new()).is_err());
+    }
 }

@@ -90,9 +90,10 @@ fn foreach_passes_each_row_on_unchanged() {
     assert_eq!(
         run(
             &session,
-            "UNWIND [19, 3, 88] AS i FOREACH (x IN range(1, 2) | CREATE (:Z {i: i})) RETURN i"
+            "UNWIND [19, 3, 88] AS i WITH i ORDER BY i DESC \
+             FOREACH (x IN range(1, 2) | CREATE (:Z {i: i})) RETURN i"
         ),
-        [[int(19)], [int(3)], [int(88)]]
+        [[int(88)], [int(19)], [int(3)]]
     );
     let result = session
         .execute_cypher("UNWIND [3] AS i FOREACH (x IN [1, 2] | CREATE (z:Z)) RETURN *")

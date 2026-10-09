@@ -142,7 +142,10 @@ fn plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
             vec![&collect.key_var, &collect.value_var, &collect.alias]
         }
         LogicalOperator::ShortestPath(path) => {
-            vec![&path.source_var, &path.target_var, &path.path_alias]
+            [&path.source_var, &path.target_var, &path.path_alias]
+                .into_iter()
+                .chain(&path.edge_variable)
+                .collect()
         }
         LogicalOperator::VectorScan(scan) => vec![&scan.variable],
         LogicalOperator::VectorJoin(join) => std::iter::once(&join.right_variable)

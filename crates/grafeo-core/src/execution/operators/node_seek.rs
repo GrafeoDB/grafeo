@@ -29,9 +29,11 @@ pub enum SeekKey {
 /// Only nodes visible to the query that carry the scan's label are emitted.
 /// The seek produces candidates for the filter it replaces, which stays on top
 /// and decides: a candidate whose value no longer matches (the index holds the
-/// latest value) is dropped there, so results equal those of a scan. Equality
-/// across types (`1 = 1.0`, `42 = '42'`) finds the canonical forms of the
-/// key: the integer, the float and the decimal string of a number.
+/// latest value) is dropped there, so results equal those of a scan. The
+/// index finds every value `=` may find equal to the key, across types and
+/// spellings (`1 = 1.0`, `42 = '042'`, see
+/// [`GraphStore::find_nodes_maybe_equal`](crate::graph::GraphStore::find_nodes_maybe_equal));
+/// a store that cannot look a key up that way gives every node.
 pub struct NodeSeekOperator {
     store: Arc<dyn GraphStoreSearch>,
     input: Box<dyn Operator>,
@@ -117,10 +119,13 @@ impl NodeSeekOperator {
         let mut found = Vec::new();
         for key in &keys {
             match &self.key {
-                SeekKey::Id => found.extend(node_id(key)),
+                SeekKey::Id => found.extend(node_ids(key)),
                 SeekKey::Property(property) => {
-                    for probe in equal_forms(key) {
-                        found.extend(self.store.find_nodes_by_property(property, &probe));
+                    match self.store.find_nodes_maybe_equal(property, key) {
+                        Some(nodes) => found.extend(nodes),
+                        // The store cannot look the key up: every node is a
+                        // candidate, as for the scan the seek replaces.
+                        None => found.extend(self.store.all_node_ids()),
                     }
                 }
             }
@@ -236,62 +241,40 @@ impl Operator for NodeSeekOperator {
     }
 }
 
-/// The node ID a key names: a non-negative integer, or a float equal to one.
-fn node_id(key: &Value) -> Option<NodeId> {
-    let id = match key {
-        Value::Int64(id) => *id,
-        Value::Float64(f) => integral(*f)?,
-        _ => return None,
+/// The node IDs `=` finds equal to a key, as the filter `id(n) = key`
+/// compares an ID (an integer) with it: the integer itself, a float within
+/// `f64::EPSILON` of it, or a string that parses as it.
+fn node_ids(key: &Value) -> Vec<NodeId> {
+    let ids: Vec<i64> = match key {
+        Value::Int64(id) => vec![*id],
+        Value::Float64(f) => integers_near(*f),
+        Value::String(s) => s.parse::<i64>().ok().into_iter().collect(),
+        _ => Vec::new(),
     };
-    u64::try_from(id).ok().map(NodeId::new)
+    ids.into_iter()
+        .filter_map(|id| u64::try_from(id).ok().map(NodeId::new))
+        .collect()
 }
 
-/// The values a key finds through the index: the key itself and the other
-/// canonical forms that compare equal to it. NULL and NaN find nothing.
-fn equal_forms(key: &Value) -> Vec<Value> {
-    match key {
-        Value::Null => Vec::new(),
-        Value::Float64(f) if f.is_nan() => Vec::new(),
-        Value::Int64(i) => vec![
-            Value::Int64(*i),
-            Value::Float64(*i as f64),
-            Value::from(i.to_string()),
-        ],
-        Value::Float64(f) => {
-            let mut forms = vec![Value::Float64(*f), Value::from(f.to_string())];
-            if let Some(i) = integral(*f) {
-                forms.push(Value::Int64(i));
-            }
-            forms
-        }
-        Value::String(s) => {
-            let mut forms = vec![key.clone()];
-            if let Ok(i) = s.parse::<i64>() {
-                forms.push(Value::Int64(i));
-            }
-            if let Ok(f) = s.parse::<f64>()
-                && !f.is_nan()
-            {
-                forms.push(Value::Float64(f));
-            }
-            forms
-        }
-        other => vec![other.clone()],
-    }
-}
-
-/// The integer a float equals, if it is integral and within the `i64` range.
-fn integral(f: f64) -> Option<i64> {
+/// The integers `=` finds equal to a float: those within `f64::EPSILON`.
+/// Only the floor and the ceiling can be.
+fn integers_near(f: f64) -> Vec<i64> {
     // 2^63 as f64 is exact; every integral float in [-2^63, 2^63) fits i64.
     const LIMIT: f64 = 9_223_372_036_854_775_808.0;
-    if f.fract() != 0.0 || !(-LIMIT..LIMIT).contains(&f) {
-        return None;
+    let mut near = Vec::new();
+    for candidate in [f.floor(), f.ceil()] {
+        if (-LIMIT..LIMIT).contains(&candidate) && (candidate - f).abs() < f64::EPSILON {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "candidate is integral and within [-2^63, 2^63), checked above"
+            )]
+            let integer = candidate as i64;
+            if !near.contains(&integer) {
+                near.push(integer);
+            }
+        }
     }
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "f is integral and within [-2^63, 2^63), checked above"
-    )]
-    Some(f as i64)
+    near
 }
 
 #[cfg(all(test, feature = "lpg"))]

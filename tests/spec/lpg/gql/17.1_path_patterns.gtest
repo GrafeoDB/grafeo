@@ -213,3 +213,94 @@ tests:
     expect:
       rows:
         - [C]
+
+  # ---------------------------------------------------------------------------
+  # The element pattern WHERE of a quantified edge pattern holds for each
+  # edge (16.7 <path pattern expression>: inside the quantified pattern the
+  # edge variable is one edge; only outside it is it the group list of the
+  # edges). Setup: Alix -> Gus -> Vincent -> Mia (w 3, 19, 88, kind 'road')
+  # and the shortcut Alix -> Vincent (w 38, kind 'air').
+  # ---------------------------------------------------------------------------
+
+  - name: quantified_edge_where_holds_for_each_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    query: "MATCH (a:Person)-[e:KNOWS WHERE e.w > 10]->{1,3}(b) RETURN a.name AS a, b.name AS b, [x IN e | x.w] AS ws"
+    expect:
+      rows:
+        - [Alix, Mia, "[38, 88]"]
+        - [Alix, Vincent, "[38]"]
+        - [Gus, Mia, "[19, 88]"]
+        - [Gus, Vincent, "[19]"]
+        - [Vincent, Mia, "[88]"]
+
+  - name: quantified_edge_where_reads_an_earlier_variable
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    query: "UNWIND [19, 50] AS lim MATCH (a:Person {name: 'Alix'})-[e:KNOWS WHERE e.w > lim OR e.w = 3]->{1,3}(b) RETURN lim, b.name AS b, [x IN e | x.w] AS ws"
+    expect:
+      rows:
+        - [19, Gus, "[3]"]
+        - [19, Mia, "[38, 88]"]
+        - [19, Vincent, "[38]"]
+        - [50, Gus, "[3]"]
+
+  - name: quantified_edge_where_keeps_the_empty_path
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    query: "MATCH (a:Person {name: 'Alix'})-[e:KNOWS WHERE e.w > 10]->{0,2}(b) RETURN b.name AS b, size(e) AS hops"
+    expect:
+      rows:
+        - [Alix, 0]
+        - [Mia, 2]
+        - [Vincent, 1]
+
+  # ---------------------------------------------------------------------------
+  # Horizontal aggregation (20.9 <aggregate function>): an aggregate over a
+  # property of a group variable is computed per path. Same setup.
+  # ---------------------------------------------------------------------------
+
+  - name: horizontal_sum_is_per_path
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    query: "MATCH (a:Person {name: 'Alix'})-[e:KNOWS]->{1,3}(b) RETURN b.name AS name, sum(e.w) AS total, max(e.w) AS high"
+    expect:
+      columns: [name, total, high]
+      rows:
+        - [Gus, 3, 3]
+        - [Mia, 110, 88]
+        - [Mia, 126, 88]
+        - [Vincent, 22, 19]
+        - [Vincent, 38, 38]
+
+  - name: horizontal_sum_without_alias_returns_only_its_column
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    query: "MATCH (a:Person {name: 'Alix'})-[e:KNOWS]->{1,3}(b) RETURN sum(e.w)"
+    expect:
+      columns: ["sum(e.w)"]
+      rows:
+        - [3]
+        - [22]
+        - [38]
+        - [110]
+        - [126]
+
+  - name: horizontal_aggregate_beside_a_regular_aggregate
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    query: "MATCH (a:Person {name: 'Alix'})-[e:KNOWS]->{1,3}(b) RETURN sum(e.w) > 50 AS long, count(*) AS paths"
+    expect:
+      rows:
+        - [false, 3]
+        - [true, 2]
+
+  - name: horizontal_aggregate_in_with
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    query: "MATCH (a:Person {name: 'Alix'})-[e:KNOWS]->{1,3}(b) WITH b, sum(e.w) AS total WHERE total > 50 RETURN b.name AS name, total ORDER BY total"
+    expect:
+      ordered: true
+      rows:
+        - [Mia, 110]
+        - [Mia, 126]

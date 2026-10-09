@@ -147,6 +147,55 @@ def search(grafeo):
     return db
 
 
+def typed(grafeo):
+    """Type DDL and the writes after it: `City` with a node type default (`country`
+    'NL'), `ROUTE` between cities with an edge type default (`km` 88), Paris to Prague
+    without `km`, Berlin to Amsterdam with `km` 3; and a graph type in ISO's brace form
+    that declares `Stop` and `LEG`. Every statement runs on 0.5.44 too."""
+    db = grafeo.GrafeoDB()
+    db.execute("CREATE NODE TYPE City (name STRING, country STRING DEFAULT 'NL')")
+    db.execute(
+        "CREATE EDGE TYPE ROUTE CONNECTING (City) TO (City) (km INT64 DEFAULT 88)"
+    )
+    db.execute("INSERT (:City {name: 'Paris'})-[:ROUTE]->(:City {name: 'Prague'})")
+    db.execute(
+        "INSERT (:City {name: 'Berlin'})-[:ROUTE {km: 3}]->(:City {name: 'Amsterdam'})"
+    )
+    db.execute(
+        "CREATE GRAPH TYPE stops "
+        "{ (:Stop {name STRING NOT NULL, zone INT64})-[:LEG {minutes INT64}]->(:Stop) }"
+    )
+    return db
+
+
+def mixed(grafeo, indexed=False):
+    """`Doc` nodes whose `p` is 42 as an integer, a float and three strings ('42', '042',
+    '42.0'), two numbers within EPSILON of each other (0.1 + 0.2 and 0.3) and a word,
+    each named `n` after its kind, and one `Other` node. With `indexed`, a property index
+    on `p`."""
+    db = grafeo.GrafeoDB()
+    if indexed:
+        db.create_property_index("p")
+    for name, value in [
+        ("int", "42"),
+        ("float", "42.0"),
+        ("string", "'42'"),
+        ("padded", "'042'"),
+        ("decimal", "'42.0'"),
+        ("sum", "0.1 + 0.2"),
+        ("tenths", "0.3"),
+        ("word", "'abc'"),
+    ]:
+        db.execute(f"INSERT (:Doc {{n: '{name}', p: {value}}})")
+    db.execute("INSERT (:Other {n: 'other'})")
+    return db
+
+
+def mixed_indexed(grafeo):
+    """`mixed` with a property index on `p`."""
+    return mixed(grafeo, indexed=True)
+
+
 FIXTURES = {
     "social": social,
     "chain": chain,
@@ -155,6 +204,9 @@ FIXTURES = {
     "labels_indexed": labels_indexed,
     "labels_compacted": labels_compacted,
     "search": search,
+    "typed": typed,
+    "mixed": mixed,
+    "mixed_indexed": mixed_indexed,
 }
 
 CASES: list[Case] = []
@@ -856,6 +908,309 @@ for case_id, query, languages in [
     ("AP4", "MATCH (x:Person {name: 'Gus'}), (c:City), (c)<-[:LIVES_IN {years: x.age - 22}]-(a) RETURN x.name AS x, a.name AS a, c.name AS c", BOTH),
     ("AP5", "UNWIND [6, 8] AS w MATCH (c:City), (c)<-[r:LIVES_IN WHERE r.w = w]-(a) RETURN w, a.name AS a, c.name AS c", GQL),
     ("AP6", "UNWIND [6, 7, 9] AS w OPTIONAL MATCH (c:City {name: 'Berlin'}), (c)<-[:LIVES_IN {w: w}]-(a) RETURN w, a.name AS a", BOTH),
+]:
+    case(case_id, query, languages)
+
+# AR: path semantics. A path variable binds the whole path of a pattern of several edge
+#     patterns (AR1 to AR4; it held the last hop only, or failed); DIFFERENT EDGES binds no
+#     edge twice and a path mode holds for the whole path (AR5 to AR8; both were ignored);
+#     a shortest-path search binds its edge variable, keeps the edge pattern's WHERE in the
+#     search, and takes an edge bound before (AR9 to AR13)
+for case_id, query, languages in [
+    ("AR1", "MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN a.name AS a, c.name AS c, length(p) AS len, [n IN nodes(p) | n.name] AS names", BOTH),
+    ("AR2", "MATCH p = (a)-[:KNOWS]->()-[:KNOWS]->(c) RETURN a.name AS a, c.name AS c, length(p) AS len", BOTH),
+    ("AR3", "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->(b)-[:KNOWS]->{1,2}(c) RETURN [n IN nodes(p) | n.name] AS names, length(p) AS len", GQL),
+    ("AR4", "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->(b)-[:KNOWS*1..2]->(c) RETURN [n IN nodes(p) | n.name] AS names, length(p) AS len", CYPHER),
+    ("AR5", "MATCH DIFFERENT EDGES (a)-[e1:KNOWS]->(b), (a)-[e2:KNOWS]->(c) RETURN a.name AS a, b.name AS b, c.name AS c", GQL),
+    ("AR6", "MATCH TRAIL (a)-[:KNOWS]-(b)-[:KNOWS]-(c) RETURN count(*) AS c", GQL),
+    ("AR7", "MATCH ACYCLIC (a)-[:KNOWS]-(b)-[:KNOWS]-(c)-[:KNOWS]-(d) RETURN count(*) AS c", GQL),
+    ("AR8", "MATCH REPEATABLE ELEMENTS TRAIL (a)-[:KNOWS]-(b)-[:KNOWS]-(c) RETURN count(*) AS c", GQL),
+    ("AR9", "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[e:KNOWS]->{1,4}(b:Person {name: 'Mia'}) RETURN [x IN e | x.w] AS ws, [n IN nodes(p) | n.name] AS names", GQL),
+    ("AR10", "MATCH p = shortestPath((a:Person {name: 'Alix'})-[r:KNOWS*]->(b:Person {name: 'Mia'})) RETURN [x IN r | x.w] AS ws, [n IN nodes(p) | n.name] AS names", CYPHER),
+    ("AR11", "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[e:KNOWS WHERE e.w <> 5]->{1,4}(b:Person {name: 'Mia'}) RETURN length(p) AS len", GQL),
+    ("AR12", "MATCH ()-[e:KNOWS]->() MATCH ANY SHORTEST (x)-[e]->(y) RETURN e.w AS w, x.name AS x, y.name AS y", GQL),
+    ("AR13", "MATCH p = ALL SHORTEST (a:Person {name: 'Alix'})-[:KNOWS]-+(b:Person {name: 'Vincent'}) RETURN [n IN nodes(p) | n.name] AS names", GQL),
+]:
+    case(case_id, query, languages)
+
+# AV: `=` finds the same rows with and without a property index, in every plan that runs it
+#     (#535): a constant key with and without a label, an IN list, a key from the row, a key
+#     after a clause, and an id() from a string. `=` finds a number equal to the strings
+#     that parse as it and numbers within EPSILON equal; the lookups of an index found
+#     their exact value only, and a constant key on a label scan without an index used a
+#     stricter `=` of its own. AV1 to AV8 without an index, AV9 to AV16 with one
+for case_id, query, fixture in [
+    ("AV1", "MATCH (d:Doc) WHERE d.p = 42 RETURN d.n AS n", "mixed"),
+    ("AV2", "MATCH (d:Doc) WHERE d.p = 42.0 RETURN d.n AS n", "mixed"),
+    ("AV3", "MATCH (d:Doc) WHERE d.p = '042' RETURN d.n AS n", "mixed"),
+    ("AV4", "MATCH (d:Doc) WHERE d.p IN [42, 0.3] RETURN d.n AS n", "mixed"),
+    ("AV5", "UNWIND [42.0, 0.3] AS k MATCH (d:Doc) WHERE d.p = k RETURN k, d.n AS n", "mixed"),
+    ("AV6", "MATCH (o:Other) MATCH (d:Doc) WHERE d.p = 0.3 RETURN d.n AS n", "mixed"),
+    ("AV7", "MATCH (d) WHERE d.p = 42 RETURN d.n AS n", "mixed"),
+    ("AV8", "MATCH (a:Doc {n: 'int'}) MATCH (b:Doc) WHERE id(b) = toString(id(a)) RETURN b.n AS n", "mixed"),
+    ("AV9", "MATCH (d:Doc) WHERE d.p = 42 RETURN d.n AS n", "mixed_indexed"),
+    ("AV10", "MATCH (d:Doc) WHERE d.p = 42.0 RETURN d.n AS n", "mixed_indexed"),
+    ("AV11", "MATCH (d:Doc) WHERE d.p = '042' RETURN d.n AS n", "mixed_indexed"),
+    ("AV12", "MATCH (d:Doc) WHERE d.p IN [42, 0.3] RETURN d.n AS n", "mixed_indexed"),
+    ("AV13", "UNWIND [42.0, 0.3] AS k MATCH (d:Doc) WHERE d.p = k RETURN k, d.n AS n", "mixed_indexed"),
+    ("AV14", "MATCH (o:Other) MATCH (d:Doc) WHERE d.p = 0.3 RETURN d.n AS n", "mixed_indexed"),
+    ("AV15", "MATCH (d) WHERE d.p = 42 RETURN d.n AS n", "mixed_indexed"),
+    ("AV16", "MATCH (a:Doc {n: 'int'}) MATCH (b:Doc) WHERE id(b) = toString(id(a)) RETURN b.n AS n", "mixed_indexed"),
+]:
+    case(case_id, query, BOTH, fixture)
+
+# AW: a statement nested deeper than the stack allows fails with an error that names the
+#     limit (#573): 70 levels of parentheses and an OR of 100 terms are beyond the nesting
+#     limit of 64 (they ran on a large stack and overflowed a small one); AW3 and AW4 at
+#     the limit still run
+for case_id, query in [
+    ("AW1", "RETURN " + "(" * 70 + "3" + ")" * 70 + " AS v"),
+    ("AW2", "MATCH (a:Person) WHERE " + " OR ".join(f"a.age = {i}" for i in range(100)) + " RETURN count(*) AS c"),
+    ("AW3", "RETURN " + "(" * 60 + "3" + ")" * 60 + " AS v"),
+    ("AW4", "MATCH (a:Person) WHERE " + " OR ".join(f"a.age = {i}" for i in range(25, 85)) + " RETURN count(*) AS c"),
+]:
+    case(case_id, query)
+# AX: a Cypher chain of comparisons is their conjunction, `a < b <= c` is `a < b AND b <= c`
+#     (AX1 to AX4; it was null, so a WHERE dropped every row), and GQL rejects one (AX5);
+#     datetime({epochMillis: n}) and datetime({epochSeconds: n}) are instants (AX6, AX7) and
+#     a temporal value's components read like properties (AX8 to AX10); both were null
+for case_id, query, languages in [
+    ("AX1", "MATCH (p:Person) WHERE 25 <= p.age < 35 RETURN p.name AS name", CYPHER),
+    ("AX2", "RETURN 1 <= 2 < 3 AS a, 3 > 19 >= 1 AS b, 3 <> 19 <> 3 AS c, 1 < null < 3 AS d, 19 < 3 < null AS e", CYPHER),
+    ("AX3", "MATCH (p:Person) RETURN sum(CASE WHEN 25 <= p.age < 35 THEN 1 ELSE 0 END) AS inside", CYPHER),
+    ("AX4", "MATCH (a)-[k:KNOWS]->(b) WHERE 2012 <= k.since < 2020 RETURN a.name AS a, b.name AS b, k.since AS since", CYPHER),
+    ("AX5", "RETURN 1 <= 2 < 3 AS a", GQL),
+    ("AX6", "RETURN datetime({epochMillis: 1590433388088}) = datetime('2020-05-25T19:03:08.088Z') AS millis, datetime({epochSeconds: 1590364800}) = datetime('2020-05-25T00:00:00Z') AS seconds", BOTH),
+    ("AX7", "MATCH (p:Person) RETURN p.name AS name, month(datetime({epochMillis: p.age * 86400000})) AS m, day(datetime({epochMillis: p.age * 86400000})) AS d", BOTH),
+    ("AX8", "WITH date('2020-05-25') AS d RETURN d.year AS y, d.quarter AS q, d.month AS m, d.week AS w, d.day AS dd, d.dayOfWeek AS dow, d.ordinalDay AS od", CYPHER),
+    ("AX9", "MATCH (p:Person) WITH p, datetime({epochMillis: p.age * 86400000}) AS b WHERE b.month = 1 AND b.day > 28 RETURN p.name AS name, b.day AS day, b.epochSeconds AS s", CYPHER),
+    ("AX10", "WITH duration({years: 1, months: 3, days: 19, hours: 3, minutes: 8}) AS d RETURN d.years AS y, d.months AS m, d.monthsOfYear AS moy, d.weeks AS w, d.minutes AS mi, d.minutesOfHour AS moh", CYPHER),
+]:
+    case(case_id, query, languages)
+
+# AY: DISTINCT in the statistical aggregates (stDev, stDevP, variance, the percentiles and
+#     the binary set functions) drops the copies of a value or a pair before the aggregate
+#     sees them; they counted every copy (AY1 to AY3, AY7). In GQL an aggregate in HAVING is
+#     computed per group, also one the RETURN list does not compute (AY4, AY5; there were no
+#     rows), and GROUP BY without an aggregate gives one row per group (AY6; it was ignored);
+#     HAVING reads a grouping key by its text or its alias (AY8; there were no rows)
+for case_id, query, languages in [
+    ("AY1", "MATCH (a:Person)-[:KNOWS]->(b) RETURN stDev(DISTINCT a.age) AS s, stDevP(DISTINCT a.age) AS p, stDev(a.age) AS plain", BOTH),
+    ("AY2", "MATCH (a:Person)-[:KNOWS]->(b) RETURN percentileDisc(DISTINCT a.age, 0.25) AS d, percentileCont(DISTINCT a.age, 0.5) AS c", BOTH),
+    ("AY3", "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name IN ['Alix', 'Gus'] AS front, variance(DISTINCT a.age) AS v", BOTH),
+    ("AY4", "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name AS a, count(*) AS c GROUP BY a.name HAVING count(*) > 1", GQL),
+    ("AY5", "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name AS a GROUP BY a.name HAVING min(b.age) < 30", GQL),
+    ("AY6", "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name AS a GROUP BY a.name", GQL),
+    ("AY7", "MATCH (a:Person)-[:KNOWS]->(b) RETURN regr_count(DISTINCT a.age, a.age) AS n, covar_pop(DISTINCT a.age, a.age) AS c", GQL),
+    ("AY8", "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name AS who, count(*) AS c GROUP BY a.name HAVING who <> 'Alix' AND a.name <> 'Gus'", GQL),
+]:
+    case(case_id, query, languages)
+
+# AZ: values of earlier clauses inside an OPTIONAL MATCH and a comma MATCH. An OPTIONAL
+#     MATCH keeps every row: a property map or WHERE that reads an imported value in a CALL
+#     subquery (AZ2 to AZ4) or the start of a shortest path (AZ12, AZ13) matched nothing or
+#     dropped the row; a WHERE on a list of a WITH with a name the WITH dropped (AZ5, LDBC
+#     IC5; AZ6 its GQL form inside the pattern, AZ17 a condition on that name alone), on a
+#     node both sides name (AZ7), only on earlier values (AZ8) or on none (AZ9) filtered
+#     the rows. GQL's FILTER filters every row (AZ10, AZ11), and so does a WHERE after a
+#     questioned edge (AZ14). A later comma part reads a value of the WITH before it (AZ15,
+#     AZ16, LDBC IC6); AZ1 already worked
+for case_id, query, languages in [
+    ("AZ1", "UNWIND [25, 40, 88] AS x OPTIONAL MATCH (p:Person {age: x}) RETURN x, p.name AS p", BOTH),
+    ("AZ2", "UNWIND [25, 88] AS x CALL (x) { OPTIONAL MATCH (p:Person {age: x}) RETURN p.name AS p } RETURN x, p", BOTH),
+    ("AZ3", "UNWIND [25, 88] AS x CALL { WITH * OPTIONAL MATCH (p:Person WHERE p.age = x) RETURN p.name AS p } RETURN x, p", GQL),
+    ("AZ4", "UNWIND [25, 88] AS x CALL { WITH x OPTIONAL MATCH (p:Person) WHERE p.age = x RETURN p.name AS p } RETURN x, p", CYPHER),
+    ("AZ5", "MATCH (c:City) MATCH (friend:Person {name: 'Gus'}) WITH c, collect(friend) AS friends OPTIONAL MATCH (friend)-[:LIVES_IN]->(c) WHERE friend IN friends RETURN c.name AS c, count(friend) AS n", CYPHER),
+    ("AZ6", "MATCH (c:City) MATCH (friend:Person {name: 'Gus'}) WITH c, collect(friend) AS friends OPTIONAL MATCH (friend WHERE friend IN friends)-[:LIVES_IN]->(c) RETURN c.name AS c, count(friend) AS n", GQL),
+    ("AZ7", "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) WHERE c.name = 'Berlin' RETURN c.name AS c, p.name AS p", BOTH),
+    ("AZ8", "MATCH (c:City) OPTIONAL MATCH (p:Person {name: 'Mia'}) WHERE c.name = 'Paris' RETURN c.name AS c, p.name AS p", BOTH),
+    ("AZ9", "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) WHERE 3 = 19 RETURN c.name AS c, p.name AS p", BOTH),
+    ("AZ10", "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) FILTER c.name = 'Berlin' RETURN c.name AS c, p.name AS p", GQL),
+    ("AZ11", "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) FILTER p.name = 'Gus' RETURN c.name AS c, p.name AS p", GQL),
+    ("AZ12", "UNWIND ['Alix', 'Jules'] AS n OPTIONAL MATCH p = shortestPath((a:Person {name: n})-[:KNOWS*]->(b:Person {name: 'Vincent'})) RETURN n, length(p) AS hops", CYPHER),
+    ("AZ13", "UNWIND ['Alix', 'Jules'] AS n OPTIONAL MATCH p = ANY SHORTEST (a:Person {name: n})-[:KNOWS]->+(b:Person {name: 'Vincent'}) RETURN n, length(p) AS hops", GQL),
+    ("AZ14", "MATCH (a:Person)-[:KNOWS]->?(b) WHERE b.name = 'Gus' RETURN a.name AS a, b.name AS b", GQL),
+    ("AZ15", "MATCH (v:Person {name: 'Vincent'}) WITH v.age AS age MATCH (a:Person {name: 'Gus'}), (a)-[:KNOWS]->(b:Person {age: age}) RETURN b.name AS b", BOTH),
+    ("AZ16", "MATCH (:Person {name: 'Gus'})-[r:KNOWS]->() WITH r.since AS y MATCH (a:Person), (a)-[:KNOWS {since: y}]->(b) RETURN a.name AS a, b.name AS b", BOTH),
+    ("AZ17", "MATCH (c:City), (p:Person) WITH c, count(p) AS people OPTIONAL MATCH (p)-[:LIVES_IN]->(c) WHERE p.age = 25 RETURN c.name AS c, people, p.name AS p", CYPHER),
+]:
+    case(case_id, query, languages)
+
+# BB: what type DDL declares (fixture `typed`). An edge type's default fills a property
+#     an insert left out, as a node type's does (BB1; the edge had no `km`); a graph type
+#     in the brace form declares its element types with their properties (BB2, BB3; it
+#     declared their names only)
+for case_id, query, languages in [
+    ("BB1", "MATCH (a:City)-[r:ROUTE]->(b:City) RETURN a.name AS a, r.km AS km, b.country AS country", BOTH),
+    ("BB2", "SHOW NODE TYPES", GQL),
+    ("BB3", "SHOW EDGE TYPES", GQL),
+]:
+    case(case_id, query, languages, fixture="typed")
+
+# BC: path search prefixes. ANY keeps one path per pair of endpoints and input row (BC1 to
+#     BC4, BC10; it kept one row in total, and `p = ANY` and ANY k were ignored), with the
+#     edge pattern's WHERE checked before it selects (BC4); `p = TRAIL (...)` is the path
+#     mode of one pattern (BC5; a syntax error); SHORTEST k and SHORTEST k GROUPS keep k
+#     paths or groups per pair (BC6, BC7; one path); a search prefix's path mode restricts
+#     the paths it selects among (BC8; ignored), BC9 the WALK control
+for case_id, query, languages in [
+    ("BC1", "MATCH ANY (a:Person)-[:KNOWS]->{1,3}(b) RETURN a.name AS a, b.name AS b", GQL),
+    ("BC2", "MATCH p = ANY 2 (a:Person {name: 'Alix'})-[:KNOWS]-{1,3}(b) RETURN b.name AS b, count(*) AS n", GQL),
+    ("BC3", "UNWIND [1, 1] AS x MATCH ANY (a:Person {name: 'Alix'})-[:KNOWS]->{1,2}(b) RETURN x, b.name AS b", GQL),
+    ("BC4", "MATCH p = ANY (a:Person {name: 'Alix'})-[e:KNOWS WHERE e.w > 1]->{1,3}(b) RETURN b.name AS b, [x IN e | x.w] AS ws", GQL),
+    ("BC5", "MATCH p = TRAIL (a:Person {name: 'Alix'})-[:KNOWS]-{1,3}(b:Person {name: 'Vincent'}) RETURN length(p) AS len", GQL),
+    ("BC6", "MATCH p = SHORTEST 2 (a:Person {name: 'Alix'})-[:KNOWS]-{1,4}(b:Person) RETURN b.name AS b, length(p) AS len", GQL),
+    ("BC7", "MATCH p = SHORTEST 2 GROUPS (a:Person {name: 'Alix'})-[:KNOWS]-{1,4}(b:Person) RETURN b.name AS b, length(p) AS len", GQL),
+    ("BC8", "MATCH p = ANY SHORTEST TRAIL (a:Person {name: 'Alix'})-[:KNOWS]-{3,}(b:Person {name: 'Gus'}) RETURN length(p) AS len", GQL),
+    ("BC9", "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[:KNOWS]-{3,}(b:Person {name: 'Gus'}) RETURN length(p) AS len", GQL),
+    ("BC10", "MATCH ANY (a:Person)-[e:KNOWS]->(b) RETURN a.name AS a, b.name AS b", GQL),
+]:
+    case(case_id, query, languages)
+
+# BD: GQL statements in any order (#483). An ORDER BY and LIMIT (or OFFSET) before the
+#     result statement cut the rows the statements after them read (BD1 to BD4, BD11,
+#     BD12 on `chain`); a WHERE or FILTER between MATCH statements filters the rows so far
+#     (BD5 to BD8); a statement may start with LET or FILTER, and a WITH may follow a FOR
+#     (BD9, BD10). All were syntax errors in GQL; BD2 and BD3 also run in Cypher
+for case_id, query, languages, fixture in [
+    ("BD1", "MATCH (p:Person) ORDER BY p.age DESC LIMIT 2 MATCH (p)-[:KNOWS]->(f) RETURN p.name AS p, f.name AS f", GQL, "social"),
+    ("BD2", "MATCH (p:Person) WITH p ORDER BY p.age DESC LIMIT 2 MATCH (p)-[:KNOWS]->(f) RETURN p.name AS p, f.name AS f", BOTH, "social"),
+    ("BD3", "MATCH (p:Person) WITH p LIMIT 1 RETURN count(*) AS c", BOTH, "social"),
+    ("BD4", "MATCH (p:Person) ORDER BY p.age OFFSET 1 LIMIT 2 RETURN p.name AS name", GQL, "social"),
+    ("BD5", "MATCH (a:Person) WHERE a.age > 29 MATCH (a)-[:LIVES_IN]->(c) RETURN a.name AS a, c.name AS c", GQL, "social"),
+    ("BD6", "MATCH (a:Person) FILTER a.age > 29 OPTIONAL MATCH (a)-[:LIVES_IN]->(c) RETURN a.name AS a, c.name AS c", GQL, "social"),
+    ("BD7", "MATCH (a:Person) WHERE a.age < 30 CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS b } RETURN a.name AS a, b", GQL, "social"),
+    ("BD8", "MATCH (s:Person) WHERE s.age IN [25, 28] LET x = s.name RETURN x", GQL, "social"),
+    ("BD9", "LET x = 19 FILTER x > 3 RETURN x + 3 AS y", GQL, "social"),
+    ("BD10", "FOR x IN [3, 19, 88] WITH x WHERE x > 3 RETURN x", GQL, "social"),
+    ("BD11", "MATCH (n:N) ORDER BY n.i DESC LIMIT 3 MATCH (n)<-[:NEXT]-(m) RETURN n.i AS n, m.i AS m", GQL, "chain"),
+    ("BD12", "MATCH (n:N) WHERE n.m = 3 ORDER BY n.i SKIP 700 LIMIT 2 RETURN n.i AS i", GQL, "chain"),
+]:
+    case(case_id, query, languages, fixture)
+
+# BE: nodes and edges keep their kind inside list and map values (BE1 to BE5: a list or
+#     map literal held their IDs, so `{msg: m}.msg.name` was null and RETURN gave numbers;
+#     BE3 is the shape of LDBC SNB IC7), startNode and endNode return nodes (BE6; their
+#     properties were an error), a returned path holds its nodes and edges (BE7, BE8; it
+#     held IDs, and a grouped path became the text `Path(2 nodes, 1 edges)`), and size() of
+#     a string counts characters (BE9; it counted UTF-8 bytes)
+for case_id, query, languages in [
+    ("BE1", "MATCH (a:Person {name: 'Jules'})-[r:KNOWS]->(b) WITH [a, r, b, 3] AS l RETURN l, l[0].w AS aw, l[1].w AS rw, l[2].name AS b", BOTH),
+    ("BE2", "MATCH (m:Person {name: 'Mia'})<-[r:KNOWS]-() WITH {msg: m, e: r, t: 19} AS x RETURN x, x.msg.name AS n, x.msg.w AS mw, x.e.w AS ew", BOTH),
+    ("BE3", "MATCH (a:Person)-[k:KNOWS]->(b) WITH a, b, k.w AS w ORDER BY w DESC WITH a, head(collect({msg: b, w: w})) AS latest RETURN a.name AS a, latest.msg.name AS msg, latest.msg.w AS mw, latest.w AS w", CYPHER),
+    ("BE4", "MATCH (a:Person)-[:KNOWS]->(b) WITH {p: a} AS x, count(b) AS c RETURN x, x.p.w AS w, c", BOTH),
+    ("BE5", "MATCH (a:Person)-[r:LIVES_IN]->(c) WITH collect({p: a, e: r}) AS xs UNWIND xs AS x RETURN x, x.p.name AS p, x.e.w AS w", BOTH),
+    ("BE6", "MATCH ()-[r:LIVES_IN]->() RETURN startNode(r) AS s, startNode(r).w AS sw, endNode(r).name AS e, labels(endNode(r)) AS l", BOTH),
+    ("BE7", "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:LIVES_IN]->() RETURN p", BOTH),
+    ("BE8", "MATCH p = (:Person {name: 'Jules'})-[:KNOWS]->() RETURN p, count(*) AS c", BOTH),
+    ("BE9", "MATCH (c:City) RETURN c.name AS name, size(c.name + 'ň') AS chars, size('🌷') AS tulip", BOTH),
+]:
+    case(case_id, query, languages)
+# BF: a filter reaches the scan or seek of its own variable. A target the WHERE pins by
+#     ID (BF1 to BF3, BF6, BF7; in GQL the WHERE of the node pattern, BF11 to BF17, as
+#     GQL does not read a WHERE after a MATCH that follows a WITH) or by an indexed key
+#     (BF208, BF209) starts its expand, which follows the edges back to the source;
+#     RETURN * keeps the columns in their order (BF7, BF17). A WHERE after an OPTIONAL
+#     MATCH and a WITH filters the rows: its conjunct on the earlier clauses filters them
+#     first, the one on the optional side stays above the join (BF4, BF5). Endpoints
+#     pinned by row keys are each sought (BF10). These were slower before, the rows are
+#     the same
+for case_id, query, languages in [
+    ("BF1", "MATCH (g:Person {name: 'Gus'}) WITH id(g) AS gid MATCH (src)-[r]->(tgt) WHERE id(tgt) = gid RETURN src.name AS s, r.w AS w", CYPHER),
+    ("BF2", "MATCH (g:Person {name: 'Gus'}) WITH id(g) AS gid MATCH (src)<-[r]-(tgt) WHERE id(tgt) = gid RETURN src.name AS s, type(r) AS t", CYPHER),
+    ("BF3", "MATCH (p:Person) WHERE p.name IN ['Gus', 'Mia'] WITH collect(id(p)) AS ids MATCH (src)-[r]-(tgt) WHERE id(tgt) IN ids RETURN src.name AS s, tgt.name AS t, r.w AS w", CYPHER),
+    ("BF4", "MATCH (p:Person) OPTIONAL MATCH (p)-[:LIVES_IN]->(c) WITH p, c WHERE p.age > 26 AND c IS NULL RETURN p.name AS p", BOTH),
+    ("BF5", "MATCH (p:Person) OPTIONAL MATCH (p)-[:LIVES_IN]->(c) WITH p, c WHERE c.name = 'Amsterdam' AND p.age > 20 RETURN p.name AS p, c.name AS c", BOTH),
+    ("BF6", "MATCH (g:Person {name: 'Gus'}) WITH id(g) AS gid MATCH (src)-[:KNOWS]->(tgt)-[:LIVES_IN]->(c) WHERE id(tgt) = gid RETURN src.name AS s, c.name AS c", CYPHER),
+    ("BF7", "MATCH (g:Person {name: 'Gus'}) WITH id(g) AS gid MATCH (src)-[r:KNOWS]->(tgt) WHERE id(tgt) = gid RETURN *", CYPHER),
+    ("BF10", "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) UNWIND [{src: id(a), dst: id(b)}, {src: id(b), dst: id(a)}] AS row MATCH (s), (d) WHERE id(s) = row.src AND id(d) = row.dst RETURN s.name AS s, d.name AS d", BOTH),
+    ("BF11", "MATCH (g:Person {name: 'Gus'}) WITH id(g) AS gid MATCH (src)-[r]->(tgt WHERE id(tgt) = gid) RETURN src.name AS s, r.w AS w", GQL),
+    ("BF12", "MATCH (g:Person {name: 'Gus'}) WITH id(g) AS gid MATCH (src)<-[r]-(tgt WHERE id(tgt) = gid) RETURN src.name AS s, type(r) AS t", GQL),
+    ("BF13", "MATCH (p:Person) WHERE p.name IN ['Gus', 'Mia'] WITH collect(id(p)) AS ids MATCH (src)-[r]-(tgt WHERE id(tgt) IN ids) RETURN src.name AS s, tgt.name AS t, r.w AS w", GQL),
+    ("BF16", "MATCH (g:Person {name: 'Gus'}) WITH id(g) AS gid MATCH (src)-[:KNOWS]->(tgt WHERE id(tgt) = gid)-[:LIVES_IN]->(c) RETURN src.name AS s, c.name AS c", GQL),
+    ("BF17", "MATCH (g:Person {name: 'Gus'}) WITH id(g) AS gid MATCH (src)-[r:KNOWS]->(tgt WHERE id(tgt) = gid) RETURN *", GQL),
+]:
+    case(case_id, query, languages)
+for fixture, offset in [("labels", 100), ("labels_indexed", 200)]:
+    for number, query in [
+        (8, "MATCH (src)-[h:HAS]->(g) WHERE g.id IN ['g0', 'g2', 'g7'] RETURN src.id AS s, g.id AS g, h.w AS w"),
+        (9, "UNWIND ['g1', 'r1'] AS k MATCH (src)-[h]-(g) WHERE g.id = k RETURN k, src.id AS s"),
+    ]:
+        case(f"BF{offset + number}", query, BOTH, fixture)
+# BG: Cypher translator fixes. exists() of a pattern is true when the pattern has a match
+#     for the row (BG1, BG2; it was true for every row); a pattern comprehension reads the
+#     row's variables at either end of its pattern and in its filters, and starts from a
+#     node of its own when the row binds none (BG3, BG4 failed with Undefined variable
+#     imported into CALL; BG5 matched any node at the bound end); the ORDER BY of a WITH
+#     that neither aggregates nor is DISTINCT reads its input's variables (BG6, BG7 failed
+#     with Undefined variable); a variable named like an anonymous one is the user's (BG9;
+#     it matched only self-loops); `*` takes more items after it (BG10, BG11; a syntax
+#     error); an aggregate in the ORDER BY of a projection that does not aggregate is an
+#     error (BG12 failed with Empty plan, BG13 sorted as if it were not there); after an
+#     aggregating RETURN, a key that repeats a returned expression sorts by its column
+#     (BG14 sorted as if the key were not there, BG15 failed with an internal error)
+for case_id, query, languages in [
+    ("BG1", "MATCH (p:Person) RETURN p.name AS name, exists((p)-[:LIVES_IN]->()) AS lives", CYPHER),
+    ("BG2", "MATCH (p:Person) WHERE NOT exists((p)-[:KNOWS]->(:Person {name: 'Gus'})) RETURN p.name AS name", CYPHER),
+    ("BG3", "RETURN [(a:Person)-[:LIVES_IN]->(c:City {name: 'Paris'}) | a.name] AS names", CYPHER),
+    ("BG4", "UNWIND [25, 40] AS x RETURN x, [(p:Person {age: x}) | p.name] AS names", CYPHER),
+    ("BG5", "MATCH (a:Person), (b:Person) WHERE a.name IN ['Alix', 'Jules'] AND b.name IN ['Gus', 'Mia'] RETURN a.name AS a, b.name AS b, size([(a)-[:KNOWS]->(b) | 1]) AS links", CYPHER),
+    ("BG9", "MATCH (_anon_0:Person)-[:KNOWS]->() RETURN _anon_0.name AS name", CYPHER),
+    ("BG10", "MATCH (a:Person)-[r:KNOWS]->(b) WITH *, r.since AS since RETURN a.name AS a, since", CYPHER),
+    ("BG11", "UNWIND [3, 19] AS x RETURN *, x * 2 AS y", CYPHER),
+    ("BG12", "RETURN 3 AS x ORDER BY count(*)", CYPHER),
+    ("BG13", "UNWIND [3, 19] AS x RETURN x ORDER BY count(*)", CYPHER),
+]:
+    case(case_id, query, languages)
+ordered("BG6", "MATCH (a:Person) WITH a.name AS name ORDER BY a.age RETURN name", CYPHER)
+ordered("BG7", "MATCH (a:Person) WITH a.name AS name ORDER BY a.age DESC SKIP 1 LIMIT 2 RETURN name", CYPHER)
+ordered("BG14", "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name AS who, max(b.age) AS oldest ORDER BY max(b.age), who", CYPHER)
+ordered("BG15", "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name AS who, count(*) AS c ORDER BY a.name DESC", CYPHER)
+
+# BH: grouping keys and DISTINCT use equivalence, min and max the order of ORDER BY, and
+#     UNWIND keeps its list variable. A float key kept its bits as an integer after a
+#     WITH (BH1, 1.5 became 4609434218613702656), 3 and 3.0 were two groups and two
+#     distinct values (BH3, BH6, BH11), DISTINCT took paths of one length for one path
+#     (BH4, BH5: two paths gave 1), min and max of mixed values depended on the input order
+#     and did not compare lists (BH7, BH8), and the list variable read null after UNWIND
+#     (BH9, BH10). Cypher's two-argument aggregates read their second argument (BH13, null
+#     and 0) and listagg and group_concat their separator (BH14, a space)
+for case_id, query, languages in [
+    ("BH1", "UNWIND [1.5, 1.5, 2.5] AS x WITH x, count(*) AS c RETURN x, c", BOTH),
+    ("BH2", "UNWIND [1.5, 1.5, 2.5] AS x RETURN x, count(*) AS c", BOTH),
+    ("BH3", "UNWIND [3, 3.0, 19] AS x WITH x, count(*) AS c RETURN x, c", BOTH),
+    ("BH4", "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(c) RETURN count(DISTINCT p) AS d, count(p) AS n", BOTH),
+    ("BH5", "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(c) WITH DISTINCT p RETURN count(*) AS d", BOTH),
+    ("BH6", "UNWIND [3, 3.0, 19] AS x RETURN DISTINCT x", BOTH),
+    ("BH7", "UNWIND ['a', 3, 1] AS x RETURN min(x) AS lo, max(x) AS hi", BOTH),
+    ("BH8", "UNWIND [[1, 2], [1], [0, 88]] AS x RETURN min(x) AS lo, max(x) AS hi", BOTH),
+    ("BH9", "MATCH (n:Person) WITH collect(n.name) AS names UNWIND names AS x RETURN size(names) AS s, x", BOTH),
+    ("BH10", "WITH [3, 19] AS l UNWIND l AS x RETURN l, x", CYPHER),
+    ("BH11", "RETURN 3 AS x UNION RETURN 3.0 AS x", BOTH),
+    ("BH12", "LET l = [3, 19] FOR x IN l RETURN l, x", GQL),
+    ("BH13", "MATCH (p:Person) RETURN covar_pop(p.age, p.age) AS c, regr_count(p.age, p.age) AS n", BOTH),
+    ("BH14", "UNWIND ['Alix', 'Gus'] AS n RETURN listagg(n) AS a, group_concat(n, '|') AS g, group_concat(n) AS s", BOTH),
+]:
+    case(case_id, query, languages)
+
+# BI: quantified paths. The element pattern WHERE of a quantified edge holds for each edge
+#     (BI1, BI2 with an earlier variable; there were no rows); an aggregate over a group
+#     variable is computed per path (BI3 to BI5: every internal column and a sum of 0.0,
+#     or an undefined variable); a SIMPLE path ends once back at its start (BI6; it went
+#     on); `length` reads a path a WITH passed on or an UNWIND gave, and a string (BI7 to
+#     BI9; an undefined `_path_length_` column), and an unaliased `length(p)` is named so
+#     (BI10; it was `_path_length_p`)
+for case_id, query, languages in [
+    ("BI1", "MATCH (a:Person)-[e:KNOWS WHERE e.w > 1]->{1,3}(b) RETURN a.name AS a, b.name AS b, [x IN e | x.w] AS ws", GQL),
+    ("BI2", "UNWIND [1, 3] AS lim MATCH (a:Person {name: 'Alix'})-[e:KNOWS WHERE e.w > lim]->{1,3}(b) RETURN lim, b.name AS b, [x IN e | x.w] AS ws", GQL),
+    ("BI3", "MATCH (a:Person {name: 'Alix'})-[e:KNOWS]->{1,3}(b) RETURN b.name AS b, sum(e.w) AS total, max(e.w) AS high", GQL),
+    ("BI4", "MATCH (a:Person {name: 'Alix'})-[e:KNOWS]->{1,3}(b) RETURN sum(e.w)", GQL),
+    ("BI5", "MATCH (a:Person {name: 'Alix'})-[e:KNOWS]->{1,3}(b) RETURN sum(e.w) > 4 AS long, count(*) AS paths", GQL),
+    ("BI6", "MATCH SIMPLE (a:Person {name: 'Alix'})-[:KNOWS]-{1,4}(b) RETURN b.name AS b", GQL),
+    ("BI7", "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS*1..3]->(b) WITH b, p WHERE length(p) >= 2 RETURN b.name AS b, length(p) AS len", BOTH),
+    ("BI8", "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS*1..2]->(b) WITH collect(p) AS ps UNWIND ps AS u RETURN length(u) AS len, [n IN nodes(u) | n.name] AS names", BOTH),
+    ("BI9", "UNWIND ['Amsterdam', 'Paris'] AS s RETURN s, length(s) AS len", BOTH),
+    ("BI10", "MATCH p = (a:Person {name: 'Jules'})-[:KNOWS]->(b) RETURN length(p)", BOTH),
 ]:
     case(case_id, query, languages)
 

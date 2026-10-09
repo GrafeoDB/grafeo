@@ -1,7 +1,8 @@
 //! A `LIMIT 0` (and GQL's `FINISH`) after a write cuts the rows, not the
 //! write: the write runs to its end and the clause passes no row on. A
 //! `LIMIT 0` that never read its input wrote nothing: in a `CALL` body
-//! (`FOR i IN [1, 2] CALL { INSERT (:W) FINISH }` wrote no `W`), and in a
+//! (`FOR i IN [1, 2] CALL { INSERT (:W) FINISH } RETURN count(*) AS rows`
+//! wrote no `W`, where two are right), and in a
 //! statement that goes on after it (`... CREATE (:W) WITH j LIMIT 0 RETURN
 //! j`). Only a `LIMIT 0` at the very end of a statement wrote, since the
 //! statement reads its last clause the way that reads its input once. A

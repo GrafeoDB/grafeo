@@ -5,56 +5,48 @@
 
 use std::collections::HashSet;
 
-use grafeo_common::types::{HashableValue, LogicalType, Value};
+use grafeo_common::types::{LogicalType, Value};
 
+use super::accumulator::RowKey;
 use super::{DataChunk, Operator, OperatorError, OperatorResult};
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
 
-/// A hashable row key: one `HashableValue` per column.
-type RowKey = Vec<HashableValue>;
-
-/// Extracts a hashable row key from a `DataChunk`.
-fn row_key(chunk: &DataChunk, row: usize) -> RowKey {
-    let mut key = Vec::with_capacity(chunk.num_columns());
-    for col_idx in 0..chunk.num_columns() {
-        let val = chunk
-            .column(col_idx)
-            .and_then(|col| col.get_value(row))
-            .unwrap_or(Value::Null);
-        key.push(HashableValue(val));
-    }
-    key
+/// A row of a set operation: its values, and its key, which two rows share
+/// when their values are the same values (`3` and `3.0`, see [`RowKey`]).
+#[derive(Clone)]
+struct Row {
+    key: RowKey,
+    values: Vec<Value>,
 }
 
-/// Extracts the plain Values from a row key (for chunk reconstruction).
-fn row_values(key: &RowKey) -> Vec<Value> {
-    key.iter().map(|hv| hv.0.clone()).collect()
-}
-
-/// Materializes all rows from an operator into a vector of row keys, with
-/// the column types of its chunks.
-fn materialize(op: &mut dyn Operator) -> Result<(Vec<RowKey>, Vec<LogicalType>), OperatorError> {
+/// Materializes all rows from an operator, with the column types of its
+/// chunks.
+fn materialize(op: &mut dyn Operator) -> Result<(Vec<Row>, Vec<LogicalType>), OperatorError> {
     let mut rows = Vec::new();
     let mut column_types = ColumnTypes::default();
     while let Some(chunk) = op.next()? {
         column_types.add(&chunk);
+        let columns: Vec<usize> = (0..chunk.num_columns()).collect();
         for row in chunk.selected_indices() {
-            rows.push(row_key(&chunk, row));
+            let values = RowKey::values_of(&chunk, row, &columns);
+            rows.push(Row {
+                key: RowKey::of(&values),
+                values,
+            });
         }
     }
     Ok((rows, column_types.types().to_vec()))
 }
 
-/// Rebuilds a `DataChunk` from a set of row keys, in columns of the types
-/// the rows came in.
-fn rows_to_chunk(rows: &[RowKey], schema: &[LogicalType]) -> DataChunk {
+/// Rebuilds a `DataChunk` from rows, in columns of the types the rows came
+/// in.
+fn rows_to_chunk(rows: &[Row], schema: &[LogicalType]) -> DataChunk {
     if rows.is_empty() {
         return DataChunk::empty();
     }
     let mut builder = DataChunkBuilder::new(schema);
     for row in rows {
-        let values = row_values(row);
-        for (col_idx, val) in values.into_iter().enumerate() {
+        for (col_idx, val) in row.values.iter().cloned().enumerate() {
             if let Some(col) = builder.column_mut(col_idx) {
                 col.push_value(val);
             }
@@ -71,7 +63,7 @@ pub struct ExceptOperator {
     all: bool,
     /// The column types of the left input, which the result rows come from.
     column_types: Vec<LogicalType>,
-    result: Option<Vec<RowKey>>,
+    result: Option<Vec<Row>>,
     position: usize,
 }
 
@@ -97,18 +89,18 @@ impl ExceptOperator {
             // EXCEPT ALL: for each right row, remove one matching left row
             let mut result = left_rows;
             for right_row in &right_rows {
-                if let Some(pos) = result.iter().position(|r| r == right_row) {
+                if let Some(pos) = result.iter().position(|r| r.key == right_row.key) {
                     result.remove(pos);
                 }
             }
             self.result = Some(result);
         } else {
             // EXCEPT DISTINCT: remove all matching rows
-            let right_set: HashSet<RowKey> = right_rows.into_iter().collect();
+            let right_set: HashSet<RowKey> = right_rows.into_iter().map(|row| row.key).collect();
             let mut seen = HashSet::new();
-            let result: Vec<RowKey> = left_rows
+            let result: Vec<Row> = left_rows
                 .into_iter()
-                .filter(|row| !right_set.contains(row) && seen.insert(row.clone()))
+                .filter(|row| !right_set.contains(&row.key) && seen.insert(row.key.clone()))
                 .collect();
             self.result = Some(result);
         }
@@ -162,7 +154,7 @@ pub struct IntersectOperator {
     all: bool,
     /// The column types of the left input, which the result rows come from.
     column_types: Vec<LogicalType>,
-    result: Option<Vec<RowKey>>,
+    result: Option<Vec<Row>>,
     position: usize,
 }
 
@@ -189,7 +181,7 @@ impl IntersectOperator {
             let mut remaining_right = right_rows;
             let mut result = Vec::new();
             for left_row in &left_rows {
-                if let Some(pos) = remaining_right.iter().position(|r| r == left_row) {
+                if let Some(pos) = remaining_right.iter().position(|r| r.key == left_row.key) {
                     result.push(left_row.clone());
                     remaining_right.remove(pos);
                 }
@@ -197,11 +189,11 @@ impl IntersectOperator {
             self.result = Some(result);
         } else {
             // INTERSECT DISTINCT: rows present in both, deduplicated
-            let right_set: HashSet<RowKey> = right_rows.into_iter().collect();
+            let right_set: HashSet<RowKey> = right_rows.into_iter().map(|row| row.key).collect();
             let mut seen = HashSet::new();
-            let result: Vec<RowKey> = left_rows
+            let result: Vec<Row> = left_rows
                 .into_iter()
-                .filter(|row| right_set.contains(row) && seen.insert(row.clone()))
+                .filter(|row| right_set.contains(&row.key) && seen.insert(row.key.clone()))
                 .collect();
             self.result = Some(result);
         }
@@ -525,5 +517,40 @@ mod tests {
         let op: Box<dyn Operator> =
             Box::new(OtherwiseOperator::new(Box::new(empty()), Box::new(empty())));
         assert!(op.into_any().downcast::<OtherwiseOperator>().is_ok());
+    }
+
+    /// One chunk of one column of any value per value of `values`.
+    fn values_operator(values: &[Value]) -> MockOperator {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+        for value in values {
+            builder.column_mut(0).unwrap().push_value(value.clone());
+            builder.advance_row();
+        }
+        MockOperator::new(vec![builder.finish()])
+    }
+
+    fn collect_values(op: &mut dyn Operator) -> Vec<Value> {
+        let mut result = Vec::new();
+        while let Some(chunk) = op.next().unwrap() {
+            for row in chunk.selected_indices() {
+                result.push(chunk.column(0).unwrap().get_value(row).unwrap());
+            }
+        }
+        result
+    }
+
+    /// INTERSECT and EXCEPT match rows whose values are the same values, as
+    /// DISTINCT and UNION do: `3` and `3.0` are one value, and a row keeps
+    /// its own value from the left input.
+    #[test]
+    fn set_operations_match_equivalent_values() {
+        let left = || Box::new(values_operator(&[Value::Float64(3.0), Value::Int64(19)]));
+        let right = || Box::new(values_operator(&[Value::Int64(3), Value::Float64(-0.0)]));
+        for all in [false, true] {
+            let mut intersect = IntersectOperator::new(left(), right(), all);
+            assert_eq!(collect_values(&mut intersect), [Value::Float64(3.0)]);
+            let mut except = ExceptOperator::new(left(), right(), all);
+            assert_eq!(collect_values(&mut except), [Value::Int64(19)]);
+        }
     }
 }

@@ -1,0 +1,120 @@
+# Rosetta: a path variable binds the whole path of its pattern
+#
+# ISO/IEC 39075:2024 16.7 <path pattern>: the path variable is bound to the
+# path the whole path pattern matches, every node and edge of it, for a chain
+# of edge patterns of any length (#590). Cypher's named paths bind the same.
+#
+# Setup (GQL): Alix -> Gus -> Vincent -> Mia (KNOWS, w 3, 19, 88) and the
+# shortcut Alix -> Vincent (w 38). The w of an edge names it.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Named paths over several edge patterns
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: two_hop_path_holds_both_hops
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3}]->(gus), (gus)-[:KNOWS {w: 19}]->(vincent), (vincent)-[:KNOWS {w: 88}]->(mia), (alix)-[:KNOWS {w: 38}]->(vincent)"
+    variants:
+      gql: "MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN [n IN nodes(p) | n.name] AS names, [e IN edges(p) | e.w] AS ws, length(p) AS len"
+      cypher: "MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN [n IN nodes(p) | n.name] AS names, [e IN relationships(p) | e.w] AS ws, length(p) AS len"
+    expect:
+      rows:
+        - ["[Alix, Gus, Vincent]", "[3, 19]", 2]
+        - ["[Alix, Vincent, Mia]", "[38, 88]", 2]
+        - ["[Gus, Vincent, Mia]", "[19, 88]", 2]
+
+  - name: chain_without_labels_holds_every_hop
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3}]->(gus), (gus)-[:KNOWS {w: 19}]->(vincent), (vincent)-[:KNOWS {w: 88}]->(mia), (alix)-[:KNOWS {w: 38}]->(vincent)"
+    variants:
+      gql: "MATCH p = (a)-[:KNOWS]->()-[:KNOWS]->(c) RETURN a.name, c.name, length(p) AS len, size(nodes(p)) AS n, size(edges(p)) AS e"
+      cypher: "MATCH p = (a)-[:KNOWS]->()-[:KNOWS]->(c) RETURN a.name, c.name, length(p) AS len, size(nodes(p)) AS n, size(relationships(p)) AS e"
+    expect:
+      rows:
+        - [Alix, Mia, 2, 3, 2]
+        - [Alix, Vincent, 2, 3, 2]
+        - [Gus, Mia, 2, 3, 2]
+
+  - name: three_hop_path_holds_all_three_hops
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3}]->(gus), (gus)-[:KNOWS {w: 19}]->(vincent), (vincent)-[:KNOWS {w: 88}]->(mia), (alix)-[:KNOWS {w: 38}]->(vincent)"
+    variants:
+      gql: "MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(d:Person) RETURN [n IN nodes(p) | n.name] AS names, [e IN edges(p) | e.w] AS ws"
+      cypher: "MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(d:Person) RETURN [n IN nodes(p) | n.name] AS names, [e IN relationships(p) | e.w] AS ws"
+    expect:
+      rows:
+        - ["[Alix, Gus, Vincent, Mia]", "[3, 19, 88]"]
+
+  - name: fixed_hop_then_variable_length_hop
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3}]->(gus), (gus)-[:KNOWS {w: 19}]->(vincent), (vincent)-[:KNOWS {w: 88}]->(mia), (alix)-[:KNOWS {w: 38}]->(vincent)"
+    variants:
+      gql: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->(b)-[:KNOWS]->{1,2}(c) RETURN [n IN nodes(p) | n.name] AS names, length(p) AS len"
+      cypher: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->(b)-[:KNOWS*1..2]->(c) RETURN [n IN nodes(p) | n.name] AS names, length(p) AS len"
+    expect:
+      rows:
+        - ["[Alix, Gus, Vincent, Mia]", 3]
+        - ["[Alix, Gus, Vincent]", 2]
+        - ["[Alix, Vincent, Mia]", 2]
+
+  - name: edges_of_a_two_hop_path_unwound
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3}]->(gus), (gus)-[:KNOWS {w: 19}]->(vincent), (vincent)-[:KNOWS {w: 88}]->(mia), (alix)-[:KNOWS {w: 38}]->(vincent)"
+    variants:
+      gql: "MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) UNWIND edges(p) AS r RETURN r.w AS w"
+      cypher: "MATCH p = (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) UNWIND relationships(p) AS r RETURN r.w AS w"
+    expect:
+      rows:
+        - [3]
+        - [19]
+        - [19]
+        - [38]
+        - [88]
+        - [88]
+
+  - name: filter_on_the_length_of_the_whole_path
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3}]->(gus), (gus)-[:KNOWS {w: 19}]->(vincent), (vincent)-[:KNOWS {w: 88}]->(mia), (alix)-[:KNOWS {w: 38}]->(vincent)"
+    variants:
+      gql: "MATCH p = (a:Person)-[:KNOWS]->(b)-[:KNOWS]->{1,2}(c) WHERE length(p) = 3 RETURN a.name, c.name"
+      cypher: "MATCH p = (a:Person)-[:KNOWS]->(b)-[:KNOWS*1..2]->(c) WHERE length(p) = 3 RETURN a.name, c.name"
+    expect:
+      rows:
+        - [Alix, Mia]
+
+  - name: length_of_a_path_passed_on_by_with
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3}]->(gus), (gus)-[:KNOWS {w: 19}]->(vincent), (vincent)-[:KNOWS {w: 88}]->(mia), (alix)-[:KNOWS {w: 38}]->(vincent)"
+    variants:
+      gql: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->{1,3}(b) WITH b, p WHERE length(p) >= 2 RETURN b.name AS name, length(p) AS len"
+      cypher: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS*1..3]->(b) WITH b, p WHERE length(p) >= 2 RETURN b.name AS name, length(p) AS len"
+    expect:
+      rows:
+        - [Mia, 2]
+        - [Mia, 3]
+        - [Vincent, 2]
+
+  - name: length_and_edges_of_an_unwound_path
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3}]->(gus), (gus)-[:KNOWS {w: 19}]->(vincent), (vincent)-[:KNOWS {w: 88}]->(mia), (alix)-[:KNOWS {w: 38}]->(vincent)"
+    variants:
+      gql: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->{1,2}(b) WHERE b.name <> 'Vincent' WITH collect(p) AS ps UNWIND ps AS u RETURN length(u) AS len, [r IN edges(u) | r.w] AS ws"
+      cypher: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS*1..2]->(b) WHERE b.name <> 'Vincent' WITH collect(p) AS ps UNWIND ps AS u RETURN length(u) AS len, [r IN relationships(u) | r.w] AS ws"
+    expect:
+      rows:
+        - [1, "[3]"]
+        - [2, "[38, 88]"]
+
+  - name: length_of_a_string_variable
+    variants:
+      gql: "UNWIND ['Amsterdam', 'Paris'] AS s RETURN s, length(s) AS len"
+      cypher: "UNWIND ['Amsterdam', 'Paris'] AS s RETURN s, length(s) AS len"
+    expect:
+      rows:
+        - [Amsterdam, 9]
+        - [Paris, 5]

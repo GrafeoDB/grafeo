@@ -303,11 +303,130 @@ pub(crate) fn has_all_labels(variable: &str, labels: &[String]) -> Option<Logica
 }
 
 // ---------------------------------------------------------------------------
+// Whole paths of path patterns
+// ---------------------------------------------------------------------------
+
+/// One hop of a path pattern as a translator binds it: the edge it takes and
+/// the node it reaches.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+#[derive(Debug, Clone)]
+pub(crate) struct PathHop {
+    /// The variable of the edge (of a single-hop edge pattern).
+    pub edge: String,
+    /// The variable of the node the hop ends at.
+    pub target: String,
+    /// For a variable-length edge pattern, the path alias of its expand: the
+    /// `_path_nodes_` and `_path_edges_` columns of that alias hold the
+    /// nodes and edges of the hop, and `edge` is not read.
+    pub segment: Option<String>,
+}
+
+/// The ids of the nodes of the path that starts at `source` and takes `hops`,
+/// as one list. A hop that is missing (a questioned edge, `->?`, that
+/// matched nothing) has a null edge and node, whose ids are no value: a list
+/// leaves them out, so the path leaves the hop out.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+fn path_node_ids(source: &str, hops: &[PathHop]) -> LogicalExpression {
+    let mut parts = vec![LogicalExpression::List(vec![LogicalExpression::Id(
+        source.to_string(),
+    )])];
+    for hop in hops {
+        parts.push(match &hop.segment {
+            // The first node of a segment is the last node of the hop before
+            Some(segment) => LogicalExpression::FunctionCall {
+                name: "tail".into(),
+                args: vec![LogicalExpression::Variable(format!(
+                    "_path_nodes_{segment}"
+                ))],
+                distinct: false,
+            },
+            None => LogicalExpression::List(vec![LogicalExpression::Id(hop.target.clone())]),
+        });
+    }
+    concatenation(parts)
+}
+
+/// The ids of the edges of the path that takes `hops`, as one list (a
+/// missing hop left out, see [`path_node_ids`]).
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn path_edge_ids(hops: &[PathHop]) -> LogicalExpression {
+    concatenation(
+        hops.iter()
+            .map(|hop| match &hop.segment {
+                Some(segment) => LogicalExpression::Variable(format!("_path_edges_{segment}")),
+                None => LogicalExpression::List(vec![LogicalExpression::Id(hop.edge.clone())]),
+            })
+            .collect(),
+    )
+}
+
+/// The lists `parts` joined into one (`a + b + ...`).
+#[cfg(any(feature = "gql", feature = "cypher"))]
+fn concatenation(parts: Vec<LogicalExpression>) -> LogicalExpression {
+    parts
+        .into_iter()
+        .reduce(|left, right| LogicalExpression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::Add,
+            right: Box::new(right),
+        })
+        .unwrap_or(LogicalExpression::List(Vec::new()))
+}
+
+/// The path that starts at `source` and takes `hops`, as one path value.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn whole_path(source: &str, hops: &[PathHop]) -> LogicalExpression {
+    LogicalExpression::FunctionCall {
+        name: "path".into(),
+        args: vec![path_node_ids(source, hops), path_edge_ids(hops)],
+        distinct: false,
+    }
+}
+
+/// Binds the path variable `alias` to the whole path of a path pattern with
+/// more than one edge pattern, which starts at `source` and takes `hops`: the
+/// columns `length(p)`, `nodes(p)` and `edges(p)` read (`_path_length_p` and
+/// so on) and the path value itself. An expand binds a path for its own edge
+/// pattern only (ISO/IEC 39075:2024 16.7: a path variable binds the path of
+/// the whole path pattern).
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn bind_whole_path(
+    plan: LogicalOperator,
+    alias: &str,
+    source: &str,
+    hops: &[PathHop],
+) -> LogicalOperator {
+    let projection = |expression: LogicalExpression, name: String| crate::query::plan::Projection {
+        expression,
+        alias: Some(name),
+    };
+    LogicalOperator::Project(crate::query::plan::ProjectOp {
+        projections: vec![
+            projection(path_node_ids(source, hops), format!("_path_nodes_{alias}")),
+            projection(path_edge_ids(hops), format!("_path_edges_{alias}")),
+            projection(
+                LogicalExpression::FunctionCall {
+                    name: "size".into(),
+                    args: vec![path_edge_ids(hops)],
+                    distinct: false,
+                },
+                format!("_path_length_{alias}"),
+            ),
+            projection(whole_path(source, hops), alias.to_string()),
+        ],
+        input: Box::new(plan),
+        pass_through_input: true,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Variable extraction
 // ---------------------------------------------------------------------------
 
-/// `all(hop IN edges(path) WHERE predicate)`: a property map on a
-/// variable-length edge must hold for every edge of the path.
+/// `all(hop IN edges(path) WHERE predicate)`: a property map or an element
+/// pattern `WHERE` on a variable-length edge must hold for every edge of the
+/// path. `hop` may be the edge pattern's own variable: inside the predicate it
+/// is then the one edge, not the list of the path's edges.
 pub(crate) fn every_edge_matches(
     path: String,
     hop: String,
@@ -325,23 +444,35 @@ pub(crate) fn every_edge_matches(
     }
 }
 
-/// Collects all variable names referenced by a logical expression.
-/// Dotted access `base.key` into a map value (`n.meta.route`), for the GQL and
-/// Cypher translators.
+/// Dotted access `base.key` into a map value (`n.meta.route`), or into a node
+/// or edge that is not a pattern variable (`startNode(r).name`,
+/// `head(rs).w`, `x.msg.id` of `{msg: m}`), for the GQL and Cypher
+/// translators.
 ///
 /// # Errors
 ///
-/// Returns an error when `base` cannot be a map. A node or edge that a
-/// function returns (`startNode(r)`, `head(collect(n))`) is an entity ID at
-/// runtime, so reading a key from it would give null without saying why.
+/// Returns an error when `base` can be neither a map nor a node or edge (a
+/// number, a string), or reads an aggregate (`head(collect(n)).name`, whose
+/// aggregate the translators do not take out of a key read), so the read
+/// would give null without saying why.
 pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalExpression> {
+    if calls_an_aggregate(&base) {
+        let base = crate::query::planner::common::expression_to_string(&base);
+        return Err(Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            format!(
+                "{base} reads an aggregate, so .{key} cannot read from it in the same clause: \
+                 name it first (WITH {base} AS x) and read x.{key}"
+            ),
+        )));
+    }
     if !can_be_map(&base) {
         let base = crate::query::planner::common::expression_to_string(&base);
         return Err(Error::Query(QueryError::new(
             QueryErrorKind::Semantic,
             format!(
-                "{base} is not a map value, so .{key} cannot read from it: read .{key} of a node \
-                 or edge bound to a variable in the pattern, or of a map value"
+                "{base} is not a map value, a node or an edge, so .{key} cannot read from it: \
+                 read .{key} of a node, an edge or a map value"
             ),
         )));
     }
@@ -351,9 +482,11 @@ pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalEx
     })
 }
 
-/// Whether an expression can evaluate to a map: a variable, a parameter, a
-/// property, a map literal or projection, `properties(...)`, or a key or
-/// element of one of those (or of a list literal).
+/// Whether an expression can evaluate to a map, a node or an edge: a
+/// variable, a parameter, a property, a map literal or projection,
+/// `properties(...)`, `startNode(r)` and `endNode(r)`, the first or last item
+/// of a list (`head`, `last`), or a key or element of one of those (or of a
+/// list literal, or of a list of nodes or edges such as `nodes(p)`).
 fn can_be_map(expr: &LogicalExpression) -> bool {
     match expr {
         LogicalExpression::Variable(_)
@@ -363,9 +496,48 @@ fn can_be_map(expr: &LogicalExpression) -> bool {
         | LogicalExpression::MapProjection { .. }
         | LogicalExpression::MapAccess { .. } => true,
         LogicalExpression::IndexAccess { base, .. } => {
-            matches!(**base, LogicalExpression::List(_)) || can_be_map(base)
+            matches!(**base, LogicalExpression::List(_)) || can_be_list(base) || can_be_map(base)
         }
-        LogicalExpression::FunctionCall { name, .. } => name.eq_ignore_ascii_case("properties"),
+        LogicalExpression::FunctionCall { name, .. } => [
+            "properties",
+            "startnode",
+            "start_node",
+            "endnode",
+            "end_node",
+            "head",
+            "last",
+        ]
+        .iter()
+        .any(|function| name.eq_ignore_ascii_case(function)),
+        _ => false,
+    }
+}
+
+/// Whether an expression is a function that returns a list whose items can
+/// be maps, nodes or edges (`nodes(p)`, `relationships(p)`, and `tail` or
+/// `reverse` of a list).
+fn can_be_list(expr: &LogicalExpression) -> bool {
+    match expr {
+        LogicalExpression::FunctionCall { name, .. } => {
+            ["nodes", "relationships", "edges", "tail", "reverse"]
+                .iter()
+                .any(|function| name.eq_ignore_ascii_case(function))
+        }
+        _ => false,
+    }
+}
+
+/// Whether an expression calls an aggregate function in a function argument,
+/// an index or a key read (`head(collect(n))`, `collect(n)[0]`).
+fn calls_an_aggregate(expr: &LogicalExpression) -> bool {
+    match expr {
+        LogicalExpression::FunctionCall { name, args, .. } => {
+            is_aggregate_function(name) || args.iter().any(calls_an_aggregate)
+        }
+        LogicalExpression::IndexAccess { base, index } => {
+            calls_an_aggregate(base) || calls_an_aggregate(index)
+        }
+        LogicalExpression::MapAccess { base, .. } => calls_an_aggregate(base),
         _ => false,
     }
 }
@@ -523,30 +695,36 @@ fn split_conjuncts_recursive(expr: LogicalExpression, out: &mut Vec<LogicalExpre
 
 /// Result of classifying WHERE predicates for OPTIONAL MATCH.
 ///
-/// Predicates are split based on which side of the LeftJoin their variables
-/// belong to, ensuring correct NULL-preservation semantics.
+/// The WHERE of an OPTIONAL MATCH is part of its pattern (ISO GQL,
+/// openCypher): it decides which matches count and never removes a row of the
+/// clauses before it, so each conjunct goes into the optional side or into
+/// the join condition.
 pub(crate) struct ClassifiedPredicates {
-    /// Predicates referencing only left-side variables (or constants): placed
-    /// as a Filter above the LeftJoin (they filter the required side).
+    /// Conjuncts with an `EXISTS`, `COUNT` or value subquery or a pattern
+    /// comprehension that read no variable only the optional side binds (see
+    /// [`classify_optional_predicates`]): a Filter above the LeftJoin.
     pub post_filters: Vec<LogicalExpression>,
-    /// Predicates whose referenced variables all exist on the right side:
-    /// pushed as a pre-filter on the right input of the LeftJoin.
+    /// Conjuncts that read no variable only the left side binds (the optional
+    /// side's own variables, the variables both sides share, or none): a
+    /// filter on the right input of the LeftJoin.
     pub right_filters: Vec<LogicalExpression>,
-    /// Predicates referencing variables from both sides: stored as null-safe
-    /// join conditions. Applied as `(right_var IS NULL) OR predicate` so that
-    /// NULL-padded rows (unmatched optional side) are preserved.
+    /// Conjuncts that read a variable only the left side binds: conditions
+    /// of the LeftJoin, which reads the joined row (a left row none of whose
+    /// pairs pass them keeps nulls).
     pub cross_filters: Vec<LogicalExpression>,
 }
 
-/// Classifies WHERE predicates for correct OPTIONAL MATCH semantics.
+/// Classifies the conjuncts of the WHERE of an OPTIONAL MATCH by the
+/// variables they read: `left_vars` are those of the rows the OPTIONAL MATCH
+/// goes on from, `right_vars` those of its pattern (see
+/// [`ClassifiedPredicates`]).
 ///
-/// Given a predicate and the set of variables produced by the left (required)
-/// and right (optional) sides of a LeftJoin, splits the predicate into:
-///
-/// - **post_filters**: reference only left-side variables, safe to apply after the join
-/// - **right_filters**: reference only right-side variables, can be pushed as a
-///   pre-filter on the right input (semantically equivalent to a join condition)
-/// - **cross_filters**: reference both sides, must be applied as a join condition
+/// A conjunct with a subquery or pattern comprehension keeps the placement it
+/// had before: [`collect_expression_variables`] does not see what the
+/// subquery reads, so it cannot be placed by its variables, and the join
+/// condition cannot run a subquery. One that reads a variable only the
+/// optional side binds is a right filter, any other one stays a filter above
+/// the join.
 pub(crate) fn classify_optional_predicates(
     predicate: LogicalExpression,
     left_vars: &HashSet<String>,
@@ -561,33 +739,31 @@ pub(crate) fn classify_optional_predicates(
         let mut referenced = HashSet::new();
         collect_expression_variables(&conjunct, &mut referenced);
 
-        // A predicate is a right-filter only if it references at least one
-        // right-ONLY variable (a variable produced exclusively by the optional
-        // side, not shared with the required side). Predicates on shared
-        // variables alone (e.g., `n.city = 'NYC'` where `n` is the join key)
-        // must remain as post-filters because they constrain the required side.
         let has_right_only_var = referenced
             .iter()
             .any(|v| right_vars.contains(v) && !left_vars.contains(v));
         let has_left_only_var = referenced
             .iter()
             .any(|v| left_vars.contains(v) && !right_vars.contains(v));
-        let all_in_right = referenced.iter().all(|v| right_vars.contains(v));
 
-        if referenced.is_empty() {
-            // Constant predicate: post-filter
-            post_filters.push(conjunct);
-        } else if has_right_only_var && all_in_right {
-            // References at least one right-only variable, and all referenced
-            // variables exist on the right side: push as pre-filter on right input.
-            right_filters.push(conjunct);
-        } else if has_left_only_var && has_right_only_var {
-            // True cross-side: references at least one left-only AND one right-only
-            // variable. Store for null-safe join condition wrapping.
+        if has_subquery(&conjunct) {
+            let all_in_right = referenced.iter().all(|v| right_vars.contains(v));
+            if has_right_only_var && all_in_right {
+                right_filters.push(conjunct);
+            } else if has_left_only_var && has_right_only_var {
+                cross_filters.push(conjunct);
+            } else {
+                post_filters.push(conjunct);
+            }
+        } else if has_left_only_var {
+            // `p.id IN xs`, `forum.id = x`, `x = 3`: the joined row has the
+            // left side's value
             cross_filters.push(conjunct);
         } else {
-            // Left-only or shared-only: post-filter above the join.
-            post_filters.push(conjunct);
+            // `p.name = 'Gus'`, a condition on a variable both sides share
+            // (`f.id = 3`, the optional side's `f` is the same node), or a
+            // constant (`3 = 19`): a filter on the optional side's matches
+            right_filters.push(conjunct);
         }
     }
 
@@ -595,6 +771,76 @@ pub(crate) fn classify_optional_predicates(
         post_filters,
         right_filters,
         cross_filters,
+    }
+}
+
+/// Whether `expr` has an `EXISTS`, `COUNT` or value subquery or a pattern
+/// comprehension, whose plan may read variables of the row that
+/// [`collect_expression_variables`] does not list.
+fn has_subquery(expr: &LogicalExpression) -> bool {
+    match expr {
+        LogicalExpression::ExistsSubquery(_)
+        | LogicalExpression::CountSubquery(_)
+        | LogicalExpression::ValueSubquery(_)
+        | LogicalExpression::PatternComprehension { .. } => true,
+        LogicalExpression::Literal(_)
+        | LogicalExpression::Variable(_)
+        | LogicalExpression::Property { .. }
+        | LogicalExpression::Parameter(_)
+        | LogicalExpression::Labels(_)
+        | LogicalExpression::Type(_)
+        | LogicalExpression::Id(_) => false,
+        LogicalExpression::Binary { left, right, .. } => has_subquery(left) || has_subquery(right),
+        LogicalExpression::Unary { operand, .. } => has_subquery(operand),
+        LogicalExpression::FunctionCall { args: items, .. } | LogicalExpression::List(items) => {
+            items.iter().any(has_subquery)
+        }
+        LogicalExpression::Map(pairs) => pairs.iter().any(|(_, value)| has_subquery(value)),
+        LogicalExpression::IndexAccess { base, index } => has_subquery(base) || has_subquery(index),
+        LogicalExpression::MapAccess { base, .. } => has_subquery(base),
+        LogicalExpression::SliceAccess { base, start, end } => {
+            has_subquery(base)
+                || start.as_deref().is_some_and(has_subquery)
+                || end.as_deref().is_some_and(has_subquery)
+        }
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand.as_deref().is_some_and(has_subquery)
+                || when_clauses
+                    .iter()
+                    .any(|(condition, result)| has_subquery(condition) || has_subquery(result))
+                || else_clause.as_deref().is_some_and(has_subquery)
+        }
+        LogicalExpression::ListComprehension {
+            list_expr,
+            filter_expr,
+            map_expr,
+            ..
+        } => {
+            has_subquery(list_expr)
+                || filter_expr.as_deref().is_some_and(has_subquery)
+                || has_subquery(map_expr)
+        }
+        LogicalExpression::ListPredicate {
+            list_expr,
+            predicate,
+            ..
+        } => has_subquery(list_expr) || has_subquery(predicate),
+        LogicalExpression::MapProjection { entries, .. } => entries.iter().any(|entry| {
+            matches!(
+                entry,
+                crate::query::plan::MapProjectionEntry::LiteralEntry(_, value) if has_subquery(value)
+            )
+        }),
+        LogicalExpression::Reduce {
+            initial,
+            list,
+            expression,
+            ..
+        } => has_subquery(initial) || has_subquery(list) || has_subquery(expression),
     }
 }
 
@@ -767,26 +1013,52 @@ pub(crate) fn comma_part_reads_earlier_rows(
 }
 
 /// Adds the variables the filters of `op`, and of every operator below it,
-/// read.
+/// read: the edge conditions of shortest-path searches included.
 #[cfg(any(feature = "gql", feature = "cypher"))]
 fn collect_filter_reads(op: &LogicalOperator, read: &mut HashSet<String>) {
-    if let LogicalOperator::Filter(filter) = op {
-        collect_expression_variables(&filter.predicate, read);
+    match op {
+        LogicalOperator::Filter(filter) => collect_expression_variables(&filter.predicate, read),
+        LogicalOperator::ShortestPath(path) => {
+            if let Some(condition) = &path.edge_condition {
+                collect_expression_variables(&condition.predicate, read);
+            }
+        }
+        _ => {}
     }
     for child in op.children() {
         collect_filter_reads(child, read);
     }
 }
 
+/// The variables the rows of `rows`, a side of the left join of an OPTIONAL
+/// MATCH, hold (see [`LogicalOperator::bound_variables`]): a `WITH` holds
+/// only what it projects, so a name it dropped that the OPTIONAL MATCH binds
+/// again is the optional part's own (LDBC IC5's `WITH forum, collect(friend)
+/// AS friends OPTIONAL MATCH (friend)<-...`), a subquery's import holds the
+/// variables it imports (`imports` for `WITH *`), and a shortest path holds
+/// its ends and its path. Where they are not known here, every variable bound
+/// below `rows`.
+fn row_variables(rows: &LogicalOperator, imports: Option<&HashSet<String>>) -> HashSet<String> {
+    rows.bound_variables(imports).unwrap_or_else(|| {
+        let mut vars = HashSet::new();
+        collect_operator_variables(rows, &mut vars);
+        vars
+    })
+}
+
 /// The left join of an OPTIONAL MATCH: `right` matched for each row of
 /// `left`, with nulls where it has no match. A filter in `right` that reads a
-/// variable only `left` binds (GQL's `(c WHERE c.age > a.age)`) is a condition
-/// of the join: it decides which matches count, so it moves there.
-pub(crate) fn optional_join(left: LogicalOperator, right: LogicalOperator) -> LogicalOperator {
-    let mut left_vars = HashSet::new();
-    collect_operator_variables(&left, &mut left_vars);
-    let mut right_vars = HashSet::new();
-    collect_operator_variables(&right, &mut right_vars);
+/// variable only `left` binds (GQL's `(c WHERE c.age > a.age)`, or a property
+/// map that reads an imported value) is a condition of the join: it decides
+/// which matches count, so it moves there. `imports` is what a subquery's
+/// `WITH *` imports (see [`row_variables`]).
+pub(crate) fn optional_join(
+    left: LogicalOperator,
+    right: LogicalOperator,
+    imports: Option<&HashSet<String>>,
+) -> LogicalOperator {
+    let left_vars = row_variables(&left, imports);
+    let right_vars = row_variables(&right, imports);
     let mut moved = Vec::new();
     let right = take_left_reading_filters(right, &left_vars, &right_vars, &mut moved);
     LogicalOperator::LeftJoin(LeftJoinOp {
@@ -847,6 +1119,18 @@ fn take_left_reading_filters(
             });
             LogicalOperator::NodeScan(scan)
         }
+        // A shortest path from a node whose property map reads an earlier
+        // value (`shortestPath((a {id: x})-[*]->(b))`) searches from every
+        // candidate; the condition keeps the paths of the row's own.
+        LogicalOperator::ShortestPath(mut path) => {
+            path.input = Box::new(take_left_reading_filters(
+                *path.input,
+                left_vars,
+                right_vars,
+                moved,
+            ));
+            LogicalOperator::ShortestPath(path)
+        }
         // The patterns of a comma list each have their filters.
         LogicalOperator::Join(mut join) => {
             join.left = Box::new(take_left_reading_filters(
@@ -895,15 +1179,19 @@ fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression
 ///
 /// Given a WHERE predicate that follows an OPTIONAL MATCH (whose join is
 /// `left_join`), this function:
-/// 1. Collects variables from both sides
-/// 2. Classifies predicates into left-only, right-only, and cross-side
-/// 3. Pushes right-only predicates as a Filter on the right input
-/// 4. Adds cross-side predicates to `LeftJoinOp.condition`, which decides
-///    which pairs of rows are matches (a left row without one keeps nulls)
+/// 1. Collects the variables the rows of each side hold (`imports` is what a
+///    subquery's `WITH *` imports, see [`row_variables`])
+/// 2. Classifies the conjuncts (see [`classify_optional_predicates`])
+/// 3. Pushes those that read no left-only variable as a Filter on the right
+///    input
+/// 4. Adds those that read a left-only variable to `LeftJoinOp.condition`,
+///    which decides which pairs of rows are matches (a left row without one
+///    keeps nulls)
 /// 5. Returns the LeftJoin and any remaining post-filters to apply above
 pub(crate) fn build_left_join_with_predicates(
     left_join: LeftJoinOp,
     predicate: Option<LogicalExpression>,
+    imports: Option<&HashSet<String>>,
 ) -> (LogicalOperator, Option<LogicalExpression>) {
     let LeftJoinOp {
         left,
@@ -921,10 +1209,8 @@ pub(crate) fn build_left_join_with_predicates(
     };
 
     // Collect variables from each side
-    let mut left_vars = HashSet::new();
-    collect_operator_variables(&left, &mut left_vars);
-    let mut right_vars = HashSet::new();
-    collect_operator_variables(&right, &mut right_vars);
+    let left_vars = row_variables(&left, imports);
+    let right_vars = row_variables(&right, imports);
 
     // Classify
     let classified = classify_optional_predicates(predicate, &left_vars, &right_vars);
@@ -1700,13 +1986,37 @@ mod tests {
             property: "age".into(),
         };
 
+        // A condition on the rows before the OPTIONAL MATCH decides which
+        // matches count: a join condition, never a filter of those rows
         let result = classify_optional_predicates(pred, &left_vars, &right_vars);
         assert_eq!(
-            result.post_filters.len(),
+            result.cross_filters.len(),
             1,
-            "left-only should be post-filter"
+            "left-only should be a join condition"
         );
+        assert!(result.post_filters.is_empty());
         assert!(result.right_filters.is_empty());
+    }
+
+    #[test]
+    fn classify_shared_only_and_constant_predicates_as_right() {
+        let left_vars: HashSet<String> = ["n".into()].into_iter().collect();
+        let right_vars: HashSet<String> = ["n".into(), "m".into()].into_iter().collect();
+        let shared = LogicalExpression::Property {
+            variable: "n".into(),
+            property: "active".into(),
+        };
+        let constant = LogicalExpression::Literal(Value::Bool(false));
+        let combined = LogicalExpression::Binary {
+            left: Box::new(shared),
+            op: BinaryOp::And,
+            right: Box::new(constant),
+        };
+
+        let result = classify_optional_predicates(combined, &left_vars, &right_vars);
+        assert_eq!(result.right_filters.len(), 2, "both filter the matches");
+        assert!(result.post_filters.is_empty());
+        assert!(result.cross_filters.is_empty());
     }
 
     #[test]

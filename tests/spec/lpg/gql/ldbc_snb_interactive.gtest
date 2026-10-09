@@ -5,8 +5,8 @@
 # queries (Grafeo's GQL accepts WITH and UNWIND) and use GQL forms where they differ: quantifiers (`-{1,2}`),
 # ANY SHORTEST and ALL SHORTEST, EXISTS subqueries for pattern predicates, CAST, `month()` and `day()`, `edges(p)`,
 # no chained comparisons, `IS NULL` instead of `CASE x WHEN null`, and `lk` for the LIKES variable (LIKE is a
-# reserved word in GQL). An update whose reference query continues after CREATE runs here as several statements,
-# since GQL accepts no clause after INSERT yet (#483).
+# reserved word in GQL). An update whose reference query continues after CREATE does so here too, with INSERT and
+# FOR in place of CREATE and UNWIND.
 #
 # Dataset: ldbc_snb_mini, a small slice of the LDBC SNB Interactive v1 test data, every value copied unchanged (see
 # its .setup file). The parameters are chosen from that slice; IC13 also uses the LDBC parameter pair (Gary Hill,
@@ -50,7 +50,6 @@ tests:
 
   # IS2. Recent messages of a person.
   - name: is2_recent_messages_of_a_person
-    skip: "GQL rejects ORDER BY and LIMIT after WITH"
     params:
       personId: 228
     query: |
@@ -198,7 +197,6 @@ tests:
 
   # IC1. Transitive friends with certain name.
   - name: ic1_transitive_friends_with_a_name_maria
-    skip: "GQL rejects ORDER BY and LIMIT after WITH; then a list-valued grouping key next to collect() becomes 0 (friendUniversities)"
     params:
       personId: 228
       firstName: "Maria"
@@ -250,7 +248,6 @@ tests:
 
   # IC1. Transitive friends with certain name.
   - name: ic1_transitive_friends_with_a_name_john
-    skip: "GQL rejects ORDER BY and LIMIT after WITH; then a list-valued grouping key next to collect() becomes 0 (friendUniversities)"
     params:
       personId: 228
       firstName: "John"
@@ -345,7 +342,6 @@ tests:
 
   # IC3. Friends and friends of friends that have been to given countries.
   - name: ic3_friends_in_countries_x_and_y
-    skip: "GQL rejects LIMIT after WITH, and a WHERE on a MATCH that follows WITH (#483); then the comma MATCH with country IN [countryX, countryY] returns no rows"
     params:
       personId: 228
       countryXName: "Uruguay"
@@ -424,7 +420,6 @@ tests:
 
   # IC5. New groups.
   - name: ic5_new_groups
-    skip: "GQL rejects a WHERE on a MATCH that follows WITH (#483); then OPTIONAL MATCH ... WHERE friend IN friends loses the forums without a match"
     params:
       personId: 228
       minDate: 1275350400000
@@ -467,7 +462,6 @@ tests:
 
   # IC6. Tag co-occurrence.
   - name: ic6_tag_co_occurrence
-    skip: "GQL rejects a WHERE on a MATCH that follows WITH (#483); then the comma MATCH with {id: knownTagId} returns no rows"
     params:
       personId: 228
       tagName: "Luis_Horna"
@@ -499,7 +493,6 @@ tests:
 
   # IC7. Recent likers.
   - name: ic7_recent_likers
-    skip: "GQL rejects ORDER BY after WITH; then a node stored in a map loses its kind (latestLike.msg.id is null)"
     params:
       personId: 228
     query: |
@@ -558,7 +551,6 @@ tests:
 
   # IC9. Recent messages by friends or friends of friends.
   - name: ic9_recent_messages_by_friends_of_friends
-    skip: "GQL rejects a WHERE on a MATCH that follows WITH (#483)"
     params:
       personId: 228
       maxDate: 1285891200000
@@ -606,7 +598,7 @@ tests:
 
   # IC10. Friend recommendation.
   - name: ic10_friend_recommendation
-    skip: "#543: EXISTS with a two-hop pattern in a list comprehension fails with Unsupported EXISTS subquery pattern; then datetime({epochMillis: ...}) returns null"
+    skip: "#543: EXISTS with a two-hop pattern in a list comprehension fails with Unsupported EXISTS subquery pattern"
     params:
       personId: 228
       month: 7
@@ -641,7 +633,6 @@ tests:
 
   # IC11. Job referral.
   - name: ic11_job_referral
-    skip: "GQL rejects a WHERE on a MATCH that follows WITH (#483)"
     params:
       personId: 228
       countryName: "Philippines"
@@ -671,7 +662,6 @@ tests:
 
   # IC12. Expert search.
   - name: ic12_expert_search_office_holder
-    skip: "GQL rejects a WHERE on a MATCH that follows WITH (#483)"
     params:
       personId: 228
       tagClassName: "OfficeHolder"
@@ -701,7 +691,6 @@ tests:
 
   # IC12. Expert search.
   - name: ic12_expert_search_tennis_player
-    skip: "GQL rejects a WHERE on a MATCH that follows WITH (#483)"
     params:
       personId: 228
       tagClassName: "TennisPlayer"
@@ -731,7 +720,6 @@ tests:
 
   # IC13. Single shortest path.
   - name: ic13_single_shortest_path_ldbc_pair
-    skip: "#318: path IS NULL is true for an ANY SHORTEST path, so the query returns -1"
     params:
       person1Id: 8796093022357
       person2Id: 8796093022390
@@ -747,7 +735,6 @@ tests:
 
   # IC13. Single shortest path.
   - name: ic13_single_shortest_path_three_hops
-    skip: "#318: path IS NULL is true for an ANY SHORTEST path, so the query returns -1"
     params:
       person1Id: 228
       person2Id: 41
@@ -828,21 +815,18 @@ tests:
             languages: ['en'],
             email: ['Isabel10995116277976@gmx.com', 'Isabel10995116277976@yahoo.com', 'Isabel10995116277976@zoho.com']
           })-[:IS_LOCATED_IN]->(c)
-      - |
-        MATCH (p:Person {id: $personId})
+        WITH p, count(*) AS dummy1
         FOR tagId IN [26]
-        MATCH (t:Tag {id: tagId})
-        INSERT (p)-[:HAS_INTEREST]->(t)
-      - |
-        MATCH (p:Person {id: $personId})
+          MATCH (t:Tag {id: tagId})
+          INSERT (p)-[:HAS_INTEREST]->(t)
+        WITH p, count(*) AS dummy2
         FOR s IN [[5522, 2003]]
-        MATCH (u:Organisation {id: s[0]})
-        INSERT (p)-[:STUDY_AT {classYear: s[1]}]->(u)
-      - |
-        MATCH (p:Person {id: $personId})
+          MATCH (u:Organisation {id: s[0]})
+          INSERT (p)-[:STUDY_AT {classYear: s[1]}]->(u)
+        WITH p, count(*) AS dummy3
         FOR w IN [[965, 2004], [955, 2005], [957, 2004]]
-        MATCH (comp:Organisation {id: w[0]})
-        INSERT (p)-[:WORKS_AT {workFrom: w[1]}]->(comp)
+          MATCH (comp:Organisation {id: w[0]})
+          INSERT (p)-[:WORKS_AT {workFrom: w[1]}]->(comp)
       - |
         MATCH (p:Person {id: 10995116277976})-[:IS_LOCATED_IN]->(c:City)
         RETURN p.firstName, p.lastName, p.gender, p.birthday, p.browserUsed, p.languages, p.email, c.name
@@ -877,21 +861,18 @@ tests:
             languages: ['en'],
             email: ['Isabel10995116277976@gmx.com', 'Isabel10995116277976@yahoo.com', 'Isabel10995116277976@zoho.com']
           })-[:IS_LOCATED_IN]->(c)
-      - |
-        MATCH (p:Person {id: $personId})
+        WITH p, count(*) AS dummy1
         FOR tagId IN [26]
-        MATCH (t:Tag {id: tagId})
-        INSERT (p)-[:HAS_INTEREST]->(t)
-      - |
-        MATCH (p:Person {id: $personId})
+          MATCH (t:Tag {id: tagId})
+          INSERT (p)-[:HAS_INTEREST]->(t)
+        WITH p, count(*) AS dummy2
         FOR s IN [[5522, 2003]]
-        MATCH (u:Organisation {id: s[0]})
-        INSERT (p)-[:STUDY_AT {classYear: s[1]}]->(u)
-      - |
-        MATCH (p:Person {id: $personId})
+          MATCH (u:Organisation {id: s[0]})
+          INSERT (p)-[:STUDY_AT {classYear: s[1]}]->(u)
+        WITH p, count(*) AS dummy3
         FOR w IN [[965, 2004], [955, 2005], [957, 2004]]
-        MATCH (comp:Organisation {id: w[0]})
-        INSERT (p)-[:WORKS_AT {workFrom: w[1]}]->(comp)
+          MATCH (comp:Organisation {id: w[0]})
+          INSERT (p)-[:WORKS_AT {workFrom: w[1]}]->(comp)
       - |
         MATCH (p:Person {id: 10995116277976})-[r]->(x)
         RETURN type(r), x.id, coalesce(r.classYear, r.workFrom)
@@ -948,11 +929,10 @@ tests:
       - |
         MATCH (p:Person {id: $moderatorPersonId})
         INSERT (f:Forum {id: $forumId, title: $forumTitle, creationDate: $creationDate})-[:HAS_MODERATOR]->(p)
-      - |
-        MATCH (f:Forum {id: $forumId})
+        WITH f
         FOR tagId IN [1410]
-        MATCH (t:Tag {id: tagId})
-        INSERT (f)-[:HAS_TAG]->(t)
+          MATCH (t:Tag {id: tagId})
+          INSERT (f)-[:HAS_TAG]->(t)
       - |
         MATCH (x)-[r]->(y) WHERE x.id = 343597384372 OR y.id = 343597384372 RETURN x.id, type(r), y.id
     expect:
@@ -1004,11 +984,10 @@ tests:
             imageFile: CASE $imageFile WHEN '' THEN NULL ELSE $imageFile END,
             length: $length
           })<-[:CONTAINER_OF]-(forum), (p)-[:IS_LOCATED_IN]->(country)
-      - |
-        MATCH (p:Post {id: $postId})
+        WITH p
         FOR tagId IN [1538]
-        MATCH (t:Tag {id: tagId})
-        INSERT (p)-[:HAS_TAG]->(t)
+          MATCH (t:Tag {id: tagId})
+          INSERT (p)-[:HAS_TAG]->(t)
       - |
         MATCH (x)-[r]->(y) WHERE x.id = 412316868991 OR y.id = 412316868991 RETURN x.id, type(r), y.id
     expect:
@@ -1045,11 +1024,10 @@ tests:
             imageFile: CASE $imageFile WHEN '' THEN NULL ELSE $imageFile END,
             length: $length
           })<-[:CONTAINER_OF]-(forum), (p)-[:IS_LOCATED_IN]->(country)
-      - |
-        MATCH (p:Post {id: $postId})
+        WITH p
         FOR tagId IN [1538]
-        MATCH (t:Tag {id: tagId})
-        INSERT (p)-[:HAS_TAG]->(t)
+          MATCH (t:Tag {id: tagId})
+          INSERT (p)-[:HAS_TAG]->(t)
       - |
         MATCH (p:Post:Message {id: 412316868991}) RETURN p.content, p.imageFile, p.language, p.length, p.browserUsed
     expect:
@@ -1103,11 +1081,10 @@ tests:
             length: $length
           })-[:REPLY_OF]->(message),
           (c)-[:IS_LOCATED_IN]->(country)
-      - |
-        MATCH (c:Comment {id: $commentId})
+        WITH c
         FOR tagId IN [3075]
-        MATCH (t:Tag {id: tagId})
-        INSERT (c)-[:HAS_TAG]->(t)
+          MATCH (t:Tag {id: tagId})
+          INSERT (c)-[:HAS_TAG]->(t)
       - |
         MATCH (x)-[r]->(y) WHERE x.id = 412316868996 OR y.id = 412316868996 RETURN x.id, type(r), y.id
     expect:

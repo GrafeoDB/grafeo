@@ -64,6 +64,25 @@ pub(crate) fn choose_seek<'a>(
     by_property
 }
 
+/// Whether `conjunct` pins `variable` to the nodes a key selects: `id(v) = e`,
+/// or `v.p = e` with `p` indexed, or the `IN` form of either, where `e` reads
+/// only `input` (the variables of the rows the scan of `v` runs for, none
+/// for a scan without input), parameters and literals, through functions a
+/// seek evaluates (see [`value_variables`]). The planner then looks the nodes
+/// up instead of scanning: a seek (see [`choose_seek`]), or for a constant
+/// property key of a scan without input the index lookup while planning.
+pub(crate) fn pins(
+    conjunct: &LogicalExpression,
+    variable: &str,
+    has_index: impl Fn(&str) -> bool,
+    input: &HashSet<String>,
+) -> bool {
+    seek_of(conjunct, variable, &has_index).is_some_and(|choice| {
+        value_variables(choice.value)
+            .is_some_and(|variables| !variables.contains(variable) && variables.is_subset(input))
+    })
+}
+
 /// The node scan a filter's seek replaces, with the filters between them.
 pub(crate) struct CheckedScan<'a> {
     /// The scan below the filter.

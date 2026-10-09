@@ -6,11 +6,8 @@
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
+use crate::query::limits::{Chain, Nesting, nesting_error_message};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind, Result};
-
-/// Maximum nesting depth for recursive parsing constructs (parenthesized
-/// expressions, CASE, EXISTS subqueries, list literals, function calls).
-const MAX_NESTING_DEPTH: u32 = 128;
 
 /// Cypher query parser.
 pub struct Parser<'a> {
@@ -18,8 +15,10 @@ pub struct Parser<'a> {
     current: Token,
     previous: Token,
     source: &'a str,
-    /// Current nesting depth for recursive parsing constructs.
-    nesting_depth: u32,
+    /// How deep the statement parsed so far nests (see
+    /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)).
+    /// Saved and restored with the lexer where the parser backtracks.
+    nesting: Nesting,
 }
 
 impl<'a> Parser<'a> {
@@ -37,24 +36,54 @@ impl<'a> Parser<'a> {
             current,
             previous,
             source: query,
-            nesting_depth: 0,
+            nesting: Nesting::default(),
         }
     }
 
-    /// Increments the nesting depth and returns an error if the limit is exceeded.
+    /// Enters one level of nesting, or fails past the nesting limit.
     fn enter_nesting(&mut self) -> Result<()> {
-        self.nesting_depth += 1;
-        if self.nesting_depth > MAX_NESTING_DEPTH {
-            return Err(self.error(&format!(
-                "Maximum nesting depth of {MAX_NESTING_DEPTH} exceeded"
-            )));
+        if self.nesting.enter() {
+            Ok(())
+        } else {
+            Err(self.error(&nesting_error_message()))
         }
-        Ok(())
     }
 
-    /// Decrements the nesting depth.
+    /// Leaves the level [`Self::enter_nesting`] entered.
     fn exit_nesting(&mut self) {
-        self.nesting_depth = self.nesting_depth.saturating_sub(1);
+        self.nesting.exit();
+    }
+
+    /// Enters a subquery, which nests two levels: translating and planning
+    /// one takes more stack than an expression in parentheses.
+    fn enter_subquery(&mut self) -> Result<()> {
+        self.enter_nesting()?;
+        self.enter_nesting()
+    }
+
+    /// Leaves the levels [`Self::enter_subquery`] entered.
+    fn exit_subquery(&mut self) {
+        self.exit_nesting();
+        self.exit_nesting();
+    }
+
+    /// Begins a chain of binary operators (see [`Nesting::begin_chain`]).
+    fn begin_chain(&mut self) -> Chain {
+        self.nesting.begin_chain()
+    }
+
+    /// Counts one operator of a chain, or fails past the nesting limit.
+    fn link_chain(&mut self) -> Result<()> {
+        if self.nesting.link() {
+            Ok(())
+        } else {
+            Err(self.error(&nesting_error_message()))
+        }
+    }
+
+    /// Ends a chain of binary operators.
+    fn end_chain(&mut self, chain: Chain) {
+        self.nesting.end_chain(chain);
     }
 
     /// Parses the query into a statement.
@@ -275,7 +304,7 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect(TokenKind::LBrace)?;
-        self.enter_nesting()?;
+        self.enter_subquery()?;
         let query = self.parse_subquery_body()?;
         let mut unions = Vec::new();
         let mut union_all = None;
@@ -283,7 +312,7 @@ impl<'a> Parser<'a> {
             self.parse_union_keyword(&mut union_all)?;
             unions.push(self.parse_subquery_body()?);
         }
-        self.exit_nesting();
+        self.exit_subquery();
         self.expect(TokenKind::RBrace)?;
         Ok(Clause::CallSubquery {
             query,
@@ -425,7 +454,11 @@ impl<'a> Parser<'a> {
                     if self.can_be_identifier()
                         && self.get_identifier_text().to_uppercase() == "FOREACH"
                     {
-                        clauses.push(Clause::ForEach(self.parse_foreach_clause()?));
+                        // A nested FOREACH nests as a subquery: it plans as one.
+                        self.enter_subquery()?;
+                        let inner = self.parse_foreach_clause()?;
+                        self.exit_subquery();
+                        clauses.push(Clause::ForEach(inner));
                     } else {
                         return Err(self.error("Expected mutation clause in FOREACH"));
                     }
@@ -594,7 +627,8 @@ impl<'a> Parser<'a> {
             false
         };
 
-        // Check for WITH *
+        // `WITH *`, which more items may follow (openCypher 9 grammar,
+        // ProjectionItems: `*, a.name AS name`)
         let is_wildcard = if self.current.kind == TokenKind::Star {
             self.advance();
             true
@@ -602,10 +636,13 @@ impl<'a> Parser<'a> {
             false
         };
 
-        let items = if is_wildcard {
-            Vec::new()
-        } else {
+        let items = if !is_wildcard {
             self.parse_projection_items()?
+        } else if self.current.kind == TokenKind::Comma {
+            self.advance();
+            self.parse_projection_items()?
+        } else {
+            Vec::new()
         };
 
         let where_clause = if self.current.kind == TokenKind::Where {
@@ -633,9 +670,15 @@ impl<'a> Parser<'a> {
             false
         };
 
+        // `RETURN *`, which more items may follow, as after WITH
         let items = if self.current.kind == TokenKind::Star {
             self.advance();
-            ReturnItems::All
+            if self.current.kind == TokenKind::Comma {
+                self.advance();
+                ReturnItems::AllAnd(self.parse_projection_items()?)
+            } else {
+                ReturnItems::All
+            }
         } else {
             ReturnItems::Explicit(self.parse_projection_items()?)
         };
@@ -1204,49 +1247,64 @@ impl<'a> Parser<'a> {
     }
 
     // Expression parsing with precedence climbing
+
+    /// Parses an expression, which nests one level in the expression,
+    /// list, call or clause it is part of.
     fn parse_expression(&mut self) -> Result<Expression> {
-        self.parse_or_expression()
+        self.enter_nesting()?;
+        let expression = self.parse_or_expression()?;
+        self.exit_nesting();
+        Ok(expression)
     }
 
     fn parse_or_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_xor_expression()?;
         while self.current.kind == TokenKind::Or {
             self.advance();
             let right = self.parse_xor_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op: BinaryOp::Or,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
         Ok(left)
     }
 
     fn parse_xor_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_and_expression()?;
         while self.current.kind == TokenKind::Xor {
             self.advance();
             let right = self.parse_and_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op: BinaryOp::Xor,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
         Ok(left)
     }
 
     fn parse_and_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_not_expression()?;
         while self.current.kind == TokenKind::And {
             self.advance();
             let right = self.parse_not_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op: BinaryOp::And,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
         Ok(left)
     }
 
@@ -1266,22 +1324,60 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses comparisons and the string, list and null predicates. A chain
+    /// of comparisons is the conjunction of its comparisons (openCypher 9,
+    /// "Comparison operators"): `a < b <= c` is `a < b AND b <= c`, which does
+    /// not compare `a` with `c`.
     fn parse_comparison_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
+        let expression = self.parse_comparison_chain()?;
+        self.end_chain(chain);
+        Ok(expression)
+    }
+
+    /// The operands and operators of a chain of comparisons, each operator
+    /// nesting one level (see [`Self::parse_comparison_expression`]).
+    fn parse_comparison_chain(&mut self) -> Result<Expression> {
         let mut left = self.parse_additive_expression()?;
+        // The right operand of the comparison `left` ends with, kept when the
+        // next operator is a comparison too, which compares it again.
+        let mut chained_operand: Option<Expression> = None;
 
         loop {
+            if let Some(op) = comparison_op(self.current.kind) {
+                self.advance();
+                let right = self.parse_additive_expression()?;
+                let middle = chained_operand.take();
+                if comparison_op(self.current.kind).is_some() {
+                    chained_operand = Some(right.clone());
+                }
+                left = match middle {
+                    // `a < b <= c` reads `a < b AND b <= c`.
+                    Some(middle) => Expression::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::And,
+                        right: Box::new(Expression::Binary {
+                            left: Box::new(middle),
+                            op,
+                            right: Box::new(right),
+                        }),
+                    },
+                    None => Expression::Binary {
+                        left: Box::new(left),
+                        op,
+                        right: Box::new(right),
+                    },
+                };
+                continue;
+            }
+
             let op = match self.current.kind {
-                TokenKind::Eq => BinaryOp::Eq,
-                TokenKind::Ne => BinaryOp::Ne,
-                TokenKind::Lt => BinaryOp::Lt,
-                TokenKind::Le => BinaryOp::Le,
-                TokenKind::Gt => BinaryOp::Gt,
-                TokenKind::Ge => BinaryOp::Ge,
                 TokenKind::In => BinaryOp::In,
                 TokenKind::Starts => {
                     self.advance();
                     self.expect(TokenKind::With)?;
                     let right = self.parse_additive_expression()?;
+                    self.link_chain()?;
                     left = Expression::Binary {
                         left: Box::new(left),
                         op: BinaryOp::StartsWith,
@@ -1293,6 +1389,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.expect(TokenKind::With)?;
                     let right = self.parse_additive_expression()?;
+                    self.link_chain()?;
                     left = Expression::Binary {
                         left: Box::new(left),
                         op: BinaryOp::EndsWith,
@@ -1303,6 +1400,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Contains => {
                     self.advance();
                     let right = self.parse_additive_expression()?;
+                    self.link_chain()?;
                     left = Expression::Binary {
                         left: Box::new(left),
                         op: BinaryOp::Contains,
@@ -1318,6 +1416,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                     }
                     self.expect(TokenKind::Null)?;
+                    self.link_chain()?;
                     left = Expression::Unary {
                         op: if not {
                             UnaryOp::IsNotNull
@@ -1333,6 +1432,7 @@ impl<'a> Parser<'a> {
 
             self.advance();
             let right = self.parse_additive_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op,
@@ -1344,6 +1444,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_additive_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_multiplicative_expression()?;
 
         loop {
@@ -1355,17 +1456,20 @@ impl<'a> Parser<'a> {
 
             self.advance();
             let right = self.parse_multiplicative_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
 
         Ok(left)
     }
 
     fn parse_multiplicative_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_power_expression()?;
 
         loop {
@@ -1378,12 +1482,14 @@ impl<'a> Parser<'a> {
 
             self.advance();
             let right = self.parse_power_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
 
         Ok(left)
     }
@@ -1452,13 +1558,34 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_postfix_expression(&mut self) -> Result<Expression> {
-        let mut expr = self.parse_primary_expression()?;
+        // Each property access, subscript and label check nests one level.
+        let chain = self.begin_chain();
+        // Parentheses, lists and maps go around the primary expression's
+        // parser: its frame is large, and each level of a deeply nested
+        // expression would keep one on the stack.
+        // A call (a function, or a form such as reduce or a list predicate)
+        // nests one level more than its arguments: it is parsed in that
+        // large frame.
+        let call = self.can_be_identifier() && self.peek_kind() == TokenKind::LParen;
+        let mut expr = match self.current.kind {
+            TokenKind::LParen => self.parse_parenthesized_expression()?,
+            TokenKind::LBracket => self.parse_list_expression()?,
+            TokenKind::LBrace => self.parse_map_literal()?,
+            _ if call => {
+                self.enter_nesting()?;
+                let call = self.parse_primary_expression();
+                self.exit_nesting();
+                call?
+            }
+            _ => self.parse_primary_expression()?,
+        };
 
         loop {
             match self.current.kind {
                 TokenKind::Dot => {
                     self.advance();
                     let property = self.expect_identifier()?;
+                    self.link_chain()?;
                     expr = Expression::PropertyAccess {
                         base: Box::new(expr),
                         property,
@@ -1466,6 +1593,7 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::LBracket => {
                     self.advance();
+                    self.link_chain()?;
                     // Detect slice: [start..end], [start..], [..end], [..]
                     if self.current.kind == TokenKind::DotDot {
                         // [..end] or [..]
@@ -1515,6 +1643,7 @@ impl<'a> Parser<'a> {
                     while self.current.kind == TokenKind::Colon {
                         self.advance();
                         let label = self.expect_identifier()?;
+                        self.link_chain()?;
                         let check = Expression::FunctionCall {
                             name: "hasLabel".to_string(),
                             distinct: false,
@@ -1536,8 +1665,171 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
+        self.end_chain(chain);
 
         Ok(expr)
+    }
+
+    /// Parses `( ... )` at the start of an expression. A pattern with a
+    /// relationship, `(d)-[:T]->()`, is a pattern predicate: true when it has
+    /// a match, like EXISTS { MATCH (d)-[:T]->() }. Anything else in
+    /// parentheses, including a lone `(n)`, is an expression, which nests one
+    /// level deeper.
+    fn parse_parenthesized_expression(&mut self) -> Result<Expression> {
+        let saved = (
+            self.lexer.clone(),
+            self.current.clone(),
+            self.previous.clone(),
+            self.nesting,
+        );
+        if let Ok(pattern @ Pattern::Path(_)) = self.parse_pattern() {
+            return Ok(Expression::Exists(Box::new(Query {
+                clauses: vec![Clause::Match(MatchClause {
+                    patterns: vec![pattern],
+                    span: None,
+                })],
+                span: None,
+            })));
+        }
+        (self.lexer, self.current, self.previous, self.nesting) = saved;
+
+        self.expect(TokenKind::LParen)?;
+        let expr = self.parse_expression()?;
+        self.expect(TokenKind::RParen)?;
+        Ok(expr)
+    }
+
+    /// Parses a list literal, a list comprehension or a pattern
+    /// comprehension, from its `[`: each element nests one level deeper.
+    fn parse_list_expression(&mut self) -> Result<Expression> {
+        self.expect(TokenKind::LBracket)?;
+
+        // Detect pattern comprehension: [(pattern) WHERE pred | expr]
+        // A pattern starts with `(`, while list elements starting with `(`
+        // are parenthesized expressions. We use backtracking to distinguish.
+        if self.current.kind == TokenKind::LParen {
+            let saved = (
+                self.lexer.clone(),
+                self.current.clone(),
+                self.previous.clone(),
+                self.nesting,
+            );
+            if let Ok(pattern) = self.parse_pattern() {
+                let where_clause = if self.current.kind == TokenKind::Where {
+                    self.advance();
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                if self.current.kind == TokenKind::Pipe {
+                    self.advance();
+                    let projection = self.parse_expression()?;
+                    self.expect(TokenKind::RBracket)?;
+                    return Ok(Expression::PatternComprehension {
+                        pattern: Box::new(pattern),
+                        where_clause,
+                        projection: Box::new(projection),
+                    });
+                }
+            }
+            // Not a pattern comprehension, restore and continue
+            (self.lexer, self.current, self.previous, self.nesting) = saved;
+        }
+
+        // Detect list comprehension: [var IN list WHERE pred | expr]
+        if self.can_be_identifier() && self.peek_kind() == TokenKind::In {
+            let variable = self.get_identifier_text();
+            self.advance(); // consume variable
+            self.advance(); // consume IN
+            let list = self.parse_expression()?;
+
+            let filter = if self.current.kind == TokenKind::Where {
+                self.advance();
+                Some(Box::new(self.parse_expression()?))
+            } else {
+                None
+            };
+
+            let projection = if self.current.kind == TokenKind::Pipe {
+                self.advance();
+                Some(Box::new(self.parse_expression()?))
+            } else {
+                None
+            };
+
+            self.expect(TokenKind::RBracket)?;
+            return Ok(Expression::ListComprehension {
+                variable,
+                list: Box::new(list),
+                filter,
+                projection,
+            });
+        }
+
+        // List literal
+        let mut items = Vec::new();
+        if self.current.kind != TokenKind::RBracket {
+            items.push(self.parse_expression()?);
+            while self.current.kind == TokenKind::Comma {
+                self.advance();
+                items.push(self.parse_expression()?);
+            }
+        }
+        self.expect(TokenKind::RBracket)?;
+        Ok(Expression::List(items))
+    }
+
+    /// Parses the arguments of a call of the function `name`, from its `(`.
+    fn parse_function_call(&mut self, name: String) -> Result<Expression> {
+        self.expect(TokenKind::LParen)?;
+        let distinct = if self.current.kind == TokenKind::Distinct {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        let mut args = Vec::new();
+        // Handle count(*) special case
+        if self.current.kind == TokenKind::Star {
+            self.advance();
+            args.push(Expression::Variable("*".to_string()));
+        } else if self.current.kind != TokenKind::RParen {
+            args.push(self.parse_expression()?);
+            while self.current.kind == TokenKind::Comma {
+                self.advance();
+                args.push(self.parse_expression()?);
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+
+        Ok(Expression::FunctionCall {
+            name,
+            distinct,
+            args,
+        })
+    }
+
+    /// Parses a map literal, from its `{`: each value nests one level deeper.
+    fn parse_map_literal(&mut self) -> Result<Expression> {
+        self.expect(TokenKind::LBrace)?;
+        let mut pairs = Vec::new();
+        if self.current.kind != TokenKind::RBrace {
+            let key = self.expect_identifier()?;
+            self.expect(TokenKind::Colon)?;
+            let value = self.parse_expression()?;
+            pairs.push((key, value));
+
+            while self.current.kind == TokenKind::Comma {
+                self.advance();
+                let key = self.expect_identifier()?;
+                self.expect(TokenKind::Colon)?;
+                let value = self.parse_expression()?;
+                pairs.push((key, value));
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Expression::Map(pairs))
     }
 
     fn parse_primary_expression(&mut self) -> Result<Expression> {
@@ -1669,21 +1961,21 @@ impl<'a> Parser<'a> {
 
                 // EXISTS { MATCH ... WHERE ... } subquery form
                 if lower == "exists" && self.current.kind == TokenKind::LBrace {
-                    self.enter_nesting()?;
+                    self.enter_subquery()?;
                     self.advance(); // consume {
                     let inner_query = self.parse_exists_inner_query()?;
                     self.expect(TokenKind::RBrace)?;
-                    self.exit_nesting();
+                    self.exit_subquery();
                     return Ok(Expression::Exists(Box::new(inner_query)));
                 }
 
                 // COUNT { MATCH ... WHERE ... } subquery form
                 if lower == "count" && self.current.kind == TokenKind::LBrace {
-                    self.enter_nesting()?;
+                    self.enter_subquery()?;
                     self.advance(); // consume {
                     let inner_query = self.parse_exists_inner_query()?;
                     self.expect(TokenKind::RBrace)?;
-                    self.exit_nesting();
+                    self.exit_subquery();
                     return Ok(Expression::CountSubquery(Box::new(inner_query)));
                 }
 
@@ -1773,168 +2065,17 @@ impl<'a> Parser<'a> {
                     (self.lexer, self.current, self.previous) = saved;
                 }
 
-                // Check if function call
+                // Check if function call (its extra level of nesting is
+                // counted where the postfix expression starts)
                 if self.current.kind == TokenKind::LParen {
-                    self.advance();
-                    let distinct = if self.current.kind == TokenKind::Distinct {
-                        self.advance();
-                        true
-                    } else {
-                        false
-                    };
-
-                    let mut args = Vec::new();
-                    // Handle count(*) special case
-                    if self.current.kind == TokenKind::Star {
-                        self.advance();
-                        args.push(Expression::Variable("*".to_string()));
-                    } else if self.current.kind != TokenKind::RParen {
-                        args.push(self.parse_expression()?);
-                        while self.current.kind == TokenKind::Comma {
-                            self.advance();
-                            args.push(self.parse_expression()?);
-                        }
-                    }
-                    self.expect(TokenKind::RParen)?;
-
-                    Ok(Expression::FunctionCall {
-                        name,
-                        distinct,
-                        args,
-                    })
+                    self.parse_function_call(name)
                 } else {
                     Ok(Expression::Variable(name))
                 }
             }
-            TokenKind::LParen => {
-                // A pattern with a relationship, `(d)-[:T]->()`, is a pattern
-                // predicate: true when it has a match, like
-                // EXISTS { MATCH (d)-[:T]->() }. Anything else in parentheses,
-                // including a lone `(n)`, is a parenthesized expression.
-                let saved = (
-                    self.lexer.clone(),
-                    self.current.clone(),
-                    self.previous.clone(),
-                );
-                if let Ok(pattern @ Pattern::Path(_)) = self.parse_pattern() {
-                    return Ok(Expression::Exists(Box::new(Query {
-                        clauses: vec![Clause::Match(MatchClause {
-                            patterns: vec![pattern],
-                            span: None,
-                        })],
-                        span: None,
-                    })));
-                }
-                (self.lexer, self.current, self.previous) = saved;
-
-                self.enter_nesting()?;
-                self.advance();
-                let expr = self.parse_expression()?;
-                self.expect(TokenKind::RParen)?;
-                self.exit_nesting();
-                Ok(expr)
-            }
-            TokenKind::LBracket => {
-                self.enter_nesting()?;
-                self.advance();
-
-                // Detect pattern comprehension: [(pattern) WHERE pred | expr]
-                // A pattern starts with `(`, while list elements starting with `(`
-                // are parenthesized expressions. We use backtracking to distinguish.
-                if self.current.kind == TokenKind::LParen {
-                    let saved = (
-                        self.lexer.clone(),
-                        self.current.clone(),
-                        self.previous.clone(),
-                    );
-                    if let Ok(pattern) = self.parse_pattern() {
-                        let where_clause = if self.current.kind == TokenKind::Where {
-                            self.advance();
-                            Some(Box::new(self.parse_expression()?))
-                        } else {
-                            None
-                        };
-                        if self.current.kind == TokenKind::Pipe {
-                            self.advance();
-                            let projection = self.parse_expression()?;
-                            self.expect(TokenKind::RBracket)?;
-                            self.exit_nesting();
-                            return Ok(Expression::PatternComprehension {
-                                pattern: Box::new(pattern),
-                                where_clause,
-                                projection: Box::new(projection),
-                            });
-                        }
-                    }
-                    // Not a pattern comprehension, restore and continue
-                    (self.lexer, self.current, self.previous) = saved;
-                }
-
-                // Detect list comprehension: [var IN list WHERE pred | expr]
-                if self.can_be_identifier() && self.peek_kind() == TokenKind::In {
-                    let variable = self.get_identifier_text();
-                    self.advance(); // consume variable
-                    self.advance(); // consume IN
-                    let list = self.parse_expression()?;
-
-                    let filter = if self.current.kind == TokenKind::Where {
-                        self.advance();
-                        Some(Box::new(self.parse_expression()?))
-                    } else {
-                        None
-                    };
-
-                    let projection = if self.current.kind == TokenKind::Pipe {
-                        self.advance();
-                        Some(Box::new(self.parse_expression()?))
-                    } else {
-                        None
-                    };
-
-                    self.expect(TokenKind::RBracket)?;
-                    self.exit_nesting();
-                    return Ok(Expression::ListComprehension {
-                        variable,
-                        list: Box::new(list),
-                        filter,
-                        projection,
-                    });
-                }
-
-                // List literal
-                let mut items = Vec::new();
-                if self.current.kind != TokenKind::RBracket {
-                    items.push(self.parse_expression()?);
-                    while self.current.kind == TokenKind::Comma {
-                        self.advance();
-                        items.push(self.parse_expression()?);
-                    }
-                }
-                self.expect(TokenKind::RBracket)?;
-                self.exit_nesting();
-                Ok(Expression::List(items))
-            }
-            TokenKind::LBrace => {
-                // Map literal
-                self.advance();
-                let mut pairs = Vec::new();
-                if self.current.kind != TokenKind::RBrace {
-                    let key = self.expect_identifier()?;
-                    self.expect(TokenKind::Colon)?;
-                    let value = self.parse_expression()?;
-                    pairs.push((key, value));
-
-                    while self.current.kind == TokenKind::Comma {
-                        self.advance();
-                        let key = self.expect_identifier()?;
-                        self.expect(TokenKind::Colon)?;
-                        let value = self.parse_expression()?;
-                        pairs.push((key, value));
-                    }
-                }
-                self.expect(TokenKind::RBrace)?;
-                Ok(Expression::Map(pairs))
-            }
+            TokenKind::LParen => self.parse_parenthesized_expression(),
+            TokenKind::LBracket => self.parse_list_expression(),
+            TokenKind::LBrace => self.parse_map_literal(),
             TokenKind::Case => {
                 self.advance();
                 self.parse_case_expression()
@@ -2687,6 +2828,20 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The comparison a token stands for (`=`, `<>`, `<`, `<=`, `>`, `>=`): the
+/// operators a chain of comparisons links.
+fn comparison_op(kind: TokenKind) -> Option<BinaryOp> {
+    match kind {
+        TokenKind::Eq => Some(BinaryOp::Eq),
+        TokenKind::Ne => Some(BinaryOp::Ne),
+        TokenKind::Lt => Some(BinaryOp::Lt),
+        TokenKind::Le => Some(BinaryOp::Le),
+        TokenKind::Gt => Some(BinaryOp::Gt),
+        TokenKind::Ge => Some(BinaryOp::Ge),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3069,6 +3224,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_chain_of_comparisons_parses_as_the_conjunction_of_its_comparisons() {
+        let stmt = parse_ok("MATCH (n) WHERE 3 < n.age <= 19 > n.min RETURN n");
+        let Statement::Query(Query { clauses, .. }) = stmt else {
+            panic!("expected a query");
+        };
+        let Clause::Where(WhereClause { predicate, .. }) = &clauses[1] else {
+            panic!("expected a WHERE clause, got {:?}", clauses[1]);
+        };
+        // (3 < n.age AND n.age <= 19) AND 19 > n.min
+        let Expression::Binary {
+            left: first_two,
+            op: BinaryOp::And,
+            right: last,
+        } = predicate
+        else {
+            panic!("expected a conjunction, got {predicate:?}");
+        };
+        let Expression::Binary {
+            left: first,
+            op: BinaryOp::And,
+            right: second,
+        } = first_two.as_ref()
+        else {
+            panic!("expected a conjunction, got {first_two:?}");
+        };
+        let is_age = |expression: &Expression| matches!(expression, Expression::PropertyAccess { property, .. } if property == "age");
+        assert!(
+            matches!(first.as_ref(), Expression::Binary { op: BinaryOp::Lt, right, .. } if is_age(right)),
+            "3 < n.age: {first:?}"
+        );
+        assert!(
+            matches!(second.as_ref(), Expression::Binary { op: BinaryOp::Le, left, .. } if is_age(left)),
+            "n.age <= 19: {second:?}"
+        );
+        assert!(
+            matches!(
+                last.as_ref(),
+                Expression::Binary {
+                    op: BinaryOp::Gt,
+                    left,
+                    ..
+                } if matches!(left.as_ref(), Expression::Literal(Literal::Integer(19)))
+            ),
+            "19 > n.min: {last:?}"
+        );
+    }
+
     // ==================== RETURN Clause Tests ====================
 
     #[test]
@@ -3079,6 +3282,41 @@ mod tests {
         {
             assert!(matches!(items, ReturnItems::All));
         }
+    }
+
+    /// `*` takes more items after it (openCypher 9 grammar, ProjectionItems),
+    /// in RETURN and in WITH; `*` after an item does not.
+    #[test]
+    fn star_followed_by_more_items() {
+        let Statement::Query(Query { clauses, .. }) =
+            parse_ok("MATCH (a)-[r]->(c) RETURN *, r.years AS y, c")
+        else {
+            panic!("expected a query");
+        };
+        let Clause::Return(ReturnClause {
+            items: ReturnItems::AllAnd(items),
+            ..
+        }) = &clauses[1]
+        else {
+            panic!("expected RETURN *, ...: {:?}", clauses[1]);
+        };
+        let aliases: Vec<Option<&str>> = items.iter().map(|item| item.alias.as_deref()).collect();
+        assert_eq!(aliases, [Some("y"), None]);
+
+        let Statement::Query(Query { clauses, .. }) =
+            parse_ok("MATCH (a)-[r]->(c) WITH *, r.years AS y RETURN y")
+        else {
+            panic!("expected a query");
+        };
+        let Clause::With(with) = &clauses[1] else {
+            panic!("expected WITH: {:?}", clauses[1]);
+        };
+        assert!(with.is_wildcard);
+        assert_eq!(with.items.len(), 1);
+        assert_eq!(with.items[0].alias.as_deref(), Some("y"));
+
+        parse_err("MATCH (a) RETURN a, *");
+        parse_err("MATCH (a) RETURN *, ");
     }
 
     #[test]

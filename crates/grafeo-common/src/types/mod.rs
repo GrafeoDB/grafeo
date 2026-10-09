@@ -14,6 +14,7 @@ pub mod hlc;
 mod id;
 mod logical_type;
 mod property_map;
+mod temporal_component;
 mod time;
 mod timestamp;
 mod validity;

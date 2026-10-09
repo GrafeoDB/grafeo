@@ -1,0 +1,64 @@
+# Rosetta: GQL ANY and the distinct endpoints of a Cypher pattern
+#
+# GQL `MATCH ANY` keeps one path for each pair of endpoints (ISO/IEC
+# 39075:2024 16.6), so its endpoints are those a Cypher variable-length
+# pattern reaches, each pair once: `RETURN DISTINCT` over them. (It kept one
+# row in total.) The edge pattern's WHERE holds for every edge before ANY
+# selects, as `all(x IN e WHERE ...)` does for each Cypher path.
+#
+# Setup (GQL): Alix, Gus, Vincent, Mia and Jules with KNOWS edges named by
+# their w: Alix->Gus 3, Alix->Vincent 19, Gus->Mia 88, Vincent->Mia 38,
+# Gus->Vincent 33, Mia->Jules 83.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: ANY paths cross-language equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: any_reaches_each_target_once
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    variants:
+      gql: "MATCH ANY (a:Person {name: 'Alix'})-[:KNOWS]->{1,3}(b) RETURN b.name AS b"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS*1..3]->(b) RETURN DISTINCT b.name AS b"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+        - [Mia]
+        - [Jules]
+
+  - name: any_keeps_each_pair_of_endpoints_once
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    variants:
+      gql: "MATCH ANY (a:Person)-[:KNOWS]->{1,3}(b) RETURN a.name AS a, b.name AS b"
+      cypher: "MATCH (a:Person)-[:KNOWS*1..3]->(b) RETURN DISTINCT a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Alix, Vincent]
+        - [Alix, Mia]
+        - [Alix, Jules]
+        - [Gus, Vincent]
+        - [Gus, Mia]
+        - [Gus, Jules]
+        - [Vincent, Mia]
+        - [Vincent, Jules]
+        - [Mia, Jules]
+
+  - name: an_edge_where_holds_for_every_edge_before_any_selects
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    variants:
+      gql: "MATCH ANY (a:Person {name: 'Alix'})-[e:KNOWS WHERE e.w > 10]->{1,3}(b) RETURN b.name AS b"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[e:KNOWS*1..3]->(b) WHERE all(x IN e WHERE x.w > 10) RETURN DISTINCT b.name AS b"
+    expect:
+      rows:
+        - [Vincent]
+        - [Mia]
+        - [Jules]

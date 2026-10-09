@@ -1,0 +1,164 @@
+# Rosetta: a property map filters every element of a pattern
+#
+# A property map `{k: v}` on an element pattern is a predicate on that element
+# (ISO/IEC 39075:2024 16.7 <path pattern expression>, <element property
+# specification>; SQL/PGQ, ISO/IEC 9075-16:2023, takes its element patterns
+# from GQL), wherever the element stands: the first node, a later node, an
+# edge, or the end of a variable-length edge. On a variable-length edge the map
+# holds for every edge of the walk. SQL/PGQ used to apply the map of the first
+# node only.
+#
+# Setup (GQL): Alix knows Gus (since 3) and Vincent (since 19); Gus knows Mia
+# (since 3); Vincent knows Jules (since 88); Mia knows Jules (since 3).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Property maps on every element of a pattern
+  dataset: empty
+  requires: [cypher, sql-pgq]
+
+tests:
+
+  - name: map_on_the_second_node
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', city: 'Amsterdam'}), (gus:Person {name: 'Gus', city: 'Berlin'}), (vincent:Person {name: 'Vincent', city: 'Paris'}), (mia:Person {name: 'Mia', city: 'Prague'}), (jules:Person {name: 'Jules', city: 'Amsterdam'}), (alix)-[:KNOWS {since: 3}]->(gus), (alix)-[:KNOWS {since: 19}]->(vincent), (gus)-[:KNOWS {since: 3}]->(mia), (vincent)-[:KNOWS {since: 88}]->(jules), (mia)-[:KNOWS {since: 3}]->(jules)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b:Person {name: 'Gus'}) RETURN b.name"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b:Person {name: 'Gus'}) RETURN b.name"
+      sql-pgq: |
+        SELECT name FROM GRAPH_TABLE (
+          MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b:Person {name: 'Gus'})
+          COLUMNS (b.name AS name)
+        )
+    expect:
+      rows:
+        - [Gus]
+
+  - name: map_on_an_anonymous_later_node
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', city: 'Amsterdam'}), (gus:Person {name: 'Gus', city: 'Berlin'}), (vincent:Person {name: 'Vincent', city: 'Paris'}), (mia:Person {name: 'Mia', city: 'Prague'}), (jules:Person {name: 'Jules', city: 'Amsterdam'}), (alix)-[:KNOWS {since: 3}]->(gus), (alix)-[:KNOWS {since: 19}]->(vincent), (gus)-[:KNOWS {since: 3}]->(mia), (vincent)-[:KNOWS {since: 88}]->(jules), (mia)-[:KNOWS {since: 3}]->(jules)"
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->(:Person {city: 'Paris'}) RETURN a.name"
+      cypher: "MATCH (a:Person)-[:KNOWS]->(:Person {city: 'Paris'}) RETURN a.name"
+      sql-pgq: |
+        SELECT name FROM GRAPH_TABLE (
+          MATCH (a:Person)-[:KNOWS]->(:Person {city: 'Paris'})
+          COLUMNS (a.name AS name)
+        )
+    expect:
+      rows:
+        - [Alix]
+
+  - name: map_on_the_third_node
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', city: 'Amsterdam'}), (gus:Person {name: 'Gus', city: 'Berlin'}), (vincent:Person {name: 'Vincent', city: 'Paris'}), (mia:Person {name: 'Mia', city: 'Prague'}), (jules:Person {name: 'Jules', city: 'Amsterdam'}), (alix)-[:KNOWS {since: 3}]->(gus), (alix)-[:KNOWS {since: 19}]->(vincent), (gus)-[:KNOWS {since: 3}]->(mia), (vincent)-[:KNOWS {since: 88}]->(jules), (mia)-[:KNOWS {since: 3}]->(jules)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b)-[:KNOWS]->(c:Person {name: 'Jules'}) RETURN b.name"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b)-[:KNOWS]->(c:Person {name: 'Jules'}) RETURN b.name"
+      sql-pgq: |
+        SELECT via FROM GRAPH_TABLE (
+          MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(b)-[:KNOWS]->(c:Person {name: 'Jules'})
+          COLUMNS (b.name AS via)
+        )
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: map_on_a_named_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', city: 'Amsterdam'}), (gus:Person {name: 'Gus', city: 'Berlin'}), (vincent:Person {name: 'Vincent', city: 'Paris'}), (mia:Person {name: 'Mia', city: 'Prague'}), (jules:Person {name: 'Jules', city: 'Amsterdam'}), (alix)-[:KNOWS {since: 3}]->(gus), (alix)-[:KNOWS {since: 19}]->(vincent), (gus)-[:KNOWS {since: 3}]->(mia), (vincent)-[:KNOWS {since: 88}]->(jules), (mia)-[:KNOWS {since: 3}]->(jules)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[e:KNOWS {since: 19}]->(b) RETURN b.name"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[e:KNOWS {since: 19}]->(b) RETURN b.name"
+      sql-pgq: |
+        SELECT name FROM GRAPH_TABLE (
+          MATCH (a:Person {name: 'Alix'})-[e:KNOWS {since: 19}]->(b)
+          COLUMNS (b.name AS name)
+        )
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: map_on_an_anonymous_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', city: 'Amsterdam'}), (gus:Person {name: 'Gus', city: 'Berlin'}), (vincent:Person {name: 'Vincent', city: 'Paris'}), (mia:Person {name: 'Mia', city: 'Prague'}), (jules:Person {name: 'Jules', city: 'Amsterdam'}), (alix)-[:KNOWS {since: 3}]->(gus), (alix)-[:KNOWS {since: 19}]->(vincent), (gus)-[:KNOWS {since: 3}]->(mia), (vincent)-[:KNOWS {since: 88}]->(jules), (mia)-[:KNOWS {since: 3}]->(jules)"
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS {since: 88}]->(b) RETURN a.name, b.name"
+      cypher: "MATCH (a:Person)-[:KNOWS {since: 88}]->(b) RETURN a.name, b.name"
+      sql-pgq: |
+        SELECT source, target FROM GRAPH_TABLE (
+          MATCH (a:Person)-[:KNOWS {since: 88}]->(b)
+          COLUMNS (a.name AS source, b.name AS target)
+        )
+    expect:
+      rows:
+        - [Vincent, Jules]
+
+  # Two walks reach Jules: through Vincent, and through Gus and Mia
+  - name: map_on_the_end_of_a_variable_length_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', city: 'Amsterdam'}), (gus:Person {name: 'Gus', city: 'Berlin'}), (vincent:Person {name: 'Vincent', city: 'Paris'}), (mia:Person {name: 'Mia', city: 'Prague'}), (jules:Person {name: 'Jules', city: 'Amsterdam'}), (alix)-[:KNOWS {since: 3}]->(gus), (alix)-[:KNOWS {since: 19}]->(vincent), (gus)-[:KNOWS {since: 3}]->(mia), (vincent)-[:KNOWS {since: 88}]->(jules), (mia)-[:KNOWS {since: 3}]->(jules)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->{1,3}(b:Person {name: 'Jules'}) RETURN b.city"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS*1..3]->(b:Person {name: 'Jules'}) RETURN b.city"
+      sql-pgq: |
+        SELECT city FROM GRAPH_TABLE (
+          MATCH (a:Person {name: 'Alix'})-[:KNOWS*1..3]->(b:Person {name: 'Jules'})
+          COLUMNS (b.city AS city)
+        )
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Amsterdam]
+
+  # Only the edges since 3 make walks: Alix to Gus, Mia and Jules
+  - name: map_on_a_variable_length_edge_holds_for_every_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', city: 'Amsterdam'}), (gus:Person {name: 'Gus', city: 'Berlin'}), (vincent:Person {name: 'Vincent', city: 'Paris'}), (mia:Person {name: 'Mia', city: 'Prague'}), (jules:Person {name: 'Jules', city: 'Amsterdam'}), (alix)-[:KNOWS {since: 3}]->(gus), (alix)-[:KNOWS {since: 19}]->(vincent), (gus)-[:KNOWS {since: 3}]->(mia), (vincent)-[:KNOWS {since: 88}]->(jules), (mia)-[:KNOWS {since: 3}]->(jules)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS {since: 3}]->{1,3}(b) RETURN b.name"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS*1..3 {since: 3}]->(b) RETURN b.name"
+      sql-pgq: |
+        SELECT name FROM GRAPH_TABLE (
+          MATCH (a:Person {name: 'Alix'})-[:KNOWS*1..3 {since: 3}]->(b)
+          COLUMNS (b.name AS name)
+        )
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: map_on_a_named_variable_length_edge_holds_for_every_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', city: 'Amsterdam'}), (gus:Person {name: 'Gus', city: 'Berlin'}), (vincent:Person {name: 'Vincent', city: 'Paris'}), (mia:Person {name: 'Mia', city: 'Prague'}), (jules:Person {name: 'Jules', city: 'Amsterdam'}), (alix)-[:KNOWS {since: 3}]->(gus), (alix)-[:KNOWS {since: 19}]->(vincent), (gus)-[:KNOWS {since: 3}]->(mia), (vincent)-[:KNOWS {since: 88}]->(jules), (mia)-[:KNOWS {since: 3}]->(jules)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[e:KNOWS {since: 3}]->{1,3}(b) RETURN b.name"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[e:KNOWS*1..3 {since: 3}]->(b) RETURN b.name"
+      sql-pgq: |
+        SELECT name FROM GRAPH_TABLE (
+          MATCH (a:Person {name: 'Alix'})-[e:KNOWS*1..3 {since: 3}]->(b)
+          COLUMNS (b.name AS name)
+        )
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: map_in_an_optional_match_keeps_the_row_without_a_match
+    setup:
+      - "INSERT (alix:Person {name: 'Alix', city: 'Amsterdam'}), (gus:Person {name: 'Gus', city: 'Berlin'}), (vincent:Person {name: 'Vincent', city: 'Paris'}), (mia:Person {name: 'Mia', city: 'Prague'}), (jules:Person {name: 'Jules', city: 'Amsterdam'}), (alix)-[:KNOWS {since: 3}]->(gus), (alix)-[:KNOWS {since: 19}]->(vincent), (gus)-[:KNOWS {since: 3}]->(mia), (vincent)-[:KNOWS {since: 88}]->(jules), (mia)-[:KNOWS {since: 3}]->(jules)"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person {city: 'Prague'}) RETURN a.name, b.name"
+      cypher: "MATCH (a:Person {name: 'Alix'}) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person {city: 'Prague'}) RETURN a.name, b.name"
+      sql-pgq: |
+        SELECT source, target FROM GRAPH_TABLE (
+          MATCH (a:Person {name: 'Alix'})
+          OPTIONAL MATCH (a)-[:KNOWS]->(b:Person {city: 'Prague'})
+          COLUMNS (a.name AS source, b.name AS target)
+        )
+    expect:
+      rows:
+        - [Alix, null]

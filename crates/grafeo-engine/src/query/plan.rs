@@ -941,6 +941,10 @@ impl LogicalOperator {
             Self::ShortestPath(path) => {
                 bound = path.input.bound_variables(imports)?;
                 bound.insert(path.path_alias.clone());
+                bound.extend(path.edge_variable.iter().cloned());
+                if path.binds_target {
+                    bound.insert(path.target_var.clone());
+                }
             }
             Self::MapCollect(collect) => {
                 bound.insert(collect.alias.clone());
@@ -1097,11 +1101,6 @@ impl LogicalOperator {
                 let _ = writeln!(out, "{indent}EdgeScan ({var}:{types})", var = op.variable);
             }
             Self::Expand(op) => {
-                let types = if op.edge_types.is_empty() {
-                    "*".to_string()
-                } else {
-                    op.edge_types.join("|")
-                };
                 let dir = match op.direction {
                     ExpandDirection::Outgoing => "->",
                     ExpandDirection::Incoming => "<-",
@@ -1113,6 +1112,13 @@ impl LogicalOperator {
                     (min, Some(max)) => format!("*{min}..{max}"),
                     (min, None) => format!("*{min}.."),
                 };
+                // `[:T*1..2]` for a typed expand, `[*1..2]` for an untyped
+                // one with a hop range, and `[:*]` for an untyped single hop
+                let edge = match (op.edge_types.is_empty(), hops.is_empty()) {
+                    (false, _) => format!(":{}{hops}", op.edge_types.join("|")),
+                    (true, false) => hops,
+                    (true, true) => ":*".to_string(),
+                };
                 let mode = out
                     .reachability
                     .iter()
@@ -1120,7 +1126,7 @@ impl LogicalOperator {
                     .map_or(String::new(), |(_, mode)| format!(" {}", mode.marker()));
                 let _ = writeln!(
                     out,
-                    "{indent}Expand ({from}){dir}[:{types}{hops}]{dir}({to}){mode}",
+                    "{indent}Expand ({from}){dir}[{edge}]{dir}({to}){mode}",
                     from = op.from_variable,
                     to = op.to_variable,
                 );
@@ -1310,9 +1316,21 @@ impl LogicalOperator {
                 op.right.fmt_tree(out, depth + 1);
             }
             Self::ShortestPath(op) => {
+                // The condition every edge of a path meets, checked in the search
+                let edges = op.edge_condition.as_ref().map_or_else(String::new, |c| {
+                    format!(" [edges: {}]", fmt_expr(&c.predicate))
+                });
+                // The selection and path mode of a selective path pattern
+                let selection = op.selection.explain();
+                let mode = match op.path_mode {
+                    PathMode::Walk => "",
+                    PathMode::Trail => " [TRAIL]",
+                    PathMode::Simple => " [SIMPLE]",
+                    PathMode::Acyclic => " [ACYCLIC]",
+                };
                 let _ = writeln!(
                     out,
-                    "{indent}ShortestPath ({from} -> {to})",
+                    "{indent}ShortestPath ({from} -> {to}){selection}{mode}{edges}",
                     from = op.source_var,
                     to = op.target_var
                 );
@@ -1464,6 +1482,19 @@ impl LogicalOperator {
             }
             Self::Empty => {
                 let _ = writeln!(out, "{indent}Empty");
+            }
+            // `HorizontalAggregate (total := Sum(e.w))`: per row, over the list
+            Self::HorizontalAggregate(op) => {
+                let distinct = if op.distinct { "DISTINCT " } else { "" };
+                let _ = writeln!(
+                    out,
+                    "{indent}HorizontalAggregate ({alias} := {function:?}({distinct}{list}.{property}))",
+                    alias = op.alias,
+                    function = op.function,
+                    list = op.list_column,
+                    property = op.property,
+                );
+                op.input.fmt_tree(out, depth + 1);
             }
             // Remaining operators: show a simple name
             _ => {
@@ -1702,12 +1733,19 @@ pub enum EntityKind {
 /// `property` on each entity, computes the aggregate, and emits the scalar result.
 #[derive(Debug, Clone)]
 pub struct HorizontalAggregateOp {
-    /// The list column name (e.g., `_path_edges_p`).
+    /// The list column name: a group variable (`e` of `-[e]->{1,3}`), the
+    /// list of the edge ids of each path.
     pub list_column: String,
     /// Whether the list contains edge IDs or node IDs.
     pub entity_kind: EntityKind,
     /// The aggregate function to apply.
     pub function: AggregateFunction,
+    /// Whether the aggregate reads each distinct value once.
+    pub distinct: bool,
+    /// The percentile of `PERCENTILE_DISC` and `PERCENTILE_CONT`.
+    pub percentile: Option<f64>,
+    /// The separator of `LISTAGG` and `GROUP_CONCAT`.
+    pub separator: Option<String>,
     /// The property to access on each entity.
     pub property: String,
     /// Output alias for the result column.
@@ -2233,6 +2271,10 @@ pub struct MergeOp {
     pub on_create: Vec<(String, LogicalExpression)>,
     /// Properties to set on MATCH.
     pub on_match: Vec<(String, LogicalExpression)>,
+    /// Labels to add on CREATE (`ON CREATE SET n:Label`).
+    pub on_create_labels: Vec<String>,
+    /// Labels to add on MATCH (`ON MATCH SET n:Label`).
+    pub on_match_labels: Vec<String>,
     /// Input operator.
     pub input: Box<LogicalOperator>,
 }
@@ -2247,10 +2289,15 @@ pub struct MergeOp {
 pub struct MergeRelationshipOp {
     /// Variable to bind the relationship to.
     pub variable: String,
-    /// Source node variable (must already be bound).
+    /// Source node variable (must already be bound): the node the
+    /// relationship points from (the right node of `(a)<-[:T]-(b)`).
     pub source_variable: String,
     /// Target node variable (must already be bound).
     pub target_variable: String,
+    /// Whether the pattern has no direction (`(a)-[:T]-(b)`): a relationship
+    /// either way round between the nodes matches, and when none does one is
+    /// created from source to target.
+    pub undirected: bool,
     /// Relationship type.
     pub edge_type: String,
     /// Properties that must match (used for both matching and creation).
@@ -2267,7 +2314,10 @@ pub struct MergeRelationshipOp {
 ///
 /// This operator uses breadth-first search to find the shortest path(s)
 /// between a source node and a target node, optionally filtered by edge type.
-/// A pair without a path within the hop bounds produces no row.
+/// A pair without a path within the hop bounds produces no row. It is the
+/// search of every selective path pattern (ISO/IEC 39075:2024 16.6): each
+/// pair of endpoints of each input row keeps the paths of its
+/// [`Self::selection`], among those of its [`Self::path_mode`].
 #[derive(Debug, Clone)]
 pub struct ShortestPathOp {
     /// Input operator providing source/target nodes.
@@ -2282,12 +2332,71 @@ pub struct ShortestPathOp {
     pub direction: ExpandDirection,
     /// Variable name to bind the path result.
     pub path_alias: String,
-    /// Whether to find all shortest paths (vs. just one).
-    pub all_paths: bool,
+    /// Which paths of each pair the search keeps.
+    pub selection: PathSelection,
+    /// The paths the search follows (WALK, TRAIL, SIMPLE, ACYCLIC).
+    pub path_mode: PathMode,
+    /// Whether the search binds [`Self::target_var`] to every node it
+    /// reaches, each a pair of its own, instead of searching for the node
+    /// the input row binds to it.
+    pub binds_target: bool,
     /// Minimum number of edges in a path, from the edge's quantifier.
     pub min_hops: u32,
     /// Maximum number of edges in a path (`None` = unbounded).
     pub max_hops: Option<u32>,
+    /// The variable of the edge pattern, bound to the edges of each path (see
+    /// [`Self::quantified`]). `None` when the pattern names no edge, or names
+    /// one bound before (an [`Self::edge_condition`] then keeps to it).
+    pub edge_variable: Option<String>,
+    /// Whether the edge pattern has a quantifier: its variable is then a
+    /// group variable, bound to the list of the path's edges, and otherwise
+    /// to the path's one edge.
+    pub quantified: bool,
+    /// A condition every edge of a path meets, checked during the search, so
+    /// that the shortest paths are picked among the paths the pattern matches
+    /// (ISO/IEC 39075:2024 16.6): the property map and `WHERE` of the edge
+    /// pattern, or the equality with an edge bound before.
+    pub edge_condition: Option<ShortestPathEdgeCondition>,
+}
+
+/// Which paths a path search keeps for each pair of endpoints: the selection
+/// of a path search prefix (ISO/IEC 39075:2024 16.6 `<path search prefix>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PathSelection {
+    /// `ANY k`: k paths of each pair, whichever; the search keeps the k
+    /// shortest.
+    Any(usize),
+    /// `SHORTEST k` (`ANY SHORTEST` and `shortestPath` are 1): the k
+    /// shortest paths of each pair.
+    Shortest(usize),
+    /// `SHORTEST k GROUPS` (`ALL SHORTEST` and `allShortestPaths` are 1):
+    /// every path of the k shortest lengths of each pair.
+    ShortestGroups(usize),
+}
+
+impl PathSelection {
+    /// The selection as EXPLAIN shows it, empty for the one shortest path.
+    fn explain(self) -> String {
+        match self {
+            Self::Any(count) => format!(" [ANY {count}]"),
+            Self::Shortest(1) => String::new(),
+            Self::Shortest(count) => format!(" [SHORTEST {count}]"),
+            Self::ShortestGroups(1) => " [ALL SHORTEST]".to_string(),
+            Self::ShortestGroups(count) => format!(" [SHORTEST {count} GROUPS]"),
+        }
+    }
+}
+
+/// A condition on the edges a shortest-path search may take (see
+/// [`ShortestPathOp::edge_condition`]).
+#[derive(Debug, Clone)]
+pub struct ShortestPathEdgeCondition {
+    /// The variable the predicate reads the candidate edge as.
+    pub variable: String,
+    /// The predicate: it reads the candidate edge and the variables of the
+    /// input row.
+    pub predicate: LogicalExpression,
 }
 
 // ==================== SPARQL Update Operators ====================
@@ -3634,6 +3743,9 @@ mod tests {
             list_column: "_path".into(),
             entity_kind: EntityKind::Edge,
             function: AggregateFunction::Sum,
+            distinct: false,
+            percentile: None,
+            separator: None,
             property: "weight".into(),
             alias: "total".into(),
             input: Box::new(base()),
@@ -4160,9 +4272,14 @@ mod tests {
             edge_types: vec![],
             direction: ExpandDirection::Outgoing,
             path_alias: "p".into(),
-            all_paths: false,
+            selection: PathSelection::Shortest(1),
+            path_mode: PathMode::Walk,
+            binds_target: false,
             min_hops: 1,
             max_hops: None,
+            edge_variable: None,
+            quantified: true,
+            edge_condition: None,
         });
         assert_eq!(sp.display_label(), "a -> b");
 
@@ -4172,6 +4289,8 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: leaf_empty(),
         });
         assert_eq!(merge.display_label(), "django");
@@ -4184,6 +4303,7 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: leaf_empty(),
         });
         assert_eq!(merge_rel.display_label(), "r");
@@ -4374,6 +4494,29 @@ mod tests {
         assert!(s.contains("--"));
         let s = mk(2, None, ExpandDirection::Outgoing);
         assert!(s.contains("*2.."));
+
+        // An untyped expand prints its hop range once, without the type
+        // marker of a single hop
+        let untyped = |min, max, quantified| {
+            LogicalOperator::Expand(ExpandOp {
+                quantified,
+                from_variable: "a".into(),
+                to_variable: "b".into(),
+                edge_variable: None,
+                direction: ExpandDirection::Both,
+                edge_types: Vec::new(),
+                min_hops: min,
+                max_hops: max,
+                input: leaf_node_scan("a"),
+                path_alias: None,
+                path_mode: PathMode::Walk,
+            })
+            .explain_tree()
+        };
+        let s = untyped(1, Some(2), true);
+        assert!(s.contains("(a)--[*1..2]--(b)"), "{s}");
+        let s = untyped(1, Some(1), false);
+        assert!(s.contains("(a)--[:*]--(b)"), "{s}");
     }
 
     #[test]
@@ -4631,9 +4774,14 @@ mod tests {
             edge_types: vec![],
             direction: ExpandDirection::Outgoing,
             path_alias: "p".into(),
-            all_paths: false,
+            selection: PathSelection::Shortest(1),
+            path_mode: PathMode::Walk,
+            binds_target: false,
             min_hops: 1,
             max_hops: None,
+            edge_variable: None,
+            quantified: true,
+            edge_condition: None,
         });
         assert!(sp.explain_tree().contains("ShortestPath (a -> b)"));
     }
@@ -4646,6 +4794,8 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: leaf_empty(),
         });
         assert!(merge.explain_tree().contains("Merge (vincent)"));
@@ -4658,6 +4808,7 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: leaf_empty(),
         });
         assert!(merge_rel.explain_tree().contains("MergeRelationship (r)"));

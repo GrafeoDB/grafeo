@@ -2,7 +2,7 @@
 
 use crate::execution::chunk::{ColumnTypes, DataChunk};
 use crate::execution::operators::OperatorError;
-use crate::execution::operators::accumulator::{AggregateExpr, AggregateState};
+use crate::execution::operators::accumulator::{AggregateExpr, AggregateState, RowKey};
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 #[cfg(feature = "spill")]
 use crate::execution::spill::{PartitionedState, SpillManager};
@@ -13,16 +13,6 @@ use spill_codec::{deserialize_group_state, serialize_group_state};
 use std::collections::HashMap;
 #[cfg(feature = "spill")]
 use std::sync::Arc;
-
-/// Creates a new [`AggregateState`] from an [`AggregateExpr`].
-fn state_for_expr(expr: &AggregateExpr) -> AggregateState {
-    AggregateState::new(
-        expr.function,
-        expr.distinct,
-        expr.percentile,
-        expr.separator.as_deref(),
-    )
-}
 
 /// Updates a single accumulator from a data chunk row, handling bivariate
 /// functions and `COUNT(*)`. The accumulator skips a null operand.
@@ -52,138 +42,6 @@ fn update_accumulator(
         // COUNT(*)
         acc.update(None);
     }
-}
-
-/// Hash key for grouping.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct GroupKey(Vec<u64>);
-
-impl GroupKey {
-    fn from_row(chunk: &DataChunk, row: usize, group_by: &[usize]) -> Self {
-        let hashes: Vec<u64> = group_by
-            .iter()
-            .map(|&col| {
-                chunk
-                    .column(col)
-                    .and_then(|c| c.get_value(row))
-                    .map_or(0, |v| hash_value(&v))
-            })
-            .collect();
-        Self(hashes)
-    }
-}
-
-fn hash_value(value: &Value) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    // Discriminant tag prevents cross-type collisions (e.g. Null vs unknown)
-    match value {
-        Value::Null => 0u8.hash(&mut hasher),
-        Value::Bool(b) => {
-            1u8.hash(&mut hasher);
-            b.hash(&mut hasher);
-        }
-        Value::Int64(i) => {
-            2u8.hash(&mut hasher);
-            i.hash(&mut hasher);
-        }
-        Value::Float64(f) => {
-            3u8.hash(&mut hasher);
-            f.to_bits().hash(&mut hasher);
-        }
-        Value::String(s) => {
-            4u8.hash(&mut hasher);
-            s.hash(&mut hasher);
-        }
-        Value::Bytes(b) => {
-            5u8.hash(&mut hasher);
-            b.hash(&mut hasher);
-        }
-        Value::Timestamp(t) => {
-            6u8.hash(&mut hasher);
-            t.hash(&mut hasher);
-        }
-        Value::Date(d) => {
-            7u8.hash(&mut hasher);
-            d.hash(&mut hasher);
-        }
-        Value::Time(t) => {
-            8u8.hash(&mut hasher);
-            t.hash(&mut hasher);
-        }
-        Value::Duration(d) => {
-            9u8.hash(&mut hasher);
-            d.hash(&mut hasher);
-        }
-        Value::ZonedDatetime(zdt) => {
-            10u8.hash(&mut hasher);
-            zdt.hash(&mut hasher);
-        }
-        Value::List(list) => {
-            11u8.hash(&mut hasher);
-            list.len().hash(&mut hasher);
-            for elem in list.iter() {
-                hash_value(elem).hash(&mut hasher);
-            }
-        }
-        Value::Map(map) => {
-            12u8.hash(&mut hasher);
-            map.len().hash(&mut hasher);
-            // BTreeMap iterates in key order, so hashing is deterministic
-            for (k, v) in map.as_ref() {
-                k.as_str().hash(&mut hasher);
-                hash_value(v).hash(&mut hasher);
-            }
-        }
-        Value::Vector(vec) => {
-            13u8.hash(&mut hasher);
-            vec.len().hash(&mut hasher);
-            for f in vec.iter() {
-                f.to_bits().hash(&mut hasher);
-            }
-        }
-        Value::Path { nodes, edges } => {
-            14u8.hash(&mut hasher);
-            nodes.len().hash(&mut hasher);
-            for n in nodes.iter() {
-                hash_value(n).hash(&mut hasher);
-            }
-            for e in edges.iter() {
-                hash_value(e).hash(&mut hasher);
-            }
-        }
-        Value::GCounter(map) => {
-            15u8.hash(&mut hasher);
-            let mut entries: Vec<_> = map.iter().collect();
-            entries.sort_by_key(|(k, _)| *k);
-            for (k, v) in entries {
-                k.hash(&mut hasher);
-                v.hash(&mut hasher);
-            }
-        }
-        Value::OnCounter { pos, neg } => {
-            16u8.hash(&mut hasher);
-            let mut pos_entries: Vec<_> = pos.iter().collect();
-            pos_entries.sort_by_key(|(k, _)| *k);
-            for (k, v) in pos_entries {
-                k.hash(&mut hasher);
-                v.hash(&mut hasher);
-            }
-            let mut neg_entries: Vec<_> = neg.iter().collect();
-            neg_entries.sort_by_key(|(k, _)| *k);
-            for (k, v) in neg_entries {
-                k.hash(&mut hasher);
-                v.hash(&mut hasher);
-            }
-        }
-        other => {
-            255u8.hash(&mut hasher);
-            std::mem::discriminant(other).hash(&mut hasher);
-        }
-    }
-    hasher.finish()
 }
 
 /// The output columns: the group keys in their input columns' types (a node
@@ -219,8 +77,9 @@ pub struct AggregatePushOperator {
     group_by: Vec<usize>,
     /// Aggregate expressions.
     aggregates: Vec<AggregateExpr>,
-    /// Group states by hash key.
-    groups: HashMap<GroupKey, GroupState>,
+    /// Group states by their key: keys whose values are the same values
+    /// (`3` and `3.0`) are one key, see [`RowKey`].
+    groups: HashMap<RowKey, GroupState>,
     /// Global accumulator (for no GROUP BY).
     global_state: Option<Vec<AggregateState>>,
     /// The column types of the input chunks.
@@ -231,7 +90,7 @@ impl AggregatePushOperator {
     /// Create a new aggregate operator.
     pub fn new(group_by: Vec<usize>, aggregates: Vec<AggregateExpr>) -> Self {
         let global_state = if group_by.is_empty() {
-            Some(aggregates.iter().map(state_for_expr).collect())
+            Some(aggregates.iter().map(AggregateState::for_expr).collect())
         } else {
             None
         };
@@ -267,26 +126,17 @@ impl PushOperator for AggregatePushOperator {
                     }
                 }
             } else {
-                // Group by aggregation
-                let key = GroupKey::from_row(&chunk, row, &self.group_by);
-
-                let state = self.groups.entry(key).or_insert_with(|| {
-                    let key_values: Vec<Value> = self
-                        .group_by
-                        .iter()
-                        .map(|&col| {
-                            chunk
-                                .column(col)
-                                .and_then(|c| c.get_value(row))
-                                .unwrap_or(Value::Null)
-                        })
-                        .collect();
-
-                    GroupState {
-                        key_values,
-                        accumulators: self.aggregates.iter().map(state_for_expr).collect(),
-                    }
-                });
+                // Group by aggregation: a new group keeps the key values of
+                // its first row.
+                let group_by = &self.group_by;
+                let aggregates = &self.aggregates;
+                let state = self
+                    .groups
+                    .entry(RowKey::from_row(&chunk, row, group_by))
+                    .or_insert_with(|| GroupState {
+                        key_values: RowKey::values_of(&chunk, row, group_by),
+                        accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
+                    });
 
                 for (acc, expr) in state.accumulators.iter_mut().zip(&self.aggregates) {
                     update_accumulator(acc, expr, &chunk, row);
@@ -377,7 +227,7 @@ pub struct SpillableAggregatePushOperator {
     /// Partitioned groups (used when spilling is enabled).
     partitioned_groups: Option<PartitionedState<GroupState>>,
     /// Non-partitioned groups (used when spilling is disabled).
-    groups: HashMap<GroupKey, GroupState>,
+    groups: HashMap<RowKey, GroupState>,
     /// Global accumulator (for no GROUP BY).
     global_state: Option<Vec<AggregateState>>,
     /// Spill threshold (number of groups, used by fallback mode).
@@ -399,7 +249,7 @@ impl SpillableAggregatePushOperator {
     /// Create a new spillable aggregate operator (row-count fallback mode).
     pub fn new(group_by: Vec<usize>, aggregates: Vec<AggregateExpr>) -> Self {
         let global_state = if group_by.is_empty() {
-            Some(aggregates.iter().map(state_for_expr).collect())
+            Some(aggregates.iter().map(AggregateState::for_expr).collect())
         } else {
             None
         };
@@ -428,7 +278,7 @@ impl SpillableAggregatePushOperator {
         threshold: usize,
     ) -> Self {
         let global_state = if group_by.is_empty() {
-            Some(aggregates.iter().map(state_for_expr).collect())
+            Some(aggregates.iter().map(AggregateState::for_expr).collect())
         } else {
             None
         };
@@ -468,7 +318,7 @@ impl SpillableAggregatePushOperator {
         use super::spill_state::{OperatorConsumerAdapter, OperatorSpillState};
 
         let global_state = if group_by.is_empty() {
-            Some(aggregates.iter().map(state_for_expr).collect())
+            Some(aggregates.iter().map(AggregateState::for_expr).collect())
         } else {
             None
         };
@@ -579,10 +429,11 @@ impl SpillableAggregatePushOperator {
                     deserialize_group_state,
                 );
 
-                // Move existing groups to partitioned state
-                for (_key, state) in self.groups.drain() {
+                // Move existing groups to partitioned state, filed under
+                // their keys' representatives (see `push`)
+                for (key, state) in self.groups.drain() {
                     partitioned
-                        .insert(state.key_values.clone(), state)
+                        .insert(key.representatives(), state)
                         .map_err(|e| OperatorError::Execution(e.to_string()))?;
                 }
 
@@ -621,22 +472,17 @@ impl PushOperator for SpillableAggregatePushOperator {
             } else if self.using_partitioned {
                 // Use partitioned state
                 if let Some(ref mut partitioned) = self.partitioned_groups {
-                    let key_values: Vec<Value> = self
-                        .group_by
-                        .iter()
-                        .map(|&col| {
-                            chunk
-                                .column(col)
-                                .and_then(|c| c.get_value(row))
-                                .unwrap_or(Value::Null)
-                        })
-                        .collect();
-
+                    // A partition files a group under the representatives of
+                    // its key values, which are equal (and serialize to the
+                    // same bytes) for the same values, `3` and `3.0` too; the
+                    // group keeps the key values of its first row.
+                    let group_by = &self.group_by;
                     let aggregates = &self.aggregates;
+                    let key = RowKey::from_row(&chunk, row, group_by).representatives();
                     let state = partitioned
-                        .get_or_insert_with(key_values.clone(), || GroupState {
-                            key_values: key_values.clone(),
-                            accumulators: aggregates.iter().map(state_for_expr).collect(),
+                        .get_or_insert_with(key, || GroupState {
+                            key_values: RowKey::values_of(&chunk, row, group_by),
+                            accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
                         })
                         .map_err(|e| OperatorError::Execution(e.to_string()))?;
 
@@ -646,25 +492,15 @@ impl PushOperator for SpillableAggregatePushOperator {
                 }
             } else {
                 // Use regular hash map
-                let key = GroupKey::from_row(&chunk, row, &self.group_by);
-
-                let state = self.groups.entry(key).or_insert_with(|| {
-                    let key_values: Vec<Value> = self
-                        .group_by
-                        .iter()
-                        .map(|&col| {
-                            chunk
-                                .column(col)
-                                .and_then(|c| c.get_value(row))
-                                .unwrap_or(Value::Null)
-                        })
-                        .collect();
-
-                    GroupState {
-                        key_values,
-                        accumulators: self.aggregates.iter().map(state_for_expr).collect(),
-                    }
-                });
+                let group_by = &self.group_by;
+                let aggregates = &self.aggregates;
+                let state = self
+                    .groups
+                    .entry(RowKey::from_row(&chunk, row, group_by))
+                    .or_insert_with(|| GroupState {
+                        key_values: RowKey::values_of(&chunk, row, group_by),
+                        accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
+                    });
 
                 for (acc, expr) in state.accumulators.iter_mut().zip(&self.aggregates) {
                     update_accumulator(acc, expr, &chunk, row);
@@ -817,6 +653,125 @@ mod tests {
             groups,
             [(101, Some(Value::Int64(2))), (102, Some(Value::Int64(1)))]
         );
+    }
+
+    /// Grouping keys that are the same value: `3` and `3.0`, `-0.0` and
+    /// `0.0`, two NaN with different bits, a path and its copy.
+    fn equivalent_keys() -> Vec<DataChunk> {
+        let path = |middle: i64| Value::Path {
+            nodes: vec![Value::Int64(1), Value::Int64(middle)].into(),
+            edges: vec![Value::Int64(10 + middle)].into(),
+        };
+        [
+            Value::Int64(3),
+            Value::Float64(3.0),
+            Value::Float64(-0.0),
+            Value::Float64(0.0),
+            Value::Float64(f64::NAN),
+            Value::Float64(f64::from_bits(f64::NAN.to_bits() | 1)),
+            path(2),
+            path(2),
+            path(3),
+        ]
+        .into_iter()
+        .map(|key| DataChunk::new(vec![ValueVector::from_values(&[key])]))
+        .collect()
+    }
+
+    /// The `(key, count)` rows of an aggregate's output, sorted by count.
+    fn key_counts(chunks: &[DataChunk]) -> Vec<(Value, i64)> {
+        let mut rows: Vec<(Value, i64)> = chunks
+            .iter()
+            .flat_map(|chunk| {
+                chunk.selected_indices().map(|row| {
+                    let Some(Value::Int64(count)) = chunk.column(1).unwrap().get_value(row) else {
+                        panic!("a count")
+                    };
+                    (chunk.column(0).unwrap().get_value(row).unwrap(), count)
+                })
+            })
+            .collect();
+        rows.sort_by_key(|(key, count)| (*count, format!("{key:?}")));
+        rows
+    }
+
+    /// Checks the groups of [`equivalent_keys`]: four groups of two (each
+    /// keeping the value of its first row) and one of one.
+    fn assert_equivalent_key_groups(rows: &[(Value, i64)]) {
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        assert_eq!(rows[0].1, 1, "{rows:?}");
+        assert!(rows[1..].iter().all(|(_, count)| *count == 2), "{rows:?}");
+        let keys: Vec<&Value> = rows.iter().map(|(key, _)| key).collect();
+        assert!(keys.contains(&&Value::Int64(3)), "{rows:?}");
+        assert!(
+            keys.iter()
+                .any(|key| matches!(key, Value::Float64(z) if z.is_sign_negative() && *z == 0.0)),
+            "{rows:?}"
+        );
+        assert!(
+            keys.iter()
+                .any(|key| matches!(key, Value::Float64(n) if n.is_nan())),
+            "{rows:?}"
+        );
+    }
+
+    /// Keys that are the same value are one group (they were two whenever
+    /// their types or bits differed), which keeps the value of its first row.
+    #[test]
+    fn group_keys_are_equivalent_values() {
+        let mut agg = AggregatePushOperator::new(vec![0], vec![AggregateExpr::count_star()]);
+        let mut sink = CollectorSink::new();
+        for chunk in equivalent_keys() {
+            agg.push(chunk, &mut sink).unwrap();
+        }
+        agg.finalize(&mut sink).unwrap();
+        assert_equivalent_key_groups(&key_counts(&sink.into_chunks()));
+    }
+
+    /// A spilling aggregate files its groups under the representatives of
+    /// their keys, so the same values meet in one group across spills too.
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spilled_group_keys_are_equivalent_values() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let manager = Arc::new(SpillManager::new(temp_dir.path()).unwrap());
+        for threshold in [1, 3, 1000] {
+            let mut agg = SpillableAggregatePushOperator::with_spilling(
+                vec![0],
+                vec![AggregateExpr::count_star()],
+                Arc::clone(&manager),
+                threshold,
+            );
+            let mut sink = CollectorSink::new();
+            for chunk in equivalent_keys() {
+                agg.push(chunk, &mut sink).unwrap();
+            }
+            agg.finalize(&mut sink).unwrap();
+            assert_equivalent_key_groups(&key_counts(&sink.into_chunks()));
+        }
+    }
+
+    /// A DISTINCT identity survives a spill: two paths of one length stay
+    /// two values after the reload (identities were text, the same for both).
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spilled_distinct_identities_keep_paths_apart() {
+        let path = |middle: i64| Value::Path {
+            nodes: vec![Value::Int64(1), Value::Int64(middle)].into(),
+            edges: vec![Value::Int64(10 + middle)].into(),
+        };
+        let mut count = AggregateState::new(AggregateFunction::Count, true, None, None);
+        count.update(Some(path(2)));
+        let state = GroupState {
+            key_values: vec![Value::Int64(1)],
+            accumulators: vec![count],
+        };
+        let mut buf = Vec::new();
+        serialize_group_state(&state, &mut buf).unwrap();
+        let mut restored = deserialize_group_state(&mut &buf[..]).unwrap();
+        restored.accumulators[0].update(Some(path(3)));
+        restored.accumulators[0].update(Some(path(2)));
+        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(2));
     }
 
     #[test]
@@ -1002,143 +957,6 @@ mod tests {
                 assert_eq!(count, 1);
             }
         }
-    }
-
-    // ---------------------------------------------------------------
-    // hash_value coverage for all Value variants
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn hash_value_null() {
-        let h = hash_value(&Value::Null);
-        assert_ne!(h, 0); // hasher produces non-zero for Null discriminant
-    }
-
-    #[test]
-    fn hash_value_bool() {
-        let t = hash_value(&Value::Bool(true));
-        let f = hash_value(&Value::Bool(false));
-        assert_ne!(t, f);
-    }
-
-    #[test]
-    fn hash_value_int64() {
-        let a = hash_value(&Value::Int64(42));
-        let b = hash_value(&Value::Int64(43));
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn hash_value_float64() {
-        let a = hash_value(&Value::Float64(19.88));
-        let b = hash_value(&Value::Float64(3.19));
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn hash_value_string() {
-        let a = hash_value(&Value::String("hello".into()));
-        let b = hash_value(&Value::String("world".into()));
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn hash_value_bytes() {
-        let a = hash_value(&Value::Bytes(vec![1, 2, 3].into()));
-        let b = hash_value(&Value::Bytes(vec![4, 5, 6].into()));
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn hash_value_list() {
-        let a = hash_value(&Value::List(vec![Value::Int64(1), Value::Int64(2)].into()));
-        let b = hash_value(&Value::List(vec![Value::Int64(3)].into()));
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn hash_value_map() {
-        use grafeo_common::types::PropertyKey;
-        use std::collections::BTreeMap;
-        use std::sync::Arc;
-        let mut map = BTreeMap::new();
-        map.insert(PropertyKey::new("key"), Value::Int64(42));
-        let h = hash_value(&Value::Map(Arc::new(map)));
-        assert_ne!(h, 0);
-    }
-
-    #[test]
-    fn hash_value_vector() {
-        let h = hash_value(&Value::Vector(vec![1.0, 2.0, 3.0].into()));
-        assert_ne!(h, 0);
-    }
-
-    #[test]
-    fn hash_value_path() {
-        let h = hash_value(&Value::Path {
-            nodes: vec![Value::Int64(1), Value::Int64(2)].into(),
-            edges: vec![Value::Int64(10)].into(),
-        });
-        assert_ne!(h, 0);
-    }
-
-    #[test]
-    fn hash_value_gcounter() {
-        use std::sync::Arc;
-        let mut map = std::collections::HashMap::new();
-        map.insert("replica1".to_string(), 10u64);
-        let h = hash_value(&Value::GCounter(Arc::new(map)));
-        assert_ne!(h, 0);
-    }
-
-    #[test]
-    fn hash_value_on_counter() {
-        use std::sync::Arc;
-        let mut pos = std::collections::HashMap::new();
-        pos.insert("replica1".to_string(), 10u64);
-        let neg = std::collections::HashMap::new();
-        let h = hash_value(&Value::OnCounter {
-            pos: Arc::new(pos),
-            neg: Arc::new(neg),
-        });
-        assert_ne!(h, 0);
-    }
-
-    #[test]
-    fn hash_value_timestamp() {
-        use grafeo_common::types::Timestamp;
-        let h = hash_value(&Value::Timestamp(Timestamp::from_micros(1_700_000_000_000)));
-        assert_ne!(h, 0);
-    }
-
-    #[test]
-    fn hash_value_date() {
-        use grafeo_common::types::Date;
-        let h = hash_value(&Value::Date(Date::from_days(19000)));
-        assert_ne!(h, 0);
-    }
-
-    #[test]
-    fn hash_value_time() {
-        use grafeo_common::types::Time;
-        let h = hash_value(&Value::Time(Time::from_hms(12, 0, 0).unwrap()));
-        assert_ne!(h, 0);
-    }
-
-    #[test]
-    fn hash_value_duration() {
-        use grafeo_common::types::Duration;
-        let h = hash_value(&Value::Duration(Duration::from_days(1)));
-        assert_ne!(h, 0);
-    }
-
-    #[test]
-    fn hash_value_zoned_datetime() {
-        use grafeo_common::types::{Timestamp, ZonedDatetime};
-        let zdt =
-            ZonedDatetime::from_timestamp_offset(Timestamp::from_micros(1_700_000_000_000), 3600);
-        let h = hash_value(&Value::ZonedDatetime(zdt));
-        assert_ne!(h, 0);
     }
 
     // ---------------------------------------------------------------
@@ -2048,7 +1866,7 @@ mod tests {
                     Value::Int64(i64::from(n))
                 }
             };
-            if matches!(state, AggregateState::Bivariate { .. }) {
+            if state.is_bivariate() {
                 state.update_bivariate(Some(operand(y)), Some(operand(x)));
             } else {
                 state.update(Some(operand(y)));
@@ -2088,6 +1906,26 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    /// A DISTINCT statistical state keeps the values it has seen across a
+    /// spill, so a copy after the reload is still dropped.
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spill_distinct_statistical_state_resumes() {
+        let mut state = AggregateState::new(AggregateFunction::StdDevPop, true, None, None);
+        for x in [3, 19, 3] {
+            state.update(Some(Value::Int64(x)));
+        }
+        let mut restored = restore_spilled_accumulator(&state);
+        for x in [19, 88, 3] {
+            restored.update(Some(Value::Int64(x)));
+        }
+        let mut once = AggregateState::new(AggregateFunction::StdDevPop, false, None, None);
+        for x in [3, 19, 88] {
+            once.update(Some(Value::Int64(x)));
+        }
+        assert_eq!(restored.finalize(), once.finalize());
+    }
+
     /// Each kind of DISTINCT identity survives a spill; a null is no operand,
     /// before the spill or after it.
     #[test]
@@ -2097,7 +1935,7 @@ mod tests {
         let identities = vec![
             Value::Bool(true),
             Value::Int64(1),
-            Value::Float64(1.0),
+            Value::Float64(1.5),
             Value::String("seen".into()),
             Value::String(format!("{other:?}").into()),
             other,

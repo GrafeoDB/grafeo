@@ -228,6 +228,18 @@ pub trait GraphStore: Send + Sync {
     /// Finds nodes matching multiple property equality conditions.
     fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId>;
 
+    /// The nodes whose `property` may be equal to `value` under `=` (the
+    /// filter's equality, see
+    /// [`HashKey::for_equality`](crate::execution::operators::HashKey::for_equality)),
+    /// found through the property's index: every node `=` finds equal, and
+    /// maybe others, for a filter to decide.
+    ///
+    /// The default returns `None`, as does a store without an index on
+    /// `property`: the caller then scans.
+    fn find_nodes_maybe_equal(&self, _property: &str, _value: &Value) -> Option<Vec<NodeId>> {
+        None
+    }
+
     /// Finds nodes whose property value falls within a range.
     fn find_nodes_in_range(
         &self,

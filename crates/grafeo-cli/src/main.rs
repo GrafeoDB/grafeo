@@ -285,26 +285,44 @@ enum BackupCommands {
 /// Data export/import commands.
 #[derive(Subcommand)]
 enum DataCommands {
-    /// Export data to a portable format
+    /// Export the default graph to a file
+    ///
+    /// Only the default graph is exported: named graphs, the schema and
+    /// indexes are not.
     Dump {
         /// Path to the database
         path: PathBuf,
 
-        /// Output file or directory
+        /// Output file
         #[arg(short, long)]
         output: PathBuf,
 
-        /// Export format (parquet, turtle, json)
+        /// Export format: json (JSON Lines, which `data load` reads, the
+        /// default), arrow, gexf or graphml
         #[arg(long = "export-format")]
         export_format: Option<String>,
     },
 
-    /// Import data from a dump
+    /// Add the graph of a JSON Lines file to a database
+    ///
+    /// Each line is a node or an edge, as `data dump` writes them:
+    ///
+    ///   {"type":"node","id":3,"labels":["Person"],"properties":{"name":"Alix"}}
+    ///   {"type":"edge","source":3,"target":19,"edge_type":"KNOWS","properties":{}}
+    ///
+    /// A node's id names it within the file: edges name their nodes by it,
+    /// in any order, and each node gets a new id. Property values are plain
+    /// JSON or tagged with their type as a dump writes them
+    /// ({"Int64":3}, {"Date":19000}).
+    ///
+    /// The file loads into the default graph in one transaction: when a line
+    /// fails, the error names it and the database stays as it was.
+    #[command(verbatim_doc_comment)]
     Load {
-        /// Path to the dump file/directory
+        /// The JSON Lines file to load
         input: PathBuf,
 
-        /// Target database path
+        /// The database to load it into (created when it does not exist)
         path: PathBuf,
     },
 }

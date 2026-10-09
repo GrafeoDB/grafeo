@@ -224,9 +224,11 @@ pub struct Planner {
     /// Variables that hold edge IDs (from MATCH edge patterns).
     /// Used by plan_return to emit `EdgeResolve` instead of `NodeResolve`.
     pub(super) edge_columns: std::cell::RefCell<std::collections::HashSet<String>>,
-    /// Columns that hold a list of node or edge ids: the variable of a
-    /// variable-length edge pattern, and WITH aliases of such lists. RETURN
-    /// returns their items as node and edge maps.
+    /// Columns that hold a list of node or edge ids (the variable of a
+    /// variable-length edge pattern, a collected list) or a value with node
+    /// or edge ids inside (a map or list literal, a path, see
+    /// [`EntityValue::Nested`]), and WITH aliases of them. RETURN returns
+    /// the nodes and edges in them as node and edge maps.
     pub(super) entity_list_columns: std::cell::RefCell<
         std::collections::HashMap<String, grafeo_core::execution::operators::EntityValue>,
     >,
@@ -583,7 +585,7 @@ impl Planner {
     /// for a scalar, a path detail or a group list, an edge for an edge column
     /// and otherwise a node.
     pub(super) fn column_entity(&self, name: &str) -> Option<EntityValue> {
-        if let Some(kind) = self.entity_list_columns.borrow().get(name).copied() {
+        if let Some(kind) = self.entity_list_columns.borrow().get(name).cloned() {
             return Some(kind);
         }
         if name.starts_with("_path_")
@@ -600,7 +602,8 @@ impl Planner {
     }
 
     /// Records that the named column holds `kind`: a node (the default), an
-    /// edge, a node or edge list, or a scalar value (`None`).
+    /// edge, a node or edge list, a value with nodes or edges inside, or a
+    /// scalar value (`None`).
     pub(super) fn set_column_entity(&self, name: &str, kind: Option<EntityValue>) {
         let name = name.to_string();
         self.scalar_columns.borrow_mut().remove(&name);
@@ -611,10 +614,10 @@ impl Planner {
             Some(EntityValue::Edge) => {
                 self.edge_columns.borrow_mut().insert(name);
             }
-            Some(list @ (EntityValue::Nodes | EntityValue::Edges)) => {
-                self.entity_list_columns.borrow_mut().insert(name, list);
+            Some(nested) => {
+                self.entity_list_columns.borrow_mut().insert(name, nested);
             }
-            _ => {
+            None => {
                 self.scalar_columns.borrow_mut().insert(name);
             }
         }
@@ -668,37 +671,38 @@ impl Planner {
         name
     }
 
-    /// Counts consecutive single-hop expand operations.
+    /// Counts the expands of the chain at the top of `op` (see
+    /// [`Self::collect_expand_chain`]).
     ///
-    /// Returns the count and the deepest non-expand operator (the base of the chain).
+    /// Returns the count and the operator below the chain (the base of the
+    /// chain).
     fn count_expand_chain(op: &LogicalOperator) -> (usize, &LogicalOperator) {
-        match op {
-            LogicalOperator::Expand(expand) => {
-                let is_single_hop =
-                    !expand.quantified && expand.min_hops == 1 && expand.max_hops == Some(1);
-
-                if is_single_hop {
-                    let (inner_count, base) = Self::count_expand_chain(&expand.input);
-                    (inner_count + 1, base)
-                } else {
-                    (0, op)
-                }
-            }
-            _ => (0, op),
+        let chain = Self::collect_expand_chain(op);
+        match chain.first() {
+            Some(first) => (chain.len(), &first.input),
+            None => (0, op),
         }
     }
 
-    /// Collects expand operations from the outermost down to the base.
+    /// Collects the consecutive single-hop expands at the top of `op`, each
+    /// going on from the target of the one below it: a factorized chain reads
+    /// the source of each level from the target of the level before. The
+    /// chain ends below an expand from another variable, such as a second
+    /// expand from the target an expand started at (see the optimizer's
+    /// `start_at_the_sought_end`).
     ///
     /// Returns expands in order from innermost (base) to outermost.
     fn collect_expand_chain(op: &LogicalOperator) -> Vec<&ExpandOp> {
-        let mut chain = Vec::new();
+        let mut chain: Vec<&ExpandOp> = Vec::new();
         let mut current = op;
 
         while let LogicalOperator::Expand(expand) = current {
             let is_single_hop =
                 !expand.quantified && expand.min_hops == 1 && expand.max_hops == Some(1);
-            if !is_single_hop {
+            let goes_on = chain
+                .last()
+                .is_none_or(|outer| outer.from_variable == expand.to_variable);
+            if !is_single_hop || !goes_on {
                 break;
             }
             chain.push(expand);
@@ -1038,13 +1042,15 @@ impl Planner {
         let _statement = value_join::StatementScope::enter(&self.statement_writes, op);
         // A chain of filters over a node scan reads the label with the fewest
         // nodes (see `scan.rs`); PROFILE then shows the plan that runs.
+        // Boxed: this frame is on the stack once per level of the plan (see
+        // `crate::query::limits`), an operator in it would make it larger.
         let reordered = match op {
             LogicalOperator::Filter(filter) => self
                 .scan_smallest_label(filter)
-                .map(LogicalOperator::Filter),
+                .map(|filter| Box::new(LogicalOperator::Filter(filter))),
             _ => None,
         };
-        let op = reordered.as_ref().unwrap_or(op);
+        let op = reordered.as_deref().unwrap_or(op);
         let result = match op {
             LogicalOperator::NodeScan(scan) => self.plan_node_scan(scan),
             LogicalOperator::Expand(expand) => {
@@ -1112,18 +1118,7 @@ impl Planner {
             LogicalOperator::ParameterScan(param_scan) => self.plan_parameter_scan(param_scan),
             LogicalOperator::MultiWayJoin(mwj) => self.plan_multi_way_join(mwj),
             LogicalOperator::HorizontalAggregate(ha) => self.plan_horizontal_aggregate(ha),
-            LogicalOperator::LoadData(load) => {
-                let operator: Box<dyn Operator> = Box::new(LoadDataOperator::new(
-                    load.path.clone(),
-                    load.format,
-                    load.with_headers,
-                    load.field_terminator,
-                    load.variable.clone(),
-                ));
-                // A loaded row is a value (a map or a list), not a node.
-                self.set_column_entity(&load.variable, None);
-                Ok((operator, vec![load.variable.clone()]))
-            }
+            LogicalOperator::LoadData(load) => self.plan_load_data(load),
             LogicalOperator::Empty => Err(Error::Internal("Empty plan".to_string())),
             #[cfg(feature = "vector-index")]
             LogicalOperator::VectorScan(scan) => self.plan_vector_scan(scan),
@@ -1146,6 +1141,24 @@ impl Planner {
             ))),
         };
         self.maybe_profile(result, op)
+    }
+
+    /// Plans a `LOAD DATA` source: a loaded row is a value (a map or a
+    /// list), not a node.
+    #[inline(never)]
+    fn plan_load_data(
+        &self,
+        load: &crate::query::plan::LoadDataOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let operator: Box<dyn Operator> = Box::new(LoadDataOperator::new(
+            load.path.clone(),
+            load.format,
+            load.with_headers,
+            load.field_terminator,
+            load.variable.clone(),
+        ));
+        self.set_column_entity(&load.variable, None);
+        Ok((operator, vec![load.variable.clone()]))
     }
 
     /// Plans a horizontal aggregate operator (per-row aggregation over a list column).
@@ -1173,15 +1186,19 @@ impl Planner {
         let function = convert_aggregate_function(ha.function);
         let input_column_count = child_columns.len();
 
-        let operator: Box<dyn Operator> = Box::new(HorizontalAggregateOperator::new(
-            child_op,
-            list_col_idx,
-            entity_kind,
-            function,
-            ha.property.clone(),
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            input_column_count,
-        ));
+        let operator: Box<dyn Operator> = Box::new(
+            HorizontalAggregateOperator::new(
+                child_op,
+                list_col_idx,
+                entity_kind,
+                function,
+                ha.property.clone(),
+                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                input_column_count,
+            )
+            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone())
+            .with_transaction_context(self.viewing_epoch, self.transaction_id),
+        );
 
         let mut columns = child_columns;
         columns.push(ha.alias.clone());
@@ -3360,8 +3377,9 @@ mod tests {
     use crate::query::plan::{
         AddLabelOp, AntiJoinOp, ApplyOp, BindOp, DeleteEdgeOp, EdgeScanOp, ExceptOp,
         HorizontalAggregateOp, IntersectOp, LeftJoinOp, LoadDataFormat, LoadDataOp, MapCollectOp,
-        MergeOp, MergeRelationshipOp, MultiWayJoinOp, OtherwiseOp, ParameterScanOp, RemoveLabelOp,
-        SetPropertyOp, ShortestPathOp, TripleComponent, TripleScanOp, UnionOp, UnwindOp,
+        MergeOp, MergeRelationshipOp, MultiWayJoinOp, OtherwiseOp, ParameterScanOp, PathSelection,
+        RemoveLabelOp, SetPropertyOp, ShortestPathOp, TripleComponent, TripleScanOp, UnionOp,
+        UnwindOp,
     };
     use grafeo_core::execution::operators::SessionContext;
 
@@ -3697,6 +3715,8 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(LogicalOperator::Empty),
         }));
         let physical = planner.plan(&logical).unwrap();
@@ -3717,6 +3737,7 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: Box::new(LogicalOperator::Join(JoinOp {
                 left: Box::new(scan_person("a")),
                 right: Box::new(scan_person("b")),
@@ -3817,16 +3838,21 @@ mod tests {
             edge_types: vec!["KNOWS".to_string()],
             direction: ExpandDirection::Outgoing,
             path_alias: "p".to_string(),
-            all_paths: false,
+            selection: PathSelection::Shortest(1),
+            path_mode: PathMode::Walk,
+            binds_target: false,
             min_hops: 1,
             max_hops: None,
+            edge_variable: Some("r".to_string()),
+            quantified: true,
+            edge_condition: None,
         }));
         let physical = planner.plan(&logical).unwrap();
-        assert!(
-            physical
-                .columns()
-                .iter()
-                .any(|c| c.contains("_path_length_p"))
+        // The length, the edge variable, then the path's nodes, edges and
+        // value, as a variable-length expand names them
+        assert_eq!(
+            &physical.columns()[2..],
+            ["_path_length_p", "r", "_path_nodes_p", "_path_edges_p", "p"]
         );
     }
 
@@ -3841,9 +3867,14 @@ mod tests {
             edge_types: vec![],
             direction: ExpandDirection::Both,
             path_alias: "p".to_string(),
-            all_paths: false,
+            selection: PathSelection::Shortest(1),
+            path_mode: PathMode::Walk,
+            binds_target: false,
             min_hops: 1,
             max_hops: None,
+            edge_variable: None,
+            quantified: true,
+            edge_condition: None,
         }));
         let err = planner.plan(&logical).err().expect("plan should fail");
         assert!(format!("{err}").contains("Source variable"));
@@ -3918,6 +3949,9 @@ mod tests {
                 list_column: "not_a_column".to_string(),
                 entity_kind: crate::query::plan::EntityKind::Edge,
                 function: LogicalAggregateFunction::Count,
+                distinct: false,
+                percentile: None,
+                separator: None,
                 property: "age".to_string(),
                 alias: "total".to_string(),
                 input: Box::new(scan_any("n")),
@@ -4021,6 +4055,9 @@ mod tests {
                 list_column: "_path_edges_p".to_string(),
                 entity_kind: crate::query::plan::EntityKind::Edge,
                 function: LogicalAggregateFunction::Count,
+                distinct: false,
+                percentile: None,
+                separator: None,
                 property: "weight".to_string(),
                 alias: "edge_count".to_string(),
                 input: Box::new(path),
@@ -4090,6 +4127,36 @@ mod tests {
         });
         let (count, _) = Planner::count_expand_chain(&var_expand);
         assert_eq!(count, 0);
+    }
+
+    /// Two expands from the same node (`(c)<-[:LIVES_IN]-(a)-[:KNOWS]->(b)`
+    /// started at `a`) are no chain: the second goes on from `a`, not from
+    /// the target of the first, which a factorized chain would read.
+    #[test]
+    fn test_count_expand_chain_ends_at_an_expand_from_another_variable() {
+        let hop = |from: &str, to: &str, input: LogicalOperator| {
+            LogicalOperator::Expand(ExpandOp {
+                quantified: false,
+                from_variable: from.to_string(),
+                to_variable: to.to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_types: vec!["KNOWS".to_string()],
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(input),
+                path_alias: None,
+                path_mode: PathMode::Walk,
+            })
+        };
+        let star = hop("a", "c", hop("a", "b", scan_person("a")));
+        let (count, base) = Planner::count_expand_chain(&star);
+        assert_eq!(count, 1, "the outer expand alone");
+        assert!(matches!(base, LogicalOperator::Expand(inner) if inner.to_variable == "b"));
+        let chain = hop("b", "c", hop("a", "b", scan_person("a")));
+        let (count, base) = Planner::count_expand_chain(&chain);
+        assert_eq!(count, 2, "a path goes on from each target");
+        assert!(matches!(base, LogicalOperator::NodeScan(_)));
     }
 
     // ==================== StaticResultOperator ====================

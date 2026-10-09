@@ -471,6 +471,17 @@ impl GraphStore for GraphProjection {
             .collect()
     }
 
+    fn find_nodes_maybe_equal(&self, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+        self.inner
+            .find_nodes_maybe_equal(property, value)
+            .map(|nodes| {
+                nodes
+                    .into_iter()
+                    .filter(|&id| self.node_id_matches(id))
+                    .collect()
+            })
+    }
+
     fn find_nodes_in_range(
         &self,
         property: &str,

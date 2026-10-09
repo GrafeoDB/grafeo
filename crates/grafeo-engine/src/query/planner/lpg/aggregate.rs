@@ -228,6 +228,7 @@ impl super::Planner {
                     alias: agg_expr.alias.clone(),
                     percentile: agg_expr.percentile,
                     separator: agg_expr.separator.clone(),
+                    rdf_literals: false,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -240,13 +241,11 @@ impl super::Planner {
         let mut output_columns = Vec::new();
         let mut output_entities = Vec::new();
 
-        // Add group-by columns
+        // Add group-by columns: a group key keeps what it holds, also one
+        // computed by an expression (`{msg: m}`, `x.msg`, `startNode(r)`).
         for expr in &agg.group_by {
-            let entity = match expr {
-                LogicalExpression::Variable(name) => self.column_entity(name),
-                _ => None,
-            };
-            output_schema.push(entity_type(entity));
+            let entity = self.held_entity(expr);
+            output_schema.push(entity_type(entity.as_ref()));
             output_columns.push(expression_to_string(expr));
             output_entities.push(entity);
         }
@@ -256,17 +255,10 @@ impl super::Planner {
             let collected = match (agg_expr.function, &agg_expr.expression) {
                 // The list of what `collect` gathers keeps its kind: a node or
                 // edge column, or an expression that yields one (`head(rs)`,
-                // `last(relationships(p))`).
+                // `last(relationships(p))`), or a value with them inside
+                // (`collect({msg: m})`, `collect(p)`).
                 (LogicalAggregateFunction::Collect, Some(expression)) => {
-                    let item = match expression {
-                        LogicalExpression::Variable(name) => self.column_entity(name),
-                        other => self.entity_value(other),
-                    };
-                    match item {
-                        Some(EntityValue::Node) => Some(EntityValue::Nodes),
-                        Some(EntityValue::Edge) => Some(EntityValue::Edges),
-                        _ => None,
-                    }
+                    self.held_entity(expression).map(|item| item.list())
                 }
                 _ => None,
             };
@@ -283,7 +275,7 @@ impl super::Planner {
                     LogicalType::Any
                 }
                 // A list of nodes or edges, or of any values
-                LogicalAggregateFunction::Collect => entity_type(collected),
+                LogicalAggregateFunction::Collect => entity_type(collected.as_ref()),
                 LogicalAggregateFunction::GroupConcat => LogicalType::String,
                 LogicalAggregateFunction::Sample => LogicalType::Any,
                 // Statistical functions return Float64
@@ -317,7 +309,7 @@ impl super::Planner {
         }
 
         for (column, entity) in output_columns.iter().zip(&output_entities) {
-            self.set_column_entity(column, *entity);
+            self.set_column_entity(column, entity.clone());
         }
 
         // Choose operator based on whether there are group-by columns
@@ -526,15 +518,9 @@ impl super::Planner {
 }
 
 /// The declared type of a column that holds `entity`: a node, an edge, a list
-/// of them, or any value.
-fn entity_type(entity: Option<EntityValue>) -> LogicalType {
-    match entity {
-        Some(EntityValue::Node) => LogicalType::Node,
-        Some(EntityValue::Edge) => LogicalType::Edge,
-        Some(EntityValue::Nodes) => LogicalType::List(Box::new(LogicalType::Node)),
-        Some(EntityValue::Edges) => LogicalType::List(Box::new(LogicalType::Edge)),
-        _ => LogicalType::Any,
-    }
+/// of them, a value with them inside, or any value.
+fn entity_type(entity: Option<&EntityValue>) -> LogicalType {
+    entity.map_or(LogicalType::Any, EntityValue::logical_type)
 }
 
 #[cfg(test)]

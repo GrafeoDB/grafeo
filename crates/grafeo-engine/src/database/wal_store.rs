@@ -207,6 +207,10 @@ impl GraphStore for WalGraphStore {
         self.inner.find_nodes_by_property(property, value)
     }
 
+    fn find_nodes_maybe_equal(&self, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+        self.inner.find_nodes_maybe_equal(property, value)
+    }
+
     fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId> {
         self.inner.find_nodes_by_properties(conditions)
     }

@@ -955,6 +955,9 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
             substitute_in_operator(&mut remove_label.input, params)?;
         }
         LogicalOperator::ShortestPath(sp) => {
+            if let Some(condition) = &mut sp.edge_condition {
+                substitute_in_expression(&mut condition.predicate, params)?;
+            }
             substitute_in_operator(&mut sp.input, params)?;
         }
         // SPARQL Update operators

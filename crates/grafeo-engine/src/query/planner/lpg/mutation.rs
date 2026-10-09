@@ -12,8 +12,11 @@ use super::{
 };
 #[cfg(feature = "algos")]
 use super::{CallProcedureOp, StaticResultOperator};
+use crate::query::plan::{PathMode, PathSelection};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
-use grafeo_core::execution::operators::{JoinCondition, JoinedRowCondition};
+use grafeo_core::execution::operators::{
+    ExecutionPathMode, ExecutionPathSelection, JoinCondition, JoinedRowCondition,
+};
 
 impl super::Planner {
     /// Plans a CREATE NODE operator.
@@ -21,14 +24,27 @@ impl super::Planner {
         &self,
         create: &CreateNodeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Plan input if present
-        let (mut input_op, mut columns) = if let Some(ref input) = create.input {
+        // Plan input if present. The input is planned in this small frame and
+        // the operator built in another: an INSERT of many patterns is a long
+        // chain of creations, each planning the one below it (see
+        // `crate::query::limits`).
+        let (input_op, columns) = if let Some(ref input) = create.input {
             let (op, cols) = self.plan_operator(input)?;
             (Some(op), cols)
         } else {
             (None, vec![])
         };
+        self.build_create_node(create, input_op, columns)
+    }
 
+    /// Builds the operator of `create` over its planned input.
+    #[inline(never)]
+    fn build_create_node(
+        &self,
+        create: &CreateNodeOp,
+        mut input_op: Option<Box<dyn Operator>>,
+        mut columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // If the variable already exists in input columns and no labels/properties
         // are specified, this is a reference to an existing node (e.g., from MATCH).
         // Skip creating a new node and just pass through.
@@ -77,8 +93,19 @@ impl super::Planner {
         &self,
         create: &CreateEdgeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, mut columns) = self.plan_operator(&create.input)?;
+        // The input is planned in this small frame, as for a node.
+        let (input_op, columns) = self.plan_operator(&create.input)?;
+        self.build_create_edge(create, input_op, columns)
+    }
 
+    /// Builds the operator of `create` over its planned input.
+    #[inline(never)]
+    fn build_create_edge(
+        &self,
+        create: &CreateEdgeOp,
+        input_op: Box<dyn Operator>,
+        mut columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Find source and target columns
         let from_column = columns
             .iter()
@@ -369,21 +396,21 @@ impl super::Planner {
         columns.push(unwind.variable.clone());
 
         // The items of a node or edge list (a collected list, `nodes(p)`,
-        // `relationships(p)`, ...) are nodes or edges, so a property read takes
-        // the right entity; the items of any other list are values.
-        let item = match self.entity_value(&unwind.expression) {
-            Some(EntityValue::Nodes) => Some(EntityValue::Node),
-            Some(EntityValue::Edges) => Some(EntityValue::Edge),
-            _ => None,
-        };
+        // `relationships(p)`, a list literal of nodes, ...) are nodes or
+        // edges, so a property read takes the right entity, and the items of
+        // a list of maps or paths with nodes in them keep them; the items of
+        // any other list are values. A list literal whose items differ
+        // (`[n, 1]`) gives values: one column holds one kind.
+        let item = self
+            .entity_value(&unwind.expression)
+            .and_then(|list| list.item());
 
         // Build output schema
         let mut output_schema = self.derive_schema_from_columns(&final_input_columns);
-        output_schema.push(match item {
-            Some(EntityValue::Node) => LogicalType::Node,
-            Some(EntityValue::Edge) => LogicalType::Edge,
-            _ => LogicalType::Any,
-        });
+        output_schema.push(
+            item.as_ref()
+                .map_or(LogicalType::Any, EntityValue::logical_type),
+        );
         self.set_column_entity(&unwind.variable, item);
 
         // Add ORDINALITY column (1-based index) if requested
@@ -402,14 +429,23 @@ impl super::Planner {
             self.scalar_columns.borrow_mut().insert(off_var.clone());
         }
 
-        let operator: Box<dyn Operator> = Box::new(UnwindOperator::new(
+        let unwind_op = UnwindOperator::new(
             final_input_op,
             col_idx,
             unwind.variable.clone(),
             output_schema,
             emit_ordinality,
             emit_offset,
-        ));
+        );
+        // A variable that holds the list stays in scope, so the rows pass the
+        // list on; a list computed for the UNWIND alone (a constant, or an
+        // expression in a column of its own) stays out of them.
+        let list_is_a_variable = !unwinds_a_constant && list_col_idx.is_some();
+        let operator: Box<dyn Operator> = Box::new(if list_is_a_variable {
+            unwind_op
+        } else {
+            unwind_op.without_the_list()
+        });
 
         Ok((operator, columns))
     }
@@ -485,6 +521,8 @@ impl super::Planner {
                 match_properties,
                 on_create_properties,
                 on_match_properties,
+                on_create_labels: merge.on_create_labels.clone(),
+                on_match_labels: merge.on_match_labels.clone(),
                 output_schema,
                 output_column,
                 bound_variable_column,
@@ -572,6 +610,7 @@ impl super::Planner {
             target_column,
             source_variable: merge_rel.source_variable.clone(),
             target_variable: merge_rel.target_variable.clone(),
+            undirected: merge_rel.undirected,
             edge_type: merge_rel.edge_type.clone(),
             match_properties,
             on_create_properties,
@@ -608,15 +647,21 @@ impl super::Planner {
                 ))
             })?;
 
-        let target_column = columns
-            .iter()
-            .position(|c| c == &sp.target_var)
-            .ok_or_else(|| {
-                Error::Internal(format!(
-                    "Target variable '{}' not found for shortestPath",
-                    sp.target_var
-                ))
-            })?;
+        // A search that binds the target has none in its input
+        let target_column = if sp.binds_target {
+            None
+        } else {
+            let column = columns
+                .iter()
+                .position(|c| c == &sp.target_var)
+                .ok_or_else(|| {
+                    Error::Internal(format!(
+                        "Target variable '{}' not found for shortestPath",
+                        sp.target_var
+                    ))
+                })?;
+            Some(column)
+        };
 
         // Convert direction
         let direction = match sp.direction {
@@ -624,23 +669,70 @@ impl super::Planner {
             ExpandDirection::Incoming => Direction::Incoming,
             ExpandDirection::Both => Direction::Both,
         };
+        // ANY k keeps the k shortest paths, which are k paths of the pair
+        let selection = match sp.selection {
+            PathSelection::Any(count) | PathSelection::Shortest(count) => {
+                ExecutionPathSelection::Shortest(count)
+            }
+            PathSelection::ShortestGroups(count) => ExecutionPathSelection::ShortestGroups(count),
+        };
+        let path_mode = match sp.path_mode {
+            PathMode::Walk => ExecutionPathMode::Walk,
+            PathMode::Trail => ExecutionPathMode::Trail,
+            PathMode::Simple => ExecutionPathMode::Simple,
+            PathMode::Acyclic => ExecutionPathMode::Acyclic,
+        };
 
         // Create the shortest path operator: it walks the edges this query
         // sees, its transaction's uncommitted ones included, as an expand does.
-        let operator: Box<dyn Operator> = Box::new(
-            ShortestPathOperator::new(
+        let operator = match target_column {
+            Some(target_column) => ShortestPathOperator::new(
                 Arc::clone(&self.store),
                 input_op,
                 source_column,
                 target_column,
                 sp.edge_types.clone(),
                 direction,
-            )
-            .with_all_paths(sp.all_paths)
+            ),
+            None => ShortestPathOperator::from_source(
+                Arc::clone(&self.store),
+                input_op,
+                source_column,
+                sp.edge_types.clone(),
+                direction,
+            ),
+        };
+        let mut operator = operator
+            .with_selection(selection)
+            .with_path_mode(path_mode)
             .with_hop_bounds(sp.min_hops, sp.max_hops)
             .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_read_only(self.read_only),
-        );
+            .with_read_only(self.read_only)
+            .with_path_output();
+
+        // The edge condition reads a row of the input columns and the
+        // candidate edge after them
+        if let Some(condition) = &sp.edge_condition {
+            let mut variable_columns: HashMap<String, usize> = columns
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i))
+                .collect();
+            variable_columns.insert(condition.variable.clone(), columns.len());
+            let predicate = ExpressionPredicate::new(
+                self.convert_expression(&condition.predicate)?,
+                variable_columns,
+                Arc::clone(&self.store),
+            )
+            .with_transaction_context(self.viewing_epoch, self.transaction_id)
+            .with_session_context(self.session_context.clone());
+            operator = operator.with_edge_condition(Box::new(predicate));
+        }
+
+        // The target the search binds comes before the length
+        if sp.binds_target {
+            columns.push(sp.target_var.clone());
+        }
 
         // Add path length column with the expected naming convention
         // The translator expects _path_length_{alias} format for length(p) calls
@@ -650,7 +742,38 @@ impl super::Planner {
         // Mark path length as scalar so plan_return uses LogicalType::Any, not Node
         self.scalar_columns.borrow_mut().insert(path_col_name);
 
-        Ok((operator, columns))
+        // The edge variable: the list of the path's edges for a quantified
+        // edge pattern (a group variable, as a variable-length expand binds
+        // it), the path's one edge otherwise
+        if let Some(edge_variable) = &sp.edge_variable {
+            operator = operator.with_edge_output(sp.quantified);
+            let edge_column = self.register_edge_column(&Some(edge_variable.clone()));
+            if sp.quantified {
+                self.edge_columns.borrow_mut().remove(&edge_column);
+                self.entity_list_columns
+                    .borrow_mut()
+                    .insert(edge_column.clone(), EntityValue::Edges);
+                self.group_list_variables
+                    .borrow_mut()
+                    .insert(edge_column.clone());
+            }
+            columns.push(edge_column);
+        }
+
+        // The path's nodes, edges and the path itself, as a variable-length
+        // expand writes them for a named path; the path holds node and edge
+        // ids, which RETURN gives as nodes and edges.
+        for column in [
+            format!("_path_nodes_{}", sp.path_alias),
+            format!("_path_edges_{}", sp.path_alias),
+        ] {
+            self.scalar_columns.borrow_mut().insert(column.clone());
+            columns.push(column);
+        }
+        self.set_column_entity(&sp.path_alias, Some(EntityValue::Nested(LogicalType::Path)));
+        columns.push(sp.path_alias.clone());
+
+        Ok((Box::new(operator), columns))
     }
 
     /// Plans a CALL procedure operator.

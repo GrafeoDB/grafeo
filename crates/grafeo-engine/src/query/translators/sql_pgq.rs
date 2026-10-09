@@ -8,14 +8,15 @@ use std::collections::HashSet;
 
 use super::common::{
     VarGen, check_branch_columns, combine_with_and, has_all_labels, is_aggregate_function,
-    to_aggregate_function, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    is_binary_set_function, to_aggregate_function, wrap_filter, wrap_limit, wrap_return, wrap_skip,
+    wrap_sort,
 };
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp,
     CreatePropertyGraphOp, DistinctOp, ExceptOp, ExpandDirection, ExpandOp, IntersectOp,
-    LeftJoinOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp, PathMode,
-    ProcedureYield, PropertyGraphEdgeTable, PropertyGraphNodeTable, ReturnItem, SortKey, SortOrder,
-    UnaryOp, UnionOp,
+    LeftJoinOp, ListPredicateKind, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
+    PathMode, ProcedureYield, PropertyGraphEdgeTable, PropertyGraphNodeTable, ReturnItem, SortKey,
+    SortOrder, UnaryOp, UnionOp,
 };
 use grafeo_adapters::query::sql_pgq::{self, ast};
 use grafeo_common::types::Value;
@@ -55,7 +56,8 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 
     let statement = sql_pgq::parse(actual_query)?;
     let translator = SqlPgqTranslator::new(&statement);
-    let mut plan = translator.translate_statement(&statement)?;
+    let plan = translator.translate_statement(&statement)?;
+    let mut plan = crate::query::limits::check_plan_depth(plan)?;
     plan.explain = explain;
     plan.profile = profile;
     Ok(plan)
@@ -159,7 +161,11 @@ impl SqlPgqTranslator {
             .collect();
         let table_alias = select.table_alias.as_deref();
 
-        // Plan structure: Distinct? → Limit → Skip → Return → Aggregate? → Sort → Filter → NodeScan/Expand
+        // Plan structure, from the top:
+        // - a plain SELECT: Return → Limit → Skip → Sort → Filter → NodeScan/Expand
+        // - with DISTINCT: Limit → Skip → Distinct → Return → Sort → Filter → ...
+        // - with an aggregate or GROUP BY:
+        //   Limit → Skip → Distinct? → Sort → Return → Aggregate → Return (COLUMNS) → Filter → ...
         //
         // SQL WHERE and ORDER BY operate on output column aliases, but the binder/planner
         // need graph-level expressions. We resolve aliases back to graph expressions and
@@ -232,20 +238,16 @@ impl SqlPgqTranslator {
             plan = wrap_sort(plan, keys);
         }
 
-        // 4. Translate OFFSET → Skip (below Return, after Sort)
-        if let Some(offset) = select.offset {
-            // reason: SQL/PGQ u64 offset fits usize on 64-bit targets
-            #[allow(clippy::cast_possible_truncation)]
-            let skip_n = offset as usize;
-            plan = wrap_skip(plan, skip_n);
-        }
-
-        // 5. Translate LIMIT → Limit (below Return, after Skip)
-        if let Some(limit) = select.limit {
-            // reason: SQL/PGQ u64 limit fits usize on 64-bit targets
-            #[allow(clippy::cast_possible_truncation)]
-            let limit_n = limit as usize;
-            plan = wrap_limit(plan, limit_n);
+        // 4-5. OFFSET and LIMIT cut the rows of the query (ISO/IEC 9075-2
+        // <query expression>): the rows after GROUP BY, HAVING, DISTINCT and
+        // ORDER BY. Without grouping or DISTINCT the projection keeps one row
+        // per input row, so the cut can go below it, right above the Sort,
+        // where the planner can fuse the two into a top-k. With grouping or
+        // DISTINCT it goes last (step 9): a cut before them would split
+        // groups and drop rows that DISTINCT keeps.
+        let cut_below_projection = !is_aggregate_query && !select.distinct;
+        if cut_below_projection {
+            plan = wrap_offset_and_limit(plan, select)?;
         }
 
         // 6-7. Translate COLUMNS + outer SELECT list into a single projection.
@@ -305,31 +307,9 @@ impl SqlPgqTranslator {
                             let agg_fn = to_aggregate_function(name).expect(
                                 "aggregate function validated by is_aggregate_function guard",
                             );
-                            let expr = if args.len() == 1 {
-                                let arg = &args[0];
-                                if matches!(arg, ast::Expression::Variable(v) if v == "*") {
-                                    None // COUNT(*)
-                                } else {
-                                    Some(self.translate_expression(arg, None)?)
-                                }
-                            } else {
-                                None
-                            };
-                            // COUNT(expr) should skip NULLs, unlike COUNT(*)
-                            let agg_fn = if agg_fn == AggregateFunction::Count && expr.is_some() {
-                                AggregateFunction::CountNonNull
-                            } else {
-                                agg_fn
-                            };
-                            aggregates.push(AggregateExpr {
-                                function: agg_fn,
-                                expression: expr,
-                                expression2: None,
-                                distinct: *distinct,
-                                alias,
-                                percentile: None,
-                                separator: None,
-                            });
+                            aggregates.push(
+                                self.translate_aggregate(name, agg_fn, args, *distinct, alias)?,
+                            );
                         }
                         _ => {
                             // Non-aggregate SELECT items pass through as group-by keys.
@@ -462,12 +442,18 @@ impl SqlPgqTranslator {
             plan = wrap_sort(plan, keys);
         }
 
-        // 8. SELECT DISTINCT → wrap with Distinct operator
+        // 8. SELECT DISTINCT → wrap with Distinct operator (it keeps the
+        // order of the sorted rows)
         if select.distinct {
             plan = LogicalOperator::Distinct(DistinctOp {
                 input: Box::new(plan),
                 columns: None,
             });
+        }
+
+        // 9. OFFSET and LIMIT of a grouping or DISTINCT query (see step 4-5)
+        if !cut_below_projection {
+            plan = wrap_offset_and_limit(plan, select)?;
         }
 
         Ok(LogicalPlan::new(plan))
@@ -652,7 +638,12 @@ impl SqlPgqTranslator {
         input: LogicalOperator,
     ) -> Result<LogicalOperator> {
         let from_variable = Self::get_last_variable(&input)?;
-        let edge_variable = edge.variable.clone();
+        // An edge with a property map needs a variable to filter on, even
+        // when the pattern leaves it anonymous: `-[:KNOWS {since: 3}]->`.
+        let edge_variable = edge
+            .variable
+            .clone()
+            .or_else(|| (!edge.properties.is_empty()).then(|| self.anonymous_variable()));
         let edge_types = edge.types.clone();
         let to_variable = edge
             .target
@@ -682,25 +673,56 @@ impl SqlPgqTranslator {
             None
         };
 
-        let expand = LogicalOperator::Expand(ExpandOp {
+        let mut plan = LogicalOperator::Expand(ExpandOp {
             quantified,
             from_variable,
             to_variable: to_variable.clone(),
-            edge_variable,
+            edge_variable: edge_variable.clone(),
             direction,
             edge_types,
             min_hops,
             max_hops,
             input: Box::new(input),
-            path_alias,
+            path_alias: path_alias.clone(),
             path_mode: PathMode::Walk,
         });
 
         // Every label of the target node must hold
-        Ok(match has_all_labels(&to_variable, &edge.target.labels) {
-            Some(predicate) => wrap_filter(expand, predicate),
-            None => expand,
-        })
+        if let Some(predicate) = has_all_labels(&to_variable, &edge.target.labels) {
+            plan = wrap_filter(plan, predicate);
+        }
+
+        // The property map of the edge (ISO/IEC 39075:2024 16.7, which
+        // SQL/PGQ takes its element patterns from): on a quantified edge it
+        // holds for every edge of the walk, read from the path's edge list.
+        if !edge.properties.is_empty()
+            && let Some(variable) = &edge_variable
+        {
+            let predicate = match &path_alias {
+                Some(path) => {
+                    let hop = self.anonymous_variable();
+                    LogicalExpression::ListPredicate {
+                        kind: ListPredicateKind::All,
+                        variable: hop.clone(),
+                        list_expr: Box::new(LogicalExpression::Variable(format!(
+                            "_path_edges_{path}"
+                        ))),
+                        predicate: Box::new(self.build_property_predicate(&hop, &edge.properties)?),
+                    }
+                }
+                None => self.build_property_predicate(variable, &edge.properties)?,
+            };
+            plan = wrap_filter(plan, predicate);
+        }
+
+        // The property map of the target node, like the one of the first
+        // node of the pattern (see `translate_node_pattern`)
+        if !edge.target.properties.is_empty() {
+            let predicate = self.build_property_predicate(&to_variable, &edge.target.properties)?;
+            plan = wrap_filter(plan, predicate);
+        }
+
+        Ok(plan)
     }
 
     // ==================== COLUMNS Translation ====================
@@ -726,6 +748,70 @@ impl SqlPgqTranslator {
 
     // ==================== Expression Translation ====================
 
+    /// Translates an aggregate call `name(args)` of `function`: its value
+    /// (none for `COUNT(*)`), the independent value of a binary set function
+    /// (`COVAR_SAMP(y, x)`, ISO/IEC 9075-2 <binary set function>), the
+    /// percentile of `PERCENTILE_DISC(x, p)` and `PERCENTILE_CONT(x, p)`, and
+    /// the separator of `LISTAGG(x, s)` (`,` by default) and
+    /// `GROUP_CONCAT(x, s)`, as the GQL translator reads them.
+    fn translate_aggregate(
+        &self,
+        name: &str,
+        function: AggregateFunction,
+        args: &[ast::Expression],
+        distinct: bool,
+        alias: Option<String>,
+    ) -> Result<AggregateExpr> {
+        let expression = match args.first() {
+            None => None,
+            Some(ast::Expression::Variable(v)) if v == "*" => None, // COUNT(*)
+            Some(argument) => Some(self.translate_expression(argument, None)?),
+        };
+        // COUNT(expr) should skip NULLs, unlike COUNT(*)
+        let function = if function == AggregateFunction::Count && expression.is_some() {
+            AggregateFunction::CountNonNull
+        } else {
+            function
+        };
+        let second = args.get(1);
+        let expression2 = if is_binary_set_function(function) {
+            second
+                .map(|argument| self.translate_expression(argument, None))
+                .transpose()?
+        } else {
+            None
+        };
+        let percentile = matches!(
+            function,
+            AggregateFunction::PercentileDisc | AggregateFunction::PercentileCont
+        )
+        .then(|| match second {
+            Some(ast::Expression::Literal(ast::Literal::Float(p))) => p.clamp(0.0, 1.0),
+            Some(ast::Expression::Literal(ast::Literal::Integer(p))) => (*p as f64).clamp(0.0, 1.0),
+            _ => 0.5,
+        });
+        let separator = if function == AggregateFunction::GroupConcat {
+            match second {
+                Some(ast::Expression::Literal(ast::Literal::String(separator))) => {
+                    Some(separator.clone())
+                }
+                _ if name.eq_ignore_ascii_case("LISTAGG") => Some(",".to_string()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        Ok(AggregateExpr {
+            function,
+            expression,
+            expression2,
+            distinct,
+            alias,
+            percentile,
+            separator,
+        })
+    }
+
     /// Translates a HAVING expression, extracting inline aggregate calls into the
     /// aggregates list and replacing them with variable references.
     ///
@@ -748,31 +834,14 @@ impl SqlPgqTranslator {
                 // This is an inline aggregate: extract it.
                 let agg_fn =
                     to_aggregate_function(name).expect("validated by is_aggregate_function");
-                let agg_expr = if args.len() == 1 {
-                    let arg = &args[0];
-                    if matches!(arg, ast::Expression::Variable(v) if v == "*") {
-                        None
-                    } else {
-                        Some(self.translate_expression(arg, None)?)
-                    }
-                } else {
-                    None
-                };
-                let agg_fn = if agg_fn == AggregateFunction::Count && agg_expr.is_some() {
-                    AggregateFunction::CountNonNull
-                } else {
-                    agg_fn
-                };
                 let alias = format!("_having_agg_{}", aggregates.len());
-                aggregates.push(AggregateExpr {
-                    function: agg_fn,
-                    expression: agg_expr,
-                    expression2: None,
-                    distinct: *distinct,
-                    alias: Some(alias.clone()),
-                    percentile: None,
-                    separator: None,
-                });
+                aggregates.push(self.translate_aggregate(
+                    name,
+                    agg_fn,
+                    args,
+                    *distinct,
+                    Some(alias.clone()),
+                )?);
                 Ok(LogicalExpression::Variable(alias))
             }
             ast::Expression::Binary { left, op, right } => {
@@ -1340,6 +1409,32 @@ fn select_names(select: &ast::SelectStatement, names: &mut HashSet<String>) {
     if let ast::SelectList::Columns(items) = &select.select_list {
         names.extend(items.iter().filter_map(|item| item.alias.clone()));
     }
+}
+
+/// Wraps `plan` in the OFFSET (a Skip) and then the LIMIT of `select`.
+///
+/// # Errors
+///
+/// Returns an error when a count does not fit in `usize`.
+fn wrap_offset_and_limit(
+    mut plan: LogicalOperator,
+    select: &ast::SelectStatement,
+) -> Result<LogicalOperator> {
+    let count = |value: u64, clause: &str| {
+        usize::try_from(value).map_err(|_| {
+            Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!("{clause} {value} is larger than this platform can count"),
+            ))
+        })
+    };
+    if let Some(offset) = select.offset {
+        plan = wrap_skip(plan, count(offset, "OFFSET")?);
+    }
+    if let Some(limit) = select.limit {
+        plan = wrap_limit(plan, count(limit, "LIMIT")?);
+    }
+    Ok(plan)
 }
 
 /// Adds the variables a pattern names.

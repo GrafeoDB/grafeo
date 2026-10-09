@@ -147,18 +147,22 @@ Per the standard, minimum conformance requires:
 | TRAIL | Supported | No repeated edges |
 | SIMPLE | Supported | No repeated nodes (except endpoints) |
 | ACYCLIC | Supported | No repeated nodes at all |
+| Path mode of one path pattern `p = TRAIL (...)` | Supported | |
+| PATH / PATHS keywords | Supported | `TRAIL PATHS`, `ANY SHORTEST PATH` |
 
 ### Path Search Prefixes (Section 16.6)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | ALL | Supported | |
-| ANY | Supported | |
-| ANY k | Supported | |
-| ALL SHORTEST | Supported | |
-| ANY SHORTEST | Supported | |
-| SHORTEST k | Supported | |
-| SHORTEST k GROUPS | Supported | |
+| ANY | Partial | One path per pair of endpoints; over one edge pattern between two node patterns |
+| ANY k | Partial | k paths per pair of endpoints (the k shortest); over one edge pattern |
+| ALL SHORTEST | Partial | Over one edge pattern |
+| ANY SHORTEST | Partial | Over one edge pattern |
+| SHORTEST k | Partial | Over one edge pattern |
+| SHORTEST k GROUPS | Partial | Over one edge pattern |
+| Path mode of a search prefix `ANY SHORTEST TRAIL` | Supported | |
+| Search prefix of one path pattern `p = ANY SHORTEST (...)` | Supported | |
 
 ### Match Modes (Section 16.4)
 
@@ -262,19 +266,19 @@ Per the standard, minimum conformance requires:
 | G003 | Explicit REPEATABLE ELEMENTS | Supported |
 | G004 | Path variables | Supported |
 | G005 | Path search prefix in path pattern | Supported |
-| G006 | KEEP clause: path mode prefix | Supported |
-| G007 | KEEP clause: path search prefix | Supported |
+| G006 | KEEP clause: path mode prefix | **Not yet** (KEEP takes a match mode) |
+| G007 | KEEP clause: path search prefix | **Not yet** (KEEP takes a match mode) |
 | G010 | Explicit WALK keyword | Supported |
 | G011 | Advanced path modes: TRAIL | Supported |
 | G012 | Advanced path modes: SIMPLE | Supported |
 | G013 | Advanced path modes: ACYCLIC | Supported |
 | G014 | Explicit PATH/PATHS keywords | Supported |
 | G015 | All path search: explicit ALL keyword | Supported |
-| G016 | Any path search | Supported |
-| G017 | All shortest path search | Supported |
-| G018 | Any shortest path search | Supported |
-| G019 | Counted shortest path search | Supported |
-| G020 | Counted shortest group search | Supported |
+| G016 | Any path search | Partial (over one edge pattern) |
+| G017 | All shortest path search | Partial (over one edge pattern) |
+| G018 | Any shortest path search | Partial (over one edge pattern) |
+| G019 | Counted shortest path search | Partial (over one edge pattern) |
+| G020 | Counted shortest group search | Partial (over one edge pattern) |
 | G030 | Path multiset alternation | **Supported** |
 | G031 | Path multiset alternation: var-length operands | **Supported** |
 | G032 | Path pattern union | Supported |
@@ -550,9 +554,9 @@ GQL uses three-valued logic where comparisons involving NULL produce UNKNOWN (no
    internally converted to function calls (isDirected(), hasLabel(), etc.) rather than being
    preserved as first-class predicate AST nodes. Semantics are equivalent.
 
-2. **KEEP clause representation**: The standard specifies `KEEP <path pattern prefix>` wrapping
-   all patterns. Grafeo implements KEEP as a per-pattern match mode flag, which is simpler but
-   semantically equivalent.
+2. **KEEP clause**: The standard specifies `KEEP <path pattern prefix>`, a path mode or search
+   prefix for all path patterns. Grafeo's KEEP takes a match mode for one path pattern
+   (`KEEP DIFFERENT EDGES`); `KEEP <path pattern prefix>` is not supported yet (G006, G007).
 
 3. **Variable scope validation**: The standard defines degree-of-exposure categories (unconditional
    singleton, conditional singleton, etc.) at parse time. Grafeo defers variable scope validation
@@ -560,3 +564,8 @@ GQL uses three-valued logic where comparisons involving NULL produce UNKNOWN (no
 
 4. **Simplified path patterns**: The `-/:Label/->` shorthand is desugared to `-[:Label]->` at parse
    time. Both forms are semantically equivalent.
+
+5. **Prefix after MATCH**: In `MATCH TRAIL (...), (...)` and `MATCH ANY SHORTEST (...), (...)` the
+   standard reads the prefix as the first path pattern's. Grafeo applies it to every path pattern
+   of the clause without a prefix of its own; a prefix after a path variable
+   (`p = ANY SHORTEST TRAIL (...)`) or before a later path pattern holds for that pattern.

@@ -89,8 +89,9 @@
 //! the record at the type that passes the cap.
 //!
 //! The framing itself (`RecordFraming`, `encode_framed_record`,
-//! `read_framed_records`) knows nothing of the catalog: another family of
-//! records can use it with its own kinds and maximum.
+//! `read_framed_records`) knows nothing of the catalog: the log records of
+//! the WAL ([`log_record`](super::log_record)) use it with their own kinds
+//! and maximum.
 
 use std::fmt;
 use std::io::{self, Read};
@@ -99,7 +100,7 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, SeqAccess, Visito
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::value_codec::{MAX_PROPERTY_VALUE_DEPTH, encoded_len, nests_too_deep};
+use super::value_codec::{MAX_PROPERTY_VALUE_DEPTH, encoded_len, nests_too_deep_to_encode};
 use crate::types::Value;
 use crate::utils::error::{Error, Result};
 
@@ -681,6 +682,86 @@ pub struct SchemaRecord {
     pub name: String,
 }
 
+/// What identifies an index of a graph: what it indexes, without its
+/// parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum IndexKeyRecord {
+    /// The property index on a node property key.
+    Property {
+        /// The property key.
+        #[serde(deserialize_with = "text")]
+        key: String,
+    },
+    /// The vector index on a label's property.
+    Vector {
+        /// The node label.
+        #[serde(deserialize_with = "text")]
+        label: String,
+        /// The property holding the vectors.
+        #[serde(deserialize_with = "text")]
+        property: String,
+    },
+    /// The full-text index on a label's property.
+    Text {
+        /// The node label.
+        #[serde(deserialize_with = "text")]
+        label: String,
+        /// The indexed property.
+        #[serde(deserialize_with = "text")]
+        property: String,
+    },
+}
+
+/// What identifies a catalog record: what dropping it names
+/// ([`StandaloneOp::DropCatalog`](crate::change::StandaloneOp::DropCatalog)),
+/// and what [`CatalogRecord::key`] returns. Its kind is the kind of the
+/// catalog records it identifies.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CatalogKey {
+    /// A schema namespace, by name (catalog kind 1).
+    Schema(String),
+    /// A node type, by name (catalog kind 2).
+    NodeType(String),
+    /// An edge type, by name (catalog kind 3).
+    EdgeType(String),
+    /// A graph type, by name (catalog kind 4).
+    GraphType(String),
+    /// The graph type binding of a graph, by the graph's name (catalog kind 5).
+    GraphBinding(String),
+    /// A named constraint, by name (catalog kind 6).
+    Constraint(String),
+    /// An index of a graph (catalog kind 7).
+    Index {
+        /// The graph's storage key; `None` for the default graph.
+        graph: Option<String>,
+        /// What the index indexes.
+        index: IndexKeyRecord,
+    },
+    /// An index name, by the name (catalog kind 8).
+    IndexName(String),
+    /// A stored procedure, by name (catalog kind 9).
+    Procedure(String),
+}
+
+impl CatalogKey {
+    /// The kind of the catalog records the key identifies, as
+    /// [`CatalogRecord::kind`] numbers them: 1 `Schema` to 9 `Procedure`.
+    #[must_use]
+    pub const fn kind(&self) -> u8 {
+        match self {
+            Self::Schema(_) => KIND_SCHEMA,
+            Self::NodeType(_) => KIND_NODE_TYPE,
+            Self::EdgeType(_) => KIND_EDGE_TYPE,
+            Self::GraphType(_) => KIND_GRAPH_TYPE,
+            Self::GraphBinding(_) => KIND_GRAPH_BINDING,
+            Self::Constraint(_) => KIND_CONSTRAINT,
+            Self::Index { .. } => KIND_INDEX,
+            Self::IndexName(_) => KIND_INDEX_NAME,
+            Self::Procedure(_) => KIND_PROCEDURE,
+        }
+    }
+}
+
 /// One record of the catalog. Matches over it are exhaustive on purpose: a
 /// kind added later must be handled by every reader of this crate.
 #[derive(Debug, Clone, PartialEq)]
@@ -721,6 +802,40 @@ impl CatalogRecord {
             Self::Index(_) => KIND_INDEX,
             Self::IndexName(_) => KIND_INDEX_NAME,
             Self::Procedure(_) => KIND_PROCEDURE,
+        }
+    }
+
+    /// What identifies the record: what a drop of it names. A record put
+    /// again with the same key replaces this one.
+    #[must_use]
+    pub fn key(&self) -> CatalogKey {
+        match self {
+            Self::Schema(record) => CatalogKey::Schema(record.name.clone()),
+            Self::NodeType(record) => CatalogKey::NodeType(record.name.clone()),
+            Self::EdgeType(record) => CatalogKey::EdgeType(record.name.clone()),
+            Self::GraphType(record) => CatalogKey::GraphType(record.name.clone()),
+            Self::GraphBinding(record) => CatalogKey::GraphBinding(record.graph.clone()),
+            Self::Constraint(record) => CatalogKey::Constraint(record.name.clone()),
+            Self::Index(record) => CatalogKey::Index {
+                graph: record.graph.clone(),
+                index: match &record.index {
+                    IndexKindRecord::Property { key } => {
+                        IndexKeyRecord::Property { key: key.clone() }
+                    }
+                    IndexKindRecord::Vector {
+                        label, property, ..
+                    } => IndexKeyRecord::Vector {
+                        label: label.clone(),
+                        property: property.clone(),
+                    },
+                    IndexKindRecord::Text { label, property } => IndexKeyRecord::Text {
+                        label: label.clone(),
+                        property: property.clone(),
+                    },
+                },
+            },
+            Self::IndexName(record) => CatalogKey::IndexName(record.name.clone()),
+            Self::Procedure(record) => CatalogKey::Procedure(record.name.clone()),
         }
     }
 
@@ -798,15 +913,15 @@ impl CatalogRecord {
 
     /// The bytes the value codec writes for the default values of the
     /// record's properties, counted without encoding them. A value nested
-    /// deeper than a property value may be ([`nests_too_deep`]) counts
-    /// nothing, so the count recurses no deeper than that: the value codec
-    /// refuses it, as it reaches the depth it refuses, or it is written
-    /// through the payload's maximum as before.
+    /// deeper than the value codec encodes ([`nests_too_deep_to_encode`])
+    /// counts nothing, so the count recurses no deeper than that: the codec
+    /// refuses it as it reaches that depth. Every value the codec takes is
+    /// counted, also one nested deeper than a property value may be.
     fn default_value_bytes(&self) -> usize {
         self.properties()
             .iter()
             .filter_map(|property| property.default_value.as_ref())
-            .filter(|value| !nests_too_deep(value))
+            .filter(|value| !nests_too_deep_to_encode(value))
             .map(encoded_len)
             .fold(0, usize::saturating_add)
     }
@@ -870,7 +985,7 @@ pub fn read_catalog_records(
     read_framed_records(
         &CATALOG_FRAMING,
         reader,
-        &mut CatalogRecord::decode_payload,
+        &mut |kind, _required, payload| CatalogRecord::decode_payload(kind, payload),
         apply,
     )
 }
@@ -1043,12 +1158,57 @@ pub(crate) fn decode_bincode_payload<T: DeserializeOwned, const LIMIT: usize>(
     }
 }
 
+/// Reads a string in place: its length is checked against the bytes present
+/// before the string is copied out. (A `String` field of a derived
+/// `Deserialize` would allocate the length bincode reads before it reads
+/// the bytes.)
+pub(crate) fn text<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    deserializer.deserialize_str(TextVisitor)
+}
+
+/// Reads an optional string in place (see [`text`]).
+pub(crate) fn optional_text<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Option::<Text>::deserialize(deserializer).map(|text| text.map(|Text(text)| text))
+}
+
+struct TextVisitor;
+
+impl Visitor<'_> for TextVisitor {
+    type Value = String;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a string")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> std::result::Result<String, E> {
+        Ok(text.to_owned())
+    }
+}
+
+/// A string read in place (see [`text`]).
+pub(crate) struct Text(pub(crate) String);
+
+impl<'de> Deserialize<'de> for Text {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        text(deserializer).map(Text)
+    }
+}
+
 /// Reads records of `framing` from `reader` until it ends. `decode` turns a
-/// kind and its payload into a record, or `None` for a kind it does not
-/// know; `apply` takes each record, in order.
+/// kind, whether the record is required (its flag) and its payload into a
+/// record, or `None` for a record it does not know; `apply` takes each
+/// record, in order.
 ///
-/// An unknown kind is skipped when its required flag is clear. A stream that
-/// ends between two records ends the read.
+/// A record `decode` does not know is skipped when its required flag is
+/// clear. A record of a known kind can hold something `decode` does not know
+/// (a log record holding a catalog record of a later kind): `decode` then
+/// returns `None` when the record is not required, and its own error naming
+/// what it does not know when it is. A stream that ends between two records
+/// ends the read.
 ///
 /// # Errors
 ///
@@ -1058,7 +1218,7 @@ pub(crate) fn decode_bincode_payload<T: DeserializeOwned, const LIMIT: usize>(
 pub(crate) fn read_framed_records<T>(
     framing: &RecordFraming,
     reader: &mut dyn Read,
-    decode: &mut dyn FnMut(u8, &[u8]) -> Result<Option<T>>,
+    decode: &mut dyn FnMut(u8, bool, &[u8]) -> Result<Option<T>>,
     apply: &mut dyn FnMut(T) -> Result<()>,
 ) -> Result<()> {
     let mut payload = Vec::new();
@@ -1118,7 +1278,8 @@ pub(crate) fn read_framed_records<T>(
                 ),
             ));
         }
-        let decoded = decode(kind, &payload).map_err(|error| match error {
+        let required = flags & RECORD_REQUIRED != 0;
+        let decoded = decode(kind, required, &payload).map_err(|error| match error {
             Error::Serialization(message) => {
                 framing.error(index, offset, format_args!("kind {kind}: {message}"))
             }
@@ -1126,7 +1287,7 @@ pub(crate) fn read_framed_records<T>(
         })?;
         match decoded {
             Some(record) => apply(record)?,
-            None if flags & RECORD_REQUIRED != 0 => {
+            None if required => {
                 return Err(framing.error(
                     index,
                     offset,
@@ -1509,6 +1670,60 @@ mod tests {
             kinds,
             [1, 2, 3, 4, 5, 6, 7, 7, 7, 8, 9],
             "one kind per record type, numbered as the module documents"
+        );
+    }
+
+    /// A record's key names it by what identifies it (a name, the graph of
+    /// a binding, the graph and target of an index), with the record's kind,
+    /// and two records a put would replace one with the other share it.
+    #[test]
+    fn every_record_names_its_key() {
+        let keys: Vec<CatalogKey> = one_of_each().iter().map(CatalogRecord::key).collect();
+        assert_eq!(
+            keys,
+            [
+                CatalogKey::Schema("travel".into()),
+                CatalogKey::NodeType("City".into()),
+                CatalogKey::EdgeType("ROUTE".into()),
+                CatalogKey::GraphType("travel".into()),
+                CatalogKey::GraphBinding("trips".into()),
+                CatalogKey::Constraint("person_email".into()),
+                CatalogKey::Index {
+                    graph: None,
+                    index: IndexKeyRecord::Property { key: "id".into() },
+                },
+                CatalogKey::Index {
+                    graph: Some("trips".into()),
+                    index: IndexKeyRecord::Vector {
+                        label: "Doc".into(),
+                        property: "emb".into(),
+                    },
+                },
+                CatalogKey::Index {
+                    graph: None,
+                    index: IndexKeyRecord::Text {
+                        label: "Doc".into(),
+                        property: "body".into(),
+                    },
+                },
+                CatalogKey::IndexName("person_name".into()),
+                CatalogKey::Procedure("get_adults".into()),
+            ]
+        );
+        for record in one_of_each().iter().chain(&every_variant()) {
+            assert_eq!(record.key().kind(), record.kind(), "{record:?}");
+        }
+        // The vector indexes of `every_variant` differ only in parameters:
+        // one key, so a put of one replaces another.
+        let vector_keys: Vec<CatalogKey> = every_variant()
+            .iter()
+            .filter(|record| matches!(record, CatalogRecord::Index(_)))
+            .map(CatalogRecord::key)
+            .collect();
+        assert_eq!(vector_keys.len(), 4);
+        assert!(
+            vector_keys.iter().all(|key| *key == vector_keys[0]),
+            "{vector_keys:?}"
         );
     }
 
@@ -2209,6 +2424,49 @@ mod tests {
             "{message}"
         );
         assert_eq!(out, [3, 19, 88], "a refused record appends nothing");
+    }
+
+    /// The count of default value bytes takes every value the value codec
+    /// encodes, also one nested deeper than a property value may be (129
+    /// and 130 levels): such a default, too large for a payload, is refused
+    /// from its size instead of being encoded whole first. Only a value the
+    /// codec refuses counts nothing.
+    #[test]
+    fn default_values_the_codec_encodes_are_counted_at_every_depth() {
+        use super::super::value_codec::MAX_VALUE_DEPTH;
+
+        let maximum = usize::try_from(MAX_CATALOG_RECORD_PAYLOAD).unwrap();
+        let nested = |levels: usize, inner: Value| {
+            (0..levels).fold(inner, |inner, _| Value::List(vec![inner].into()))
+        };
+        for levels in [MAX_PROPERTY_VALUE_DEPTH + 1, MAX_VALUE_DEPTH] {
+            let default = nested(levels, Value::from("Berlin ".repeat(maximum / 7 + 1)));
+            let record = node_type(vec![property(
+                "nested",
+                PropertyTypeRecord::List,
+                true,
+                Some(default.clone()),
+            )]);
+            assert_eq!(
+                record.default_value_bytes(),
+                encoded_len(&default),
+                "a default nested {levels} levels deep is counted"
+            );
+            let mut out = vec![3, 19, 88];
+            let error = record.encode_framed(&mut out).unwrap_err();
+            assert!(
+                error.to_string().contains(&maximum.to_string()),
+                "{levels} levels: {error}"
+            );
+            assert_eq!(out, [3, 19, 88], "a refused record appends nothing");
+        }
+        let refused = node_type(vec![property(
+            "nested",
+            PropertyTypeRecord::List,
+            true,
+            Some(nested(MAX_VALUE_DEPTH + 1, Value::Null)),
+        )]);
+        assert_eq!(refused.default_value_bytes(), 0, "the codec refuses it");
     }
 
     /// A record whose payload would pass the maximum is refused while it is

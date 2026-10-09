@@ -7,7 +7,11 @@
  * Reuses the parser and comparator from the Node.js runner.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+
+// A test that loads a dataset (the LDBC files) takes seconds through the binding,
+// close to vitest's 5 s default on a busy machine: give each test a minute.
+vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams } from '../node/parser.mjs'

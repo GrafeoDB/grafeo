@@ -1787,3 +1787,76 @@ describe('row order', () => {
     db.close()
   })
 })
+
+// ── Nodes and edges inside lists, maps and paths ─────────────────────
+
+// A node or edge in a list or map literal, a whole path and what startNode
+// and endNode return come back as node and edge objects (`_id`, `_labels` or
+// `_type`, the properties), as `RETURN n` gives them; they used to come back
+// as bare IDs. A path keeps its object shape, `{ nodes, edges }`.
+describe('values that hold nodes and edges', () => {
+  const props = (value) =>
+    Object.fromEntries(Object.entries(value).filter(([key]) => !key.startsWith('_')))
+  const node = (value) => [value._labels, props(value)]
+  const edge = (value) => [value._type, props(value)]
+  const ALIX = [['Person'], { name: 'Alix', age: 19 }]
+  const GUS = [['Person'], { name: 'Gus', age: 88 }]
+  const KNOWS = ['KNOWS', { w: 3 }]
+  let db
+
+  beforeEach(async () => {
+    db = GrafeoDB.create()
+    await db.execute(
+      "INSERT (:Person {name: 'Alix', age: 19})-[:KNOWS {w: 3}]->(:Person {name: 'Gus', age: 88})"
+    )
+  })
+
+  afterEach(() => db.close())
+
+  it('should return the node and edge in a list literal', async () => {
+    const [row] = (
+      await db.execute("MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN [a, r, 3] AS l")
+    ).toArray()
+    expect(node(row.l[0])).toEqual(ALIX)
+    expect(edge(row.l[1])).toEqual(KNOWS)
+    expect(row.l[2]).toBe(3)
+  })
+
+  it('should return the node in a map literal and read its property', async () => {
+    const [row] = (
+      await db.execute(
+        "MATCH (a:Person {name: 'Gus'}) WITH {msg: a, t: 19} AS x RETURN x, x.msg.name AS n"
+      )
+    ).toArray()
+    expect(node(row.x.msg)).toEqual(GUS)
+    expect(row.x.t).toBe(19)
+    expect(row.n).toBe('Gus')
+  })
+
+  it('should return a path with its nodes and edges', async () => {
+    const [row] = (
+      await db.execute(
+        "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->() RETURN p, nodes(p) AS ns, relationships(p) AS rs"
+      )
+    ).toArray()
+    expect(Object.keys(row.p).sort()).toEqual(['edges', 'nodes'])
+    expect(row.p.nodes.map(node)).toEqual([ALIX, GUS])
+    expect(row.p.edges.map(edge)).toEqual([KNOWS])
+    expect(row.p.nodes).toEqual(row.ns)
+    expect(row.p.edges).toEqual(row.rs)
+  })
+
+  it('should return nodes from startNode and endNode', async () => {
+    const [row] = (
+      await db.executeCypher('MATCH ()-[r:KNOWS]->() RETURN startNode(r) AS s, endNode(r) AS e')
+    ).toArray()
+    expect(node(row.s)).toEqual(ALIX)
+    expect(node(row.e)).toEqual(GUS)
+  })
+
+  it('should list the nodes and edges inside returned values', async () => {
+    const result = await db.execute("MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->() RETURN p")
+    expect(result.nodes().map((n) => n.get('name')).sort()).toEqual(['Alix', 'Gus'])
+    expect(result.edges().map((e) => e.edgeType)).toEqual(['KNOWS'])
+  })
+})

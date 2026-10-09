@@ -142,8 +142,14 @@ impl super::Planner {
             self.scalar_columns.borrow_mut().insert(length_col.clone());
             self.scalar_columns.borrow_mut().insert(nodes_col.clone());
             self.scalar_columns.borrow_mut().insert(edges_col.clone());
-            // The path alias itself is also a scalar column containing Value::Path
-            self.scalar_columns.borrow_mut().insert(path_alias.clone());
+            // The path alias itself holds a Value::Path of node and edge ids,
+            // which RETURN gives as nodes and edges.
+            self.set_column_entity(
+                path_alias,
+                Some(grafeo_core::execution::operators::EntityValue::Nested(
+                    grafeo_common::types::LogicalType::Path,
+                )),
+            );
             columns.push(length_col);
             columns.push(nodes_col);
             columns.push(edges_col);

@@ -53,29 +53,10 @@ impl GqlTranslator {
             }
         };
 
-        let on_create: Vec<(String, LogicalExpression)> = merge_clause
-            .on_create
-            .as_ref()
-            .map(|assignments| {
-                assignments
-                    .iter()
-                    .map(|a| Ok((a.property.clone(), self.translate_expression(&a.value)?)))
-                    .collect::<Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
-
-        let on_match: Vec<(String, LogicalExpression)> = merge_clause
-            .on_match
-            .as_ref()
-            .map(|assignments| {
-                assignments
-                    .iter()
-                    .map(|a| Ok((a.property.clone(), self.translate_expression(&a.value)?)))
-                    .collect::<Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
+        let on_create =
+            self.merge_assignments(merge_clause.on_create.as_deref(), "ON CREATE", &variable)?;
+        let on_match =
+            self.merge_assignments(merge_clause.on_match.as_deref(), "ON MATCH", &variable)?;
 
         Ok(LogicalOperator::Merge(MergeOp {
             variable,
@@ -83,8 +64,42 @@ impl GqlTranslator {
             match_properties,
             on_create,
             on_match,
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(input),
         }))
+    }
+
+    /// The property assignments of an `ON CREATE` or `ON MATCH` (`clause`)
+    /// of a MERGE that binds `variable`. The MERGE writes the element it binds
+    /// only, so an assignment to another variable is an error instead of a
+    /// write to the wrong element.
+    fn merge_assignments(
+        &self,
+        assignments: Option<&[ast::PropertyAssignment]>,
+        clause: &str,
+        variable: &str,
+    ) -> Result<Vec<(String, LogicalExpression)>> {
+        assignments
+            .unwrap_or_default()
+            .iter()
+            .map(|assignment| {
+                if assignment.variable != variable {
+                    return Err(Error::Query(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        format!(
+                            "MERGE ... {clause} SET sets {}, but can only set the element the \
+                             MERGE binds",
+                            assignment.variable
+                        ),
+                    )));
+                }
+                Ok((
+                    assignment.property.clone(),
+                    self.translate_expression(&assignment.value)?,
+                ))
+            })
+            .collect()
     }
 
     /// Translates a MERGE with a relationship pattern.
@@ -118,6 +133,8 @@ impl GqlTranslator {
                 match_properties: node_props,
                 on_create: Vec::new(),
                 on_match: Vec::new(),
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 input: Box::new(current_input),
             });
         }
@@ -163,6 +180,8 @@ impl GqlTranslator {
                 match_properties: node_props,
                 on_create: Vec::new(),
                 on_match: Vec::new(),
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 input: Box::new(current_input),
             });
         }
@@ -173,34 +192,23 @@ impl GqlTranslator {
             .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
             .collect::<Result<Vec<_>>>()?;
 
-        let on_create: Vec<(String, LogicalExpression)> = merge_clause
-            .on_create
-            .as_ref()
-            .map(|assignments| {
-                assignments
-                    .iter()
-                    .map(|a| Ok((a.property.clone(), self.translate_expression(&a.value)?)))
-                    .collect::<Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
+        let on_create =
+            self.merge_assignments(merge_clause.on_create.as_deref(), "ON CREATE", &variable)?;
+        let on_match =
+            self.merge_assignments(merge_clause.on_match.as_deref(), "ON MATCH", &variable)?;
 
-        let on_match: Vec<(String, LogicalExpression)> = merge_clause
-            .on_match
-            .as_ref()
-            .map(|assignments| {
-                assignments
-                    .iter()
-                    .map(|a| Ok((a.property.clone(), self.translate_expression(&a.value)?)))
-                    .collect::<Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
-
+        // `(a)<-[:T]-(b)` is an edge from b to a.
+        let (source_variable, target_variable) = match edge.direction {
+            ast::EdgeDirection::Incoming => (target_variable, source_variable),
+            ast::EdgeDirection::Outgoing | ast::EdgeDirection::Undirected => {
+                (source_variable, target_variable)
+            }
+        };
         Ok(LogicalOperator::MergeRelationship(MergeRelationshipOp {
             variable,
             source_variable,
             target_variable,
+            undirected: edge.direction == ast::EdgeDirection::Undirected,
             edge_type,
             match_properties,
             on_create,
@@ -482,22 +490,52 @@ impl GqlTranslator {
         }
 
         // Process each edge in the chain
+        let path_start = source_var.clone();
         let mut current_source = source_var;
         let edge_count = path.edges.len();
 
-        for (idx, edge) in path.edges.iter().enumerate() {
+        // A path variable on more than one edge pattern binds the path of all
+        // of them (ISO/IEC 39075:2024 16.7), which no single expand has: the
+        // hops are bound one by one and the path is put together after them.
+        // A path mode holds for that whole path too (16.6), while an expand
+        // checks it for its own edge pattern only.
+        let whole_path_alias = path_alias.filter(|_| edge_count > 1);
+        // One edge without a quantifier is a single expand, which checks no
+        // mode: only ACYCLIC can fail there, on a self-loop.
+        let single_hop = matches!(path.edges.as_slice(), [edge] if edge.min_hops.is_none() && edge.max_hops.is_none());
+        let whole_path_check = match path_mode {
+            PathMode::Walk => None,
+            PathMode::Trail => Some("isTrail"),
+            PathMode::Simple => Some("isSimple"),
+            PathMode::Acyclic => Some("isAcyclic"),
+        }
+        .filter(|check| edge_count > 1 || (single_hop && *check == "isAcyclic"));
+        let tracks_hops = whole_path_alias.is_some() || whole_path_check.is_some();
+        let mut hops: Vec<crate::query::translators::common::PathHop> = Vec::new();
+
+        for edge in &path.edges {
             let target_var = edge
                 .target
                 .variable
                 .clone()
                 .unwrap_or_else(|| format!("_anon_{}", rand_id()));
 
+            // A quantifier (`{1,1}` too) makes the edge variable a group
+            // variable: the list of the path's edges. An edge without one is a
+            // single hop, so the quantified edges are the variable-length ones.
+            let quantified = edge.min_hops.is_some() || edge.max_hops.is_some();
+            let is_variable_length = quantified;
+
             // An edge with a property map needs a variable to filter on, even
-            // when the pattern leaves it anonymous: `-[:T {w: 1}]->`.
-            let edge_var = edge
-                .variable
-                .clone()
-                .or_else(|| (!edge.properties.is_empty()).then(|| format!("_anon_{}", rand_id())));
+            // when the pattern leaves it anonymous: `-[:T {w: 1}]->`. So does
+            // every edge of a path put together from its hops, and a
+            // quantified edge with a WHERE, which holds for each of its edges.
+            let edge_var = edge.variable.clone().or_else(|| {
+                (!edge.properties.is_empty()
+                    || tracks_hops
+                    || (quantified && edge.where_clause.is_some()))
+                .then(|| format!("_anon_{}", rand_id()))
+            });
             let edge_types = edge.types.clone();
 
             let direction = match edge.direction {
@@ -508,8 +546,8 @@ impl GqlTranslator {
 
             let edge_var_for_filter = edge_var.clone();
 
-            // Set path_alias on the last edge of a named path
-            let expand_path_alias = if idx == edge_count - 1 {
+            // A named path of one edge pattern is the path of its expand
+            let expand_path_alias = if edge_count == 1 {
                 path_alias.map(String::from)
             } else {
                 None
@@ -517,15 +555,9 @@ impl GqlTranslator {
 
             let (min_hops, max_hops) = edge_hop_bounds(edge);
 
-            // A quantifier (`{1,1}` too) makes the edge variable a group
-            // variable: the list of the path's edges. An edge without one is a
-            // single hop, so the quantified edges are the variable-length ones.
-            let quantified = edge.min_hops.is_some() || edge.max_hops.is_some();
-            let is_variable_length = quantified;
-
             // For variable-length edges with a named edge variable, auto-generate
-            // a path alias if none exists, so path detail columns are available
-            // for horizontal aggregation (GE09).
+            // a path alias if none exists, so the path's edges are available
+            // to the edge's property map and WHERE, which hold for each edge.
             let expand_path_alias = if is_variable_length
                 && edge_var_for_filter.is_some()
                 && expand_path_alias.is_none()
@@ -600,7 +632,7 @@ impl GqlTranslator {
             if !edge.properties.is_empty()
                 && let Some(ref ev) = edge_var_for_filter
             {
-                let predicate = match property_path.filter(|_| is_variable_length) {
+                let predicate = match property_path.clone().filter(|_| is_variable_length) {
                     // `all(e IN edges(path) WHERE e.k = v ...)`: the edge column
                     // of a variable-length expand only holds the last hop.
                     Some(path) => {
@@ -616,9 +648,26 @@ impl GqlTranslator {
                 plan = wrap_filter(plan, predicate);
             }
 
-            // Add element WHERE clause for edge
+            // Add element WHERE clause for edge. Inside a quantified edge
+            // pattern its variable is one edge of the path (a singleton; it
+            // is the group list of the edges only outside the pattern, ISO/IEC
+            // 39075:2024 16.7), so the WHERE holds for each edge:
+            // `all(e IN edges(path) WHERE ...)`, whose `e` is that edge.
             if let Some(ref where_expr) = edge.where_clause {
                 let predicate = self.translate_expression(where_expr)?;
+                let predicate = match (
+                    property_path.clone().filter(|_| is_variable_length),
+                    &edge_var_for_filter,
+                ) {
+                    (Some(path), Some(edge_name)) => {
+                        crate::query::translators::common::every_edge_matches(
+                            path,
+                            edge_name.clone(),
+                            predicate,
+                        )
+                    }
+                    _ => predicate,
+                };
                 plan = wrap_filter(plan, predicate);
             }
 
@@ -671,7 +720,33 @@ impl GqlTranslator {
                 });
             }
 
+            if let Some(edge_name) = &edge_var_for_filter {
+                hops.push(crate::query::translators::common::PathHop {
+                    edge: edge_name.clone(),
+                    target: target_var.clone(),
+                    segment: property_path.filter(|_| is_variable_length),
+                });
+            }
             current_source = target_var;
+        }
+
+        if let Some(alias) = whole_path_alias {
+            plan =
+                crate::query::translators::common::bind_whole_path(plan, alias, &path_start, &hops);
+        }
+        if let Some(check) = whole_path_check {
+            let path = match whole_path_alias {
+                Some(alias) => LogicalExpression::Variable(alias.to_string()),
+                None => crate::query::translators::common::whole_path(&path_start, &hops),
+            };
+            plan = wrap_filter(
+                plan,
+                LogicalExpression::FunctionCall {
+                    name: check.into(),
+                    args: vec![path],
+                    distinct: false,
+                },
+            );
         }
 
         Ok(plan)
@@ -757,6 +832,122 @@ fn insert_input_variables(plan: &LogicalOperator) -> HashSet<String> {
     let mut vars = HashSet::new();
     collect(plan, &mut vars);
     vars
+}
+
+/// A copy of `match_clause` in which every anonymous edge pattern has a
+/// variable, so that a check over the edges of the clause can name them.
+pub(super) fn with_named_edges(match_clause: &ast::MatchClause) -> ast::MatchClause {
+    fn name_edges(pattern: &mut ast::Pattern) {
+        match pattern {
+            ast::Pattern::Node(_) => {}
+            ast::Pattern::Path(path) => {
+                for edge in &mut path.edges {
+                    if edge.variable.is_none() {
+                        edge.variable = Some(format!("_anon_{}", rand_id()));
+                    }
+                }
+            }
+            ast::Pattern::Quantified { pattern, .. } => name_edges(pattern),
+            ast::Pattern::Union(patterns) | ast::Pattern::MultisetUnion(patterns) => {
+                patterns.iter_mut().for_each(name_edges);
+            }
+        }
+    }
+    let mut named = match_clause.clone();
+    for aliased in &mut named.patterns {
+        name_edges(&mut aliased.pattern);
+    }
+    named
+}
+
+/// The DIFFERENT EDGES condition over the edge patterns of `patterns`
+/// (ISO/IEC 39075:2024 16.4): the edges they bind are all different, each
+/// edge of a quantified edge pattern (a group variable, bound to the list of
+/// its edges) included. Every edge pattern has a variable (see
+/// [`with_named_edges`]); one that occurs twice binds one edge. `None` when
+/// there is nothing to compare.
+///
+/// # Errors
+///
+/// Returns an error for a union of path patterns, whose alternatives bind
+/// different edge variables.
+pub(super) fn different_edges(patterns: &[&ast::Pattern]) -> Result<Option<LogicalExpression>> {
+    /// The edges of the patterns seen so far, as lists of edge ids.
+    #[derive(Default)]
+    struct Edges {
+        seen: HashSet<String>,
+        lists: Vec<LogicalExpression>,
+        has_group: bool,
+    }
+
+    impl Edges {
+        fn collect(&mut self, pattern: &ast::Pattern, group: bool) -> Result<()> {
+            match pattern {
+                ast::Pattern::Node(_) => {}
+                ast::Pattern::Path(path) => {
+                    for edge in &path.edges {
+                        let Some(variable) = &edge.variable else {
+                            continue;
+                        };
+                        if !self.seen.insert(variable.clone()) {
+                            continue;
+                        }
+                        // A questioned edge (`->?`) that matched nothing is
+                        // null: its id is no value, which a list leaves out
+                        if group || edge.min_hops.is_some() || edge.max_hops.is_some() {
+                            self.has_group = true;
+                            self.lists
+                                .push(LogicalExpression::Variable(variable.clone()));
+                        } else {
+                            self.lists
+                                .push(LogicalExpression::List(vec![LogicalExpression::Id(
+                                    variable.clone(),
+                                )]));
+                        }
+                    }
+                }
+                // A quantified pattern of one edge is translated as that edge
+                // with the quantifier, so its variable is a group variable
+                ast::Pattern::Quantified { pattern, .. } => {
+                    let single_edge = matches!(
+                        pattern.as_ref(),
+                        ast::Pattern::Path(path) if path.edges.len() == 1
+                    );
+                    self.collect(pattern, single_edge)?;
+                }
+                ast::Pattern::Union(_) | ast::Pattern::MultisetUnion(_) => {
+                    return Err(Error::Query(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        "DIFFERENT EDGES is not supported for a union of path patterns",
+                    )));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let mut edges = Edges::default();
+    for pattern in patterns {
+        edges.collect(pattern, false)?;
+    }
+    // One single edge differs from nothing
+    if edges.lists.len() < 2 && !edges.has_group {
+        return Ok(None);
+    }
+    let all_edges = edges
+        .lists
+        .into_iter()
+        .reduce(|left, right| LogicalExpression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::Add,
+            right: Box::new(right),
+        })
+        .unwrap_or(LogicalExpression::List(Vec::new()));
+    Ok(Some(LogicalExpression::FunctionCall {
+        name: "all_different".into(),
+        args: vec![all_edges],
+        distinct: false,
+    }))
 }
 
 /// The minimum and maximum number of hops (`None` = unbounded) an edge pattern

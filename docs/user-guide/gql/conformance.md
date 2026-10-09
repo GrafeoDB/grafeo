@@ -206,6 +206,20 @@ Per the standard, minimum conformance requires:
 | LIKE pattern matching | Supported | |
 | IN list membership | Supported | |
 | STARTS WITH / ENDS WITH / CONTAINS | Supported | |
+| Regular expression match `=~` | Supported | Extension, as in Cypher (see below) |
+
+`s =~ pattern` is a Grafeo extension: ISO GQL has no regular expressions. It has the
+meaning and the precedence of Cypher's `=~`: true when the pattern matches the whole
+string, null when either side is null (see [Filtering](filtering.md#regular-expressions)).
+The pattern syntax is that of the Rust [`regex`](https://docs.rs/regex/latest/regex/#syntax)
+crate: classes, alternation, repetition, anchors and inline flags such as `(?i)`, without
+look-around or backreferences. The browser (WASM) build uses
+[`regex-lite`](https://docs.rs/regex-lite/latest/regex_lite/), which has the same syntax
+but `\d`, `\w` and `\s` match ASCII characters only, `(?i)` folds ASCII letters only, and
+Unicode classes such as `\p{L}` and class set operations (`&&`, `--`) are not available.
+A pattern the query gives (as a string or a parameter) that is not a regular expression
+is an error that names it. A build with neither the `regex` nor the `regex-lite` feature
+refuses `=~` and LIKE with an error that says so.
 
 ### Predicates (Section 19)
 
@@ -230,7 +244,7 @@ Per the standard, minimum conformance requires:
 | Variable references | Supported | |
 | Property access `n.prop` | Supported | |
 | Parameter references `$name` | Supported | |
-| Function calls | Supported | Built-in and user-defined |
+| Function calls | Supported | Built-in; a call to an unknown function is an error before the query runs |
 | CASE WHEN / THEN / ELSE | Supported | Simple and searched |
 | CAST(expr AS type) (GA05) | Supported | |
 | List literals `[1, 2, 3]` | Supported | |

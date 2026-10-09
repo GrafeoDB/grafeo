@@ -31,6 +31,13 @@ nin = "nin"
 hel = "hel"
 # "caf" = "café" written with a Unicode escape in tests (caf\u{e9}, café)
 caf = "caf"
+# "STIRNG" = a deliberate typo of STRING: type DDL tests check that an unknown type name is refused
+STIRNG = "STIRNG"
+# "nce" = a fragment of a regular expression in a difftest case (`.*(lix|nce).*`, Vincent)
+nce = "nce"
+# "coutn", "lenght" = deliberate misspellings that unknown-function tests check the "Did you mean" hint with
+coutn = "coutn"
+lenght = "lenght"
 
 [default.extend-identifiers]
 abd = "abd"         # Levenshtein distance test input

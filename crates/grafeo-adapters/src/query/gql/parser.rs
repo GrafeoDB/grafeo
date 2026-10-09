@@ -3457,6 +3457,20 @@ impl<'a> Parser<'a> {
     fn parse_comparison_operands(&mut self) -> Result<Expression> {
         let left = self.parse_additive_expression()?;
 
+        // `=~`, a regular expression match: a Grafeo extension with the
+        // precedence and meaning of Cypher's `=~`.
+        if self.at_regex_match() {
+            self.advance(); // consume =
+            self.advance(); // consume ~
+            let right = self.parse_additive_expression()?;
+            self.link_chain()?;
+            return Ok(Expression::Binary {
+                left: Box::new(left),
+                op: BinaryOp::RegexMatch,
+                right: Box::new(right),
+            });
+        }
+
         // Check for regular comparison operators
         let op = match self.current.kind {
             TokenKind::Eq => Some(BinaryOp::Eq),
@@ -6679,6 +6693,21 @@ impl<'a> Parser<'a> {
             .kind
     }
 
+    /// Whether the current token starts `=~`: a `=` with a `~` right after
+    /// it. An expression never starts with `~`, so after an operand this is
+    /// the regular expression match; with a space between (`= ~`) it is
+    /// not, as in Cypher, where `=~` is one token. A path variable before
+    /// an undirected edge (`p=~[e]~(b)`) is not read as an expression.
+    fn at_regex_match(&mut self) -> bool {
+        if self.current.kind != TokenKind::Eq || self.peek_kind() != TokenKind::Tilde {
+            return false;
+        }
+        let equals_end = self.current.span.end;
+        self.peeked
+            .as_ref()
+            .is_some_and(|tilde| tilde.span.start == equals_end)
+    }
+
     /// Peeks at the token after the next token (two-token lookahead).
     fn peek_second_kind(&mut self) -> TokenKind {
         // Ensure first peeked is populated
@@ -7479,6 +7508,109 @@ mod tests {
         } else {
             panic!("Expected Query statement");
         }
+    }
+
+    /// The WHERE expression of `query`, a GQL query statement.
+    fn where_expression(query: &str) -> Expression {
+        let Statement::Query(statement) = Parser::new(query).parse().unwrap() else {
+            panic!("{query} is not a query statement");
+        };
+        filter_of(&statement)
+            .unwrap_or_else(|| panic!("{query} has no WHERE"))
+            .expression
+    }
+
+    /// Whether `expression` is `left =~ right` with a string literal `right`.
+    fn is_regex_match(expression: &Expression, pattern: &str) -> bool {
+        matches!(
+            expression,
+            Expression::Binary { op: BinaryOp::RegexMatch, right, .. }
+                if matches!(right.as_ref(), Expression::Literal(Literal::String(p)) if p == pattern)
+        )
+    }
+
+    #[test]
+    fn regex_match_parses_as_a_comparison() {
+        let expression =
+            where_expression("MATCH (n) WHERE n.path =~ '.*(test|spec).*' RETURN n.path");
+        assert!(
+            is_regex_match(&expression, ".*(test|spec).*"),
+            "{expression:?}"
+        );
+        let Expression::Binary { left, .. } = &expression else {
+            unreachable!()
+        };
+        assert!(
+            matches!(left.as_ref(), Expression::PropertyAccess { variable, property }
+                if variable == "n" && property == "path"),
+            "{left:?}"
+        );
+    }
+
+    #[test]
+    fn regex_match_binds_like_the_other_comparisons() {
+        // Looser than `||`, tighter than AND and NOT, as `=~` in Cypher.
+        let expression =
+            where_expression("MATCH (n) WHERE n.a || 'x' =~ 'ax' AND n.b = 3 RETURN n");
+        let Expression::Binary {
+            left,
+            op: BinaryOp::And,
+            ..
+        } = &expression
+        else {
+            panic!("AND is not the top operator: {expression:?}");
+        };
+        assert!(is_regex_match(left, "ax"), "{left:?}");
+        let Expression::Binary { left: operand, .. } = left.as_ref() else {
+            unreachable!()
+        };
+        assert!(
+            matches!(
+                operand.as_ref(),
+                Expression::Binary {
+                    op: BinaryOp::Concat,
+                    ..
+                }
+            ),
+            "the left operand is not `n.a || 'x'`: {operand:?}"
+        );
+
+        let negated = where_expression("MATCH (n) WHERE NOT n.a =~ 'x.*' RETURN n");
+        assert!(
+            matches!(&negated, Expression::Unary { op: UnaryOp::Not, operand }
+                if is_regex_match(operand, "x.*")),
+            "{negated:?}"
+        );
+    }
+
+    #[test]
+    fn regex_match_parses_in_return_and_set() {
+        let Statement::Query(query) = Parser::new("MATCH (n) RETURN n.path =~ 'src/.*' AS in_src")
+            .parse()
+            .unwrap()
+        else {
+            panic!("not a query");
+        };
+        let item = &query.return_clause.items[0];
+        assert!(is_regex_match(&item.expression, "src/.*"), "{item:?}");
+
+        let set = Parser::new("MATCH (n) SET n.in_src = n.path =~ 'src/.*'").parse();
+        assert!(set.is_ok(), "{set:?}");
+    }
+
+    #[test]
+    fn equals_then_a_tilde_with_a_space_is_not_a_regex_match() {
+        // `=~` is one operator, as in Cypher: `= ~` is an equality with no
+        // right operand.
+        let result = Parser::new("MATCH (n) WHERE n.a = ~'x' RETURN n").parse();
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    #[test]
+    fn a_path_variable_before_an_undirected_edge_still_parses() {
+        // `p=~[e]~(b)` is a path variable and an undirected edge, not `=~`.
+        let result = Parser::new("MATCH p=~[e]~(b) RETURN p").parse();
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]

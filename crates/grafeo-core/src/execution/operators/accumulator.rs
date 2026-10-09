@@ -410,6 +410,7 @@ impl RowKey {
     /// The representatives of the key's values: equal keys have equal
     /// representatives that serialize to the same bytes, so a spilled
     /// partition can file groups under them.
+    #[cfg(any(feature = "spill", test))]
     pub(crate) fn representatives(&self) -> Vec<Value> {
         self.0
             .iter()

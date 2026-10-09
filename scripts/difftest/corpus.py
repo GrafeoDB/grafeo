@@ -1293,4 +1293,22 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages)
 
+# BO: GQL has `=~`, Cypher's whole-string regular expression match (BO1 to BO3; GQL
+#     refused it with "Expected expression"). A pattern that is not a regular
+#     expression is an error that names it (BO4; Cypher matched nothing). A call to an
+#     unknown function is an error before any row is read (BO5, BO6, BO8; it was null
+#     for every row, so the WHERE of BO6 kept none). BO7 is the control: function names
+#     in any case still run
+for case_id, query, languages in [
+    ("BO1", "MATCH (p:Person) WHERE p.name =~ '(A|G).*' RETURN p.name AS n", BOTH),
+    ("BO2", "MATCH (p:Person) WHERE NOT p.name =~ '.*(lix|nce).*' RETURN p.name AS n", BOTH),
+    ("BO3", "MATCH (p:Person) RETURN p.name AS n, p.name =~ '[A-J].*' AS early", BOTH),
+    ("BO4", "MATCH (p:Person) WHERE p.name =~ '(Alix' RETURN p.name AS n", BOTH),
+    ("BO5", "MATCH (p:Person) RETURN no_such_function(p.name) AS x", BOTH),
+    ("BO6", "MATCH (p:Person) WHERE upperr(p.name) = 'ALIX' RETURN p.name AS n", BOTH),
+    ("BO7", "MATCH (p:Person) RETURN toUpper(p.name) AS u, UPPER(p.name) AS v, Size(p.name) AS s", BOTH),
+    ("BO8", "MATCH (p:Person) RETURN [x IN [p.name] | lowerr(x)] AS l", BOTH),
+]:
+    case(case_id, query, languages)
+
 # fmt: on

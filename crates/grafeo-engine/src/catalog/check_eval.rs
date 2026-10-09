@@ -12,15 +12,16 @@
 //! (dates order, `1 = 1.0`, a comparison with null is unknown), and holds
 //! only where that predicate is true, as a WHERE keeps only those rows.
 
+#[cfg(feature = "lpg")]
 use std::collections::HashMap;
+#[cfg(feature = "lpg")]
 use std::sync::{Arc, OnceLock};
 
 use grafeo_common::types::Value;
-use grafeo_core::execution::DataChunk;
-use grafeo_core::execution::operators::{
-    BinaryFilterOp, ExpressionPredicate, FilterExpression, UnaryFilterOp,
-};
-use grafeo_core::execution::vector::ValueVector;
+use grafeo_core::execution::operators::{BinaryFilterOp, FilterExpression, UnaryFilterOp};
+#[cfg(feature = "lpg")]
+use grafeo_core::execution::{DataChunk, operators::ExpressionPredicate, vector::ValueVector};
+#[cfg(feature = "lpg")]
 use grafeo_core::graph::lpg::LpgStore;
 
 /// A parsed CHECK constraint expression, ready to evaluate.
@@ -30,7 +31,10 @@ pub(crate) struct CheckExpression {
     /// The properties it reads, in the order of the evaluation row's
     /// columns.
     properties: Vec<String>,
-    /// The query evaluator of the expression, each property a variable.
+    /// The query evaluator of the expression, each property a variable. A
+    /// build without `lpg` has no store to build one with, and no node or
+    /// edge writes to check.
+    #[cfg(feature = "lpg")]
     predicate: ExpressionPredicate,
 }
 
@@ -52,16 +56,23 @@ impl CheckExpression {
         }
         let mut properties = Vec::new();
         collect_properties(&expression, &mut properties);
-        let columns = properties
-            .iter()
-            .enumerate()
-            .map(|(column, name)| (name.clone(), column))
-            .collect::<HashMap<_, _>>();
-        let store = no_graph().ok_or("no store to evaluate the expression with")?;
+        #[cfg(feature = "lpg")]
+        let predicate = {
+            let columns = properties
+                .iter()
+                .enumerate()
+                .map(|(column, name)| (name.clone(), column))
+                .collect::<HashMap<_, _>>();
+            let store = no_graph().ok_or("no store to evaluate the expression with")?;
+            ExpressionPredicate::new(expression, columns, store)
+        };
+        #[cfg(not(feature = "lpg"))]
+        drop(expression);
         Ok(Self {
             text: text.to_string(),
             properties,
-            predicate: ExpressionPredicate::new(expression, columns, store),
+            #[cfg(feature = "lpg")]
+            predicate,
         })
     }
 
@@ -76,6 +87,20 @@ impl CheckExpression {
     ///
     /// When the expression gives a value other than a boolean (`x + 1`).
     pub(crate) fn evaluate(&self, properties: &[(String, Value)]) -> Result<bool, String> {
+        #[cfg(not(feature = "lpg"))]
+        {
+            let _ = (&self.properties, properties);
+            Err(format!(
+                "({}) cannot be checked: this build has no node and edge store (the `lpg` feature)",
+                self.text
+            ))
+        }
+        #[cfg(feature = "lpg")]
+        self.evaluate_with_store(properties)
+    }
+
+    #[cfg(feature = "lpg")]
+    fn evaluate_with_store(&self, properties: &[(String, Value)]) -> Result<bool, String> {
         let columns = self
             .properties
             .iter()
@@ -98,6 +123,7 @@ impl CheckExpression {
 /// The store an expression evaluator reads graph elements from: an empty
 /// one, since a CHECK expression reads property values only. `None` when it
 /// cannot be made (an arena that does not allocate).
+#[cfg(feature = "lpg")]
 fn no_graph() -> Option<Arc<LpgStore>> {
     static NO_GRAPH: OnceLock<Option<Arc<LpgStore>>> = OnceLock::new();
     NO_GRAPH
@@ -647,7 +673,7 @@ fn expect_token(
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
 

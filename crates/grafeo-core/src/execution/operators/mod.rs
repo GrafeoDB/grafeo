@@ -29,6 +29,7 @@ mod factorized_aggregate;
 mod factorized_expand;
 mod factorized_filter;
 mod filter;
+mod functions;
 mod horizontal_aggregate;
 mod join;
 mod leapfrog_join;
@@ -80,6 +81,9 @@ pub use factorized_filter::{
 pub use filter::{
     BinaryFilterOp, ExpressionPredicate, FilterExpression, FilterOperator, LazyValue,
     ListPredicateKind, Predicate, SessionContext, UnaryFilterOp,
+};
+pub use functions::{
+    FunctionSupport, REGEX_SUPPORT, function_names, function_support, regex_pattern_error,
 };
 pub use horizontal_aggregate::{EntityKind, HorizontalAggregateOperator};
 pub use join::{

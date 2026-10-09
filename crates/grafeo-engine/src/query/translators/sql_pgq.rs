@@ -1264,6 +1264,8 @@ impl SqlPgqTranslator {
             ast::BinaryOp::StartsWith => BinaryOp::StartsWith,
             ast::BinaryOp::EndsWith => BinaryOp::EndsWith,
             ast::BinaryOp::Contains => BinaryOp::Contains,
+            // The SQL/PGQ parser has no `=~`; the AST it shares with GQL does.
+            ast::BinaryOp::RegexMatch => BinaryOp::Regex,
         })
     }
 

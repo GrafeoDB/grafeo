@@ -1220,6 +1220,9 @@ impl super::Planner {
                                 needs_projection = true;
                                 PropertySource::Column(col_idx)
                             }
+                            // An error the query is to blame for, such as a call
+                            // to an unknown function, is the error.
+                            Err(error @ Error::Query(_)) => return Err(error),
                             Err(_) => {
                                 return Err(Error::Internal(format!(
                                     "Cannot resolve SET expression for property '{name}': \

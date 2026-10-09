@@ -137,12 +137,11 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: unknown_function
-    skip: "unknown functions return NULL instead of erroring"
     setup:
       - "INSERT (:N {v: 1})"
     query: "MATCH (n:N) RETURN nonexistent_function(n.v)"
     expect:
-      error: ""
+      error: "Unknown function 'nonexistent_function'"
 
   - name: wrong_argument_count
     skip: "extra arguments ignored instead of erroring"

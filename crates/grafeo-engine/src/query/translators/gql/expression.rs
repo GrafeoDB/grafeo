@@ -345,6 +345,7 @@ impl GqlTranslator {
             ast::BinaryOp::StartsWith => BinaryOp::StartsWith,
             ast::BinaryOp::EndsWith => BinaryOp::EndsWith,
             ast::BinaryOp::Contains => BinaryOp::Contains,
+            ast::BinaryOp::RegexMatch => BinaryOp::Regex,
         }
     }
 

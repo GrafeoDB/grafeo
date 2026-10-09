@@ -601,9 +601,9 @@ tests:
       error: "'INT32' is not a property type"
 
   - name: unknown_list_element_type_is_refused
-    query: "CREATE EDGE TYPE ROAD (lanes LIST<STRING>)"
+    query: "CREATE EDGE TYPE ROAD (lanes LIST<STIRNG>)"
     expect:
-      error: "'STRING' is not a property type"
+      error: "'STIRNG' is not a property type"
 
   - name: unknown_inline_property_type_is_refused
     query: "CREATE GRAPH TYPE atlas { (:Town {population DECIMAL})-[:ROAD]->(:Town) }"

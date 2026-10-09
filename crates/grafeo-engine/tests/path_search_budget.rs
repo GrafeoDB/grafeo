@@ -31,7 +31,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_engine::database::QueryResult;
-use grafeo_engine::{Config, GrafeoDB};
+use grafeo_engine::{Config, GrafeoDB, Session};
 
 /// The most this test binary holds: a request beyond it fails.
 const CAP: usize = 3 * 1024 * 1024 * 1024;
@@ -183,8 +183,12 @@ fn code_graph() -> CodeGraph {
     code_graph_in(GrafeoDB::new_in_memory())
 }
 
-/// [`code_graph`] in `db`.
+/// [`code_graph`] in `db`, written in one transaction: a build with
+/// `tiered-storage` gives every commit's epoch an arena of its own, so one
+/// commit per node and edge would hold gigabytes before a query runs.
 fn code_graph_in(db: GrafeoDB) -> CodeGraph {
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
     let mut state: u64 = 0x0003_0019_0088;
     let mut pick = |bound: usize| {
         state = state
@@ -193,12 +197,12 @@ fn code_graph_in(db: GrafeoDB) -> CodeGraph {
         usize::try_from(state >> 33).unwrap() % bound
     };
     let mut edges = Vec::new();
-    let mut edge = |db: &GrafeoDB, from: NodeId, to: NodeId, edge_type: &str| {
-        db.create_edge(from, to, edge_type).unwrap();
+    let mut edge = |session: &Session, from: NodeId, to: NodeId, edge_type: &str| {
+        session.create_edge(from, to, edge_type).unwrap();
         edges.push((from, to));
     };
 
-    let repo = db
+    let repo = session
         .create_node_with_props(&["Repository"], [("repoName", Value::from("deriva"))])
         .unwrap();
     let mut directories = Vec::new();
@@ -207,8 +211,8 @@ fn code_graph_in(db: GrafeoDB) -> CodeGraph {
         let mut next = Vec::new();
         for &parent in &level {
             for _ in 0..4 {
-                let directory = db.create_node(&["Directory"]).unwrap();
-                edge(&db, parent, directory, "CONTAINS");
+                let directory = session.create_node(&["Directory"]).unwrap();
+                edge(&session, parent, directory, "CONTAINS");
                 directories.push(directory);
                 next.push(directory);
             }
@@ -217,29 +221,36 @@ fn code_graph_in(db: GrafeoDB) -> CodeGraph {
     }
     let mut files = Vec::new();
     for i in 0..500 {
-        let file = db
+        let file = session
             .create_node_with_props(&["File"], [("filePath", Value::from(format!("f{i}.py")))])
             .unwrap();
-        edge(&db, directories[pick(directories.len())], file, "CONTAINS");
+        edge(
+            &session,
+            directories[pick(directories.len())],
+            file,
+            "CONTAINS",
+        );
         files.push(file);
     }
     let mut methods = Vec::new();
     for _ in 0..900 {
-        let method = db.create_node(&["Method"]).unwrap();
-        edge(&db, files[pick(files.len())], method, "CONTAINS");
+        let method = session.create_node(&["Method"]).unwrap();
+        edge(&session, files[pick(files.len())], method, "CONTAINS");
         methods.push(method);
     }
     for &file in &files {
         for _ in 0..3 {
-            edge(&db, file, files[pick(files.len())], "IMPORTS");
+            edge(&session, file, files[pick(files.len())], "IMPORTS");
         }
     }
     for &method in &methods {
         for _ in 0..2 {
-            edge(&db, method, methods[pick(methods.len())], "CALLS");
+            edge(&session, method, methods[pick(methods.len())], "CALLS");
         }
-        edge(&db, method, files[pick(files.len())], "USES");
+        edge(&session, method, files[pick(files.len())], "USES");
     }
+    session.commit().unwrap();
+    drop(session);
     CodeGraph {
         db,
         repo,

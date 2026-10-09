@@ -998,6 +998,10 @@ pub enum BinaryOp {
     EndsWith,
     /// CONTAINS substring matching.
     Contains,
+    /// `=~` regular expression match, a Grafeo extension (ISO GQL has no
+    /// regular expressions): the pattern must match the whole string, as
+    /// Cypher's `=~` does.
+    RegexMatch,
 }
 
 /// A unary operator.

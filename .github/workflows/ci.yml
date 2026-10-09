@@ -395,8 +395,8 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
-      - name: Test migration and close without the wal feature, files and snapshots with data this build cannot read
-        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close --test compacted_file_without_compact_store --test rdf_file_without_triple_store --test search_indexes_without_their_features --test snapshot_without_its_features
+      - name: Test migration and close without the wal feature, files and snapshots with data this build cannot read, functions without their features
+        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close --test compacted_file_without_compact_store --test rdf_file_without_triple_store --test search_indexes_without_their_features --test snapshot_without_its_features --test functions_without_their_features
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"

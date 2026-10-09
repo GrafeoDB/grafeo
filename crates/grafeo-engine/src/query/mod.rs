@@ -15,6 +15,7 @@
 pub mod binder;
 pub mod cache;
 pub mod executor;
+pub(crate) mod functions;
 pub mod limits;
 pub mod optimizer;
 pub mod plan;

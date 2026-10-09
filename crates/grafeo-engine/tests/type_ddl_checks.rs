@@ -120,8 +120,8 @@ fn append_wal(wal_dir: &Path, mut records: Vec<WalRecord>) {
 /// type's name: every form of type DDL. `City` exists when they run.
 const UNKNOWN_TYPES: &[(&str, &str)] = &[
     ("CREATE NODE TYPE Town (population INT32)", "INT32"),
-    ("CREATE NODE TYPE Town (name STRING)", "STRING"),
-    ("CREATE NODE TYPE Town (tags LIST<STRING>)", "STRING"),
+    ("CREATE NODE TYPE Town (name STIRNG)", "STIRNG"),
+    ("CREATE NODE TYPE Town (tags LIST<STIRNG>)", "STIRNG"),
     ("CREATE NODE TYPE Town (grid LIST<LIST<INT32>>)", "INT32"),
     ("CREATE EDGE TYPE ROAD (km INT32)", "INT32"),
     ("ALTER NODE TYPE City ADD population INT32", "INT32"),

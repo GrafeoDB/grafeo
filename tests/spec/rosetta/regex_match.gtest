@@ -1,0 +1,76 @@
+# Rosetta: `=~`, a regular expression match
+#
+# GQL has `=~` as a Grafeo extension (ISO GQL has no regular expressions) with
+# the meaning and the precedence of Cypher's: true when the pattern matches the
+# whole string, inline flags such as `(?i)` included. A pattern the query gives
+# that is not a regular expression is an error that names it (Cypher matched
+# nothing with it, and GQL had no `=~`). The patterns stay within what the
+# browser build's regex-lite takes (ASCII classes).
+#
+# Setup (GQL): directories of a project tree, with the paths a derivation
+# query leaves out (tests, specs, caches, node_modules, .git) and `src/agit`,
+# which has `git` but no `.git`.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Regular expression match
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: an_alternation_leaves_out_paths
+    setup:
+      - "INSERT (:Dir {path: 'src/tests'}), (:Dir {path: 'src/app'}), (:Dir {path: 'lib/spec/models'}), (:Dir {path: 'web/node_modules/x'}), (:Dir {path: 'src/.git/hooks'}), (:Dir {path: 'src/agit'})"
+    variants:
+      gql: "MATCH (d:Dir) WHERE NOT d.path =~ '.*(test|spec|__pycache__|node_modules|\.git).*' RETURN d.path AS path"
+      cypher: "MATCH (d:Dir) WHERE NOT d.path =~ '.*(test|spec|__pycache__|node_modules|\.git).*' RETURN d.path AS path"
+    expect:
+      rows:
+        - [src/agit]
+        - [src/app]
+
+  - name: an_alternation_keeps_paths
+    setup:
+      - "INSERT (:Dir {path: 'src/tests'}), (:Dir {path: 'src/app'}), (:Dir {path: 'lib/spec/models'}), (:Dir {path: 'web/node_modules/x'}), (:Dir {path: 'src/.git/hooks'}), (:Dir {path: 'src/agit'})"
+    variants:
+      gql: "MATCH (d:Dir) WHERE d.path =~ '.*(test|spec|__pycache__|node_modules|\.git).*' RETURN d.path AS path"
+      cypher: "MATCH (d:Dir) WHERE d.path =~ '.*(test|spec|__pycache__|node_modules|\.git).*' RETURN d.path AS path"
+    expect:
+      rows:
+        - [lib/spec/models]
+        - [src/.git/hooks]
+        - [src/tests]
+        - [web/node_modules/x]
+
+  - name: a_pattern_matches_the_whole_string
+    setup:
+      - "INSERT (:Dir {path: 'src/app'}), (:Dir {path: 'src'})"
+    variants:
+      gql: "MATCH (d:Dir) WHERE d.path =~ 'src' RETURN d.path AS path"
+      cypher: "MATCH (d:Dir) WHERE d.path =~ 'src' RETURN d.path AS path"
+    expect:
+      rows:
+        - [src]
+
+  - name: a_match_is_a_value
+    setup:
+      - "INSERT (:Dir {path: 'src/app'}), (:Dir {path: 'lib/x'}), (:Dir {name: 'unnamed'})"
+    variants:
+      gql: "MATCH (d:Dir) RETURN d.path AS path, d.path =~ 'SRC/.*' AS exact, d.path =~ '(?i)SRC/.*' AS folded"
+      cypher: "MATCH (d:Dir) RETURN d.path AS path, d.path =~ 'SRC/.*' AS exact, d.path =~ '(?i)SRC/.*' AS folded"
+    expect:
+      rows:
+        - [lib/x, false, false]
+        - [src/app, false, true]
+        - [null, null, null]
+
+  - name: a_pattern_that_is_no_regular_expression_is_an_error
+    setup:
+      - "INSERT (:Dir {path: 'src/app'})"
+    variants:
+      gql: "MATCH (d:Dir) WHERE d.path =~ '(src' RETURN d.path AS path"
+      cypher: "MATCH (d:Dir) WHERE d.path =~ '(src' RETURN d.path AS path"
+    expect:
+      error: "Invalid regular expression '(src'"

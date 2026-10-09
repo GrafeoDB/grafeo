@@ -77,47 +77,9 @@ pub(crate) fn unaliased_with_expression() -> Error {
     ))
 }
 
-/// Returns true if the function name is a recognized aggregate function.
-pub(crate) fn is_aggregate_function(name: &str) -> bool {
-    matches!(
-        name.to_uppercase().as_str(),
-        "COUNT"
-            | "SUM"
-            | "AVG"
-            | "MIN"
-            | "MAX"
-            | "COLLECT"
-            | "STDEV"
-            | "STDDEV"
-            | "STDDEV_SAMP"
-            | "STDEVP"
-            | "STDDEVP"
-            | "STDDEV_POP"
-            | "VARIANCE"
-            | "VAR_SAMP"
-            | "VAR_POP"
-            | "PERCENTILE_DISC"
-            | "PERCENTILEDISC"
-            | "PERCENTILE_CONT"
-            | "PERCENTILECONT"
-            | "GROUP_CONCAT"
-            | "GROUPCONCAT"
-            | "LISTAGG"
-            | "SAMPLE"
-            | "COVAR_SAMP"
-            | "COVAR_POP"
-            | "CORR"
-            | "REGR_SLOPE"
-            | "REGR_INTERCEPT"
-            | "REGR_R2"
-            | "REGR_COUNT"
-            | "REGR_SXX"
-            | "REGR_SYY"
-            | "REGR_SXY"
-            | "REGR_AVGX"
-            | "REGR_AVGY"
-    )
-}
+// Whether a function name is an aggregate: one list with the planner's check
+// of function calls.
+pub(crate) use crate::query::functions::is_aggregate_function;
 
 /// Converts a function name to an `AggregateFunction` enum variant.
 pub(crate) fn to_aggregate_function(name: &str) -> Option<AggregateFunction> {

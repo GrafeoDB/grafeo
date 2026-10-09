@@ -306,3 +306,14 @@ BN2|cypher a10a3ef2a6 A relationship has one type, also in a variable-length pat
 BN2|gql 4b8071a731 An edge has one type, also in a variable-length pattern; it followed the KNOWS or LIVES_IN edges.
 BN3|cypher 1919420008 openCypher 9 writes alternative relationship types :A|:B; it failed with "Expected identifier".
 BN4|gql 6cf625b151 An edge has one type, so :A&B is an error that says so and names :A|B; it was "Expected RBracket".
+BO1|gql d2dbc8421e GQL has `=~`, Cypher's whole-string regular expression match; it was a syntax error.
+BO2|gql 708e0919bf GQL has `=~`, Cypher's whole-string regular expression match; it was a syntax error.
+BO3|gql fc887a4629 GQL has `=~`, Cypher's whole-string regular expression match; it was a syntax error.
+BO4|cypher b1c4ec8c33 A pattern that is not a regular expression is an error that names it; it matched nothing.
+BO4|gql b1c4ec8c33 A pattern that is not a regular expression is an error that names it; GQL had no `=~`.
+BO5|cypher 70429e65a5 A call to an unknown function is an error; it was null for every row.
+BO5|gql 70429e65a5 A call to an unknown function is an error; it was null for every row.
+BO6|cypher b93a6e4ba7 A call to an unknown function is an error; it was null, so the WHERE kept no rows.
+BO6|gql b93a6e4ba7 A call to an unknown function is an error; it was null, so the WHERE kept no rows.
+BO8|cypher 59ee27e748 A call to an unknown function is an error, also in a list comprehension; it was null.
+BO8|gql 59ee27e748 A call to an unknown function is an error, also in a list comprehension; it was null.

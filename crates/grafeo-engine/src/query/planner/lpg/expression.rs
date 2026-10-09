@@ -20,9 +20,17 @@ use super::{
     Direction, Error, ExpandDirection, FilterExpression, LogicalExpression, LogicalOperator,
     Result, Value, convert_binary_op, convert_unary_op,
 };
+use crate::query::functions::{check_function_call, check_pattern_match};
 
 impl super::Planner {
     /// Converts a logical expression to a filter expression.
+    ///
+    /// # Errors
+    ///
+    /// A call to a function the evaluator does not compute in this build, and
+    /// a `=~` or LIKE this build cannot match (see [`crate::query::functions`]),
+    /// are errors here, before any row is read: the evaluator would answer
+    /// them with a null for every row.
     pub(super) fn convert_expression(&self, expr: &LogicalExpression) -> Result<FilterExpression> {
         match expr {
             LogicalExpression::Literal(v) => Ok(FilterExpression::Literal(v.clone())),
@@ -32,6 +40,9 @@ impl super::Planner {
                 property: property.clone(),
             }),
             LogicalExpression::Binary { left, op, right } => {
+                // `=~` and LIKE need regular expressions, and a `=~` pattern
+                // the query gives must be one.
+                check_pattern_match(*op, right)?;
                 let left_expr = self.convert_expression(left)?;
                 let right_expr = self.convert_expression(right)?;
                 let filter_op = convert_binary_op(*op)?;
@@ -50,6 +61,9 @@ impl super::Planner {
                 })
             }
             LogicalExpression::FunctionCall { name, args, .. } => {
+                // The evaluator answers a call it cannot compute with a null
+                // for every row: refuse it here, before any row is read.
+                check_function_call(name)?;
                 let filter_args: Vec<FilterExpression> = args
                     .iter()
                     .map(|a| self.convert_expression(a))

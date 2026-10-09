@@ -1217,7 +1217,7 @@ mod legacy_commit_tests {
         }
         HITS.with(|hits| {
             hits.borrow_mut()
-                .push((point, file.metadata().unwrap().len()))
+                .push((point, file.metadata().unwrap().len()));
         });
         with_failure_at(1, || grafeo_common::testing::crash::maybe_fail(point))
     }
@@ -1478,7 +1478,7 @@ mod legacy_commit_tests {
         for record in &group {
             let payload =
                 bincode::serde::encode_to_vec(record, bincode::config::standard()).unwrap();
-            expected.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            expected.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
             expected.extend_from_slice(&payload);
             expected.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
         }

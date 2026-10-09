@@ -645,8 +645,8 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "GRAFEO-T008: an earlier commit did not complete, so no transaction can commit and \
-             nothing can be checkpointed, saved or copied: reopen the database (reads still see \
+            "GRAFEO-T008: an earlier commit did not complete; its outcome may be unknown, so no transaction can commit and nothing \
+             can be checkpointed, saved or copied: reopen the database (reads still see \
              every commit published before it)"
         );
     }

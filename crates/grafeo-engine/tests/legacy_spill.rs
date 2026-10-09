@@ -4,8 +4,10 @@
 //! `<file>.spill/vectors_<label>%3A<property>.bin` and out of the database. An
 //! open folds them back into their columns: a read-write open makes them
 //! durable and deletes the old files, a read-only open keeps them in memory
-//! and changes nothing. The fixtures (`fixtures/closed-while-spilled/`, see its
-//! README) were closed while spilled by 0.5.44 and by a 0.6 development build.
+//! and changes nothing. The 0.5.x database (`fixtures/closed-while-spilled/`,
+//! see its README) was closed while spilled by 0.5.44; the 0.6 one is built
+//! here ([`build_0_6`]): a 0.6 file with old spill files beside it, as a crash
+//! leaves them after migrating such a database and before deleting them.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --features full --test legacy_spill
@@ -29,15 +31,65 @@ use grafeo_engine::{Config, GrafeoDB};
 
 const SPILL_FILE: &str = "vectors_Item%3Aembedding.bin";
 
-/// A copy of the fixture written by `version`, and the path of its database.
+/// A database closed while spilled, and the path of its database file:
+/// `"0.5.44"` a copy of the fixture 0.5.44 wrote, `"0.6"` one [`build_0_6`]
+/// builds.
 fn fixture(version: &str) -> (tempfile::TempDir, PathBuf) {
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/closed-while-spilled")
-        .join(version);
     let dir = tempfile::tempdir().unwrap();
-    copy_tree(&source, dir.path());
     let path = dir.path().join("spilled.grafeo");
+    if version == "0.6" {
+        build_0_6(&path);
+    } else {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/closed-while-spilled")
+            .join(version);
+        copy_tree(&source, dir.path());
+    }
     (dir, path)
+}
+
+/// The embeddings the old spill file holds, by node id: Alix, Gus, Vincent
+/// and Jules, as spilled.
+fn spilled_records() -> Vec<(u64, Vec<f32>)> {
+    vec![
+        (0, vec![3.0, 19.0, 88.0]),
+        (1, vec![19.0, 88.0, 3.0]),
+        (2, vec![88.0, 3.0, 19.0]),
+        (3, vec![3.19, 19.88, 88.3]),
+    ]
+}
+
+/// Builds at `path` a 0.6 database with old spill files beside it, the state
+/// a crash leaves after migrating a 0.5.x database closed while spilled and
+/// before deleting its old files, from the 0.5.44 fixture's steps: the
+/// database file holds the four `:Item` nodes as they were after the spill
+/// (Gus's embedding set to `[1988, 3, 19]`, Vincent deleted, no embedding
+/// for Alix and Jules) with a vector index on `:Item(embedding)`, and
+/// `<file>.spill` holds the four embeddings spilled before ([`spilled_records`]).
+fn build_0_6(path: &Path) {
+    let db = GrafeoDB::with_config(Config::persistent(path)).unwrap();
+    let embedding = |name: &str| {
+        (name == "Gus").then(|| ("embedding", Value::Vector(vec![1988.0, 3.0, 19.0].into())))
+    };
+    let ids: Vec<_> = ["Alix", "Gus", "Vincent", "Jules"]
+        .into_iter()
+        .map(|name| {
+            let properties = std::iter::once(("name", Value::from(name))).chain(embedding(name));
+            db.create_node_with_props(&["Item"], properties).unwrap()
+        })
+        .collect();
+    assert_eq!(
+        ids.iter().map(|id| id.as_u64()).collect::<Vec<_>>(),
+        [0, 1, 2, 3],
+        "the ids the old spill file names"
+    );
+    db.create_vector_index("Item", "embedding", Some(3), None, None, None, None)
+        .unwrap();
+    db.delete_node(ids[2]).unwrap();
+    db.close().unwrap();
+    drop(db);
+    std::fs::create_dir(spill_dir(path)).unwrap();
+    write_old(&spill_dir(path).join(SPILL_FILE), 3, &spilled_records());
 }
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -121,7 +173,7 @@ fn nearest_to_alix(db: &GrafeoDB) -> String {
 /// deletes the old files: the database file alone then holds everything.
 #[test]
 fn a_read_write_open_folds_the_spilled_embeddings_back_in() {
-    let (dir, path) = fixture("0.6.0-dev");
+    let (dir, path) = fixture("0.6");
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(embeddings(&db), folded());
     assert_eq!(nearest_to_alix(&db), "Alix");
@@ -140,7 +192,7 @@ fn a_read_write_open_folds_the_spilled_embeddings_back_in() {
 /// disk, for a 0.6 file and for a 0.5.x one.
 #[test]
 fn a_read_only_open_folds_in_memory_and_changes_nothing() {
-    for version in ["0.6.0-dev", "0.5.44"] {
+    for version in ["0.6", "0.5.44"] {
         let (dir, path) = fixture(version);
         let before = files(dir.path());
         let db = GrafeoDB::open_read_only(&path).unwrap();
@@ -279,7 +331,7 @@ fn old_files_in_a_spill_path_are_folded_only_for_this_databases_indexes() {
     assert_eq!(embeddings(&GrafeoDB::open(&path).unwrap()), folded());
 }
 
-/// What the 0.6.0-dev fixture holds without its spill file: Gus's newer
+/// What the 0.6 database holds without its spill file: Gus's newer
 /// embedding, which the database file holds, and nothing for Alix and Jules.
 fn unfolded() -> Vec<(String, Option<Vec<f32>>)> {
     vec![
@@ -290,12 +342,12 @@ fn unfolded() -> Vec<(String, Option<Vec<f32>>)> {
 }
 
 /// A 0.6 database never reads old files in a configured spill path: they are
-/// read only with a 0.5.x database. So one written by a 0.6 development build
-/// that spilled there does not get those embeddings back (a documented
-/// limit), and the file stays as it is.
+/// read only with a 0.5.x database (the migration reads them). So a 0.6
+/// database meeting old files there does not get those embeddings back (a
+/// documented limit), and the file stays as it is.
 #[test]
 fn a_0_6_database_does_not_read_old_files_in_a_configured_spill_path() {
-    let (dir, path) = fixture("0.6.0-dev");
+    let (dir, path) = fixture("0.6");
     let configured = dir.path().join("configured");
     std::fs::create_dir(&configured).unwrap();
     std::fs::rename(
@@ -348,7 +400,7 @@ fn an_embedding_removed_after_the_migration_stays_removed() {
 /// alone, also in `<file>.spill`.
 #[test]
 fn a_spill_file_without_an_index_here_is_left_alone() {
-    let (dir, path) = fixture("0.6.0-dev");
+    let (dir, path) = fixture("0.6");
     let foreign = spill_dir(&path).join("vectors_Doc%3Aembedding.bin");
     std::fs::copy(spill_dir(&path).join(SPILL_FILE), &foreign).unwrap();
     let foreign_bytes = std::fs::read(&foreign).unwrap();
@@ -373,7 +425,7 @@ fn kept_dir(path: &Path) -> PathBuf {
 /// it to `<file>.spill/kept/`, byte for byte, so no later open reads it again.
 #[test]
 fn an_old_spill_file_that_is_not_one_moves_to_kept() {
-    let (_source_dir, source) = fixture("0.6.0-dev");
+    let (_source_dir, source) = fixture("0.6");
     let original = std::fs::read(spill_dir(&source).join(SPILL_FILE)).unwrap();
     let mut other_magic = original.clone();
     other_magic[..8].copy_from_slice(b"GRAFVEC0");
@@ -385,7 +437,7 @@ fn an_old_spill_file_that_is_not_one_moves_to_kept() {
         ("no header", b"GRAFVEC1".to_vec()),
         ("a count no file can hold", huge_count),
     ] {
-        let (_dir, path) = fixture("0.6.0-dev");
+        let (_dir, path) = fixture("0.6");
         let old = spill_dir(&path).join(SPILL_FILE);
         std::fs::write(&old, &bytes).unwrap();
 
@@ -420,7 +472,7 @@ fn an_old_spill_file_that_is_not_one_moves_to_kept() {
 fn a_refused_file_moves_to_kept_and_the_next_open_neither_rebuilds_nor_checkpoints() {
     use grafeo_common::testing::crash::{CrashResult, with_crash_at, with_failure_at};
 
-    let (_dir, path) = fixture("0.6.0-dev");
+    let (_dir, path) = fixture("0.6");
     let old = spill_dir(&path).join(SPILL_FILE);
     write_old(&old, 2, &[(0, vec![3.0, 19.0])]);
     let bytes = std::fs::read(&old).unwrap();
@@ -471,7 +523,7 @@ fn a_refused_file_moves_to_kept_and_the_next_open_neither_rebuilds_nor_checkpoin
 /// numeric suffix.
 #[test]
 fn a_kept_file_never_replaces_another() {
-    let (_dir, path) = fixture("0.6.0-dev");
+    let (_dir, path) = fixture("0.6");
     let old = spill_dir(&path).join(SPILL_FILE);
     write_old(&old, 2, &[(0, vec![3.0, 19.0])]);
     let bytes = std::fs::read(&old).unwrap();
@@ -499,7 +551,7 @@ fn a_kept_file_never_replaces_another() {
 #[test]
 fn folding_in_adds_no_change_event_and_no_epoch() {
     let open = |with_spill_file: bool| {
-        let (dir, path) = fixture("0.6.0-dev");
+        let (dir, path) = fixture("0.6");
         if !with_spill_file {
             std::fs::remove_dir_all(spill_dir(&path)).unwrap();
         }
@@ -595,7 +647,7 @@ fn crash_child() {
 fn a_crash_while_folding_in_loses_nothing() {
     let mut points = Vec::new();
     for point in 1.. {
-        let (_dir, path) = fixture("0.6.0-dev");
+        let (_dir, path) = fixture("0.6");
         let crashed = open_in_child(point, &path);
         let Some(name) = crashed else {
             assert!(
@@ -636,7 +688,7 @@ fn a_crash_while_folding_in_loses_nothing() {
 #[cfg(feature = "testing-crash-injection")]
 #[test]
 fn a_failed_checkpoint_keeps_the_old_file() {
-    let (_dir, path) = fixture("0.6.0-dev");
+    let (_dir, path) = fixture("0.6");
     let old = spill_dir(&path).join(SPILL_FILE);
     let bytes = std::fs::read(&old).unwrap();
     let opened = grafeo_common::testing::crash::with_failure_at(1, || GrafeoDB::open(&path));
@@ -678,7 +730,7 @@ fn a_spill_file_of_another_dimension_is_not_read() {
         ("Gus".to_string(), Some(vec![1988.0, 3.0, 19.0])),
         ("Jules".to_string(), None),
     ];
-    for version in ["0.6.0-dev", "0.5.44"] {
+    for version in ["0.6", "0.5.44"] {
         for dimensions in [2, 0] {
             let context = format!("{version}, {dimensions} dimensions");
             let vector: Vec<f32> = [3.0, 19.0].into_iter().take(dimensions).collect();
@@ -866,7 +918,7 @@ fn search_names(db: &GrafeoDB, query: &[f32], k: usize) -> Vec<String> {
 #[test]
 fn search_finds_the_embeddings_the_fold_brings_back() {
     let gus = [1988.0, 3.0, 19.0];
-    for version in ["0.6.0-dev", "0.5.44"] {
+    for version in ["0.6", "0.5.44"] {
         let (_dir, path) = fixture(version);
         let db = GrafeoDB::open_read_only(&path).unwrap();
         let hits = search_names(&db, &gus, 3);
@@ -972,7 +1024,7 @@ fn the_embedding_of_a_node_that_lost_the_label_is_kept() {
 #[cfg(feature = "testing-crash-injection")]
 #[test]
 fn a_rebuild_without_a_fill_is_durable() {
-    let (_dir, path) = fixture("0.6.0-dev");
+    let (_dir, path) = fixture("0.6");
     write_old(
         &spill_dir(&path).join(SPILL_FILE),
         3,

@@ -1,11 +1,10 @@
-//! A compacted node keeps each of its labels.
+//! A node keeps each of its labels through `compact()`.
 //!
-//! `compact()` stores the nodes with the same labels as one columnar table.
-//! Every label of such a node reads it: `labels(n)`, a label scan, a label
-//! count, a pattern with several labels (whose scan reads the label with the
-//! fewest nodes, which the planner counts per label), a traversal, the
-//! statistics, and a write or delete through any of them; after a merge of
-//! the overlay and after a close and reopen too.
+//! Every label of a node reads it: `labels(n)`, a label scan, a label count,
+//! a pattern with several labels (whose scan reads the label with the fewest
+//! nodes, which the planner counts per label), a traversal, and a write or
+//! delete through any of them; after `recompact()` and after a close and
+//! reopen too.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test compact_labels
@@ -142,18 +141,6 @@ fn assert_each_label_reads_its_nodes(db: &GrafeoDB, stage: &str) {
         ["NodeScan (n:Employee)"],
         "{stage}: the scan reads the label with the fewest nodes"
     );
-    // The statistics of a compacted database count each label of the base
-    // (those of the LPG store are refreshed later, not on every write).
-    if db.layered_store().is_some() {
-        let statistics = db.graph_store().statistics();
-        for (label, count) in [("Person", 5), ("Employee", 3), ("Manager", 3)] {
-            assert_eq!(
-                statistics.get_label(label).map(|s| s.node_count),
-                Some(count),
-                "{stage}: {label} statistics"
-            );
-        }
-    }
 }
 
 #[test]
@@ -163,7 +150,7 @@ fn each_label_of_a_compacted_node_reads_it() {
     assert_each_label_reads_its_nodes(&db, "before compact()");
     db.compact().unwrap();
     assert_each_label_reads_its_nodes(&db, "after compact()");
-    db.recompact().unwrap();
+    db.compact().unwrap();
     assert_each_label_reads_its_nodes(&db, "after recompact()");
 }
 
@@ -223,9 +210,8 @@ fn the_direct_api_reads_each_label_of_a_compacted_node() {
     assert_eq!(db.graph_store().nodes_by_label("Employee"), [alix]);
 }
 
-/// The compacted base of a file keeps each label of a node through a close
-/// and reopen, after a merge, and after the reopened database writes the
-/// file again.
+/// A file keeps each label of a node through `compact()`, a close and
+/// reopen, `recompact()`, and the reopened database writing the file again.
 #[cfg(all(feature = "grafeo-file", feature = "wal"))]
 #[test]
 fn a_reopened_compacted_file_keeps_each_label() {
@@ -239,12 +225,8 @@ fn a_reopened_compacted_file_keeps_each_label() {
     }
     {
         let mut db = GrafeoDB::open(&path).unwrap();
-        assert!(
-            db.layered_store().is_some(),
-            "the file holds a compacted base"
-        );
         assert_each_label_reads_its_nodes(&db, "after a reopen");
-        db.recompact().unwrap();
+        db.compact().unwrap();
         assert_each_label_reads_its_nodes(&db, "after a reopen and a merge");
         db.close().unwrap();
     }

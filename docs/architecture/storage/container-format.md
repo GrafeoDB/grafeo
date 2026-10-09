@@ -63,7 +63,7 @@ on disk.
 | Offset | Size | Type | Field | Description |
 |--------|------|------|-------|-------------|
 | 0 | 4 | `[u8; 4]` | `magic` | `GDBH` |
-| 4 | 4 | `u32` | (reserved) | Zero |
+| 4 | 4 | `u32` | `format_revision` | Which additions to v3 the image may use (see below) |
 | 8 | 8 | `u64` | `iteration` | Checkpoint counter, higher = current |
 | 16 | 8 | `u64` | `checkpoint_lsn` | WAL position the checkpoint covers (currently always 0) |
 | 24 | 8 | `u64` | `epoch` | MVCC epoch at the checkpoint |
@@ -84,6 +84,15 @@ on a tie). If no slot is valid and one is damaged, the open fails instead of
 treating the file as empty: the image the damaged slot pointed at may still be
 in the file. A new database gets a valid iteration-0 header in slot 0 that
 points at an image without sections.
+
+**Format revision:** the active header's `format_revision` says which additions
+to container v3 its image may use. 0.6.0 writes and reads revision 1. A reader
+refuses a revision above the highest it knows ("written by a newer version of
+Grafeo") and revision 0 (a 0.6.0 development build from before revisions, which
+no release reads), before it reads the directory, and leaves the file as it is.
+A checkpoint writes the revision of the header it replaces, so a file keeps its
+revision: a 0.6.x release that adds a revision gives it to a file only through
+an explicit upgrade, and new files keep revision 1 throughout 0.6.x.
 
 ---
 
@@ -127,7 +136,8 @@ entries, the CRC and the magic, and that the chain never visits a block twice.
 | 32 | 8 | `u64` | `length` | Stored length of the chunk |
 | 40 | 4 | `u32` | `crc` | CRC-32 of the stored chunk |
 | 44 | 1 | `u8` | `flags` | Bit 0: a reader that does not know the section type skips the entry; bit 1: a reader that knows the section type but not the chunk kind skips it (see below) |
-| 45 | 3 | - | (reserved) | Written as zero, ignored by readers |
+| 45 | 1 | `u8` | `namespace` | The numbering `column_id` belongs to (see [Namespaces](#namespaces)) |
+| 46 | 2 | - | (reserved) | Written as zero, ignored by readers |
 
 **Unknown entries.** A newer version may add section types and chunk kinds.
 The flags of each entry tell an older reader what to do with one it does not
@@ -166,8 +176,8 @@ block.
 | 1 | `CATALOG` | 2 | Schema definitions, index definitions and index names, as [records](#catalog-records) |
 | 2 | `LPG_STORE` | 3 | Nodes, edges, properties, named graphs |
 | 3 | `RDF_STORE` | 3 | RDF triples, named graphs |
-| 4 | `COMPACT_STORE` | 5 | Columnar base of the layered compact store |
-| 5 | `OVERLAY_DELETIONS` | 2 | Base entities the compact store's overlay deleted |
+| 4 | `COMPACT_STORE` | 5 | Columnar base of a database compacted by 0.5.x (read only: an open folds it into the LPG store) |
+| 5 | `OVERLAY_DELETIONS` | 2 | Base entities deleted since that `compact()` (read only, as `COMPACT_STORE`) |
 | 10 | `VECTOR_STORE` | 3 | HNSW topology of each vector index (the embeddings are node properties) |
 | 11 | `TEXT_INDEX` | 2 | BM25 document lengths and posting lists |
 | 12 | `RDF_RING` | 3 | Term dictionary, wavelet trees and permutations of the RDF ring |
@@ -216,8 +226,28 @@ which the section's 0.5.x reader reads.
 
 A raw or metadata chunk has every other field of its directory entry set to 0.
 All chunks of a section carry the same `section_version`, and no two of them
-have the same kind, graph, column and first row: a reader refuses a section
-that breaks either rule.
+have the same kind, namespace, graph, column and first row (the chunk's
+identity): a reader refuses a section that breaks either rule.
+
+### Namespaces
+
+A chunk's `column_id` is a number within its namespace, so ids repeat across
+namespaces: a node property and an edge property column can have the same id.
+The namespace bytes come in groups with room to grow:
+
+| Byte | Namespace | Columns |
+|------|-----------|---------|
+| 0 | Section | The section's own numbering: metadata, raw and stream chunks, and every section without node and edge tables |
+| 16 | Node structure | The node table's fixed columns |
+| 17 | Node properties | The node table's property columns |
+| 32 | Edge structure | The edge table's fixed columns |
+| 33 | Edge properties | The edge table's property columns |
+
+Reserved and not written yet: 18 node deletes, 19 node label bitmaps, 20 node
+versions, 34 edge deletes, 36 edge versions, 48 outgoing adjacency and 49
+incoming adjacency; the other bytes are unassigned. Every namespace a file of a
+known revision can hold is known to its reader, so an entry with a namespace
+byte the reader does not know is refused as damage, whatever its flags.
 
 ### Caps
 
@@ -350,13 +380,13 @@ come the named graphs in name order: a graph's id is its position in the
 metadata, so the ids are this checkpoint's. A row is a node or edge id. The
 columns:
 
-| Column | Table | Values |
-|--------|-------|--------|
-| 0 | Node | The node's label ids, ascending, in decimal, joined by `,` (`""` for a node without labels), as a `String` |
-| 1 | Edge | The source node id, as an `Int64` |
-| 2 | Edge | The target node id, as an `Int64` |
-| 3 | Edge | The edge type id, as an `Int64` |
-| 16 and up | Node or edge | A property column, as the metadata lists it |
+| Namespace | Column | Values |
+|-----------|--------|--------|
+| Node structure | 0 | The node's label ids, ascending, in decimal, joined by `,` (`""` for a node without labels), as a `String` |
+| Edge structure | 1 | The source node id, as an `Int64` |
+| Edge structure | 2 | The target node id, as an `Int64` |
+| Edge structure | 3 | The edge type id, as an `Int64` |
+| Node properties or edge properties | 16 and up | A property column of that table, as the metadata lists it |
 
 Ids 4 to 15 are reserved for fixed columns. A label's or an edge type's id is
 its position in the metadata's list of names. Within a row group, a column's
@@ -655,9 +685,11 @@ fair.
 In an encrypted file (flag bit 0), every chunk and every directory block is
 encrypted with AES-256-GCM under a key derived for the database's id, with a
 random nonce each. The associated data binds a chunk to its section type, chunk
-kind, graph, column and first row, and a directory block to its offset, so a
-chunk cannot pass for another part of a section, nor a directory block for one
-at another offset. A stored block is the nonce, the ciphertext and the tag: 28
+kind, namespace, graph, column and first row
+(`grafeo-chunk:{section}:{kind}:{namespace}:{graph}:{column}:{first row}`, in
+decimal), and a directory block to its offset, so a chunk cannot pass for
+another part of a section (a node property chunk for an edge property chunk of
+the same column id, say), nor a directory block for one at another offset. A stored block is the nonce, the ciphertext and the tag: 28
 bytes longer than its plaintext. A chunk's `length` and `crc` cover the stored
 bytes; a directory block's pointer holds the plaintext length and CRC. The file
 header and the database headers are not encrypted. See
@@ -721,7 +753,8 @@ spills nothing, as spill files are not encrypted. See
 Open database:
   1. Read the file header at 0x0000 and validate it (a file written by 0.5.x
      takes the migration path instead, see below)
-  2. Read both database header slots and select the active one
+  2. Read both database header slots, select the active one, and check its
+     format revision
   3. Read the directory chain from the active header's root, checking every
      block (and decrypting it in an encrypted file); set optional entries of
      an unknown section type or chunk kind apart, and refuse required ones
@@ -835,4 +868,4 @@ for what users need to do.
 |---------|--------|------------|-------|
 | v1 | Monolithic blob after the headers | 0.5.21 to 0.5.34 | Single bincode snapshot; read by 0.6 only to migrate |
 | v2 | Section directory at `0x3000` | 0.5.35 to 0.5.44 | Independent sections; read by 0.6 only to migrate |
-| v3 | Copy-on-write pages, chained directory | 0.6.0 and later | Checksummed chunks of at most 64Ki rows and 1 MiB, 64-bit offsets (no 4 GiB limit), per-chunk encryption, the catalog as typed records |
+| v3 | Copy-on-write pages, chained directory | 0.6.0 and later | Checksummed chunks of at most 64Ki rows and 1 MiB, 64-bit offsets (no 4 GiB limit), per-chunk encryption, the catalog as typed records; format revision 1 |

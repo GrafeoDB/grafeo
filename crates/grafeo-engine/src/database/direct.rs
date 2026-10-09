@@ -56,107 +56,6 @@ pub(crate) struct ImplicitWrites {
     /// The CDC events of the running call, recorded at its epoch.
     #[cfg(feature = "cdc")]
     cdc_events: Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>,
-    /// Held while a direct call on a compacted database builds its WAL
-    /// records from the state and writes them (see `log_compacted_write`).
-    #[cfg(all(feature = "wal", feature = "compact-store"))]
-    compacted_log: parking_lot::Mutex<()>,
-}
-
-/// What a direct call changed. A compacted database's sessions write the
-/// layered store, which the WAL wrapper cannot record, so a direct call there
-/// writes WAL records from the state it left (until the WAL comes from the
-/// transaction's change set, #448).
-#[cfg_attr(
-    not(all(feature = "wal", feature = "compact-store")),
-    expect(
-        dead_code,
-        reason = "only compacted databases log from what a call changed"
-    )
-)]
-pub(crate) enum Touched {
-    /// A node the call created.
-    NewNode(NodeId),
-    /// An edge the call created.
-    NewEdge(EdgeId),
-    /// A property of a node: what the node has now, or removed.
-    NodeProperty(NodeId, String),
-    /// A property of an edge: what the edge has now, or removed.
-    EdgeProperty(EdgeId, String),
-    /// A label of a node: added if the node has it now, else removed.
-    NodeLabel(NodeId, String),
-    /// A node the call deleted.
-    DeletedNode(NodeId),
-    /// An edge the call deleted.
-    DeletedEdge(EdgeId),
-}
-
-#[cfg(all(feature = "wal", feature = "compact-store"))]
-impl Touched {
-    /// The WAL records of this change, from the state `store` has after it.
-    fn records(self, store: &dyn GraphStoreSearch) -> Vec<grafeo_storage::wal::WalRecord> {
-        use grafeo_storage::wal::WalRecord;
-
-        match self {
-            Self::NewNode(id) => store.get_node(id).map_or_else(Vec::new, |node| {
-                let mut records = vec![WalRecord::CreateNode {
-                    id,
-                    labels: node.labels.iter().map(ToString::to_string).collect(),
-                }];
-                records.extend(node.properties.into_iter().map(|(key, value)| {
-                    WalRecord::SetNodeProperty {
-                        id,
-                        key: key.to_string(),
-                        value,
-                    }
-                }));
-                records
-            }),
-            Self::NewEdge(id) => store.get_edge(id).map_or_else(Vec::new, |edge| {
-                let mut records = vec![WalRecord::CreateEdge {
-                    id,
-                    src: edge.src,
-                    dst: edge.dst,
-                    edge_type: edge.edge_type.to_string(),
-                }];
-                records.extend(edge.properties.into_iter().map(|(key, value)| {
-                    WalRecord::SetEdgeProperty {
-                        id,
-                        key: key.to_string(),
-                        value,
-                    }
-                }));
-                records
-            }),
-            Self::NodeProperty(id, key) => {
-                vec![
-                    match store.get_node_property(id, &PropertyKey::new(key.as_str())) {
-                        Some(value) => WalRecord::SetNodeProperty { id, key, value },
-                        None => WalRecord::RemoveNodeProperty { id, key },
-                    },
-                ]
-            }
-            Self::EdgeProperty(id, key) => {
-                vec![
-                    match store.get_edge_property(id, &PropertyKey::new(key.as_str())) {
-                        Some(value) => WalRecord::SetEdgeProperty { id, key, value },
-                        None => WalRecord::RemoveEdgeProperty { id, key },
-                    },
-                ]
-            }
-            Self::NodeLabel(id, label) => {
-                let has_label = store
-                    .get_node(id)
-                    .is_some_and(|node| node.labels.iter().any(|l| **l == *label));
-                vec![if has_label {
-                    WalRecord::AddNodeLabel { id, label }
-                } else {
-                    WalRecord::RemoveNodeLabel { id, label }
-                }]
-            }
-            Self::DeletedNode(id) => vec![WalRecord::DeleteNode { id }],
-            Self::DeletedEdge(id) => vec![WalRecord::DeleteEdge { id }],
-        }
-    }
 }
 
 /// An edge to create with [`GrafeoDB::batch_create_edges`]: its endpoints,
@@ -212,20 +111,10 @@ impl GrafeoDB {
         DirectCalls { db: self, target }
     }
 
-    /// Whether direct calls outside a transaction on the graph with storage
-    /// key `graph` can skip the session: not on a read-only database, not on
-    /// an external store, and not on a compacted database's default graph,
-    /// the layered store (its named graphs are plain stores in the overlay).
-    fn writes_without_session(&self, graph: Option<&str>) -> bool {
-        if self.read_only || self.root_store().is_none() {
-            return false;
-        }
-        #[cfg(feature = "compact-store")]
-        if self.layered_store.is_some() {
-            return graph.is_some();
-        }
-        let _ = graph;
-        self.external_read_store.is_none()
+    /// Whether direct calls outside a transaction can skip the session: not
+    /// on a read-only database, and not on an external store.
+    fn writes_without_session(&self) -> bool {
+        !self.read_only && self.root_store().is_some() && self.external_read_store.is_none()
     }
 
     /// The built-in store of the graph `target` names and its storage key
@@ -268,8 +157,8 @@ impl GrafeoDB {
 
     /// The store the direct API reads the graph `target` names from: its own
     /// store for a named graph; for the default graph the store queries read,
-    /// which is the layered store after `compact()` and the external store of
-    /// a database built with `with_store` or `with_read_store`.
+    /// which is the external store of a database built with `with_store` or
+    /// `with_read_store`.
     ///
     /// # Errors
     ///
@@ -283,17 +172,14 @@ impl GrafeoDB {
 
     /// Runs one direct call on `target`: without a session while no
     /// transaction is open, otherwise as an implicit transaction of a session.
-    /// `touched` names what the call changed, for the WAL of a compacted
-    /// database (see [`Touched`]).
     fn write_direct<T>(
         &self,
         target: DirectTarget<'_>,
         batch: bool,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
-        touched: impl FnOnce(&T) -> Vec<Touched>,
     ) -> Result<T> {
         if let Some((store, graph)) = self.direct_store(target)?
-            && self.writes_without_session(graph.as_deref())
+            && self.writes_without_session()
             && let Some(_gate) = self.transaction_manager.idle_gate()
         {
             return self.write_outside_transaction(&store, graph.as_deref(), batch, write);
@@ -302,55 +188,7 @@ impl GrafeoDB {
             DirectTarget::Current => self.session(),
             DirectTarget::Named { schema, name } => self.graph_in(schema, name)?.session()?,
         };
-        let result = session.write(write)?;
-        #[cfg(all(feature = "wal", feature = "compact-store"))]
-        self.log_compacted_write(target, touched(&result));
-        #[cfg(not(all(feature = "wal", feature = "compact-store")))]
-        let _ = touched;
-        Ok(result)
-    }
-
-    /// Writes the WAL records of a direct call that a compacted database's
-    /// session made, from the state it left, as one group.
-    ///
-    /// Reading the state and writing the records happen under one lock, so
-    /// every call reads the state after all calls that logged before it: the
-    /// last group in the WAL holds the newest state, never an older one that
-    /// a call read before another call's commit and wrote after it.
-    #[cfg(all(feature = "wal", feature = "compact-store"))]
-    fn log_compacted_write(&self, target: DirectTarget<'_>, touched: Vec<Touched>) {
-        use grafeo_storage::wal::WalRecord;
-
-        let (Some(_), Some(wal)) = (&self.layered_store, &self.wal) else {
-            return;
-        };
-        let _logging = self.implicit_writes.compacted_log.lock();
-        let Ok(Some((graph_store, graph))) = self.direct_store(target) else {
-            return;
-        };
-        let store: Arc<dyn GraphStoreSearch> = match graph {
-            None => self.graph_store(),
-            Some(_) => graph_store,
-        };
-        let buffer = crate::transaction::wal_buffer::WalBuffer::new(Arc::clone(wal));
-        for change in touched {
-            for record in change.records(&*store) {
-                buffer.push(graph.clone(), record);
-            }
-        }
-        if buffer.len() == 0 {
-            return;
-        }
-        if let Err(e) = buffer.flush(&[
-            WalRecord::TransactionCommit {
-                transaction_id: grafeo_common::types::TransactionId::SYSTEM,
-            },
-            WalRecord::EpochAdvance {
-                epoch: self.transaction_manager.current_epoch(),
-            },
-        ]) {
-            grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
-        }
+        session.write(write)
     }
 
     /// Writes one direct call to `store` (the graph with storage key `graph`)
@@ -534,17 +372,15 @@ impl DirectCalls<'_> {
     fn write<T>(
         &self,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
-        touched: impl FnOnce(&T) -> Vec<Touched>,
     ) -> Result<T> {
-        self.db.write_direct(self.target, false, write, touched)
+        self.db.write_direct(self.target, false, write)
     }
 
     fn write_batch<T>(
         &self,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
-        touched: impl FnOnce(&T) -> Vec<Touched>,
     ) -> Result<T> {
-        self.db.write_direct(self.target, true, write, touched)
+        self.db.write_direct(self.target, true, write)
     }
 
     /// The store of the graph, for reads (see [`GrafeoDB::read_store`]).
@@ -559,10 +395,7 @@ impl DirectCalls<'_> {
     ) -> Result<NodeId> {
         let labels: Vec<String> = labels.iter().map(|label| (*label).to_string()).collect();
         let properties = direct_properties(properties);
-        self.write(
-            |writer| writer.create_node(&labels, properties),
-            |id| vec![Touched::NewNode(*id)],
-        )
+        self.write(|writer| writer.create_node(&labels, properties))
     }
 
     pub(crate) fn create_edge_with_props(
@@ -573,24 +406,15 @@ impl DirectCalls<'_> {
         properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
     ) -> Result<EdgeId> {
         let properties = direct_properties(properties);
-        self.write(
-            |writer| create_edge(writer, src, dst, edge_type, properties),
-            |id| vec![Touched::NewEdge(*id)],
-        )
+        self.write(|writer| create_edge(writer, src, dst, edge_type, properties))
     }
 
     pub(crate) fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
-        self.write(
-            |writer| set_node_property(writer, id, key, value),
-            |()| vec![Touched::NodeProperty(id, key.to_string())],
-        )
+        self.write(|writer| set_node_property(writer, id, key, value))
     }
 
     pub(crate) fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
-        self.write(
-            |writer| set_edge_property(writer, id, key, value),
-            |()| vec![Touched::EdgeProperty(id, key.to_string())],
-        )
+        self.write(|writer| set_edge_property(writer, id, key, value))
     }
 
     pub(crate) fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
@@ -604,49 +428,33 @@ impl DirectCalls<'_> {
                     Ok(false)
                 }
             },
-            |_| vec![Touched::NodeProperty(id, key.to_string())],
         )
     }
 
     pub(crate) fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
-        self.write(
-            |writer| {
-                if writer.has_edge(id) {
-                    writer.remove_edge_property(id, key)
-                } else {
-                    Ok(false)
-                }
-            },
-            |_| vec![Touched::EdgeProperty(id, key.to_string())],
-        )
+        self.write(|writer| {
+            if writer.has_edge(id) {
+                writer.remove_edge_property(id, key)
+            } else {
+                Ok(false)
+            }
+        })
     }
 
     pub(crate) fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.write(
-            |writer| add_node_label(writer, id, label),
-            |_| vec![Touched::NodeLabel(id, label.to_string())],
-        )
+        self.write(|writer| add_node_label(writer, id, label))
     }
 
     pub(crate) fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.write(
-            |writer| remove_node_label(writer, id, label),
-            |_| vec![Touched::NodeLabel(id, label.to_string())],
-        )
+        self.write(|writer| remove_node_label(writer, id, label))
     }
 
     pub(crate) fn delete_node(&self, id: NodeId) -> Result<bool> {
-        self.write(
-            |writer| writer.delete_node(id, false),
-            |deleted| deleted_or_nothing(*deleted, Touched::DeletedNode(id)),
-        )
+        self.write(|writer| writer.delete_node(id, false))
     }
 
     pub(crate) fn delete_edge(&self, id: EdgeId) -> Result<bool> {
-        self.write(
-            |writer| writer.delete_edge(id),
-            |deleted| deleted_or_nothing(*deleted, Touched::DeletedEdge(id)),
-        )
+        self.write(|writer| writer.delete_edge(id))
     }
 
     pub(crate) fn batch_create_nodes(
@@ -655,10 +463,7 @@ impl DirectCalls<'_> {
         property: &str,
         vectors: Vec<Vec<f32>>,
     ) -> Result<Vec<NodeId>> {
-        self.write_batch(
-            |writer| create_vector_nodes(writer, label, property, vectors),
-            |ids| ids.iter().map(|id| Touched::NewNode(*id)).collect(),
-        )
+        self.write_batch(|writer| create_vector_nodes(writer, label, property, vectors))
     }
 
     pub(crate) fn batch_create_nodes_with_labels(
@@ -666,17 +471,11 @@ impl DirectCalls<'_> {
         labels: &[&str],
         properties_list: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
-        self.write_batch(
-            |writer| create_nodes(writer, labels, properties_list),
-            |ids| ids.iter().map(|id| Touched::NewNode(*id)).collect(),
-        )
+        self.write_batch(|writer| create_nodes(writer, labels, properties_list))
     }
 
     pub(crate) fn batch_create_edges(&self, edges: Vec<BatchEdge>) -> Result<Vec<EdgeId>> {
-        self.write_batch(
-            |writer| create_edges(writer, edges),
-            |ids| ids.iter().map(|id| Touched::NewEdge(*id)).collect(),
-        )
+        self.write_batch(|writer| create_edges(writer, edges))
     }
 
     pub(crate) fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
@@ -688,11 +487,6 @@ impl DirectCalls<'_> {
         let epoch = self.db.read_epoch();
         Ok(self.store()?.get_edge_at_epoch(id, epoch))
     }
-}
-
-/// `deleted` as a change, if the call deleted anything.
-fn deleted_or_nothing(deleted: bool, change: Touched) -> Vec<Touched> {
-    if deleted { vec![change] } else { Vec::new() }
 }
 
 // === The writes of the direct API, shared with `Session` ===
@@ -861,15 +655,10 @@ mod tests {
     fn panicking_call(db: &GrafeoDB, batch: bool, label: &str) -> NodeId {
         let created = parking_lot::Mutex::new(None);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            db.write_direct(
-                DirectTarget::Current,
-                batch,
-                |writer| {
-                    *created.lock() = Some(writer.create_node(&[label.to_string()], Vec::new())?);
-                    panic!("the call fails halfway");
-                },
-                |(): &()| Vec::new(),
-            )
+            db.write_direct::<()>(DirectTarget::Current, batch, |writer| {
+                *created.lock() = Some(writer.create_node(&[label.to_string()], Vec::new())?);
+                panic!("the call fails halfway");
+            })
         }));
         assert!(outcome.is_err(), "the panic comes through");
         created.into_inner().unwrap()

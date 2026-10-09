@@ -260,7 +260,7 @@ fn recompact_merges_overlay() {
     db.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
 
     // Recompact: merge overlay into base.
-    db.recompact().unwrap();
+    db.compact().unwrap();
 
     // All data should be in the merged base now.
     let session = db.session();
@@ -292,7 +292,7 @@ fn named_graphs_survive_compact_and_recompact() {
     db.set_current_graph(Some("asia")).unwrap();
     db.set_current_graph(None).unwrap();
 
-    db.recompact().unwrap();
+    db.compact().unwrap();
 
     let mut names = db.list_graphs();
     names.sort();

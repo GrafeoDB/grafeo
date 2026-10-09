@@ -130,6 +130,24 @@ impl OverlayDeletionsSection {
         }
     }
 
+    /// Creates a section holding the deletes of `nodes` and `edges`, sorted
+    /// and deduplicated as [`Self::from_layered`] holds them: the deletion
+    /// log of a compacted database file, for a test of its load.
+    #[must_use]
+    pub fn from_ids(mut nodes: Vec<NodeId>, mut edges: Vec<EdgeId>) -> Self {
+        nodes.sort_unstable();
+        nodes.dedup();
+        edges.sort_unstable();
+        edges.dedup();
+        Self {
+            payload: RwLock::new(DeletionsPayload { nodes, edges }),
+            #[cfg(feature = "lpg")]
+            layered: None,
+            local_dirty: AtomicBool::new(false),
+            caps: ChunkCaps::current(),
+        }
+    }
+
     /// Creates an empty section, used by the load path before
     /// [`Self::deserialize`] populates it. Has no attached layered store;
     /// `is_dirty` is `false` until the caller hands the deserialized

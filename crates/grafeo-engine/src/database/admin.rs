@@ -401,8 +401,7 @@ impl super::GrafeoDB {
     #[must_use]
     pub fn validate(&self) -> crate::admin::ValidationResult {
         let mut result = crate::admin::ValidationResult::default();
-        // Nodes as queries see them, at the current epoch: after `compact()`
-        // an edge of the overlay can end at a node of the compacted base.
+        // Nodes as queries see them, at the current epoch.
         let epoch = self.read_epoch();
         let store = self.graph_store();
 
@@ -483,12 +482,24 @@ impl super::GrafeoDB {
     /// and the database-closed error after `close()` of a persistent database
     /// (its file is released: another handle may have written it since).
     pub fn wal_checkpoint(&self) -> Result<()> {
+        self.checkpoint_now().map(|_| ())
+    }
+
+    /// Writes a checkpoint of the database file, as
+    /// [`wal_checkpoint()`](Self::wal_checkpoint) does, and returns whether
+    /// it wrote one: not for a read-only database, nor for one without a
+    /// file.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`wal_checkpoint()`](Self::wal_checkpoint).
+    pub(super) fn checkpoint_now(&self) -> Result<bool> {
         // `close()` waits for the checkpoint, and none runs after it.
         let _open = self.hold_open()?;
         // Read-only databases have no WAL and the on-disk file is already a
         // valid snapshot: nothing to checkpoint.
         if self.read_only {
-            return Ok(());
+            return Ok(false);
         }
         // The store holds the stamped part of a commit that did not complete.
         self.transaction_manager.check_no_incomplete_commit()?;
@@ -497,10 +508,11 @@ impl super::GrafeoDB {
         // the WAL only once the file is durable (#417).
         #[cfg(feature = "grafeo-file")]
         if let Some(ref fm) = self.file_manager {
-            let _ = self.checkpoint_to_file(fm)?;
+            self.checkpoint_to_file(fm)?;
+            return Ok(true);
         }
 
-        Ok(())
+        Ok(false)
     }
 
     // =========================================================================

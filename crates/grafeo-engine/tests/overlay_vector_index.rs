@@ -1,14 +1,13 @@
-//! A vector index of a compacted database links the vectors written after
-//! `compact()` to the compacted ones.
+//! A vector index links the vectors written after `compact()` to those
+//! written before it.
 //!
-//! After `compact()` the vectors of the compacted nodes are in the columnar
-//! base and the overlay takes every write. A vector written then (a new node,
-//! or a new value of a compacted node) goes into the same HNSW graph as the
-//! compacted ones (an index built over them), linked to its nearest neighbors
-//! among both, so a search finds it beside them: through `vector_search` and
-//! through a query, which scans the index, after a merge of the overlay into
-//! the base, and after a close and reopen. A search without an index of its
-//! metric scans the compacted nodes and the later ones.
+//! A vector written after `compact()` (a new node, or a new value of a node
+//! written before it) goes into the same HNSW graph as the earlier ones (an
+//! index built over them), linked to its nearest neighbors among both, so a
+//! search finds it beside them: through `vector_search` and through a query,
+//! which scans the index, after `recompact()`, and after a close and reopen.
+//! A search without an index of its metric scans the earlier nodes and the
+//! later ones.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test overlay_vector_index
@@ -190,7 +189,7 @@ fn vectors_are_found_across_a_merge() {
     let mut db = compacted_people();
     let (mia, jules) = (LATER[0], LATER[1]);
     person(&db, mia.0, mia.1);
-    db.recompact().unwrap();
+    db.compact().unwrap();
     person(&db, jules.0, jules.1);
     assert_everyone_is_found(&db, "a vector before and one after recompact()");
 }
@@ -214,10 +213,6 @@ fn vectors_are_found_after_a_reopen() {
         db.close().unwrap();
     }
     let db = GrafeoDB::open(&path).unwrap();
-    assert!(
-        db.layered_store().is_some(),
-        "the file holds a compacted base"
-    );
     person(&db, jules.0, jules.1);
     assert_everyone_is_found(&db, "a vector before the close and one after the reopen");
     db.close().unwrap();

@@ -1,124 +1,32 @@
 ---
 title: Compact Store
-description: Convert a database to a layered columnar format for faster queries and lower memory usage; remains writable through an overlay.
+description: What compact() does since 0.6.0, and how databases compacted by 0.5.44 or older open.
 tags:
-  - performance
   - storage
   - compact-store
-  - wasm
 ---
 
 # Compact Store
 
-CompactStore is a columnar graph format that trades some write performance for large
-memory and query wins. After ingesting data, call `compact()` to switch the database
-to a columnar layout with CSR adjacency. From 0.5.39, `compact()` is **non-destructive
-and writable**: it produces a layered store with an immutable columnar base plus a
-mutable overlay (a database opened read-only stays read-only, see
-[Writes After `compact()`](#writes-after-compact)). Inserts and property updates after
-`compact()` land in the overlay; compacting again merges the overlay back into a fresh
-base (`recompact()` in Rust, `compact()` again in Python and Node.js).
-
-Queries keep working across all supported languages. The property, vector and text
-indexes made before `compact()` stay (with their configuration), new ones can be
-created after it, and they find the compacted nodes and those written later. Named
-graphs are preserved across `compact()` / `recompact()`.
-
-**When to use it:** workloads that ingest once and query many times, or read-heavy
-workloads with occasional updates. Code analysis tools, static knowledge graphs,
-pre-built datasets for WASM or edge deployments.
-
-## Performance
-
-Measured on the same data, CompactStore vs the standard mutable LpgStore:
-
-| Metric | LpgStore | CompactStore | Improvement |
-|--------|----------|--------------|-------------|
-| Memory per node (degree 5) | ~3,200 bytes | ~51 bytes | **63x** |
-| Edge traversal (10K lookups) | 619 us | 5.3 us | **116x** |
-| Property random access (10K) | 123 us | 10 us | **12x** |
-
-The gains come from eliminating MVCC version chains, read locks, hash lookups, and
-chunk decompression. CompactStore replaces those with array indexing and contiguous
-memory reads.
-
-## Quick Start
+Up to 0.5.44, `compact()` converted the default graph into a separate columnar store: a
+read-only base, with an overlay on top that took the writes made after it. Since 0.6.0 a
+database keeps one store. `compact()` writes a checkpoint of a persistent database (an
+in-memory or read-only one writes none), drops the old versions no open transaction can see
+any more, in every graph, and reports what it did: whether it wrote a checkpoint, how many
+versions it dropped, and how long it took. Writes after it are logged and recovered like
+any other, and transactions, indexes and named graphs work the same before and after it.
+`recompact()` (Rust) is a deprecated alias of `compact()`.
 
 === "Python"
 
     ```python
     import grafeo
 
-    db = grafeo.GrafeoDB()
-
-    # Ingest data (read-write phase)
+    db = grafeo.GrafeoDB("people.grafeo")
     db.execute("INSERT (:Person {name: 'Alix', age: 30})")
+    report = db.compact()
+    # {'checkpointed': True, 'versions_collected': 0, 'duration_ms': 4}
     db.execute("INSERT (:Person {name: 'Gus', age: 25})")
-    db.execute("INSERT (:City {name: 'Amsterdam'})")
-    db.execute("""
-        MATCH (p:Person {name: 'Alix'}), (c:City {name: 'Amsterdam'})
-        INSERT (p)-[:LIVES_IN]->(c)
-    """)
-
-    # Switch to compact mode (subsequent writes go to a mutable overlay)
-    db.compact()
-
-    # Queries work as before, but faster
-    result = db.execute("MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN p.name, c.name")
-    ```
-
-=== "Node.js"
-
-    ```typescript
-    import { GrafeoDB } from '@grafeo-db/node';
-
-    const db = GrafeoDB.create();
-
-    await db.execute("INSERT (:Person {name: 'Alix', age: 30})");
-    await db.execute("INSERT (:City {name: 'Amsterdam'})");
-    await db.execute(`
-        MATCH (p:Person {name: 'Alix'}), (c:City {name: 'Amsterdam'})
-        INSERT (p)-[:LIVES_IN]->(c)
-    `);
-
-    db.compact();
-
-    const result = await db.execute(
-        "MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN p.name, c.name"
-    );
-    ```
-
-=== "WASM"
-
-    ```javascript
-    import init, { Database } from '@grafeo-db/wasm';
-    await init();
-
-    const db = new Database();
-    db.execute("INSERT (:Person {name: 'Alix', age: 30})");
-    db.execute("INSERT (:City {name: 'Amsterdam'})");
-
-    db.compact();
-
-    const result = db.execute(
-        "MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN p.name, c.name"
-    );
-    ```
-
-=== "C"
-
-    ```c
-    #include "grafeo.h"
-
-    GrafeoDatabase *db = grafeo_open_memory();
-
-    grafeo_execute(db, "INSERT (:Person {name: 'Alix', age: 30})");
-    grafeo_execute(db, "INSERT (:City {name: 'Amsterdam'})");
-
-    grafeo_compact(db);
-
-    GrafeoResult *r = grafeo_execute(db,
-        "MATCH (p:Person) RETURN p.name");
     ```
 
 === "Rust"
@@ -126,97 +34,43 @@ memory reads.
     ```rust
     use grafeo::GrafeoDB;
 
-    let mut db = GrafeoDB::new_in_memory();
-
+    let mut db = GrafeoDB::open("people.grafeo")?;
     db.execute("INSERT (:Person {name: 'Alix', age: 30})")?;
-    db.execute("INSERT (:City {name: 'Amsterdam'})")?;
-
-    db.compact()?;
-
-    let result = db.execute(
-        "MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN p.name, c.name"
-    )?;
+    let report = db.compact()?;
+    assert!(report.checkpointed);
+    db.execute("INSERT (:Person {name: 'Gus', age: 25})")?;
     ```
 
-## How It Works
+## Databases Compacted by 0.5.44 or Older
 
-`compact()` performs four steps:
+A file written after `compact()` by 0.5.44 or older holds the compacted base, the nodes and
+edges deleted from it since, and the writes made since. Opening it folds the base into the
+database's store: every node and edge of the base comes back with its id, its labels and
+its properties, a change made after `compact()` wins over the base's version, and what was
+deleted stays deleted. A read-write open migrates the file, as it migrates every 0.5.x
+file (see [Persistent Mode](persistence/persistent.md)), so the migrated file holds one
+store; a read-only open folds the base in memory and leaves the file as it is.
 
-1. **Scans** all nodes from the current store, grouped by label
-2. **Infers** column types from property values and builds per-label columnar tables
-3. **Builds** forward and backward CSR adjacency for each edge type
-4. **Swaps** the database to a layered store: the new columnar tables become the
-   immutable base and a mutable overlay is attached on top to absorb subsequent
-   writes. Compacting again later folds the overlay back into a fresh base.
+What those versions stored differently stays as they stored it:
 
-The result is a `CompactStore` backed by:
-
-- **Per-label columnar tables** with typed codecs (bit-packed integers, dictionary-encoded
-  strings, boolean bitmaps)
-- **Double-indexed CSR** (Compressed Sparse Row) for O(degree) forward and backward traversal
-- **Zone maps** (min/max statistics per column) for predicate pushdown
-
-## Type Mapping
-
-Property values are automatically mapped to the most efficient columnar codec:
-
-| Value type | Codec | Notes |
-|------------|-------|-------|
-| `Int64` (non-negative) | BitPacked | Auto-determined bit width |
-| `Bool` | Bitmap | 1 bit per value |
-| `String` | Dictionary | Deduplicated string table |
-| `Float64` | Float64 (native) | 8 bytes per value, since 0.5.40 |
-| `Vector` (f32) | Float32Vector (native) | Contiguous float32 storage, since 0.5.40 |
-| Mixed `Int64 + Float64` | Float64 (native) | Columns coalesce to `Float64` when both types appear |
-| Negative `Int64` | Dictionary | Serialized as string |
-| `List`, `Map`, `Timestamp`, etc. | Dictionary | Serialized as string |
-
-!!! note
-    Before 0.5.40, `Float64` and `Vector` columns fell back to dictionary encoding,
-    which preserved data but lost typed semantics for range scans. Native codecs
-    now retain those semantics without a dictionary round-trip. Dictionary fallback
-    still applies to negative integers and complex values (`List`, `Map`, etc.).
-
-## Writes After `compact()`
-
-Since 0.5.39, `compact()` returns a layered store: an immutable columnar base plus a
-mutable overlay. New inserts and property updates land in the overlay and are visible
-to subsequent queries (`get_node`, property reads, pattern matching, `list_graphs`).
-
-A database opened read-only (`open_read_only()` in Python and Rust, `openReadOnly()` in
-Node.js, `grafeo_open_read_only()` in C) stays read-only: `compact()` speeds up its
-reads, and writes still fail.
-
-Compact again to merge the overlay back into a fresh base (`recompact()` in Rust):
-
-    db.compact()
-    db.execute("INSERT (:Person {name: 'Mia'})")   # lands in overlay
-    db.compact()                                    # merges overlay into new base
-
-Indexes (`create_vector_index`, `create_text_index`, hybrid search) work on layered
-stores: vector/text scan and search now fall through both layers.
-
-## Limitations
-
-- `compact()` and `recompact()` fail while a transaction is open: commit or roll it back first.
-- **Overlay write path**: writes go through the overlay, which is less optimized than
-  `LpgStore`'s full MVCC path. Sustained write-heavy workloads should stay on `LpgStore`
-  or compact again periodically.
-- **Multi-label nodes in databases compacted by 0.5.44 or older**: those versions stored
-  the labels of a node with several as one name (`"Actor|Person"`). Since 0.6.0 each label
-  reads such a node again (`MATCH (n:Person)` and `MATCH (n:Actor)` both find it), but a
-  single label that holds a `|` reads as two labels in those files.
-- **Persistence needs the feature**: a persistent database writes its compacted base to its
-  file, and `save()` copies it, so only a build with the `compact-store` feature opens such a
-  file (see [Feature Flag](#feature-flag)).
-- **Databases compacted by 0.5.44 or older**: those versions stored a property that a node or
-  edge lacked as the column's empty value (`''`, `0`, `0.0` or `false`), and such files keep those
-  values. Since 0.6.0 a missing property stays missing after `compact()`
+- **Multi-label nodes**: the labels of a node with several were stored as one name
+  (`"Actor|Person"`). Each label reads such a node (`MATCH (n:Person)` and
+  `MATCH (n:Actor)` both find it), but a single label that holds a `|` reads as two labels.
+  A write after `compact()` that matched such a node by one of its labels found nothing
+  then, so it is not in the file.
+- **Missing properties**: a property that a node or edge lacked was stored as the
+  column's empty value (`''`, `0`, `0.0` or `false`)
   ([#542](https://github.com/GrafeoDB/grafeo/issues/542)).
+- **Lists, maps, dates, times and durations** were stored as their text: they read as
+  strings, such as `'["amsterdam", "jazz"]'` or `'1994-03-19'`.
+- **Vector and text indexes** were dropped by `compact()`: create them again
+  (`SHOW INDEXES` may still list the name of a text index).
 
 ## Feature Flag
 
-CompactStore requires the `compact-store` feature flag. It is **not** included in the engine-level named profiles (`embedded`, `browser`, `server`, `full`), but it is included in the binding-level defaults:
+Reading a compacted base needs the `compact-store` feature. It is **not** included in the
+engine-level named profiles (`embedded`, `browser`, `server`, `full`), but it is included
+in the binding-level defaults:
 
 | Binding | Profile | Includes `compact-store` |
 |---------|---------|--------------------------|
@@ -227,4 +81,10 @@ CompactStore requires the `compact-store` feature flag. It is **not** included i
 
 For custom Rust builds: `cargo build --features compact-store`.
 
-A persistent database keeps its compacted base in its file. A build without the feature cannot read that base, so it refuses such a file: a read-write open, a read-only open and `open_in_memory()` fail with an error that names the `compact-store` feature, and nothing on disk changes. This includes a 0.5.x file compacted by 0.5.44 or older, which such a build neither reads nor migrates. The `grafeo` Rust crate (unless you add the `compact-store` feature) and the `grafeo` command line tool are such builds: open these files with the Python, Node.js or C bindings, or with a Rust build that has the feature. Before 0.6.0 such a build opened the file without its compacted base, and its next checkpoint lost the base for good.
+A build without the feature cannot read the base, so it refuses a compacted file: a
+read-write open, a read-only open and `open_in_memory()` fail with an error that names the
+`compact-store` feature, and nothing on disk changes. The `grafeo` Rust crate (unless you
+add the `compact-store` feature) and the `grafeo` command line tool are such builds: open
+these files with the Python, Node.js or C bindings, or with a Rust build that has the
+feature. Before 0.6.0 such a build opened the file without its compacted base, and its
+next checkpoint lost the base for good.

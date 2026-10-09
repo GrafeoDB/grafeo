@@ -788,15 +788,15 @@ mod tests {
         let start = usize::try_from(foreign.offset).unwrap();
         let stored = &bytes[start..start + usize::try_from(foreign.length).unwrap()];
         assert_eq!(
-            alix.decrypt(stored, &chunk_aad_parts(2, 250, 0, 0, 0))
+            alix.decrypt(stored, &chunk_aad_parts(2, 250, 0, 0, 0, 0))
                 .unwrap(),
             b"Vincent"
         );
     }
 
-    /// The writer binds a chunk to its section type, kind, graph, column and
-    /// first row in exactly the bytes every encrypted image written so far
-    /// uses: the stored chunk decrypts with the literal associated data.
+    /// The writer binds a chunk to its section type, kind, namespace, graph,
+    /// column and first row in exactly the bytes every encrypted image uses:
+    /// the stored chunk decrypts with the literal associated data.
     #[cfg(feature = "encryption")]
     #[test]
     fn the_writer_encrypts_a_chunk_with_the_associated_data_of_its_place() {
@@ -824,9 +824,9 @@ mod tests {
         let start = usize::try_from(entry.offset).unwrap();
         let stored = &bytes[start..start + usize::try_from(entry.length).unwrap()];
         assert_eq!(
-            alix.decrypt(stored, b"grafeo-chunk:2:2:3:19:88").unwrap(),
+            alix.decrypt(stored, b"grafeo-chunk:2:2:0:3:19:88").unwrap(),
             b"Prague",
-            "section type 2, kind 2 (column), graph 3, column 19, first row 88"
+            "section type 2, kind 2 (column), namespace 0, graph 3, column 19, first row 88"
         );
     }
 

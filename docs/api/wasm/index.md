@@ -144,13 +144,11 @@ Objects can be a plain string (treated as IRI), or a structured literal with `va
 
 ## Compact Store
 
-Convert to a layered columnar store for faster queries. See the [CompactStore guide](../../user-guide/compact-store.md).
+`compact()` drops the old versions no open transaction can see any more and returns what it did: `{ checkpointed, versions_collected, duration_ms }` (a database in memory, as every WASM database is, writes no checkpoint). Since 0.6.0 it no longer builds a separate columnar store. See the [Compact Store guide](../../user-guide/compact-store.md).
 
 ```javascript
-db.compact();  // switches to a columnar base with a mutable overlay
+const report = db.compact();
 ```
-
-After this call, queries run with ~60x lower memory and 100x+ faster traversal, and writes land in the overlay. Particularly useful for WASM deployments where memory is constrained.
 
 ## Snapshots (Persistence)
 

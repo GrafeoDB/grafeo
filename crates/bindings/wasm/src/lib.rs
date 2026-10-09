@@ -1165,23 +1165,21 @@ impl Database {
         serde_wasm_bindgen::to_value(&info).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Converts the default graph to a columnar CompactStore for faster queries.
-    ///
-    /// Builds a columnar store with CSR adjacency from all nodes and edges,
-    /// giving up to ~60x memory reduction and 100x+ traversal speedup. The
-    /// database stays writable: later writes go to an overlay on top of the
-    /// columnar base, which is merged into the base under memory pressure or
-    /// by calling `compact()` again. Named graphs and indexes stay.
+    /// Compacts the database: drops the old versions no open transaction can
+    /// see any more (a database in memory, as every WASM database is, writes
+    /// no checkpoint), and returns what it did:
+    /// `{checkpointed, versions_collected, duration_ms}`. `compact()` no
+    /// longer builds a separate columnar store.
     ///
     /// # Errors
     ///
-    /// Returns `JsError` while a transaction is open (commit or roll it back
-    /// first), or if the conversion fails.
-    #[cfg(feature = "compact-store")]
-    pub fn compact(&mut self) -> Result<(), JsError> {
-        self.inner
+    /// Returns `JsError` after a commit that did not complete.
+    pub fn compact(&mut self) -> Result<JsValue, JsError> {
+        let report = self
+            .inner
             .compact()
-            .map_err(|e| JsError::new(&e.to_string()))
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        serde_wasm_bindgen::to_value(&report).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Bulk-imports rows (array of objects) as nodes or edges.

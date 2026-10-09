@@ -44,7 +44,7 @@ pub mod transaction;
 pub mod validation;
 
 pub use admin::{
-    AdminService, CompactionStats, DatabaseInfo, DatabaseMode, DatabaseStats, DumpFormat,
+    AdminService, CompactReport, DatabaseInfo, DatabaseMode, DatabaseStats, DumpFormat,
     DumpMetadata, IndexInfo, LpgSchemaInfo, RdfSchemaInfo, SchemaInfo, ValidationError,
     ValidationResult, ValidationWarning, WalStatus,
 };

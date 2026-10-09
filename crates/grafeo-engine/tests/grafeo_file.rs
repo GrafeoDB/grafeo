@@ -1596,20 +1596,17 @@ fn save_to_a_path_with_a_trailing_separator_writes_the_file_it_names() {
 }
 
 // =========================================================================
-// Layered overlay deletion durability (#323 follow-up)
+// Deletes after compact() are durable (#323 follow-up)
 // =========================================================================
 
-/// Regression test: when a database has been compacted (so deletes go
-/// through the LayeredStore's `deleted_from_base_*` sets rather than
-/// directly modifying an LpgStore), those deletions must survive a
-/// close/reopen cycle. Before the OverlayDeletions section landed, the
-/// deletion sets were in-memory only and previously-deleted base nodes
-/// silently reappeared on reopen.
+/// Regression test: deletes of nodes written before `compact()` survive a
+/// close and reopen. A compacted store once kept them in memory only, and
+/// the deleted nodes reappeared on reopen.
 #[cfg(all(feature = "compact-store", feature = "lpg"))]
 #[test]
 fn deleted_base_nodes_stay_deleted_across_reopen() {
     let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("layered_delete_persist.grafeo");
+    let path = dir.path().join("compact_delete_persist.grafeo");
 
     {
         let mut db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
@@ -1623,11 +1620,6 @@ fn deleted_base_nodes_stay_deleted_across_reopen() {
         // the write lock on the store.
         drop(session);
 
-        // Compact: pushes the three nodes into the columnar base and
-        // installs a LayeredStore. Subsequent deletes go through
-        // `LayeredStore::delete_node` and write to
-        // `deleted_from_base_nodes`, which is exactly the path we need
-        // to durably persist.
         db.compact().expect("compact should succeed");
 
         let session = db.session();
@@ -1662,12 +1654,12 @@ fn deleted_base_nodes_stay_deleted_across_reopen() {
     db.close().unwrap();
 }
 
-/// Companion test for edge deletion through the LayeredStore.
+/// Companion test for edge deletion after `compact()`.
 #[cfg(all(feature = "compact-store", feature = "lpg"))]
 #[test]
 fn deleted_base_edges_stay_deleted_across_reopen() {
     let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("layered_edge_delete_persist.grafeo");
+    let path = dir.path().join("compact_edge_delete_persist.grafeo");
 
     {
         let mut db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();

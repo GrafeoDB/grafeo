@@ -46,7 +46,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use grafeo_common::storage::section::SectionSource;
-use grafeo_common::storage::{ChunkCaps, ChunkKind, ChunkMeta, SectionSink};
+use grafeo_common::storage::{ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, SectionSink};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, Result};
 
@@ -161,6 +161,7 @@ fn write_triple_table(
                 .iter()
                 .map(|&(column_id, _)| ChunkColumn {
                     kind: ChunkKind::Column,
+                    namespace: ChunkNamespace::Section,
                     column_id,
                 })
                 .collect();

@@ -2572,21 +2572,17 @@ impl PyGrafeoDB {
         self.inner.read().clear_plan_cache();
     }
 
-    /// Converts the default graph to a columnar CompactStore for faster queries.
+    /// Compacts the database: writes a checkpoint of a persistent database
+    /// and drops the old versions no open transaction can see any more. The
+    /// database keeps one store (``compact()`` no longer builds a separate
+    /// columnar one), and every write after it is logged as before.
     ///
-    /// Builds a columnar store with CSR adjacency from all nodes and edges and
-    /// drops the original store to free memory, giving up to ~60x memory
-    /// reduction and 100x+ traversal speedup. The database stays writable
-    /// unless opened read-only (``open_read_only()``, where writes still
-    /// fail): later writes go to an overlay on top of the columnar base,
-    /// which is merged into the base under memory pressure or by calling
-    /// ``compact()`` again (``recompact()`` in Rust). Named graphs and the
-    /// property, text and vector indexes stay. Compaction keeps no version
-    /// history, so point-in-time reads see the compacted data at every epoch.
+    /// Returns:
+    ///     dict: What it did: ``checkpointed`` (bool), ``versions_collected``
+    ///     (int) and ``duration_ms`` (int).
     ///
     /// Raises:
-    ///     GrafeoError: While a transaction is open (commit or roll it back
-    ///         first), or if the conversion fails.
+    ///     GrafeoError: If the checkpoint fails, or after ``close()``.
     ///
     /// Example:
     ///     db = GrafeoDB()
@@ -2594,11 +2590,16 @@ impl PyGrafeoDB {
     ///     db.compact()
     ///     db.execute("INSERT (:Person {name: 'Gus', age: 25})")
     ///     result = db.execute("MATCH (p:Person) RETURN p.name")
-    #[cfg(feature = "compact-store")]
-    fn compact(&self) -> PyResult<()> {
-        let mut db = self.inner.write();
-        db.compact().map_err(PyGrafeoError::from)?;
-        Ok(())
+    fn compact(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let report = {
+            let mut db = self.inner.write();
+            db.compact().map_err(PyGrafeoError::from)?
+        };
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("checkpointed", report.checkpointed)?;
+        dict.set_item("versions_collected", report.versions_collected)?;
+        dict.set_item("duration_ms", report.duration_ms)?;
+        Ok(dict.into())
     }
 
     /// Close the database.

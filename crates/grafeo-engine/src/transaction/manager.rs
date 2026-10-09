@@ -266,16 +266,15 @@ pub struct TransactionManager {
     /// Lock order: a checkpoint takes the file's checkpoint guard before this
     /// lock, and the idle gate comes before it too; the write freeze comes
     /// after it. Nothing that holds it waits for the checkpoint timer thread
-    /// (`close()` and `compact()` stop the timer before they take it).
+    /// (`close()` stops the timer before it takes it).
     commit_lock: Mutex<()>,
     /// The write freeze: held shared by every store change of an open
     /// transaction while it runs (a write, see
     /// [`write_in_progress`](Self::write_in_progress), and the undo of a
     /// rollback or a rollback to a savepoint), and exclusively by a
     /// checkpoint or a copy of the store while it builds its image (see
-    /// [`hold_commits`](Self::hold_commits)) and by a merge of a compacted
-    /// store's overlay (see [`try_hold_commits`](Self::try_hold_commits)):
-    /// they read a store and change logs that do not move. Changes outside
+    /// [`hold_commits`](Self::hold_commits)): they read a store and change
+    /// logs that do not move. Changes outside
     /// any commit ([`hold_commits_for_change`](Self::hold_commits_for_change))
     /// do not take it: they hold the commit lock, which already keeps every
     /// checkpoint out.
@@ -821,30 +820,6 @@ impl TransactionManager {
             _writes: None,
             _commit: commit,
         })
-    }
-
-    /// [`hold_commits`](Self::hold_commits) without waiting: `None` while a
-    /// commit (or anything else holding commits off) is in progress, or a
-    /// store change of an open transaction, also one on the calling thread
-    /// (a write that asks for memory, which merges a compacted store's
-    /// overlay, never waits for itself).
-    ///
-    /// # Errors
-    ///
-    /// As [`hold_commits`](Self::hold_commits), when the commit lock is free.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    pub(crate) fn try_hold_commits(&self) -> Result<Option<CommitsHeld<'_>>> {
-        let Some(commit) = self.commit_lock.try_lock() else {
-            return Ok(None);
-        };
-        self.check_no_incomplete_commit()?;
-        let Some(writes) = self.write_freeze.try_write() else {
-            return Ok(None);
-        };
-        Ok(Some(CommitsHeld {
-            _writes: Some(writes),
-            _commit: commit,
-        }))
     }
 
     /// Marks a store change of an open transaction as in progress, for as
@@ -2052,41 +2027,6 @@ mod tests {
             assert!(finished, "a write does not wait for the change");
             write.join().unwrap();
             drop(held);
-        });
-    }
-
-    /// The merge of a compacted store's overlay holds commits off and
-    /// freezes the store without waiting: while a write is in progress, also
-    /// one on the calling thread (a write that asks for memory), it gets
-    /// `None` at once and leaves the commit lock free; otherwise it holds
-    /// both, and a write waits for it.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    #[test]
-    fn the_merge_hold_never_waits_for_a_write_in_progress() {
-        let mgr = TransactionManager::new();
-        let writing = mgr.write_in_progress();
-        assert!(
-            mgr.try_hold_commits().unwrap().is_none(),
-            "no merge while a write is in progress on this thread"
-        );
-        assert!(
-            mgr.commit_lock.try_lock().is_some(),
-            "the commit lock is free again"
-        );
-        drop(writing);
-
-        let manager = &mgr;
-        std::thread::scope(|scope| {
-            let held = mgr
-                .try_hold_commits()
-                .unwrap()
-                .expect("the merge holds commits off when nothing is in progress");
-            let (finished, write) = spawn_and_wait(scope, BRIEFLY, move || {
-                drop(manager.write_in_progress());
-            });
-            assert!(!finished, "a write waits for the merge");
-            drop(held);
-            write.join().unwrap();
         });
     }
 

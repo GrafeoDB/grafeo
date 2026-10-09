@@ -975,24 +975,22 @@ impl JsGrafeoDB {
 }
 
 // Compact-store methods live in a separate impl block for the same reason.
-#[cfg(feature = "compact-store")]
 #[napi]
 impl JsGrafeoDB {
-    /// Converts the default graph to a columnar CompactStore for faster queries.
-    ///
-    /// Builds a columnar store with CSR adjacency from all nodes and edges and
-    /// drops the original store to free memory. The database stays writable
-    /// unless opened read-only (`openReadOnly()`, where writes still throw):
-    /// later writes go to an overlay on top of the columnar base, which is
-    /// merged into the base under memory pressure or by calling `compact()`
-    /// again. Named graphs and the property, text and vector indexes stay.
-    /// Throws while a transaction is open (commit or roll it back first).
+    /// Compacts the database: writes a checkpoint of a persistent database
+    /// and drops the old versions no open transaction can see any more.
+    /// Returns what it did: `{checkpointed, versions_collected, duration_ms}`.
+    /// The database keeps one store (`compact()` no longer builds a separate
+    /// columnar one), and every write after it is logged as before. Throws if
+    /// the checkpoint fails, or after `close()`.
     #[napi]
-    pub fn compact(&self) -> Result<()> {
+    pub fn compact(&self) -> Result<serde_json::Value> {
         let mut db = self.inner.write();
-        db.compact()
+        let report = db
+            .compact()
             .map_err(NodeGrafeoError::from)
-            .map_err(napi::Error::from)
+            .map_err(napi::Error::from)?;
+        serde_json::to_value(&report).map_err(|e| NodeGrafeoError::Database(e.to_string()).into())
     }
 }
 

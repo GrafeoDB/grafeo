@@ -711,10 +711,16 @@ fn an_encrypted_database_has_no_spill_path() {
     );
 }
 
-/// Under memory pressure an unencrypted database moves its compacted base to
-/// a spill file next to it; an encrypted one keeps it in memory and writes
-/// nothing next to its file but the file and its sidecar WAL.
-#[cfg(all(feature = "compact-store", feature = "spill", feature = "mmap"))]
+/// Under memory pressure an unencrypted database moves the vectors of its
+/// vector index to a spill file next to it; an encrypted one keeps them in
+/// memory and writes nothing next to its file but the file and its sidecar
+/// WAL. (The vectors spill only without `temporal`.)
+#[cfg(all(
+    feature = "vector-index",
+    feature = "spill",
+    feature = "mmap",
+    not(feature = "temporal")
+))]
 #[test]
 fn an_encrypted_database_spills_nothing_to_disk() {
     let dir = tempfile::tempdir().unwrap();
@@ -724,14 +730,19 @@ fn an_encrypted_database_spills_nothing_to_disk() {
             Some(seed) => encrypted(&path, &key_chain(seed)),
             None => Config::persistent(&path),
         };
-        let mut db = GrafeoDB::with_config(config).unwrap();
-        for name in ["Alix", "Gus", "Vincent", "Mia", "Jules"] {
+        let db = GrafeoDB::with_config(config).unwrap();
+        for (seed, name) in ["Alix", "Gus", "Vincent", "Mia", "Jules"]
+            .into_iter()
+            .enumerate()
+        {
             db.execute(&format!(
-                "INSERT (:Person {{name: '{name}', note: '{MARKER}'}})"
+                "INSERT (:Person {{name: '{name}', note: '{MARKER}', \
+                 embedding: vector([{seed}.0, 19.0, 88.0])}})"
             ))
             .unwrap();
         }
-        db.compact().unwrap();
+        db.create_vector_index("Person", "embedding", None, None, None, None, None)
+            .unwrap();
         db.buffer_manager().spill_all();
         let found: Vec<PathBuf> = files_under(root)
             .into_iter()

@@ -13,8 +13,10 @@
 //! file compacted by 0.5.44 or older is refused the same way: it is neither
 //! read nor migrated.
 //!
-//! The tests with `compact-store` check that the fixture is the compacted
-//! database the README describes, and write it again on request.
+//! A build with `compact-store` folds the base into the store as it opens
+//! the file: the database then holds one store, its writes go to the WAL as
+//! any database's do, and its next checkpoint writes the file without the
+//! base and the deletion log.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file \
@@ -29,6 +31,9 @@
 #[cfg(not(feature = "compact-store"))]
 #[path = "common/legacy_file.rs"]
 mod legacy_file;
+#[cfg(all(feature = "compact-store", feature = "wal"))]
+#[path = "common/replay.rs"]
+mod replay;
 
 use std::path::{Path, PathBuf};
 
@@ -36,15 +41,21 @@ use grafeo_common::storage::section::SectionType;
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB};
 
-/// The fixture, written by a build with `compact-store` (see its README).
+/// The fixture, written by a 0.6 development build with `compact-store`
+/// (see its README).
 const FIXTURE: &str = "tests/fixtures/compacted/0.6.0-dev/people.grafeo";
 
 /// A copy of the fixture, and the path of the copy.
 fn fixture() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("people.grafeo");
-    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE), &path).unwrap();
+    copy_fixture(&path);
     (dir, path)
+}
+
+/// Copies the fixture to `path`.
+fn copy_fixture(path: &Path) {
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE), path).unwrap();
 }
 
 /// The people and the city of each, sorted by name.
@@ -111,40 +122,14 @@ fn section_types(sections: &[(SectionType, Vec<bytes::Bytes>)]) -> Vec<SectionTy
         .collect()
 }
 
-/// Writes the fixture's database at `path`, as its README describes.
-#[cfg(feature = "compact-store")]
-fn write_compacted(path: &Path) {
-    let mut db = GrafeoDB::with_config(Config::persistent(path)).unwrap();
-    db.execute(
-        "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})\
-         -[:KNOWS]->(:Person {name: 'Vincent'})",
-    )
-    .unwrap();
-    db.compact().unwrap();
-    db.execute("MATCH (g:Person {name: 'Gus'}) DETACH DELETE g")
-        .unwrap();
-    db.execute("MATCH (a:Person {name: 'Alix'}) SET a.city = 'Paris'")
-        .unwrap();
-    db.execute("INSERT (:Person {name: 'Mia'})").unwrap();
-    db.close().unwrap();
-}
-
-/// Writes the fixture again at the path `GRAFEO_WRITE_COMPACTED_FIXTURE`
-/// names; a no-op without it.
+/// A build with `compact-store` folds the fixture's base into the store as
+/// it opens the file: Vincent, whom only the base holds, is there with Alix
+/// (the overlay's copy, in Paris) and Mia, and Gus and his edges stay
+/// deleted. The checkpoint of `close()` writes the database without the base
+/// and the deletion log, and it reopens the same.
 #[cfg(feature = "compact-store")]
 #[test]
-fn write_the_fixture() {
-    if let Some(path) = std::env::var_os("GRAFEO_WRITE_COMPACTED_FIXTURE") {
-        write_compacted(Path::new(&path));
-    }
-}
-
-/// The fixture is the compacted database its README describes: a build with
-/// `compact-store` reads its base, its deletion log and its overlay. A
-/// change of the file format shows up here first: write the fixture again.
-#[cfg(feature = "compact-store")]
-#[test]
-fn the_fixture_is_a_compacted_database() {
+fn a_build_with_compact_store_folds_a_compacted_file() {
     let (_dir, path) = fixture();
     assert_eq!(
         section_types(&compacted_sections(&path)),
@@ -152,20 +137,65 @@ fn the_fixture_is_a_compacted_database() {
         "the file holds the base and the deletion log"
     );
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-    assert!(
-        db.layered_store().is_some(),
-        "opened as a compacted database"
-    );
     assert_eq!(people(&db), everyone());
     assert_eq!(knows(&db), 0, "Gus's edges are deleted");
     db.close().unwrap();
 
-    // The same steps write the same database.
-    let dir = tempfile::tempdir().unwrap();
-    let written = dir.path().join("people.grafeo");
-    write_compacted(&written);
-    let db = GrafeoDB::with_config(Config::persistent(&written)).unwrap();
+    assert_eq!(
+        section_types(&compacted_sections(&path)),
+        [],
+        "the checkpoint writes no compacted sections"
+    );
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    assert_eq!(people(&db), everyone(), "after a reopen");
+    assert_eq!(knows(&db), 0);
+    db.close().unwrap();
+}
+
+/// A read-only open folds the base in memory and leaves the file as it is.
+#[cfg(feature = "compact-store")]
+#[test]
+fn a_read_only_open_folds_a_compacted_file_in_memory() {
+    let (_dir, path) = fixture();
+    let before = std::fs::read(&path).unwrap();
+    let db = GrafeoDB::open_read_only(&path).unwrap();
     assert_eq!(people(&db), everyone());
+    db.close().unwrap();
+    assert!(
+        std::fs::read(&path).unwrap() == before,
+        "the file is unchanged"
+    );
+}
+
+/// Writes after the open of a compacted file go to its WAL: a crash before
+/// the first checkpoint leaves the file with its base, and the reopen folds
+/// it again and replays the writes on top, the delete of Vincent, whom only
+/// the base held, included.
+#[cfg(all(feature = "compact-store", feature = "wal"))]
+#[test]
+fn writes_after_a_fold_replay_after_a_crash() {
+    let open = |path: &Path| {
+        if !path.exists() {
+            copy_fixture(path);
+        }
+        GrafeoDB::with_config(Config::persistent(path)).unwrap()
+    };
+    let (_dir, db) =
+        replay::reopened_after_crash("writes_after_a_fold_replay_after_a_crash", open, |db| {
+            db.execute("MATCH (v:Person {name: 'Vincent'}) DELETE v")
+                .unwrap();
+            db.execute("MATCH (a:Person {name: 'Alix'}) SET a.city = 'Prague'")
+                .unwrap();
+            db.execute("INSERT (:Person {name: 'Jules'})").unwrap();
+        });
+    assert_eq!(
+        people(&db),
+        [
+            ("Alix".to_string(), Some("Prague".to_string())),
+            ("Jules".to_string(), None),
+            ("Mia".to_string(), None),
+        ]
+    );
     db.close().unwrap();
 }
 

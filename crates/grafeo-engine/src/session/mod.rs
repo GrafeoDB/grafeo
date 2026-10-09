@@ -43,14 +43,6 @@ use crate::transaction::TransactionManager;
 /// Auto-created by `CREATE SCHEMA` and auto-dropped by `DROP SCHEMA`.
 const SCHEMA_DEFAULT_GRAPH: &str = "__default__";
 
-/// The layered store a compacted database's sessions read and write the
-/// default graph through, shared by the database and all its sessions:
-/// `compact()` fills it, so a session opened before it follows too (see
-/// [`Session::layered`]).
-#[cfg(all(feature = "compact-store", feature = "lpg"))]
-pub(crate) type LayersSlot =
-    Arc<parking_lot::RwLock<Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>>>>;
-
 /// The database's named graph projections, shared by its sessions.
 #[cfg(feature = "lpg")]
 pub(crate) type ProjectionRegistry = Arc<
@@ -211,17 +203,9 @@ pub(crate) struct SessionConfig {
 /// sessions without them interfering.
 pub struct Session {
     /// The underlying store. Read it through
-    /// [`root_store`](Self::root_store): after `compact()` the store is the
-    /// layered store's overlay, which a merge replaces, and this is an empty
-    /// placeholder (or, for a session opened before `compact()`, the store
-    /// the database had then, which it no longer reads).
+    /// [`root_store`](Self::root_store).
     #[cfg(feature = "lpg")]
     store: Arc<LpgStore>,
-    /// The database's layered store once it is compacted, whose overlay is
-    /// then this session's store and which it reads and writes the default
-    /// graph through (see [`layered`](Self::layered)).
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    layers: Option<LayersSlot>,
     /// Classifies the role of `store` for the active backend.
     /// Search procedures (CALL grafeo.search.*) only reach into `store` when
     /// this is `Active`. External-store sessions keep `store` as a placeholder
@@ -329,7 +313,7 @@ pub struct Session {
 #[derive(Clone, Copy)]
 enum LpgBackend {
     /// The internal `LpgStore` is the session's active backing store (possibly
-    /// wrapped by WAL/CDC/Layered decorators on the read/write path). Search
+    /// wrapped by WAL/CDC decorators on the read/write path). Search
     /// procedures can reach its HNSW/BM25 indexes.
     Active,
     /// The internal `LpgStore` is an empty placeholder because the session is
@@ -374,8 +358,6 @@ impl Session {
         let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         Self {
             store,
-            #[cfg(feature = "compact-store")]
-            layers: None,
             lpg_backend: LpgBackend::Active,
             graph_store,
             graph_store_mut,
@@ -426,53 +408,16 @@ impl Session {
         }
     }
 
-    /// Routes the session through the database's layered store once the
-    /// database is compacted (`slot` holds it, or will once `compact()`
-    /// runs): queries read and write it (base and overlay), and the
-    /// session's own store (named graphs, the MVCC steps of its
-    /// transactions) is its overlay, asked for each time (see
-    /// [`root_store`](Self::root_store)).
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    pub(crate) fn follow_layers(&mut self, slot: LayersSlot) {
-        self.layers = Some(slot);
-    }
-
-    /// The database's layered store, once it is compacted. A session opened
-    /// before `compact()` goes on with it from the next statement on: a
-    /// transaction cannot be open across `compact()`, which refuses to run
-    /// then, so the switch falls between transactions; a statement that
-    /// resolved its store before `compact()` and began its transaction after
-    /// it plans against the layered store (see
-    /// `create_planner_for_store_with_read_only`).
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    fn layered(&self) -> Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>> {
-        self.layers.as_ref().and_then(|slot| slot.read().clone())
-    }
-
     /// The session's own `LpgStore`: the default graph's store, which holds
     /// the named graphs and on which its transactions commit and roll back.
-    /// After `compact()` it is the layered store's overlay as it is now: a
-    /// merge under memory pressure replaces the overlay (while no
-    /// transaction is open), and the session goes on with the new one.
     #[cfg(feature = "lpg")]
     fn root_store(&self) -> Arc<LpgStore> {
-        #[cfg(feature = "compact-store")]
-        if let Some(layered) = self.layered() {
-            return layered.overlay_store();
-        }
         Arc::clone(&self.store)
     }
 
-    /// The session's WAL buffer, if it logs its writes: not once the
-    /// database is compacted, whose sessions write the layered store, which
-    /// the WAL wrapper cannot record (#448), so a session opened before
-    /// `compact()` stops logging as it switches to the layered store.
+    /// The session's WAL buffer, if it logs its writes.
     #[cfg(feature = "wal")]
     fn wal(&self) -> Option<&Arc<crate::transaction::wal_buffer::WalBuffer>> {
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        if self.layered().is_some() {
-            return None;
-        }
         self.wal.as_ref()
     }
 
@@ -552,8 +497,6 @@ impl Session {
         Ok(Self {
             #[cfg(feature = "lpg")]
             store: Arc::new(LpgStore::new()?),
-            #[cfg(all(feature = "compact-store", feature = "lpg"))]
-            layers: None,
             #[cfg(feature = "lpg")]
             lpg_backend: LpgBackend::Placeholder,
             graph_store: read_store,
@@ -694,12 +637,6 @@ impl Session {
     /// The graph store for the graph with storage key `key` (see
     /// [`active_store`](Self::active_store)).
     fn store_for_key(&self, key: Option<&str>) -> Arc<dyn GraphStoreSearch> {
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        if key.is_none()
-            && let Some(layered) = self.layered()
-        {
-            return layered;
-        }
         match key {
             None => Arc::clone(&self.graph_store),
             #[cfg(feature = "lpg")]
@@ -735,22 +672,6 @@ impl Session {
     /// The writable store for the graph with storage key `key` (see
     /// [`active_write_store`](Self::active_write_store)).
     fn write_store_for_key(&self, key: Option<&str>) -> Option<Arc<dyn GraphStoreMut>> {
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        if key.is_none()
-            && let Some(layered) = self.layered()
-        {
-            let store: Arc<dyn GraphStoreMut> = layered;
-            #[cfg(feature = "cdc")]
-            let store: Arc<dyn GraphStoreMut> = match &self.cdc_pending_events {
-                Some(pending) => Arc::new(crate::database::cdc_store::CdcGraphStore::wrap(
-                    store,
-                    Arc::clone(&self.cdc_log),
-                    Arc::clone(pending),
-                )),
-                None => store,
-            };
-            return Some(store);
-        }
         match key {
             None => self.graph_store_mut.as_ref().map(Arc::clone),
             #[cfg(feature = "lpg")]
@@ -5303,9 +5224,6 @@ impl Session {
         use crate::query::Planner;
         use grafeo_core::execution::operators::{LazyValue, SessionContext};
 
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        let store = self.current_default_store(store);
-
         // Capture store reference for lazy introspection (only computed if info()/schema() called).
         let info_store = Arc::clone(&store);
         let schema_store = Arc::clone(&store);
@@ -5363,37 +5281,11 @@ impl Session {
         planner
     }
 
-    /// `store`, which the statement resolved for the active graph before
-    /// its implicit transaction began, or the layered store when the active
-    /// graph is the default graph and that is its store now: a `compact()`
-    /// ran in between (the transaction began after it, and none can be open
-    /// across one), and a plan against the store from before would read data
-    /// the database no longer has. Named graphs keep their stores across
-    /// `compact()` (one dropped meanwhile stays without data).
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    fn current_default_store(&self, store: Arc<dyn GraphStoreSearch>) -> Arc<dyn GraphStoreSearch> {
-        match self.layered() {
-            Some(layered) if self.active_graph_storage_key().is_none() => {
-                let layered = layered as Arc<dyn GraphStoreSearch>;
-                if Arc::ptr_eq(&store, &layered) {
-                    store
-                } else {
-                    layered
-                }
-            }
-            _ => store,
-        }
-    }
-
     /// Whether search procedures reach the session's own store: the
-    /// database's built-in store, or after `compact()` its overlay; not the
-    /// empty placeholder of a session on an external store.
+    /// database's built-in store, not the empty placeholder of a session on
+    /// an external store.
     #[cfg(feature = "lpg")]
     fn searches_own_store(&self) -> bool {
-        #[cfg(feature = "compact-store")]
-        if self.layered().is_some() {
-            return true;
-        }
         matches!(self.lpg_backend, LpgBackend::Active)
     }
 
@@ -7685,65 +7577,5 @@ mod tests {
 
         assert_eq!(session.active_store().node_count(), 0);
         assert!(session.active_write_store().is_none());
-    }
-
-    /// On a compacted database too, a selected graph dropped meanwhile keeps
-    /// resolving to no data when the planner checks the statement's store
-    /// against the default graph's: it is never the default graph's.
-    #[cfg(feature = "compact-store")]
-    #[test]
-    fn a_dropped_selected_graph_of_a_compacted_database_plans_against_nothing() {
-        let mut db = GrafeoDB::new_in_memory();
-        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-        db.create_graph("model").unwrap();
-        db.compact().unwrap();
-        let session = db.session();
-        session.use_graph("model");
-        assert!(db.drop_graph("model").unwrap());
-
-        let planned = session.current_default_store(session.active_store());
-        assert_eq!(planned.node_count(), 0, "not the default graph's Alix");
-    }
-
-    /// A statement of a session opened before `compact()` that resolved its
-    /// store before `compact()` and began its transaction after it plans
-    /// against the compacted store: it reads what the database has, not the
-    /// store from before `compact()`.
-    #[cfg(all(feature = "compact-store", feature = "gql"))]
-    #[test]
-    fn a_statement_straddling_compact_plans_against_the_compacted_store() {
-        use crate::query::optimizer::Optimizer;
-        use crate::query::translators::gql;
-
-        let mut db = GrafeoDB::new_in_memory();
-        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-        let session = db.session();
-        let resolved = session.active_store();
-        db.compact().unwrap();
-        db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
-
-        session.begin_transaction_inner(false, None).unwrap();
-        let gql::GqlTranslationResult::Plan(plan) =
-            gql::translate_full("MATCH (p:Person) RETURN p.name ORDER BY p.name").unwrap()
-        else {
-            panic!("a query plan");
-        };
-        let plan = Optimizer::from_graph_store(&*resolved)
-            .optimize(plan)
-            .unwrap();
-        let (epoch, transaction_id) = session.get_transaction_context();
-        let planner = session.create_planner_for_store(resolved, epoch, transaction_id);
-        let mut physical = planner.plan(&plan).unwrap();
-        let result = session
-            .make_executor(physical.columns.clone())
-            .execute(physical.operator.as_mut())
-            .unwrap();
-        session.rollback_inner().unwrap();
-
-        assert_eq!(
-            result.rows(),
-            [vec![Value::from("Alix")], vec![Value::from("Gus")]],
-            "the compacted store, with what was written after compact()"
-        );
     }
 }

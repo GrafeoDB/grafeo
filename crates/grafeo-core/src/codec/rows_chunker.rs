@@ -5,7 +5,7 @@
 //! cell per column, and every chunk the chunker cuts holds the same rows in
 //! each of its columns.
 
-use grafeo_common::storage::{ChunkCaps, ChunkKind, ChunkMeta, SectionSink};
+use grafeo_common::storage::{ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, SectionSink};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashSet;
@@ -13,13 +13,15 @@ use grafeo_common::utils::hash::FxHashSet;
 use crate::codec::column_chunk::{chunk_overhead, encode_column_chunk, value_bound};
 
 /// One column a [`RowsChunker`] writes: its chunk kind
-/// ([`ChunkKind::Column`] or [`ChunkKind::History`]) and column id.
+/// ([`ChunkKind::Column`] or [`ChunkKind::History`]), namespace and column id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkColumn {
     /// [`ChunkKind::Column`] for the current values, [`ChunkKind::History`]
     /// for the older versions of a column.
     pub kind: ChunkKind,
-    /// The column's id in its table.
+    /// The numbering the column id belongs to.
+    pub namespace: ChunkNamespace,
+    /// The column's id in its namespace.
     pub column_id: u32,
 }
 
@@ -84,8 +86,8 @@ impl RowsChunker {
     /// A chunker of the row group starting at `group_start` of graph
     /// `graph_id`, writing `columns`.
     ///
-    /// A column listed twice (one kind and column id) is refused by the
-    /// first [`push`](Self::push): its chunks would share an identity.
+    /// A column listed twice (one kind, namespace and column id) is refused
+    /// by the first [`push`](Self::push): its chunks would share an identity.
     pub fn new(
         graph_id: u32,
         columns: Vec<ChunkColumn>,
@@ -96,7 +98,13 @@ impl RowsChunker {
         let mut seen = FxHashSet::default();
         let repeated = columns
             .iter()
-            .find(|column| !seen.insert((column.kind.to_byte(), column.column_id)))
+            .find(|column| {
+                !seen.insert((
+                    column.kind.to_byte(),
+                    column.namespace.to_byte(),
+                    column.column_id,
+                ))
+            })
             .copied();
         Self {
             graph_id,
@@ -173,9 +181,9 @@ impl RowsChunker {
         let graph = self.graph_id;
         if let Some(column) = self.repeated {
             return Err(Error::Internal(format!(
-                "graph {graph}: {:?} column {} is listed twice, so two of its chunks would \
-                 share an identity",
-                column.kind, column.column_id
+                "graph {graph}: {:?} column {} of namespace {:?} is listed twice, so two of its \
+                 chunks would share an identity",
+                column.kind, column.column_id, column.namespace
             )));
         }
         if cells.len() != self.columns.len() {
@@ -279,7 +287,8 @@ impl RowsChunker {
                 ChunkMeta::history(graph_id, column_id, row_start, row_count, codec)
             } else {
                 ChunkMeta::column(graph_id, column_id, row_start, row_count, codec)
-            };
+            }
+            .in_namespace(column.namespace);
             sink.write_chunk(meta, &bytes)?;
             open.clear();
         }
@@ -313,7 +322,7 @@ impl RowsChunker {
 
 #[cfg(test)]
 mod tests {
-    use grafeo_common::storage::{ChunkCaps, ChunkKind, ChunkMeta, SectionSink};
+    use grafeo_common::storage::{ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, SectionSink};
     use grafeo_common::types::Value;
     use grafeo_common::utils::error::{Error, Result};
 
@@ -345,6 +354,7 @@ mod tests {
     fn column(column_id: u32) -> ChunkColumn {
         ChunkColumn {
             kind: ChunkKind::Column,
+            namespace: ChunkNamespace::NodeProperties,
             column_id,
         }
     }
@@ -352,6 +362,7 @@ mod tests {
     fn history(column_id: u32) -> ChunkColumn {
         ChunkColumn {
             kind: ChunkKind::History,
+            namespace: ChunkNamespace::NodeProperties,
             column_id,
         }
     }
@@ -447,6 +458,39 @@ mod tests {
             cells_of(&sink, ChunkKind::Column, 16),
             pushed,
             "every value comes back at its row"
+        );
+    }
+
+    /// Every chunk is in the namespace of its column: columns of one id in
+    /// two namespaces are two columns, each with its own chunks.
+    #[test]
+    fn every_chunk_carries_the_namespace_of_its_column() {
+        let caps = ChunkCaps {
+            max_rows: 8,
+            max_bytes: 1024,
+        };
+        let mut sink = Recorder::default();
+        let edge = ChunkColumn {
+            namespace: ChunkNamespace::EdgeProperties,
+            ..column(0)
+        };
+        let mut chunker = RowsChunker::new(3, vec![column(0), edge], 0, caps);
+        for row in 0..3u64 {
+            let value = i64::try_from(row).unwrap();
+            chunker
+                .push(&mut sink, row, vec![int(value), int(value + 19)])
+                .unwrap();
+        }
+        chunker.finish(&mut sink).unwrap();
+        let metas: Vec<ChunkMeta> = sink.0.iter().map(|(meta, _)| *meta).collect();
+        assert_eq!(
+            metas,
+            [
+                ChunkMeta::column(3, 0, 0, 3, metas[0].codec)
+                    .in_namespace(ChunkNamespace::NodeProperties),
+                ChunkMeta::column(3, 0, 0, 3, metas[1].codec)
+                    .in_namespace(ChunkNamespace::EdgeProperties),
+            ]
         );
     }
 
@@ -852,6 +896,7 @@ mod tests {
         );
         let stream = ChunkColumn {
             kind: ChunkKind::Stream,
+            namespace: ChunkNamespace::Section,
             column_id: 16,
         };
         let error = refused(vec![stream], caps, vec![None]);

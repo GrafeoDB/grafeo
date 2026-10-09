@@ -115,9 +115,10 @@ fn a_compacted_checkpoint_counts_the_base() {
 /// The timer captured the store when the database opened, so after
 /// `compact()` its checkpoints wrote the old store without the compacted
 /// base. A crash after such a checkpoint lost the base: the WAL files that
-/// held its data were deleted.
+/// held its data were deleted. Its checkpoints after `compact()` now hold
+/// every node and edge, in the one store.
 #[test]
-fn the_checkpoint_timer_writes_the_compacted_base() {
+fn the_checkpoint_timer_writes_everything_after_compact() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db.grafeo");
     let mut db =
@@ -127,6 +128,9 @@ fn the_checkpoint_timer_writes_the_compacted_base() {
         .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
         .unwrap();
     db.compact().unwrap();
+    db.session()
+        .execute("INSERT (:Person {name: 'Vincent'})")
+        .unwrap();
 
     let fm = std::sync::Arc::clone(db.file_manager().unwrap());
     let compacted_at = fm.active_header().iteration;
@@ -136,11 +140,18 @@ fn the_checkpoint_timer_writes_the_compacted_base() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    assert!(
-        holds(&fm, SectionType::CompactStore),
-        "the timer's checkpoint contains the compacted base"
+    let header = fm.active_header();
+    assert_eq!(
+        (header.node_count, header.edge_count),
+        (3, 1),
+        "the timer's checkpoint holds every node and edge"
     );
+    assert!(holds(&fm, SectionType::LpgStore));
     assert!(holds(&fm, SectionType::Catalog));
+    assert!(
+        !holds(&fm, SectionType::CompactStore),
+        "no compacted base: the database has one store"
+    );
     db.close().unwrap();
 }
 
@@ -345,22 +356,17 @@ fn every_kind_of_section_survives_a_reopen_in_small_chunks() {
     }
 }
 
-/// A compacted database's v3 file holds the compacted base and the
-/// overlay's deletions next to the other sections, and they come back.
-///
-/// `compact()` drops the vector and text indexes (the database has none
-/// right after it), so this file has no sections for them;
-/// `every_kind_of_section_survives_a_reopen` covers those.
+/// The file of a database compacted with `compact()` holds one store, with
+/// the other sections, and a delete after `compact()` survives a reopen.
 #[test]
 #[cfg(all(feature = "sparql", feature = "vector-index", feature = "text-index"))]
-fn a_compacted_base_and_its_deletions_survive_a_reopen() {
+fn a_compacted_database_and_its_deletes_survive_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db.grafeo");
     {
         let mut db = GrafeoDB::with_config(config(&path)).unwrap();
         write_every_kind_of_section(&db);
-        // Mia goes into the compacted base, and her deletion into the
-        // overlay's deletions.
+        // Mia is written before `compact()` and deleted after it.
         db.execute("INSERT (:Person {name: 'Mia', email: 'mia@example.org'})")
             .unwrap();
         db.compact().unwrap();
@@ -375,24 +381,28 @@ fn a_compacted_base_and_its_deletions_survive_a_reopen() {
         SectionType::Catalog,
         SectionType::LpgStore,
         SectionType::RdfStore,
-        SectionType::CompactStore,
-        SectionType::OverlayDeletions,
     ] {
         assert!(
             holds(fm, section_type),
             "the file holds the {section_type:?} section"
         );
     }
+    for section_type in [SectionType::CompactStore, SectionType::OverlayDeletions] {
+        assert!(
+            !holds(fm, section_type),
+            "the file holds no {section_type:?} section: the database has one store"
+        );
+    }
     let rows = |query: &str| db.execute(query).unwrap().rows().to_vec();
     assert_eq!(
         rows("MATCH (p:Person) RETURN p.name ORDER BY p.name"),
         [vec![Value::from("Alix")], vec![Value::from("Gus")]],
-        "the base holds Alix and Gus; Mia, deleted from it, stays deleted"
+        "Mia, deleted after compact(), stays deleted"
     );
     assert_eq!(
         rows("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"),
         [vec![Value::from("Alix"), Value::from("Gus")]],
-        "the base's edge"
+        "the edge"
     );
     assert_eq!(
         db.graph("trips")
@@ -407,8 +417,6 @@ fn a_compacted_base_and_its_deletions_survive_a_reopen() {
         ]],
         "the named graph"
     );
-    // SPARQL over a compacted database does not see RDF data yet (see
-    // `a_compacted_database_keeps_its_rdf_section`): read the store.
     assert_eq!(db.rdf_store().len(), 1, "the triple");
     assert_eq!(
         rows("SHOW CONSTRAINTS")

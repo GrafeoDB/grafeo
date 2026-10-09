@@ -1062,12 +1062,10 @@ test_db = file_db.to_memory()  # safe copy for experiments, indexes included
 
 ### compact()
 
-Converts the database to a layered [CompactStore](../../user-guide/compact-store.md) for faster queries: a columnar base with CSR adjacency, built from a snapshot of all nodes and edges, plus a mutable overlay. The original store is dropped to free memory.
-
-The database stays writable: new writes land in the overlay, and calling `compact()` again merges them into a fresh base. A database opened with `open_read_only()` stays read-only: writes still fail. Gives ~60x memory reduction and 100x+ traversal speedup for read-mostly workloads.
+Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, and returns what it did as a dict: `checkpointed`, `versions_collected` and `duration_ms`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Raises if the checkpoint fails, or after `close()`.
 
 ```python
-def compact(self) -> None
+def compact(self) -> dict
 ```
 
 ```python
@@ -1075,14 +1073,11 @@ db = grafeo.GrafeoDB()
 db.execute("INSERT (:Person {name: 'Alix', age: 30})")
 db.execute("INSERT (:Person {name: 'Gus', age: 25})")
 
-db.compact()  # switch to the columnar base
+report = db.compact()  # {'checkpointed': False, 'versions_collected': 0, 'duration_ms': 0}
 
-result = db.execute("MATCH (p:Person) RETURN p.name")  # fast
-db.execute("INSERT (:Person {name: 'Vincent'})")        # lands in the overlay
+result = db.execute("MATCH (p:Person) RETURN p.name")
+db.execute("INSERT (:Person {name: 'Vincent'})")
 ```
-
-!!! note
-    Requires the `compact-store` feature (included in the default `lpg` profile).
 
 ### close()
 

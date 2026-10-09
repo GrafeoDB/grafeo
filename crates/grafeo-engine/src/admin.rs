@@ -261,16 +261,21 @@ impl std::str::FromStr for DumpFormat {
     }
 }
 
-/// Compaction statistics returned after a compact operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionStats {
-    /// Bytes reclaimed.
-    pub bytes_reclaimed: usize,
-    /// Number of nodes compacted.
-    pub nodes_compacted: usize,
-    /// Number of edges compacted.
-    pub edges_compacted: usize,
-    /// Duration in milliseconds.
+/// What [`GrafeoDB::compact`](crate::GrafeoDB::compact) did.
+///
+/// `compact()` may take on more work in later releases, and its report then
+/// gains fields, so the struct is `#[non_exhaustive]`: read its fields, and
+/// expect new ones.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CompactReport {
+    /// Whether a checkpoint of the database file was written: only for a
+    /// persistent database that is not read-only.
+    pub checkpointed: bool,
+    /// The old versions dropped, in every graph: versions no open transaction
+    /// can see any more.
+    pub versions_collected: u64,
+    /// How long `compact()` took, in milliseconds.
     pub duration_ms: u64,
 }
 
@@ -576,17 +581,19 @@ mod tests {
     }
 
     #[test]
-    fn test_compaction_stats_serde() {
-        let stats = CompactionStats {
-            bytes_reclaimed: 1024,
-            nodes_compacted: 10,
-            edges_compacted: 20,
-            duration_ms: 150,
+    fn a_compact_report_round_trips_through_json() {
+        let report = CompactReport {
+            checkpointed: true,
+            versions_collected: 19,
+            duration_ms: 88,
         };
-        let json = serde_json::to_string(&stats).unwrap();
-        let parsed: CompactionStats = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.bytes_reclaimed, 1024);
-        assert_eq!(parsed.duration_ms, 150);
+        let json = serde_json::to_string(&report).unwrap();
+        assert_eq!(
+            json, r#"{"checkpointed":true,"versions_collected":19,"duration_ms":88}"#,
+            "the field names the bindings and server clients read"
+        );
+        let parsed: CompactReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, report);
     }
 
     #[test]

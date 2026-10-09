@@ -197,90 +197,6 @@ fn collect_snapshot_edges(store: &grafeo_core::graph::lpg::LpgStore) -> Vec<Snap
     edges
 }
 
-/// Collects the nodes and edges of a compacted database into snapshot
-/// format, as the layered store shows them: the compacted base and the
-/// overlay, without the base nodes and edges whose delete is committed.
-/// What the overlay holds (the nodes and edges added since `compact()` and
-/// its copies of base ones changed since) is read as
-/// [`collect_snapshot_nodes`] and [`collect_snapshot_edges`] read a store,
-/// with its histories under `temporal`; a value only the base holds has one
-/// version, at epoch 0 (the base keeps no history).
-///
-/// # Errors
-///
-/// Returns the error of reading an overlay node or a spilled value.
-#[cfg(feature = "compact-store")]
-fn collect_layered_snapshot(
-    layered: &grafeo_core::graph::compact::layered::LayeredStore,
-) -> Result<(Vec<SnapshotNode>, Vec<SnapshotEdge>)> {
-    use grafeo_core::graph::{Direction, GraphStore};
-
-    /// A value only the base holds, as a version list.
-    fn base_properties(
-        properties: impl IntoIterator<Item = (grafeo_common::types::PropertyKey, Value)>,
-    ) -> Vec<(String, Vec<(EpochId, Value)>)> {
-        let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = properties
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), vec![(EpochId::new(0), value)]))
-            .collect();
-        properties.sort_by(|(a, _), (b, _)| a.cmp(b));
-        properties
-    }
-
-    let overlay = layered.overlay_store();
-    let node_ids = layered.node_ids();
-    let visible: HashSet<NodeId> = node_ids.iter().copied().collect();
-    let mut nodes = collect_snapshot_nodes(&overlay)?;
-    nodes.retain(|node| visible.contains(&node.id));
-    let in_overlay: HashSet<NodeId> = nodes.iter().map(|node| node.id).collect();
-
-    let mut edge_ids: Vec<EdgeId> = Vec::new();
-    for &id in &node_ids {
-        edge_ids.extend(
-            layered
-                .edges_from(id, Direction::Outgoing)
-                .into_iter()
-                .map(|(_, edge)| edge),
-        );
-        if in_overlay.contains(&id) {
-            continue;
-        }
-        let Some(node) = layered.get_node(id) else {
-            continue;
-        };
-        let mut labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
-        labels.sort();
-        nodes.push(SnapshotNode {
-            id,
-            labels,
-            properties: base_properties(node.properties),
-        });
-    }
-    nodes.sort_by_key(|node| node.id);
-
-    let edge_set: HashSet<EdgeId> = edge_ids.iter().copied().collect();
-    let mut edges = collect_snapshot_edges(&overlay);
-    edges.retain(|edge| edge_set.contains(&edge.id));
-    let edges_in_overlay: HashSet<EdgeId> = edges.iter().map(|edge| edge.id).collect();
-    for id in edge_ids {
-        if edges_in_overlay.contains(&id) {
-            continue;
-        }
-        if let Some(edge) = layered.get_edge(id) {
-            edges.push(SnapshotEdge {
-                id,
-                src: edge.src,
-                dst: edge.dst,
-                edge_type: edge.edge_type.to_string(),
-                properties: base_properties(edge.properties),
-            });
-        }
-    }
-    edges.sort_by_key(|edge| edge.id);
-    edges.dedup_by_key(|edge| edge.id);
-    Ok((nodes, edges))
-}
-
 /// Populates a store from snapshot node/edge data.
 ///
 /// With `temporal`: replays all `(epoch, value)` entries into version logs.
@@ -980,7 +896,7 @@ impl super::GrafeoDB {
     /// Returns an error if the copy operation fails, or after a commit that
     /// did not complete.
     pub fn to_memory(&self) -> Result<Self> {
-        let mut target = Self::with_config(Config::in_memory())?;
+        let target = Self::with_config(Config::in_memory())?;
         // Each section is served once and freed as soon as it is loaded.
         let image = grafeo_common::storage::ServedOnce::new(self.copy_into(&target)?);
         let loaded = super::sections::load_sections(
@@ -995,7 +911,7 @@ impl super::GrafeoDB {
         target
             .transaction_manager
             .sync_epoch(target.lpg_store().current_epoch());
-        target.finish_load(loaded)?;
+        target.finish_load(loaded);
         Ok(target)
     }
 
@@ -1006,8 +922,7 @@ impl super::GrafeoDB {
     /// Both are taken under one commit hold, so they hold the same commits:
     /// every commit whole, none that did not complete, and nothing of a
     /// transaction still open (the hold also holds its writes). The LPG
-    /// section (the overlay's, after `compact()`) is left out of the image:
-    /// its nodes and edges are copied from store to store instead, which is
+    /// section is left out of the image: its nodes and edges are copied from store to store instead, which is
     /// much faster than encoding them. While a transaction is open the stores
     /// hold what it wrote, so the image holds the LPG section, which writes
     /// the committed state, and the copy loads it as a reopen does.
@@ -1110,10 +1025,7 @@ impl super::GrafeoDB {
     /// The snapshot holds the committed state: what a transaction still open
     /// deleted is in it, with the values and labels it changed as they were
     /// committed, and nothing it created is (while one is open, the data is
-    /// read from a committed copy, which takes as much memory again). After
-    /// [`compact()`](Self::compact) it holds the compacted base and the
-    /// overlay, without the base nodes and edges whose delete is committed;
-    /// a value from the base has one version, at epoch 0.
+    /// read from a committed copy, which takes as much memory again).
     ///
     /// # Errors
     ///
@@ -1131,15 +1043,6 @@ impl super::GrafeoDB {
                 Error::Internal("export_snapshot needs the built-in LPG store".to_string())
             })?;
         let store = &committed.store;
-        #[cfg(feature = "compact-store")]
-        let (nodes, edges) = match &committed.layered {
-            Some(layered) => collect_layered_snapshot(layered)?,
-            None => (
-                collect_snapshot_nodes(store)?,
-                collect_snapshot_edges(store),
-            ),
-        };
-        #[cfg(not(feature = "compact-store"))]
         let (nodes, edges) = (
             collect_snapshot_nodes(store)?,
             collect_snapshot_edges(store),
@@ -1309,11 +1212,6 @@ impl super::GrafeoDB {
     /// rebuilt from the snapshot atomically (from the perspective of
     /// subsequent queries).
     ///
-    /// The restore replaces the whole state, also of a database
-    /// [compacted](Self::compact): its columnar base goes with the rest, and
-    /// the snapshot is held as a plain store, which the next checkpoint
-    /// writes as one (a reopen finds no compacted base).
-    ///
     /// A build without the `triple-store`, `vector-index` or `text-index`
     /// feature refuses a snapshot that holds RDF triples, or vector or text
     /// index definitions, and leaves the database as it was: it would restore
@@ -1365,22 +1263,6 @@ impl super::GrafeoDB {
         }
         #[cfg(feature = "triple-store")]
         let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;
-
-        // A compacted database drops its base too, with the tombstones of
-        // base deletes: the overlay, which is the LPG store below, then holds
-        // the whole state. The next checkpoint writes no compacted base, so
-        // the database reopens as a plain store.
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        if let Some(layered) = &self.layered_store {
-            let empty = layered.drop_base();
-            // A spill of the base under memory pressure writes the empty one.
-            #[cfg(feature = "mmap")]
-            if let Some(tiered) = &self.compact_tiered {
-                tiered.replace(empty);
-            }
-            #[cfg(not(feature = "mmap"))]
-            drop(empty);
-        }
 
         // Drop all existing named graphs, then clear default store
         for name in self.lpg_store().graph_names() {
@@ -1437,64 +1319,28 @@ impl super::GrafeoDB {
 
     /// Returns an iterator over all nodes in the database, as of the current
     /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
-    /// After [`compact()`](Self::compact) it reads the compacted base and the
-    /// overlay, without the nodes deleted since.
     ///
     /// Useful for dump/export operations.
     pub fn iter_nodes(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Node> + '_ {
         let epoch = self.read_epoch();
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        if let Some(layered) = &self.layered_store {
-            use grafeo_core::graph::GraphStore;
-            let nodes: Box<dyn Iterator<Item = grafeo_core::graph::lpg::Node> + '_> = Box::new(
-                layered
-                    .node_ids()
-                    .into_iter()
-                    .filter_map(move |id| layered.get_node_at_epoch(id, epoch)),
-            );
-            return nodes;
-        }
         let store = self.lpg_store();
-        Box::new(
-            store
-                .all_node_ids()
-                .into_iter()
-                .filter_map(move |id| store.get_node_at_epoch(id, epoch)),
-        )
+        store
+            .all_node_ids()
+            .into_iter()
+            .filter_map(move |id| store.get_node_at_epoch(id, epoch))
     }
 
     /// Returns an iterator over all edges in the database, as of the current
     /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
-    /// After [`compact()`](Self::compact) it reads the compacted base and the
-    /// overlay, without the edges deleted since.
     ///
     /// Useful for dump/export operations.
     pub fn iter_edges(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Edge> + '_ {
         let epoch = self.read_epoch();
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        if let Some(layered) = &self.layered_store {
-            use grafeo_core::graph::{Direction, GraphStore};
-            // Each edge goes out of one node: the base's ids are not dense
-            // with the overlay's.
-            let mut ids: Vec<EdgeId> = layered
-                .node_ids()
-                .into_iter()
-                .flat_map(|id| layered.edges_from(id, Direction::Outgoing))
-                .map(|(_, edge)| edge)
-                .collect();
-            ids.sort_unstable();
-            ids.dedup();
-            let edges: Box<dyn Iterator<Item = grafeo_core::graph::lpg::Edge> + '_> = Box::new(
-                ids.into_iter()
-                    .filter_map(move |id| layered.get_edge_at_epoch(id, epoch)),
-            );
-            return edges;
-        }
         let store = self.lpg_store();
         // The store numbers its edges densely.
-        Box::new((0..store.next_edge_id()).filter_map(move |id| {
+        (0..store.next_edge_id()).filter_map(move |id| {
             store.get_edge_at_epoch(grafeo_common::types::EdgeId::new(id), epoch)
-        }))
+        })
     }
 }
 

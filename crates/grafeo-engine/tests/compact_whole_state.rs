@@ -1,13 +1,12 @@
-//! The calls that read or replace a database's whole state see a compacted
-//! database whole: its columnar base and its overlay.
+//! The calls that read or replace a database's whole state see all of it
+//! after `compact()`.
 //!
-//! - `restore_snapshot()` replaces the whole state: the compacted base, its
-//!   tombstones and the overlay go, and the snapshot is loaded as a plain
-//!   store (which reopens as one), however the ids of the snapshot and the
-//!   base meet.
-//! - `iter_nodes()` and `iter_edges()` read the base and the overlay, without
-//!   the nodes and edges deleted since `compact()`.
-//! - A snapshot of a compacted database imports whole.
+//! - `restore_snapshot()` replaces the whole state, and the database
+//!   reopens with the snapshot, however the ids of the snapshot and of the
+//!   data before it meet.
+//! - `iter_nodes()` and `iter_edges()` read every node and edge, without
+//!   those deleted since `compact()`.
+//! - A snapshot taken after `compact()` imports whole.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test compact_whole_state
@@ -113,30 +112,9 @@ fn a_restore_replaces_the_compacted_base() {
     );
 }
 
-/// A spill of the base under memory pressure after the restore spills the
-/// empty base, not the one the restore dropped.
-#[cfg(feature = "mmap")]
-#[test]
-fn a_spill_after_a_restore_does_not_bring_the_base_back() {
-    let spill = tempfile::tempdir().unwrap();
-    let mut db = GrafeoDB::with_config(
-        grafeo_engine::Config::in_memory().with_spill_path(spill.path().to_path_buf()),
-    )
-    .unwrap();
-    populate(&db);
-    db.compact().unwrap();
-    db.restore_snapshot(&snapshot_of_mia_and_jules()).unwrap();
-    db.buffer_manager().spill_all();
-    assert!(
-        db.compact_tiered().unwrap().is_on_disk(),
-        "the base was spilled"
-    );
-    assert_holds_the_snapshot(&db, "after a spill");
-}
-
-/// The restore of a compacted file leaves a plain store: closed and opened
-/// again it holds the snapshot, without a compacted base, and takes writes
-/// as one. The same after a restore of a reopened compacted file.
+/// The restore of a compacted file: closed and opened again it holds the
+/// snapshot, and takes writes. The same after a restore of a reopened
+/// compacted file.
 #[cfg(all(feature = "grafeo-file", feature = "wal"))]
 #[test]
 fn a_restored_compacted_file_reopens_as_a_plain_store() {
@@ -154,7 +132,6 @@ fn a_restored_compacted_file_reopens_as_a_plain_store() {
             if reopen_before_restore {
                 db.close().unwrap();
                 db = GrafeoDB::open(&path).unwrap();
-                assert!(db.layered_store().is_some(), "{case}: compacted");
             }
             db.restore_snapshot(&snapshot_of_mia_and_jules()).unwrap();
             assert_holds_the_snapshot(&db, case);
@@ -162,10 +139,6 @@ fn a_restored_compacted_file_reopens_as_a_plain_store() {
         }
         {
             let db = GrafeoDB::open(&path).unwrap();
-            assert!(
-                db.layered_store().is_none(),
-                "{case}: the file holds no compacted base"
-            );
             assert_holds_the_snapshot(&db, &format!("{case}, reopened"));
             db.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
             db.close().unwrap();

@@ -1,15 +1,10 @@
 //! Regression tests for writes performed after `GrafeoDB::compact()`
 //! remaining visible to subsequent GQL `MATCH` queries.
 //!
-//! Pre-fix behaviour: `LayeredStore::is_node_visible_at_epoch` (and its
-//! edge / versioned / epoch siblings) fell through to the base store's
-//! visibility check for any id not in `dirty_node_ids`. Overlay-only
-//! nodes (post-`compact()` writes) are not "dirty" in that sense —
-//! `dirty_node_ids` only tracks overlay modifications of base nodes —
-//! so the base was asked, didn't know the id, and returned false.
-//! Result: post-compact writes silently vanished from reads.
-//!
-//! Tracked upstream as GrafeoDB/grafeo#302.
+//! A compacted store once asked its base whether a node written after
+//! `compact()` was visible, and the base, which did not know it, said no:
+//! writes after `compact()` vanished from reads (#302). The tests stay for
+//! `compact()` storing data a different way again.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --features "compact-store lpg gql" \

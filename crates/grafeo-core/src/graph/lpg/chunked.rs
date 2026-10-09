@@ -78,7 +78,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
-use grafeo_common::storage::{ChunkCaps, ChunkKind, ChunkMeta, SectionSink, SectionSource};
+use grafeo_common::storage::{
+    ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, SectionSink, SectionSource,
+};
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
@@ -167,6 +169,22 @@ impl Table {
         match self {
             Self::Node => "node",
             Self::Edge => "edge",
+        }
+    }
+
+    /// The namespace of the table's fixed columns.
+    pub(crate) fn structure(self) -> ChunkNamespace {
+        match self {
+            Self::Node => ChunkNamespace::NodeStructure,
+            Self::Edge => ChunkNamespace::EdgeStructure,
+        }
+    }
+
+    /// The namespace of the table's property columns.
+    pub(crate) fn properties(self) -> ChunkNamespace {
+        match self {
+            Self::Node => ChunkNamespace::NodeProperties,
+            Self::Edge => ChunkNamespace::EdgeProperties,
         }
     }
 }
@@ -348,7 +366,7 @@ fn write_node_table(
     });
     let table = TableWriter {
         table: Table::Node,
-        fixed: vec![column(COLUMN_LABELS)],
+        fixed: vec![column(Table::Node.structure(), COLUMN_LABELS)],
         properties: &graph.node_properties,
         #[cfg(not(feature = "temporal"))]
         committed: changes.node_values(),
@@ -399,9 +417,9 @@ fn write_edge_table(
     let table = TableWriter {
         table: Table::Edge,
         fixed: vec![
-            column(COLUMN_SOURCE),
-            column(COLUMN_TARGET),
-            column(COLUMN_EDGE_TYPE),
+            column(Table::Edge.structure(), COLUMN_SOURCE),
+            column(Table::Edge.structure(), COLUMN_TARGET),
+            column(Table::Edge.structure(), COLUMN_EDGE_TYPE),
         ],
         properties: &graph.edge_properties,
         #[cfg(not(feature = "temporal"))]
@@ -464,10 +482,11 @@ fn describe_graph(index: usize, name: &str) -> String {
     }
 }
 
-/// A `Column` chunk column.
-fn column(column_id: u32) -> ChunkColumn {
+/// A `Column` chunk column of `namespace`.
+fn column(namespace: ChunkNamespace, column_id: u32) -> ChunkColumn {
     ChunkColumn {
         kind: ChunkKind::Column,
+        namespace,
         column_id,
     }
 }
@@ -869,15 +888,17 @@ impl<'p, Id: EntityId> Group<'p, Id> {
                 Some((history_cell(self.place, table, id, &key, older)?, 0))
             };
             let (place, start) = (self.place, self.start);
+            let namespace = table.table.properties();
             self.properties
                 .entry(column_id)
                 .or_insert_with(|| {
                     let columns = vec![
                         ChunkColumn {
                             kind: ChunkKind::History,
+                            namespace,
                             column_id,
                         },
-                        column(column_id),
+                        column(namespace, column_id),
                     ];
                     RowsChunker::new(place.graph_id, columns, start, place.caps)
                 })
@@ -917,7 +938,7 @@ impl<'p, Id: EntityId> Group<'p, Id> {
             }
             let mut chunker = RowsChunker::new(
                 self.place.graph_id,
-                vec![column(cursor.column_id)],
+                vec![column(table.table.properties(), cursor.column_id)],
                 self.start,
                 self.place.caps,
             );
@@ -1692,22 +1713,52 @@ impl<'m> Layout<'m> {
         })
     }
 
-    /// What `column_id` holds.
-    fn role(&self, column_id: u32) -> std::result::Result<Role, String> {
-        match column_id {
-            COLUMN_LABELS => Ok(Role::Labels),
-            COLUMN_SOURCE => Ok(Role::Endpoints),
-            COLUMN_TARGET | COLUMN_EDGE_TYPE => Err(format!(
-                "column {column_id} comes without column {COLUMN_SOURCE} of the same rows \
-                 before it"
+    /// What column `column_id` of `namespace` holds.
+    fn role(&self, namespace: ChunkNamespace, column_id: u32) -> std::result::Result<Role, String> {
+        let properties_of = match namespace {
+            ChunkNamespace::NodeStructure if column_id == COLUMN_LABELS => {
+                return Ok(Role::Labels);
+            }
+            ChunkNamespace::NodeStructure => {
+                return Err(format!(
+                    "column {column_id} of the node structure, which holds column \
+                     {COLUMN_LABELS} (the labels) only"
+                ));
+            }
+            ChunkNamespace::EdgeStructure => {
+                return match column_id {
+                    COLUMN_SOURCE => Ok(Role::Endpoints),
+                    COLUMN_TARGET | COLUMN_EDGE_TYPE => Err(format!(
+                        "column {column_id} comes without column {COLUMN_SOURCE} of the same \
+                         rows before it"
+                    )),
+                    _ => Err(format!(
+                        "column {column_id} of the edge structure, which holds columns \
+                         {COLUMN_SOURCE} to {COLUMN_EDGE_TYPE} (source, target, edge type) only"
+                    )),
+                };
+            }
+            ChunkNamespace::NodeProperties => Table::Node,
+            ChunkNamespace::EdgeProperties => Table::Edge,
+            _ => {
+                return Err(format!(
+                    "a chunk in namespace {namespace:?}, where an LPG section has the node \
+                     and edge namespaces only"
+                ));
+            }
+        };
+        match self.columns.get(&column_id) {
+            Some((table, key)) if *table == properties_of => Ok(Role::Property {
+                table: *table,
+                key: key.clone(),
+            }),
+            Some((table, key)) => Err(format!(
+                "column {column_id} is the {} property {:?}, in the {} property namespace",
+                table.entity(),
+                key.as_str(),
+                properties_of.entity()
             )),
-            _ => match self.columns.get(&column_id) {
-                Some((table, key)) => Ok(Role::Property {
-                    table: *table,
-                    key: key.clone(),
-                }),
-                None => Err(format!("column {column_id} is not in the metadata chunk")),
-            },
+            None => Err(format!("column {column_id} is not in the metadata chunk")),
         }
     }
 }
@@ -1745,8 +1796,9 @@ struct ReadGroup {
     key: (u32, Table, u64),
     /// The group's first row.
     start: u64,
-    /// One past the last row of the last chunk of each (kind, column).
-    ends: BTreeMap<(u8, u32), u64>,
+    /// One past the last row of the last chunk of each (kind, namespace,
+    /// column).
+    ends: BTreeMap<(u8, u8, u32), u64>,
     /// The rows with a node or an edge.
     entities: RowBits,
     /// The rows with a property or history value.
@@ -1775,8 +1827,8 @@ impl Reader<'_, '_> {
     ) -> Result<usize> {
         let chunk = data[index];
         let place = format!(
-            "LPG section, chunk {index} (graph {}, column {}, rows from {})",
-            chunk.graph_id, chunk.column_id, chunk.row_start
+            "LPG section, chunk {index} (graph {}, namespace {:?}, column {}, rows from {})",
+            chunk.graph_id, chunk.namespace, chunk.column_id, chunk.row_start
         );
         let refuse = |what: String| Error::Serialization(format!("{place}: {what}"));
         if !matches!(chunk.kind, ChunkKind::Column | ChunkKind::History) {
@@ -1791,7 +1843,10 @@ impl Reader<'_, '_> {
             .ok()
             .and_then(|at| self.layout.meta.graphs.get(at))
             .ok_or_else(|| refuse(format!("graph {graph_id} is not in the metadata chunk")))?;
-        let role = self.layout.role(chunk.column_id).map_err(refuse)?;
+        let role = self
+            .layout
+            .role(chunk.namespace, chunk.column_id)
+            .map_err(refuse)?;
         if chunk.kind == ChunkKind::History && !matches!(role, Role::Property { .. }) {
             return Err(refuse(
                 "a history chunk of a fixed column, where only property columns have history"
@@ -1822,6 +1877,7 @@ impl Reader<'_, '_> {
                 for (partner, column_id) in partners.iter().zip([COLUMN_TARGET, COLUMN_EDGE_TYPE]) {
                     let fits = partner.is_some_and(|partner| {
                         partner.kind == ChunkKind::Column
+                            && partner.namespace == ChunkNamespace::EdgeStructure
                             && partner.column_id == column_id
                             && partner.graph_id == chunk.graph_id
                             && partner.row_start == chunk.row_start
@@ -1938,7 +1994,11 @@ impl Reader<'_, '_> {
     /// `last_row`.
     fn check_order(&mut self, chunk: &ChunkMeta, last_row: u64) -> std::result::Result<(), String> {
         let group = self.group.as_mut().ok_or("no row group")?;
-        let identity = (chunk.kind.to_byte(), chunk.column_id);
+        let identity = (
+            chunk.kind.to_byte(),
+            chunk.namespace.to_byte(),
+            chunk.column_id,
+        );
         if let Some(end) = group.ends.get(&identity)
             && chunk.row_start < *end
         {
@@ -1949,9 +2009,11 @@ impl Reader<'_, '_> {
             ));
         }
         if chunk.kind == ChunkKind::History
-            && let Some(end) = group
-                .ends
-                .get(&(ChunkKind::Column.to_byte(), chunk.column_id))
+            && let Some(end) = group.ends.get(&(
+                ChunkKind::Column.to_byte(),
+                chunk.namespace.to_byte(),
+                chunk.column_id,
+            ))
             && chunk.row_start < *end
         {
             return Err(format!(
@@ -2257,7 +2319,8 @@ mod tests {
     use grafeo_common::storage::SectionType;
     use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
     use grafeo_common::storage::{
-        ChunkCaps, ChunkKind, ChunkMeta, ImageSource, MemoryImage, SectionSink, SectionSource,
+        ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, ImageSource, MemoryImage, SectionSink,
+        SectionSource,
     };
     use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
     use grafeo_common::utils::error::{Error, Result};
@@ -2429,6 +2492,18 @@ mod tests {
                 .get(chunk.graph_id as usize)
                 .unwrap_or_else(|| panic!("chunk {index}: graph {} is unknown", chunk.graph_id));
             let table = table_of(&meta, chunk.column_id);
+            let namespace = if chunk.column_id < FIRST_PROPERTY_COLUMN {
+                table.structure()
+            } else {
+                table.properties()
+            };
+            assert_eq!(
+                chunk.namespace,
+                namespace,
+                "chunk {index}: column {} of the {} table",
+                chunk.column_id,
+                table.entity()
+            );
             if chunk.kind == ChunkKind::History {
                 assert!(
                     chunk.column_id >= FIRST_PROPERTY_COLUMN,
@@ -3727,7 +3802,7 @@ mod tests {
         let committed = BTreeMap::from([(key.clone(), vec![(GUS, Some(Value::from("G")))])]);
         let table = TableWriter {
             table: Table::Node,
-            fixed: vec![column(COLUMN_LABELS)],
+            fixed: vec![column(Table::Node.structure(), COLUMN_LABELS)],
             properties: &store.node_properties,
             committed: &committed,
             names: &names,
@@ -4647,27 +4722,28 @@ mod tests {
         Meta,
         /// A metadata chunk of other metadata.
         MetaOf(LpgMeta),
-        /// A labels chunk of graph 0.
+        /// A labels chunk of graph 0 (node structure column 0).
         Labels {
             row_start: u64,
             row_count: u32,
             rows: Vec<(u32, &'static str)>,
         },
-        /// A chunk of column 16 of graph 0, every row "Alix".
+        /// A chunk of node property column 16 of graph 0, every row "Alix".
         Name {
             row_start: u64,
             row_count: u32,
             rows: Vec<u32>,
         },
-        /// A chunk of `column_id` of graph 0 with Int64 values.
+        /// A chunk of edge structure column `column_id` of graph 0 with Int64
+        /// values.
         Column {
             column_id: u32,
             row_start: u64,
             row_count: u32,
             rows: Vec<(u32, i64)>,
         },
-        /// Any chunk: its kind, graph, column and rows from `meta`, its
-        /// values and epochs encoded.
+        /// Any chunk: its kind, namespace, graph, column and rows from
+        /// `meta`, its values and epochs encoded.
         Raw {
             meta: ChunkMeta,
             values: Vec<(u32, Value)>,
@@ -4675,9 +4751,12 @@ mod tests {
         },
     }
 
-    /// The bytes of a column chunk of `values`, and its entry with `kind`.
+    /// The bytes of a column chunk of `values`, and its entry with `kind`
+    /// in `namespace`.
+    #[expect(clippy::too_many_arguments, reason = "one argument per entry field")]
     fn crafted_chunk(
         kind: ChunkKind,
+        namespace: ChunkNamespace,
         graph: u32,
         column: u32,
         row_start: u64,
@@ -4692,7 +4771,7 @@ mod tests {
         } else {
             ChunkMeta::column(graph, column, row_start, row_count, codec.to_byte())
         };
-        (meta, bytes)
+        (meta.in_namespace(namespace), bytes)
     }
 
     /// Writes `chunks` in order into a memory image (LpgStore, version 3) and
@@ -4713,7 +4792,16 @@ mod tests {
                         .into_iter()
                         .map(|(row, labels)| (row, Value::from(labels)))
                         .collect();
-                    crafted_chunk(ChunkKind::Column, 0, 0, row_start, row_count, &values, None)
+                    crafted_chunk(
+                        ChunkKind::Column,
+                        ChunkNamespace::NodeStructure,
+                        0,
+                        COLUMN_LABELS,
+                        row_start,
+                        row_count,
+                        &values,
+                        None,
+                    )
                 }
                 Crafted::Name {
                     row_start,
@@ -4726,6 +4814,7 @@ mod tests {
                         .collect();
                     crafted_chunk(
                         ChunkKind::Column,
+                        ChunkNamespace::NodeProperties,
                         0,
                         16,
                         row_start,
@@ -4746,6 +4835,7 @@ mod tests {
                         .collect();
                     crafted_chunk(
                         ChunkKind::Column,
+                        ChunkNamespace::EdgeStructure,
                         0,
                         column_id,
                         row_start,
@@ -4761,6 +4851,7 @@ mod tests {
                 } => {
                     let (encoded, bytes) = crafted_chunk(
                         meta.kind,
+                        meta.namespace,
                         meta.graph_id,
                         meta.column_id,
                         meta.row_start,
@@ -4822,12 +4913,14 @@ mod tests {
             rows: vec![(0, "0")],
         };
         let history = |column: u32, values: Vec<(u32, Value)>, epochs: Option<Vec<u64>>| Raw {
-            meta: ChunkMeta::history(0, column, 0, 1, 0),
+            meta: ChunkMeta::history(0, column, 0, 1, 0)
+                .in_namespace(ChunkNamespace::NodeProperties),
             values,
             epochs,
         };
         let column = |column: u32, values: Vec<(u32, Value)>, epochs: Option<Vec<u64>>| Raw {
-            meta: ChunkMeta::column(0, column, 0, 1, 0),
+            meta: ChunkMeta::column(0, column, 0, 1, 0)
+                .in_namespace(ChunkNamespace::NodeProperties),
             values,
             epochs,
         };
@@ -4907,7 +5000,7 @@ mod tests {
                 "overlap",
             ),
             (
-                "an unknown column",
+                "an unknown edge structure column",
                 vec![
                     Column {
                         column_id: 99,
@@ -4917,7 +5010,55 @@ mod tests {
                     },
                     Meta,
                 ],
-                "column 99",
+                "column 99 of the edge structure",
+            ),
+            (
+                "an unknown property column",
+                vec![
+                    alix(),
+                    column(99, vec![(0, Value::from("Gus"))], None),
+                    Meta,
+                ],
+                "column 99 is not in the metadata chunk",
+            ),
+            (
+                "a node structure column other than the labels",
+                vec![
+                    Raw {
+                        meta: ChunkMeta::column(0, COLUMN_SOURCE, 0, 1, 0)
+                            .in_namespace(ChunkNamespace::NodeStructure),
+                        values: vec![(0, Value::Int64(3))],
+                        epochs: None,
+                    },
+                    Meta,
+                ],
+                "column 1 of the node structure",
+            ),
+            (
+                "a chunk in the section's own namespace",
+                vec![
+                    Raw {
+                        meta: ChunkMeta::column(0, COLUMN_LABELS, 0, 1, 0),
+                        values: vec![(0, Value::from("0"))],
+                        epochs: None,
+                    },
+                    Meta,
+                ],
+                "namespace Section",
+            ),
+            (
+                "a node property column in the edge property namespace",
+                vec![
+                    two_nodes(),
+                    Raw {
+                        meta: ChunkMeta::column(0, 16, 0, 1, 0)
+                            .in_namespace(ChunkNamespace::EdgeProperties),
+                        values: vec![(0, Value::from("Alix"))],
+                        epochs: None,
+                    },
+                    Meta,
+                ],
+                "column 16 is the node property \"name\", in the edge property namespace",
             ),
             (
                 "rows past the next id",
@@ -5013,8 +5154,16 @@ mod tests {
             ),
             (
                 "a history chunk of a fixed column",
-                vec![history(0, vec![(0, Value::from("0"))], None), Meta],
-                "history",
+                vec![
+                    Raw {
+                        meta: ChunkMeta::history(0, COLUMN_LABELS, 0, 1, 0)
+                            .in_namespace(ChunkNamespace::NodeStructure),
+                        values: vec![(0, Value::from("0"))],
+                        epochs: None,
+                    },
+                    Meta,
+                ],
+                "a history chunk of a fixed column",
             ),
             (
                 "a history chunk with epochs",
@@ -5085,14 +5234,23 @@ mod tests {
             ),
             (
                 "epochs on a fixed column",
-                vec![column(0, vec![(0, Value::from("0"))], Some(vec![3])), Meta],
+                vec![
+                    Raw {
+                        meta: ChunkMeta::column(0, COLUMN_LABELS, 0, 1, 0)
+                            .in_namespace(ChunkNamespace::NodeStructure),
+                        values: vec![(0, Value::from("0"))],
+                        epochs: Some(vec![3]),
+                    },
+                    Meta,
+                ],
                 "epoch",
             ),
             (
                 "an unknown graph",
                 vec![
                     Raw {
-                        meta: ChunkMeta::column(5, 0, 0, 1, 0),
+                        meta: ChunkMeta::column(5, COLUMN_LABELS, 0, 1, 0)
+                            .in_namespace(ChunkNamespace::NodeStructure),
                         values: vec![(0, Value::from("0"))],
                         epochs: None,
                     },
@@ -5151,7 +5309,8 @@ mod tests {
                 vec![
                     alix(),
                     Raw {
-                        meta: ChunkMeta::history(0, 16, 0, 3, 0),
+                        meta: ChunkMeta::history(0, 16, 0, 3, 0)
+                            .in_namespace(ChunkNamespace::NodeProperties),
                         values: vec![(2, history_value(&[(3, Value::from("Gus"))]))],
                         epochs: None,
                     },

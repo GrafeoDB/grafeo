@@ -7,7 +7,7 @@
 //! constraints, logged to the WAL and reported to CDC like the same write in a
 //! query, and it either applies completely or fails with an error (see
 //! [`direct`](super::direct) for how). Reads see the current graph as queries
-//! do (after `compact()` and on an external store too), and nothing when the
+//! do (on an external store too), and nothing when the
 //! selected graph no longer exists. Like queries, they read at the last epoch
 //! whose commit is complete, so they never see part of a commit.
 

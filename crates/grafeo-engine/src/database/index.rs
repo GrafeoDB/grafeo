@@ -201,10 +201,7 @@ impl super::GrafeoDB {
     }
 
     /// The store that takes an index of the graph with storage key `graph`
-    /// (`None` for the default graph), resolved while commits are held: after
-    /// `compact()` the default graph's store is the layered store's overlay,
-    /// which a merge under memory pressure may replace while the index is
-    /// built, and the merge cannot run while commits are held.
+    /// (`None` for the default graph).
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
     fn install_target(&self, graph: Option<&str>) -> Result<Arc<LpgStore>> {
         self.index_target(graph).map(|(_, target)| target)

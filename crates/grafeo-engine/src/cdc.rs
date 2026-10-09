@@ -50,7 +50,7 @@
 //! Recording happens inline in `database::crud` and the
 //! MutationOperator: each write calls one of the `record_*` methods on
 //! [`CdcLog`] immediately after the corresponding mutation lands in the
-//! overlay store, still holding the writer's logical frame. That means
+//! store, still holding the writer's logical frame. That means
 //! CDC event visibility tracks LpgStore visibility: a reader that sees
 //! the mutation via MVCC also sees the event, and vice versa. There is
 //! no asynchronous flush queue between the write and the log; the

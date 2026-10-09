@@ -659,10 +659,9 @@ fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
     assert_refused(&db, "to_memory", db.to_memory().map(drop));
     assert_refused(&db, "export_snapshot", db.export_snapshot().map(drop));
     assert_refused(&db, "backup_full", db.backup_full(&backups).map(drop));
-    #[cfg(feature = "compact-store")]
     let db = {
         let mut db = db;
-        let outcome = db.compact();
+        let outcome = db.compact().map(drop);
         assert_refused(&db, "compact", outcome);
         db
     };

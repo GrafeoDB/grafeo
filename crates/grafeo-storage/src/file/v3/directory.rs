@@ -20,7 +20,7 @@
 
 use std::collections::HashSet;
 
-use grafeo_common::storage::{ChunkKind, ChunkMeta, SectionType};
+use grafeo_common::storage::{ChunkKind, ChunkMeta, ChunkNamespace, SectionType};
 use grafeo_common::utils::error::{Error, Result};
 
 use super::alloc::PageRun;
@@ -47,6 +47,8 @@ const KNOWN_INCOMPATIBLE_FLAGS: u8 = ENTRY_SECTION_OPTIONAL | ENTRY_CHUNK_OPTION
 
 /// Byte of an entry that holds its flags.
 const FLAGS_AT: usize = 44;
+/// Byte of an entry that holds its chunk's namespace.
+const NAMESPACE_AT: usize = 45;
 
 /// Magic bytes at the start of every directory block.
 const BLOCK_MAGIC: [u8; 4] = *b"GDIR";
@@ -56,8 +58,10 @@ const BLOCK_MAGIC: [u8; 4] = *b"GDIR";
 /// Layout (48 bytes, little-endian): `0 section type u8`,
 /// `1 section version u8`, `2 chunk kind u8`, `3 codec u8`, `4 graph id u32`,
 /// `8 column id u32`, `12 row count u32`, `16 row start u64`, `24 offset u64`,
-/// `32 length u64`, `40 crc u32`, `44 flags u8`, `45 reserved [u8; 3]`. The
-/// reserved bytes are written as zero and ignored by readers.
+/// `32 length u64`, `40 crc u32`, `44 flags u8`, `45 namespace u8`,
+/// `46 reserved [u8; 2]`. The reserved bytes are written as zero and ignored
+/// by readers. The identity of a chunk, unique within its section, is (chunk
+/// kind, namespace, graph id, column id, row start).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirectoryEntry {
     /// Section the chunk belongs to.
@@ -109,6 +113,7 @@ impl DirectoryEntry {
         out[32..40].copy_from_slice(&self.length.to_le_bytes());
         out[40..44].copy_from_slice(&self.crc.to_le_bytes());
         out[FLAGS_AT] = self.flags;
+        out[NAMESPACE_AT] = self.meta.namespace.to_byte();
     }
 
     /// Decodes an entry. An unknown section type or chunk kind is `Skipped` when its bit is
@@ -166,11 +171,22 @@ impl DirectoryEntry {
                  not set): the file was written by a newer version"
             )));
         };
+        // Every namespace a file of a known revision can hold is known (a
+        // newer one comes with a newer revision, refused before the
+        // directory is read), so an unknown byte is damage, not news.
+        let namespace_byte = bytes[NAMESPACE_AT];
+        let Some(namespace) = ChunkNamespace::from_byte(namespace_byte) else {
+            return Err(Error::Serialization(format!(
+                "directory entry of section {section_type:?}, chunk kind {kind:?}, has \
+                 namespace {namespace_byte}, which no Grafeo writes: the file is damaged"
+            )));
+        };
         Ok(DecodedEntry::Known(Self {
             section_type,
             section_version: bytes[1],
             meta: ChunkMeta {
                 kind,
+                namespace,
                 codec: bytes[3],
                 graph_id: u32_at(bytes, 4),
                 column_id: u32_at(bytes, 8),
@@ -868,6 +884,7 @@ mod tests {
             section_version: 19,
             meta: ChunkMeta {
                 kind: ChunkKind::Raw,
+                namespace: ChunkNamespace::EdgeStructure,
                 codec: 88,
                 graph_id: 0x0102_0304,
                 column_id: 0x0506_0708,
@@ -913,10 +930,11 @@ mod tests {
         );
         assert_eq!(bytes[40..44], [0x19, 0x03, 0x88, 0x19], "crc");
         assert_eq!(bytes[44], 0x33, "flags");
-        assert_eq!(bytes[45..48], [0, 0, 0], "reserved, written as zero");
+        assert_eq!(bytes[45], 32, "namespace byte (edge structure)");
+        assert_eq!(bytes[46..48], [0, 0], "reserved, written as zero");
         // Bits 2, 3, 6 and 7: a reserved byte read into the flags would set
         // an incompatible bit and the entry would be refused.
-        bytes[45..48].copy_from_slice(&[0xCC, 0xCC, 0xCC]);
+        bytes[46..48].copy_from_slice(&[0xCC, 0xCC]);
         assert_eq!(
             DirectoryEntry::decode(&bytes).unwrap(),
             DecodedEntry::Known(entry),
@@ -927,6 +945,29 @@ mod tests {
             0,
             "an entry without flags writes 0"
         );
+    }
+
+    /// A namespace byte no Grafeo writes (a reserved one included) is damage:
+    /// the entry is refused, also when its optional bits are set, since only
+    /// an unknown section type or chunk kind may be skipped.
+    #[test]
+    fn an_entry_with_an_unknown_namespace_is_refused() {
+        for (namespace, flags) in [
+            (18, 0),
+            (49, 0),
+            (255, ENTRY_SECTION_OPTIONAL | ENTRY_CHUNK_OPTIONAL),
+        ] {
+            let mut bytes = encoded(&DirectoryEntry {
+                flags,
+                ..fixed_entry()
+            });
+            bytes[45] = namespace;
+            let error = DirectoryEntry::decode(&bytes).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("namespace {namespace}")) && error.contains("damaged"),
+                "namespace {namespace}: {error}"
+            );
+        }
     }
 
     #[test]

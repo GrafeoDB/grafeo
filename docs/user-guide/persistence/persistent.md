@@ -204,7 +204,7 @@ A build without the `wal` feature cannot replay a WAL, so it refuses to open (or
 
 ### Builds Without the `compact-store` Feature
 
-A database on which [`compact()`](../compact-store.md) ran keeps its compacted base in its file, which only a build with the `compact-store` feature can read. A build without it refuses such a file, a 0.6 file or a 0.5.x file compacted by 0.5.44 or older, on a read-write open (which would migrate a 0.5.x file), a read-only open and `open_in_memory()`, and changes nothing. The `grafeo` Rust crate (unless you add the `compact-store` feature) and the `grafeo` command line tool are such builds; the Python, Node.js and C bindings have the feature. Open these databases with a build that has it.
+A database on which [`compact()`](../compact-store.md) ran in 0.5.44 or older keeps its compacted base in its file, which only a build with the `compact-store` feature can read: it folds the base into the store as it opens the file. A build without it refuses such a file on a read-write open (which would migrate it), a read-only open and `open_in_memory()`, and changes nothing. The `grafeo` Rust crate (unless you add the `compact-store` feature) and the `grafeo` command line tool are such builds; the Python, Node.js and C bindings have the feature. Open these databases with a build that has it.
 
 ### Builds Without the `triple-store`, `vector-index` or `text-index` Feature
 

@@ -318,11 +318,64 @@ impl ChunkKind {
     }
 }
 
+/// Which numbering a chunk's column id belongs to. Within a namespace a
+/// column id has one meaning; across namespaces ids repeat (property key 0
+/// of the node table and of the edge table, say).
+///
+/// The byte of each namespace is part of the file format and never changes.
+/// The bytes come in groups with room to grow: 0 for a section's own
+/// numbering, 16 to 31 for the node table, 32 to 47 for the edge table and
+/// 48 to 63 for adjacency. These are reserved and not written yet, so a
+/// reader refuses them as it refuses any byte it does not know: 18 node
+/// deletes, 19 node label bitmaps, 20 node versions, 34 edge deletes, 36 edge
+/// versions, 48 outgoing adjacency and 49 incoming adjacency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum ChunkNamespace {
+    /// The section's own numbering: metadata, raw chunks, streams, and every
+    /// section without node and edge tables.
+    Section = 0,
+    /// The node table's fixed columns: column 0 holds the labels.
+    NodeStructure = 16,
+    /// The node table's property columns.
+    NodeProperties = 17,
+    /// The edge table's fixed columns: 1 the source node, 2 the target node,
+    /// 3 the edge type.
+    EdgeStructure = 32,
+    /// The edge table's property columns.
+    EdgeProperties = 33,
+}
+
+impl ChunkNamespace {
+    /// The on-disk byte for this namespace.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// Decodes an on-disk byte, or `None` for one this version does not know
+    /// (reserved bytes included).
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Section),
+            16 => Some(Self::NodeStructure),
+            17 => Some(Self::NodeProperties),
+            32 => Some(Self::EdgeStructure),
+            33 => Some(Self::EdgeProperties),
+            _ => None,
+        }
+    }
+}
+
 /// A chunk as its section describes it; storage adds where it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkMeta {
     /// What the chunk holds.
     pub kind: ChunkKind,
+    /// The numbering [`column_id`](Self::column_id) belongs to.
+    pub namespace: ChunkNamespace,
     /// Codec identifier of the chunk's bytes (0 for none).
     pub codec: u8,
     /// Graph the chunk belongs to (0 when not graph-specific).
@@ -338,11 +391,13 @@ pub struct ChunkMeta {
 }
 
 impl ChunkMeta {
-    /// Metadata of a raw chunk: kind [`ChunkKind::Raw`], everything else zero.
+    /// Metadata of a raw chunk: kind [`ChunkKind::Raw`], namespace
+    /// [`ChunkNamespace::Section`], everything else zero.
     #[must_use]
     pub const fn raw() -> Self {
         Self {
             kind: ChunkKind::Raw,
+            namespace: ChunkNamespace::Section,
             codec: 0,
             graph_id: 0,
             column_id: 0,
@@ -362,7 +417,9 @@ impl ChunkMeta {
     }
 
     /// Metadata of a column chunk: `row_count` rows of column `column_id` of
-    /// graph `graph_id` from row `row_start`, encoded with `codec`.
+    /// graph `graph_id` from row `row_start`, encoded with `codec`, in
+    /// namespace [`ChunkNamespace::Section`] (see
+    /// [`in_namespace`](Self::in_namespace)).
     #[must_use]
     pub const fn column(
         graph_id: u32,
@@ -373,6 +430,7 @@ impl ChunkMeta {
     ) -> Self {
         Self {
             kind: ChunkKind::Column,
+            namespace: ChunkNamespace::Section,
             codec,
             graph_id,
             column_id,
@@ -406,6 +464,7 @@ impl ChunkMeta {
     pub const fn stream_piece(graph_id: u32, stream: u32, offset: u64) -> Self {
         Self {
             kind: ChunkKind::Stream,
+            namespace: ChunkNamespace::Section,
             codec: 0,
             graph_id,
             column_id: stream,
@@ -414,12 +473,20 @@ impl ChunkMeta {
         }
     }
 
-    /// What must be unique within a section: (kind byte, graph, column, first
-    /// row). The codec and the row count are not part of it.
+    /// The same chunk with its column id in `namespace`.
     #[must_use]
-    pub const fn identity(&self) -> (u8, u32, u32, u64) {
+    pub const fn in_namespace(self, namespace: ChunkNamespace) -> Self {
+        Self { namespace, ..self }
+    }
+
+    /// What must be unique within a section: (kind byte, namespace byte,
+    /// graph, column, first row). The codec and the row count are not part of
+    /// it.
+    #[must_use]
+    pub const fn identity(&self) -> (u8, u8, u32, u32, u64) {
         (
             self.kind.to_byte(),
+            self.namespace.to_byte(),
             self.graph_id,
             self.column_id,
             self.row_start,
@@ -1289,13 +1356,65 @@ mod tests {
                 ..ChunkMeta::raw()
             }
         );
-        assert_eq!(column.identity(), (ChunkKind::Column.to_byte(), 3, 19, 88));
+        assert_eq!(
+            column.identity(),
+            (ChunkKind::Column.to_byte(), 0, 3, 19, 88)
+        );
         assert_eq!(
             ChunkMeta::column(3, 19, 88, 1, 0).identity(),
             column.identity(),
             "the row count and the codec are not part of the identity"
         );
         assert_ne!(history.identity(), column.identity(), "the kind is");
+        let node = column.in_namespace(ChunkNamespace::NodeProperties);
+        let edge = column.in_namespace(ChunkNamespace::EdgeProperties);
+        assert_eq!(
+            node.identity(),
+            (ChunkKind::Column.to_byte(), 17, 3, 19, 88)
+        );
+        assert_ne!(
+            node.identity(),
+            edge.identity(),
+            "the namespace is: one key id names a node and an edge column"
+        );
+        assert_eq!(
+            (node.kind, node.graph_id, node.column_id, node.row_start),
+            (column.kind, 3, 19, 88),
+            "in_namespace changes the namespace only"
+        );
+    }
+
+    /// The namespace bytes are part of the format: they never change, and a
+    /// reserved or unknown byte decodes to nothing.
+    #[test]
+    fn chunk_namespaces_keep_their_bytes() {
+        let known = [
+            (ChunkNamespace::Section, 0),
+            (ChunkNamespace::NodeStructure, 16),
+            (ChunkNamespace::NodeProperties, 17),
+            (ChunkNamespace::EdgeStructure, 32),
+            (ChunkNamespace::EdgeProperties, 33),
+        ];
+        for (namespace, byte) in known {
+            assert_eq!(namespace.to_byte(), byte, "{namespace:?}");
+            assert_eq!(ChunkNamespace::from_byte(byte), Some(namespace), "{byte}");
+        }
+        for reserved in [18, 19, 20, 34, 36, 48, 49] {
+            assert_eq!(
+                ChunkNamespace::from_byte(reserved),
+                None,
+                "reserved {reserved}"
+            );
+        }
+        let unknown = (0..=u8::MAX)
+            .filter(|&byte| ChunkNamespace::from_byte(byte).is_some())
+            .count();
+        assert_eq!(unknown, known.len(), "every other byte is unknown");
+        assert_eq!(
+            ChunkMeta::raw().namespace,
+            ChunkNamespace::Section,
+            "chunks are in the section's numbering unless placed in a namespace"
+        );
     }
 
     /// Closes the deferred A1 item: the branch for a chunk of another kind.

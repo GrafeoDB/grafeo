@@ -575,19 +575,19 @@ version(): string
 
 ### compact()
 
-Converts the database to a layered [CompactStore](../../user-guide/compact-store.md) for faster queries: a columnar base with CSR adjacency, built from a snapshot of all nodes and edges, plus a mutable overlay. The database stays writable: new writes land in the overlay, and calling `compact()` again merges them into a fresh base. A database opened with `openReadOnly()` stays read-only: writes still throw. Throws while a transaction is open.
+Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, and returns what it did: `{ checkpointed, versions_collected, duration_ms }`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Throws if the checkpoint fails, or after `close()`.
 
 ```typescript
-compact(): void
+compact(): { checkpointed: boolean, versions_collected: number, duration_ms: number }
 ```
 
 ```typescript
 const db = GrafeoDB.create();
 await db.execute("INSERT (:Person {name: 'Alix', age: 30})");
 
-db.compact();
+const report = db.compact(); // { checkpointed: false, versions_collected: 0, ... }
 
-const result = await db.execute("MATCH (p:Person) RETURN p.name"); // fast
+const result = await db.execute("MATCH (p:Person) RETURN p.name");
 ```
 
 ### close()

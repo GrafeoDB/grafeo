@@ -371,8 +371,19 @@ impl LpgStore {
     /// of re-created entities. Any other node or edge has a single version
     /// (created, perhaps marked deleted), so there is nothing to collect and
     /// the cost does not grow with the store.
+    ///
+    /// Returns how many versions it dropped: node and edge versions, property
+    /// values and label sets.
     #[doc(hidden)]
-    pub fn gc_versions(&self, min_epoch: EpochId) {
+    pub fn gc_versions(&self, min_epoch: EpochId) -> usize {
+        #[cfg_attr(
+            not(any(feature = "temporal", feature = "tiered-storage")),
+            expect(
+                unused_mut,
+                reason = "only the temporal and tiered-storage builds keep versions to collect"
+            )
+        )]
+        let mut dropped = 0;
         #[cfg(feature = "tiered-storage")]
         {
             let (nodes, edges) = {
@@ -387,7 +398,7 @@ impl LpgStore {
                 let mut versions = self.node_versions.write();
                 for id in nodes {
                     if let Some(index) = versions.get_mut(&id) {
-                        index.gc(min_epoch);
+                        dropped += index.gc(min_epoch);
                         if index.is_empty() {
                             versions.remove(&id);
                         } else if index.version_count() > 1 {
@@ -401,7 +412,7 @@ impl LpgStore {
                 let mut versions = self.edge_versions.write();
                 for id in edges {
                     if let Some(index) = versions.get_mut(&id) {
-                        index.gc(min_epoch);
+                        dropped += index.gc(min_epoch);
                         if index.is_empty() {
                             versions.remove(&id);
                         } else if index.version_count() > 1 {
@@ -417,15 +428,15 @@ impl LpgStore {
 
         #[cfg(feature = "temporal")]
         {
-            self.node_properties.gc(min_epoch);
-            self.edge_properties.gc(min_epoch);
+            dropped += self.node_properties.gc(min_epoch);
+            dropped += self.edge_properties.gc(min_epoch);
             let nodes = std::mem::take(&mut self.gc_candidates.lock().labels);
             let mut still = Vec::new();
             {
                 let mut labels = self.node_labels.write();
                 for id in nodes {
                     if let Some(log) = labels.get_mut(&id) {
-                        log.gc(min_epoch);
+                        dropped += log.gc(min_epoch);
                         if log.is_empty() {
                             labels.remove(&id);
                         } else if log.len() > 1 {
@@ -439,6 +450,7 @@ impl LpgStore {
 
         #[cfg(not(any(feature = "temporal", feature = "tiered-storage")))]
         let _ = min_epoch;
+        dropped
     }
 
     /// Appends a node's new label set to its label log, noting the node for

@@ -14,6 +14,9 @@ pub mod csr;
 /// Container section serialization for the layered overlay deletion log.
 #[cfg(feature = "lpg")]
 pub mod deletions_section;
+/// Folds the compacted base of a database file into its LPG store.
+#[cfg(feature = "lpg")]
+pub mod fold;
 mod graph_store_impl;
 /// Node/edge ID encoding and decoding helpers.
 pub mod id;

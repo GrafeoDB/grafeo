@@ -75,7 +75,7 @@ impl ChunkCaps {
 /// The identities a section has used so far (see [`ChunkMeta::identity`]).
 #[derive(Debug, Default)]
 pub struct ChunkIdentities {
-    seen: FxHashSet<(u8, u32, u32, u64)>,
+    seen: FxHashSet<(u8, u8, u32, u32, u64)>,
 }
 
 impl ChunkIdentities {
@@ -84,16 +84,16 @@ impl ChunkIdentities {
     /// # Errors
     ///
     /// Returns [`Error::Serialization`] "section {type:?}: two chunks of kind
-    /// {kind:?} for graph {g}, column {c}, first row {r}" when the identity
-    /// was recorded before.
+    /// {kind:?} in namespace {namespace:?} for graph {g}, column {c}, first
+    /// row {r}" when the identity was recorded before.
     pub fn insert(&mut self, section_type: SectionType, meta: &ChunkMeta) -> Result<()> {
         if self.seen.insert(meta.identity()) {
             Ok(())
         } else {
             Err(Error::Serialization(format!(
-                "section {section_type:?}: two chunks of kind {:?} for graph {}, column {}, \
-                 first row {}",
-                meta.kind, meta.graph_id, meta.column_id, meta.row_start
+                "section {section_type:?}: two chunks of kind {:?} in namespace {:?} for graph \
+                 {}, column {}, first row {}",
+                meta.kind, meta.namespace, meta.graph_id, meta.column_id, meta.row_start
             )))
         }
     }

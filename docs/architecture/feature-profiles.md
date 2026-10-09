@@ -212,7 +212,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 | `spill` | (storage) | Out-of-core disk spilling | Implemented |
 | `mmap` | (storage) | Memory-mapped file storage | Implemented |
 | `async-storage` | Enterprise | Async WAL backend (tokio) | Implemented |
-| `compact-store` | (standalone); in the bindings' `embedded` and in WASM `edge` | Columnar store for read-mostly datasets | Implemented |
+| `compact-store` | (standalone); in the bindings' `embedded` and in WASM `edge` | Reads databases compacted by 0.5.44 or older | Implemented |
 
 ### Graph Model
 

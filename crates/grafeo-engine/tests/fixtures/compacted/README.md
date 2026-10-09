@@ -2,7 +2,8 @@
 
 `tests/compacted_file_without_compact_store.rs` opens these: a build without the `compact-store` feature must
 refuse such a file (a read-write open, a read-only open and `open_in_memory`) and leave it as it is, never serve
-or checkpoint the overlay alone. Each directory holds one database, `people.grafeo`:
+or checkpoint the overlay alone; a build with it folds the base into the store as it opens the file. Each
+directory holds one database, `people.grafeo`:
 
 - `0.6.0-dev/`: written by a 0.6 development build (on commit `1c75897f` with the 0.6.0 work in progress on top,
   a 0.6 file).
@@ -21,10 +22,5 @@ So the file holds the base (`CompactStore` section), the deletion log (`OverlayD
 section with Alix and Mia), and a build that reads all of it finds Alix (in Paris), Mia and Vincent, and no edges;
 the overlay alone has no Vincent.
 
-Write it again (after a change of the file format, which `the_fixture_is_a_compacted_database` reports) with the
-test that runs these steps:
-
-```bash
-GRAFEO_WRITE_COMPACTED_FIXTURE=$PWD/crates/grafeo-engine/tests/fixtures/compacted/0.6.0-dev/people.grafeo \
-  cargo test -p grafeo-engine --all-features --test compacted_file_without_compact_store write_the_fixture
-```
+No build writes such a file any more (`compact()` no longer builds a compacted base), so the fixture cannot be
+written again: it stays as it is until 0.7.0 drops the compacted sections.

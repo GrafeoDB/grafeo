@@ -1,10 +1,8 @@
 //! `compact()` keeps the indexes made before it.
 //!
-//! `compact()` moves the default graph's data into a columnar base under an
-//! overlay that takes every later write. The property, text and vector
-//! indexes defined before it (through the API or through DDL, a vector index
-//! with its whole configuration) stay: they find the compacted nodes and the
-//! nodes written after `compact()`, across a merge of the overlay,
+//! The property, text and vector indexes defined before it (through the API
+//! or through DDL, a vector index with its whole configuration) stay: they
+//! find the nodes written before and after `compact()`, across
 //! `recompact()`, another `compact()`, a checkpoint and a reopen. The indexes
 //! of named graphs stay too, and so do the constraints that read an index (a
 //! vector index fixes the size of its vectors, UNIQUE looks a value up in a
@@ -340,36 +338,22 @@ fn constraints_that_read_an_index_hold_after_compact() {
     assert_eq!(named(&db, "Jules"), Vec::<String>::new());
 }
 
-/// Asks the overlay's memory consumer to merge the overlay into the base, as
-/// memory pressure does, and checks that it did.
-fn merge_under_pressure(db: &GrafeoDB) {
-    let layered = db.layered_store().expect("the database is compacted");
-    assert!(
-        layered.overlay_mutation_count() > 0,
-        "the overlay holds changes to merge"
-    );
-    db.buffer_manager()
-        .spill_consumer_by_name("overlay:LpgStore");
-    assert_eq!(layered.overlay_mutation_count(), 0, "the overlay is merged");
-}
-
-/// The indexes stay across a merge, `recompact()` and a second `compact()`,
-/// which leaves Gus, deleted before it, out of the base and out of the text
-/// and vector indexes.
+/// The indexes stay across writes after `compact()`, `recompact()` and a
+/// second `compact()`, and Gus, deleted before it, leaves the text and
+/// vector indexes.
 #[test]
-fn indexes_stay_across_a_merge_recompact_and_another_compact() {
+fn indexes_stay_across_recompact_and_another_compact() {
     let mut db = people();
     index_through_the_api(&db);
     db.compact().unwrap();
     db.execute(VINCENT).unwrap();
 
-    merge_under_pressure(&db);
     let everyone = ["Alix", "Vincent", "Mia", "Gus"];
-    assert_person_indexes(&db, &everyone, &["Alix", "Vincent"], "after a merge");
+    assert_person_indexes(&db, &everyone, &["Alix", "Vincent"], "after a write");
 
     db.execute("MATCH (m:Person {name: 'Mia'}) SET m.bio = 'canals of Paris'")
         .unwrap();
-    db.recompact().unwrap();
+    db.compact().unwrap();
     assert_person_indexes(
         &db,
         &everyone,

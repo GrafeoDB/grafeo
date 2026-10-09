@@ -569,8 +569,8 @@ fn point_in_time_reads_survive_a_reopen() {
 /// store with a named graph and (with `temporal`) property history, RDF
 /// triples in the default and a named graph with non-ASCII literals and
 /// their ring, a vector and a text index, a constraint in the catalog, and a
-/// compacted base with a deletion in the overlay. It reopens with all of it,
-/// and once more after a checkpoint with the default caps.
+/// delete after `compact()`. It reopens with all of it, and once more after a
+/// checkpoint with the default caps.
 #[cfg(all(
     feature = "compact-store",
     feature = "sparql",
@@ -619,12 +619,10 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
         )
         .unwrap();
         db.rdf_store().rebuild_ring();
-        // Mia goes into the compacted base, and her deletion into the
-        // overlay's deletions.
+        // Mia is written before `compact()` and deleted after it.
         db.compact().unwrap();
         db.execute("MATCH (p:Person {name: 'Mia'}) DELETE p")
             .unwrap();
-        // `compact()` drops the vector and text indexes: these come after it.
         db.execute(
             "INSERT (:Person {name: 'Vincent', email: 'vincent@example.org', \
              bio: 'jazz in Amsterdam', embedding: vector([3.0, 19.0, 88.0])}), \
@@ -655,8 +653,7 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
         assert_eq!(
             rows(db, "MATCH (p:Person) RETURN p.name ORDER BY p.name"),
             [["Alix"], ["Gus"], ["Jules"], ["Vincent"]].map(|[name]| vec![Value::from(name)]),
-            "{what}: the base holds Alix and Gus (Mia, deleted from it, stays deleted), the \
-             overlay Vincent and Jules"
+            "{what}: Mia, deleted after compact(), stays deleted"
         );
         assert_eq!(
             rows(
@@ -668,7 +665,7 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
                 Value::Int64(1988),
                 Value::from("Gus")
             ]],
-            "{what}: the base's edge"
+            "{what}: the edge"
         );
         assert_eq!(
             db.graph("trips")
@@ -683,8 +680,6 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
             ]],
             "{what}: the named graph"
         );
-        // SPARQL over a compacted database does not see RDF data yet: read
-        // the store.
         let rdf = db.rdf_store();
         let triples: Vec<String> = rdf.triples().iter().map(ToString::to_string).collect();
         assert_eq!(
@@ -757,8 +752,6 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
         "VectorStore",
         "TextIndex",
         "RdfRing",
-        "CompactStore",
-        "OverlayDeletions",
     ] {
         let chunks = counts.get(section).copied().unwrap_or(0);
         // Every section is a metadata chunk and its data (the catalog's
@@ -1337,7 +1330,9 @@ mod moved_chunks {
     use std::sync::Arc;
 
     use grafeo_common::encryption::{KeyChain, PageEncryptor, random_nonce};
-    use grafeo_common::storage::{ChunkKind, SectionType};
+    use grafeo_common::storage::{
+        ChunkKind, ChunkMeta, ChunkNamespace, SectionSource, SectionType,
+    };
     use grafeo_common::testing::chunk_caps::with_chunk_caps;
     use grafeo_common::types::Value;
     use grafeo_engine::config::EncryptionConfig;
@@ -1533,8 +1528,8 @@ mod moved_chunks {
 
     /// A chunk of an encrypted file moved to another chunk's place, with the
     /// checksum that place's directory entry then holds, fails to decrypt:
-    /// its associated data binds it to the section, kind, graph, column and
-    /// first row it was written for, so it never gives its rows to another
+    /// its associated data binds it to the section, kind, namespace, graph,
+    /// column and first row it was written for, so it never gives its rows to another
     /// place. (Only a writer holding the key can change the directory this
     /// way.)
     #[test]
@@ -1582,5 +1577,61 @@ mod moved_chunks {
                 && error.contains("decryption failed"),
             "{error}"
         );
+    }
+
+    /// The namespace is part of a chunk's associated data: a node property
+    /// chunk whose directory entry is rewritten into the edge property
+    /// namespace (same offset, checksum, graph, column and rows) fails to
+    /// decrypt, so a chunk never passes for one of another namespace whose
+    /// column id is the same. (Only a writer holding the key can change the
+    /// directory this way.)
+    #[test]
+    fn a_chunk_moved_to_another_namespace_fails_to_decrypt() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = Arc::new(KeyChain::new([19; 32]));
+        let path = dir.path().join("secret.grafeo");
+        write_thirty_people(with_key(Config::persistent(&path), &chain));
+        let cipher = container_cipher(&path, &chain);
+        let (slot, header, entries, runs) = active_image(&path, Some(&cipher));
+        let node = *entries
+            .iter()
+            .find(|entry| {
+                entry.section_type == SectionType::LpgStore
+                    && entry.meta.kind == ChunkKind::Column
+                    && entry.meta.namespace == ChunkNamespace::NodeProperties
+            })
+            .expect("a node property chunk");
+        // Fetches the LPG chunk `meta` describes through the active directory.
+        let fetch = |meta: ChunkMeta| {
+            let mut file = std::fs::File::open(&path).unwrap();
+            let root = active_image(&path, Some(&cipher)).1.root;
+            let reader = ImageReader::open(&mut file, root, Some(&cipher)).unwrap();
+            let section = reader.section(SectionType::LpgStore).unwrap();
+            let index = section
+                .chunks()
+                .iter()
+                .position(|chunk| *chunk == meta)
+                .expect("the chunk is listed");
+            section.fetch(index).map(|_| ())
+        };
+        fetch(node.meta).expect("the chunk decrypts in its own namespace");
+
+        let edge_meta = node.meta.in_namespace(ChunkNamespace::EdgeProperties);
+        let moved: Vec<DirectoryEntry> = entries
+            .iter()
+            .map(|entry| {
+                if *entry == node {
+                    DirectoryEntry {
+                        meta: edge_meta,
+                        ..*entry
+                    }
+                } else {
+                    *entry
+                }
+            })
+            .collect();
+        rewrite_directory(&path, &cipher, (slot, &header), &moved, &runs);
+        let error = fetch(edge_meta).unwrap_err().to_string();
+        assert!(error.contains("decryption failed"), "{error}");
     }
 }

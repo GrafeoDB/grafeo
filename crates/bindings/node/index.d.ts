@@ -214,17 +214,14 @@ export declare class GrafeoDB {
    */
   hybridSearch(label: string, textProperty: string, vectorProperty: string, queryText: string, k: number, queryVector?: Array<number> | undefined | null, fusion?: string | undefined | null, weights?: Array<number> | undefined | null): Promise<Array<Array<number>>>
   /**
-   * Converts the default graph to a columnar CompactStore for faster queries.
-   *
-   * Builds a columnar store with CSR adjacency from all nodes and edges and
-   * drops the original store to free memory. The database stays writable
-   * unless opened read-only (`openReadOnly()`, where writes still throw):
-   * later writes go to an overlay on top of the columnar base, which is
-   * merged into the base under memory pressure or by calling `compact()`
-   * again. Named graphs and the property, text and vector indexes stay.
-   * Throws while a transaction is open (commit or roll it back first).
+   * Compacts the database: writes a checkpoint of a persistent database
+   * and drops the old versions no open transaction can see any more.
+   * Returns what it did: `{checkpointed, versions_collected, duration_ms}`.
+   * The database keeps one store (`compact()` no longer builds a separate
+   * columnar one), and every write after it is logged as before. Throws if
+   * the checkpoint fails, or after `close()`.
    */
-  compact(): void
+  compact(): any
   /** Enable CDC for all future sessions. */
   enableCdc(): void
   /** Disable CDC for all future sessions. */

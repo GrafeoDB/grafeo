@@ -36,8 +36,6 @@ impl Session {
         let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         Self {
             store,
-            #[cfg(feature = "compact-store")]
-            layers: None,
             lpg_backend: super::LpgBackend::Active,
             graph_store,
             graph_store_mut,

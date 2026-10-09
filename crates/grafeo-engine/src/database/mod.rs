@@ -29,8 +29,6 @@ pub(crate) mod catalog_section;
 pub(crate) mod cdc_store;
 #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
 mod checkpoint_timer;
-#[cfg(all(feature = "compact-store", feature = "mmap"))]
-pub mod compact_tiered;
 #[cfg(feature = "lpg")]
 mod crud;
 #[cfg(feature = "lpg")]
@@ -140,9 +138,8 @@ use crate::transaction::TransactionManager;
 pub struct GrafeoDB {
     /// Database configuration.
     pub(super) config: Config,
-    /// The underlying graph store (None when using an external store, and
-    /// after `compact()`, when the layered store holds it as its overlay,
-    /// which a merge replaces). Read it through `root_store` or `lpg_store`.
+    /// The underlying graph store (None when using an external store). Read
+    /// it through `root_store` or `lpg_store`.
     #[cfg(feature = "lpg")]
     pub(super) store: Option<Arc<LpgStore>>,
     /// Schema and metadata catalog shared across sessions.
@@ -222,25 +219,6 @@ pub struct GrafeoDB {
     /// Named graph projections (virtual subgraphs), shared with sessions.
     projections:
         Arc<RwLock<std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>>>,
-    /// Layered store (compact base + mutable overlay), set after `compact()`.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    layered_store: Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>>,
-    /// The layered store as every session sees it, set with `layered_store`
-    /// (see [`set_layered_store`](Self::set_layered_store)): sessions read
-    /// and write the default graph through what it holds, so a session
-    /// opened before `compact()` goes on with the compacted store too.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    session_layers: crate::session::LayersSlot,
-    /// Disk-backed tier wrapper for the compact base, set after `compact()`.
-    ///
-    /// Holds the tier of the base for [`CompactStoreConsumer`]: under memory
-    /// pressure the consumer has the wrapper write and map a copy of the
-    /// base, publishes the copy to `layered_store` only while that still
-    /// reads the base it copied (`swap_base_if()`), and then installs the
-    /// copy here. A merge of the overlay replaces the base; the consumer
-    /// brings the wrapper in line with it first.
-    #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
-    compact_tiered: Option<Arc<compact_tiered::CompactStoreTiered>>,
 }
 
 impl GrafeoDB {
@@ -259,46 +237,14 @@ impl GrafeoDB {
         )
     }
 
-    /// The built-in LPG store, or `None` with an external store: after
-    /// [`compact()`](Self::compact) the layered store's overlay as it is
-    /// now, since a merge under memory pressure replaces it (between
-    /// transactions), and the database goes on with the new one.
+    /// The built-in LPG store, or `None` with an external store.
     #[cfg(feature = "lpg")]
     fn root_store(&self) -> Option<Arc<LpgStore>> {
-        #[cfg(feature = "compact-store")]
-        if let Some(layered) = &self.layered_store {
-            return Some(layered.overlay_store());
-        }
         self.store.clone()
     }
 
-    /// Lets the layered store, set up just before, hold the built-in store
-    /// alone (as its overlay): `store` and the LPG section's memory consumer
-    /// let go of the store they held. A merge replaces the overlay, and the
-    /// old one is freed once nothing holds it; the overlay's memory consumer
-    /// reports the overlay from then on.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    fn hand_store_to_layers(&mut self) {
-        self.store = None;
-        self.buffer_manager.unregister_consumer("section:LpgStore");
-    }
-
-    /// Makes `layered` the database's store, for the database and for every
-    /// session, also those opened before (see `session_layers`).
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    fn set_layered_store(
-        &mut self,
-        layered: Arc<grafeo_core::graph::compact::layered::LayeredStore>,
-    ) {
-        *self.session_layers.write() = Some(Arc::clone(&layered));
-        self.layered_store = Some(layered);
-    }
-
-    /// Returns a borrowed reference to the active graph store.
-    ///
-    /// In layered mode (after [`compact()`](Self::compact)), returns the
-    /// `LayeredStore` which merges the columnar base with the overlay.
-    /// Otherwise, returns the built-in `LpgStore`.
+    /// Returns a borrowed reference to the active graph store: the external
+    /// store, or else the built-in `LpgStore`.
     ///
     /// Unlike [`graph_store()`](Self::graph_store) (which clones an `Arc`),
     /// this borrows from `self`, suitable for constructing accessors that
@@ -308,8 +254,6 @@ impl GrafeoDB {
         if let Some(ref ext_read) = self.external_read_store {
             ext_read.as_ref()
         } else {
-            // Not compacted (a compacted database reads the layered store
-            // above), so the built-in store is `store` itself.
             #[cfg(feature = "lpg")]
             {
                 &**self
@@ -559,8 +503,8 @@ impl GrafeoDB {
             ));
         }
 
-        // What loading a v2 section file leaves for the built database: a
-        // compacted base to wire under its overlay, and indexes to build.
+        // What loading a v2 section file leaves for the built database: the
+        // indexes to build.
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
         let mut loaded_sections = sections::LoadedSections::default();
 
@@ -972,22 +916,15 @@ impl GrafeoDB {
             #[cfg(any(feature = "wal", feature = "cdc"))]
             implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            #[cfg(all(feature = "compact-store", feature = "lpg"))]
-            layered_store: None,
-            #[cfg(all(feature = "compact-store", feature = "lpg"))]
-            session_layers: crate::session::LayersSlot::default(),
-            #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
-            compact_tiered: None,
         };
 
         // Register storage sections as memory consumers for pressure tracking
         db.register_section_consumers();
 
-        // A previously compacted file gets its layered store back, and the
-        // indexes its sections did not hold are built from all the data,
+        // The indexes the sections did not hold are built from all the data,
         // now that WAL recovery is done.
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        db.finish_load(loaded_sections)?;
+        db.finish_load(loaded_sections);
 
         // With `wal_enabled` off, no WAL of this handle marks or trims the
         // sidecar WAL it replayed: left in place, a crash after a later
@@ -1018,8 +955,7 @@ impl GrafeoDB {
             reads_a_0_5_database,
         )?;
 
-        // Start periodic checkpoint timer if configured (after the layered
-        // store is wired, so its checkpoints include the compacted base)
+        // Start periodic checkpoint timer if configured.
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
         db.start_checkpoint_timer();
 
@@ -1138,12 +1074,6 @@ impl GrafeoDB {
             #[cfg(any(feature = "wal", feature = "cdc"))]
             implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            #[cfg(all(feature = "compact-store", feature = "lpg"))]
-            layered_store: None,
-            #[cfg(all(feature = "compact-store", feature = "lpg"))]
-            session_layers: crate::session::LayersSlot::default(),
-            #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
-            compact_tiered: None,
         })
     }
 
@@ -1242,232 +1172,48 @@ impl GrafeoDB {
             #[cfg(any(feature = "wal", feature = "cdc"))]
             implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            #[cfg(all(feature = "compact-store", feature = "lpg"))]
-            layered_store: None,
-            #[cfg(all(feature = "compact-store", feature = "lpg"))]
-            session_layers: crate::session::LayersSlot::default(),
-            #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
-            compact_tiered: None,
         })
     }
 
-    /// Compacts the database into a two-layer store: columnar base + mutable overlay.
+    /// Compacts the database: writes a checkpoint of a persistent database
+    /// (as [`wal_checkpoint()`](Self::wal_checkpoint) does), drops the old
+    /// versions no open transaction can see any more, in every graph (as
+    /// [`gc()`](Self::gc) does), and reports what it did. An in-memory or
+    /// read-only database writes no checkpoint.
     ///
-    /// Takes a snapshot of all nodes and edges from the current store, builds
-    /// a columnar `CompactStore` with CSR adjacency as the read-only base,
-    /// and creates an empty `LpgStore` overlay for future mutations, which
-    /// keeps the named graphs and the indexes (property, text and vector,
-    /// with their configuration): they find the compacted nodes and those
-    /// written later. The original store is dropped to free memory.
-    ///
-    /// Unlike the pre-0.5.39 behavior, the database remains writable after
-    /// compaction: new writes go to the overlay. One opened read-only
-    /// (`open_read_only`) stays read-only: writes still fail. Call
-    /// [`recompact()`](Self::recompact) to merge the overlay back into the
-    /// columnar base periodically.
-    ///
-    /// Compaction keeps no version history: point-in-time reads
-    /// ([`get_node_at_epoch`](Self::get_node_at_epoch), `execute_at_epoch`) see
-    /// the compacted nodes and edges at every epoch.
-    ///
-    /// Sessions opened before go on with the compacted store, from their
-    /// next statement on.
+    /// The database keeps its one store throughout: writes after `compact()`
+    /// go through the same path, and to the WAL, as before it, and open
+    /// transactions keep their snapshots and their changes.
     ///
     /// # Errors
     ///
-    /// Returns an error while a transaction is open (the compacted base keeps
-    /// no versions, so its snapshot and its changes would not survive), if
-    /// the conversion fails (e.g. more than 32,767 distinct labels or edge
-    /// types), after a commit that did not complete (see
-    /// [`TransactionManager`]), and the database-closed error after `close()`
-    /// of a persistent database.
-    ///
-    /// [`CompactStore`]: grafeo_core::graph::compact::CompactStore
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    pub fn compact(&mut self) -> Result<()> {
-        self.with_checkpoint_timer_paused(Self::compact_into_layers)
+    /// The errors of [`wal_checkpoint()`](Self::wal_checkpoint): a failed
+    /// checkpoint, a commit that did not complete, and the database-closed
+    /// error after `close()` of a persistent database. No version is dropped
+    /// when the checkpoint fails.
+    pub fn compact(&mut self) -> Result<crate::admin::CompactReport> {
+        let started = std::time::Instant::now();
+        #[cfg(feature = "lpg")]
+        let checkpointed = self.checkpoint_now()?;
+        // A build without the LPG model has no checkpoint of its own to write.
+        #[cfg(not(feature = "lpg"))]
+        let checkpointed = false;
+        let versions_collected = u64::try_from(self.collect_garbage()).unwrap_or(u64::MAX);
+        Ok(crate::admin::CompactReport {
+            checkpointed,
+            versions_collected,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        })
     }
 
-    /// Runs `change`, which replaces the store, with the periodic checkpoint
-    /// timer stopped (a checkpoint running meanwhile would write the old
-    /// store), then restarts the timer on the new state, also when `change`
-    /// fails. Fails at once after `close()` (see [`hold_open`](Self::hold_open)).
-    /// `change` runs with commits held off (see
-    /// [`TransactionManager::hold_commits`]), taken once the timer is
-    /// stopped: the new store holds every commit whole, and nothing runs
-    /// after a commit that did not complete (the new store would be built
-    /// from its stamped part). Under that hold the closed state is checked
-    /// again (see [`TransactionManager::check_open`]), as every change
-    /// outside a commit does.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    fn with_checkpoint_timer_paused(&mut self, change: fn(&mut Self) -> Result<()>) -> Result<()> {
-        // After `close()` no timer may run against the released file. The
-        // receiver is exclusive, so no `close()` of this handle starts
-        // meanwhile; should one ever run in between, the check under the
-        // commit guard below still refuses the change.
-        drop(self.hold_open()?);
-        #[cfg(feature = "grafeo-file")]
-        self.stop_checkpoint_timer();
-        let transaction_manager = Arc::clone(&self.transaction_manager);
-        let result = transaction_manager.hold_commits().and_then(|_commits| {
-            transaction_manager.check_open()?;
-            change(self)
-        });
-        // After a commit that did not complete the timer could never write.
-        #[cfg(feature = "grafeo-file")]
-        if !transaction_manager.has_incomplete_commit() {
-            self.start_checkpoint_timer();
-        }
-        result
-    }
-
-    /// [`compact()`](Self::compact) without the checkpoint timer handling.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    fn compact_into_layers(&mut self) -> Result<()> {
-        use grafeo_core::graph::compact::from_graph_store_preserving_ids;
-        use grafeo_core::graph::compact::layered::LayeredStore;
-
-        // Commits are held off, so no transaction begins or ends meanwhile.
-        // An open one began on the store this replaces: its writes would land
-        // in the old store, and its snapshot is not in the new base.
-        if self.transaction_manager.active_count() > 0 {
-            return Err(Error::Transaction(
-                grafeo_common::utils::error::TransactionError::InvalidState(
-                    "compact() cannot run while a transaction is open".to_string(),
-                ),
-            ));
-        }
-
-        let current_store = self.graph_store();
-        let compact = from_graph_store_preserving_ids(current_store.as_ref())
-            .map_err(|e| Error::Internal(e.to_string()))?;
-
-        let layered = match self.root_store() {
-            // The overlay carries on the built-in store (or the overlay an
-            // earlier compact() left), as a merge's carries on the old
-            // overlay: its named graphs, which stay outside the columnar
-            // base, its id allocators, and its indexes, whose text and
-            // vector entries cover the base.
-            Some(store) => LayeredStore::carrying_on(compact, &store),
-            // An external store has none of that: the overlay's ids start
-            // past its data.
-            None => {
-                let max_node_id = current_store.node_ids().last().map_or(0, |id| id.as_u64());
-                let mut max_edge_id = 0u64;
-                for nid in current_store.node_ids() {
-                    for (_, eid) in
-                        current_store.edges_from(nid, grafeo_core::graph::Direction::Outgoing)
-                    {
-                        max_edge_id = max_edge_id.max(eid.as_u64());
-                    }
-                }
-                LayeredStore::new(compact, max_node_id, max_edge_id)
-            }
-        }
-        .map_err(|e| Error::Internal(e.to_string()))?;
-        let layered = Arc::new(layered);
-
-        // Sync the overlay's epoch with the TransactionManager so MVCC
-        // visibility works correctly for nodes created after compact().
-        let current_epoch = self.transaction_manager.current_epoch();
-        layered.overlay_store().sync_epoch(current_epoch);
-
-        self.external_read_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreSearch>);
-        self.external_write_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreMut>);
-        self.hand_store_to_layers();
-
-        // Install the disk-backed tier wrapper and register its memory
-        // consumer so the BufferManager can spill the base to mmap under
-        // memory pressure.
-        #[cfg(feature = "mmap")]
-        {
-            let tiered = Arc::new(compact_tiered::CompactStoreTiered::new_in_memory(
-                layered.base_store_arc(),
-            ));
-            let spill_path = self.buffer_manager.config().spill_path.clone();
-            let consumer = Arc::new(section_consumer::CompactStoreConsumer::new(
-                &tiered, &layered, spill_path,
-            ));
-            self.buffer_manager.register_consumer(consumer);
-            self.compact_tiered = Some(tiered);
-        }
-
-        // Phase 5c: register the overlay consumer so growing-overlay
-        // pressure triggers an automatic merge-into-base.
-        let overlay_consumer = Arc::new(section_consumer::OverlayConsumer::new(
-            &layered,
-            &self.transaction_manager,
-        ));
-        self.buffer_manager.register_consumer(overlay_consumer);
-
-        self.set_layered_store(layered);
-        // A database opened read-only stays read-only; an external read-only
-        // store becomes an owned copy that takes writes.
-        self.read_only = self.config.access_mode == crate::config::AccessMode::ReadOnly;
-        self.query_cache = Arc::new(QueryCache::default());
-        self.projections.write().clear();
-
-        Ok(())
-    }
-
-    /// Merges the overlay back into the columnar base.
-    ///
-    /// Reads the combined view (base + overlay) into a fresh `CompactStore`,
-    /// which becomes the base under an empty overlay that carries on the old
-    /// one (named graphs, indexes), as a merge under memory pressure does.
-    /// Sessions opened before go on with the new overlay.
+    /// Compacts the database: the same as [`compact()`](Self::compact).
     ///
     /// # Errors
     ///
-    /// Returns an error if the database was not previously compacted, while
-    /// a transaction is open (the base has no versions, so the merge would
-    /// make its changes everyone's or lose them, and change its snapshot),
-    /// if the merge fails, after a commit that did not complete, and the
-    /// database-closed error after `close()` of a persistent database.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    pub fn recompact(&mut self) -> Result<()> {
-        self.with_checkpoint_timer_paused(Self::merge_overlay_into_base)
-    }
-
-    /// [`recompact()`](Self::recompact) without the checkpoint timer handling.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    fn merge_overlay_into_base(&mut self) -> Result<()> {
-        let layered = Arc::clone(
-            self.layered_store
-                .as_ref()
-                .ok_or_else(|| Error::Internal("recompact() requires a prior compact()".into()))?,
-        );
-        // Commits are held off, so no transaction begins or ends meanwhile.
-        if self.transaction_manager.active_count() > 0 {
-            return Err(Error::Transaction(
-                grafeo_common::utils::error::TransactionError::InvalidState(
-                    "recompact() cannot run while a transaction is open".to_string(),
-                ),
-            ));
-        }
-        // The layered store stays, so its sessions, its overlay consumer and
-        // the database follow the new overlay.
-        layered.merge_overlay_in_place().map_err(Error::Internal)?;
-
-        // A fresh tier wrapper for the merged base.
-        #[cfg(feature = "mmap")]
-        {
-            self.buffer_manager
-                .unregister_consumer("section:CompactStore");
-            let tiered = Arc::new(compact_tiered::CompactStoreTiered::new_in_memory(
-                layered.base_store_arc(),
-            ));
-            let spill_path = self.buffer_manager.config().spill_path.clone();
-            let consumer = Arc::new(section_consumer::CompactStoreConsumer::new(
-                &tiered, &layered, spill_path,
-            ));
-            self.buffer_manager.register_consumer(consumer);
-            self.compact_tiered = Some(tiered);
-        }
-
-        self.query_cache = Arc::new(QueryCache::default());
-
-        Ok(())
+    /// The errors of [`compact()`](Self::compact).
+    #[deprecated(since = "0.6.0", note = "use `compact()`, which this calls")]
+    pub fn recompact(&mut self) -> Result<crate::admin::CompactReport> {
+        self.compact()
     }
 
     /// Whether replaying `records` leaves the graph cursor on a named graph.
@@ -1947,80 +1693,6 @@ impl GrafeoDB {
         )
     }
 
-    /// Post-load LayeredStore wiring.
-    ///
-    /// After `sections::load_sections` has populated `self.store` (the
-    /// LpgStore, which now holds the overlay data) and produced the base,
-    /// this rebuilds the same engine state that `compact()` establishes:
-    ///
-    /// - `self.layered_store = Some(LayeredStore { base, overlay = self.store })`
-    /// - `self.external_read_store / external_write_store = Arc::clone(layered)`
-    /// - `self.store` handed to the layered store (see `hand_store_to_layers`)
-    /// - Tier wrapper installed and `CompactStoreConsumer` + `OverlayConsumer`
-    ///   registered with the BufferManager
-    #[cfg(all(feature = "lpg", feature = "compact-store"))]
-    fn wire_layered_after_load(
-        &mut self,
-        compact_base: Arc<grafeo_core::graph::compact::CompactStore>,
-        deletion_log: Option<(
-            Vec<grafeo_common::types::NodeId>,
-            Vec<grafeo_common::types::EdgeId>,
-        )>,
-    ) -> Result<()> {
-        use grafeo_core::graph::compact::layered::LayeredStore;
-
-        let overlay_store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| Error::Internal("wire_layered_after_load: no LpgStore".into()))?;
-
-        // Adopt the loaded base + the loaded overlay (id allocator state
-        // is preserved on the overlay during deserialization).
-        let layered = Arc::new(LayeredStore::with_overlay(
-            Arc::clone(&compact_base),
-            Arc::clone(overlay_store),
-        ));
-
-        // Restore base-entity tombstones from the persisted deletion log,
-        // if the file carried one. Without this, base nodes/edges deleted
-        // by the previous session silently reappear after reload.
-        if let Some((nodes, edges)) = deletion_log {
-            layered.seed_deleted_from_base(nodes, edges);
-        }
-
-        // Sync overlay epoch with the transaction manager.
-        let current_epoch = self.transaction_manager.current_epoch();
-        layered.overlay_store().sync_epoch(current_epoch);
-
-        self.external_read_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreSearch>);
-        self.external_write_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreMut>);
-        self.hand_store_to_layers();
-
-        // Install the tier wrapper + consumers (mirror of compact()'s flow).
-        #[cfg(feature = "mmap")]
-        {
-            let tiered = Arc::new(compact_tiered::CompactStoreTiered::new_in_memory(
-                layered.base_store_arc(),
-            ));
-            let spill_path = self.buffer_manager.config().spill_path.clone();
-            let consumer = Arc::new(section_consumer::CompactStoreConsumer::new(
-                &tiered, &layered, spill_path,
-            ));
-            self.buffer_manager.register_consumer(consumer);
-            self.compact_tiered = Some(tiered);
-        }
-
-        let overlay_consumer = Arc::new(section_consumer::OverlayConsumer::new(
-            &layered,
-            &self.transaction_manager,
-        ));
-        self.buffer_manager.register_consumer(overlay_consumer);
-
-        self.set_layered_store(layered);
-
-        Ok(())
-    }
-
     // =========================================================================
     // Session & Configuration
     // =========================================================================
@@ -2173,72 +1845,30 @@ impl GrafeoDB {
             projections: Arc::clone(&self.projections),
         };
 
-        // After `compact()` the session keeps the overlay as its internal
-        // store, so MVCC operations (begin, commit, visibility) work, and
-        // reads and writes the layered store (base and overlay) below. It is
-        // wired like any other session: WAL, CDC, RDF store, graph, schema.
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        let layered = self.layered_store.clone();
-        #[cfg(not(all(feature = "compact-store", feature = "lpg")))]
-        let layered: Option<()> = None;
-
-        if layered.is_none()
-            && let Some(ref ext_read) = self.external_read_store
-        {
-            let session = Session::with_external_store(
+        if let Some(ref ext_read) = self.external_read_store {
+            return Session::with_external_store(
                 Arc::clone(ext_read),
                 self.external_write_store.as_ref().map(Arc::clone),
                 session_cfg(),
             )
             .expect("arena allocation for external store session");
-            // A `compact()` makes the external store an owned, compacted one,
-            // which the session then reads and writes.
-            #[cfg(all(feature = "compact-store", feature = "lpg"))]
-            let session = {
-                let mut session = session;
-                session.follow_layers(Arc::clone(&self.session_layers));
-                session
-            };
-            return session;
         }
 
-        // A compacted database's session reads its store, the layered
-        // store's overlay, through the layered store (`use_layered_store`
-        // below), so a merge that replaces the overlay finds it holding none:
-        // its own store is an empty placeholder.
-        #[cfg(feature = "lpg")]
-        let internal_store = match &layered {
-            #[cfg(feature = "compact-store")]
-            Some(_) => Arc::new(
-                LpgStore::new().expect("arena allocation for a compacted session's placeholder"),
-            ),
-            _ => self.lpg_store(),
-        };
         #[cfg(all(feature = "lpg", feature = "triple-store"))]
         let mut session = Session::with_rdf_store_and_adaptive(
-            internal_store,
+            self.lpg_store(),
             Arc::clone(&self.rdf_store),
             session_cfg(),
         );
         #[cfg(all(feature = "lpg", not(feature = "triple-store")))]
-        let mut session = Session::with_adaptive(internal_store, session_cfg());
-        // Every session reads and writes the layered store once the
-        // database is compacted, also one opened before `compact()`.
-        #[cfg(all(feature = "compact-store", feature = "lpg"))]
-        session.follow_layers(Arc::clone(&self.session_layers));
+        let mut session = Session::with_adaptive(self.lpg_store(), session_cfg());
         #[cfg(not(feature = "lpg"))]
         let mut session =
             Session::with_external_store(self.graph_store(), self.graph_store_mut(), session_cfg())
                 .expect("session creation for non-lpg build");
 
         #[cfg(all(feature = "wal", feature = "lpg"))]
-        // The WAL wrapper records writes to the session's own store only: a
-        // compacted database's sessions write the layered store, so queries
-        // there are not logged (direct calls log their own records) until the
-        // WAL comes from the transaction's change set (#448).
-        if let Some(ref wal) = self.wal
-            && layered.is_none()
-        {
+        if let Some(ref wal) = self.wal {
             session.set_wal(Arc::clone(wal));
         }
 
@@ -2421,12 +2051,6 @@ impl GrafeoDB {
     /// For code that only needs read/write graph operations, prefer
     /// [`graph_store()`](Self::graph_store) which returns the trait interface.
     ///
-    /// After [`compact()`](Self::compact) this is the overlay of the layered
-    /// store as it is now, which holds only what changed since the last
-    /// merge into the base ([`graph_store()`](Self::graph_store) reads the
-    /// compacted base with it): a merge under memory pressure replaces it, so
-    /// call this again rather than keeping the store across writes.
-    ///
     /// # Panics
     ///
     /// Panics if the database uses an external store
@@ -2434,10 +2058,7 @@ impl GrafeoDB {
     #[cfg(feature = "lpg")]
     #[must_use]
     pub fn store(&self) -> Arc<LpgStore> {
-        match &self.store {
-            Some(store) => Arc::clone(store),
-            None => self.lpg_store(),
-        }
+        self.lpg_store()
     }
 
     // === Named Graph Management ===
@@ -2469,8 +2090,6 @@ impl GrafeoDB {
         // Tests start a checkpoint or `close()` here, which must wait.
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_held_change();
-        // Resolved under the hold: after `compact()` a merge may replace the
-        // store until then, and the graph belongs in the new one.
         let created = self.lpg_store().create_graph(name)?;
         #[cfg(feature = "wal")]
         if created {
@@ -2661,15 +2280,29 @@ impl GrafeoDB {
     /// Garbage collects old MVCC versions that are no longer visible.
     ///
     /// Determines the minimum epoch required by active transactions and prunes
-    /// version chains older than that threshold. Also cleans up completed
-    /// transaction metadata in the transaction manager, and prunes the CDC
-    /// event log according to its retention policy.
+    /// the versions older than that threshold, in the default graph and every
+    /// named graph. Also cleans up completed transaction metadata in the
+    /// transaction manager, and prunes the CDC event log according to its
+    /// retention policy.
     pub fn gc(&self) {
+        self.collect_garbage();
+    }
+
+    /// What [`gc()`](Self::gc) does; returns how many versions it dropped.
+    fn collect_garbage(&self) -> usize {
         #[cfg(feature = "lpg")]
-        {
+        let versions = self.root_store().map_or(0, |store| {
             let min_epoch = self.transaction_manager.min_active_epoch();
-            self.lpg_store().gc_versions(min_epoch);
-        }
+            let named: usize = store
+                .graph_names()
+                .iter()
+                .filter_map(|name| store.graph(name))
+                .map(|graph| graph.gc_versions(min_epoch))
+                .sum();
+            store.gc_versions(min_epoch) + named
+        });
+        #[cfg(not(feature = "lpg"))]
+        let versions = 0;
         #[cfg(all(feature = "lpg", feature = "cdc"))]
         let current_epoch = self.transaction_manager.current_epoch();
         self.transaction_manager.gc();
@@ -2680,30 +2313,13 @@ impl GrafeoDB {
             #[cfg(feature = "lpg")]
             self.cdc_log.apply_retention(current_epoch);
         }
+        versions
     }
 
     /// Returns the buffer manager for memory-aware operations.
     #[must_use]
     pub fn buffer_manager(&self) -> &Arc<BufferManager> {
         &self.buffer_manager
-    }
-
-    /// Returns the layered store (compact base + mutable overlay), if
-    /// [`compact()`](Self::compact) has been called.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    #[must_use]
-    pub fn layered_store(
-        &self,
-    ) -> Option<&Arc<grafeo_core::graph::compact::layered::LayeredStore>> {
-        self.layered_store.as_ref()
-    }
-
-    /// Returns the disk-backed tier wrapper for the compact base, if
-    /// [`compact()`](Self::compact) has been called and `mmap` is enabled.
-    #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
-    #[must_use]
-    pub fn compact_tiered(&self) -> Option<&Arc<compact_tiered::CompactStoreTiered>> {
-        self.compact_tiered.as_ref()
     }
 
     /// Returns the query cache.
@@ -2805,10 +2421,8 @@ impl GrafeoDB {
             self.transaction_manager.close_for_writes();
         }
 
-        // Stop the periodic checkpoint timer first, even for read-only databases.
-        // compact() can switch a writable DB to read-only after the timer started,
-        // so the timer must be stopped before any early return to avoid racing
-        // with the closed file manager.
+        // Stop the periodic checkpoint timer first, before any early return,
+        // so it does not race with the closed file manager.
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
         if let Some(mut timer) = self.checkpoint_timer.lock().take() {
             timer.stop();
@@ -3186,8 +2800,6 @@ impl GrafeoDB {
         sections::CheckpointSources {
             #[cfg(feature = "lpg")]
             store: self.store.clone(),
-            #[cfg(all(feature = "compact-store", feature = "lpg"))]
-            layered: self.layered_store.clone(),
             #[cfg(feature = "lpg")]
             catalog: Arc::clone(&self.catalog),
             transaction_manager: Arc::clone(&self.transaction_manager),
@@ -3197,13 +2809,12 @@ impl GrafeoDB {
     }
 
     /// Starts the periodic checkpoint timer when one is configured, replacing
-    /// a running one. Its checkpoints must cover the current state, which
-    /// changes shape when the database is compacted.
+    /// a running one.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     fn start_checkpoint_timer(&self) {
         self.stop_checkpoint_timer();
-        // `compact()` clears `read_only`, but a file opened read-only stays
-        // so; a closed database has released its file.
+        // A file opened read-only stays so; a closed database has released
+        // its file.
         if let (Some(interval), Some(fm)) = (self.config.checkpoint_interval, &self.file_manager)
             && !self.read_only
             && !fm.is_read_only()
@@ -3967,9 +3578,91 @@ mod tests {
         db.close().unwrap();
     }
 
-    /// `compact()` makes a database opened read-only writable in memory, but
-    /// its file stays read-only: no checkpoint timer may run against it.
-    #[cfg(all(feature = "compact-store", feature = "grafeo-file", feature = "lpg"))]
+    /// `compact()` reports what it did: an in-memory database writes no
+    /// checkpoint, a persistent one does; a read-only one writes none.
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[test]
+    fn compact_reports_whether_it_checkpointed() {
+        let mut memory = GrafeoDB::new_in_memory();
+        memory.create_node(&["Person"]).unwrap();
+        let report = memory.compact().unwrap();
+        assert!(!report.checkpointed, "no file to write: {report:?}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        let mut db = GrafeoDB::open(&path).unwrap();
+        db.create_node(&["Person"]).unwrap();
+        let report = db.compact().unwrap();
+        assert!(report.checkpointed, "the file is written: {report:?}");
+        db.close().unwrap();
+
+        let mut read_only = GrafeoDB::open_read_only(&path).unwrap();
+        let report = read_only.compact().unwrap();
+        assert!(
+            !report.checkpointed,
+            "a read-only file is left alone: {report:?}"
+        );
+    }
+
+    /// `compact()` drops the old versions of every graph, the named ones
+    /// too, and a second `compact()` finds none left. Only builds that keep
+    /// property history hold old versions.
+    #[cfg(all(feature = "temporal", feature = "lpg"))]
+    #[test]
+    fn compact_collects_old_versions_in_every_graph() {
+        use grafeo_common::types::Value;
+
+        let mut db = GrafeoDB::new_in_memory();
+        let alix = db.create_node(&["Person"]).unwrap();
+        db.create_graph("trips").unwrap();
+        let trips = db.graph("trips").unwrap();
+        trips.execute("INSERT (:City {name: 'Paris'})").unwrap();
+        for age in [30, 31, 32] {
+            db.set_node_property(alix, "age", Value::Int64(age))
+                .unwrap();
+        }
+        for name in ["Prague", "Berlin"] {
+            trips
+                .execute(&format!("MATCH (c:City) SET c.name = '{name}'"))
+                .unwrap();
+        }
+        let after_default_only = {
+            // The default graph alone, as `gc()` collected before 0.6.0.
+            let store = db.lpg_store();
+            store.gc_versions(db.transaction_manager.min_active_epoch())
+        };
+        assert!(after_default_only > 0, "Alix's older ages are collectable");
+
+        let report = db.compact().unwrap();
+        assert!(
+            report.versions_collected > 0,
+            "the named graph's older city names are collected too: {report:?}"
+        );
+        assert_eq!(
+            db.compact().unwrap().versions_collected,
+            0,
+            "nothing is left to collect"
+        );
+        assert_eq!(
+            db.get_node(alix).unwrap().properties.get(&"age".into()),
+            Some(&Value::Int64(32)),
+            "the current value stays"
+        );
+    }
+
+    /// `recompact()` is a deprecated alias of `compact()`.
+    #[test]
+    #[expect(deprecated, reason = "the deprecated alias is what this tests")]
+    fn recompact_is_compact() {
+        let mut db = GrafeoDB::new_in_memory();
+        let report = db.recompact().unwrap();
+        assert!(!report.checkpointed);
+        assert_eq!(report.versions_collected, 0);
+    }
+
+    /// `compact()` of a database opened read-only changes nothing, and no
+    /// checkpoint timer may run against its file.
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     #[test]
     fn compacting_a_read_only_database_starts_no_checkpoint_timer() {
         let dir = tempfile::tempdir().unwrap();
@@ -3989,7 +3682,7 @@ mod tests {
 
     /// `compact()` after `close()` fails and starts no checkpoint timer: its
     /// checkpoints would write a file the database no longer holds.
-    #[cfg(all(feature = "compact-store", feature = "wal", feature = "lpg"))]
+    #[cfg(all(feature = "wal", feature = "lpg"))]
     #[test]
     fn compacting_a_closed_database_starts_no_checkpoint_timer() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,13 +1,10 @@
-//! Sessions opened before `compact()` go on with the compacted store.
+//! Sessions opened before `compact()` go on as before.
 //!
-//! `compact()` replaces the database's store with a compacted base under an
-//! overlay. A session opened before follows it, as one opened after does:
-//! its reads see the compacted data and every write made since, and its
-//! writes land in the overlay, so the database and every other session see
-//! them, its named graphs included, also after a reopen. An open transaction
-//! holds a snapshot of the store it began on, which the compacted base (it
-//! keeps no versions) cannot keep: `compact()` refuses to run while one is
-//! open, as `recompact()` does.
+//! A session opened before `compact()` reads and writes the same store as one
+//! opened after it: its reads see every write made since, and its writes
+//! reach the database and every other session, its named graphs included,
+//! also after a reopen. A transaction open across `compact()` keeps its
+//! changes to itself until it commits.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test compact_open_sessions
@@ -84,7 +81,7 @@ fn a_session_opened_before_compact_writes_the_compacted_store() {
         list(&["Alix", "Gus", "Mia", "Vincent"]),
         "the session sees the writes made after compact()"
     );
-    db.recompact().unwrap();
+    db.compact().unwrap();
     assert_eq!(
         people_in(&session),
         list(&["Alix", "Gus", "Mia", "Vincent"]),
@@ -119,23 +116,21 @@ fn a_transaction_of_a_session_opened_before_compact_commits_in_the_compacted_sto
     assert_eq!(city.rows(), [vec![Value::from("Amsterdam")]]);
 }
 
-/// `compact()` refuses to run while a transaction is open (the compacted
-/// base keeps no versions, so the transaction's snapshot and its changes
-/// would not survive), and leaves the database as it was; once the
-/// transaction commits, it compacts, with the transaction's changes.
+/// `compact()` while a transaction is open leaves the transaction alone:
+/// its changes stay its own until it commits, and then everyone sees them,
+/// also after another `compact()`.
 #[test]
-fn compact_refuses_while_a_transaction_is_open() {
+fn compact_leaves_an_open_transaction_alone() {
     let mut db = with_alix();
     let mut session = db.session();
     session.begin_transaction().unwrap();
     session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
 
-    let compacted = db.compact();
-    assert!(
-        compacted
-            .as_ref()
-            .is_err_and(|error| error.to_string().contains("transaction is open")),
-        "compact() with a transaction open: {compacted:?}"
+    db.compact().unwrap();
+    assert_eq!(
+        people(&db),
+        list(&["Alix"]),
+        "Gus is the open transaction's own"
     );
     session.execute("INSERT (:Person {name: 'Mia'})").unwrap();
     session.commit().unwrap();

@@ -79,8 +79,7 @@
 //!   check. It ignores transaction identity entirely: a version is
 //!   visible if `created_epoch <= viewing_epoch` and it is not deleted
 //!   at or before `viewing_epoch`. Callers: GC ("is any active
-//!   transaction still able to see this?"), epoch-scoped scans, and
-//!   post-commit reads from the layered store.
+//!   transaction still able to see this?") and epoch-scoped scans.
 //!
 //! - **`VersionInfo::is_visible_to(viewing_epoch, viewing_tx)`** layers
 //!   "read your own writes" on top. It first rules out versions the

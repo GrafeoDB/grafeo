@@ -2093,22 +2093,17 @@ pub extern "C" fn grafeo_wal_checkpoint(db: *mut GrafeoDatabase) -> GrafeoStatus
 // CompactStore
 // =========================================================================
 
-/// Converts the default graph to a columnar CompactStore for faster queries.
-///
-/// Builds a columnar store with CSR adjacency from all nodes and edges. A
-/// read-write database stays writable: later writes go to an overlay on top
-/// of the columnar base, which is merged into the base under memory pressure
-/// or by calling `grafeo_compact` again. One opened with
-/// `grafeo_open_read_only` stays read-only: writes still fail. Named graphs
-/// and indexes stay. Fails (an error status) while a transaction is open, or
-/// if the conversion fails.
-#[cfg(feature = "compact-store")]
+/// Compacts the database: writes a checkpoint of a persistent database and
+/// drops the old versions no open transaction can see any more. The database
+/// keeps one store (`grafeo_compact` no longer builds a separate columnar
+/// one), and every write after it is logged as before. Fails (an error
+/// status) if the checkpoint fails, or after the database was closed.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_compact(db: *mut GrafeoDatabase) -> GrafeoStatus {
     let db = db_ref!(db);
     let mut guard = db.inner.write();
     match guard.compact() {
-        Ok(()) => GrafeoStatus::Ok,
+        Ok(_) => GrafeoStatus::Ok,
         Err(e) => set_error(&e),
     }
 }

@@ -4,8 +4,8 @@
 file (a read-write open, a read-only open and `open_in_memory`) and leave it as it is, never serve or checkpoint the
 database without its triples. Each directory holds one database, `triples.grafeo`:
 
-- `0.6.0-dev/`: written by a 0.6 development build (on commit `565a7113` with the 0.6.0 work in progress on top,
-  a 0.6 file).
+- `0.6.0-dev/`: written by a 0.6 development build of format revision 1 (rewritten on 2026-10-09 when the
+  database header got its format revision and chunks their namespaces, a 0.6 file).
 
 The database went through these steps, in a persistent database (`Config::persistent`) of a build with
 `triple-store`, `sparql` and `ring-index`:

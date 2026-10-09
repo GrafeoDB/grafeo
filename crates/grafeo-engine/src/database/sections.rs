@@ -34,13 +34,9 @@ use grafeo_core::graph::lpg::LpgStore;
 /// `to_memory()` copies a database through them.
 #[derive(Clone)]
 pub(super) struct CheckpointSources {
-    /// The LPG store, `None` after `compact()` (see
-    /// [`root_store`](Self::root_store)).
+    /// The LPG store, `None` with an external store.
     #[cfg(feature = "lpg")]
     pub store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
-    /// The compacted base and overlay, after `compact()`.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    pub layered: Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>>,
     #[cfg(feature = "lpg")]
     pub catalog: Arc<crate::catalog::Catalog>,
     pub transaction_manager: Arc<crate::transaction::TransactionManager>,
@@ -49,14 +45,9 @@ pub(super) struct CheckpointSources {
 }
 
 impl CheckpointSources {
-    /// The LPG store: after `compact()` the layered store's overlay as it is
-    /// now (a merge replaces it, never while commits are held).
+    /// The LPG store, `None` with an external store.
     #[cfg(feature = "lpg")]
     pub fn root_store(&self) -> Option<Arc<grafeo_core::graph::lpg::LpgStore>> {
-        #[cfg(feature = "compact-store")]
-        if let Some(layered) = &self.layered {
-            return Some(layered.overlay_store());
-        }
         self.store.clone()
     }
 
@@ -93,24 +84,18 @@ impl CheckpointSources {
                 move || transaction_manager.current_epoch().as_u64(),
             )));
 
-            #[cfg(feature = "compact-store")]
-            let layered = self.push_layered(&mut sections);
-            #[cfg(not(feature = "compact-store"))]
-            let layered = false;
-            if !layered {
-                sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
-                    Arc::clone(store),
-                )));
-            }
+            sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
+                Arc::clone(store),
+            )));
 
             // The vector and text indexes take a transaction's values as it
             // writes them, and keep them until it commits or rolls back. The
             // LPG section writes the committed state; an index section would
             // hold what a transaction still open wrote. So while one is open
-            // in the store whose indexes the sections hold (the overlay after
-            // `compact()`; those of named graphs are always built from the
-            // data), the sections are left out, and the load builds the
-            // indexes from the committed data (see `restore_indexes`).
+            // in the default graph's store, whose indexes the sections hold
+            // (those of named graphs are always built from the data), the
+            // sections are left out, and the load builds the indexes from the
+            // committed data (see `restore_indexes`).
             #[cfg(any(feature = "vector-index", feature = "text-index"))]
             let indexes_committed = !store.has_open_changes();
 
@@ -154,48 +139,11 @@ impl CheckpointSources {
         sections
     }
 
-    /// Adds the compacted base, the overlay and the overlay's deletions, or
-    /// returns `false` when the database is not compacted. A base that
-    /// holds nothing (a restore drops the base) adds nothing: the overlay is
-    /// then written as the plain LPG store, so the database reopens as one.
-    #[cfg(all(feature = "lpg", feature = "compact-store"))]
-    fn push_layered(&self, sections: &mut Vec<Box<dyn Section>>) -> bool {
-        use grafeo_core::graph::GraphStore;
-        use grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection;
-        use grafeo_core::graph::compact::section::CompactStoreSection;
-
-        let Some(layered) = &self.layered else {
-            return false;
-        };
-        let base = layered.base_store_arc();
-        if base.node_count() == 0 && base.edge_count() == 0 {
-            // No tombstone names a base entity either: there is none.
-            sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
-                layered.overlay_store(),
-            )));
-            return true;
-        }
-        sections.push(Box::new(CompactStoreSection::new(base)));
-        sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
-            layered.overlay_store(),
-        )));
-        // Tombstones for base nodes and edges not yet merged into the base:
-        // without them a reopen would bring deleted entities back.
-        let deletions = OverlayDeletionsSection::from_layered(Arc::clone(layered));
-        if deletions.is_empty() {
-            layered.mark_deletions_clean();
-        } else {
-            sections.push(Box::new(deletions));
-        }
-        true
-    }
-
-    /// Whether a transaction still open has changed the LPG store (the
-    /// overlay after `compact()`) or one of its named graphs: the stores
-    /// then hold what it wrote (see [`LpgStore::has_open_changes`]), which a
-    /// copy must leave out. The caller holds commits off (`_commits`), which
-    /// also holds the writes and rollbacks of open transactions, so the
-    /// answer holds until it lets go.
+    /// Whether a transaction still open has changed the LPG store or one of
+    /// its named graphs: the stores then hold what it wrote (see
+    /// [`LpgStore::has_open_changes`]), which a copy must leave out. The
+    /// caller holds commits off (`_commits`), which also holds the writes and
+    /// rollbacks of open transactions, so the answer holds until it lets go.
     #[cfg(feature = "lpg")]
     pub fn has_open_changes(&self, _commits: &CommitsHeld<'_>) -> bool {
         self.root_store().is_some_and(|store| {
@@ -214,8 +162,8 @@ impl CheckpointSources {
     /// its own holding their committed state, as the LPG section writes it
     /// (what open transactions deleted, the values and labels they changed
     /// as committed, nothing they created; see [`LpgStore::committed_copy`],
-    /// which copies it without the section's codec), with the compacted base
-    /// under it. `None` for a database without the built-in LPG store.
+    /// which copies it without the section's codec). `None` for a database
+    /// without the built-in LPG store.
     ///
     /// The committed copy costs as much memory as the committed data; it is
     /// only made while a transaction is open.
@@ -235,29 +183,7 @@ impl CheckpointSources {
         } else {
             Arc::clone(store)
         };
-        #[cfg(feature = "compact-store")]
-        let layered = self.layered.as_ref().map(|layered| {
-            if !open {
-                return Arc::clone(layered);
-            }
-            // The base does not change while compacted; the copy of the
-            // overlay takes the committed tombstones of base entities (a
-            // pending one is the open transaction's).
-            let committed = grafeo_core::graph::compact::layered::LayeredStore::with_overlay(
-                layered.base_store_arc(),
-                Arc::clone(&store),
-            );
-            committed.seed_deleted_from_base(
-                layered.snapshot_deleted_node_ids(),
-                layered.snapshot_deleted_edge_ids(),
-            );
-            Arc::new(committed)
-        });
-        Ok(Some(CommittedLpg {
-            store,
-            #[cfg(feature = "compact-store")]
-            layered,
-        }))
+        Ok(Some(CommittedLpg { store }))
     }
 }
 
@@ -265,11 +191,8 @@ impl CheckpointSources {
 /// [`CheckpointSources::committed`]).
 #[cfg(feature = "lpg")]
 pub(super) struct CommittedLpg {
-    /// The LPG store, the overlay after `compact()`, with its named graphs.
+    /// The LPG store, with its named graphs.
     pub store: Arc<LpgStore>,
-    /// The compacted base with the overlay in `store`, after `compact()`.
-    #[cfg(feature = "compact-store")]
-    pub layered: Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>>,
 }
 
 /// What loading leaves for [`GrafeoDB::finish_load`](super::GrafeoDB) to do
@@ -277,15 +200,6 @@ pub(super) struct CommittedLpg {
 #[cfg(feature = "lpg")]
 #[derive(Default)]
 pub(super) struct LoadedSections {
-    /// The compacted base; the loaded LPG store is its overlay.
-    #[cfg(feature = "compact-store")]
-    compact_base: Option<Arc<grafeo_core::graph::compact::CompactStore>>,
-    /// Base nodes and edges the overlay deleted.
-    #[cfg(feature = "compact-store")]
-    overlay_deletions: Option<(
-        Vec<grafeo_common::types::NodeId>,
-        Vec<grafeo_common::types::EdgeId>,
-    )>,
     /// Vector and text indexes the sections did not hold, built from the
     /// data once the database is built.
     unbuilt: Vec<GraphIndexes>,
@@ -327,14 +241,16 @@ enum HeldIn {
     TextIndexDefinitions,
 }
 
-/// A compacted database (written after `compact()`, also by 0.5.x): its base
-/// and the deletes of base nodes and edges since. Without them the database
-/// is the overlay alone, without every node and edge only the base holds.
+/// A compacted database (written after `compact()` by 0.5.x and 0.6
+/// development builds): its base and the deletes of base nodes and edges
+/// since, which a load folds into the store (see `fold_compacted_base`).
+/// Without them the database is the overlay alone, without every node and
+/// edge only the base holds.
 #[cfg(feature = "lpg")]
 const COMPACTED: FeatureData = FeatureData {
     what: "a compacted database",
     feature: "compact-store",
-    in_build: cfg!(feature = "compact-store"),
+    in_build: cfg!(all(feature = "compact-store", feature = "grafeo-file")),
     held_in: HeldIn::Sections(&[SectionType::CompactStore, SectionType::OverlayDeletions]),
 };
 
@@ -557,7 +473,8 @@ pub(super) fn load_sections(
         refuse_unreadable(image, &indexes, path)?;
     }
 
-    // With a compacted base, this is the overlay.
+    // With a compacted base, this is the overlay, which the base is folded
+    // into below.
     if let Some(source) = image.section_source(SectionType::LpgStore) {
         grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(store)).read_from(&*source)?;
     }
@@ -580,25 +497,60 @@ pub(super) fn load_sections(
         rdf_store.rebuild_ring();
     }
 
-    #[cfg(feature = "compact-store")]
-    {
-        use grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection;
-        use grafeo_core::graph::compact::section::CompactStoreSection;
-
-        if let Some(source) = image.section_source(SectionType::CompactStore) {
-            let mut section = CompactStoreSection::empty();
-            section.read_from(&*source)?;
-            loaded.compact_base = section.store();
-        }
-        if let Some(source) = image.section_source(SectionType::OverlayDeletions) {
-            let mut section = OverlayDeletionsSection::empty();
-            section.read_from(&*source)?;
-            loaded.overlay_deletions = Some(section.take());
-        }
-    }
+    // Before the indexes: they are built from all the data. Only a database
+    // file holds a compacted base: a copy (`to_memory`) never does.
+    #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
+    fold_compacted_base(image, store)?;
 
     loaded.unbuilt = restore_indexes(image, store, indexes)?;
     Ok(loaded)
+}
+
+/// Folds the compacted base of an image written after `compact()` (by 0.5.x
+/// or a 0.6 development build) into `store`, which holds its overlay: every
+/// base node and edge the overlay neither copied nor deleted is created in
+/// it under its id (see
+/// [`fold_into`](grafeo_core::graph::compact::fold::fold_into)).
+/// The database then has one store, and its next checkpoint writes it as a
+/// plain one. Deletes without a base name nothing, and are dropped.
+///
+/// # Errors
+///
+/// Returns an error if a section cannot be read or decoded, or if the base
+/// cannot be folded.
+#[cfg(all(feature = "lpg", feature = "compact-store", feature = "grafeo-file"))]
+fn fold_compacted_base(image: &dyn ImageSource, store: &LpgStore) -> Result<()> {
+    use grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection;
+    use grafeo_core::graph::compact::fold::fold_into;
+    use grafeo_core::graph::compact::section::CompactStoreSection;
+
+    let base = match image.section_source(SectionType::CompactStore) {
+        Some(source) => {
+            let mut section = CompactStoreSection::empty();
+            section.read_from(&*source)?;
+            section.store()
+        }
+        None => None,
+    };
+    let (nodes, edges) = match image.section_source(SectionType::OverlayDeletions) {
+        Some(source) => {
+            let mut section = OverlayDeletionsSection::empty();
+            section.read_from(&*source)?;
+            section.take()
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let Some(base) = base else {
+        return Ok(());
+    };
+    let folded = fold_into(&base, store, &nodes, &edges)?;
+    if folded.dangling_edges > 0 {
+        grafeo_common::grafeo_warn!(
+            "left out {} edges of the compacted base whose endpoint was deleted",
+            folded.dangling_edges
+        );
+    }
+    Ok(())
 }
 
 /// Builds the property indexes of every graph and restores the default
@@ -834,36 +786,12 @@ impl SectionSource for FetchWatch<'_> {
 
 #[cfg(feature = "lpg")]
 impl super::GrafeoDB {
-    /// Finishes a load once the database is built: puts a compacted base
-    /// under its overlay, then builds the indexes the sections did not hold
-    /// from all the data.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the compacted base cannot be wired.
-    #[cfg_attr(
-        not(feature = "compact-store"),
-        expect(
-            clippy::unnecessary_wraps,
-            reason = "only wiring a compacted base can fail"
-        )
-    )]
-    #[cfg_attr(
-        not(feature = "compact-store"),
-        expect(
-            clippy::needless_pass_by_ref_mut,
-            reason = "only wiring a compacted base changes the database"
-        )
-    )]
-    pub(super) fn finish_load(&mut self, loaded: LoadedSections) -> Result<()> {
-        #[cfg(feature = "compact-store")]
-        if let Some(base) = loaded.compact_base {
-            self.wire_layered_after_load(base, loaded.overlay_deletions)?;
-        }
+    /// Finishes a load once the database is built: builds the indexes the
+    /// sections did not hold from all the data.
+    pub(super) fn finish_load(&self, loaded: LoadedSections) {
         for indexes in loaded.unbuilt {
             self.build_indexes(indexes);
         }
-        Ok(())
     }
 
     /// Builds vector and text indexes from the data. One that cannot be
@@ -1101,9 +1029,8 @@ mod tests {
     }
 
     /// A database whose checkpoint holds every kind of section this build
-    /// has: the catalog, the LPG store, a vector and a text index and, with
-    /// the features for them, RDF triples with their ring and a compacted
-    /// base with a deletion.
+    /// writes: the catalog, the LPG store, a vector and a text index and,
+    /// with the features for them, RDF triples with their ring.
     fn every_kind_of_section() -> GrafeoDB {
         let db = GrafeoDB::new_in_memory();
         db.execute(
@@ -1121,14 +1048,6 @@ mod tests {
             #[cfg(feature = "ring-index")]
             db.rdf_store().rebuild_ring();
         }
-        #[cfg(feature = "compact-store")]
-        let db = {
-            let mut db = db;
-            db.compact().unwrap();
-            db.execute("MATCH (c:City {name: 'Berlin'}) DELETE c")
-                .unwrap();
-            db
-        };
         db.execute("INSERT (:Doc {emb: vector([3.0, 19.0]), body: 'Prague'})")
             .unwrap();
         db.create_vector_index("Doc", "emb", None, None, None, None, None)
@@ -1150,8 +1069,6 @@ mod tests {
         types.push(SectionType::RdfStore);
         #[cfg(all(feature = "sparql", feature = "ring-index"))]
         types.push(SectionType::RdfRing);
-        #[cfg(feature = "compact-store")]
-        types.extend([SectionType::CompactStore, SectionType::OverlayDeletions]);
         types.sort_by_key(|section_type| section_type.to_u8());
         types
     }
@@ -1612,33 +1529,143 @@ mod tests {
         );
     }
 
-    /// `to_memory` loads the copy from every section but the LPG store's: a
-    /// compacted base keeps the deletions of its overlay.
-    #[cfg(feature = "compact-store")]
-    #[test]
-    fn to_memory_keeps_the_deletions_of_a_compacted_base() {
-        let mut db = GrafeoDB::new_in_memory();
-        db.execute(
-            "INSERT (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), \
-             (:City {name: 'Paris'})",
-        )
-        .unwrap();
-        db.compact().unwrap();
-        db.execute("MATCH (c:City {name: 'Berlin'}) DELETE c")
-            .unwrap();
+    /// The ids of [`compacted_image`].
+    #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
+    struct CompactedIds {
+        amsterdam: grafeo_common::types::NodeId,
+        berlin: grafeo_common::types::NodeId,
+        paris: grafeo_common::types::NodeId,
+        to_berlin: grafeo_common::types::EdgeId,
+        to_paris: grafeo_common::types::EdgeId,
+    }
 
-        let copy = db.to_memory().unwrap();
-        let names = copy
-            .execute("MATCH (c:City) RETURN c.name ORDER BY c.name")
-            .unwrap();
-        assert_eq!(
-            names.rows(),
-            [
-                [grafeo_common::types::Value::from("Amsterdam")],
-                [grafeo_common::types::Value::from("Paris")]
-            ],
-            "Berlin, deleted from the compacted base, stays deleted in the copy"
+    /// The image of a database file `compact()` wrote: Amsterdam, Berlin and
+    /// Paris with a route from Amsterdam to each in the base; since then
+    /// Berlin and its route deleted, Amsterdam changed (its copy in the
+    /// overlay) and Prague created, with a route from Paris.
+    #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
+    fn compacted_image() -> (MemoryImage, CompactedIds) {
+        use grafeo_common::types::Value;
+        use grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection;
+        use grafeo_core::graph::compact::from_graph_store_preserving_ids;
+        use grafeo_core::graph::compact::section::CompactStoreSection;
+
+        let source = LpgStore::new().unwrap();
+        let city = |name: &str| {
+            let id = source.create_node(&["City"]);
+            source.set_node_property(id, "name", Value::from(name));
+            id
+        };
+        let (amsterdam, berlin, paris) = (city("Amsterdam"), city("Berlin"), city("Paris"));
+        let to_berlin = source.create_edge(amsterdam, berlin, "ROUTE");
+        source.set_edge_property(to_berlin, "km", Value::Int64(653));
+        let to_paris = source.create_edge(amsterdam, paris, "ROUTE");
+        source.set_edge_property(to_paris, "km", Value::Int64(501));
+        let base = from_graph_store_preserving_ids(&source).unwrap();
+
+        let overlay = LpgStore::new().unwrap();
+        overlay.set_next_node_id(paris.as_u64() + 1);
+        overlay.set_next_edge_id(to_paris.as_u64() + 1);
+        overlay.create_node_with_id(amsterdam, &["City"]).unwrap();
+        overlay.set_node_property(amsterdam, "name", Value::from("Amsterdam"));
+        overlay.set_node_property(amsterdam, "country", Value::from("NL"));
+        let prague = overlay.create_node(&["City"]);
+        overlay.set_node_property(prague, "name", Value::from("Prague"));
+        overlay.create_edge(paris, prague, "ROUTE");
+
+        let lpg = grafeo_core::graph::lpg::LpgStoreSection::new(Arc::new(overlay));
+        let compacted = CompactStoreSection::new(Arc::new(base));
+        let deletions = OverlayDeletionsSection::from_ids(vec![berlin], vec![to_berlin]);
+        let sections: [&dyn Section; 3] = [&lpg, &compacted, &deletions];
+        let image = MemoryImage::from_sections(&sections).unwrap();
+        let ids = CompactedIds {
+            amsterdam,
+            berlin,
+            paris,
+            to_berlin,
+            to_paris,
+        };
+        (image, ids)
+    }
+
+    /// The load folds a compacted base into the store its overlay loads into:
+    /// the base's nodes and edges come back under their ids, the overlay's
+    /// copy of a changed one wins, and the deleted ones stay deleted.
+    #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
+    #[test]
+    fn a_compacted_base_folds_into_the_store() {
+        use grafeo_common::types::{PropertyKey, Value};
+
+        let (image, ids) = compacted_image();
+        let image = ServedOnce::new(image);
+        let store = Arc::new(LpgStore::new().unwrap());
+        load(&image, &store).unwrap();
+
+        assert!(
+            image.section_types().is_empty(),
+            "the base and the deletion log are read"
         );
+        let mut names: Vec<String> = store
+            .nodes_by_label("City")
+            .into_iter()
+            .filter_map(|id| store.get_node_property(id, &PropertyKey::from("name")))
+            .filter_map(|name| name.as_str().map(str::to_string))
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Amsterdam", "Paris", "Prague"]);
+        assert_eq!(
+            store.get_node_property(ids.amsterdam, &PropertyKey::from("country")),
+            Some(Value::from("NL")),
+            "the overlay's copy of Amsterdam wins"
+        );
+        assert!(store.get_node(ids.berlin).is_none(), "Berlin stays deleted");
+        assert!(store.edge_type(ids.to_berlin).is_none());
+        let route = store.get_edge(ids.to_paris).unwrap();
+        assert_eq!((route.src, route.dst), (ids.amsterdam, ids.paris));
+        assert_eq!(
+            store.get_edge_property(ids.to_paris, &PropertyKey::from("km")),
+            Some(Value::Int64(501))
+        );
+        assert_eq!(store.edge_count(), 2, "Amsterdam to Paris, Paris to Prague");
+        let created = store.create_node(&["City"]);
+        assert!(
+            created.as_u64() > ids.paris.as_u64(),
+            "new ids stay clear of the base's"
+        );
+    }
+
+    /// A database loaded from a compacted image is one plain store: its
+    /// checkpoint writes the folded data in the LPG section and no compacted
+    /// sections, and that image loads back to the same data.
+    #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
+    #[test]
+    fn a_folded_database_checkpoints_as_a_plain_one() {
+        let (image, _) = compacted_image();
+        let db = GrafeoDB::new_in_memory();
+        let loaded = load(&image, &db.lpg_store()).unwrap();
+        db.finish_load(loaded);
+        let names = |db: &GrafeoDB| {
+            db.execute("MATCH (c:City) RETURN c.name ORDER BY c.name")
+                .unwrap()
+                .rows()
+                .to_vec()
+        };
+        let before = names(&db);
+        assert_eq!(before.len(), 3);
+
+        let checkpoint = image_of(&db);
+        assert_eq!(
+            by_byte(checkpoint.section_types()),
+            by_byte(vec![SectionType::Catalog, SectionType::LpgStore])
+        );
+        let reopened = GrafeoDB::new_in_memory();
+        let loaded = load(&checkpoint, &reopened.lpg_store()).unwrap();
+        reopened.finish_load(loaded);
+        assert_eq!(names(&reopened), before);
+        let routes = reopened
+            .execute("MATCH (:City)-[r:ROUTE]->(:City) RETURN count(r)")
+            .unwrap();
+        assert_eq!(routes.rows(), [[grafeo_common::types::Value::Int64(2)]]);
     }
 
     /// `to_memory` copies the RDF ring from its section.
@@ -2111,8 +2138,8 @@ mod tests {
         }
     }
 
-    /// A database whose checkpoint holds every section of this build but the
-    /// compacted ones: the catalog, the LPG store with a named graph, a vector
+    /// A database whose checkpoint holds every section a checkpoint of this
+    /// build writes: the catalog, the LPG store with a named graph, a vector
     /// and a text index and, with the features for them, RDF triples in the
     /// default and a named graph, with their ring.
     fn database_with_every_section() -> GrafeoDB {
@@ -2137,102 +2164,61 @@ mod tests {
         db
     }
 
-    /// A compacted database whose overlay holds a node and deleted a base
-    /// node and its edge.
-    #[cfg(feature = "compact-store")]
-    fn compacted_database_with_deletions() -> GrafeoDB {
-        let mut db = GrafeoDB::new_in_memory();
-        db.execute(
-            "INSERT (:City {name: 'Amsterdam'})-[:ROUTE {km: 653}]->(:City {name: 'Berlin'}), \
-             (:City {name: 'Paris'})",
-        )
-        .unwrap();
-        db.compact().unwrap();
-        db.execute("MATCH (c:City {name: 'Berlin'}) DETACH DELETE c")
-            .unwrap();
-        db.execute("INSERT (:City {name: 'Prague'})").unwrap();
-        db
-    }
-
     /// Every section a checkpoint writes streams chunks: none is one raw
     /// chunk, which only 0.5.x bytes are. Each holds one metadata chunk, first
     /// (the LPG store's last: it lists the names met while the chunks before
-    /// it were written), and its data in chunks of their own; a catalog
-    /// without entries (the compacted database's) is its metadata chunk
-    /// alone.
+    /// it were written), and its data in chunks of their own.
     #[test]
     fn no_production_section_writes_a_raw_chunk() {
-        let mut uncompacted = vec![
+        let mut expected = vec![
             SectionType::Catalog,
             SectionType::LpgStore,
             SectionType::VectorStore,
             SectionType::TextIndex,
         ];
         #[cfg(all(feature = "sparql", feature = "triple-store"))]
-        uncompacted.push(SectionType::RdfStore);
+        expected.push(SectionType::RdfStore);
         #[cfg(all(feature = "sparql", feature = "ring-index"))]
-        uncompacted.push(SectionType::RdfRing);
-        // The indexed database's catalog holds its index definitions.
-        let mut databases = vec![(database_with_every_section(), by_byte(uncompacted), true)];
-        #[cfg(feature = "compact-store")]
-        databases.push((
-            compacted_database_with_deletions(),
-            by_byte(vec![
-                SectionType::Catalog,
-                SectionType::LpgStore,
-                SectionType::CompactStore,
-                SectionType::OverlayDeletions,
-            ]),
-            false,
-        ));
-        for (db, expected, catalog_entries) in databases {
-            let commits = db.transaction_manager.hold_commits().unwrap();
-            let sections = db.checkpoint_sources().sections(&commits);
-            let refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
-            let image = MemoryImage::from_sections(&refs).unwrap();
-            drop(commits);
-            assert_eq!(
-                by_byte(image.section_types()),
-                expected,
-                "the checkpoint holds every section the database has"
+        expected.push(SectionType::RdfRing);
+        let db = database_with_every_section();
+        let commits = db.transaction_manager.hold_commits().unwrap();
+        let sections = db.checkpoint_sources().sections(&commits);
+        let refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
+        let image = MemoryImage::from_sections(&refs).unwrap();
+        drop(commits);
+        assert_eq!(
+            by_byte(image.section_types()),
+            by_byte(expected),
+            "the checkpoint holds every section the database has"
+        );
+        for section_type in image.section_types() {
+            let source = image.section_source(section_type).unwrap();
+            let chunks = source.chunks();
+            assert!(
+                chunks.iter().all(|meta| meta.kind != ChunkKind::Raw),
+                "{section_type:?} writes no raw chunk: {chunks:?}"
             );
-            for section_type in image.section_types() {
-                let source = image.section_source(section_type).unwrap();
-                let chunks = source.chunks();
-                if section_type == SectionType::Catalog && !catalog_entries {
-                    assert_eq!(
-                        chunks,
-                        [ChunkMeta::meta()],
-                        "a catalog without entries is its metadata chunk alone"
-                    );
-                    continue;
-                }
-                assert!(
-                    chunks.iter().all(|meta| meta.kind != ChunkKind::Raw),
-                    "{section_type:?} writes no raw chunk: {chunks:?}"
-                );
-                let metadata: Vec<usize> = chunks
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, meta)| meta.kind == ChunkKind::Meta)
-                    .map(|(index, _)| index)
-                    .collect();
-                let place = if section_type == SectionType::LpgStore {
-                    chunks.len() - 1
-                } else {
-                    0
-                };
-                assert_eq!(
-                    metadata,
-                    [place],
-                    "{section_type:?} has one metadata chunk, at {place} of its {} chunks",
-                    chunks.len()
-                );
-                assert!(
-                    chunks.len() > 1,
-                    "{section_type:?} holds its data in chunks of their own"
-                );
-            }
+            let metadata: Vec<usize> = chunks
+                .iter()
+                .enumerate()
+                .filter(|(_, meta)| meta.kind == ChunkKind::Meta)
+                .map(|(index, _)| index)
+                .collect();
+            let place = if section_type == SectionType::LpgStore {
+                chunks.len() - 1
+            } else {
+                0
+            };
+            assert_eq!(
+                metadata,
+                [place],
+                "{section_type:?} has one metadata chunk, at {place} of its {} chunks",
+                chunks.len()
+            );
+            assert!(
+                chunks.len() > 1,
+                "{section_type:?} holds its data in chunks of their own"
+            );
         }
     }
 }

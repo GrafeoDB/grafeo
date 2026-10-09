@@ -1,11 +1,9 @@
-//! A compacted database keeps its nodes without labels.
+//! `compact()` keeps the nodes without labels.
 //!
-//! `compact()` stores the nodes with the same labels as one columnar table,
-//! and the nodes without labels as the table of the empty label set: with
-//! their properties and their edges (to and from labeled nodes and between
-//! themselves), in a scan of all nodes, the counts and the statistics. They
-//! stay through writes after `compact()`, a merge of the overlay (under
-//! memory pressure or by `recompact()`), and a close and reopen.
+//! The nodes without labels stay with their properties and their edges (to
+//! and from labeled nodes and between themselves), in a scan of all nodes,
+//! the counts and the statistics: through `compact()`, writes after it,
+//! `recompact()`, and a close and reopen.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test compact_unlabeled_nodes
@@ -16,8 +14,13 @@
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
-/// The name of the overlay's memory consumer.
-const OVERLAY_CONSUMER: &str = "overlay:LpgStore";
+/// The statistics as the planner reads them: refreshed from the store's
+/// counters first.
+fn fresh_statistics(db: &GrafeoDB) -> std::sync::Arc<grafeo_core::statistics::Statistics> {
+    let store = db.store();
+    store.ensure_statistics_fresh();
+    store.statistics()
+}
 
 /// Every node's name, sorted.
 const NAMES: &str = "MATCH (n) RETURN n.name AS name ORDER BY name";
@@ -108,7 +111,7 @@ impl Holds {
     /// The node and edge counts of the statistics, which the planner
     /// estimates with, agree with the counts of `self`.
     fn statistics_agree(&self, db: &GrafeoDB, stage: &str) {
-        let statistics = db.graph_store().statistics();
+        let statistics = fresh_statistics(db);
         assert_eq!(
             (statistics.total_nodes, statistics.total_edges),
             (
@@ -151,18 +154,6 @@ fn change(db: &GrafeoDB) {
         .unwrap();
 }
 
-/// Merges the overlay under memory pressure, as the buffer manager does;
-/// returns whether it merged.
-fn merge_under_pressure(db: &GrafeoDB) -> bool {
-    let layered = db.layered_store().expect("the database is compacted");
-    assert!(
-        layered.overlay_mutation_count() > 0,
-        "the overlay holds changes to merge"
-    );
-    db.buffer_manager().spill_consumer_by_name(OVERLAY_CONSUMER);
-    layered.overlay_mutation_count() == 0
-}
-
 /// `compact()` keeps the nodes without labels, with their properties and
 /// edges, in the scans, counts and statistics.
 #[test]
@@ -190,34 +181,27 @@ fn a_database_without_labels_compacts_whole() {
         "their edge"
     );
     assert_eq!(db.node_count(), 2);
-    assert_eq!(db.graph_store().statistics().total_nodes, 2);
+    assert_eq!(fresh_statistics(&db).total_nodes, 2);
 }
 
-/// Writes reach the compacted nodes without labels, and a merge of the
-/// overlay, under memory pressure and by `recompact()`, keeps them: also a
-/// node without labels created after `compact()`, and a delete of one.
+/// Writes reach the compacted nodes without labels, and `recompact()`
+/// keeps them: also a node without labels created after `compact()`, and a
+/// delete of one.
 #[test]
-fn nodes_without_labels_stay_through_writes_and_merges() {
+fn nodes_without_labels_stay_through_writes_and_recompact() {
     let mut db = GrafeoDB::new_in_memory();
     populate(&db);
     db.compact().unwrap();
     change(&db);
     assert_eq!(Holds::of(&db), Holds::changed(), "after the writes");
     Holds::changed().statistics_agree(&db, "after the writes");
-    assert!(merge_under_pressure(&db), "no transaction is open");
-    assert_eq!(
-        Holds::of(&db),
-        Holds::changed(),
-        "after a merge under pressure"
-    );
-    Holds::changed().statistics_agree(&db, "after a merge under pressure");
-    db.recompact().unwrap();
+    db.compact().unwrap();
     assert_eq!(Holds::of(&db), Holds::changed(), "after recompact()");
     Holds::changed().statistics_agree(&db, "after recompact()");
 
     db.execute("MATCH (j {name: 'Jules'}) DETACH DELETE j")
         .unwrap();
-    db.recompact().unwrap();
+    db.compact().unwrap();
     assert_eq!(
         rows(&db, UNLABELED),
         names(&["Gus"]),
@@ -226,9 +210,9 @@ fn nodes_without_labels_stay_through_writes_and_merges() {
     assert_eq!(db.node_count(), 4);
 }
 
-/// The compacted nodes without labels are in the file: after a close and
-/// reopen, after writes and a merge of the reopened database, and after the
-/// next reopen.
+/// The nodes without labels are in the file: after `compact()` and a close
+/// and reopen, after writes and `recompact()` of the reopened database, and
+/// after the next reopen.
 #[cfg(all(feature = "grafeo-file", feature = "wal"))]
 #[test]
 fn a_reopened_compacted_file_keeps_the_nodes_without_labels() {
@@ -242,14 +226,10 @@ fn a_reopened_compacted_file_keeps_the_nodes_without_labels() {
     }
     {
         let mut db = GrafeoDB::open(&path).unwrap();
-        assert!(
-            db.layered_store().is_some(),
-            "the file holds a compacted base"
-        );
         assert_eq!(Holds::of(&db), Holds::populated(), "after a reopen");
         Holds::populated().statistics_agree(&db, "after a reopen");
         change(&db);
-        db.recompact().unwrap();
+        db.compact().unwrap();
         assert_eq!(
             Holds::of(&db),
             Holds::changed(),

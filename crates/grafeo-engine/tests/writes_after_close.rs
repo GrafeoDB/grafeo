@@ -489,11 +489,9 @@ fn persisting_after_close_fails_and_writes_nothing() {
         );
     }
     // `compact()` takes `&mut self`.
-    #[cfg(feature = "compact-store")]
     let db = {
         let mut db = db;
         assert_closed_error("compact", db.compact());
-        assert_closed_error("recompact", db.recompact());
         db
     };
     assert!(

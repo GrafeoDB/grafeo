@@ -42,9 +42,8 @@ Use `Config::with_section_tier` to pin a specific section to a tier:
 use grafeo_engine::{Config, GrafeoDB};
 use grafeo_common::storage::{SectionType, TierOverride};
 
-// Force the LPG compact base to mmap mode at database open.
+// Force the vector indexes to mmap mode at database open.
 let config = Config::persistent("/path/to/db.grafeo")
-    .with_section_tier(SectionType::CompactStore, TierOverride::ForceDisk)
     .with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk);
 
 let db = GrafeoDB::with_config(config)?;

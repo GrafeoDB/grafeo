@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::query::plan::{
     AggregateFunction, BinaryOp, CountExpr, DistinctOp, FilterOp, LeftJoinOp, LimitOp,
-    LogicalExpression, LogicalOperator, ReturnItem, ReturnOp, SkipOp, SortKey, SortOp,
+    LogicalExpression, LogicalOperator, ReturnItem, ReturnOp, SetPropertyOp, SkipOp, SortKey,
+    SortOp,
 };
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
@@ -266,40 +267,26 @@ impl VarGen {
 /// Returns an error if the input is empty. Used by `build_property_predicate`
 /// in multiple translators.
 pub(crate) fn combine_with_and(predicates: Vec<LogicalExpression>) -> Result<LogicalExpression> {
-    predicates
-        .into_iter()
-        .reduce(|acc, pred| LogicalExpression::Binary {
-            left: Box::new(acc),
-            op: BinaryOp::And,
-            right: Box::new(pred),
-        })
-        .ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Empty property predicate",
-            ))
-        })
+    LogicalExpression::conjunction(predicates).ok_or_else(|| {
+        Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            "Empty property predicate",
+        ))
+    })
 }
 
 /// `hasLabel(variable, label)` for every label, combined with AND, or `None`
 /// when `labels` is empty. A node pattern with several labels requires all of
 /// them, wherever the node appears in a pattern.
 pub(crate) fn has_all_labels(variable: &str, labels: &[String]) -> Option<LogicalExpression> {
-    labels
-        .iter()
-        .map(|label| LogicalExpression::FunctionCall {
-            name: "hasLabel".into(),
-            args: vec![
-                LogicalExpression::Variable(variable.to_string()),
-                LogicalExpression::Literal(Value::String(label.clone().into())),
-            ],
-            distinct: false,
-        })
-        .reduce(|acc, check| LogicalExpression::Binary {
-            left: Box::new(acc),
-            op: BinaryOp::And,
-            right: Box::new(check),
-        })
+    LogicalExpression::conjunction(labels.iter().map(|label| LogicalExpression::FunctionCall {
+        name: "hasLabel".into(),
+        args: vec![
+            LogicalExpression::Variable(variable.to_string()),
+            LogicalExpression::Literal(Value::String(label.clone().into())),
+        ],
+        distinct: false,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -321,15 +308,32 @@ pub(crate) struct PathHop {
     pub segment: Option<String>,
 }
 
+/// `[id(variable)]`, or `[]` when `variable` is null: the hop of a
+/// questioned edge (`->?`) that matched nothing has a null edge and node, and
+/// the path leaves the hop out. (A list literal keeps a null item, so the
+/// null is tested here.)
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn id_list(variable: &str) -> LogicalExpression {
+    let id = LogicalExpression::Id(variable.to_string());
+    LogicalExpression::Case {
+        operand: None,
+        when_clauses: vec![(
+            LogicalExpression::Unary {
+                op: crate::query::plan::UnaryOp::IsNull,
+                operand: Box::new(id.clone()),
+            },
+            LogicalExpression::List(Vec::new()),
+        )],
+        else_clause: Some(Box::new(LogicalExpression::List(vec![id]))),
+    }
+}
+
 /// The ids of the nodes of the path that starts at `source` and takes `hops`,
 /// as one list. A hop that is missing (a questioned edge, `->?`, that
-/// matched nothing) has a null edge and node, whose ids are no value: a list
-/// leaves them out, so the path leaves the hop out.
+/// matched nothing) is left out (see [`id_list`]).
 #[cfg(any(feature = "gql", feature = "cypher"))]
 fn path_node_ids(source: &str, hops: &[PathHop]) -> LogicalExpression {
-    let mut parts = vec![LogicalExpression::List(vec![LogicalExpression::Id(
-        source.to_string(),
-    )])];
+    let mut parts = vec![id_list(source)];
     for hop in hops {
         parts.push(match &hop.segment {
             // The first node of a segment is the last node of the hop before
@@ -340,7 +344,7 @@ fn path_node_ids(source: &str, hops: &[PathHop]) -> LogicalExpression {
                 ))],
                 distinct: false,
             },
-            None => LogicalExpression::List(vec![LogicalExpression::Id(hop.target.clone())]),
+            None => id_list(&hop.target),
         });
     }
     concatenation(parts)
@@ -354,7 +358,7 @@ pub(crate) fn path_edge_ids(hops: &[PathHop]) -> LogicalExpression {
         hops.iter()
             .map(|hop| match &hop.segment {
                 Some(segment) => LogicalExpression::Variable(format!("_path_edges_{segment}")),
-                None => LogicalExpression::List(vec![LogicalExpression::Id(hop.edge.clone())]),
+                None => id_list(&hop.edge),
             })
             .collect(),
     )
@@ -417,6 +421,233 @@ pub(crate) fn bind_whole_path(
         input: Box::new(plan),
         pass_through_input: true,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Generated names
+// ---------------------------------------------------------------------------
+
+/// The names a translator makes up for one statement: for its anonymous
+/// nodes and edges (`_anon_3`) and for helper columns. They are counted per
+/// statement, so a statement gets the same names each time it is
+/// translated, and none of them is a word the statement spells (see
+/// [`written_names`]): a user variable named `_anon_0` stays the user's.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) struct GeneratedNames {
+    /// The number the next name gets.
+    next: std::cell::Cell<u32>,
+    /// The words of the statement a generated name could be.
+    written: HashSet<String>,
+}
+
+#[cfg(any(feature = "gql", feature = "cypher"))]
+impl GeneratedNames {
+    /// The names for the statement `query`.
+    pub(crate) fn new(query: &str) -> Self {
+        Self {
+            next: std::cell::Cell::new(0),
+            written: written_names(query),
+        }
+    }
+
+    /// The next name that starts with `prefix`: `_anon_` gives `_anon_0`,
+    /// then `_anon_1`, skipping the ones the statement spells.
+    pub(crate) fn next(&self, prefix: &str) -> String {
+        loop {
+            let number = self.next.get();
+            self.next.set(number + 1);
+            let name = format!("{prefix}{number}");
+            if !self.written.contains(&name) {
+                return name;
+            }
+        }
+    }
+
+    /// Whether the statement spells `name`, so that a name made up another
+    /// way (Cypher's aggregate columns) must skip it.
+    #[cfg(feature = "cypher")]
+    pub(crate) fn is_written(&self, name: &str) -> bool {
+        self.written.contains(name)
+    }
+}
+
+/// The words of `query` that start with `_`, which is how every name a
+/// translator makes up starts (`_anon_3`): the statement's own variables and
+/// aliases among them, wherever they appear, backquoted or not. A word in a
+/// string literal or a comment is taken too, which only skips a name.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+fn written_names(query: &str) -> HashSet<String> {
+    query
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|word| word.starts_with('_'))
+        .map(str::to_string)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Edges a pattern binds once
+// ---------------------------------------------------------------------------
+
+/// An edge pattern of a graph pattern whose edges must all be different:
+/// GQL's DIFFERENT EDGES (ISO/IEC 39075:2024 16.4) and every Cypher MATCH
+/// (openCypher 9, relationship uniqueness). See [`different_edges`].
+#[cfg(any(feature = "gql", feature = "cypher"))]
+#[derive(Debug, Clone)]
+pub(crate) struct EdgeOccurrence {
+    /// The variable the edge pattern binds.
+    pub variable: String,
+    /// Whether `variable` is a group variable: a quantified (variable-length)
+    /// edge pattern binds it to the list of its edges.
+    pub group: bool,
+    /// The edge types the pattern allows, any type when empty.
+    pub types: Vec<String>,
+}
+
+#[cfg(any(feature = "gql", feature = "cypher"))]
+impl EdgeOccurrence {
+    /// Whether this edge pattern and `other` can bind one edge: an edge has
+    /// one type, so two patterns that allow no common type never do.
+    fn may_bind_the_edge_of(&self, other: &Self) -> bool {
+        self.types.is_empty()
+            || other.types.is_empty()
+            || self
+                .types
+                .iter()
+                .any(|edge_type| other.types.contains(edge_type))
+    }
+
+    /// The ids of the edges the pattern binds, as a list. An edge that
+    /// matched nothing (GQL's questioned edge, `->?`) is null and binds no
+    /// edge: an empty list (see [`id_list`]).
+    fn edge_ids(&self) -> LogicalExpression {
+        if self.group {
+            LogicalExpression::Variable(self.variable.clone())
+        } else {
+            id_list(&self.variable)
+        }
+    }
+}
+
+/// The edge patterns of `edges` (by index) that must be compared, in groups:
+/// patterns that may bind one edge (directly or through other patterns) are
+/// compared together, and a pattern no other one may share an edge with
+/// needs no check. With `lone_groups`, a group variable on its own is still
+/// checked, for an expand whose path may repeat an edge; without, its own
+/// edges are known to differ (its expand matches trails).
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn edges_to_compare(edges: &[EdgeOccurrence], lone_groups: bool) -> Vec<Vec<usize>> {
+    let mut grouped = vec![false; edges.len()];
+    let mut groups = Vec::new();
+    for start in 0..edges.len() {
+        if grouped[start] {
+            continue;
+        }
+        grouped[start] = true;
+        // Every pattern that may share an edge with a member joins
+        let mut members = vec![start];
+        let mut next = 0;
+        while let Some(&current) = members.get(next) {
+            next += 1;
+            for other in 0..edges.len() {
+                if !grouped[other] && edges[current].may_bind_the_edge_of(&edges[other]) {
+                    grouped[other] = true;
+                    members.push(other);
+                }
+            }
+        }
+        if members.len() > 1 || (lone_groups && edges[start].group) {
+            members.sort_unstable();
+            groups.push(members);
+        }
+    }
+    groups
+}
+
+/// The condition that the edges the patterns of each of `groups` (indices
+/// into `edges`, see [`edges_to_compare`]) bind are all different, an edge
+/// of a group variable included: `all_different` over their ids, one check
+/// per group. `None` when there is no group.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn different_edges(
+    edges: &[EdgeOccurrence],
+    groups: &[Vec<usize>],
+) -> Option<LogicalExpression> {
+    let checks = groups
+        .iter()
+        .map(|members| LogicalExpression::FunctionCall {
+            name: "all_different".into(),
+            args: vec![concatenation(
+                members
+                    .iter()
+                    .map(|&index| edges[index].edge_ids())
+                    .collect(),
+            )],
+            distinct: false,
+        })
+        .collect();
+    join_and_conjuncts(checks)
+}
+
+// ---------------------------------------------------------------------------
+// MERGE
+// ---------------------------------------------------------------------------
+
+/// The variable of an end node of a MERGE relationship pattern, and `input`
+/// with a MERGE of that node after it when the pattern gives the node
+/// `labels` or `match_properties`, as in `MERGE (h)-[:R]->(:T {x: 3})`: a node
+/// without a `variable` gets the name `fresh` makes. One with neither a
+/// variable nor a label or property could be any node, which the
+/// relationship MERGE does not support: an error.
+///
+/// # Errors
+///
+/// Returns an error for an anonymous node without a label or property.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn merge_end_node(
+    variable: Option<&str>,
+    labels: &[String],
+    match_properties: Vec<(String, LogicalExpression)>,
+    input: LogicalOperator,
+    fresh: impl FnOnce() -> String,
+) -> Result<(String, LogicalOperator)> {
+    let defined = !labels.is_empty() || !match_properties.is_empty();
+    let variable = match variable {
+        Some(name) => name.to_string(),
+        None if defined => fresh(),
+        None => {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "MERGE of a relationship with an anonymous node without a label or property is \
+                 not supported: MATCH or MERGE that node first and use its variable",
+            )));
+        }
+    };
+    if !defined {
+        return Ok((variable, input));
+    }
+    let merge = LogicalOperator::Merge(crate::query::plan::MergeOp {
+        variable: variable.clone(),
+        labels: labels.to_vec(),
+        match_properties,
+        on_create: Vec::new(),
+        on_match: Vec::new(),
+        on_create_labels: Vec::new(),
+        on_match_labels: Vec::new(),
+        input: Box::new(input),
+    });
+    Ok((variable, merge))
+}
+
+/// The error for a MERGE of a pattern with more than one relationship, which
+/// would have to match or create the whole pattern: only one relationship
+/// per MERGE is supported.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn merge_of_a_longer_path() -> Error {
+    Error::Query(QueryError::new(
+        QueryErrorKind::Semantic,
+        "MERGE of a pattern with more than one relationship is not supported: merge one \
+         relationship per MERGE clause",
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -893,6 +1124,12 @@ pub(crate) fn collect_operator_variables(op: &LogicalOperator, vars: &mut HashSe
             }
             collect_operator_variables(&create.input, vars);
         }
+        LogicalOperator::Create(create) => {
+            vars.extend(create.variables().map(str::to_string));
+            if let Some(input) = &create.input {
+                collect_operator_variables(input, vars);
+            }
+        }
         LogicalOperator::Merge(merge) => {
             vars.insert(merge.variable.clone());
             collect_operator_variables(&merge.input, vars);
@@ -1166,13 +1403,7 @@ fn split_and(predicate: LogicalExpression) -> Vec<LogicalExpression> {
 
 /// The conjunction of `conjuncts`, `None` for none.
 fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
-    conjuncts
-        .into_iter()
-        .reduce(|acc, conjunct| LogicalExpression::Binary {
-            left: Box::new(acc),
-            op: BinaryOp::And,
-            right: Box::new(conjunct),
-        })
+    LogicalExpression::conjunction(conjuncts)
 }
 
 /// Builds a LeftJoin with properly classified WHERE predicates.
@@ -1219,14 +1450,7 @@ pub(crate) fn build_left_join_with_predicates(
     let filtered_right = if classified.right_filters.is_empty() {
         right
     } else {
-        let right_pred = classified
-            .right_filters
-            .into_iter()
-            .reduce(|acc, pred| LogicalExpression::Binary {
-                left: Box::new(acc),
-                op: BinaryOp::And,
-                right: Box::new(pred),
-            })
+        let right_pred = LogicalExpression::conjunction(classified.right_filters)
             .expect("non-empty right_filters");
         wrap_filter(right, right_pred)
     };
@@ -1247,21 +1471,7 @@ pub(crate) fn build_left_join_with_predicates(
     });
 
     // Combine remaining post-filters
-    let post_filter = if classified.post_filters.is_empty() {
-        None
-    } else {
-        Some(
-            classified
-                .post_filters
-                .into_iter()
-                .reduce(|acc, pred| LogicalExpression::Binary {
-                    left: Box::new(acc),
-                    op: BinaryOp::And,
-                    right: Box::new(pred),
-                })
-                .expect("non-empty post_filters"),
-        )
-    };
+    let post_filter = LogicalExpression::conjunction(classified.post_filters);
 
     (join, post_filter)
 }
@@ -1269,6 +1479,51 @@ pub(crate) fn build_left_join_with_predicates(
 // ---------------------------------------------------------------------------
 // Plan node builder helpers
 // ---------------------------------------------------------------------------
+
+/// Adds `SET variable.property = value` on top of `plan`.
+///
+/// A constant value (a literal or a parameter) joins the [`SetPropertyOp`]
+/// at the top when that one sets only constants on the same entity: the
+/// values read nothing the earlier assignments write, so setting them
+/// together is setting them one after the other, and a list of thousands of
+/// assignments (`SET n.p0 = 0, n.p1 = 1, ...`) is one operator, not a chain
+/// as long. Any other value gets an operator of its own.
+pub(crate) fn push_set_property(
+    plan: LogicalOperator,
+    variable: &str,
+    property: String,
+    value: LogicalExpression,
+    is_edge: bool,
+) -> LogicalOperator {
+    let constant = |value: &LogicalExpression| {
+        matches!(
+            value,
+            LogicalExpression::Literal(_) | LogicalExpression::Parameter(_)
+        )
+    };
+    match plan {
+        LogicalOperator::SetProperty(mut set)
+            if constant(&value)
+                && set.variable == variable
+                && set.is_edge == is_edge
+                && !set.replace
+                && set
+                    .properties
+                    .iter()
+                    .all(|(name, value)| name != "*" && constant(value)) =>
+        {
+            set.properties.push((property, value));
+            LogicalOperator::SetProperty(set)
+        }
+        plan => LogicalOperator::SetProperty(SetPropertyOp {
+            variable: variable.to_string(),
+            properties: vec![(property, value)],
+            replace: false,
+            is_edge,
+            input: Box::new(plan),
+        }),
+    }
+}
 
 /// Wraps an operator with a filter predicate.
 pub(crate) fn wrap_filter(input: LogicalOperator, predicate: LogicalExpression) -> LogicalOperator {
@@ -1531,13 +1786,7 @@ pub(crate) fn flatten_and_conjuncts(expr: &LogicalExpression) -> Vec<&LogicalExp
 
 /// Joins a list of expressions with AND. Returns `None` for an empty list.
 pub(crate) fn join_and_conjuncts(parts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
-    parts
-        .into_iter()
-        .reduce(|acc, part| LogicalExpression::Binary {
-            left: Box::new(acc),
-            op: BinaryOp::And,
-            right: Box::new(part),
-        })
+    LogicalExpression::conjunction(parts)
 }
 
 /// Wraps an operator with RETURN.
@@ -1565,6 +1814,76 @@ pub(crate) fn no_result(input: LogicalOperator) -> LogicalOperator {
 mod tests {
     use super::*;
     use grafeo_common::types::Value;
+
+    // --- edges_to_compare and GeneratedNames ---
+
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    fn edge(variable: &str, group: bool, types: &[&str]) -> EdgeOccurrence {
+        EdgeOccurrence {
+            variable: variable.to_string(),
+            group,
+            types: types
+                .iter()
+                .map(|edge_type| (*edge_type).to_string())
+                .collect(),
+        }
+    }
+
+    /// Edge patterns of types that share none never bind one edge, while an
+    /// untyped one may bind the edge of any: it ties patterns of different
+    /// types into one check.
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    #[test]
+    fn edge_patterns_are_compared_when_they_may_bind_one_edge() {
+        let knows = edge("a", false, &["KNOWS"]);
+        let likes = edge("b", false, &["LIKES"]);
+        let any = edge("c", false, &[]);
+        let either = edge("d", false, &["LIKES", "KNOWS"]);
+        assert_eq!(
+            edges_to_compare(&[knows.clone(), likes.clone()], true),
+            Vec::<Vec<usize>>::new()
+        );
+        assert_eq!(
+            edges_to_compare(&[knows.clone(), either], true),
+            [vec![0, 1]]
+        );
+        assert_eq!(
+            edges_to_compare(&[knows.clone(), likes.clone(), any], true),
+            [vec![0, 1, 2]],
+            "the untyped pattern may share an edge with both"
+        );
+        assert_eq!(
+            edges_to_compare(&[knows.clone(), likes, knows.clone(), knows], true),
+            [vec![0, 2, 3]]
+        );
+    }
+
+    /// A group variable on its own is checked only where its expand may
+    /// repeat an edge.
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    #[test]
+    fn a_lone_group_is_checked_only_on_request() {
+        let group = edge("g", true, &["KNOWS"]);
+        let single = edge("s", false, &["LIKES"]);
+        assert_eq!(
+            edges_to_compare(&[group.clone(), single.clone()], true),
+            [vec![0]]
+        );
+        assert_eq!(
+            edges_to_compare(&[group, single], false),
+            Vec::<Vec<usize>>::new()
+        );
+    }
+
+    /// The names of a statement count from 0 and skip the words it spells.
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    #[test]
+    fn generated_names_skip_the_words_of_the_statement() {
+        let names = GeneratedNames::new("MATCH (_anon_0)-->(`_anon_2`) RETURN '_anon_3'");
+        let made: Vec<String> = (0..3).map(|_| names.next("_anon_")).collect();
+        assert_eq!(made, ["_anon_1", "_anon_4", "_anon_5"]);
+        assert_eq!(names.next("_path_"), "_path_6");
+    }
 
     // --- capitalize_first ---
 

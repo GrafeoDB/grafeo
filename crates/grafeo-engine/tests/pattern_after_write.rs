@@ -389,14 +389,15 @@ fn an_aggregate_over_a_chain_from_a_written_node_counts_the_whole_write() {
 }
 
 /// An `OPTIONAL MATCH` from a written node, and a part of a `MATCH` joined
-/// to another on a shared variable, see the whole write too.
+/// to another on a shared variable, see the whole write too. (The part takes
+/// the S relationship: a Cypher MATCH binds the one R into `q` once.)
 #[test]
 fn a_joined_pattern_from_a_written_node_sees_the_whole_write() {
     assert_after_hub_writes(
         &LANGUAGES,
         &[
             "OPTIONAL MATCH (h)-[:R]->(q:Q {i: 4}) RETURN i, q.i AS found ORDER BY i",
-            "MATCH (h)-[:R]->(q), (q)<-[:R]-(g) RETURN i, count(*) AS found ORDER BY i",
+            "MATCH (h)-[:R]->(q), (q)-[:S]->(g) RETURN i, count(*) AS found ORDER BY i",
         ],
         4,
         true,
@@ -532,12 +533,12 @@ fn a_constant_filter_after_a_write_sees_the_whole_write() {
             "OPTIONAL MATCH (t:Hub {c: 4}) RETURN i, t.c AS found ORDER BY i",
             "OPTIONAL MATCH (t {c: 4}) RETURN i, t.c AS found ORDER BY i",
             "MATCH (t:Hub {c: 4}) RETURN i, t.c AS found ORDER BY i",
-            "MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) RETURN i, t.c AS found ORDER BY i",
+            "MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) RETURN i, t.c AS found ORDER BY i",
             "RETURN i, COUNT { MATCH (t:Hub {c: 4}) } + 3 AS found ORDER BY i",
             "WITH i WHERE EXISTS { MATCH (t:Hub {c: 4}) } RETURN i, 4 AS found ORDER BY i",
             // A subquery tied to the row by `h`, whose part joined on `q`
             // has the filter on constants.
-            "WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) } \
+            "WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) } \
              RETURN i, 4 AS found ORDER BY i",
         ] {
             queries.push((language, format!("{} {rest}", hub_key_write(language))));
@@ -548,7 +549,7 @@ fn a_constant_filter_after_a_write_sees_the_whole_write() {
         "OPTIONAL MATCH (t:Hub) WHERE t.c IN [4, 88] RETURN i, t.c AS found ORDER BY i",
         "OPTIONAL MATCH (t:Hub) WHERE t.c > 3 RETURN i, t.c AS found ORDER BY i",
         "CALL { MATCH (t:Hub {c: 4}) RETURN t.c AS found } RETURN i, found ORDER BY i",
-        "CALL { WITH h MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) RETURN t.c AS found } \
+        "CALL { WITH h MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) RETURN t.c AS found } \
          RETURN i, found ORDER BY i",
     ] {
         let write = hub_key_write(Language::Cypher);
@@ -574,9 +575,11 @@ fn a_constant_filter_after_a_write_sees_the_whole_write() {
     let expected: Vec<Vec<Value>> = (1..=4).map(|i| vec![int(i), int(4)]).collect();
     let mut wrong = Vec::new();
     for (language, query) in &queries {
+        // Two relationships to the Q, R and W, as a Cypher MATCH binds each
+        // relationship once
         for setup in [
-            "CREATE (:Hub)-[:R]->(:Q)",
-            "CREATE (:Hub {c: 3})-[:R]->(:Q)",
+            "CREATE (h:Hub)-[:R]->(q:Q), (h)-[:W]->(q)",
+            "CREATE (h:Hub {c: 3})-[:R]->(q:Q), (h)-[:W]->(q)",
         ] {
             for indexed in [false, true] {
                 let db = GrafeoDB::new_in_memory();
@@ -676,7 +679,7 @@ fn patterns_after_a_write_profile() {
         for rest in [
             "MATCH (h)-[:R]->(q) RETURN i, count(q) AS found ORDER BY i",
             "OPTIONAL MATCH (h)-[:R]->(q:Q {i: 4}) RETURN i, q.i AS found ORDER BY i",
-            "MATCH (h)-[:R]->(q), (q)<-[:R]-(g) RETURN i, count(*) AS found ORDER BY i",
+            "MATCH (h)-[:R]->(q), (q)-[:S]->(g) RETURN i, count(*) AS found ORDER BY i",
         ] {
             let query = format!("{} {rest}", hub_write(language));
             let lines = profile(&GrafeoDB::new_in_memory().session(), language, &query);

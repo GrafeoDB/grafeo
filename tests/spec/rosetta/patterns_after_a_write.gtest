@@ -95,10 +95,12 @@ tests:
         - [3, 4]
         - [4, 4]
 
+  # The joined part takes the S relationship: a Cypher MATCH binds the one R
+  # into q once.
   - name: a_joined_part_of_a_match_after_a_write_sees_the_later_rows
     variants:
-      gql: "FOR i IN range(1, 4) MERGE (h:Hub) INSERT (h)-[:R]->(:Q {i: i}) WITH h, i MATCH (h)-[:R]->(q), (q)<-[:R]-(g) RETURN i, count(*) AS found"
-      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) CREATE (h)-[:R]->(:Q {i: i}) WITH h, i MATCH (h)-[:R]->(q), (q)<-[:R]-(g) RETURN i, count(*) AS found"
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) INSERT (h)-[:R]->(:Q {i: i})-[:S]->(:T) WITH h, i MATCH (h)-[:R]->(q), (q)-[:S]->(g) RETURN i, count(*) AS found"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) CREATE (h)-[:R]->(:Q {i: i})-[:S]->(:T) WITH h, i MATCH (h)-[:R]->(q), (q)-[:S]->(g) RETURN i, count(*) AS found"
     expect:
       rows:
         - [1, 4]
@@ -229,12 +231,13 @@ tests:
         - [3, 4]
         - [4, 4]
 
+  # The parts take R and W: a Cypher MATCH binds each relationship once.
   - name: a_joined_part_with_a_constant_after_a_write_sees_the_whole_write
     setup:
-      - "INSERT (:Hub)-[:R]->(:Q)"
+      - "INSERT (h:Hub)-[:R]->(q:Q), (h)-[:W]->(q)"
     variants:
-      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) RETURN i, t.c AS found"
-      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) RETURN i, t.c AS found"
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) RETURN i, t.c AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) RETURN i, t.c AS found"
     expect:
       rows:
         - [1, 4]
@@ -257,10 +260,10 @@ tests:
 
   - name: an_exists_on_a_constant_after_a_write_sees_the_whole_write
     setup:
-      - "INSERT (:Hub)-[:R]->(:Q)"
+      - "INSERT (h:Hub)-[:R]->(q:Q), (h)-[:W]->(q)"
     variants:
-      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) } RETURN i"
-      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:R]->(q) } RETURN i"
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) } RETURN i"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) } RETURN i"
     expect:
       rows:
         - [1]

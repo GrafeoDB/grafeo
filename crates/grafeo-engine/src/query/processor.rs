@@ -887,6 +887,14 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
             }
             substitute_in_operator(&mut create.input, params)?;
         }
+        LogicalOperator::Create(create) => {
+            for expr in create.property_values_mut() {
+                substitute_in_expression(expr, params)?;
+            }
+            if let Some(input) = &mut create.input {
+                substitute_in_operator(input, params)?;
+            }
+        }
         LogicalOperator::DeleteNode(delete) => {
             substitute_in_operator(&mut delete.input, params)?;
         }
@@ -1027,8 +1035,14 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
         }
         // DDL operators have no expressions to substitute
         LogicalOperator::CreatePropertyGraph(_) => {}
-        // Procedure calls: arguments could contain parameters but we handle at execution time
-        LogicalOperator::CallProcedure(_) => {}
+        // Procedure arguments take their parameters here like any other
+        // expression, so a parameter runs exactly like the same literal and a
+        // missing one fails before the procedure runs.
+        LogicalOperator::CallProcedure(call) => {
+            for argument in &mut call.arguments {
+                substitute_in_expression(argument, params)?;
+            }
+        }
         // LoadData: file path is a literal, no parameter substitution needed
         LogicalOperator::LoadData(_) => {}
         // Construct: template uses variables, substitute in the WHERE input

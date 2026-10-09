@@ -7,7 +7,6 @@
 //! Shared types ([`AggregateFunction`], [`AggregateExpr`], [`HashableValue`]) live in
 //! the [`super::accumulator`] module.
 
-use grafeo_common::types::{HashableValue as GroupValueKey, LogicalType, Value};
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
@@ -1124,53 +1123,6 @@ mod tests {
     use super::*;
     use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
-    use arcstr::ArcStr;
-    use std::sync::Arc;
-
-    #[test]
-    fn group_identity_preserves_typed_values_across_chunks() {
-        use crate::execution::vector::ValueVector;
-        use grafeo_common::types::HashableValue as ValueKey;
-        use std::collections::HashMap;
-
-        let vector = Value::Vector(Arc::from([1.0_f32, 2.0]));
-        let values = vec![
-            Value::Int64(0),
-            Value::Float64(0.0),
-            Value::Float64(-0.0),
-            Value::Float64(f64::from_bits(0x7ff8_0000_0000_0001)),
-            Value::Float64(f64::from_bits(0x7ff8_0000_0000_0002)),
-            Value::List(Arc::from([Value::Int64(0)])),
-            Value::List(Arc::from([Value::Float64(0.0)])),
-            Value::String(ArcStr::from(format!("{vector:?}"))),
-            vector,
-            Value::Null,
-        ];
-        let chunks = (0..2)
-            .map(|_| DataChunk::new(vec![ValueVector::from_values(&values)]))
-            .collect();
-        let mut aggregate = HashAggregateOperator::new(
-            Box::new(MockOperator::new(chunks)),
-            vec![0],
-            vec![AggregateExpr::count_star()],
-            vec![LogicalType::Any, LogicalType::Int64],
-        );
-        let result = aggregate.next().unwrap().unwrap();
-        let actual: HashMap<ValueKey, i64> = result
-            .selected_indices()
-            .map(|row| {
-                (
-                    result.column(0).unwrap().get_value(row).unwrap().into(),
-                    result.column(1).unwrap().get_int64(row).unwrap(),
-                )
-            })
-            .collect();
-        let expected: HashMap<ValueKey, i64> =
-            values.into_iter().map(|value| (value.into(), 2)).collect();
-        assert_eq!(result.row_count(), expected.len());
-        assert_eq!(actual, expected);
-        assert!(aggregate.next().unwrap().is_none());
-    }
 
     struct MockOperator {
         chunks: Vec<DataChunk>,

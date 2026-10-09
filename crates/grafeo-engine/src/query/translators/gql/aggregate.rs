@@ -146,7 +146,7 @@ impl GqlTranslator {
             let column = match columns.get(&text) {
                 Some(column) => column.clone(),
                 None => {
-                    let column = format!("_horizontal_{}", rand_id());
+                    let column = self.names.next("_horizontal_");
                     let input = std::mem::replace(plan, LogicalOperator::Empty);
                     *plan = LogicalOperator::HorizontalAggregate(HorizontalAggregateOp {
                         list_column,

@@ -166,6 +166,8 @@ pub(crate) struct PlanOptions {
     /// ignores duplicate rows runs as a reachability search. Always on; tests
     /// turn it off to compare with the plan that enumerates every walk.
     pub reachability: bool,
+    /// The bytes one path search may hold (`Config::path_search_budget`).
+    pub path_search_budget: usize,
 }
 
 /// Runtime configuration for creating a new session.
@@ -182,6 +184,8 @@ pub(crate) struct SessionConfig {
     pub graph_model: GraphModel,
     pub query_timeout: Option<Duration>,
     pub max_property_size: Option<usize>,
+    /// The bytes one path search may hold (`Config::path_search_budget`).
+    pub path_search_budget: usize,
     /// Buffer manager for memory-aware query execution.
     #[cfg(feature = "spill")]
     pub buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
@@ -390,6 +394,7 @@ impl Session {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
                 reachability: true,
+                path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
@@ -568,6 +573,7 @@ impl Session {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
                 reachability: true,
+                path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
@@ -5323,6 +5329,7 @@ impl Session {
         .with_factorized_execution(self.plan_options.factorized_execution)
         .with_shuffle_unordered(self.plan_options.shuffle_unordered)
         .with_reachability(self.plan_options.reachability)
+        .with_path_search_budget(self.plan_options.path_search_budget)
         .with_catalog(Arc::clone(&self.catalog))
         .with_session_context(session_context)
         .with_read_only(read_only);

@@ -125,8 +125,8 @@ fn values_are_checked_against_the_new_types() {
 }
 
 /// A property type nests at most 128 `LIST<...>` levels, as deep as a
-/// property value may be. The parser refuses a deeper one, and so does the
-/// catalog for a type name the parser passes on unread (a quoted name), so no
+/// property value may be. The parser refuses a deeper one, and a quoted type
+/// name (one name, which no supported type has with `LIST<` in it), so no
 /// statement builds a type deeper than the catalog records store.
 #[test]
 fn property_types_nest_at_most_128_lists() {
@@ -142,6 +142,17 @@ fn property_types_nest_at_most_128_lists() {
     for statement in [
         format!("CREATE NODE TYPE Deeper (a {})", nested(129)),
         format!("CREATE NODE TYPE Deeper (a {})", nested(100_000)),
+    ] {
+        let error = db.execute(&statement).unwrap_err().to_string();
+        assert!(
+            error.contains("A property type nests at most 128 LIST<...> levels"),
+            "{}: {error}",
+            &statement[..statement.len().min(60)]
+        );
+    }
+    // A quoted type name is one name, and no supported type is called
+    // `LIST<...>`: the parser refuses it before the catalog reads it.
+    for statement in [
         format!("CREATE NODE TYPE Deeper (a `{}`)", nested(129)),
         format!("CREATE EDGE TYPE DEEPER (a `{}`)", nested(129)),
         format!("ALTER NODE TYPE Deep ADD b `{}`", nested(129)),
@@ -152,7 +163,7 @@ fn property_types_nest_at_most_128_lists() {
     ] {
         let error = db.execute(&statement).unwrap_err().to_string();
         assert!(
-            error.contains("A property type nests at most 128 LIST<...> levels"),
+            error.contains("is not a property type"),
             "{}: {error}",
             &statement[..statement.len().min(60)]
         );

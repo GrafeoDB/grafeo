@@ -484,13 +484,14 @@ fn a_later_part_property_map_reads_a_with_value() {
          (post)-[:HAS_TAG]->(other:Tag WHERE NOT t = other) RETURN f.name, other.name",
         &[&["Gus", "Prague"]],
     );
-    // The value in the third part
-    assert_both(
-        "MATCH (k:Tag {name: 'Barcelona'}) WITH k.id AS tid \
-         MATCH (f:Person)<-[:HAS_CREATOR]-(post:Post), (post)-[:HAS_TAG]->(other:Tag), \
-         (post)-[:HAS_TAG {w: tid}]->(t:Tag) RETURN f.name, other.name",
-        &[&["Gus", "Barcelona"], &["Gus", "Prague"]],
-    );
+    // The value in the third part. Cypher binds a relationship once per
+    // MATCH, so `other` is reached over another HAS_TAG than `t`; GQL lets the
+    // two patterns bind one edge
+    let third = "MATCH (k:Tag {name: 'Barcelona'}) WITH k.id AS tid \
+                 MATCH (f:Person)<-[:HAS_CREATOR]-(post:Post), (post)-[:HAS_TAG]->(other:Tag), \
+                 (post)-[:HAS_TAG {w: tid}]->(t:Tag) RETURN f.name, other.name";
+    assert_gql(third, &[&["Gus", "Barcelona"], &["Gus", "Prague"]]);
+    assert_cypher(third, &[&["Gus", "Prague"]]);
 }
 
 /// A WHERE that reads only the second part and earlier values.

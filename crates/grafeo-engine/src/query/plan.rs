@@ -166,6 +166,10 @@ pub enum LogicalOperator {
     /// Create a new edge.
     CreateEdge(CreateEdgeOp),
 
+    /// Create the nodes and edges of the patterns of an `INSERT` or `CREATE`
+    /// clause, all in one operator.
+    Create(CreateOp),
+
     /// Delete a node.
     DeleteNode(DeleteNodeOp),
 
@@ -318,6 +322,7 @@ impl LogicalOperator {
             // Direct mutation operators
             Self::CreateNode(_)
             | Self::CreateEdge(_)
+            | Self::Create(_)
             | Self::DeleteNode(_)
             | Self::DeleteEdge(_)
             | Self::SetProperty(_)
@@ -395,6 +400,7 @@ impl LogicalOperator {
             Self::TripleScan(op) => op.input.as_deref().into_iter().collect(),
             Self::VectorScan(op) => op.input.as_deref().into_iter().collect(),
             Self::CreateNode(op) => op.input.as_deref().into_iter().collect(),
+            Self::Create(op) => op.input.as_deref().into_iter().collect(),
             Self::InsertTriple(op) => op.input.as_deref().into_iter().collect(),
             Self::DeleteTriple(op) => op.input.as_deref().into_iter().collect(),
 
@@ -487,6 +493,10 @@ impl LogicalOperator {
             Self::CreateNode(mut op) => {
                 op.input = op.input.map(|i| Box::new(f(*i)));
                 Self::CreateNode(op)
+            }
+            Self::Create(mut op) => {
+                op.input = op.input.map(|i| Box::new(f(*i)));
+                Self::Create(op)
             }
             Self::InsertTriple(mut op) => {
                 op.input = op.input.map(|i| Box::new(f(*i)));
@@ -782,6 +792,7 @@ impl LogicalOperator {
                     op.edge_type
                 )
             }
+            Self::Create(op) => op.describe(),
             Self::DeleteNode(op) => op.variable.clone(),
             Self::DeleteEdge(op) => op.variable.clone(),
             Self::SetProperty(op) => op.variable.clone(),
@@ -924,6 +935,12 @@ impl LogicalOperator {
             Self::CreateEdge(create) => {
                 bound = create.input.bound_variables(imports)?;
                 bound.extend(create.variable.iter().cloned());
+            }
+            Self::Create(create) => {
+                if let Some(input) = &create.input {
+                    bound = input.bound_variables(imports)?;
+                }
+                bound.extend(create.variables().map(str::to_string));
             }
             Self::Merge(merge) => {
                 bound = merge.input.bound_variables(imports)?;
@@ -1369,6 +1386,12 @@ impl LogicalOperator {
                     to = op.to_variable
                 );
                 op.input.fmt_tree(out, depth + 1);
+            }
+            Self::Create(op) => {
+                let _ = writeln!(out, "{indent}Create {}", op.describe());
+                if let Some(input) = &op.input {
+                    input.fmt_tree(out, depth + 1);
+                }
             }
             Self::DeleteNode(op) => {
                 let _ = writeln!(out, "{indent}DeleteNode ({var})", var = op.variable);
@@ -1961,6 +1984,115 @@ pub struct DistinctOp {
     /// Optional columns to use for deduplication.
     /// If None, all columns are used.
     pub columns: Option<Vec<String>>,
+}
+
+/// Create the nodes and edges of the patterns of an `INSERT` or `CREATE`
+/// clause, in order, for each input row.
+///
+/// One operator for the whole clause, where a [`CreateNodeOp`] or
+/// [`CreateEdgeOp`] per node or edge would nest one level per pattern: every
+/// stage walks the plan recursively, so a clause of thousands of patterns
+/// stays one level deep (see [`crate::query::limits`]).
+#[derive(Debug, Clone)]
+pub struct CreateOp {
+    /// What to create for each row, in order: an edge's endpoints are bound
+    /// by the input rows or created before it.
+    pub elements: Vec<CreateElement>,
+    /// Input operator; `None` for a clause that starts the statement, which
+    /// runs once.
+    pub input: Option<Box<LogicalOperator>>,
+}
+
+impl CreateOp {
+    /// The variables the operator binds, in order: each node and each named
+    /// edge it creates.
+    pub fn variables(&self) -> impl Iterator<Item = &str> {
+        self.elements.iter().filter_map(|element| match element {
+            CreateElement::Node { variable, .. } => Some(variable.as_str()),
+            CreateElement::Edge { variable, .. } => variable.as_deref(),
+        })
+    }
+
+    /// The expressions of the property values, in order.
+    pub fn property_values(&self) -> impl Iterator<Item = &LogicalExpression> {
+        self.elements
+            .iter()
+            .flat_map(|element| element.properties().iter().map(|(_, value)| value))
+    }
+
+    /// The expressions of the property values, in order, to change.
+    pub fn property_values_mut(&mut self) -> impl Iterator<Item = &mut LogicalExpression> {
+        self.elements.iter_mut().flat_map(|element| {
+            let properties = match element {
+                CreateElement::Node { properties, .. } | CreateElement::Edge { properties, .. } => {
+                    properties
+                }
+            };
+            properties.iter_mut().map(|(_, value)| value)
+        })
+    }
+
+    /// The elements as EXPLAIN lists them: `(a:Person), (a)-[e:KNOWS]->(b)`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let elements: Vec<String> = self
+            .elements
+            .iter()
+            .map(|element| match element {
+                CreateElement::Node {
+                    variable, labels, ..
+                } => format!("({variable}:{})", labels.join(":")),
+                CreateElement::Edge {
+                    variable,
+                    from_variable,
+                    to_variable,
+                    edge_type,
+                    ..
+                } => format!(
+                    "({from_variable})-[{}:{edge_type}]->({to_variable})",
+                    variable.as_deref().unwrap_or("?")
+                ),
+            })
+            .collect();
+        elements.join(", ")
+    }
+}
+
+/// A node or an edge a [`CreateOp`] creates.
+#[derive(Debug, Clone)]
+pub enum CreateElement {
+    /// A new node.
+    Node {
+        /// Variable name to bind the created node to.
+        variable: String,
+        /// Labels for the new node.
+        labels: Vec<String>,
+        /// Properties for the new node.
+        properties: Vec<(String, LogicalExpression)>,
+    },
+    /// A new edge between two nodes of the row.
+    Edge {
+        /// Variable name to bind the created edge to.
+        variable: Option<String>,
+        /// Source node variable.
+        from_variable: String,
+        /// Target node variable.
+        to_variable: String,
+        /// Edge type.
+        edge_type: String,
+        /// Properties for the new edge.
+        properties: Vec<(String, LogicalExpression)>,
+    },
+}
+
+impl CreateElement {
+    /// The properties of the new node or edge.
+    #[must_use]
+    pub fn properties(&self) -> &[(String, LogicalExpression)] {
+        match self {
+            Self::Node { properties, .. } | Self::Edge { properties, .. } => properties,
+        }
+    }
 }
 
 /// Create a new node.
@@ -2940,6 +3072,54 @@ pub enum LogicalExpression {
         /// The projection expression evaluated for each match.
         projection: Box<LogicalExpression>,
     },
+}
+
+impl LogicalExpression {
+    /// The `AND` of `conjuncts`, or `None` when there are none.
+    ///
+    /// See [`Self::balanced`]: an `AND` of any number of conjuncts stays
+    /// shallow, so the stages after this one can recurse into it.
+    #[must_use]
+    pub fn conjunction(conjuncts: impl IntoIterator<Item = Self>) -> Option<Self> {
+        Self::balanced(BinaryOp::And, conjuncts)
+    }
+
+    /// The `OR` of `disjuncts`, or `None` when there are none (see
+    /// [`Self::balanced`]).
+    #[must_use]
+    pub fn disjunction(disjuncts: impl IntoIterator<Item = Self>) -> Option<Self> {
+        Self::balanced(BinaryOp::Or, disjuncts)
+    }
+
+    /// Joins `operands` with `op`, an associative operator (`AND`, `OR`,
+    /// `XOR`), into a balanced tree that keeps their order, or `None` when
+    /// there are none.
+    ///
+    /// The tree is as deep as the logarithm of the operand count, where
+    /// joining them one by one from the left makes it as deep as the count.
+    /// Every stage that walks an expression recurses into it, so a chain of
+    /// thousands of conditions built from the left could overflow the stack
+    /// (see [`crate::query::limits`]).
+    #[must_use]
+    pub fn balanced(op: BinaryOp, operands: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut layer: Vec<Self> = operands.into_iter().collect();
+        while layer.len() > 1 {
+            let mut joined = Vec::with_capacity(layer.len().div_ceil(2));
+            let mut operands = layer.into_iter();
+            while let Some(left) = operands.next() {
+                joined.push(match operands.next() {
+                    Some(right) => Self::Binary {
+                        left: Box::new(left),
+                        op,
+                        right: Box::new(right),
+                    },
+                    None => left,
+                });
+            }
+            layer = joined;
+        }
+        layer.pop()
+    }
 }
 
 /// An entry in a map projection.

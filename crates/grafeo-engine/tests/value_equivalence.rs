@@ -195,6 +195,121 @@ fn lists_and_maps_of_equal_numbers_are_one_group() {
     }
 }
 
+/// A database whose `K` nodes hold `values` in `v`, each twice.
+fn keys_twice(values: &[Value]) -> GrafeoDB {
+    let db = GrafeoDB::new_in_memory();
+    for value in values.iter().chain(values) {
+        db.create_node_with_props(&["K"], [("v", value.clone())])
+            .unwrap();
+    }
+    db
+}
+
+/// Counters are other values when their replica state differs: a positive
+/// and a negative count of one replica, and two replicas with one count
+/// each, stay apart under grouping and DISTINCT (#605). A counter rebuilt in
+/// another insertion order is the same value.
+#[test]
+fn counters_with_another_replica_state_are_other_values() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let empty = Arc::new(HashMap::new());
+    let one = Arc::new(HashMap::from([("Amsterdam".to_owned(), 1_u64)]));
+    let positive = Value::OnCounter {
+        pos: Arc::clone(&one),
+        neg: Arc::clone(&empty),
+    };
+    let negative = Value::OnCounter {
+        pos: empty,
+        neg: one,
+    };
+    let berlin = Value::GCounter(Arc::new(HashMap::from([("Berlin".to_owned(), 1_u64)])));
+    let paris = Value::GCounter(Arc::new(HashMap::from([("Paris".to_owned(), 1_u64)])));
+    // Prague 3 and Barcelona 19, inserted in the order given.
+    let both = |first: &str, second: &str| {
+        let count = |replica: &str| if replica == "Prague" { 3_u64 } else { 19 };
+        let mut map = HashMap::new();
+        map.insert(first.to_owned(), count(first));
+        map.insert(second.to_owned(), count(second));
+        Value::GCounter(Arc::new(map))
+    };
+    let db = keys_twice(&[
+        positive,
+        negative,
+        berlin,
+        paris,
+        both("Prague", "Barcelona"),
+        both("Barcelona", "Prague"),
+    ]);
+    for language in languages() {
+        let grouped = rows(&db, language, "MATCH (n:K) RETURN n.v AS v, count(*) AS c");
+        let counts: Vec<&Value> = grouped.iter().map(|row| &row[1]).collect();
+        assert_eq!(grouped.len(), 5, "{language}: {grouped:?}");
+        assert_eq!(
+            counts.iter().filter(|c| ***c == Value::Int64(4)).count(),
+            1,
+            "{language}: the two insertion orders of one counter are one group: {grouped:?}"
+        );
+        let distinct = rows(&db, language, "MATCH (n:K) RETURN DISTINCT n.v AS v");
+        assert_eq!(distinct.len(), 5, "{language}: {distinct:?}");
+    }
+}
+
+/// Byte strings and vectors that share their first item and length are
+/// other values (their debug text was cut to those and took them for one),
+/// also inside lists; a string that reads like a vector is not the vector.
+#[test]
+fn values_with_one_debug_prefix_are_other_values() {
+    use std::sync::Arc;
+
+    let nested = |value: Value| Value::List(vec![Value::List(vec![value].into())].into());
+    let vector = Value::Vector(Arc::from([3.0_f32, 19.0]));
+    let db = keys_twice(&[
+        nested(Value::Bytes(vec![7, 1, 2].into())),
+        nested(Value::Bytes(vec![7, 3, 4].into())),
+        Value::Vector(Arc::from([3.0_f32, 88.0])),
+        Value::String(format!("{vector:?}").into()),
+        vector,
+    ]);
+    for language in languages() {
+        let grouped = rows(&db, language, "MATCH (n:K) RETURN n.v AS v, count(*) AS c");
+        assert_eq!(grouped.len(), 5, "{language}: {grouped:?}");
+        assert!(
+            grouped.iter().all(|row| row[1] == Value::Int64(2)),
+            "{language}: {grouped:?}"
+        );
+        let distinct = rows(&db, language, "MATCH (n:K) RETURN DISTINCT n.v AS v");
+        assert_eq!(distinct.len(), 5, "{language}: {distinct:?}");
+    }
+}
+
+/// PROFILE runs the query as it runs without it, so its aggregate and
+/// DISTINCT report the rows the query returns (#605 saw one row in PROFILE
+/// and two without it).
+#[test]
+fn profile_reports_the_groups_the_query_returns() {
+    let db = keys_twice(&[Value::Int64(0), Value::Float64(0.0), Value::Int64(3)]);
+    let session = db.session();
+    for (query, operator) in [
+        (
+            "MATCH (n:K) RETURN n.v AS v, count(*) AS c",
+            "HashAggregate ",
+        ),
+        ("MATCH (n:K) RETURN DISTINCT n.v AS v", "Distinct "),
+    ] {
+        let result = session.execute(query).unwrap();
+        assert_eq!(result.rows().len(), 2, "{query}: 0 and 0.0 are one value");
+        let profile = session.execute(&format!("PROFILE {query}")).unwrap();
+        let report = profile.rows()[0][0].as_str().unwrap().to_owned();
+        let line = report
+            .lines()
+            .find(|line| line.trim_start().starts_with(operator))
+            .unwrap_or_else(|| panic!("{query}: no {operator}in {report}"));
+        assert!(line.contains("  rows=2  "), "{query}: {report}");
+    }
+}
+
 // ============================================================================
 // DISTINCT over paths
 // ============================================================================

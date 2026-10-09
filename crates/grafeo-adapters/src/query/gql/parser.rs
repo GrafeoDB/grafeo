@@ -351,15 +351,39 @@ impl<'a> Parser<'a> {
             };
         }
 
-        // Check for composite query operators (UNION, EXCEPT, INTERSECT, OTHERWISE)
-        while let Some(op) = self.parse_composite_op() {
-            let right = self.parse_single_statement()?;
-            self.link_chain()?;
-            left = Statement::CompositeQuery {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            };
+        // Check for composite query operators (UNION, EXCEPT, INTERSECT,
+        // OTHERWISE). A run of one associative operator is a balanced tree:
+        // a UNION of any number of queries stays shallow.
+        let mut pending = self.parse_composite_op();
+        while let Some(op) = pending {
+            if !is_associative(op) {
+                let right = self.parse_single_statement()?;
+                self.link_chain()?;
+                left = Statement::CompositeQuery {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+                pending = self.parse_composite_op();
+                continue;
+            }
+            let mut operands = vec![(left, self.nesting.take_operand())];
+            loop {
+                let right = self.parse_single_statement()?;
+                operands.push((right, self.nesting.take_operand()));
+                pending = self.parse_composite_op();
+                if pending != Some(op) {
+                    break;
+                }
+            }
+            left = self
+                .nesting
+                .join_balanced(operands, |left, right| Statement::CompositeQuery {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                })
+                .ok_or_else(|| self.error(&nesting_error_message()))?;
         }
         self.end_chain(chain);
 
@@ -1417,6 +1441,7 @@ impl<'a> Parser<'a> {
 
         // Parse the pattern to merge
         let pattern = self.parse_pattern()?;
+        self.check_one_type_each("MERGE", &pattern)?;
 
         // Parse optional ON CREATE and ON MATCH clauses
         let mut on_create = None;
@@ -2260,6 +2285,66 @@ impl<'a> Parser<'a> {
         Err(self.error("Expected label name, %, or ("))
     }
 
+    /// Parses the types of an edge pattern, after its variable: none, one
+    /// (`:KNOWS`), or alternatives (`:KNOWS|LIKES`), the disjunction of a
+    /// label expression (ISO/IEC 39075:2024, 16.8 `<label expression>`).
+    ///
+    /// An edge has exactly one type, so a conjunction (`:A&B`, an edge with
+    /// both labels) would match no edge, and `:A:B` is no label expression:
+    /// both are errors that name what to write, the alternatives or the
+    /// quoted name of one type.
+    fn parse_edge_types(&mut self) -> Result<Vec<String>> {
+        let mut types = Vec::new();
+        if self.current.kind != TokenKind::Colon {
+            return Ok(types);
+        }
+        self.advance();
+        loop {
+            if !self.is_label_or_type_name() {
+                return Err(self.error(if types.is_empty() {
+                    "Expected edge type"
+                } else {
+                    "Expected edge type after |"
+                }));
+            }
+            types.push(self.get_identifier_name());
+            self.advance();
+            if self.current.kind != TokenKind::Pipe {
+                break;
+            }
+            self.advance();
+        }
+        let joint = match self.current.kind {
+            TokenKind::Colon => ":",
+            TokenKind::Ampersand => "&",
+            _ => return Ok(types),
+        };
+        let at = self.current.span;
+        self.advance();
+        let first = types.last().map_or("A", String::as_str);
+        let second = if self.is_label_or_type_name() {
+            self.get_identifier_name()
+        } else {
+            "B".to_string()
+        };
+        let what = if joint == "&" {
+            format!("An edge has one type, so :{first}&{second}, an edge of both, matches no edge")
+        } else {
+            "An edge has one type".to_string()
+        };
+        Err(Error::Query(
+            QueryError::new(
+                QueryErrorKind::Syntax,
+                format!(
+                    "[GQL] {what}: write :`{first}{joint}{second}` for the type named \
+                     {first}{joint}{second}, or :{first}|{second} to match either type"
+                ),
+            )
+            .with_span(at)
+            .with_source(self.source.to_string()),
+        ))
+    }
+
     fn parse_edge_pattern(&mut self) -> Result<EdgePattern> {
         // Handle both styles:
         // 1. `-[...]->` or `-[:TYPE]->` or `-[:TYPE*1..3]->` (direction determined by trailing arrow)
@@ -2304,24 +2389,7 @@ impl<'a> Parser<'a> {
                             None
                         };
 
-                        let mut tps = Vec::new();
-                        while self.current.kind == TokenKind::Colon {
-                            self.advance();
-                            if !self.is_label_or_type_name() {
-                                return Err(self.error("Expected edge type"));
-                            }
-                            tps.push(self.get_identifier_name());
-                            self.advance();
-                            // Support pipe-separated alternatives: :T1|T2|T3
-                            while self.current.kind == TokenKind::Pipe {
-                                self.advance();
-                                if !self.is_label_or_type_name() {
-                                    return Err(self.error("Expected edge type after |"));
-                                }
-                                tps.push(self.get_identifier_name());
-                                self.advance();
-                            }
-                        }
+                        let tps = self.parse_edge_types()?;
 
                         // Parse variable-length path quantifier: *min..max
                         let (min_h, max_h) = self.parse_path_quantifier()?;
@@ -2393,24 +2461,7 @@ impl<'a> Parser<'a> {
                             None
                         };
 
-                        let mut tps = Vec::new();
-                        while self.current.kind == TokenKind::Colon {
-                            self.advance();
-                            if !self.is_label_or_type_name() {
-                                return Err(self.error("Expected edge type"));
-                            }
-                            tps.push(self.get_identifier_name());
-                            self.advance();
-                            // Support pipe-separated alternatives: :T1|T2|T3
-                            while self.current.kind == TokenKind::Pipe {
-                                self.advance();
-                                if !self.is_label_or_type_name() {
-                                    return Err(self.error("Expected edge type after |"));
-                                }
-                                tps.push(self.get_identifier_name());
-                                self.advance();
-                            }
-                        }
+                        let tps = self.parse_edge_types()?;
 
                         // Parse variable-length path quantifier
                         let (min_h, max_h) = self.parse_path_quantifier()?;
@@ -2515,23 +2566,7 @@ impl<'a> Parser<'a> {
                             None
                         };
 
-                        let mut tps = Vec::new();
-                        while self.current.kind == TokenKind::Colon {
-                            self.advance();
-                            if !self.is_label_or_type_name() {
-                                return Err(self.error("Expected edge type"));
-                            }
-                            tps.push(self.get_identifier_name());
-                            self.advance();
-                            while self.current.kind == TokenKind::Pipe {
-                                self.advance();
-                                if !self.is_label_or_type_name() {
-                                    return Err(self.error("Expected edge type after |"));
-                                }
-                                tps.push(self.get_identifier_name());
-                                self.advance();
-                            }
-                        }
+                        let tps = self.parse_edge_types()?;
 
                         let (min_h, max_h) = self.parse_path_quantifier()?;
 
@@ -3351,60 +3386,48 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_or_expression(&mut self) -> Result<Expression> {
-        let chain = self.begin_chain();
-        let mut left = self.parse_xor_expression()?;
-
-        while self.current.kind == TokenKind::Or {
-            self.advance();
-            let right = self.parse_xor_expression()?;
-            self.link_chain()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::Or,
-                right: Box::new(right),
-            };
-        }
-        self.end_chain(chain);
-
-        Ok(left)
+        self.parse_balanced_chain(TokenKind::Or, BinaryOp::Or, Self::parse_xor_expression)
     }
 
     fn parse_xor_expression(&mut self) -> Result<Expression> {
-        let chain = self.begin_chain();
-        let mut left = self.parse_and_expression()?;
-
-        while self.current.kind == TokenKind::Xor {
-            self.advance();
-            let right = self.parse_and_expression()?;
-            self.link_chain()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::Xor,
-                right: Box::new(right),
-            };
-        }
-        self.end_chain(chain);
-
-        Ok(left)
+        self.parse_balanced_chain(TokenKind::Xor, BinaryOp::Xor, Self::parse_and_expression)
     }
 
     fn parse_and_expression(&mut self) -> Result<Expression> {
+        self.parse_balanced_chain(TokenKind::And, BinaryOp::And, Self::parse_not_expression)
+    }
+
+    /// Parses `operand` joined by `token`, an associative operator, into a
+    /// balanced tree of `op` (see [`Nesting::join_balanced`]): a chain of any
+    /// length stays shallow.
+    fn parse_balanced_chain(
+        &mut self,
+        token: TokenKind,
+        op: BinaryOp,
+        operand: fn(&mut Self) -> Result<Expression>,
+    ) -> Result<Expression> {
         let chain = self.begin_chain();
-        let mut left = self.parse_not_expression()?;
-
-        while self.current.kind == TokenKind::And {
-            self.advance();
-            let right = self.parse_not_expression()?;
-            self.link_chain()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::And,
-                right: Box::new(right),
-            };
+        let first = operand(self)?;
+        if self.current.kind != token {
+            self.end_chain(chain);
+            return Ok(first);
         }
+        let mut operands = vec![(first, self.nesting.take_operand())];
+        while self.current.kind == token {
+            self.advance();
+            let next = operand(self)?;
+            operands.push((next, self.nesting.take_operand()));
+        }
+        let tree = self
+            .nesting
+            .join_balanced(operands, |left, right| Expression::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            })
+            .ok_or_else(|| self.error(&nesting_error_message()));
         self.end_chain(chain);
-
-        Ok(left)
+        tree
     }
 
     fn parse_not_expression(&mut self) -> Result<Expression> {
@@ -4817,6 +4840,9 @@ impl<'a> Parser<'a> {
             self.advance();
             patterns.push(self.parse_pattern()?);
         }
+        for pattern in &patterns {
+            self.check_one_type_each("INSERT", pattern)?;
+        }
 
         Ok(InsertStatement {
             patterns,
@@ -4835,11 +4861,36 @@ impl<'a> Parser<'a> {
             self.advance();
             patterns.push(self.parse_pattern()?);
         }
+        for pattern in &patterns {
+            self.check_one_type_each("CREATE", pattern)?;
+        }
 
         Ok(InsertStatement {
             patterns,
             span: None,
         })
+    }
+
+    /// Refuses an edge with alternative types (`:A|B`) in `pattern` of
+    /// `clause`, which creates edges: each gets one type (the label set of
+    /// an inserted edge has no disjunction, ISO/IEC 39075:2024 16.5
+    /// `<insert graph pattern>`).
+    fn check_one_type_each(&self, clause: &str, pattern: &Pattern) -> Result<()> {
+        match pattern {
+            Pattern::Node(_) => Ok(()),
+            Pattern::Path(path) => match path.edges.iter().find(|edge| edge.types.len() > 1) {
+                Some(edge) => Err(self.error(&format!(
+                    "{clause} gives an edge one type: :{} names alternatives, which only a \
+                     pattern to match can have",
+                    edge.types.join("|")
+                ))),
+                None => Ok(()),
+            },
+            Pattern::Quantified { pattern, .. } => self.check_one_type_each(clause, pattern),
+            Pattern::Union(patterns) | Pattern::MultisetUnion(patterns) => patterns
+                .iter()
+                .try_for_each(|pattern| self.check_one_type_each(clause, pattern)),
+        }
     }
 
     /// Parses a DELETE target: either a plain variable or a general expression (GD04).
@@ -6081,19 +6132,30 @@ impl<'a> Parser<'a> {
 
     /// Parses ALTER NODE TYPE name / ALTER EDGE TYPE name alterations.
     /// Consumes an optional `PROPERTY` keyword in `ADD PROPERTY name ...` /
-    /// `DROP PROPERTY name`. It is a keyword only when a name follows, so a
-    /// property that is itself called `property` still works as a backtick-quoted
-    /// identifier.
+    /// `DROP PROPERTY name`. It is a keyword only when a property name
+    /// follows (see [`Self::next_names_property`]), so a property that is
+    /// itself called `property` still works as a backtick-quoted identifier.
     fn skip_property_keyword(&mut self) {
         if self.current.kind == TokenKind::Identifier
             && self.current.text.eq_ignore_ascii_case("PROPERTY")
-            && matches!(
-                self.peek_kind(),
-                TokenKind::Identifier | TokenKind::QuotedIdentifier
-            )
+            && self.next_names_property()
         {
             self.advance();
         }
+    }
+
+    /// Whether the token after the current one can name a property, as a
+    /// key of a property map can (see [`Self::is_label_or_type_name`]):
+    /// keywords such as `starts` or `match` included.
+    fn next_names_property(&mut self) -> bool {
+        let _ = self.peek_kind();
+        let Some(next) = self.peeked.take() else {
+            return false;
+        };
+        let current = std::mem::replace(&mut self.current, next);
+        let names_property = self.is_label_or_type_name();
+        self.peeked = Some(std::mem::replace(&mut self.current, current));
+        names_property
     }
 
     fn parse_alter_type(&mut self, is_node: bool, span_start: usize) -> Result<Statement> {
@@ -6112,55 +6174,17 @@ impl<'a> Parser<'a> {
             match action.as_str() {
                 "ADD" => {
                     self.advance();
-                    // ADD [PROPERTY] property_name type [NOT NULL]
+                    // ADD [PROPERTY] property_name type [NOT NULL] [DEFAULT literal]
                     self.skip_property_keyword();
-                    if !self.is_identifier() {
-                        return Err(self.error("Expected property name after ADD"));
-                    }
-                    let prop_name = self.get_identifier_name();
-                    self.advance();
-                    let data_type = self.parse_property_type_name()?;
-                    let nullable = if self.current.kind == TokenKind::Not {
-                        self.advance();
-                        if self.current.kind != TokenKind::Null {
-                            return Err(self.error("Expected NULL after NOT"));
-                        }
-                        self.advance();
-                        false
-                    } else {
-                        true
-                    };
-                    // Optional DEFAULT <literal>
-                    let default_value = if self.is_identifier()
-                        && self.get_identifier_name().eq_ignore_ascii_case("DEFAULT")
-                    {
-                        self.advance();
-                        let lit = match self.current.kind {
-                            TokenKind::String
-                            | TokenKind::Integer
-                            | TokenKind::Float
-                            | TokenKind::True
-                            | TokenKind::False
-                            | TokenKind::Null => self.current.text.clone(),
-                            _ => return Err(self.error("Expected literal value after DEFAULT")),
-                        };
-                        self.advance();
-                        Some(lit)
-                    } else {
-                        None
-                    };
-                    alterations.push(TypeAlteration::AddProperty(PropertyDefinition {
-                        name: prop_name,
-                        data_type,
-                        nullable,
-                        default_value,
-                    }));
+                    alterations.push(TypeAlteration::AddProperty(
+                        self.parse_property_definition()?,
+                    ));
                 }
                 "DROP" => {
                     self.advance();
                     // DROP [PROPERTY] property_name
                     self.skip_property_keyword();
-                    if !self.is_identifier() {
+                    if !self.is_label_or_type_name() {
                         return Err(self.error("Expected property name after DROP"));
                     }
                     let prop_name = self.get_identifier_name();
@@ -6287,33 +6311,45 @@ impl<'a> Parser<'a> {
     /// The `LIST<` levels are counted, not recursed into, and at most
     /// [`MAX_PROPERTY_VALUE_DEPTH`] are accepted, as deep as a property value
     /// may be: a type of any depth is refused without a stack overflow.
-    fn parse_property_type_name(&mut self) -> Result<String> {
+    ///
+    /// A name that is not a property type Grafeo supports is refused
+    /// (ISO/IEC 39075:2024 18.7 `<property value type>`, Syntax Rule 4); it
+    /// used to declare an `ANY` property. Returns the type's spelling and
+    /// what it takes as a `DEFAULT`.
+    fn parse_property_type_name(&mut self) -> Result<(String, PropertyTypeKind)> {
+        use crate::query::schema::{property_type_kind, unknown_property_type};
+
         let mut levels = 0;
-        let mut element = loop {
+        let (mut element, kind) = loop {
             if !self.is_identifier() {
                 return Err(self.error("Expected type name"));
             }
             let name = self.get_identifier_name();
-            self.advance();
 
-            if name.eq_ignore_ascii_case("LIST") && self.current.kind == TokenKind::Lt {
+            if name.eq_ignore_ascii_case("LIST") && self.peek_kind() == TokenKind::Lt {
                 levels += 1;
                 if levels > MAX_PROPERTY_VALUE_DEPTH {
                     return Err(self.error(&format!(
                         "A property type nests at most {MAX_PROPERTY_VALUE_DEPTH} LIST<...> levels"
                     )));
                 }
-                self.advance();
+                self.advance(); // LIST
+                self.advance(); // <
                 continue;
             }
             if name.eq_ignore_ascii_case("ZONED") || name.eq_ignore_ascii_case("LOCAL") {
+                self.advance();
                 let prefix = name.to_ascii_uppercase();
                 if !self.try_accept_identifier_keyword("DATETIME") {
                     return Err(self.error(&format!("Expected DATETIME after {prefix}")));
                 }
-                break format!("{prefix} DATETIME");
+                break (format!("{prefix} DATETIME"), PropertyTypeKind::Other);
             }
-            break name;
+            let Some(kind) = property_type_kind(&name) else {
+                return Err(self.error(&unknown_property_type(&name)));
+            };
+            self.advance();
+            break (name, kind);
         };
 
         for _ in 0..levels {
@@ -6323,129 +6359,182 @@ impl<'a> Parser<'a> {
             self.advance();
             element = format!("LIST<{element}>");
         }
-        Ok(element)
+        let kind = if levels == 0 {
+            kind
+        } else {
+            PropertyTypeKind::Other
+        };
+        Ok((element, kind))
     }
 
-    fn parse_property_definitions(&mut self) -> Result<Vec<PropertyDefinition>> {
-        self.expect(TokenKind::LParen)?;
-
-        let mut defs = Vec::new();
-
-        if self.current.kind != TokenKind::RParen {
-            loop {
-                if !self.is_identifier() {
-                    return Err(self.error("Expected property name"));
-                }
-                let name = self.get_identifier_name();
-                self.advance();
-
-                let data_type = self.parse_property_type_name()?;
-
-                let nullable = if self.current.kind == TokenKind::Not {
-                    self.advance();
-                    if self.current.kind != TokenKind::Null {
-                        return Err(self.error("Expected NULL after NOT"));
-                    }
-                    self.advance();
-                    false
-                } else {
-                    true
-                };
-
-                // Optional DEFAULT <literal>
-                let default_value = if self.is_identifier()
-                    && self.get_identifier_name().eq_ignore_ascii_case("DEFAULT")
-                {
-                    self.advance();
-                    let lit = match self.current.kind {
-                        TokenKind::String
-                        | TokenKind::Integer
-                        | TokenKind::Float
-                        | TokenKind::True
-                        | TokenKind::False
-                        | TokenKind::Null => self.current.text.clone(),
-                        _ => return Err(self.error("Expected literal value after DEFAULT")),
-                    };
-                    self.advance();
-                    Some(lit)
-                } else {
-                    None
-                };
-
-                defs.push(PropertyDefinition {
-                    name,
-                    data_type,
-                    nullable,
-                    default_value,
-                });
-
-                if self.current.kind != TokenKind::Comma {
-                    break;
-                }
-                self.advance();
-            }
+    /// Reads one property of type DDL (ISO/IEC 39075:2024 18.6
+    /// `<property type>`, and Grafeo's `DEFAULT`):
+    /// `name TYPE [NOT NULL] [DEFAULT literal]`.
+    ///
+    /// The name may be any name a property map takes as a key, keywords such
+    /// as `starts` or `match` included: an INSERT can write such a property,
+    /// so its type can declare it.
+    fn parse_property_definition(&mut self) -> Result<PropertyDefinition> {
+        if !self.is_label_or_type_name() {
+            return Err(self.error("Expected property name"));
         }
+        let name = self.get_identifier_name();
+        self.advance();
 
-        self.expect(TokenKind::RParen)?;
-        Ok(defs)
+        let (data_type, kind) = self.parse_property_type_name()?;
+
+        let nullable = if self.current.kind == TokenKind::Not {
+            self.advance();
+            if self.current.kind != TokenKind::Null {
+                return Err(self.error("Expected NULL after NOT"));
+            }
+            self.advance();
+            false
+        } else {
+            true
+        };
+
+        let default_value = if self.try_accept_identifier_keyword("DEFAULT") {
+            Some(self.parse_default_literal(&data_type, kind, nullable)?)
+        } else {
+            None
+        };
+
+        Ok(PropertyDefinition {
+            name,
+            data_type,
+            nullable,
+            default_value,
+        })
+    }
+
+    /// Reads the literal after `DEFAULT` for a property of type `data_type`
+    /// (taking literals of `kind`): a string, a signed number (ISO/IEC
+    /// 39075:2024 21.2 `<signed numeric literal>`), `TRUE`, `FALSE` or
+    /// `NULL`. Returns it as [`PropertyDefinition::default_value`] spells it:
+    /// an integer default of a `FLOAT64` property as the float.
+    ///
+    /// A literal that is not a value of the type is refused, and so is `NULL`
+    /// for a `NOT NULL` property: they used to be accepted, and then every
+    /// insert that relied on the default failed.
+    fn parse_default_literal(
+        &mut self,
+        data_type: &str,
+        kind: PropertyTypeKind,
+        nullable: bool,
+    ) -> Result<String> {
+        let start = self.current.span.start;
+        let negative = match self.current.kind {
+            TokenKind::Minus | TokenKind::Plus => {
+                let negative = self.current.kind == TokenKind::Minus;
+                self.advance();
+                if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Float) {
+                    return Err(self.error("Expected a number after the sign of a DEFAULT"));
+                }
+                Some(negative)
+            }
+            _ => None,
+        };
+        let written = self
+            .source
+            .get(start..self.current.span.end)
+            .unwrap_or(&self.current.text)
+            .to_string();
+        let not_of_type = |parser: &Self| {
+            parser.error(&format!(
+                "DEFAULT {written} is not a value of type {data_type}"
+            ))
+        };
+
+        let spelled = match self.current.kind {
+            TokenKind::Null if nullable => "NULL".to_string(),
+            TokenKind::Null => {
+                return Err(self.error("DEFAULT NULL is not a value of a NOT NULL property"));
+            }
+            TokenKind::True | TokenKind::False => match kind {
+                PropertyTypeKind::Boolean | PropertyTypeKind::Any => {
+                    self.current.text.to_ascii_uppercase()
+                }
+                _ => return Err(not_of_type(self)),
+            },
+            TokenKind::String => match kind {
+                PropertyTypeKind::String | PropertyTypeKind::Any => {
+                    let text = &self.current.text;
+                    format!("'{}'", unescape_string(&text[1..text.len() - 1]))
+                }
+                _ => return Err(not_of_type(self)),
+            },
+            TokenKind::Integer => {
+                let Some(value) = integer_literal(&self.current.text, negative == Some(true))
+                else {
+                    return Err(self.error(&format!(
+                        "DEFAULT {written} is out of the INT64 range ({} to {})",
+                        i64::MIN,
+                        i64::MAX
+                    )));
+                };
+                match kind {
+                    PropertyTypeKind::Integer | PropertyTypeKind::Any => value.to_string(),
+                    PropertyTypeKind::Float => match exact_float(value) {
+                        Some(float) => format!("{float:?}"),
+                        None => {
+                            return Err(self.error(&format!(
+                                "DEFAULT {written} has no exact {data_type} value"
+                            )));
+                        }
+                    },
+                    _ => return Err(not_of_type(self)),
+                }
+            }
+            TokenKind::Float => match kind {
+                PropertyTypeKind::Float | PropertyTypeKind::Any => {
+                    let value: f64 = self
+                        .current
+                        .text
+                        .parse()
+                        .map_err(|_| self.error("Invalid float"))?;
+                    let value = if negative == Some(true) {
+                        -value
+                    } else {
+                        value
+                    };
+                    format!("{value:?}")
+                }
+                _ => return Err(not_of_type(self)),
+            },
+            _ => return Err(self.error("Expected literal value after DEFAULT")),
+        };
+        self.advance();
+        Ok(spelled)
+    }
+
+    /// Parses the property definitions of a type in parentheses:
+    /// `( name TYPE [NOT NULL] [DEFAULT literal], ... )`.
+    fn parse_property_definitions(&mut self) -> Result<Vec<PropertyDefinition>> {
+        self.parse_property_definition_list(TokenKind::LParen, TokenKind::RParen)
     }
 
     /// Parses property definitions inside braces: `{ name TYPE [NOT NULL], ... }`.
     ///
     /// Used by pattern-form graph type syntax where properties use `{}` instead of `()`.
     fn parse_property_definitions_braces(&mut self) -> Result<Vec<PropertyDefinition>> {
-        self.expect(TokenKind::LBrace)?;
+        self.parse_property_definition_list(TokenKind::LBrace, TokenKind::RBrace)
+    }
+
+    /// Parses property definitions separated by commas between `open` and
+    /// `close` (see [`Self::parse_property_definition`]).
+    fn parse_property_definition_list(
+        &mut self,
+        open: TokenKind,
+        close: TokenKind,
+    ) -> Result<Vec<PropertyDefinition>> {
+        self.expect(open)?;
 
         let mut defs = Vec::new();
 
-        if self.current.kind != TokenKind::RBrace {
+        if self.current.kind != close {
             loop {
-                if !self.is_identifier() {
-                    return Err(self.error("Expected property name"));
-                }
-                let name = self.get_identifier_name();
-                self.advance();
-
-                let data_type = self.parse_property_type_name()?;
-
-                let nullable = if self.current.kind == TokenKind::Not {
-                    self.advance();
-                    if self.current.kind != TokenKind::Null {
-                        return Err(self.error("Expected NULL after NOT"));
-                    }
-                    self.advance();
-                    false
-                } else {
-                    true
-                };
-
-                // Optional DEFAULT <literal>
-                let default_value = if self.is_identifier()
-                    && self.get_identifier_name().eq_ignore_ascii_case("DEFAULT")
-                {
-                    self.advance();
-                    let lit = match self.current.kind {
-                        TokenKind::String
-                        | TokenKind::Integer
-                        | TokenKind::Float
-                        | TokenKind::True
-                        | TokenKind::False
-                        | TokenKind::Null => self.current.text.clone(),
-                        _ => return Err(self.error("Expected literal value after DEFAULT")),
-                    };
-                    self.advance();
-                    Some(lit)
-                } else {
-                    None
-                };
-
-                defs.push(PropertyDefinition {
-                    name,
-                    data_type,
-                    nullable,
-                    default_value,
-                });
-
+                defs.push(self.parse_property_definition()?);
                 if self.current.kind != TokenKind::Comma {
                     break;
                 }
@@ -6453,7 +6542,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.expect(TokenKind::RBrace)?;
+        self.expect(close)?;
         Ok(defs)
     }
 
@@ -7290,6 +7379,49 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Whether `a op b op c` means the same however it is grouped, so a chain of
+/// `op` can be a balanced tree: the unions, the intersections and
+/// `OTHERWISE`, not `EXCEPT` or `NEXT`.
+fn is_associative(op: CompositeOp) -> bool {
+    match op {
+        CompositeOp::Union
+        | CompositeOp::UnionAll
+        | CompositeOp::Intersect
+        | CompositeOp::IntersectAll
+        | CompositeOp::Otherwise => true,
+        CompositeOp::Except | CompositeOp::ExceptAll | CompositeOp::Next => false,
+    }
+}
+
+/// What a property type of type DDL takes as a `DEFAULT`.
+type PropertyTypeKind = crate::query::schema::PropertyTypeKind;
+
+/// The value of the integer literal `text` (decimal, or `0x`, `0o`, `0b`
+/// digits), negated when `negative`; `None` when it is out of the INT64
+/// range. The sign counts before the range check, so the smallest INT64,
+/// `-9223372036854775808`, is a literal.
+fn integer_literal(text: &str, negative: bool) -> Option<i64> {
+    let (digits, radix) = match text.get(..2) {
+        Some("0x" | "0X") => (&text[2..], 16),
+        Some("0o" | "0O") => (&text[2..], 8),
+        Some("0b" | "0B") => (&text[2..], 2),
+        _ => (text, 10),
+    };
+    let magnitude = i128::from(u64::from_str_radix(digits, radix).ok()?);
+    i64::try_from(if negative { -magnitude } else { magnitude }).ok()
+}
+
+/// `value` as a float, when the float is exactly `value`: every integer up to
+/// 2^53 in magnitude, and the larger ones a float holds.
+fn exact_float(value: i64) -> Option<f64> {
+    let decimal = value.to_string();
+    let float: f64 = decimal.parse().ok()?;
+    // A float that holds an integer prints as that integer without
+    // fractional digits; the nearest float to another integer prints as a
+    // different one.
+    (format!("{float:.0}") == decimal).then_some(float)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8037,6 +8169,70 @@ mod tests {
         assert!(
             err.contains("multiple statements separated by ';' are not supported in one call"),
             "{err}"
+        );
+    }
+
+    /// The types of the first edge of `query`'s first MATCH.
+    fn first_edge_types(query: &str) -> Vec<String> {
+        let Ok(Statement::Query(query)) = Parser::new(query).parse() else {
+            panic!("{query}: expected a query");
+        };
+        let Pattern::Path(path) = &query.match_clauses[0].patterns[0].pattern else {
+            panic!("expected a path");
+        };
+        path.edges[0].types.clone()
+    }
+
+    #[test]
+    fn an_edge_has_one_type_or_alternatives() {
+        // A disjunction of label names (ISO/IEC 39075:2024, 16.8)
+        assert_eq!(first_edge_types("MATCH (a)-[:A]->(b) RETURN b"), ["A"]);
+        assert_eq!(
+            first_edge_types("MATCH (a)<-[e:A|`Graph:CONTAINS`*1..3]-(b) RETURN b"),
+            ["A", "Graph:CONTAINS"]
+        );
+        assert_eq!(
+            first_edge_types("MATCH (a)~[:A|B]~(b) RETURN b"),
+            ["A", "B"]
+        );
+        // A second `:` is no label expression, and an edge with two labels
+        // (`&`) would match none: in every bracket form, MATCH and INSERT
+        for (query, joint) in [
+            ("MATCH (a)-[:Graph:CONTAINS]->(b) RETURN b", ':'),
+            ("MATCH (a)<-[:Graph:CONTAINS*]-(b) RETURN b", ':'),
+            ("MATCH (a)~[:Graph:CONTAINS]~(b) RETURN b", ':'),
+            ("MATCH (a)-[:A|Graph:CONTAINS]->{1,3}(b) RETURN b", ':'),
+            ("INSERT (a)-[:Graph:CONTAINS]->(b)", ':'),
+            ("MATCH (a)-[:Graph&CONTAINS]->(b) RETURN b", '&'),
+            ("INSERT (a)-[:Graph&CONTAINS]->(b)", '&'),
+        ] {
+            let err = parse_err(query);
+            for advice in [
+                format!(":`Graph{joint}CONTAINS`"),
+                ":Graph|CONTAINS".to_string(),
+            ] {
+                assert!(err.contains(&advice), "{query}: names {advice}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_inserted_edge_has_one_type() {
+        for query in [
+            "INSERT (a)-[:A|B]->(b)",
+            "MATCH (a), (b) INSERT (a)-[:A]->(b), (b)-[:A|B]->(a)",
+            "MATCH (a), (b) CREATE (a)-[:A|B]->(b)",
+            "MATCH (a) MERGE (a)-[:A|B]->(b:N)",
+        ] {
+            let err = parse_err(query);
+            assert!(
+                err.contains("one type") && err.contains(":A|B"),
+                "{query}: {err}"
+            );
+        }
+        assert_eq!(
+            first_edge_types("MATCH (a)-[:A|B]->(b) INSERT (a)-[:A]->(b)"),
+            ["A", "B"]
         );
     }
 
@@ -11378,6 +11574,66 @@ mod tests {
         // A long chain fails with the limit, without a stack overflow.
         let error = sum(100_000).unwrap_err().to_string();
         assert!(error.contains("nesting depth"), "{error}");
+    }
+
+    #[test]
+    fn test_and_or_xor_and_union_chains_are_balanced_trees() {
+        /// The depth of the tree of `op` at `expression`, and its leaves.
+        fn shape(expression: &Expression, op: BinaryOp, leaves: &mut Vec<i64>) -> usize {
+            match expression {
+                Expression::Binary {
+                    left,
+                    op: found,
+                    right,
+                } if *found == op => 1 + shape(left, op, leaves).max(shape(right, op, leaves)),
+                Expression::Literal(Literal::Integer(leaf)) => {
+                    leaves.push(*leaf);
+                    0
+                }
+                other => panic!("an operand of {op:?} or a leaf: {other:?}"),
+            }
+        }
+        for (keyword, op) in [
+            ("OR", BinaryOp::Or),
+            ("AND", BinaryOp::And),
+            ("XOR", BinaryOp::Xor),
+        ] {
+            let terms: Vec<String> = (0..100_000).map(|i| i.to_string()).collect();
+            let query = format!("RETURN {} AS v", terms.join(&format!(" {keyword} ")));
+            let statement = Parser::new(&query).parse().unwrap();
+            let Statement::Query(query) = statement else {
+                panic!("a query")
+            };
+            let mut leaves = Vec::new();
+            let depth = shape(&query.return_clause.items[0].expression, op, &mut leaves);
+            assert_eq!(depth, 17, "{keyword}: ceil(log2(100,000)) levels");
+            assert_eq!(
+                leaves,
+                (0..100_000).collect::<Vec<i64>>(),
+                "{keyword}: in order"
+            );
+        }
+        // A chain of one associative set operator is balanced too; EXCEPT
+        // still nests one level per operator.
+        let union = vec!["RETURN 3 AS v"; 10_000].join(" UNION ALL ");
+        assert!(Parser::new(&union).parse().is_ok());
+        let except = |count: usize| {
+            let query = vec!["RETURN 3 AS v"; count].join(" EXCEPT ");
+            Parser::new(&query).parse()
+        };
+        let limit = crate::query::limits::MAX_NESTING_DEPTH as usize;
+        assert!(except(limit / 2).is_ok());
+        assert!(except(limit + 2).is_err());
+        // An operand deeper than the rest counts where it sits in the tree.
+        let deep = format!("{}3{}", "(".repeat(55), ")".repeat(55));
+        let chain = |count: usize| {
+            let mut terms = vec!["3".to_string(); count];
+            terms[0] = deep.clone();
+            Parser::new(&format!("RETURN {}", terms.join(" OR "))).parse()
+        };
+        // The expression, 55 parentheses and the joins above the operand.
+        assert!(chain(64).is_ok(), "six joins above the operand");
+        assert!(chain(1_000).is_err(), "ten joins above the operand");
     }
 
     #[test]

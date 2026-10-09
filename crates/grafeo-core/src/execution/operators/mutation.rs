@@ -3,6 +3,7 @@
 //! These operators modify the graph structure:
 //! - `CreateNodeOperator`: Creates new nodes
 //! - `CreateEdgeOperator`: Creates new edges
+//! - `CreateOperator`: Creates the nodes and edges of a whole clause
 //! - `DeleteNodeOperator`: Deletes nodes
 //! - `DeleteEdgeOperator`: Deletes edges
 
@@ -14,6 +15,7 @@ use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, Value};
 use super::filter::{ExpressionPredicate, FilterExpression};
 use super::{GraphWriter, Operator, OperatorError, OperatorResult, SessionContext};
 use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
+use crate::execution::vector::ValueVector;
 use crate::graph::GraphStoreSearch;
 
 /// Trait for validating schema constraints during mutation operations.
@@ -649,6 +651,203 @@ impl Operator for CreateEdgeOperator {
 
     fn name(&self) -> &'static str {
         "CreateEdge"
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+/// One node or edge a [`CreateOperator`] creates for each row.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum CreateStep {
+    /// A node, whose id goes to a new column.
+    Node {
+        /// Labels for the node.
+        labels: Vec<String>,
+        /// Properties to set, resolved against the row so far.
+        properties: Vec<(String, PropertySource)>,
+    },
+    /// An edge between the nodes in two columns of the row so far.
+    Edge {
+        /// Column index for the source node.
+        from_column: usize,
+        /// Column index for the target node.
+        to_column: usize,
+        /// Edge type.
+        edge_type: String,
+        /// Properties to set, resolved against the row so far.
+        properties: Vec<(String, PropertySource)>,
+        /// Whether the edge's id goes to a new column (a named edge).
+        output: bool,
+    },
+}
+
+impl CreateStep {
+    /// A node with `labels` and `properties`.
+    #[must_use]
+    pub fn node(labels: Vec<String>, properties: Vec<(String, PropertySource)>) -> Self {
+        Self::Node { labels, properties }
+    }
+
+    /// An edge of `edge_type` with `properties`, from the node in
+    /// `from_column` to the one in `to_column`; its id goes to a new column
+    /// when `output`.
+    #[must_use]
+    pub fn edge(
+        from_column: usize,
+        to_column: usize,
+        edge_type: String,
+        properties: Vec<(String, PropertySource)>,
+        output: bool,
+    ) -> Self {
+        Self::Edge {
+            from_column,
+            to_column,
+            edge_type,
+            properties,
+            output,
+        }
+    }
+}
+
+/// Operator that creates the nodes and edges of the patterns of an INSERT
+/// or CREATE clause.
+///
+/// For each input chunk, runs the steps in order over all its rows: a node
+/// step creates a node per row and adds a column of their ids, an edge step
+/// creates an edge per row between two nodes of the row and, for a named
+/// edge, adds a column. A step reads the columns of the input and of the
+/// steps before it. That is what a chain of [`CreateNodeOperator`] and
+/// [`CreateEdgeOperator`] does, without an operator per node or edge: a
+/// clause of thousands of patterns is one operator, not a chain as long, and
+/// the columns are not copied once per step.
+pub struct CreateOperator {
+    /// Validated, versioned writes.
+    writer: GraphWriter,
+    /// Input operator; a single empty row for a clause that starts a
+    /// statement.
+    input: Box<dyn Operator>,
+    /// The input columns passed on: the planner's hidden expression columns
+    /// past them are not.
+    input_width: usize,
+    /// What to create for each row, in order.
+    steps: Vec<CreateStep>,
+    /// Evaluates the computed property values of each step.
+    expressions: Vec<PropertyExpressions>,
+}
+
+impl CreateOperator {
+    /// Creates an operator that runs `steps` for each row of `input`,
+    /// passing on its first `input_width` columns and a column per node and
+    /// named edge it creates.
+    pub fn new(
+        writer: impl Into<GraphWriter>,
+        input: Box<dyn Operator>,
+        input_width: usize,
+        steps: Vec<CreateStep>,
+    ) -> Self {
+        let expressions = steps
+            .iter()
+            .map(|_| PropertyExpressions::default())
+            .collect();
+        Self {
+            writer: writer.into(),
+            input,
+            input_width,
+            steps,
+            expressions,
+        }
+    }
+
+    /// Provides a search-store handle so computed property values
+    /// (`PropertySource::Expression`) can be evaluated.
+    #[must_use]
+    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStoreSearch>) -> Self {
+        for expressions in &mut self.expressions {
+            expressions.search_store = Some(Arc::clone(&search_store));
+        }
+        self
+    }
+
+    /// Sets the session context used when evaluating computed property values.
+    #[must_use]
+    pub fn with_session_context(mut self, context: SessionContext) -> Self {
+        for expressions in &mut self.expressions {
+            expressions.session_context = context.clone();
+        }
+        self
+    }
+}
+
+impl Operator for CreateOperator {
+    fn next(&mut self) -> OperatorResult {
+        let Some(chunk) = self.input.next()? else {
+            return Ok(None);
+        };
+        // The passed-on input columns of the selected rows, densely.
+        let rows: Vec<usize> = chunk.selected_indices().collect();
+        let columns = chunk
+            .columns()
+            .iter()
+            .take(self.input_width)
+            .map(|column| {
+                let mut passed = ValueVector::with_capacity(column.data_type().clone(), rows.len());
+                for &row in &rows {
+                    column.copy_row_to(row, &mut passed);
+                }
+                passed
+            })
+            .collect();
+        let mut out = DataChunk::new(columns);
+        out.set_count(rows.len());
+
+        for (step, expressions) in self.steps.iter().zip(&mut self.expressions) {
+            match step {
+                CreateStep::Node { labels, properties } => {
+                    let mut ids = ValueVector::with_capacity(LogicalType::Node, rows.len());
+                    for row in 0..rows.len() {
+                        let properties =
+                            expressions.resolve_row(properties, &out, row, &self.writer)?;
+                        ids.push_node_id(self.writer.create_node(labels, properties)?);
+                    }
+                    out.push_column(ids);
+                }
+                CreateStep::Edge {
+                    from_column,
+                    to_column,
+                    edge_type,
+                    properties,
+                    output,
+                } => {
+                    let mut ids =
+                        output.then(|| ValueVector::with_capacity(LogicalType::Edge, rows.len()));
+                    for row in 0..rows.len() {
+                        let from = NodeId(id_at(&out, *from_column, row, "from", "node")?);
+                        let to = NodeId(id_at(&out, *to_column, row, "to", "node")?);
+                        let properties =
+                            expressions.resolve_row(properties, &out, row, &self.writer)?;
+                        let edge_id = self.writer.create_edge(from, to, edge_type, properties)?;
+                        if let Some(ids) = &mut ids {
+                            ids.push_edge_id(edge_id);
+                        }
+                    }
+                    if let Some(ids) = ids {
+                        out.push_column(ids);
+                    }
+                }
+            }
+        }
+        Ok(Some(out))
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+
+    fn name(&self) -> &'static str {
+        "Create"
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {

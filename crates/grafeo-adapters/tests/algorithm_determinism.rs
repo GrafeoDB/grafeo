@@ -220,9 +220,11 @@ const GOLDEN: &[(&str, u64)] = &[
     ("connected_components", 0xaa211db929fb3293),
     ("strongly_connected_components", 0xcfb40e420e8cba43),
     ("label_propagation", 0x7466bf931f2950f6),
-    ("clustering_coefficient", 0xc827cb8a6fda4b69),
-    ("clustering_coefficient_sequential", 0xc827cb8a6fda4b69),
-    ("ktruss", 0xa554f1bcf04a2297),
+    // 0.6.0: clustering and k-truss read the simple graph, the self-loops of
+    // recursive functions left out.
+    ("clustering_coefficient", 0x2e12f21fc91f0237),
+    ("clustering_coefficient_sequential", 0x2e12f21fc91f0237),
+    ("ktruss", 0xa60d0757ba8bd32a),
     ("betweenness_centrality", 0x42bccf91788a07a2),
     ("closeness_centrality", 0x6474cd4c532e5eac),
 ];

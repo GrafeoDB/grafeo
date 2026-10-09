@@ -1860,3 +1860,53 @@ describe('values that hold nodes and edges', () => {
     expect(result.edges().map((e) => e.edgeType)).toEqual(['KNOWS'])
   })
 })
+
+// ── Procedure arguments from parameters ─────────────────────────────
+
+describe('procedure arguments from parameters', () => {
+  const CHAIN =
+    "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})" +
+    "-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(:Person {name: 'Mia'}), " +
+    "(a)-[:KNOWS]->(:Person {name: 'Jules'})"
+  const PAGERANK = (args) =>
+    `CALL grafeo.pagerank(${args}) YIELD node_id, score RETURN node_id, score ORDER BY node_id`
+  const scores = (result) => result.toArray().map((row) => [row.node_id, row.score])
+
+  it('should run positional parameters like the same literals', async () => {
+    const db = GrafeoDB.create()
+    await db.execute(CHAIN)
+    const literal = scores(await db.execute(PAGERANK('0.5, 1, 0.0001')))
+    const params = scores(await db.execute(PAGERANK('$d, $m, $t'), { d: 0.5, m: 1, t: 0.0001 }))
+    expect(params).toEqual(literal)
+    expect(scores(await db.execute(PAGERANK('')))).not.toEqual(literal)
+    const cypher = scores(
+      await db.executeCypher(PAGERANK('$d, $m, $t'), { d: 0.5, m: 1, t: 0.0001 })
+    )
+    expect(cypher).toEqual(literal)
+    db.close()
+  })
+
+  it('should run a required argument from a parameter', async () => {
+    const db = GrafeoDB.create()
+    await db.execute(CHAIN)
+    const alix = (await db.execute("MATCH (p:Person {name: 'Alix'}) RETURN id(p)")).scalar()
+    const result = await db.execute(
+      'CALL grafeo.bfs($s) YIELD node_id, depth RETURN node_id, depth ORDER BY node_id',
+      { s: alix }
+    )
+    expect(result.toArray().map((row) => row.depth)).toEqual([0, 1, 2, 3, 1])
+    db.close()
+  })
+
+  it('should refuse a missing parameter and a value of the wrong type', async () => {
+    const db = GrafeoDB.create()
+    await db.execute(CHAIN)
+    await expect(db.execute('CALL grafeo.pagerank($d) YIELD score RETURN score')).rejects.toThrow(
+      /Missing parameter: \$d/
+    )
+    await expect(
+      db.execute('CALL grafeo.pagerank($d) YIELD score RETURN score', { d: 'high' })
+    ).rejects.toThrow(/Argument 'damping' of grafeo.pagerank/)
+    db.close()
+  })
+})

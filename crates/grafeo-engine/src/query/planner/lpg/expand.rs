@@ -53,11 +53,24 @@ impl super::Planner {
                 1
             };
             let max_hops = if is_variable_length {
-                expand.max_hops.unwrap_or(expand.min_hops + 100)
+                // An unbounded walk can go round a cycle forever, so it stops
+                // after `min + 100` hops. A path in any other mode repeats no
+                // edge (TRAIL) or node, so it ends on its own.
+                expand
+                    .max_hops
+                    .unwrap_or(if expand.path_mode == PathMode::Walk {
+                        expand.min_hops + 100
+                    } else {
+                        u32::MAX
+                    })
             } else {
                 1
             };
+            let reachability = self.reachability_mode(expand);
             let exec_path_mode = match expand.path_mode {
+                // A reachability search follows walks: it runs only where the
+                // paths reach what the walks reach (see `reaches_as_walks`)
+                _ if reachability.is_some() => ExecutionPathMode::Walk,
                 PathMode::Walk => ExecutionPathMode::Walk,
                 PathMode::Trail => ExecutionPathMode::Trail,
                 PathMode::Simple => ExecutionPathMode::Simple,
@@ -75,7 +88,8 @@ impl super::Planner {
             )
             .with_path_mode(exec_path_mode)
             .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_read_only(self.read_only);
+            .with_read_only(self.read_only)
+            .with_memory_budget(self.path_search_budget);
 
             // If a path alias is set, enable path length and detail output
             if needs_path_details {
@@ -86,7 +100,7 @@ impl super::Planner {
             if binds_edge_list {
                 expand_op = expand_op.with_edge_list_output();
             }
-            match self.reachability_mode(expand) {
+            match reachability {
                 Some(ReachabilityMode::PerInputRow) => {
                     expand_op = expand_op.with_reachability();
                 }

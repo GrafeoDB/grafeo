@@ -2,7 +2,7 @@
 
 use super::tokenizer::{SimpleTokenizer, Tokenizer};
 use grafeo_common::types::NodeId;
-use grafeo_common::utils::error::Result;
+use grafeo_common::utils::error::{Error, Result};
 use std::collections::HashMap;
 
 /// Receives an [`InvertedIndex`] one posting list at a time, from
@@ -43,6 +43,40 @@ pub trait PostingsVisitor {
     ///
     /// An error ends the visit.
     fn doc_length(&mut self, node: NodeId, length: u32) -> Result<()>;
+}
+
+/// The length of the document of `tokens` and the frequency of each of its
+/// terms, as the index stores them.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidValue`] when there are more than `u32::MAX`
+/// tokens. Every term frequency is then at most the length, so the checked
+/// increments below cannot fail either.
+fn count_terms<'t>(
+    tokens: impl ExactSizeIterator<Item = &'t str>,
+) -> Result<(u32, HashMap<&'t str, u32>)> {
+    let token_count = tokens.len();
+    let length = u32::try_from(token_count).map_err(|_| {
+        Error::InvalidValue(format!(
+            "a text index counts at most {} tokens in a document, this one has {token_count} tokens",
+            u32::MAX
+        ))
+    })?;
+    let mut frequencies: HashMap<&str, u32> = HashMap::new();
+    if length == 0 {
+        return Ok((0, frequencies));
+    }
+    for token in tokens {
+        let frequency = frequencies.entry(token).or_insert(0);
+        *frequency = frequency.checked_add(1).ok_or_else(|| {
+            Error::InvalidValue(format!(
+                "a text index counts a term at most {} times in a document",
+                u32::MAX
+            ))
+        })?;
+    }
+    Ok((length, frequencies))
 }
 
 /// Configuration for BM25 scoring.
@@ -138,26 +172,48 @@ impl InvertedIndex {
     /// Indexes a document (node text) into the inverted index.
     ///
     /// If the node was already indexed, it is first removed and re-indexed.
+    /// A document the index cannot count (more than `u32::MAX` tokens, a
+    /// string of at least 8 GiB) is left out of the index, as a vector of the
+    /// wrong dimension is left out of a vector index: [`Self::try_insert`]
+    /// returns the error instead.
     pub fn insert(&mut self, id: NodeId, text: &str) {
+        if self.try_insert(id, text).is_err() {
+            debug_assert!(
+                !self.contains(id),
+                "a document the index cannot count is not indexed"
+            );
+        }
+    }
+
+    /// Indexes a document (node text) into the inverted index, as
+    /// [`Self::insert`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidValue`] when the document has more than
+    /// `u32::MAX` tokens, or when the sum of all document lengths would pass
+    /// `u64::MAX`. The node is then not in the index (an earlier text of it is
+    /// removed).
+    pub fn try_insert(&mut self, id: NodeId, text: &str) -> Result<()> {
         // Remove existing entry if present
         if self.doc_lengths.contains_key(&id) {
             self.remove(id);
         }
 
         let tokens = self.tokenizer.tokenize(text);
-        // reason: document token count fits u32 for practical text sizes
-        #[allow(clippy::cast_possible_truncation)]
-        let doc_len = tokens.len() as u32;
-
+        let (doc_len, term_freqs) = count_terms(tokens.iter().map(String::as_str))?;
         if doc_len == 0 {
-            return;
+            return Ok(());
         }
-
-        // Count term frequencies
-        let mut term_freqs: HashMap<&str, u32> = HashMap::new();
-        for token in &tokens {
-            *term_freqs.entry(token.as_str()).or_insert(0) += 1;
-        }
+        let total_length = self
+            .total_length
+            .checked_add(u64::from(doc_len))
+            .ok_or_else(|| {
+                Error::InvalidValue(format!(
+                    "a text index cannot add a document of {doc_len} tokens to its {} tokens",
+                    self.total_length
+                ))
+            })?;
 
         // Add to posting lists
         for (term, freq) in term_freqs {
@@ -172,7 +228,8 @@ impl InvertedIndex {
         }
 
         self.doc_lengths.insert(id, doc_len);
-        self.total_length += u64::from(doc_len);
+        self.total_length = total_length;
+        Ok(())
     }
 
     /// Removes a document from the index.
@@ -518,6 +575,31 @@ mod tests {
         assert!(!results.is_empty(), "results is empty");
         // Node 3 mentions both "brown" and "dog" in a shorter document
         assert_eq!(results[0].0, NodeId::new(3));
+    }
+
+    #[test]
+    fn term_counts_hold_the_document_length_and_each_term_frequency() {
+        let (length, frequencies) =
+            count_terms(["graph", "notes", "graph"].into_iter()).expect("three tokens fit u32");
+        assert_eq!(length, 3, "the document length counts every token");
+        assert_eq!(frequencies.get("graph"), Some(&2));
+        assert_eq!(frequencies.get("notes"), Some(&1));
+        assert_eq!(frequencies.len(), 2, "{frequencies:?}");
+    }
+
+    /// A length past `u32::MAX` used to be cast: 2^32 tokens became a
+    /// document of length 0, which the index left out without a word, and
+    /// 2^32 + 3 tokens a document of length 3.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn a_document_with_more_tokens_than_u32_counts_is_an_error() {
+        let too_many = usize::try_from(u64::from(u32::MAX) + 1).expect("64-bit usize");
+        let result = count_terms(std::iter::repeat_n("graph", too_many));
+        assert!(
+            matches!(&result, Err(Error::InvalidValue(message)) if message.contains("4294967296 tokens")),
+            "{:?}",
+            result.map(|(length, _)| length)
+        );
     }
 
     #[test]

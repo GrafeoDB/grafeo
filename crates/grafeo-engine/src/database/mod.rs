@@ -2162,6 +2162,7 @@ impl GrafeoDB {
             graph_model: self.config.graph_model,
             query_timeout: self.config.query_timeout,
             max_property_size: self.config.max_property_size,
+            path_search_budget: self.config.path_search_budget(),
             #[cfg(feature = "spill")]
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
             commit_counter: Arc::clone(&self.commit_counter),

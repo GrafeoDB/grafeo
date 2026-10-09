@@ -13,6 +13,8 @@
 
 mod check_eval;
 
+use check_eval::CheckExpression;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -295,6 +297,7 @@ impl Catalog {
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeAlreadyExists` if a type with the same name exists.
+    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_node_type(&self, def: NodeTypeDefinition) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.register_node_type(def),
@@ -369,6 +372,7 @@ impl Catalog {
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeAlreadyExists` if an edge type with the same name exists.
+    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_edge_type_def(&self, def: EdgeTypeDefinition) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.register_edge_type(def),
@@ -495,7 +499,9 @@ impl Catalog {
     ///
     /// # Errors
     ///
-    /// Returns `CatalogError::SchemaNotEnabled` if schema is disabled.
+    /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
+    /// * `CatalogError::InvalidCheck` if the constraint is a CHECK whose
+    ///   expression does not parse.
     pub fn add_constraint_to_type(
         &self,
         label: &str,
@@ -504,6 +510,20 @@ impl Catalog {
         match &self.schema {
             Some(schema) => schema.add_constraint_to_type(label, constraint),
             None => Err(CatalogError::SchemaNotEnabled),
+        }
+    }
+
+    /// Whether `properties` (an entity's properties) satisfy the CHECK
+    /// expression `expression`, which is parsed on its first use and kept:
+    /// see [`CheckExpression::evaluate`].
+    fn evaluate_check(
+        &self,
+        expression: &str,
+        properties: &[(String, Value)],
+    ) -> Result<bool, String> {
+        match &self.schema {
+            Some(schema) => schema.check_expression(expression)?.evaluate(properties),
+            None => CheckExpression::parse(expression)?.evaluate(properties),
         }
     }
 
@@ -1263,7 +1283,12 @@ impl PropertyDataType {
     /// Reads every spelling [`Display`](std::fmt::Display) writes, including
     /// `ZONED DATETIME`, `LOCAL DATETIME` and nested `LIST<...>`, so the type
     /// names of WAL records and `SHOW` output read back as the same type.
-    /// Unknown names are [`Any`](Self::Any).
+    ///
+    /// Unknown names are [`Any`](Self::Any): type DDL refuses them (the
+    /// parsers check each name against
+    /// [`PROPERTY_TYPE_NAMES`](grafeo_adapters::query::schema::PROPERTY_TYPE_NAMES)),
+    /// so only a WAL record written by 0.5.x, which logged a type as it was
+    /// written, holds one, and 0.5.x read it as `ANY` too.
     ///
     /// # Errors
     ///
@@ -1312,6 +1337,7 @@ impl PropertyDataType {
             "BYTES" | "BINARY" | "BLOB" => Self::Bytes,
             "NODE" => Self::Node,
             "EDGE" | "RELATIONSHIP" => Self::Edge,
+            // `ANY`, and a name only an older WAL holds (see `from_type_name`).
             _ => Self::Any,
         }
     }
@@ -1618,6 +1644,9 @@ pub struct SchemaCatalog {
     procedures: RwLock<HashMap<String, ProcedureDefinition>>,
     /// Named constraints (`CREATE CONSTRAINT`), by name.
     constraints: RwLock<HashMap<String, ConstraintDefinition>>,
+    /// The CHECK expressions parsed so far, by their text: each is parsed
+    /// once, not on every write it checks.
+    checks: RwLock<HashMap<String, Arc<CheckExpression>>>,
 }
 
 impl SchemaCatalog {
@@ -1632,7 +1661,39 @@ impl SchemaCatalog {
             graph_type_bindings: RwLock::new(HashMap::new()),
             procedures: RwLock::new(HashMap::new()),
             constraints: RwLock::new(HashMap::new()),
+            checks: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// The parsed CHECK expression `expression`, parsed on its first use.
+    fn check_expression(&self, expression: &str) -> Result<Arc<CheckExpression>, String> {
+        if let Some(parsed) = self.checks.read().get(expression) {
+            return Ok(Arc::clone(parsed));
+        }
+        let parsed = Arc::new(CheckExpression::parse(expression)?);
+        self.checks
+            .write()
+            .insert(expression.to_string(), Arc::clone(&parsed));
+        Ok(parsed)
+    }
+
+    /// Parses the CHECK expressions among `constraints`, so one that does
+    /// not parse is refused when it is declared, not by every write it
+    /// would check.
+    fn parse_checks<'a>(
+        &self,
+        constraints: impl IntoIterator<Item = &'a TypeConstraint>,
+    ) -> Result<(), CatalogError> {
+        for constraint in constraints {
+            if let TypeConstraint::Check { expression, .. } = constraint {
+                self.check_expression(expression)
+                    .map_err(|reason| CatalogError::InvalidCheck {
+                        expression: expression.clone(),
+                        reason,
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     // --- Node type operations ---
@@ -1641,8 +1702,10 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Returns `CatalogError::TypeAlreadyExists` if a type with the same name exists.
+    /// * `CatalogError::TypeAlreadyExists` if a type with the same name exists.
+    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_node_type(&self, def: NodeTypeDefinition) -> Result<(), CatalogError> {
+        self.parse_checks(&def.constraints)?;
         let mut types = self.node_types.write();
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
@@ -1758,8 +1821,10 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Returns `CatalogError::TypeAlreadyExists` if an edge type with the same name exists.
+    /// * `CatalogError::TypeAlreadyExists` if an edge type with the same name exists.
+    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_edge_type(&self, def: EdgeTypeDefinition) -> Result<(), CatalogError> {
+        self.parse_checks(&def.constraints)?;
         let mut types = self.edge_types.write();
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
@@ -1808,6 +1873,12 @@ impl SchemaCatalog {
 
     /// Registers a new graph type definition.
     ///
+    /// The graph type types only the graphs bound to it from here on: a
+    /// binding to its name already there is to a graph type of that name
+    /// that was dropped (`DROP GRAPH TYPE` leaves it, binding nothing), and
+    /// goes. It used to come back to life and type its graph by the new
+    /// graph type.
+    ///
     /// # Errors
     ///
     /// Returns `CatalogError::TypeAlreadyExists` if a graph type with the same name exists.
@@ -1816,6 +1887,9 @@ impl SchemaCatalog {
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
         }
+        self.graph_type_bindings
+            .write()
+            .retain(|_, graph_type| *graph_type != def.name);
         types.insert(def.name.clone(), def);
         Ok(())
     }
@@ -1908,12 +1982,14 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Currently infallible, but returns `Result` for forward compatibility.
+    /// `CatalogError::InvalidCheck` if the constraint is a CHECK whose
+    /// expression does not parse; nothing changes then.
     pub fn add_constraint_to_type(
         &self,
         label: &str,
         constraint: TypeConstraint,
     ) -> Result<(), CatalogError> {
+        self.parse_checks([&constraint])?;
         let mut types = self.node_types.write();
         if let Some(def) = types.get_mut(label) {
             def.constraints.push(constraint);
@@ -2297,6 +2373,13 @@ pub enum CatalogError {
         /// The most levels they may nest.
         limit: usize,
     },
+    /// The expression of a CHECK constraint does not parse.
+    InvalidCheck {
+        /// The expression.
+        expression: String,
+        /// What is wrong with it.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -2321,6 +2404,9 @@ impl std::fmt::Display for CatalogError {
                 "The property types of a node or edge type nest at most {limit} LIST<...> \
                  levels in all, not {levels}"
             ),
+            Self::InvalidCheck { expression, reason } => {
+                write!(f, "Invalid CHECK constraint ({expression}): {reason}")
+            }
         }
     }
 }
@@ -2540,17 +2626,18 @@ impl ConstraintValidator for CatalogConstraintValidator {
                             }
                         }
                         TypeConstraint::Check { name, expression } => {
-                            match check_eval::evaluate_check(expression, properties) {
+                            let constraint_name = name.as_deref().unwrap_or("unnamed");
+                            match self.catalog.evaluate_check(expression, properties) {
                                 Ok(true) => {}
                                 Ok(false) => {
-                                    let constraint_name = name.as_deref().unwrap_or("unnamed");
                                     return Err(OperatorError::ConstraintViolation(format!(
                                         "CHECK constraint '{constraint_name}' violated on :{label}"
                                     )));
                                 }
                                 Err(err) => {
                                     return Err(OperatorError::ConstraintViolation(format!(
-                                        "CHECK constraint evaluation error: {err}"
+                                        "CHECK constraint '{constraint_name}' on :{label} \
+                                         cannot be evaluated: {err}"
                                     )));
                                 }
                             }
@@ -2717,17 +2804,18 @@ impl ConstraintValidator for CatalogConstraintValidator {
 
             for constraint in &type_def.constraints {
                 if let TypeConstraint::Check { name, expression } = constraint {
-                    match check_eval::evaluate_check(expression, properties) {
+                    let constraint_name = name.as_deref().unwrap_or("unnamed");
+                    match self.catalog.evaluate_check(expression, properties) {
                         Ok(true) => {}
                         Ok(false) => {
-                            let constraint_name = name.as_deref().unwrap_or("unnamed");
                             return Err(OperatorError::ConstraintViolation(format!(
                                 "CHECK constraint '{constraint_name}' violated on :{edge_type}"
                             )));
                         }
                         Err(err) => {
                             return Err(OperatorError::ConstraintViolation(format!(
-                                "CHECK constraint evaluation error: {err}"
+                                "CHECK constraint '{constraint_name}' on :{edge_type} \
+                                 cannot be evaluated: {err}"
                             )));
                         }
                     }
@@ -2890,6 +2978,44 @@ fn property_size_error(key: &str, size: usize, limit: usize) -> OperatorError {
 mod tests {
     use super::*;
     use std::thread;
+
+    /// A graph type created under the name of a dropped one types no graph:
+    /// the binding the drop left goes, while the other bindings stay.
+    #[test]
+    fn a_new_graph_type_takes_over_no_binding() {
+        let catalog = Catalog::new();
+        let graph_type = |name: &str| GraphTypeDefinition {
+            name: name.to_string(),
+            allowed_node_types: vec!["City".to_string()],
+            allowed_edge_types: Vec::new(),
+            open: false,
+        };
+        catalog.register_graph_type(graph_type("atlas")).unwrap();
+        catalog.register_graph_type(graph_type("globe")).unwrap();
+        catalog
+            .bind_graph_type("europe", "atlas".to_string())
+            .unwrap();
+        catalog
+            .bind_graph_type("world", "globe".to_string())
+            .unwrap();
+
+        catalog.drop_graph_type("atlas").unwrap();
+        catalog.register_graph_type(graph_type("atlas")).unwrap();
+        assert_eq!(catalog.get_graph_type_binding("europe"), None);
+        assert_eq!(
+            catalog.all_graph_type_bindings(),
+            [("world".to_string(), "globe".to_string())]
+        );
+        // A graph type that already exists is not registered again, and
+        // keeps its graphs.
+        catalog
+            .register_graph_type(graph_type("globe"))
+            .unwrap_err();
+        assert_eq!(
+            catalog.get_graph_type_binding("world").as_deref(),
+            Some("globe")
+        );
+    }
 
     /// Dropping one of two named constraints on a property removes only its
     /// own type constraint, and keeps the unique and required markers that
@@ -3546,6 +3672,57 @@ mod tests {
             Ok(T::Timestamp),
             "a plain DATETIME stays a TIMESTAMP"
         );
+    }
+
+    /// Type DDL takes the names of `PROPERTY_TYPE_NAMES` (grafeo-adapters)
+    /// and refuses every other one. The catalog reads each of them as a type
+    /// of the kind the parsers give it, so a `DEFAULT` a parser lets through
+    /// is a value of the type, and `ANY` only where the parsers say `ANY`
+    /// (an unknown name reads as `ANY` too); every name `SHOW` lists is one
+    /// of them.
+    #[test]
+    fn type_ddl_names_are_the_catalog_types() {
+        use PropertyDataType as T;
+        use grafeo_adapters::query::schema::{
+            PROPERTY_TYPE_NAMES, PropertyTypeKind as K, property_type_kind,
+        };
+
+        for (name, kind) in PROPERTY_TYPE_NAMES {
+            let data_type = T::from_type_name(name).unwrap();
+            let read_kind = match data_type {
+                T::String => K::String,
+                T::Int64 => K::Integer,
+                T::Float64 => K::Float,
+                T::Bool => K::Boolean,
+                T::Any => K::Any,
+                _ => K::Other,
+            };
+            assert_eq!(*kind, read_kind, "{name} reads as {data_type}");
+        }
+        let listed = [
+            T::String,
+            T::Int64,
+            T::Float64,
+            T::Bool,
+            T::Date,
+            T::Time,
+            T::Timestamp,
+            T::Duration,
+            T::List,
+            T::Map,
+            T::Bytes,
+            T::Node,
+            T::Edge,
+            T::Any,
+            T::ZonedDatetime,
+            T::LocalDatetime,
+        ];
+        for data_type in listed {
+            assert!(
+                property_type_kind(&data_type.to_string()).is_some(),
+                "type DDL refuses {data_type}, which SHOW lists"
+            );
+        }
     }
 
     /// A type name nests at most 128 `LIST<...>` levels; a deeper one, however

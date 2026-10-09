@@ -8,8 +8,8 @@
 //! Better to catch these errors early than waste time executing a broken query.
 
 use crate::query::plan::{
-    ExpandOp, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp, ReturnItem,
-    ReturnOp, TripleScanOp,
+    CreateElement, ExpandOp, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
+    ReturnItem, ReturnOp, TripleScanOp,
 };
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
@@ -279,22 +279,35 @@ impl Binder {
                 Ok(())
             }
             LogicalOperator::CreateNode(create) => {
-                // CreateNode introduces a new variable
                 if let Some(ref input) = create.input {
                     self.bind_operator(input)?;
                 }
-                self.context.add_variable(
-                    create.variable.clone(),
-                    VariableInfo {
-                        name: create.variable.clone(),
-                        data_type: LogicalType::Node,
-                        is_node: true,
-                        is_edge: false,
-                    },
-                );
-                // Validate property expressions
-                for (_, expr) in &create.properties {
-                    self.validate_expression(expr)?;
+                self.bind_created_node(&create.variable, &create.properties)
+            }
+            LogicalOperator::Create(create) => {
+                if let Some(ref input) = create.input {
+                    self.bind_operator(input)?;
+                }
+                for element in &create.elements {
+                    match element {
+                        CreateElement::Node {
+                            variable,
+                            properties,
+                            ..
+                        } => self.bind_created_node(variable, properties)?,
+                        CreateElement::Edge {
+                            variable,
+                            from_variable,
+                            to_variable,
+                            properties,
+                            ..
+                        } => self.bind_created_edge(
+                            variable.as_ref(),
+                            from_variable,
+                            to_variable,
+                            properties,
+                        )?,
+                    }
                 }
                 Ok(())
             }
@@ -309,38 +322,12 @@ impl Binder {
             LogicalOperator::Aggregate(agg) => self.bind_aggregate(agg),
             LogicalOperator::CreateEdge(create) => {
                 self.bind_operator(&create.input)?;
-                // Validate that source and target variables are defined
-                if !self.context.contains(&create.from_variable) {
-                    return Err(undefined_variable_error(
-                        &create.from_variable,
-                        &self.context,
-                        " (source in CREATE EDGE)",
-                    ));
-                }
-                if !self.context.contains(&create.to_variable) {
-                    return Err(undefined_variable_error(
-                        &create.to_variable,
-                        &self.context,
-                        " (target in CREATE EDGE)",
-                    ));
-                }
-                // Add edge variable if present
-                if let Some(ref var) = create.variable {
-                    self.context.add_variable(
-                        var.clone(),
-                        VariableInfo {
-                            name: var.clone(),
-                            data_type: LogicalType::Edge,
-                            is_node: false,
-                            is_edge: true,
-                        },
-                    );
-                }
-                // Validate property expressions
-                for (_, expr) in &create.properties {
-                    self.validate_expression(expr)?;
-                }
-                Ok(())
+                self.bind_created_edge(
+                    create.variable.as_ref(),
+                    &create.from_variable,
+                    &create.to_variable,
+                    &create.properties,
+                )
             }
             LogicalOperator::DeleteNode(delete) => {
                 self.bind_operator(&delete.input)?;
@@ -1262,13 +1249,13 @@ impl Binder {
                 if name == "*" {
                     return Ok(());
                 }
-                if !self.context.contains(name) && !name.starts_with("_anon_") {
+                if !self.context.contains(name) {
                     return Err(undefined_variable_error(name, &self.context, ""));
                 }
                 Ok(())
             }
             LogicalExpression::Property { variable, .. } => {
-                if !self.context.contains(variable) && !variable.starts_with("_anon_") {
+                if !self.context.contains(variable) {
                     return Err(undefined_variable_error(
                         variable,
                         &self.context,
@@ -1339,7 +1326,7 @@ impl Binder {
             LogicalExpression::Labels(var)
             | LogicalExpression::Type(var)
             | LogicalExpression::Id(var) => {
-                if !self.context.contains(var) && !var.starts_with("_anon_") {
+                if !self.context.contains(var) {
                     return Err(undefined_variable_error(var, &self.context, " in function"));
                 }
                 Ok(())
@@ -1376,7 +1363,7 @@ impl Binder {
                 self.validate_expression(projection)
             }
             LogicalExpression::MapProjection { base, entries } => {
-                if !self.context.contains(base) && !base.starts_with("_anon_") {
+                if !self.context.contains(base) {
                     return Err(undefined_variable_error(
                         base,
                         &self.context,
@@ -1520,6 +1507,67 @@ impl Binder {
             }
             _ => (false, false),
         }
+    }
+
+    /// Binds a node a CREATE or INSERT creates: it introduces `variable`.
+    fn bind_created_node(
+        &mut self,
+        variable: &str,
+        properties: &[(String, LogicalExpression)],
+    ) -> Result<()> {
+        self.context.add_variable(
+            variable.to_string(),
+            VariableInfo {
+                name: variable.to_string(),
+                data_type: LogicalType::Node,
+                is_node: true,
+                is_edge: false,
+            },
+        );
+        for (_, expr) in properties {
+            self.validate_expression(expr)?;
+        }
+        Ok(())
+    }
+
+    /// Binds an edge a CREATE or INSERT creates: its endpoints must be
+    /// defined, and it introduces `variable` when it has one.
+    fn bind_created_edge(
+        &mut self,
+        variable: Option<&String>,
+        from_variable: &str,
+        to_variable: &str,
+        properties: &[(String, LogicalExpression)],
+    ) -> Result<()> {
+        if !self.context.contains(from_variable) {
+            return Err(undefined_variable_error(
+                from_variable,
+                &self.context,
+                " (source in CREATE EDGE)",
+            ));
+        }
+        if !self.context.contains(to_variable) {
+            return Err(undefined_variable_error(
+                to_variable,
+                &self.context,
+                " (target in CREATE EDGE)",
+            ));
+        }
+        if let Some(var) = variable {
+            self.context.add_variable(
+                var.clone(),
+                VariableInfo {
+                    name: var.clone(),
+                    data_type: LogicalType::Edge,
+                    is_node: false,
+                    is_edge: true,
+                },
+            );
+        }
+        for (_, expr) in properties {
+            self.validate_expression(expr)?;
+        }
+        Ok(())
     }
 
     /// Binds a join operator.
@@ -2934,8 +2982,9 @@ mod tests {
     }
 
     #[test]
-    fn test_anon_variables_skip_validation() {
-        // Variables starting with _anon_ are anonymous and should be silently accepted
+    fn an_undefined_variable_named_like_a_generated_one_is_undefined() {
+        // A generated name never collides with one the statement spells, so
+        // `_anon_42` that nothing binds is the user's undefined variable
         let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
             items: vec![ReturnItem {
                 expression: LogicalExpression::Variable("_anon_42".to_string()),
@@ -2946,10 +2995,10 @@ mod tests {
         }));
 
         let mut binder = Binder::new();
-        let result = binder.bind(&plan);
+        let message = binder.bind(&plan).unwrap_err().to_string();
         assert!(
-            result.is_ok(),
-            "Anonymous variables should bypass validation"
+            message.contains("Undefined variable '_anon_42'"),
+            "{message}"
         );
     }
 

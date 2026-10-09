@@ -92,8 +92,8 @@ pub use load_data::{LoadDataFormat, LoadDataOperator};
 pub use map_collect::MapCollectOperator;
 pub use merge::{MergeConfig, MergeOperator, MergeRelationshipConfig, MergeRelationshipOperator};
 pub use mutation::{
-    AddLabelOperator, ConstraintValidator, CreateEdgeOperator, CreateNodeOperator,
-    DeleteEdgeOperator, DeleteNodeOperator, PropertySource, RemoveLabelOperator,
+    AddLabelOperator, ConstraintValidator, CreateEdgeOperator, CreateNodeOperator, CreateOperator,
+    CreateStep, DeleteEdgeOperator, DeleteNodeOperator, PropertySource, RemoveLabelOperator,
     SetPropertyOperator,
 };
 pub use node_seek::{NodeSeekOperator, SeekKey};
@@ -120,7 +120,9 @@ pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};
 pub use top_k::TopKOperator;
 pub use union::UnionOperator;
 pub use unwind::UnwindOperator;
-pub use variable_length_expand::{PathMode as ExecutionPathMode, VariableLengthExpandOperator};
+pub use variable_length_expand::{
+    DEFAULT_PATH_SEARCH_BUDGET, PathMode as ExecutionPathMode, VariableLengthExpandOperator,
+};
 pub use vector_join::VectorJoinOperator;
 pub use writer::{GraphWriter, WriteCounter, WriteCounters};
 
@@ -350,6 +352,10 @@ pub enum OperatorError {
     /// Write-write conflict detected (first-writer-wins).
     #[error("write conflict: {0}")]
     WriteConflict(String),
+    /// The query would need more of a resource than it may use, such as
+    /// the memory of a path search; the message says what to change.
+    #[error("{0}")]
+    LimitExceeded(String),
 }
 
 /// The core trait for pull-based operators.

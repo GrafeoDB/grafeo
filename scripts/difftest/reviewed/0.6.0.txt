@@ -253,3 +253,56 @@ BI9|cypher 0e635c662c length(s) of a string variable counts its characters; it f
 BI9|gql 0e635c662c length(s) of a string variable counts its characters; it failed with Undefined variable '_path_length_s'.
 BI10|cypher f36b726364 An unaliased length(p) column is named length(p); it was _path_length_p.
 BI10|gql f36b726364 An unaliased length(p) column is named length(p); it was _path_length_p.
+AI1|cypher 96898fb923 A Cypher variable-length relationship takes each relationship once (openCypher); an undirected one no longer comes back to its source over the edge it left by.
+AI2|cypher c994311a04 A Cypher variable-length relationship takes each relationship once (openCypher); trails of two or three edges reach fewer nodes than walks.
+AI4|cypher 542971867a A Cypher variable-length relationship takes each relationship once (openCypher); Jules and Mia no longer reach themselves over the edge they left by.
+AI8|cypher ba55819931 A Cypher variable-length relationship takes each relationship once (openCypher); Jules no longer reaches himself over the edge he left by.
+AI10|cypher 7f5370dbb2 A Cypher variable-length relationship takes each relationship once (openCypher); a node reaches itself only round a cycle.
+M19|cypher 7ee0a4371d An EXISTS pattern in Cypher takes each relationship once; an undirected one no longer comes back to its start over the edge it took.
+BJ1|cypher 2e8112e309 A Cypher MATCH binds each relationship once; a two-hop pattern came back over the relationship it took.
+BJ2|cypher f7121d4a86 A Cypher MATCH binds each relationship once; two relationship patterns bound one relationship.
+BJ3|cypher 77d7e3110d A Cypher variable-length relationship takes each relationship once; it went round the triangle for a hundred hops.
+BJ4|cypher ee2e439430 An unbounded Cypher pattern ends on its own; it stopped after a hundred hops.
+BJ5|gql ee2e439430 An unbounded GQL TRAIL ends on its own; it stopped after a hundred hops.
+BJ6|cypher e7b154ee99 OPTIONAL MATCH in Cypher binds each relationship once; it came back to Mia over the edge it took.
+BJ7|cypher 210586286f A Cypher pattern comprehension binds each relationship once; it came back to Mia over the edge it took.
+BJ8|cypher 25abd605b9 An EXISTS subquery in Cypher binds each relationship once; every person went there and back over one KNOWS relationship.
+BJ10|cypher caccefd526 An undefined variable named like a generated one is undefined; it failed with an internal error.
+BJ10|gql caccefd526 An undefined variable named like a generated one is undefined; it failed with an internal error.
+BJ12|cypher 3ebfb1cfe2 A Cypher variable-length relationship takes each relationship once; Mia is no longer reached back over the edge to Jules.
+BK1|cypher 3451785866 A constant expression in a procedure argument runs like its value; pagerank ran with the default damping.
+BK1|gql 3451785866 A constant expression in a procedure argument runs like its value; pagerank ran with the default damping.
+BK2|cypher 04712c318b An integer runs where a procedure expects a number; damping 1 ran as the default 0.85.
+BK2|gql 04712c318b An integer runs where a procedure expects a number; damping 1 ran as the default 0.85.
+BK3|cypher 79f40f49e6 DFS depth is the depth in the DFS tree; it was the finish order.
+BK3|gql 79f40f49e6 DFS depth is the depth in the DFS tree; it was the finish order.
+BK4|cypher f137fd2ed7 DFS reports depth, discovery and finish; depth was the finish order.
+BK4|gql f137fd2ed7 DFS reports depth, discovery and finish; depth was the finish order.
+BK5|cypher 097931792c A procedure argument without a value is an error; it ran with the default.
+BK5|gql 097931792c A procedure argument without a value is an error; it ran with the default.
+BK6|cypher d3c27a13f4 A procedure argument read from a row is an error that names it; it failed as a missing start parameter.
+BK7|cypher 3c3845ed65 A procedure argument of the wrong type is an error; it ran with the default.
+BK7|gql 3c3845ed65 A procedure argument of the wrong type is an error; it ran with the default.
+BK8|cypher 6c0424314e A computed list element is part of the query vector, so three elements no longer fit the 2-dimensional index; 0.0 + 0.0 was dropped.
+BK8|gql 6c0424314e A computed list element is part of the query vector, so three elements no longer fit the 2-dimensional index; 0.0 + 0.0 was dropped.
+BK9|cypher 79f40f49e6 A constant expression in a required procedure argument runs; it failed as a missing start parameter.
+BK9|gql 79f40f49e6 A constant expression in a required procedure argument runs; it failed as a missing start parameter.
+BM1|cypher 1737c2301d A list literal keeps a null item for a property of an unmatched OPTIONAL MATCH variable; it was [] (size 0).
+BM1|gql 1737c2301d A list literal keeps a null item for a property of an unmatched OPTIONAL MATCH variable; it was [] (size 0).
+BM2|cypher b8a12678ce A missing property is a null item: [null, 35], and [1] is 35; it was [35] and null.
+BM2|gql b8a12678ce A missing property is a null item: [null, 35], and [1] is 35; it was [35] and null.
+BM3|cypher 20233fc7fc [p.w] = [] matches no node; the nodes without w matched.
+BM3|gql 20233fc7fc [p.w] = [] matches no node; the nodes without w matched.
+BM4|cypher 358e46ebaf A map literal keeps a key whose value is missing ({age: 35, w: null}); it was {age: 35}.
+BM4|gql 358e46ebaf A map literal keeps a key whose value is missing ({age: 35, w: null}); it was {age: 35}.
+BM5|cypher 23e29c6f97 A node after a missing property keeps its list position; [1].name was null.
+BM5|gql 23e29c6f97 A node after a missing property keeps its list position; [1].name was null.
+BM6|cypher fc40feafb3 3 IN [p.w, 19] is null (unknown) with a missing item; it was false.
+BM6|gql fc40feafb3 3 IN [p.w, 19] is null (unknown) with a missing item; it was false.
+BM7|gql 09a6521ec0 A path over two edge patterns binds (#590), and a questioned edge without a match is left out of it; 0.5.44 failed with an internal error.
+BN1|cypher a10a3ef2a6 A relationship has one type: a second colon is a syntax error naming :`A:B` and :A|B; it matched the KNOWS or LIVES_IN relationships.
+BN1|gql 4b8071a731 An edge has one type: a second colon is a syntax error naming :`A:B` and :A|B; it matched the KNOWS or LIVES_IN edges.
+BN2|cypher a10a3ef2a6 A relationship has one type, also in a variable-length pattern; it followed the KNOWS or LIVES_IN relationships.
+BN2|gql 4b8071a731 An edge has one type, also in a variable-length pattern; it followed the KNOWS or LIVES_IN edges.
+BN3|cypher 1919420008 openCypher 9 writes alternative relationship types :A|:B; it failed with "Expected identifier".
+BN4|gql 6cf625b151 An edge has one type, so :A&B is an error that says so and names :A|B; it was "Expected RBracket".

@@ -365,7 +365,7 @@ mod tests {
     use super::*;
 
     fn translator() -> GqlTranslator {
-        GqlTranslator::new()
+        GqlTranslator::new("")
     }
 
     // --- NULLIF desugaring ---

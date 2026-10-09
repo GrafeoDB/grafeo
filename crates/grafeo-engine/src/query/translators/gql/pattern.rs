@@ -15,7 +15,7 @@ impl GqlTranslator {
                 let var = node
                     .variable
                     .clone()
-                    .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+                    .unwrap_or_else(|| self.anonymous_name());
                 let labels = node.labels.clone();
                 let props: Vec<(String, LogicalExpression)> = node
                     .properties
@@ -33,7 +33,7 @@ impl GqlTranslator {
                     .source
                     .variable
                     .clone()
-                    .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+                    .unwrap_or_else(|| self.anonymous_name());
                 let labels = path.source.labels.clone();
                 let props: Vec<(String, LogicalExpression)> = path
                     .source
@@ -109,47 +109,26 @@ impl GqlTranslator {
         merge_clause: &ast::MergeClause,
         input: LogicalOperator,
     ) -> Result<LogicalOperator> {
-        let mut current_input = input;
+        // One edge: a longer pattern would have to be matched or created as a
+        // whole (merging its first edge alone dropped the rest)
+        let edge = match path.edges.as_slice() {
+            [edge] => edge,
+            [] => {
+                return Err(Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    "MERGE relationship pattern is empty",
+                )));
+            }
+            _ => return Err(crate::query::translators::common::merge_of_a_longer_path()),
+        };
 
-        let source_variable = path.source.variable.clone().ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "MERGE relationship pattern requires a source node variable",
-            ))
-        })?;
-
-        // If source node has labels or properties, emit a MergeOp for it
-        if !path.source.labels.is_empty() || !path.source.properties.is_empty() {
-            let node_props: Vec<(String, LogicalExpression)> = path
-                .source
-                .properties
-                .iter()
-                .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                .collect::<Result<Vec<_>>>()?;
-
-            current_input = LogicalOperator::Merge(MergeOp {
-                variable: source_variable.clone(),
-                labels: path.source.labels.clone(),
-                match_properties: node_props,
-                on_create: Vec::new(),
-                on_match: Vec::new(),
-                on_create_labels: Vec::new(),
-                on_match_labels: Vec::new(),
-                input: Box::new(current_input),
-            });
-        }
-
-        let edge = path.edges.first().ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "MERGE relationship pattern is empty",
-            ))
-        })?;
+        // The source node, merged first when the pattern defines it
+        let (source_variable, current_input) = self.merge_end_node(&path.source, input)?;
 
         let variable = edge
             .variable
             .clone()
-            .unwrap_or_else(|| format!("_merge_rel_{}", rand_id()));
+            .unwrap_or_else(|| self.names.next("_merge_rel_"));
 
         let edge_type = edge.types.first().cloned().ok_or_else(|| {
             Error::Query(QueryError::new(
@@ -158,33 +137,8 @@ impl GqlTranslator {
             ))
         })?;
 
-        let target_variable = edge.target.variable.clone().ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "MERGE relationship pattern requires a target node variable",
-            ))
-        })?;
-
-        // If target node has labels or properties, emit a MergeOp for it
-        if !edge.target.labels.is_empty() || !edge.target.properties.is_empty() {
-            let node_props: Vec<(String, LogicalExpression)> = edge
-                .target
-                .properties
-                .iter()
-                .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                .collect::<Result<Vec<_>>>()?;
-
-            current_input = LogicalOperator::Merge(MergeOp {
-                variable: target_variable.clone(),
-                labels: edge.target.labels.clone(),
-                match_properties: node_props,
-                on_create: Vec::new(),
-                on_match: Vec::new(),
-                on_create_labels: Vec::new(),
-                on_match_labels: Vec::new(),
-                input: Box::new(current_input),
-            });
-        }
+        // The target node, merged next when the pattern defines it
+        let (target_variable, current_input) = self.merge_end_node(&edge.target, current_input)?;
 
         let match_properties: Vec<(String, LogicalExpression)> = edge
             .properties
@@ -217,51 +171,55 @@ impl GqlTranslator {
         }))
     }
 
+    /// The variable of an end node of a MERGE relationship pattern and the
+    /// plan that binds it (see
+    /// [`merge_end_node`](crate::query::translators::common::merge_end_node)):
+    /// `(:Person {name: 'Gus'})` is merged on its own first.
+    fn merge_end_node(
+        &self,
+        node: &ast::NodePattern,
+        input: LogicalOperator,
+    ) -> Result<(String, LogicalOperator)> {
+        crate::query::translators::common::merge_end_node(
+            node.variable.as_deref(),
+            &node.labels,
+            self.insert_properties(&node.properties)?,
+            input,
+            || self.anonymous_name(),
+        )
+    }
+
     /// Translates the patterns of an INSERT (or CREATE) that follows other
     /// clauses, so `plan` produces the input rows.
     pub(super) fn translate_create_patterns(
         &self,
         patterns: &[ast::Pattern],
-        mut plan: LogicalOperator,
+        plan: LogicalOperator,
     ) -> Result<LogicalOperator> {
         let mut bound = insert_input_variables(&plan);
+        let mut elements = Vec::new();
         for pattern in patterns {
             match pattern {
                 ast::Pattern::Node(node) => {
-                    let (variable, is_new) = insert_endpoint(node, &mut bound, true)?;
+                    let (variable, is_new) = insert_endpoint(node, &mut bound, true, &self.names)?;
                     if is_new {
-                        plan = LogicalOperator::CreateNode(CreateNodeOp {
-                            variable,
-                            labels: node.labels.clone(),
-                            properties: self.insert_properties(&node.properties)?,
-                            input: Some(Box::new(plan)),
-                        });
+                        elements.push(self.created_node(&variable, node)?);
                     }
                 }
                 ast::Pattern::Path(path) => {
                     // A bare variable of a path refers to a node of the input
                     // rows, even one `bound` does not list.
                     let (mut source_var, is_new) =
-                        insert_endpoint(&path.source, &mut bound, false)?;
+                        insert_endpoint(&path.source, &mut bound, false, &self.names)?;
                     if is_new {
-                        plan = LogicalOperator::CreateNode(CreateNodeOp {
-                            variable: source_var.clone(),
-                            labels: path.source.labels.clone(),
-                            properties: self.insert_properties(&path.source.properties)?,
-                            input: Some(Box::new(plan)),
-                        });
+                        elements.push(self.created_node(&source_var, &path.source)?);
                     }
 
                     for edge in &path.edges {
                         let (target_var, is_new) =
-                            insert_endpoint(&edge.target, &mut bound, false)?;
+                            insert_endpoint(&edge.target, &mut bound, false, &self.names)?;
                         if is_new {
-                            plan = LogicalOperator::CreateNode(CreateNodeOp {
-                                variable: target_var.clone(),
-                                labels: edge.target.labels.clone(),
-                                properties: self.insert_properties(&edge.target.properties)?,
-                                input: Some(Box::new(plan)),
-                            });
+                            elements.push(self.created_node(&target_var, &edge.target)?);
                         }
 
                         let (from_variable, to_variable) = match edge.direction {
@@ -270,14 +228,7 @@ impl GqlTranslator {
                                 (source_var, target_var.clone())
                             }
                         };
-                        plan = LogicalOperator::CreateEdge(CreateEdgeOp {
-                            variable: edge.variable.clone(),
-                            from_variable,
-                            to_variable,
-                            edge_type: edge.types.first().cloned().unwrap_or_default(),
-                            properties: self.insert_properties(&edge.properties)?,
-                            input: Box::new(plan),
-                        });
+                        elements.push(self.created_edge(edge, from_variable, to_variable)?);
                         // The next edge of the path starts at this target.
                         source_var = target_var;
                     }
@@ -292,7 +243,13 @@ impl GqlTranslator {
                 }
             }
         }
-        Ok(plan)
+        if elements.is_empty() {
+            return Ok(plan);
+        }
+        Ok(LogicalOperator::Create(CreateOp {
+            elements,
+            input: Some(Box::new(plan)),
+        }))
     }
 
     pub(super) fn translate_node_pattern(
@@ -303,7 +260,7 @@ impl GqlTranslator {
         let variable = node
             .variable
             .clone()
-            .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+            .unwrap_or_else(|| self.anonymous_name());
 
         // Use first label from colon syntax for the NodeScan optimization,
         // or first label from IS expression if it's a simple label.
@@ -368,30 +325,18 @@ impl GqlTranslator {
                 ],
                 distinct: false,
             },
-            ast::LabelExpression::Conjunction(operands) => {
-                let mut iter = operands.iter();
-                let first = Self::translate_label_expression(
-                    variable,
-                    iter.next().expect("conjunction has at least one operand"),
-                );
-                iter.fold(first, |acc, op| LogicalExpression::Binary {
-                    left: Box::new(acc),
-                    op: BinaryOp::And,
-                    right: Box::new(Self::translate_label_expression(variable, op)),
-                })
-            }
-            ast::LabelExpression::Disjunction(operands) => {
-                let mut iter = operands.iter();
-                let first = Self::translate_label_expression(
-                    variable,
-                    iter.next().expect("disjunction has at least one operand"),
-                );
-                iter.fold(first, |acc, op| LogicalExpression::Binary {
-                    left: Box::new(acc),
-                    op: BinaryOp::Or,
-                    right: Box::new(Self::translate_label_expression(variable, op)),
-                })
-            }
+            ast::LabelExpression::Conjunction(operands) => LogicalExpression::conjunction(
+                operands
+                    .iter()
+                    .map(|operand| Self::translate_label_expression(variable, operand)),
+            )
+            .expect("conjunction has at least one operand"),
+            ast::LabelExpression::Disjunction(operands) => LogicalExpression::disjunction(
+                operands
+                    .iter()
+                    .map(|operand| Self::translate_label_expression(variable, operand)),
+            )
+            .expect("disjunction has at least one operand"),
             ast::LabelExpression::Negation(inner) => LogicalExpression::Unary {
                 op: UnaryOp::Not,
                 operand: Box::new(Self::translate_label_expression(variable, inner)),
@@ -462,7 +407,7 @@ impl GqlTranslator {
             .source
             .variable
             .clone()
-            .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+            .unwrap_or_else(|| self.anonymous_name());
 
         let source_label = path.source.labels.first().cloned();
 
@@ -518,7 +463,7 @@ impl GqlTranslator {
                 .target
                 .variable
                 .clone()
-                .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+                .unwrap_or_else(|| self.anonymous_name());
 
             // A quantifier (`{1,1}` too) makes the edge variable a group
             // variable: the list of the path's edges. An edge without one is a
@@ -534,7 +479,7 @@ impl GqlTranslator {
                 (!edge.properties.is_empty()
                     || tracks_hops
                     || (quantified && edge.where_clause.is_some()))
-                .then(|| format!("_anon_{}", rand_id()))
+                .then(|| self.anonymous_name())
             });
             let edge_types = edge.types.clone();
 
@@ -562,7 +507,7 @@ impl GqlTranslator {
                 && edge_var_for_filter.is_some()
                 && expand_path_alias.is_none()
             {
-                Some(format!("_auto_path_{}", rand_id()))
+                Some(self.names.next("_auto_path_"))
             } else {
                 expand_path_alias
             };
@@ -588,7 +533,7 @@ impl GqlTranslator {
             // The expand must use a temporary target, then filter for equality.
             let is_cycle = target_var == current_source;
             let expand_target = if is_cycle {
-                format!("_cycle_{}", rand_id())
+                self.names.next("_cycle_")
             } else {
                 target_var.clone()
             };
@@ -636,7 +581,7 @@ impl GqlTranslator {
                     // `all(e IN edges(path) WHERE e.k = v ...)`: the edge column
                     // of a variable-length expand only holds the last hop.
                     Some(path) => {
-                        let hop = format!("_anon_{}", rand_id());
+                        let hop = self.anonymous_name();
                         crate::query::translators::common::every_edge_matches(
                             path,
                             hop.clone(),
@@ -762,6 +707,36 @@ impl GqlTranslator {
             .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
             .collect()
     }
+
+    /// The node an INSERT creates for `node`, bound to `variable`.
+    pub(super) fn created_node(
+        &self,
+        variable: &str,
+        node: &ast::NodePattern,
+    ) -> Result<CreateElement> {
+        Ok(CreateElement::Node {
+            variable: variable.to_string(),
+            labels: node.labels.clone(),
+            properties: self.insert_properties(&node.properties)?,
+        })
+    }
+
+    /// The edge an INSERT creates for `edge`, from `from_variable` to
+    /// `to_variable`.
+    pub(super) fn created_edge(
+        &self,
+        edge: &ast::EdgePattern,
+        from_variable: String,
+        to_variable: String,
+    ) -> Result<CreateElement> {
+        Ok(CreateElement::Edge {
+            variable: edge.variable.clone(),
+            from_variable,
+            to_variable,
+            edge_type: edge.types.first().cloned().unwrap_or_default(),
+            properties: self.insert_properties(&edge.properties)?,
+        })
+    }
 }
 
 /// How an INSERT treats a node pattern: returns its variable and whether it is
@@ -772,14 +747,16 @@ impl GqlTranslator {
 /// it: they used to be dropped, or a second node was created under the same
 /// name. Anonymous, labeled and property-carrying endpoints are new nodes
 /// (only labeled ones used to be, so `({id: 1})` failed as undefined), and so
-/// is a bare variable when `bare_is_new`.
+/// is a bare variable when `bare_is_new`. An anonymous node gets a name from
+/// `names`.
 pub(super) fn insert_endpoint(
     node: &ast::NodePattern,
     bound: &mut HashSet<String>,
     bare_is_new: bool,
+    names: &GeneratedNames,
 ) -> Result<(String, bool)> {
     let Some(variable) = &node.variable else {
-        return Ok((format!("_anon_{}", rand_id()), true));
+        return Ok((names.next("_anon_"), true));
     };
     let declares = !node.labels.is_empty() || !node.properties.is_empty();
     if bound.contains(variable) {
@@ -806,17 +783,11 @@ pub(super) fn insert_endpoint(
 fn insert_input_variables(plan: &LogicalOperator) -> HashSet<String> {
     fn collect(op: &LogicalOperator, vars: &mut HashSet<String>) {
         match op {
-            LogicalOperator::CreateNode(create) => {
-                vars.insert(create.variable.clone());
+            LogicalOperator::Create(create) => {
+                vars.extend(create.variables().map(str::to_string));
                 if let Some(input) = &create.input {
                     collect(input, vars);
                 }
-            }
-            LogicalOperator::CreateEdge(create) => {
-                if let Some(variable) = &create.variable {
-                    vars.insert(variable.clone());
-                }
-                collect(&create.input, vars);
             }
             LogicalOperator::Merge(merge) => {
                 vars.insert(merge.variable.clone());
@@ -835,27 +806,33 @@ fn insert_input_variables(plan: &LogicalOperator) -> HashSet<String> {
 }
 
 /// A copy of `match_clause` in which every anonymous edge pattern has a
-/// variable, so that a check over the edges of the clause can name them.
-pub(super) fn with_named_edges(match_clause: &ast::MatchClause) -> ast::MatchClause {
-    fn name_edges(pattern: &mut ast::Pattern) {
+/// variable from `names`, so that a check over the edges of the clause can
+/// name them.
+pub(super) fn with_named_edges(
+    match_clause: &ast::MatchClause,
+    names: &GeneratedNames,
+) -> ast::MatchClause {
+    fn name_edges(pattern: &mut ast::Pattern, names: &GeneratedNames) {
         match pattern {
             ast::Pattern::Node(_) => {}
             ast::Pattern::Path(path) => {
                 for edge in &mut path.edges {
                     if edge.variable.is_none() {
-                        edge.variable = Some(format!("_anon_{}", rand_id()));
+                        edge.variable = Some(names.next("_anon_"));
                     }
                 }
             }
-            ast::Pattern::Quantified { pattern, .. } => name_edges(pattern),
+            ast::Pattern::Quantified { pattern, .. } => name_edges(pattern, names),
             ast::Pattern::Union(patterns) | ast::Pattern::MultisetUnion(patterns) => {
-                patterns.iter_mut().for_each(name_edges);
+                for pattern in patterns {
+                    name_edges(pattern, names);
+                }
             }
         }
     }
     let mut named = match_clause.clone();
     for aliased in &mut named.patterns {
-        name_edges(&mut aliased.pattern);
+        name_edges(&mut aliased.pattern, names);
     }
     named
 }
@@ -863,91 +840,72 @@ pub(super) fn with_named_edges(match_clause: &ast::MatchClause) -> ast::MatchCla
 /// The DIFFERENT EDGES condition over the edge patterns of `patterns`
 /// (ISO/IEC 39075:2024 16.4): the edges they bind are all different, each
 /// edge of a quantified edge pattern (a group variable, bound to the list of
-/// its edges) included. Every edge pattern has a variable (see
-/// [`with_named_edges`]); one that occurs twice binds one edge. `None` when
-/// there is nothing to compare.
+/// its edges) included (see
+/// [`different_edges`](crate::query::translators::common::different_edges)).
+/// Every edge pattern has a variable (see [`with_named_edges`]); one that
+/// occurs twice binds one edge. `None` when there is nothing to compare.
 ///
 /// # Errors
 ///
 /// Returns an error for a union of path patterns, whose alternatives bind
 /// different edge variables.
 pub(super) fn different_edges(patterns: &[&ast::Pattern]) -> Result<Option<LogicalExpression>> {
-    /// The edges of the patterns seen so far, as lists of edge ids.
-    #[derive(Default)]
-    struct Edges {
-        seen: HashSet<String>,
-        lists: Vec<LogicalExpression>,
-        has_group: bool,
-    }
+    use crate::query::translators::common::EdgeOccurrence;
 
-    impl Edges {
-        fn collect(&mut self, pattern: &ast::Pattern, group: bool) -> Result<()> {
-            match pattern {
-                ast::Pattern::Node(_) => {}
-                ast::Pattern::Path(path) => {
-                    for edge in &path.edges {
-                        let Some(variable) = &edge.variable else {
-                            continue;
-                        };
-                        if !self.seen.insert(variable.clone()) {
-                            continue;
-                        }
-                        // A questioned edge (`->?`) that matched nothing is
-                        // null: its id is no value, which a list leaves out
-                        if group || edge.min_hops.is_some() || edge.max_hops.is_some() {
-                            self.has_group = true;
-                            self.lists
-                                .push(LogicalExpression::Variable(variable.clone()));
-                        } else {
-                            self.lists
-                                .push(LogicalExpression::List(vec![LogicalExpression::Id(
-                                    variable.clone(),
-                                )]));
-                        }
+    /// Adds the edge patterns of `pattern` to `edges`, each variable once;
+    /// with `group`, their variables are group variables.
+    fn collect(
+        pattern: &ast::Pattern,
+        group: bool,
+        seen: &mut HashSet<String>,
+        edges: &mut Vec<EdgeOccurrence>,
+    ) -> Result<()> {
+        match pattern {
+            ast::Pattern::Node(_) => {}
+            ast::Pattern::Path(path) => {
+                for edge in &path.edges {
+                    let Some(variable) = &edge.variable else {
+                        continue;
+                    };
+                    if seen.insert(variable.clone()) {
+                        edges.push(EdgeOccurrence {
+                            variable: variable.clone(),
+                            group: group || edge.min_hops.is_some() || edge.max_hops.is_some(),
+                            types: edge.types.clone(),
+                        });
                     }
                 }
-                // A quantified pattern of one edge is translated as that edge
-                // with the quantifier, so its variable is a group variable
-                ast::Pattern::Quantified { pattern, .. } => {
-                    let single_edge = matches!(
-                        pattern.as_ref(),
-                        ast::Pattern::Path(path) if path.edges.len() == 1
-                    );
-                    self.collect(pattern, single_edge)?;
-                }
-                ast::Pattern::Union(_) | ast::Pattern::MultisetUnion(_) => {
-                    return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        "DIFFERENT EDGES is not supported for a union of path patterns",
-                    )));
-                }
             }
-            Ok(())
+            // A quantified pattern of one edge is translated as that edge
+            // with the quantifier, so its variable is a group variable
+            ast::Pattern::Quantified { pattern, .. } => {
+                let single_edge = matches!(
+                    pattern.as_ref(),
+                    ast::Pattern::Path(path) if path.edges.len() == 1
+                );
+                collect(pattern, single_edge, seen, edges)?;
+            }
+            ast::Pattern::Union(_) | ast::Pattern::MultisetUnion(_) => {
+                return Err(Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    "DIFFERENT EDGES is not supported for a union of path patterns",
+                )));
+            }
         }
+        Ok(())
     }
 
-    let mut edges = Edges::default();
+    let mut seen = HashSet::new();
+    let mut edges = Vec::new();
     for pattern in patterns {
-        edges.collect(pattern, false)?;
+        collect(pattern, false, &mut seen, &mut edges)?;
     }
-    // One single edge differs from nothing
-    if edges.lists.len() < 2 && !edges.has_group {
-        return Ok(None);
-    }
-    let all_edges = edges
-        .lists
-        .into_iter()
-        .reduce(|left, right| LogicalExpression::Binary {
-            left: Box::new(left),
-            op: BinaryOp::Add,
-            right: Box::new(right),
-        })
-        .unwrap_or(LogicalExpression::List(Vec::new()));
-    Ok(Some(LogicalExpression::FunctionCall {
-        name: "all_different".into(),
-        args: vec![all_edges],
-        distinct: false,
-    }))
+    // A group on its own is checked too: KEEP DIFFERENT EDGES leaves the
+    // path mode of its pattern as it is, so its expand may repeat an edge
+    let groups = crate::query::translators::common::edges_to_compare(&edges, true);
+    Ok(crate::query::translators::common::different_edges(
+        &edges, &groups,
+    ))
 }
 
 /// The minimum and maximum number of hops (`None` = unbounded) an edge pattern

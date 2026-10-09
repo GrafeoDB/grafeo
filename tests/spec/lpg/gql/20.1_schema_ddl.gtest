@@ -482,6 +482,9 @@ tests:
       - "CREATE EDGE TYPE REPORTS_TO"
       - "CREATE GRAPH TYPE org_chart (NODE TYPE Employee, EDGE TYPE REPORTS_TO)"
       - "CREATE GRAPH hr_graph TYPED org_chart"
+      # The graph first: ISO/IEC 39075:2024 12.7 Syntax Rule 6 keeps a graph
+      # type that a graph has as its type.
+      - "DROP GRAPH hr_graph"
       - "DROP GRAPH TYPE org_chart"
       - "DROP NODE TYPE Employee"
       - "DROP EDGE TYPE REPORTS_TO"
@@ -585,3 +588,67 @@ tests:
     expect:
       rows:
         - [19]
+
+  # ---------------------------------------------------------------------------
+  # Property types, property names and defaults the DDL checks
+  # (ISO/IEC 39075:2024 18.6 <property type>, 18.7 <property value type>
+  # Syntax Rule 4, 21.2 <signed numeric literal>; DEFAULT is Grafeo's)
+  # ---------------------------------------------------------------------------
+
+  - name: unknown_property_type_is_refused
+    query: "CREATE NODE TYPE Town (population INT32)"
+    expect:
+      error: "'INT32' is not a property type"
+
+  - name: unknown_list_element_type_is_refused
+    query: "CREATE EDGE TYPE ROAD (lanes LIST<STRING>)"
+    expect:
+      error: "'STRING' is not a property type"
+
+  - name: unknown_inline_property_type_is_refused
+    query: "CREATE GRAPH TYPE atlas { (:Town {population DECIMAL})-[:ROAD]->(:Town) }"
+    expect:
+      error: "'DECIMAL' is not a property type"
+
+  - name: keyword_property_names_are_declared
+    statements:
+      - "CREATE NODE TYPE Trip (starts DATE, ends DATE, contains STRING)"
+      - "ALTER NODE TYPE Trip ADD PROPERTY match INT64"
+      - "INSERT (:Trip {starts: date('2024-03-19'), ends: date('2024-03-22'), contains: 'Prague', match: 3})"
+      - "MATCH (t:Trip) RETURN t.contains, t.match"
+    expect:
+      rows:
+        - [Prague, 3]
+
+  - name: keyword_property_type_is_checked
+    setup:
+      - "CREATE NODE TYPE Trip (contains STRING)"
+    query: "INSERT (:Trip {contains: 3})"
+    expect:
+      error: contains
+
+  - name: signed_number_defaults
+    statements:
+      - "CREATE NODE TYPE Reading (celsius INT64 DEFAULT -3, trim FLOAT64 DEFAULT -0.5, scale FLOAT64 DEFAULT 88)"
+      - "INSERT (:Reading)"
+      - "MATCH (r:Reading) RETURN r.celsius, r.trim, r.scale IS TYPED FLOAT64"
+    expect:
+      rows:
+        - [-3, -0.5, true]
+
+  - name: default_of_another_type_is_refused
+    query: "CREATE NODE TYPE Town (x INT64 DEFAULT 'far')"
+    expect:
+      error: "DEFAULT 'far' is not a value of type INT64"
+
+  - name: default_of_another_type_is_refused_by_alter
+    setup:
+      - "CREATE EDGE TYPE ROUTE (km INT64)"
+    query: "ALTER EDGE TYPE ROUTE ADD lanes INT64 DEFAULT 2.5"
+    expect:
+      error: "DEFAULT 2.5 is not a value of type INT64"
+
+  - name: null_default_of_a_not_null_property_is_refused
+    query: "CREATE NODE TYPE Town (x INT64 NOT NULL DEFAULT NULL)"
+    expect:
+      error: "DEFAULT NULL"

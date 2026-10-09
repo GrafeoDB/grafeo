@@ -6,7 +6,10 @@
 # DISTINCT, count(DISTINCT ...), min, max), each node a source reaches is
 # found once instead of once per walk (once over all sources when only the
 # end nodes are returned); the results are those of the walks, including the
-# source itself when a walk comes back to it.
+# source itself when a walk comes back to it. A Cypher variable-length
+# relationship takes each relationship once (openCypher 9): it follows trails,
+# which reach what the walks reach when directed and from at most one hop,
+# and can reach fewer otherwise (the Cypher tests below).
 #
 # Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): KNOWS
 # Alix->Gus, Gus->Vincent, Vincent->Alix, Jules->Mia and Alix->Jules; ages
@@ -44,12 +47,26 @@ tests:
       - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
     variants:
       gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]-{2,3}(b) RETURN DISTINCT b.name AS b"
-      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS*2..3]-(b) RETURN DISTINCT b.name AS b"
     expect:
       rows:
         - [Alix]
         - [Gus]
         - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  # Cypher's variable-length relationship takes each relationship once
+  # (openCypher 9): a trail of two or three edges never comes back to Jules,
+  # and reaches Alix round the triangle only
+  - name: distinct_nodes_two_or_three_undirected_relationships_away_in_cypher
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS*2..3]-(b) RETURN DISTINCT b.name AS b"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
         - [Mia]
         - [Vincent]
 
@@ -59,10 +76,22 @@ tests:
       - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
     variants:
       gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]-{2,2}(b) RETURN DISTINCT b.name AS b"
-      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS*2..2]-(b) RETURN DISTINCT b.name AS b"
     expect:
       rows:
         - [Alix]
+        - [Gus]
+        - [Mia]
+        - [Vincent]
+
+  # In Cypher, Alix is no trail of two relationships away: that walk goes
+  # there and back over one
+  - name: distinct_nodes_exactly_two_undirected_relationships_away_in_cypher
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS*2..2]-(b) RETURN DISTINCT b.name AS b"
+    expect:
+      rows:
         - [Gus]
         - [Mia]
         - [Vincent]
@@ -124,7 +153,6 @@ tests:
       - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
     variants:
       gql: "MATCH (a:Person)-[:KNOWS]->{2,2}(b) RETURN DISTINCT a.name AS a, b.name AS b"
-      cypher: "MATCH (a:Person)-[:KNOWS*2..2]->(b) RETURN DISTINCT a.name AS a, b.name AS b"
     expect:
       rows:
         - [Alix, Mia]
@@ -135,3 +163,19 @@ tests:
         - [Vincent, Gus]
         - [Vincent, Jules]
         - [Vincent, Vincent]
+
+  # In Cypher, Vincent's self-loop taken twice is no trail
+  - name: distinct_sources_and_nodes_exactly_two_relationships_away_in_cypher
+    setup:
+      - "MATCH (v:Person {name: 'Vincent'}) INSERT (v)-[:KNOWS {w: 9}]->(v)"
+    variants:
+      cypher: "MATCH (a:Person)-[:KNOWS*2..2]->(b) RETURN DISTINCT a.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Mia]
+        - [Alix, Vincent]
+        - [Gus, Alix]
+        - [Gus, Vincent]
+        - [Vincent, Alix]
+        - [Vincent, Gus]
+        - [Vincent, Jules]

@@ -361,17 +361,11 @@ impl super::Planner {
         // `first`, the checks, then the filter's predicate: the order the
         // chain of filters runs them in.
         let checked = |first: Option<LogicalExpression>| {
-            first
+            let conjuncts = first
                 .into_iter()
                 .chain(checks.iter().map(|(_, predicate)| (*predicate).clone()))
-                .rev()
-                .fold(filter.predicate.clone(), |rest, check| {
-                    LogicalExpression::Binary {
-                        left: Box::new(check),
-                        op: BinaryOp::And,
-                        right: Box::new(rest),
-                    }
-                })
+                .chain(std::iter::once(filter.predicate.clone()));
+            LogicalExpression::conjunction(conjuncts).expect("the filter's predicate")
         };
         let store = Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>;
         let expression =

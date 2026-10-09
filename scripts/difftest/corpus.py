@@ -960,14 +960,17 @@ for case_id, query, fixture in [
     case(case_id, query, BOTH, fixture)
 
 # AW: a statement nested deeper than the stack allows fails with an error that names the
-#     limit (#573): 70 levels of parentheses and an OR of 100 terms are beyond the nesting
-#     limit of 64 (they ran on a large stack and overflowed a small one); AW3 and AW4 at
-#     the limit still run
+#     limit (#573): 70 levels of parentheses are beyond the nesting limit of 64 (they ran
+#     on a large stack and overflowed a small one); 60 levels still run. A chain of AND,
+#     OR, XOR or UNION is a balanced tree, so long ones run: an OR of 100 terms (AW2),
+#     a UNION ALL of 100 queries (AW5) and an AND of 100 terms (AW6)
 for case_id, query in [
     ("AW1", "RETURN " + "(" * 70 + "3" + ")" * 70 + " AS v"),
     ("AW2", "MATCH (a:Person) WHERE " + " OR ".join(f"a.age = {i}" for i in range(100)) + " RETURN count(*) AS c"),
     ("AW3", "RETURN " + "(" * 60 + "3" + ")" * 60 + " AS v"),
     ("AW4", "MATCH (a:Person) WHERE " + " OR ".join(f"a.age = {i}" for i in range(25, 85)) + " RETURN count(*) AS c"),
+    ("AW5", " UNION ALL ".join(f"RETURN {i} AS v" for i in range(100))),
+    ("AW6", "MATCH (a:Person) WHERE " + " AND ".join(f"a.age <> {i}" for i in range(100)) + " RETURN count(*) AS c"),
 ]:
     case(case_id, query)
 # AX: a Cypher chain of comparisons is their conjunction, `a < b <= c` is `a < b AND b <= c`
@@ -1211,6 +1214,82 @@ for case_id, query, languages in [
     ("BI8", "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS*1..2]->(b) WITH collect(p) AS ps UNWIND ps AS u RETURN length(u) AS len, [n IN nodes(u) | n.name] AS names", BOTH),
     ("BI9", "UNWIND ['Amsterdam', 'Paris'] AS s RETURN s, length(s) AS len", BOTH),
     ("BI10", "MATCH p = (a:Person {name: 'Jules'})-[:KNOWS]->(b) RETURN length(p)", BOTH),
+]:
+    case(case_id, query, languages)
+# BJ: Cypher binds a relationship once per MATCH (openCypher 9, relationship uniqueness),
+#     as GQL's MATCH DIFFERENT EDGES does: two patterns never take one relationship (BJ1,
+#     BJ2; they came back over it), a variable-length relationship follows trails (BJ3
+#     went round the triangle for a hundred hops, BJ12 came back to Mia over the edge it
+#     left by), as do OPTIONAL MATCH, a pattern comprehension and EXISTS (BJ6 to BJ8).
+#     An unbounded pattern in Cypher or a GQL TRAIL ends on its own instead of stopping
+#     after a hundred hops (BJ4, BJ5; 0). BJ11 is the control: a directed DISTINCT reaches
+#     what it did. GQL's names for anonymous elements are the statement's own (BJ9, the
+#     GQL form of BG9), and an undefined variable named like one is undefined (BJ10; an
+#     internal error)
+for case_id, query, languages, fixture in [
+    ("BJ1", "MATCH (a:Person)-[:KNOWS]-(b)-[:KNOWS]-(c) RETURN a.name AS a, b.name AS b, c.name AS c", CYPHER, "social"),
+    ("BJ2", "MATCH (a:Person)-[:KNOWS]->(b)<-[:KNOWS]-(c) RETURN a.name AS a, b.name AS b, c.name AS c", CYPHER, "social"),
+    ("BJ3", "MATCH (g:Person {name: 'Gus'})-[:KNOWS*]->(c) RETURN c.name AS c", CYPHER, "social"),
+    ("BJ4", "MATCH (a:N {i: 0})-[:NEXT*]->(b:N {i: 150}) RETURN count(*) AS c", CYPHER, "chain"),
+    ("BJ5", "MATCH TRAIL (a:N {i: 0})-[:NEXT]->{1,}(b:N {i: 150}) RETURN count(*) AS c", GQL, "chain"),
+    ("BJ6", "MATCH (m:Person {name: 'Mia'}) OPTIONAL MATCH (m)-[:KNOWS]-(x)-[:KNOWS]-(y) RETURN m.name AS m, x.name AS x, y.name AS y", CYPHER, "social"),
+    ("BJ7", "MATCH (m:Person {name: 'Mia'}) RETURN [(m)-[:KNOWS]-(x)-[:KNOWS]-(y) | y.name] AS ys", CYPHER, "social"),
+    ("BJ8", "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:KNOWS]-(x)-[:KNOWS]-(p) } RETURN p.name AS p", CYPHER, "social"),
+    ("BJ9", "MATCH (_anon_0:Person)-[:KNOWS]->() RETURN _anon_0.name AS name", GQL, "social"),
+    ("BJ10", "MATCH (p:Person) RETURN _anon_5", BOTH, "social"),
+    ("BJ11", "MATCH (a:Person {name: 'Alix'})-[:KNOWS*]->(b) RETURN DISTINCT b.name AS b", CYPHER, "social"),
+    ("BJ12", "MATCH (a:Person {name: 'Mia'})-[:KNOWS*1..2]-(b) RETURN DISTINCT b.name AS b", CYPHER, "social"),
+]:
+    case(case_id, query, languages, fixture)
+# BK: procedure arguments and DFS. A constant expression in a CALL argument runs like its
+#     value (BK1, BK9; it ran with the default, or failed as "required"), an integer runs
+#     where a float is expected (BK2; damping 1 ran as 0.85), an argument that cannot be
+#     evaluated, reads a row or has the wrong type is an error (BK5 to BK7; it ran with the
+#     default), and a computed list element is kept (BK8: three elements, so the 2-dimensional
+#     index refuses them; 0.0 + 0.0 was dropped and the search ran on two). DFS reports the
+#     depth in the DFS tree and its discovery and finish order (BK3, BK4; depth was the
+#     finish order)
+for case_id, query, languages in [
+    ("BK5", "CALL grafeo.pagerank(1 / 0) YIELD score RETURN score", BOTH),
+    ("BK6", "MATCH (p:Person {name: 'Alix'}) WITH id(p) AS s CALL grafeo.bfs(s) YIELD node_id RETURN node_id", CYPHER),
+    ("BK7", "CALL grafeo.pagerank('high') YIELD score RETURN score", BOTH),
+]:
+    case(case_id, query, languages)
+ordered("BK1", "CALL grafeo.pagerank(0.25 + 0.25, 3 - 2, 0.0001) YIELD node_id, score RETURN node_id, score ORDER BY node_id")
+ordered("BK2", "CALL grafeo.pagerank(1, 3) YIELD node_id, score RETURN node_id, score ORDER BY node_id")
+ordered("BK3", "CALL grafeo.dfs(0) YIELD node_id, depth RETURN node_id, depth ORDER BY node_id")
+ordered("BK4", "CALL grafeo.dfs(0)")
+case("BK8", "CALL grafeo.search.vector('Doc', 'emb', [1.0, 0.0, 0.0 + 0.0], 2) YIELD node_id RETURN node_id", BOTH, "search")
+ordered("BK9", "CALL grafeo.bfs(0 + 0) YIELD node_id, depth RETURN node_id, depth ORDER BY node_id")
+# BM: a list literal has one item per expression and a map literal one entry per key. A
+#     property of a null entity or a property the entity does not have was left out, so
+#     the list was shorter (BM1 `[]`, BM2 `[35]`, BM5 read the node at the wrong position),
+#     `[p.w] = []` matched (BM3), the map lost the key (BM4 `{age: 35}`) and IN was false
+#     instead of unknown (BM6). A questioned edge without a match is still left out of
+#     its path (BM7, unchanged)
+for case_id, query, languages in [
+    ("BM1", "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (p)-[r:LIVES_IN]->(c:City) RETURN [c.name, r.years] AS l, size([c.name, r.years]) AS s", BOTH),
+    ("BM2", "MATCH (p:Person {name: 'Jules'}) RETURN [p.w, p.age] AS l, [p.w, p.age][1] AS second", BOTH),
+    ("BM3", "MATCH (p:Person) WHERE [p.w] = [] RETURN p.name AS n", BOTH),
+    ("BM4", "MATCH (p:Person {name: 'Jules'}) RETURN {w: p.w, age: p.age} AS m", BOTH),
+    ("BM5", "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (p)-[:LIVES_IN]->(c:City) RETURN [c.name, p][1].name AS n", BOTH),
+    ("BM6", "MATCH (p:Person {name: 'Jules'}) RETURN 3 IN [p.w, 19] AS i, 19 IN [p.w, 19] AS j", BOTH),
+    ("BM7", "MATCH p = (a:Person {name: 'Jules'})-[:KNOWS]->(b)-[:KNOWS]->?(c) RETURN length(p) AS l, b.name AS b, c.name AS c", GQL),
+]:
+    case(case_id, query, languages)
+
+# BN: edge types. An edge has one type, so a second `:` is a syntax error that names the
+#     quoted type and the alternatives (BN1, BN2: the KNOWS or LIVES_IN edges came back),
+#     and so is a conjunction in GQL (BN4); openCypher 9's `:A|:B` writes alternatives
+#     (BN3; it failed with "Expected identifier"). An EXISTS whose path ends at a node of
+#     the row searches from its start (BN5, BN6: the same rows as the semi-join)
+for case_id, query, languages in [
+    ("BN1", "MATCH (a:Person)-[:KNOWS:LIVES_IN]->(b) RETURN a.name AS a, b.name AS b", BOTH),
+    ("BN2", "MATCH (a:Person {name: 'Alix'})-[:KNOWS:LIVES_IN*1..2]->(b) RETURN DISTINCT b.name AS b", BOTH),
+    ("BN3", "MATCH (a:Person)-[:KNOWS|:LIVES_IN]->(b) RETURN a.name AS a, b.name AS b", CYPHER),
+    ("BN4", "MATCH (a:Person)-[:KNOWS&LIVES_IN]->(b) RETURN b.name AS b", GQL),
+    ("BN5", "MATCH (a:Person {name: 'Alix'}), (b:Person) WHERE EXISTS { MATCH (a)-[:KNOWS*1..3]->(b) } RETURN b.name AS b", BOTH),
+    ("BN6", "MATCH (a:Person), (b:Person) WHERE EXISTS { MATCH (a)-[:KNOWS*1..4]-(b) } RETURN a.name AS a, count(b) AS reached", GQL),
 ]:
     case(case_id, query, languages)
 

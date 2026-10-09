@@ -626,15 +626,36 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            // Optional :Type[:Type2]
+            // Optional :Type, or alternatives :Type1|Type2. An edge has one
+            // type, so a second `:` is an error naming both ways to write
+            // what was meant.
             let mut edge_types = Vec::new();
-            while self.current.kind == TokenKind::Colon {
+            if self.current.kind == TokenKind::Colon {
                 self.advance();
                 edge_types.push(self.expect_identifier()?);
-                // Handle type alternatives with |
                 while self.current.kind == TokenKind::Pipe {
                     self.advance();
                     edge_types.push(self.expect_identifier()?);
+                }
+                if self.current.kind == TokenKind::Colon {
+                    let colon = self.current.span;
+                    self.advance();
+                    let first = edge_types.last().map_or("A", String::as_str);
+                    let second = if self.can_be_identifier() {
+                        self.get_identifier_text()
+                    } else {
+                        "B".to_string()
+                    };
+                    return Err(QueryError::new(
+                        QueryErrorKind::Syntax,
+                        format!(
+                            "[SQL/PGQ] An edge has one type: write :\"{first}:{second}\" for the \
+                             type named {first}:{second}, or :{first}|{second} to match either type"
+                        ),
+                    )
+                    .with_span(colon)
+                    .with_source(self.source.to_string())
+                    .into());
                 }
             }
 
@@ -758,37 +779,44 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_or_expression(&mut self) -> Result<Expression> {
-        let chain = self.begin_chain();
-        let mut left = self.parse_and_expression()?;
-        while self.current.kind == TokenKind::Or {
-            self.advance();
-            let right = self.parse_and_expression()?;
-            self.link_chain()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::Or,
-                right: Box::new(right),
-            };
-        }
-        self.end_chain(chain);
-        Ok(left)
+        self.parse_balanced_chain(TokenKind::Or, BinaryOp::Or, Self::parse_and_expression)
     }
 
     fn parse_and_expression(&mut self) -> Result<Expression> {
+        self.parse_balanced_chain(TokenKind::And, BinaryOp::And, Self::parse_not_expression)
+    }
+
+    /// Parses `operand` joined by `token`, an associative operator, into a
+    /// balanced tree of `op` (see [`Nesting::join_balanced`]): a chain of any
+    /// length stays shallow.
+    fn parse_balanced_chain(
+        &mut self,
+        token: TokenKind,
+        op: BinaryOp,
+        operand: fn(&mut Self) -> Result<Expression>,
+    ) -> Result<Expression> {
         let chain = self.begin_chain();
-        let mut left = self.parse_not_expression()?;
-        while self.current.kind == TokenKind::And {
-            self.advance();
-            let right = self.parse_not_expression()?;
-            self.link_chain()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::And,
-                right: Box::new(right),
-            };
+        let first = operand(self)?;
+        if self.current.kind != token {
+            self.end_chain(chain);
+            return Ok(first);
         }
+        let mut operands = vec![(first, self.nesting.take_operand())];
+        while self.current.kind == token {
+            self.advance();
+            let next = operand(self)?;
+            operands.push((next, self.nesting.take_operand()));
+        }
+        let tree = self
+            .nesting
+            .join_balanced(operands, |left, right| Expression::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            })
+            .ok_or_else(|| self.error(&nesting_error_message()));
         self.end_chain(chain);
-        Ok(left)
+        tree
     }
 
     fn parse_not_expression(&mut self) -> Result<Expression> {
@@ -1528,6 +1556,20 @@ mod tests {
             "Expected parse error for: {}",
             query
         );
+    }
+
+    #[test]
+    fn an_edge_has_one_type_or_alternatives() {
+        parse_ok(
+            "SELECT * FROM GRAPH_TABLE (MATCH (a)-[:A|\"Graph:CONTAINS\"]->(b) COLUMNS (b.id AS id))",
+        );
+        let query =
+            "SELECT * FROM GRAPH_TABLE (MATCH (a)-[:Graph:CONTAINS]->(b) COLUMNS (b.id AS id))";
+        let err = Parser::new(query).parse().expect_err(query).to_string();
+        for advice in [":\"Graph:CONTAINS\"", ":Graph|CONTAINS"] {
+            assert!(err.contains(advice), "names {advice}: {err}");
+        }
+        parse_err("SELECT * FROM GRAPH_TABLE (MATCH (a)-[:A|B:C*]->(b) COLUMNS (b.id AS id))");
     }
 
     fn select(stmt: Statement) -> SelectStatement {

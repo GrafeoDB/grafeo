@@ -424,6 +424,10 @@ pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
         OperatorError::WriteConflict(msg) => {
             Error::Transaction(grafeo_common::utils::error::TransactionError::WriteConflict(msg))
         }
+        OperatorError::LimitExceeded(msg) => Error::Query(QueryError::new(
+            grafeo_common::utils::error::QueryErrorKind::Execution,
+            msg,
+        )),
         _ => Error::Internal(format!("{err}")),
     }
 }

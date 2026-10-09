@@ -589,31 +589,41 @@ fn error_message(error: wasm_bindgen::JsError) -> String {
 }
 
 /// The statements of #573: a stack overflow used to trap the module, and
-/// every later call (`new Database()` too) trapped after it. A statement beyond
-/// the limits fails with an error that names the limit, and the module keeps
-/// working.
+/// every later call (`new Database()` too) trapped after it. A long INSERT
+/// and a long OR chain run; a statement nested beyond the limits fails with
+/// an error that names the limit, and the module keeps working.
 #[wasm_bindgen_test]
-fn test_very_large_statements_fail_with_the_limit_and_the_module_keeps_working() {
+fn test_very_large_statements_run_or_fail_with_the_limit_and_the_module_keeps_working() {
     let db = Database::new().expect("create db");
     let insert = format!(
         "INSERT {}",
-        (0..400)
+        (0..10_000)
             .map(|i| format!("(:Person {{v: {i}}})"))
             .collect::<Vec<_>>()
             .join(", ")
     );
-    if let Err(error) = db.execute(&insert) {
-        let message = error_message(error);
-        assert!(message.contains("plan depth limit of 128"), "{message}");
-    }
+    db.execute(&insert)
+        .expect("an INSERT of 10,000 patterns runs");
+    assert_eq!(db.node_count(), 10_000);
     let or_chain = format!(
         "MATCH (n:Person) WHERE {} RETURN n.v",
         (0..10_000)
-            .map(|i| format!("n.v = {i}"))
+            .map(|i| format!("n.v = {}", i * 3))
             .collect::<Vec<_>>()
             .join(" OR ")
     );
-    let message = error_message(db.execute(&or_chain).expect_err("beyond the nesting limit"));
+    let rows = db.execute(&or_chain).expect("a 10,000-term OR runs");
+    assert_eq!(
+        js_sys::Array::from(&rows).length(),
+        3_334,
+        "v = 0, 3, ..., 9999"
+    );
+
+    let parentheses = format!("RETURN {}1{} AS v", "(".repeat(10_000), ")".repeat(10_000));
+    let message = error_message(
+        db.execute(&parentheses)
+            .expect_err("beyond the nesting limit"),
+    );
     assert!(message.contains("nesting depth of 64"), "{message}");
 
     db.execute("INSERT (:Person {name: 'Alix'})")

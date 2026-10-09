@@ -19,6 +19,11 @@ pub struct Parser<'a> {
     /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)).
     /// Saved and restored with the lexer where the parser backtracks.
     nesting: Nesting,
+    /// Whether the last error is one no other reading of the tokens avoids
+    /// (a second type of a relationship, see
+    /// [`Self::parse_relationship_types`]): where the parser tries a pattern
+    /// and backtracks to an expression, it returns that error instead.
+    definite_error: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -37,6 +42,7 @@ impl<'a> Parser<'a> {
             previous,
             source: query,
             nesting: Nesting::default(),
+            definite_error: false,
         }
     }
 
@@ -706,15 +712,36 @@ impl<'a> Parser<'a> {
     fn parse_create_clause(&mut self) -> Result<CreateClause> {
         self.expect(TokenKind::Create)?;
         let patterns = self.parse_pattern_list()?;
+        for pattern in &patterns {
+            self.check_one_type_each("CREATE", pattern)?;
+        }
         Ok(CreateClause {
             patterns,
             span: None,
         })
     }
 
+    /// Refuses a relationship with alternative types (`:A|B`) in `pattern`
+    /// of `clause`, which creates relationships: each gets one type.
+    fn check_one_type_each(&self, clause: &str, pattern: &Pattern) -> Result<()> {
+        match pattern {
+            Pattern::Node(_) => Ok(()),
+            Pattern::NamedPath { pattern, .. } => self.check_one_type_each(clause, pattern),
+            Pattern::Path(path) => match path.chain.iter().find(|rel| rel.types.len() > 1) {
+                Some(rel) => Err(self.error(&format!(
+                    "{clause} gives a relationship one type: :{} names alternatives, which \
+                     only a pattern to match can have",
+                    rel.types.join("|")
+                ))),
+                None => Ok(()),
+            },
+        }
+    }
+
     fn parse_merge_clause(&mut self) -> Result<MergeClause> {
         self.expect(TokenKind::Merge)?;
         let pattern = self.parse_pattern()?;
+        self.check_one_type_each("MERGE", &pattern)?;
 
         let mut on_create = None;
         let mut on_match = None;
@@ -1128,16 +1155,7 @@ impl<'a> Parser<'a> {
                     None
                 };
 
-                let mut rel_types = Vec::new();
-                while self.current.kind == TokenKind::Colon {
-                    self.advance();
-                    rel_types.push(self.expect_identifier()?);
-                    // Handle type alternatives with |
-                    while self.current.kind == TokenKind::Pipe {
-                        self.advance();
-                        rel_types.push(self.expect_identifier()?);
-                    }
-                }
+                let rel_types = self.parse_relationship_types()?;
 
                 // Parse variable length *min..max
                 let len = if self.current.kind == TokenKind::Star {
@@ -1195,6 +1213,50 @@ impl<'a> Parser<'a> {
             target,
             span: None,
         })
+    }
+
+    /// Parses the types of a relationship pattern: none, one (`:KNOWS`), or
+    /// alternatives (`:KNOWS|LIKES`, also written `:KNOWS|:LIKES`), as
+    /// openCypher 9's `RelationshipTypes` writes them. A relationship has
+    /// one type, so a second `:` (`:Graph:CONTAINS`) is an error that names
+    /// the two ways to write what was meant: the quoted name of one type
+    /// with a colon in it, or the alternatives.
+    fn parse_relationship_types(&mut self) -> Result<Vec<String>> {
+        let mut types = Vec::new();
+        if self.current.kind != TokenKind::Colon {
+            return Ok(types);
+        }
+        self.advance();
+        types.push(self.expect_identifier()?);
+        while self.current.kind == TokenKind::Pipe {
+            self.advance();
+            if self.current.kind == TokenKind::Colon {
+                self.advance();
+            }
+            types.push(self.expect_identifier()?);
+        }
+        if self.current.kind == TokenKind::Colon {
+            let colon = self.current.span;
+            self.advance();
+            self.definite_error = true;
+            let first = types.last().map_or("A", String::as_str);
+            let second = if self.can_be_identifier() {
+                self.get_identifier_text()
+            } else {
+                "B".to_string()
+            };
+            return Err(QueryError::new(
+                QueryErrorKind::Syntax,
+                format!(
+                    "[Cypher] A relationship has one type: write :`{first}:{second}` for the \
+                     type named {first}:{second}, or :{first}|{second} to match either type"
+                ),
+            )
+            .with_span(colon)
+            .with_source(self.source.to_string())
+            .into());
+        }
+        Ok(types)
     }
 
     fn parse_length_range(&mut self) -> Result<LengthRange> {
@@ -1258,54 +1320,48 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_or_expression(&mut self) -> Result<Expression> {
-        let chain = self.begin_chain();
-        let mut left = self.parse_xor_expression()?;
-        while self.current.kind == TokenKind::Or {
-            self.advance();
-            let right = self.parse_xor_expression()?;
-            self.link_chain()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::Or,
-                right: Box::new(right),
-            };
-        }
-        self.end_chain(chain);
-        Ok(left)
+        self.parse_balanced_chain(TokenKind::Or, BinaryOp::Or, Self::parse_xor_expression)
     }
 
     fn parse_xor_expression(&mut self) -> Result<Expression> {
-        let chain = self.begin_chain();
-        let mut left = self.parse_and_expression()?;
-        while self.current.kind == TokenKind::Xor {
-            self.advance();
-            let right = self.parse_and_expression()?;
-            self.link_chain()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::Xor,
-                right: Box::new(right),
-            };
-        }
-        self.end_chain(chain);
-        Ok(left)
+        self.parse_balanced_chain(TokenKind::Xor, BinaryOp::Xor, Self::parse_and_expression)
     }
 
     fn parse_and_expression(&mut self) -> Result<Expression> {
+        self.parse_balanced_chain(TokenKind::And, BinaryOp::And, Self::parse_not_expression)
+    }
+
+    /// Parses `operand` joined by `token`, an associative operator, into a
+    /// balanced tree of `op` (see [`Nesting::join_balanced`]): a chain of any
+    /// length stays shallow.
+    fn parse_balanced_chain(
+        &mut self,
+        token: TokenKind,
+        op: BinaryOp,
+        operand: fn(&mut Self) -> Result<Expression>,
+    ) -> Result<Expression> {
         let chain = self.begin_chain();
-        let mut left = self.parse_not_expression()?;
-        while self.current.kind == TokenKind::And {
-            self.advance();
-            let right = self.parse_not_expression()?;
-            self.link_chain()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::And,
-                right: Box::new(right),
-            };
+        let first = operand(self)?;
+        if self.current.kind != token {
+            self.end_chain(chain);
+            return Ok(first);
         }
+        let mut operands = vec![(first, self.nesting.take_operand())];
+        while self.current.kind == token {
+            self.advance();
+            let next = operand(self)?;
+            operands.push((next, self.nesting.take_operand()));
+        }
+        let tree = self
+            .nesting
+            .join_balanced(operands, |left, right| Expression::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            })
+            .ok_or_else(|| self.error(&nesting_error_message()));
         self.end_chain(chain);
-        Ok(left)
+        tree
     }
 
     fn parse_not_expression(&mut self) -> Result<Expression> {
@@ -1682,14 +1738,19 @@ impl<'a> Parser<'a> {
             self.previous.clone(),
             self.nesting,
         );
-        if let Ok(pattern @ Pattern::Path(_)) = self.parse_pattern() {
-            return Ok(Expression::Exists(Box::new(Query {
-                clauses: vec![Clause::Match(MatchClause {
-                    patterns: vec![pattern],
+        self.definite_error = false;
+        match self.parse_pattern() {
+            Ok(pattern @ Pattern::Path(_)) => {
+                return Ok(Expression::Exists(Box::new(Query {
+                    clauses: vec![Clause::Match(MatchClause {
+                        patterns: vec![pattern],
+                        span: None,
+                    })],
                     span: None,
-                })],
-                span: None,
-            })));
+                })));
+            }
+            Err(error) if self.definite_error => return Err(error),
+            _ => {}
         }
         (self.lexer, self.current, self.previous, self.nesting) = saved;
 
@@ -1714,23 +1775,28 @@ impl<'a> Parser<'a> {
                 self.previous.clone(),
                 self.nesting,
             );
-            if let Ok(pattern) = self.parse_pattern() {
-                let where_clause = if self.current.kind == TokenKind::Where {
-                    self.advance();
-                    Some(Box::new(self.parse_expression()?))
-                } else {
-                    None
-                };
-                if self.current.kind == TokenKind::Pipe {
-                    self.advance();
-                    let projection = self.parse_expression()?;
-                    self.expect(TokenKind::RBracket)?;
-                    return Ok(Expression::PatternComprehension {
-                        pattern: Box::new(pattern),
-                        where_clause,
-                        projection: Box::new(projection),
-                    });
+            self.definite_error = false;
+            match self.parse_pattern() {
+                Ok(pattern) => {
+                    let where_clause = if self.current.kind == TokenKind::Where {
+                        self.advance();
+                        Some(Box::new(self.parse_expression()?))
+                    } else {
+                        None
+                    };
+                    if self.current.kind == TokenKind::Pipe {
+                        self.advance();
+                        let projection = self.parse_expression()?;
+                        self.expect(TokenKind::RBracket)?;
+                        return Ok(Expression::PatternComprehension {
+                            pattern: Box::new(pattern),
+                            where_clause,
+                            projection: Box::new(projection),
+                        });
+                    }
                 }
+                Err(error) if self.definite_error => return Err(error),
+                Err(_) => {}
             }
             // Not a pattern comprehension, restore and continue
             (self.lexer, self.current, self.previous, self.nesting) = saved;
@@ -2792,7 +2858,12 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume second :
             }
 
+            // A type Grafeo supports, as in GQL's type DDL: any other name
+            // used to declare an `ANY` property.
             let data_type = self.expect_identifier()?;
+            if crate::query::schema::property_type_kind(&data_type).is_none() {
+                return Err(self.error(&crate::query::schema::unknown_property_type(&data_type)));
+            }
 
             // Optional NOT NULL
             let nullable = if self.current.kind == TokenKind::Not {
@@ -4052,6 +4123,90 @@ mod tests {
             err.contains("multiple statements separated by ';' are not supported in one call"),
             "{err}"
         );
+    }
+
+    /// The types of the first relationship of `query`'s first MATCH.
+    fn first_relationship_types(query: &str) -> Vec<String> {
+        let Statement::Query(Query { clauses, .. }) = parse_ok(query) else {
+            panic!("{query}: expected a query");
+        };
+        let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] else {
+            panic!("{query}: expected a MATCH first");
+        };
+        let Pattern::Path(path) = &patterns[0] else {
+            panic!("{query}: expected a path");
+        };
+        path.chain[0].types.clone()
+    }
+
+    #[test]
+    fn a_relationship_has_one_type_or_alternatives() {
+        // openCypher 9 RelationshipTypes: `:A`, `:A|B`, and `:A|:B`
+        assert_eq!(
+            first_relationship_types("MATCH (a)-[:A]->(b) RETURN b"),
+            ["A"]
+        );
+        assert_eq!(
+            first_relationship_types("MATCH (a)-[r:A|B*1..3]->(b) RETURN b"),
+            ["A", "B"]
+        );
+        assert_eq!(
+            first_relationship_types("MATCH (a)-[:A|:`Graph:CONTAINS`|C]-(b) RETURN b"),
+            ["A", "Graph:CONTAINS", "C"]
+        );
+        // A second `:` names a type of its own, which a relationship cannot
+        // have, wherever the pattern is
+        for (query, written) in [
+            (
+                "MATCH (a)-[:Graph:CONTAINS]->(b) RETURN b",
+                "Graph:CONTAINS",
+            ),
+            (
+                "MATCH (a)-[e:Graph:CONTAINS*]->(b) RETURN b",
+                "Graph:CONTAINS",
+            ),
+            (
+                "MATCH (a)<-[:A|Graph:CONTAINS]-(b) RETURN b",
+                "Graph:CONTAINS",
+            ),
+            (
+                "MATCH (a) WHERE (a)-[:Graph:CONTAINS]->() RETURN a",
+                "Graph:CONTAINS",
+            ),
+            (
+                "MATCH (a) RETURN [(a)-[:Graph:CONTAINS]->(b) | b] AS bs",
+                "Graph:CONTAINS",
+            ),
+            (
+                "MATCH (a) WHERE EXISTS { (a)-[:Graph:CONTAINS]->() } RETURN a",
+                "Graph:CONTAINS",
+            ),
+            ("CREATE (a)-[:Graph:CONTAINS]->(b)", "Graph:CONTAINS"),
+            ("MERGE (a)-[:Graph:CONTAINS]->(b)", "Graph:CONTAINS"),
+        ] {
+            let err = parse_error_message(query);
+            let (first, second) = written.split_once(':').unwrap();
+            for advice in [format!(":`{written}`"), format!(":{first}|{second}")] {
+                assert!(err.contains(&advice), "{query}: names {advice}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_created_relationship_has_one_type() {
+        for query in [
+            "CREATE (a)-[:A|B]->(b)",
+            "MATCH (a), (b) CREATE (a)-[:A]->(b), (b)-[:A|B]->(a)",
+            "MERGE (a)-[:A|B]->(b)",
+            "MERGE p = (a)-[:A|:B]->(b)",
+        ] {
+            let err = parse_error_message(query);
+            assert!(
+                err.contains("one type") && err.contains(":A|B"),
+                "{query}: {err}"
+            );
+        }
+        parse_ok("MATCH (a)-[:A|B]->(b) CREATE (a)-[:A]->(b)");
     }
 
     // === Schema DDL Tests ===

@@ -1430,19 +1430,9 @@ impl GremlinTranslator {
                         predicates.push(pred);
                     }
                 }
-                if predicates.is_empty() {
+                let Some(combined) = LogicalExpression::conjunction(predicates) else {
                     return Ok((input, None));
-                }
-                let mut combined = predicates
-                    .pop()
-                    .expect("predicates non-empty after is_empty check");
-                for pred in predicates {
-                    combined = LogicalExpression::Binary {
-                        left: Box::new(pred),
-                        op: BinaryOp::And,
-                        right: Box::new(combined),
-                    };
-                }
+                };
                 let plan = wrap_filter(input, combined);
                 Ok((plan, None))
             }
@@ -1455,19 +1445,9 @@ impl GremlinTranslator {
                         predicates.push(pred);
                     }
                 }
-                if predicates.is_empty() {
+                let Some(combined) = LogicalExpression::disjunction(predicates) else {
                     return Ok((input, None));
-                }
-                let mut combined = predicates
-                    .pop()
-                    .expect("predicates non-empty after is_empty check");
-                for pred in predicates {
-                    combined = LogicalExpression::Binary {
-                        left: Box::new(pred),
-                        op: BinaryOp::Or,
-                        right: Box::new(combined),
-                    };
-                }
+                };
                 let plan = wrap_filter(input, combined);
                 Ok((plan, None))
             }
@@ -2057,29 +2037,22 @@ impl GremlinTranslator {
                 op: BinaryOp::EndsWith,
                 right: Box::new(LogicalExpression::Literal(Value::String(s.clone().into()))),
             }),
-            ast::Predicate::And(preds) => {
-                let mut result = Self::translate_predicate(&preds[0], expr.clone())?;
-                for pred in &preds[1..] {
-                    let right = Self::translate_predicate(pred, expr.clone())?;
-                    result = LogicalExpression::Binary {
-                        left: Box::new(result),
-                        op: BinaryOp::And,
-                        right: Box::new(right),
-                    };
-                }
-                Ok(result)
-            }
-            ast::Predicate::Or(preds) => {
-                let mut result = Self::translate_predicate(&preds[0], expr.clone())?;
-                for pred in &preds[1..] {
-                    let right = Self::translate_predicate(pred, expr.clone())?;
-                    result = LogicalExpression::Binary {
-                        left: Box::new(result),
-                        op: BinaryOp::Or,
-                        right: Box::new(right),
-                    };
-                }
-                Ok(result)
+            ast::Predicate::And(preds) | ast::Predicate::Or(preds) => {
+                let op = if matches!(pred, ast::Predicate::And(_)) {
+                    BinaryOp::And
+                } else {
+                    BinaryOp::Or
+                };
+                let operands = preds
+                    .iter()
+                    .map(|pred| Self::translate_predicate(pred, expr.clone()))
+                    .collect::<Result<Vec<_>>>()?;
+                LogicalExpression::balanced(op, operands).ok_or_else(|| {
+                    Error::Query(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        "A predicate combination needs at least one predicate",
+                    ))
+                })
             }
             // inside(start, end) = start < x < end (exclusive both ends)
             ast::Predicate::Inside(start, end) => Ok(LogicalExpression::Binary {
@@ -2303,20 +2276,7 @@ impl GremlinTranslator {
                 _ => {}
             }
         }
-        if predicates.is_empty() {
-            return Ok(None);
-        }
-        let mut result = predicates
-            .pop()
-            .expect("predicates non-empty after is_empty check");
-        for pred in predicates {
-            result = LogicalExpression::Binary {
-                left: Box::new(pred),
-                op: BinaryOp::And,
-                right: Box::new(result),
-            };
-        }
-        Ok(Some(result))
+        Ok(LogicalExpression::conjunction(predicates))
     }
 
     fn build_id_filter(&self, var: &str, ids: &[Value]) -> LogicalExpression {

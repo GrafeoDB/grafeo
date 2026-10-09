@@ -586,6 +586,18 @@ impl Config {
         self
     }
 
+    /// The bytes one path search of a query may hold (the paths a
+    /// variable-length or shortest-path search keeps at once): a quarter of
+    /// [`memory_limit`](Self::memory_limit) when it is set, else 256 MiB. A
+    /// search that would hold more fails with an error instead of growing.
+    #[must_use]
+    pub(crate) fn path_search_budget(&self) -> usize {
+        self.memory_limit.map_or(
+            grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
+            |limit| (limit / 4).max(1),
+        )
+    }
+
     /// Sets the number of worker threads.
     #[must_use]
     pub fn with_threads(mut self, threads: usize) -> Self {

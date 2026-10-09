@@ -110,7 +110,11 @@ Each property of a node or edge type has one of these types. A value written to 
 | `LIST` | `ARRAY` | Lists of any values |
 | `LIST<type>` | | Lists whose elements all have `type`, such as `LIST<STRING>` or `LIST<ZONED DATETIME>`; they nest up to 128 levels, as in `LIST<LIST<INT64>>` |
 | `MAP` | `RECORD` | Maps, such as `{mode: 'fast', level: 3}` |
+| `NODE` | | Nodes |
+| `EDGE` | `RELATIONSHIP` | Edges |
 | `ANY` | | Any value |
+
+Any other type name is refused, a typo or a type of ISO GQL that Grafeo does not support (such as `INT32` or `DECIMAL`). A property name may be any name a property map takes, keywords such as `starts`, `ends` and `contains` included.
 
 ```sql
 CREATE NODE TYPE Event (
@@ -123,11 +127,12 @@ CREATE NODE TYPE Event (
 
 `SHOW NODE TYPES` and `SHOW EDGE TYPES` list each property with its type, in the first spelling of the table.
 
-A property of a node or edge type can have a default value, a literal after `DEFAULT`: a node or edge created without the property gets it.
+A property of a node or edge type can have a default value, a literal after `DEFAULT`: a node or edge created without the property gets it. The literal is a string, a number (signed numbers such as `-3` included), `TRUE`, `FALSE` or `NULL`, and must be a value of the property's type, or the statement fails: an integer is a default of a `FLOAT64` property too, `NULL` is no default of a `NOT NULL` property, and the types without such literals (dates, lists, maps and the others) take `NULL` only.
 
 ```sql
 CREATE NODE TYPE City (name STRING NOT NULL, country STRING DEFAULT 'NL')
 CREATE EDGE TYPE ROUTE (km INT64 DEFAULT 88)
+CREATE NODE TYPE Reading (celsius INT64 DEFAULT -3, scale FLOAT64 DEFAULT 1)
 ```
 
 ### Altering Types

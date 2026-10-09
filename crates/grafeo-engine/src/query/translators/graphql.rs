@@ -974,28 +974,8 @@ impl GraphQLTranslator {
 
     /// Combines predicates with AND.
     fn combine_with_and(&self, predicates: Vec<LogicalExpression>) -> Result<LogicalExpression> {
-        if predicates.is_empty() {
-            return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "No predicates",
-            )));
-        }
-        // Each predicate nests one level of the chain: one far beyond the
-        // plan's limit is refused before it is built.
-        if predicates.len() > crate::query::limits::MAX_PLAN_DEPTH {
-            return Err(crate::query::limits::plan_depth_error());
-        }
-
-        let result = predicates
-            .into_iter()
-            .reduce(|acc, pred| LogicalExpression::Binary {
-                left: Box::new(acc),
-                op: BinaryOp::And,
-                right: Box::new(pred),
-            })
-            .expect("predicates non-empty after is_empty check");
-
-        Ok(result)
+        LogicalExpression::conjunction(predicates)
+            .ok_or_else(|| Error::Query(QueryError::new(QueryErrorKind::Semantic, "No predicates")))
     }
 
     fn expand_fragment(

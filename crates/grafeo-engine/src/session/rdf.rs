@@ -55,6 +55,7 @@ impl Session {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
                 reachability: true,
+                path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,

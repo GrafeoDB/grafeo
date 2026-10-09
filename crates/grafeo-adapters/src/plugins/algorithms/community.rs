@@ -13,7 +13,7 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
-use super::traits::{ComponentResultBuilder, impl_algorithm};
+use super::traits::{ComponentResultBuilder, impl_algorithm, visible_edges_from};
 
 // ============================================================================
 // Label Propagation
@@ -100,7 +100,7 @@ pub fn label_propagation_in_order(
 
             // Consider both outgoing and incoming edges (undirected community detection)
             // Outgoing edges: node -> neighbor
-            for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+            for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
                 if let Some(&label) = labels.get(&neighbor) {
                     *label_counts.entry(label).or_insert(0) += 1;
                 }
@@ -108,7 +108,7 @@ pub fn label_propagation_in_order(
 
             // Incoming edges: neighbor -> node
             // Uses backward adjacency index for O(degree) instead of O(V*E)
-            for (incoming_neighbor, _) in store.edges_from(node, Direction::Incoming) {
+            for (incoming_neighbor, _) in visible_edges_from(store, node, Direction::Incoming) {
                 if let Some(&label) = labels.get(&incoming_neighbor) {
                     *label_counts.entry(label).or_insert(0) += 1;
                 }
@@ -251,7 +251,7 @@ pub fn louvain_in_order(
     let mut adjacency: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); n];
     let mut total_weight = 0.0;
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, _edge_id) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 *adjacency[i].entry(j).or_insert(0.0) += 1.0;
                 *adjacency[j].entry(i).or_insert(0.0) += 1.0;
@@ -607,7 +607,7 @@ fn stochastic_block_partition_inner(
     let mut adj: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
     for &node in &nodes {
         let i = node_to_idx[&node];
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 adj[i].insert(j);
                 adj[j].insert(i);

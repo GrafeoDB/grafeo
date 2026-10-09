@@ -365,9 +365,14 @@ impl super::Planner {
 
     /// Whether an `EXISTS` subplan takes the fast path for rows that bind
     /// `outer` (`None`: not known): its pattern must start from a node of the
-    /// row, and its other end and edge must be new to it. Anything else is a
-    /// semi-join, which matches every variable the subquery shares with the
-    /// row by name.
+    /// row, its edge must be new to it, and so must the other end of a single
+    /// edge. Anything else is a semi-join, which matches every variable the
+    /// subquery shares with the row by name.
+    ///
+    /// A path may end at a node of the row: the fast path then searches from
+    /// the start until it reaches that node, each node at most once, where
+    /// the semi-join would enumerate every walk from every node, which on a
+    /// graph with cycles are more than any memory holds.
     fn exists_fast_path_fits(
         &self,
         subplan: &LogicalOperator,
@@ -378,7 +383,7 @@ impl super::Planner {
         };
         outer.is_some_and(|outer| {
             outer.contains(&check.start_var)
-                && !outer.contains(&check.end_var)
+                && (!check.one_edge || !outer.contains(&check.end_var))
                 && check
                     .edge_var
                     .as_ref()
@@ -1633,11 +1638,5 @@ fn split_conjuncts(predicate: &LogicalExpression, out: &mut Vec<LogicalExpressio
 
 /// The `AND` of `conjuncts`, or `None` when there are none.
 fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
-    conjuncts
-        .into_iter()
-        .reduce(|left, right| LogicalExpression::Binary {
-            left: Box::new(left),
-            op: BinaryOp::And,
-            right: Box::new(right),
-        })
+    LogicalExpression::conjunction(conjuncts)
 }

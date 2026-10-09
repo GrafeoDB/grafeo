@@ -335,7 +335,9 @@ fn test_full_schema_lifecycle() {
         .execute("CREATE GRAPH hr_graph TYPED org_chart")
         .unwrap();
 
-    // Clean up
+    // Clean up, the graph first: ISO/IEC 39075:2024 12.7 Syntax Rule 6
+    // keeps a graph type that a graph has as its type.
+    session.execute("DROP GRAPH hr_graph").unwrap();
     session.execute("DROP GRAPH TYPE org_chart").unwrap();
     session.execute("DROP NODE TYPE Employee").unwrap();
     session.execute("DROP EDGE TYPE REPORTS_TO").unwrap();

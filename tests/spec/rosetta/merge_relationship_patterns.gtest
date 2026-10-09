@@ -1,0 +1,56 @@
+# Rosetta: MERGE of a relationship pattern
+#
+# An end node without a variable is merged on its own first when the pattern
+# gives it a label or a property, in GQL as in Cypher (GQL failed with
+# "requires a target node variable"). A node with neither could be any node,
+# and a pattern of more than one relationship would have to be matched or
+# created as a whole: both are refused (the longer pattern used to merge its
+# first relationship and drop the rest without a word).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: MERGE of a relationship pattern
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # The MERGE finds Gus instead of creating a second one.
+  - name: merge_to_an_anonymous_labeled_node_finds_it
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'}), (:Person {name: 'Vincent'})"
+    variants:
+      gql: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(:Person {name: 'Gus'}) WITH count(*) AS merged MATCH (p:Person {name: 'Gus'}) OPTIONAL MATCH (p)<-[r:KNOWS]-(:Person {name: 'Vincent'}) RETURN merged, count(DISTINCT p) AS gus, count(r) AS r"
+      cypher: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(:Person {name: 'Gus'}) WITH count(*) AS merged MATCH (p:Person {name: 'Gus'}) OPTIONAL MATCH (p)<-[r:KNOWS]-(:Person {name: 'Vincent'}) RETURN merged, count(DISTINCT p) AS gus, count(r) AS r"
+    expect:
+      rows:
+        - [1, 1, 1]
+
+  - name: merge_from_an_anonymous_node_it_creates
+    setup:
+      - "INSERT (:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (g:Person {name: 'Gus'}) MERGE (:City {name: 'Prague'})-[:HOME_OF]->(g) WITH count(*) AS merged MATCH (c:City)-[:HOME_OF]->(p:Person) RETURN merged, c.name AS c, p.name AS p"
+      cypher: "MATCH (g:Person {name: 'Gus'}) MERGE (:City {name: 'Prague'})-[:HOME_OF]->(g) WITH count(*) AS merged MATCH (c:City)-[:HOME_OF]->(p:Person) RETURN merged, c.name AS c, p.name AS p"
+    expect:
+      rows:
+        - [1, Prague, Gus]
+
+  - name: an_anonymous_node_without_a_label_or_property_is_refused
+    setup:
+      - "INSERT (:Person {name: 'Vincent'})"
+    variants:
+      gql: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->()"
+      cypher: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->()"
+    expect:
+      error: "anonymous node without a label or property"
+
+  - name: a_merge_of_two_relationships_is_refused
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S]->(b)-[:T]->(:N {id: 3})"
+      cypher: "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S]->(b)-[:T]->(:N {id: 3})"
+    expect:
+      error: "more than one relationship"

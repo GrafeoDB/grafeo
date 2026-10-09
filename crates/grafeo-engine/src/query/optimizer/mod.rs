@@ -2071,13 +2071,7 @@ fn wrap_filters(filters: Vec<FilterOp>, op: LogicalOperator) -> LogicalOperator 
 
 /// The `AND` of the conjuncts, or `None` when there are none.
 fn conjunction(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
-    conjuncts
-        .into_iter()
-        .reduce(|left, right| LogicalExpression::Binary {
-            left: Box::new(left),
-            op: BinaryOp::And,
-            right: Box::new(right),
-        })
+    LogicalExpression::conjunction(conjuncts)
 }
 
 #[cfg(test)]

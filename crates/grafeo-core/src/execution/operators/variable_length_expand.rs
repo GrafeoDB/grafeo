@@ -8,8 +8,45 @@ use crate::graph::GraphStoreSearch;
 use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, TransactionId};
 use grafeo_common::utils::hash::FxHashSet;
 use std::collections::VecDeque;
-use std::rc::Rc;
 use std::sync::Arc;
+
+/// The memory one path search may hold by default, in bytes: the paths a
+/// variable-length expand has found from one input row and not yet emitted
+/// or extended, or the paths a shortest-path search follows and keeps for
+/// one input row. 256 MiB.
+///
+/// Paths multiply with every hop on a graph with cycles, so a search that
+/// held them without a bound could run the process out of memory, which
+/// aborts it. A search over its budget fails with
+/// [`OperatorError::LimitExceeded`] instead.
+pub const DEFAULT_PATH_SEARCH_BUDGET: usize = 256 * 1024 * 1024;
+
+/// The error of a path search that would hold more paths than its budget of
+/// `budget` bytes allows: `what` holds `paths` already, and `advice` says how
+/// to need fewer.
+pub(super) fn path_budget_error(
+    what: &str,
+    paths: usize,
+    budget: usize,
+    advice: &str,
+) -> OperatorError {
+    let budget = if budget.is_multiple_of(1024 * 1024) {
+        format!("{} MiB", budget / (1024 * 1024))
+    } else if budget.is_multiple_of(1024) {
+        format!("{} KiB", budget / 1024)
+    } else {
+        format!("{budget} bytes")
+    };
+    OperatorError::LimitExceeded(format!(
+        "{what} would hold more than {paths} paths at once, more than the {budget} of memory \
+         a path search may use: {advice}"
+    ))
+}
+
+/// What to do about a variable-length pattern over its budget.
+const VARIABLE_LENGTH_ADVICE: &str = "give the pattern an upper bound (`*1..5` or `{1,5}`), \
+     return DISTINCT nodes (`RETURN DISTINCT f`, `count(DISTINCT f)`), or use a shortest path \
+     search (`shortestPath`, `ANY SHORTEST`)";
 
 /// Path traversal mode controlling which paths are allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,6 +67,13 @@ pub enum PathMode {
 ///
 /// For each input row containing a source node, this operator produces
 /// output rows for each neighbor reachable within the hop range.
+///
+/// The paths of an input row come from a breadth-first search, shorter paths
+/// first, which each call to [`next`](Operator::next) resumes until it has a
+/// chunk of rows: the rows stream out, and the search holds only the paths
+/// it has yet to emit or extend. Those may hold at most the memory budget
+/// (see [`Self::with_memory_budget`]); a search that would hold more fails
+/// with an error instead of growing until the process runs out of memory.
 #[allow(clippy::struct_excessive_bools)]
 pub struct VariableLengthExpandOperator {
     /// The store to traverse.
@@ -56,10 +100,19 @@ pub struct VariableLengthExpandOperator {
     read_only: bool,
     /// Materialized input rows.
     input_rows: Option<Vec<InputRow>>,
-    /// Current input row index.
+    /// The next input row to search from.
     current_input_idx: usize,
+    /// The search from the input row whose paths are being emitted, when
+    /// one has paths left.
+    search: Option<RowSearch>,
+    /// The bytes the search from one input row may hold (see
+    /// [`Self::with_memory_budget`]).
+    budget: usize,
     /// Output buffer for pending results.
     output_buffer: Vec<OutputRow>,
+    /// The node and edge ids the rows in `output_buffer` hold in their path
+    /// lists, which bound a chunk of long paths before its row count does.
+    buffered_ids: usize,
     /// Whether the operator is exhausted.
     exhausted: bool,
     /// Whether to output path length as an additional column.
@@ -123,73 +176,132 @@ struct OutputRow {
     path_edges: Option<Vec<EdgeId>>,
 }
 
+impl OutputRow {
+    /// The node and edge ids the row holds in its path lists.
+    fn path_ids(&self) -> usize {
+        self.path_nodes.as_ref().map_or(0, Vec::len) + self.path_edges.as_ref().map_or(0, Vec::len)
+    }
+}
+
+/// A path the search from an input row has found and not yet emitted or
+/// extended: the node it ends at, its number of edges, its last edge, and
+/// the path itself when the search follows paths whole (see
+/// [`VariableLengthExpandOperator::follows_paths`]).
+struct OpenPath {
+    node: NodeId,
+    length: u32,
+    edge: EdgeId,
+    segment: Option<Arc<PathSegment>>,
+}
+
+/// The breadth-first search of the paths from the source of one input row,
+/// which [`VariableLengthExpandOperator::next`] resumes until it has
+/// emitted and extended every path: the paths of `n` edges before those of
+/// `n + 1`, and the extensions of a path in the order of its last node's
+/// edges.
+struct RowSearch {
+    /// The input row, an index into `input_rows`.
+    input_idx: usize,
+    /// The node the paths start at.
+    source: NodeId,
+    /// The paths found and not yet emitted or extended, shortest first.
+    open: VecDeque<OpenPath>,
+    /// The most paths `open` may hold: the budget over the bytes one holds.
+    max_open: usize,
+    /// The budget, in bytes, for the error message.
+    budget: usize,
+}
+
+impl RowSearch {
+    /// Adds a path to emit and extend later, within the budget: `open` grows
+    /// to at most `max_open` paths, and only by memory the system grants.
+    fn push(&mut self, path: OpenPath) -> Result<(), OperatorError> {
+        let held = self.open.len();
+        if held >= self.max_open {
+            return Err(path_budget_error(
+                "A variable-length pattern",
+                held,
+                self.budget,
+                VARIABLE_LENGTH_ADVICE,
+            ));
+        }
+        if held == self.open.capacity() {
+            let more = held.max(16).min(self.max_open - held);
+            self.open.try_reserve_exact(more).map_err(|_| {
+                OperatorError::LimitExceeded(format!(
+                    "A variable-length pattern holds {held} paths and the system has no memory \
+                     for more: {VARIABLE_LENGTH_ADVICE}"
+                ))
+            })?;
+        }
+        self.open.push_back(path);
+        Ok(())
+    }
+}
+
 /// A shared-prefix path segment for efficient BFS path tracking.
 ///
 /// Instead of cloning entire `Vec<NodeId>` / `Vec<EdgeId>` at each BFS expansion
-/// step (O(depth) per clone), segments form an `Rc`-linked list that shares common
-/// prefixes. Expansion costs O(1) (one `Rc::clone` + one allocation). Full paths
+/// step (O(depth) per clone), segments form an `Arc`-linked list that shares common
+/// prefixes. Expansion costs O(1) (one `Arc::clone` + one allocation). Full paths
 /// are only materialized when emitting output rows. The shortest-path search
 /// follows the paths of a restrictive path mode with it too.
+///
+/// Every walk along a path is a loop, and so is the drop of a path (see the
+/// `Drop` implementation): a path as long as the graph allows does not need
+/// a stack as deep.
 pub(super) struct PathSegment {
     /// The node at this position in the path.
     pub(super) node: NodeId,
     /// The edge taken to reach this node. `None` for the source/root node.
     pub(super) edge: Option<EdgeId>,
     /// Parent segment, or `None` for the root.
-    pub(super) parent: Option<Rc<PathSegment>>,
+    pub(super) parent: Option<Arc<PathSegment>>,
 }
 
 impl PathSegment {
+    /// This segment and its parents, back to the root.
+    fn back_to_the_root(&self) -> impl Iterator<Item = &PathSegment> {
+        std::iter::successors(Some(self), |segment| segment.parent.as_deref())
+    }
+
     /// Materializes the full node path from root to this segment.
     pub(super) fn collect_nodes(&self, depth: u32) -> Vec<NodeId> {
         let mut nodes = Vec::with_capacity(depth as usize + 1);
-        self.collect_nodes_into(&mut nodes);
+        nodes.extend(self.back_to_the_root().map(|segment| segment.node));
+        nodes.reverse();
         nodes
-    }
-
-    fn collect_nodes_into(&self, nodes: &mut Vec<NodeId>) {
-        if let Some(parent) = &self.parent {
-            parent.collect_nodes_into(nodes);
-        }
-        nodes.push(self.node);
     }
 
     /// Materializes the full edge path from root to this segment.
     pub(super) fn collect_edges(&self, depth: u32) -> Vec<EdgeId> {
         let mut edges = Vec::with_capacity(depth as usize);
-        self.collect_edges_into(&mut edges);
+        edges.extend(self.back_to_the_root().filter_map(|segment| segment.edge));
+        edges.reverse();
         edges
-    }
-
-    fn collect_edges_into(&self, edges: &mut Vec<EdgeId>) {
-        if let Some(parent) = &self.parent {
-            parent.collect_edges_into(edges);
-        }
-        if let Some(edge) = self.edge {
-            edges.push(edge);
-        }
     }
 
     /// Checks whether a node already appears in this path segment chain.
     pub(super) fn contains_node(&self, target: NodeId) -> bool {
-        if self.node == target {
-            return true;
-        }
-        if let Some(parent) = &self.parent {
-            return parent.contains_node(target);
-        }
-        false
+        self.back_to_the_root()
+            .any(|segment| segment.node == target)
     }
 
     /// Checks whether an edge already appears in this path segment chain.
     pub(super) fn contains_edge(&self, target: EdgeId) -> bool {
-        if self.edge == Some(target) {
-            return true;
+        self.back_to_the_root()
+            .any(|segment| segment.edge == Some(target))
+    }
+}
+
+impl Drop for PathSegment {
+    /// Drops the parents only this segment holds one at a time: the default
+    /// drop would recurse once per segment, as deep as the path is long.
+    fn drop(&mut self) {
+        let mut parent = self.parent.take();
+        while let Some(segment) = parent {
+            parent = Arc::into_inner(segment).and_then(|mut segment| segment.parent.take());
         }
-        if let Some(parent) = &self.parent {
-            return parent.contains_edge(target);
-        }
-        false
     }
 }
 
@@ -218,7 +330,10 @@ impl VariableLengthExpandOperator {
             read_only: false,
             input_rows: None,
             current_input_idx: 0,
+            search: None,
+            budget: DEFAULT_PATH_SEARCH_BUDGET,
             output_buffer: Vec::new(),
+            buffered_ids: 0,
             exhausted: false,
             output_path_length: false,
             output_path_detail: false,
@@ -297,6 +412,18 @@ impl VariableLengthExpandOperator {
     /// Sets the chunk capacity.
     pub fn with_chunk_capacity(mut self, capacity: usize) -> Self {
         self.chunk_capacity = capacity;
+        self
+    }
+
+    /// Sets the memory the search from one input row may hold, in bytes:
+    /// the paths it has found and not yet emitted or extended (the default
+    /// is [`DEFAULT_PATH_SEARCH_BUDGET`]). A search that would hold more
+    /// fails with [`OperatorError::LimitExceeded`], whose message names the
+    /// ways to need fewer paths. A reachability search (see
+    /// [`Self::with_reachability`]) holds each node at most once, and needs
+    /// no budget.
+    pub fn with_memory_budget(mut self, bytes: usize) -> Self {
+        self.budget = bytes;
         self
     }
 
@@ -410,118 +537,149 @@ impl VariableLengthExpandOperator {
         }
     }
 
-    /// Process one input row, generating all reachable outputs.
-    fn process_input_row(&self, input_idx: usize, source_node: NodeId) -> Vec<OutputRow> {
-        if self.searches_reachability() {
-            return self.reachable_targets(input_idx, source_node);
-        }
-        let mut results = Vec::new();
-        let needs_edges = self.output_path_detail || self.output_edge_list;
-        let needs_tracking = needs_edges || self.path_mode != PathMode::Walk;
+    /// Whether the search follows each path whole, for the path columns,
+    /// the edge list or a path mode other than WALK; a WALK search for the
+    /// targets only needs where each path ends.
+    fn follows_paths(&self) -> bool {
+        self.output_path_detail || self.output_edge_list || self.path_mode != PathMode::Walk
+    }
 
-        // Zero-length path: when min_hops is 0 the source node matches itself
-        // with no edges traversed. Emit it before starting the BFS.
+    /// The bytes one open path of the search holds: the entry in the
+    /// search's queue, and the segment of the path's last edge when the
+    /// search follows paths (its earlier segments are shared with other
+    /// paths).
+    fn bytes_per_open_path(&self) -> usize {
+        let segment = if self.follows_paths() {
+            // The segment and the two counts of its `Arc`
+            std::mem::size_of::<PathSegment>() + 2 * std::mem::size_of::<usize>()
+        } else {
+            0
+        };
+        std::mem::size_of::<OpenPath>() + segment
+    }
+
+    /// The most node and edge ids the rows buffered for one chunk hold in
+    /// their path lists: a chunk of long paths ends before its row count,
+    /// at a sixty-fourth of the budget.
+    fn max_buffered_ids(&self) -> usize {
+        (self.budget / 64 / std::mem::size_of::<NodeId>()).max(1)
+    }
+
+    /// Whether the output buffer holds a chunk.
+    fn output_full(&self) -> bool {
+        self.output_buffer.len() >= self.chunk_capacity
+            || self.buffered_ids >= self.max_buffered_ids()
+    }
+
+    /// Adds `row` to the output buffer.
+    fn buffer(&mut self, row: OutputRow) {
+        self.buffered_ids += row.path_ids();
+        self.output_buffer.push(row);
+    }
+
+    /// Starts the search from the source of input row `input_idx`: emits
+    /// the path of no edges when `min_hops` is 0, and finds the paths of
+    /// one edge.
+    fn start_search(
+        &mut self,
+        input_idx: usize,
+        source: NodeId,
+    ) -> Result<RowSearch, OperatorError> {
+        let follows_paths = self.follows_paths();
         if self.min_hops == 0 {
-            results.push(OutputRow {
+            self.buffer(OutputRow {
                 input_idx,
                 edge_id: None,
-                target_id: source_node,
+                target_id: source,
                 path_length: 0,
-                path_nodes: if self.output_path_detail {
-                    Some(vec![source_node])
-                } else {
-                    None
-                },
-                path_edges: if needs_edges { Some(Vec::new()) } else { None },
+                path_nodes: self.output_path_detail.then(|| vec![source]),
+                path_edges: (self.output_path_detail || self.output_edge_list).then(Vec::new),
             });
         }
-
-        if needs_tracking {
-            // BFS with shared-prefix path tracking via Rc<PathSegment>.
-            // Required for path detail output or non-Walk path modes.
-            let mut frontier: VecDeque<(NodeId, u32, EdgeId, Rc<PathSegment>)> = VecDeque::new();
-
-            let root = Rc::new(PathSegment {
-                node: source_node,
-                edge: None,
-                parent: None,
+        let mut search = RowSearch {
+            input_idx,
+            source,
+            open: VecDeque::new(),
+            max_open: (self.budget / self.bytes_per_open_path()).max(1),
+            budget: self.budget,
+        };
+        if self.max_hops > 0 {
+            let root = follows_paths.then(|| {
+                Arc::new(PathSegment {
+                    node: source,
+                    edge: None,
+                    parent: None,
+                })
             });
+            self.extend(&mut search, source, 0, root.as_ref())?;
+        }
+        Ok(search)
+    }
 
-            for (target, edge_id) in self.get_edges(source_node) {
-                if !self.is_expansion_allowed(&root, target, edge_id, source_node) {
-                    continue;
+    /// Adds the extensions by one edge of the path that ends at `node` after
+    /// `length` edges to the search, those the path mode allows, in the
+    /// order of the node's edges. `segment` is the path when the search
+    /// follows paths.
+    fn extend(
+        &self,
+        search: &mut RowSearch,
+        node: NodeId,
+        length: u32,
+        segment: Option<&Arc<PathSegment>>,
+    ) -> Result<(), OperatorError> {
+        for (target, edge) in self.get_edges(node) {
+            let extended = match segment {
+                Some(segment) => {
+                    if !self.is_expansion_allowed(segment, target, edge, search.source) {
+                        continue;
+                    }
+                    Some(Arc::new(PathSegment {
+                        node: target,
+                        edge: Some(edge),
+                        parent: Some(Arc::clone(segment)),
+                    }))
                 }
-                let segment = Rc::new(PathSegment {
-                    node: target,
-                    edge: Some(edge_id),
-                    parent: Some(Rc::clone(&root)),
+                None => None,
+            };
+            search.push(OpenPath {
+                node: target,
+                length: length + 1,
+                edge,
+                segment: extended,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Emits and extends the paths of `search`, shortest first, until the
+    /// output buffer holds a chunk. Returns whether the search has paths
+    /// left.
+    fn advance(&mut self, search: &mut RowSearch) -> Result<bool, OperatorError> {
+        let with_edges = self.output_path_detail || self.output_edge_list;
+        while !self.output_full() {
+            let Some(path) = search.open.pop_front() else {
+                return Ok(false);
+            };
+            if (self.min_hops..=self.max_hops).contains(&path.length) {
+                let segment = path.segment.as_ref();
+                self.buffer(OutputRow {
+                    input_idx: search.input_idx,
+                    edge_id: Some(path.edge),
+                    target_id: path.node,
+                    path_length: path.length,
+                    path_nodes: segment
+                        .filter(|_| self.output_path_detail)
+                        .map(|segment| segment.collect_nodes(path.length)),
+                    path_edges: segment
+                        .filter(|_| with_edges)
+                        .map(|segment| segment.collect_edges(path.length)),
                 });
-                frontier.push_back((target, 1, edge_id, segment));
             }
-
-            while let Some((current_node, depth, edge_id, segment)) = frontier.pop_front() {
-                if depth >= self.min_hops && depth <= self.max_hops {
-                    results.push(OutputRow {
-                        input_idx,
-                        edge_id: Some(edge_id),
-                        target_id: current_node,
-                        path_length: depth,
-                        path_nodes: if self.output_path_detail {
-                            Some(segment.collect_nodes(depth))
-                        } else {
-                            None
-                        },
-                        path_edges: if needs_edges {
-                            Some(segment.collect_edges(depth))
-                        } else {
-                            None
-                        },
-                    });
-                }
-
-                if depth < self.max_hops {
-                    for (target, next_edge_id) in self.get_edges(current_node) {
-                        if !self.is_expansion_allowed(&segment, target, next_edge_id, source_node) {
-                            continue;
-                        }
-                        let new_segment = Rc::new(PathSegment {
-                            node: target,
-                            edge: Some(next_edge_id),
-                            parent: Some(Rc::clone(&segment)),
-                        });
-                        frontier.push_back((target, depth + 1, next_edge_id, new_segment));
-                    }
-                }
-            }
-        } else {
-            // BFS without path tracking (lightweight, Walk mode only)
-            let mut frontier: VecDeque<(NodeId, u32, EdgeId)> = VecDeque::new();
-
-            for (target, edge_id) in self.get_edges(source_node) {
-                frontier.push_back((target, 1, edge_id));
-            }
-
-            while let Some((current_node, depth, edge_id)) = frontier.pop_front() {
-                if depth >= self.min_hops && depth <= self.max_hops {
-                    results.push(OutputRow {
-                        input_idx,
-                        edge_id: Some(edge_id),
-                        target_id: current_node,
-                        path_length: depth,
-                        path_nodes: None,
-                        path_edges: None,
-                    });
-                }
-
-                if depth < self.max_hops {
-                    for (target, next_edge_id) in self.get_edges(current_node) {
-                        frontier.push_back((target, depth + 1, next_edge_id));
-                    }
-                }
+            if path.length < self.max_hops {
+                self.extend(search, path.node, path.length, path.segment.as_ref())?;
             }
         }
-
-        results
+        Ok(!search.open.is_empty())
     }
 
     /// The targets of one input row in reachability mode, each once.
@@ -587,21 +745,38 @@ impl VariableLengthExpandOperator {
         results
     }
 
-    /// Fill the output buffer with results from the next input row.
-    fn fill_output_buffer(&mut self) {
-        let Some(input_rows) = &self.input_rows else {
-            return;
-        };
-
-        while self.output_buffer.is_empty() && self.current_input_idx < input_rows.len() {
-            let source_node = input_rows[self.current_input_idx].source_node;
-            let mut results = self.process_input_row(self.current_input_idx, source_node);
-            if self.searches_reachability() && self.reachability == Reachability::AcrossInputRows {
-                results.retain(|row| self.emitted_across_rows.insert(row.target_id));
+    /// Fills the output buffer with a chunk of rows, or with the rest of
+    /// them: resumes the search from the current input row, and starts the
+    /// searches from the next ones.
+    fn fill_output_buffer(&mut self) -> Result<(), OperatorError> {
+        while !self.output_full() {
+            if let Some(mut search) = self.search.take() {
+                if self.advance(&mut search)? {
+                    self.search = Some(search);
+                }
+                continue;
             }
-            self.output_buffer.extend(results);
+            let input_idx = self.current_input_idx;
+            let Some(source_node) = self
+                .input_rows
+                .as_ref()
+                .and_then(|rows| rows.get(input_idx))
+                .map(|row| row.source_node)
+            else {
+                break;
+            };
             self.current_input_idx += 1;
+            if self.searches_reachability() {
+                let mut results = self.reachable_targets(input_idx, source_node);
+                if self.reachability == Reachability::AcrossInputRows {
+                    results.retain(|row| self.emitted_across_rows.insert(row.target_id));
+                }
+                self.output_buffer.extend(results);
+            } else {
+                self.search = Some(self.start_search(input_idx, source_node)?);
+            }
         }
+        Ok(())
     }
 }
 
@@ -620,8 +795,8 @@ impl Operator for VariableLengthExpandOperator {
             }
         }
 
-        // Fill output buffer if empty
-        self.fill_output_buffer();
+        // Fill the output buffer with a chunk of rows
+        self.fill_output_buffer()?;
 
         if self.output_buffer.is_empty() {
             self.exhausted = true;
@@ -670,6 +845,8 @@ impl Operator for VariableLengthExpandOperator {
         // Take up to chunk_capacity rows from buffer
         let take_count = self.output_buffer.len().min(self.chunk_capacity);
         let to_output: Vec<_> = self.output_buffer.drain(..take_count).collect();
+        let taken_ids: usize = to_output.iter().map(OutputRow::path_ids).sum();
+        self.buffered_ids = self.buffered_ids.saturating_sub(taken_ids);
 
         for out_row in &to_output {
             let input_row = &input_rows[out_row.input_idx];
@@ -803,7 +980,9 @@ impl Operator for VariableLengthExpandOperator {
         self.input.reset();
         self.input_rows = None;
         self.current_input_idx = 0;
+        self.search = None;
         self.output_buffer.clear();
+        self.buffered_ids = 0;
         self.emitted_across_rows.clear();
         self.exhausted = false;
     }
@@ -1317,15 +1496,15 @@ mod tests {
     #[test]
     fn test_path_segment_collect_nodes_single_hop() {
         // Root (Alix) -> target (Gus): one hop
-        let root = Rc::new(PathSegment {
+        let root = Arc::new(PathSegment {
             node: NodeId(1),
             edge: None,
             parent: None,
         });
-        let hop1 = Rc::new(PathSegment {
+        let hop1 = Arc::new(PathSegment {
             node: NodeId(2),
             edge: Some(EdgeId(100)),
-            parent: Some(Rc::clone(&root)),
+            parent: Some(Arc::clone(&root)),
         });
 
         let nodes = hop1.collect_nodes(1);
@@ -1335,25 +1514,25 @@ mod tests {
     #[test]
     fn test_path_segment_collect_nodes_multi_hop() {
         // Chain: Alix(1) -> Gus(2) -> Vincent(3) -> Jules(4)
-        let root = Rc::new(PathSegment {
+        let root = Arc::new(PathSegment {
             node: NodeId(1),
             edge: None,
             parent: None,
         });
-        let hop1 = Rc::new(PathSegment {
+        let hop1 = Arc::new(PathSegment {
             node: NodeId(2),
             edge: Some(EdgeId(100)),
-            parent: Some(Rc::clone(&root)),
+            parent: Some(Arc::clone(&root)),
         });
-        let hop2 = Rc::new(PathSegment {
+        let hop2 = Arc::new(PathSegment {
             node: NodeId(3),
             edge: Some(EdgeId(101)),
-            parent: Some(Rc::clone(&hop1)),
+            parent: Some(Arc::clone(&hop1)),
         });
-        let hop3 = Rc::new(PathSegment {
+        let hop3 = Arc::new(PathSegment {
             node: NodeId(4),
             edge: Some(EdgeId(102)),
-            parent: Some(Rc::clone(&hop2)),
+            parent: Some(Arc::clone(&hop2)),
         });
 
         let nodes = hop3.collect_nodes(3);
@@ -1362,15 +1541,15 @@ mod tests {
 
     #[test]
     fn test_path_segment_collect_edges_single_hop() {
-        let root = Rc::new(PathSegment {
+        let root = Arc::new(PathSegment {
             node: NodeId(1),
             edge: None,
             parent: None,
         });
-        let hop1 = Rc::new(PathSegment {
+        let hop1 = Arc::new(PathSegment {
             node: NodeId(2),
             edge: Some(EdgeId(100)),
-            parent: Some(Rc::clone(&root)),
+            parent: Some(Arc::clone(&root)),
         });
 
         let edges = hop1.collect_edges(1);
@@ -1380,25 +1559,25 @@ mod tests {
     #[test]
     fn test_path_segment_collect_edges_multi_hop() {
         // Chain: 3 edges connecting 4 nodes
-        let root = Rc::new(PathSegment {
+        let root = Arc::new(PathSegment {
             node: NodeId(1),
             edge: None,
             parent: None,
         });
-        let hop1 = Rc::new(PathSegment {
+        let hop1 = Arc::new(PathSegment {
             node: NodeId(2),
             edge: Some(EdgeId(10)),
-            parent: Some(Rc::clone(&root)),
+            parent: Some(Arc::clone(&root)),
         });
-        let hop2 = Rc::new(PathSegment {
+        let hop2 = Arc::new(PathSegment {
             node: NodeId(3),
             edge: Some(EdgeId(20)),
-            parent: Some(Rc::clone(&hop1)),
+            parent: Some(Arc::clone(&hop1)),
         });
-        let hop3 = Rc::new(PathSegment {
+        let hop3 = Arc::new(PathSegment {
             node: NodeId(4),
             edge: Some(EdgeId(30)),
-            parent: Some(Rc::clone(&hop2)),
+            parent: Some(Arc::clone(&hop2)),
         });
 
         let edges = hop3.collect_edges(3);
@@ -1426,15 +1605,15 @@ mod tests {
 
     #[test]
     fn test_path_segment_contains_node() {
-        let root = Rc::new(PathSegment {
+        let root = Arc::new(PathSegment {
             node: NodeId(1),
             edge: None,
             parent: None,
         });
-        let hop1 = Rc::new(PathSegment {
+        let hop1 = Arc::new(PathSegment {
             node: NodeId(2),
             edge: Some(EdgeId(100)),
-            parent: Some(Rc::clone(&root)),
+            parent: Some(Arc::clone(&root)),
         });
 
         assert!(hop1.contains_node(NodeId(1)), "Should find root node");
@@ -1447,15 +1626,15 @@ mod tests {
 
     #[test]
     fn test_path_segment_contains_edge() {
-        let root = Rc::new(PathSegment {
+        let root = Arc::new(PathSegment {
             node: NodeId(1),
             edge: None,
             parent: None,
         });
-        let hop1 = Rc::new(PathSegment {
+        let hop1 = Arc::new(PathSegment {
             node: NodeId(2),
             edge: Some(EdgeId(100)),
-            parent: Some(Rc::clone(&root)),
+            parent: Some(Arc::clone(&root)),
         });
 
         assert!(hop1.contains_edge(EdgeId(100)), "Should find current edge");
@@ -2423,5 +2602,255 @@ mod tests {
         };
         assert_eq!(pairs(true), pairs(false));
         assert_eq!(pairs(false), 4, "two trails from each node");
+    }
+
+    // --- The memory budget of a search ---
+
+    /// Alix (a `Source`) and Gus with `parallel` KNOWS edges each way: a walk
+    /// of `n` edges from Alix can take any of them at each step.
+    fn parallel_edges(parallel: usize) -> Arc<LpgStore> {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Source"]);
+        let gus = store.create_node(&["Node"]);
+        for _ in 0..parallel {
+            store.create_edge(alix, gus, "KNOWS");
+            store.create_edge(gus, alix, "KNOWS");
+        }
+        store
+    }
+
+    /// The expand of up to `max_hops` outgoing edges from the `Source` nodes
+    /// of `store`.
+    fn from_sources(
+        store: &Arc<LpgStore>,
+        min_hops: u32,
+        max_hops: u32,
+    ) -> VariableLengthExpandOperator {
+        VariableLengthExpandOperator::new(
+            Arc::clone(store) as Arc<dyn GraphStoreSearch>,
+            scan(store, "Source"),
+            0,
+            Direction::Outgoing,
+            vec![],
+            min_hops,
+            max_hops,
+        )
+    }
+
+    /// The path lengths of the rows `expand` returns, in order, and the
+    /// number of chunks; or the error it ends with.
+    fn lengths_and_chunks(
+        expand: &mut VariableLengthExpandOperator,
+    ) -> Result<(Vec<u32>, usize), OperatorError> {
+        let mut lengths = Vec::new();
+        let mut chunks = 0;
+        while let Some(chunk) = expand.next()? {
+            chunks += 1;
+            for row in 0..chunk.row_count() {
+                let Some(grafeo_common::types::Value::Int64(length)) =
+                    chunk.column(3).unwrap().get_value(row)
+                else {
+                    panic!("expected a path length in row {row}");
+                };
+                lengths.push(u32::try_from(length).unwrap());
+            }
+        }
+        Ok((lengths, chunks))
+    }
+
+    #[test]
+    fn a_search_over_its_budget_fails_with_an_error_that_says_what_to_do() {
+        // Three edges each way: 3^n walks of n edges, 2,187 of seven; six
+        // edges each way: trails of up to twelve edges, 6^2 * 5^2 * ... of
+        // them
+        for (parallel, mode, path_detail) in [
+            (3, PathMode::Walk, false),
+            (3, PathMode::Walk, true),
+            (6, PathMode::Trail, false),
+        ] {
+            let store = parallel_edges(parallel);
+            let mut expand = from_sources(&store, 1, 100)
+                .with_path_mode(mode)
+                .with_path_length_output()
+                .with_memory_budget(64 * 1024);
+            if path_detail {
+                expand = expand.with_path_detail_output();
+            }
+            let error =
+                lengths_and_chunks(&mut expand).expect_err("more paths than 64 KiB hold at once");
+            let OperatorError::LimitExceeded(message) = &error else {
+                panic!("{mode:?}: expected LimitExceeded, got {error:?}");
+            };
+            for advice in ["upper bound", "DISTINCT", "shortest", "64 KiB"] {
+                assert!(
+                    message.contains(advice),
+                    "{mode:?}: the message names `{advice}`: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_search_holds_the_paths_it_has_yet_to_emit_not_those_it_emitted() {
+        // Three edges each way, up to six edges: 1,092 walks, 729 of them of
+        // six edges, which the search holds at once after finding the last
+        // of them. A budget of exactly 729 open paths suffices, and the rows
+        // stream out in chunks of 50; one path less does not.
+        let store = parallel_edges(3);
+        let per_path = from_sources(&store, 1, 6).bytes_per_open_path();
+        let expand = |open_paths: usize| {
+            from_sources(&store, 1, 6)
+                .with_path_length_output()
+                .with_chunk_capacity(50)
+                .with_memory_budget(open_paths * per_path)
+        };
+        let (lengths, chunks) = lengths_and_chunks(&mut expand(729)).unwrap();
+        assert_eq!(lengths.len(), 3 + 9 + 27 + 81 + 243 + 729);
+        assert!(lengths.is_sorted(), "shorter walks first");
+        assert_eq!(chunks, lengths.len().div_ceil(50), "full chunks of 50 rows");
+        assert!(
+            matches!(
+                lengths_and_chunks(&mut expand(728)),
+                Err(OperatorError::LimitExceeded(_))
+            ),
+            "728 open paths are one too few"
+        );
+    }
+
+    #[test]
+    fn a_search_resumes_where_the_last_chunk_ended() {
+        // The same walks with every chunk size: each chunk ends where the
+        // output buffer is full, and the next resumes the search there
+        let store = mixed_graph();
+        let walks = |chunk_capacity: usize| {
+            let mut expand = VariableLengthExpandOperator::new(
+                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                scan(&store, "Node"),
+                0,
+                Direction::Both,
+                vec![],
+                0,
+                3,
+            )
+            .with_path_detail_output()
+            .with_chunk_capacity(chunk_capacity);
+            let mut rows = Vec::new();
+            while let Some(chunk) = expand.next().unwrap() {
+                assert!(chunk.row_count() <= chunk_capacity);
+                for row in 0..chunk.row_count() {
+                    rows.push(
+                        chunk
+                            .column(chunk.column_count() - 1)
+                            .unwrap()
+                            .get_value(row),
+                    );
+                }
+            }
+            rows
+        };
+        let all_at_once = walks(1 << 20);
+        assert!(all_at_once.len() > 1000, "{} walks", all_at_once.len());
+        for chunk_capacity in [1, 7, 50, 2048] {
+            assert_eq!(
+                walks(chunk_capacity),
+                all_at_once,
+                "chunks of {chunk_capacity}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_longer_than_the_stack_is_deep_is_followed_and_dropped() {
+        // A chain of 100,000 edges: a path along it, read and dropped
+        // segment by segment, would need a stack frame per edge
+        const LENGTH: u32 = 100_000;
+        let store = Arc::new(LpgStore::new().unwrap());
+        let first = store.create_node(&["Source"]);
+        let mut last = first;
+        for i in 0..LENGTH {
+            // An epoch's arena holds a few ten thousand edges
+            if i % 10_000 == 0 {
+                store.new_epoch();
+            }
+            let next = store.create_node(&["Node"]);
+            store.create_edge(last, next, "NEXT");
+            last = next;
+        }
+        let mut expand = from_sources(&store, LENGTH, LENGTH)
+            .with_path_length_output()
+            .with_path_detail_output();
+        let mut rows = 0;
+        while let Some(chunk) = expand.next().unwrap() {
+            for row in 0..chunk.row_count() {
+                assert_eq!(chunk.column(2).unwrap().get_node_id(row), Some(last));
+                let Some(grafeo_common::types::Value::List(nodes)) =
+                    chunk.column(4).unwrap().get_value(row)
+                else {
+                    panic!("expected the path's nodes");
+                };
+                assert_eq!(nodes.len(), LENGTH as usize + 1);
+                rows += 1;
+            }
+        }
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn a_long_path_is_checked_for_repeats_without_a_frame_per_segment() {
+        // The checks of TRAIL, SIMPLE and ACYCLIC walk the whole path
+        let mut segment = Arc::new(PathSegment {
+            node: NodeId(0),
+            edge: None,
+            parent: None,
+        });
+        for i in 1..=300_000 {
+            segment = Arc::new(PathSegment {
+                node: NodeId(i),
+                edge: Some(EdgeId(i)),
+                parent: Some(segment),
+            });
+        }
+        assert!(segment.contains_node(NodeId(0)));
+        assert!(!segment.contains_node(NodeId(300_001)));
+        assert!(segment.contains_edge(EdgeId(1)));
+        assert!(!segment.contains_edge(EdgeId(0)));
+        assert_eq!(segment.collect_edges(300_000).len(), 300_000);
+        drop(segment);
+    }
+
+    #[test]
+    fn a_chunk_of_long_paths_ends_before_its_row_count() {
+        // A chain of 2,000 edges and every path along it from the first
+        // node: 2,000 rows of up to 4,001 ids. With a budget of 1 MiB a chunk
+        // holds 2,048 ids in its path lists, and ends after the row that
+        // takes it there
+        let store = Arc::new(LpgStore::new().unwrap());
+        let mut last = store.create_node(&["Source"]);
+        for _ in 0..2_000 {
+            let next = store.create_node(&["Node"]);
+            store.create_edge(last, next, "NEXT");
+            last = next;
+        }
+        let mut expand = from_sources(&store, 1, 2_000)
+            .with_path_length_output()
+            .with_path_detail_output()
+            .with_memory_budget(1024 * 1024);
+        let (mut rows, mut chunks) = (0, 0);
+        while let Some(chunk) = expand.next().unwrap() {
+            let mut ids = 0;
+            for row in 0..chunk.row_count() {
+                let Some(grafeo_common::types::Value::List(nodes)) =
+                    chunk.column(4).unwrap().get_value(row)
+                else {
+                    panic!("expected the path's nodes");
+                };
+                assert!(ids < 2_048, "chunk {chunks} went on past 2,048 ids");
+                ids += 2 * nodes.len() - 1;
+            }
+            rows += chunk.row_count();
+            chunks += 1;
+        }
+        assert_eq!(rows, 2_000);
+        assert!(chunks > 1_000, "{chunks} chunks");
     }
 }

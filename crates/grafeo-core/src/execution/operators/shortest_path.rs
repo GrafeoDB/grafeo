@@ -6,7 +6,9 @@
 //! every path of the k shortest lengths, under a path mode.
 
 use super::expand::visible_edges_from;
-use super::variable_length_expand::{PathMode, PathSegment};
+use super::variable_length_expand::{
+    DEFAULT_PATH_SEARCH_BUDGET, PathMode, PathSegment, path_budget_error,
+};
 use super::{Operator, OperatorError, OperatorResult, Predicate};
 use crate::execution::DataChunk;
 use crate::execution::chunk::DataChunkBuilder;
@@ -16,8 +18,63 @@ use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, TransactionId, 
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::rc::Rc;
 use std::sync::Arc;
+
+/// What to do about a shortest-path search over its budget.
+const SHORTEST_PATH_ADVICE: &str = "give the pattern an upper bound (`*1..5` or `{1,5}`), \
+     keep fewer paths (`ANY SHORTEST` or `SHORTEST 3` instead of `ALL SHORTEST`), or search \
+     walks instead of trails or simple paths";
+
+/// The paths a search for one input row keeps, and the bytes they hold,
+/// within the budget.
+struct KeptPaths {
+    paths: Vec<FoundPath>,
+    /// The bytes the kept paths hold.
+    held: usize,
+    /// The bytes the search may hold.
+    budget: usize,
+}
+
+impl KeptPaths {
+    fn new(budget: usize) -> Self {
+        Self {
+            paths: Vec::new(),
+            held: 0,
+            budget,
+        }
+    }
+
+    /// The bytes `path` holds: its two lists and their headers.
+    fn bytes_of(path: &FoundPath) -> usize {
+        std::mem::size_of::<FoundPath>()
+            + std::mem::size_of::<NodeId>() * path.nodes.len()
+            + std::mem::size_of::<EdgeId>() * path.edges.len()
+    }
+
+    /// Keeps `path`, unless the search would then hold more than its
+    /// budget, `other` bytes being held elsewhere.
+    fn keep(&mut self, path: FoundPath, other: usize) -> Result<(), OperatorError> {
+        let held = self.held + Self::bytes_of(&path);
+        if held.saturating_add(other) > self.budget {
+            return Err(self.over_budget());
+        }
+        if self.paths.len() == self.paths.capacity() {
+            self.paths.try_reserve(1).map_err(|_| self.over_budget())?;
+        }
+        self.held = held;
+        self.paths.push(path);
+        Ok(())
+    }
+
+    fn over_budget(&self) -> OperatorError {
+        path_budget_error(
+            "A shortest path search",
+            self.paths.len(),
+            self.budget,
+            SHORTEST_PATH_ADVICE,
+        )
+    }
+}
 
 /// Which paths a search keeps for each pair of a source and a target: the
 /// selection of a path search prefix (ISO/IEC 39075:2024 16.6), among the
@@ -89,8 +146,24 @@ pub struct ShortestPathOperator {
     outputs: PathOutputs,
     /// A condition every edge of a path meets (see [`Self::with_edge_condition`]).
     edge_condition: Option<Box<dyn Predicate>>,
+    /// The bytes the search for one input row may hold (see
+    /// [`Self::with_memory_budget`]).
+    budget: usize,
+    /// The input chunk whose rows are being searched, when some are left.
+    pending: Option<PendingInput>,
     /// Whether the operator has been exhausted.
     exhausted: bool,
+}
+
+/// An input chunk and the rows of it still to search: a chunk of output
+/// ends when its paths hold enough ids, and the next call goes on from the
+/// next row.
+struct PendingInput {
+    chunk: DataChunk,
+    /// The chunk's selected rows.
+    rows: Vec<usize>,
+    /// The next of `rows` to search.
+    next: usize,
 }
 
 /// The columns a shortest-path search writes after the path length.
@@ -189,8 +262,22 @@ impl ShortestPathOperator {
             read_only: false,
             outputs: PathOutputs::default(),
             edge_condition: None,
+            budget: DEFAULT_PATH_SEARCH_BUDGET,
+            pending: None,
             exhausted: false,
         }
+    }
+
+    /// Sets the memory the search for one input row may hold, in bytes:
+    /// the paths a restrictive path mode follows, and the paths the search
+    /// keeps (the default is
+    /// [`DEFAULT_PATH_SEARCH_BUDGET`](super::DEFAULT_PATH_SEARCH_BUDGET)). A
+    /// search that would hold more fails with
+    /// [`OperatorError::LimitExceeded`], whose message names the ways to
+    /// need fewer paths.
+    pub fn with_memory_budget(mut self, bytes: usize) -> Self {
+        self.budget = bytes;
+        self
     }
 
     /// Sets the transaction context for MVCC visibility: the search then
@@ -359,11 +446,16 @@ impl PathSearch<'_> {
 
     /// The paths the selection keeps from `source` to `target` within the
     /// hop bounds, or to every node the search reaches when there is no
-    /// target; none when no path fits.
-    fn paths(&self, source: NodeId, target: Option<NodeId>) -> Vec<FoundPath> {
+    /// target; none when no path fits. Fails when the search would hold
+    /// more than the operator's budget.
+    fn paths(
+        &self,
+        source: NodeId,
+        target: Option<NodeId>,
+    ) -> Result<Vec<FoundPath>, OperatorError> {
         let op = self.operator;
         if op.selection.count() == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         if op.path_mode != PathMode::Walk {
             return self.restricted_paths(source, target);
@@ -380,14 +472,15 @@ impl PathSearch<'_> {
                 if !plain {
                     return self.shortest_walks(source, target, false);
                 }
-                self.shortest_path_bidirectional(source, target)
+                Ok(self
+                    .shortest_path_bidirectional(source, target)
                     .filter(|path| {
                         op.max_hops.is_none_or(|max| {
                             u32::try_from(path.edges.len()).is_ok_and(|len| len <= max)
                         })
                     })
                     .into_iter()
-                    .collect()
+                    .collect())
             }
             _ => self.selected_walks(source, Some(target)),
         }
@@ -409,7 +502,11 @@ impl PathSearch<'_> {
     /// the search ends without a maximum too. The walks are read back from
     /// each end along the steps: all of those of the `k` shortest lengths
     /// for groups, the first `k` otherwise.
-    fn selected_walks(&self, source: NodeId, target: Option<NodeId>) -> Vec<FoundPath> {
+    fn selected_walks(
+        &self,
+        source: NodeId,
+        target: Option<NodeId>,
+    ) -> Result<Vec<FoundPath>, OperatorError> {
         let op = self.operator;
         let count = op.selection.count();
         let min_hops = usize::try_from(op.min_hops).unwrap_or(usize::MAX);
@@ -480,7 +577,7 @@ impl PathSearch<'_> {
 
         let groups = matches!(op.selection, PathSelection::ShortestGroups(_));
         let mut taken: FxHashMap<NodeId, usize> = FxHashMap::default();
-        let mut paths = Vec::new();
+        let mut kept = KeptPaths::new(op.budget);
         for (end, depth) in ends {
             let taken = taken.entry(end).or_insert(0);
             let limit = if groups {
@@ -491,16 +588,14 @@ impl PathSearch<'_> {
             if limit == 0 {
                 continue;
             }
-            let found = read_back(end, depth, limit, |node, depth| {
+            *taken += read_back(end, depth, limit, &mut kept, |node, depth| {
                 layers
                     .get(depth)
                     .and_then(|layer| layer.get(&node))
                     .map_or(&[], Vec::as_slice)
-            });
-            *taken += found.len();
-            paths.extend(found);
+            })?;
         }
-        paths
+        Ok(kept.paths)
     }
 
     /// The paths a restrictive path mode allows (TRAIL, SIMPLE, ACYCLIC)
@@ -514,7 +609,14 @@ impl PathSearch<'_> {
     /// shorter trail to that node took), so every allowed path is followed,
     /// up to the maximum, and the selection takes the first of each end. A
     /// SIMPLE path back at its first node ends there.
-    fn restricted_paths(&self, source: NodeId, target: Option<NodeId>) -> Vec<FoundPath> {
+    ///
+    /// The paths followed and kept may hold at most the operator's budget:
+    /// the allowed paths can multiply with every hop.
+    fn restricted_paths(
+        &self,
+        source: NodeId,
+        target: Option<NodeId>,
+    ) -> Result<Vec<FoundPath>, OperatorError> {
         /// What the selection kept of the paths to one end.
         #[derive(Default)]
         struct Kept {
@@ -525,15 +627,20 @@ impl PathSearch<'_> {
             /// The length of the last path kept.
             last: u32,
         }
+        // A path in the queue: its entry, and the segment of its last edge
+        // with the two counts of its `Arc` (its earlier segments are shared)
+        const QUEUED_BYTES: usize = std::mem::size_of::<(Arc<PathSegment>, u32)>()
+            + std::mem::size_of::<PathSegment>()
+            + 2 * std::mem::size_of::<usize>();
 
         let op = self.operator;
         let count = op.selection.count();
         let groups = matches!(op.selection, PathSelection::ShortestGroups(_));
         let mut kept: FxHashMap<NodeId, Kept> = FxHashMap::default();
-        let mut paths = Vec::new();
-        let mut queue: VecDeque<(Rc<PathSegment>, u32)> = VecDeque::new();
+        let mut paths = KeptPaths::new(op.budget);
+        let mut queue: VecDeque<(Arc<PathSegment>, u32)> = VecDeque::new();
         queue.push_back((
-            Rc::new(PathSegment {
+            Arc::new(PathSegment {
                 node: source,
                 edge: None,
                 parent: None,
@@ -569,10 +676,11 @@ impl PathSearch<'_> {
                 };
                 if keep {
                     end.paths += 1;
-                    paths.push(FoundPath {
+                    let path = FoundPath {
                         nodes: segment.collect_nodes(depth),
                         edges: segment.collect_edges(depth),
-                    });
+                    };
+                    paths.keep(path, queue.len() * QUEUED_BYTES)?;
                 }
             }
             let closed = op.path_mode == PathMode::Simple && depth > 0 && segment.node == source;
@@ -587,16 +695,27 @@ impl PathSearch<'_> {
                     PathMode::Acyclic => !segment.contains_node(neighbor),
                 };
                 if allowed {
+                    if (queue.len() + 1) * QUEUED_BYTES + paths.held > op.budget {
+                        return Err(path_budget_error(
+                            "A shortest path search",
+                            queue.len(),
+                            op.budget,
+                            SHORTEST_PATH_ADVICE,
+                        ));
+                    }
+                    if queue.len() == queue.capacity() {
+                        queue.try_reserve(1).map_err(|_| paths.over_budget())?;
+                    }
                     let next = PathSegment {
                         node: neighbor,
                         edge: Some(edge),
-                        parent: Some(Rc::clone(&segment)),
+                        parent: Some(Arc::clone(&segment)),
                     };
-                    queue.push_back((Rc::new(next), depth + 1));
+                    queue.push_back((Arc::new(next), depth + 1));
                 }
             }
         }
-        paths
+        Ok(paths.paths)
     }
 
     /// Finds one shortest path with a breadth-first search from `source`.
@@ -660,14 +779,19 @@ impl PathSearch<'_> {
     /// `all`), and the paths are read back from `target` along those steps.
     /// A shortest continuation never passes another end node of the first
     /// steps, so each path is found once.
-    fn shortest_walks(&self, source: NodeId, target: NodeId, all: bool) -> Vec<FoundPath> {
+    fn shortest_walks(
+        &self,
+        source: NodeId,
+        target: NodeId,
+        all: bool,
+    ) -> Result<Vec<FoundPath>, OperatorError> {
         let op = self.operator;
         let min_hops = usize::try_from(op.min_hops).unwrap_or(usize::MAX);
         let max_hops = op
             .max_hops
             .map(|max| usize::try_from(max).unwrap_or(usize::MAX));
         if max_hops.is_some_and(|max| max < min_hops) {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let record = |steps: &mut Steps, node: NodeId, from: NodeId, edge: EdgeId| {
             let into = steps.entry(node).or_default();
@@ -677,8 +801,9 @@ impl PathSearch<'_> {
         };
 
         // Walks of exactly `min_hops` edges: `layers[i]` holds the steps into
-        // the nodes the walks reach after `i + 1` edges
-        let mut layers: Vec<Steps> = Vec::with_capacity(min_hops);
+        // the nodes the walks reach after `i + 1` edges (grown a layer at a
+        // time: the minimum comes from the query, the layers from the graph)
+        let mut layers: Vec<Steps> = Vec::new();
         let mut current: Vec<NodeId> = vec![source];
         for _ in 0..min_hops {
             let mut steps = Steps::default();
@@ -692,7 +817,7 @@ impl PathSearch<'_> {
                 }
             }
             if next.is_empty() {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             layers.push(steps);
             current = next;
@@ -708,7 +833,7 @@ impl PathSearch<'_> {
         let mut length = min_hops;
         while !lengths.contains_key(&target) {
             if frontier.is_empty() || max_hops.is_some_and(|max| length >= max) {
-                return Vec::new();
+                return Ok(Vec::new());
             }
             length += 1;
 
@@ -733,9 +858,11 @@ impl PathSearch<'_> {
         }
 
         let limit = if all { usize::MAX } else { 1 };
-        read_back(target, length, limit, |node, depth| {
+        let mut kept = KeptPaths::new(op.budget);
+        read_back(target, length, limit, &mut kept, |node, depth| {
             steps_into(&layers, &steps, min_hops, node, depth)
-        })
+        })?;
+        Ok(kept.paths)
     }
 
     /// Finds shortest path using bidirectional BFS.
@@ -897,29 +1024,34 @@ fn entity_id(id: u64) -> Result<Value, OperatorError> {
 /// The paths of `length` edges from the source to `end`, read back from
 /// `end` along the steps `steps_into` gives into a node at a depth (from
 /// which node, over which edge; none at depth 0, the source): the first
-/// `limit` of them. Iterative, so that a long path does not run out of
-/// stack.
+/// `limit` of them, added to `kept`; returns how many. Iterative, so that a
+/// long path does not run out of stack. Fails when `kept` would hold more
+/// than its budget: the shortest paths between two nodes can be
+/// exponentially many.
 fn read_back<'a>(
     end: NodeId,
     length: usize,
     limit: usize,
+    kept: &mut KeptPaths,
     steps_into: impl Fn(NodeId, usize) -> &'a [(NodeId, EdgeId)],
-) -> Vec<FoundPath> {
-    let mut paths = Vec::new();
+) -> Result<usize, OperatorError> {
+    let mut found = 0;
     // One frame per node on the way back: the node, its depth, and the
     // next of its steps to follow
     let mut frames: Vec<(NodeId, usize, usize)> = vec![(end, length, 0)];
     let mut nodes = vec![end];
     let mut edges: Vec<EdgeId> = Vec::new();
     while let Some(&(node, depth, next)) = frames.last() {
-        if paths.len() >= limit {
+        if found >= limit {
             break;
         }
         if depth == 0 {
-            paths.push(FoundPath {
+            let path = FoundPath {
                 nodes: nodes.iter().rev().copied().collect(),
                 edges: edges.iter().rev().copied().collect(),
-            });
+            };
+            kept.keep(path, 0)?;
+            found += 1;
         } else if let Some(&(previous, edge)) = steps_into(node, depth).get(next) {
             if let Some(frame) = frames.last_mut() {
                 frame.2 += 1;
@@ -935,7 +1067,7 @@ fn read_back<'a>(
             edges.pop();
         }
     }
-    paths
+    Ok(found)
 }
 
 /// The steps that reach `node` after `depth` edges in a search for paths of
@@ -967,10 +1099,22 @@ impl Operator for ShortestPathOperator {
         // A pair without a path has no row, so a whole chunk can produce
         // nothing: keep reading until one produces rows or the input ends.
         loop {
-            let Some(input_chunk) = self.input.next()? else {
-                self.exhausted = true;
-                return Ok(None);
+            let mut pending = match self.pending.take() {
+                Some(pending) => pending,
+                None => {
+                    let Some(chunk) = self.input.next()? else {
+                        self.exhausted = true;
+                        return Ok(None);
+                    };
+                    let rows = chunk.selected_indices().collect();
+                    PendingInput {
+                        chunk,
+                        rows,
+                        next: 0,
+                    }
+                }
             };
+            let input_chunk = &pending.chunk;
 
             // Build output: input columns + path length
             let num_input_cols = input_chunk.column_count();
@@ -1008,7 +1152,15 @@ impl Operator for ShortestPathOperator {
                 };
             let mut builder = DataChunkBuilder::with_capacity(&output_schema, initial_capacity);
 
-            for row in input_chunk.selected_indices() {
+            // The node and edge ids the paths of this output chunk hold: it
+            // ends after the row that takes them to a sixty-fourth of the
+            // budget, and the next call goes on from the next row
+            let max_ids = (self.budget / 64 / std::mem::size_of::<NodeId>()).max(1);
+            let mut ids = 0;
+            while ids < max_ids
+                && let Some(&row) = pending.rows.get(pending.next)
+            {
+                pending.next += 1;
                 // Get source and target nodes
                 let source = input_chunk
                     .column(self.source_column)
@@ -1024,12 +1176,13 @@ impl Operator for ShortestPathOperator {
 
                 // A null endpoint (from an earlier OPTIONAL MATCH) has no path
                 let paths = match (source, target) {
-                    (Some(s), Some(t)) => self.search_for_row(&input_chunk, row).paths(s, t),
+                    (Some(s), Some(t)) => self.search_for_row(input_chunk, row).paths(s, t)?,
                     _ => Vec::new(),
                 };
 
                 // Output one row per path
                 for path in paths {
+                    ids += path.nodes.len() + path.edges.len();
                     // Copy input columns
                     for col_idx in 0..num_input_cols {
                         if let Some(in_col) = input_chunk.column(col_idx)
@@ -1113,6 +1266,9 @@ impl Operator for ShortestPathOperator {
             }
 
             let chunk = builder.finish();
+            if pending.next < pending.rows.len() {
+                self.pending = Some(pending);
+            }
             if chunk.row_count() > 0 {
                 return Ok(Some(chunk));
             }
@@ -1121,6 +1277,7 @@ impl Operator for ShortestPathOperator {
 
     fn reset(&mut self) {
         self.input.reset();
+        self.pending = None;
         self.exhausted = false;
     }
 
@@ -2638,5 +2795,135 @@ mod tests {
                 "{mode:?}: the second input column is not read"
             );
         }
+    }
+
+    // --- The memory budget of a search ---
+
+    /// `diamonds` diamonds in a row: from each joint, two edges to two nodes
+    /// and from both on to the next joint, so 2^diamonds shortest paths lead
+    /// from the first joint to the last. Returns the store and the joints.
+    fn diamonds(diamonds: usize) -> (Arc<LpgStore>, Vec<NodeId>) {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let mut joints = vec![store.create_node(&["Joint"])];
+        for _ in 0..diamonds {
+            let from = *joints.last().unwrap();
+            let to = store.create_node(&["Joint"]);
+            for _ in 0..2 {
+                let side = store.create_node(&["Side"]);
+                store.create_edge(from, side, "NEXT");
+                store.create_edge(side, to, "NEXT");
+            }
+            joints.push(to);
+        }
+        (store, joints)
+    }
+
+    /// The rows `op` returns, or the error it ends with.
+    fn drain(op: &mut ShortestPathOperator) -> Result<(usize, usize), OperatorError> {
+        let (mut rows, mut chunks) = (0, 0);
+        while let Some(chunk) = op.next()? {
+            rows += chunk.row_count();
+            chunks += 1;
+        }
+        Ok((rows, chunks))
+    }
+
+    fn assert_over_budget(result: Result<(usize, usize), OperatorError>, context: &str) {
+        let Err(OperatorError::LimitExceeded(message)) = &result else {
+            panic!("{context}: expected LimitExceeded, got {result:?}");
+        };
+        for advice in ["upper bound", "ALL SHORTEST", "64 KiB"] {
+            assert!(
+                message.contains(advice),
+                "{context}: the message names `{advice}`: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_shortest_paths_over_the_budget_fail_with_an_error() {
+        // 2^20 shortest paths of 40 edges between the ends: ALL SHORTEST
+        // would keep them all
+        let (store, joints) = diamonds(20);
+        let ends = (joints[0], joints[20]);
+        let search = |all: bool| {
+            ShortestPathOperator::new(
+                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                Box::new(MockPairOperator::new(vec![ends])),
+                0,
+                1,
+                vec![],
+                Direction::Outgoing,
+            )
+            .with_all_paths(all)
+            .with_memory_budget(64 * 1024)
+        };
+        assert_over_budget(drain(&mut search(true)), "ALL SHORTEST");
+        assert_eq!(drain(&mut search(false)).unwrap().0, 1, "ANY SHORTEST");
+        // Every path of the two shortest lengths, from the walks too
+        let mut groups = search(true).with_selection(PathSelection::ShortestGroups(2));
+        assert_over_budget(drain(&mut groups), "SHORTEST 2 GROUPS");
+    }
+
+    #[test]
+    fn a_trail_search_over_the_budget_fails_with_an_error() {
+        // Two nodes with six edges each way: the trails from one to every
+        // node, which the search follows all, are 6^2 * 5^2 * ... many
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Node"]);
+        let gus = store.create_node(&["Node"]);
+        for _ in 0..6 {
+            store.create_edge(alix, gus, "KNOWS");
+            store.create_edge(gus, alix, "KNOWS");
+        }
+        for mode in [PathMode::Trail, PathMode::Simple] {
+            let mut op = selective_search(
+                &store,
+                vec![(alix, alix)],
+                true,
+                Direction::Outgoing,
+                (PathSelection::Shortest(1), mode),
+                (1, None),
+            )
+            .with_memory_budget(64 * 1024);
+            if mode == PathMode::Trail {
+                assert_over_budget(drain(&mut op), "TRAIL");
+            } else {
+                // A simple path visits Gus once: two paths
+                assert_eq!(drain(&mut op).unwrap().0, 2, "SIMPLE");
+            }
+        }
+    }
+
+    #[test]
+    fn the_paths_of_many_input_rows_come_in_several_chunks() {
+        // 300 pairs a diamond apart in one input chunk: a chunk of output
+        // ends at a sixty-fourth of the budget of ids (32 here, a path of
+        // two edges holds five), and the next call goes on from the next row
+        let (store, joints) = diamonds(3);
+        let pairs: Vec<(NodeId, NodeId)> = (0..300)
+            .map(|i| (joints[i % 3], joints[i % 3 + 1]))
+            .collect();
+        let search = |budget: usize| {
+            ShortestPathOperator::new(
+                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                Box::new(MockPairOperator::new(pairs.clone())),
+                0,
+                1,
+                vec![],
+                Direction::Outgoing,
+            )
+            .with_all_paths(true)
+            .with_path_output()
+            .with_memory_budget(budget)
+        };
+        let (rows, chunks) = drain(&mut search(16 * 1024)).unwrap();
+        assert_eq!(rows, 600, "two shortest paths per pair");
+        assert!(chunks >= 600 / 8, "{chunks} chunks");
+        assert_eq!(
+            drain(&mut search(super::DEFAULT_PATH_SEARCH_BUDGET)).unwrap(),
+            (600, 1),
+            "one chunk within the default budget"
+        );
     }
 }

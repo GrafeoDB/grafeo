@@ -1004,7 +1004,7 @@ mod tests {
                 ProjectExpr::Column(1),
                 ProjectExpr::Column(1),
             ],
-            vec![LogicalType::Any, LogicalType::Any, LogicalType::Float64],
+            vec![LogicalType::Any, LogicalType::Any, LogicalType::Int32],
         );
 
         let result = project.next().unwrap().unwrap();
@@ -1016,7 +1016,9 @@ mod tests {
         );
         assert_eq!(result.column(1).unwrap().data_type(), &LogicalType::Int64);
         assert_eq!(result.column(1).unwrap().get_int64(0), Some(10));
-        assert_eq!(result.column(2).unwrap().data_type(), &LogicalType::Float64);
+        // A copy declared with a type of its own keeps the declared type.
+        assert_eq!(result.column(2).unwrap().data_type(), &LogicalType::Int32);
+        assert_eq!(result.column(2).unwrap().get_int64(2), Some(30));
     }
 
     #[test]

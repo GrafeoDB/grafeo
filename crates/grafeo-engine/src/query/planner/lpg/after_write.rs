@@ -52,6 +52,7 @@ pub(crate) fn writes_pending(op: &LogicalOperator) -> bool {
     match op {
         LogicalOperator::CreateNode(_)
         | LogicalOperator::CreateEdge(_)
+        | LogicalOperator::Create(_)
         | LogicalOperator::DeleteNode(_)
         | LogicalOperator::DeleteEdge(_)
         | LogicalOperator::SetProperty(_)

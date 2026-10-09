@@ -1032,25 +1032,27 @@ impl ExpressionPredicate {
             FilterExpression::FunctionCall { name, args } => {
                 self.eval_function(name, args, chunk, row)
             }
+            // A list literal has one item per expression and a map literal one
+            // entry per key: an expression without a value (a property of a
+            // null entity, a property the entity does not have) is a null.
             FilterExpression::List(items) => {
                 let values: Vec<Value> = items
                     .iter()
-                    .filter_map(|item| self.eval_expr(item, chunk, row))
+                    .map(|item| self.eval_expr(item, chunk, row).unwrap_or(Value::Null))
                     .collect();
                 Some(Value::List(values.into()))
             }
             FilterExpression::Map(pairs) => {
                 let mut map = BTreeMap::new();
                 for (k, v) in pairs {
-                    if let Some(val) = self.eval_expr(v, chunk, row) {
-                        if k == "*" {
-                            // AllProperties marker: flatten the inner map into the result
-                            if let Value::Map(inner) = val {
-                                map.extend(inner.iter().map(|(pk, pv)| (pk.clone(), pv.clone())));
-                            }
-                        } else {
-                            map.insert(PropertyKey::new(k.as_str()), val);
+                    let val = self.eval_expr(v, chunk, row);
+                    if k == "*" {
+                        // AllProperties marker: flatten the inner map into the result
+                        if let Some(Value::Map(inner)) = val {
+                            map.extend(inner.iter().map(|(pk, pv)| (pk.clone(), pv.clone())));
                         }
+                    } else {
+                        map.insert(PropertyKey::new(k.as_str()), val.unwrap_or(Value::Null));
                     }
                 }
                 Some(Value::Map(Arc::new(map)))

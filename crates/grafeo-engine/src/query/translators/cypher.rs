@@ -4,15 +4,16 @@
 //! that can be optimized and executed.
 
 use super::common::{
-    build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
-    combine_with_and, comma_part_join_variables, comma_part_reads_earlier_rows,
-    expand_subquery_return_star, has_all_labels, is_aggregate_function, is_binary_set_function,
-    no_result, optional_join, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit,
-    wrap_return, wrap_skip, wrap_sort,
+    EdgeOccurrence, GeneratedNames, build_left_join_with_predicates, check_branch_columns,
+    collect_expression_variables, combine_with_and, comma_part_join_variables,
+    comma_part_reads_earlier_rows, different_edges, edges_to_compare, expand_subquery_return_star,
+    has_all_labels, is_aggregate_function, is_binary_set_function, no_result, optional_join,
+    push_set_property, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
+    wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
-    CountExpr, CreateEdgeOp, CreateNodeOp, DeleteEdgeOp, DeleteNodeOp, ExpandDirection, ExpandOp,
+    CountExpr, CreateElement, CreateOp, DeleteEdgeOp, DeleteNodeOp, ExpandDirection, ExpandOp,
     JoinCondition, JoinOp, JoinType, ListPredicateKind, LoadDataFormat, LoadDataOp,
     LogicalExpression, LogicalOperator, LogicalPlan, MapProjectionEntry, MergeOp,
     MergeRelationshipOp, NodeScanOp, ParameterScanOp, PathMode, PathSelection, ProcedureYield,
@@ -22,7 +23,7 @@ use crate::query::plan::{
 use grafeo_adapters::query::cypher::{self, ast};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 /// Result of translating a Cypher query: either a plan or a schema DDL command.
@@ -77,11 +78,9 @@ struct CypherTranslator {
     /// Variables bound to edges (from MATCH relationship patterns or MERGE relationships).
     /// Used to set `is_edge: true` on `SetPropertyOp` when the SET target is an edge variable.
     edge_variables: RefCell<HashSet<String>>,
-    /// Counter for generating unique anonymous variable names.
-    anon_counter: Cell<u32>,
-    /// The names the statement's text spells that a generated name could
-    /// take (see [`written_names`]): no generated name is one of them.
-    written: HashSet<String>,
+    /// The names made up for anonymous elements, none of them one the
+    /// statement spells.
+    names: GeneratedNames,
     /// Alias-to-output-column-name mapping from the most recent RETURN/WITH clause.
     /// Used by ORDER BY to resolve alias references to actual output column names.
     return_aliases: RefCell<HashMap<String, String>>,
@@ -127,8 +126,7 @@ impl CypherTranslator {
     fn new(query: &str) -> Self {
         Self {
             edge_variables: RefCell::new(HashSet::new()),
-            anon_counter: Cell::new(0),
-            written: written_names(query),
+            names: GeneratedNames::new(query),
             return_aliases: RefCell::new(HashMap::new()),
             call_scope: RefCell::new(None),
             sort_scope: RefCell::new(None),
@@ -138,14 +136,7 @@ impl CypherTranslator {
     /// Generates a unique anonymous variable name, one the statement does
     /// not spell: a user variable named `_anon_0` stays the user's.
     fn next_anon_var(&self) -> String {
-        loop {
-            let id = self.anon_counter.get();
-            self.anon_counter.set(id + 1);
-            let name = format!("_anon_{id}");
-            if !self.written.contains(&name) {
-                return name;
-            }
-        }
+        self.names.next("_anon_")
     }
 
     /// Records a variable as an edge variable.
@@ -632,8 +623,10 @@ impl CypherTranslator {
         }
     }
 
-    /// Translates comma-separated patterns, creating proper joins for shared
-    /// variables instead of cross products.
+    /// Translates the comma-separated patterns of a MATCH (or of an OPTIONAL
+    /// MATCH, a subquery's MATCH or a pattern comprehension), creating proper
+    /// joins for shared variables instead of cross products, and binding each
+    /// relationship once (see [`Self::unique_relationships`]).
     ///
     /// The first pattern receives `input` (to chain with prior clauses like
     /// UNWIND or an earlier MATCH). A later pattern goes on from the rows
@@ -651,7 +644,68 @@ impl CypherTranslator {
                 "Empty MATCH pattern",
             )));
         }
+        match self.unique_relationships(patterns) {
+            Some((named, unique)) => Ok(wrap_filter(
+                self.translate_pattern_parts(&named, input)?,
+                unique,
+            )),
+            None => self.translate_pattern_parts(patterns, input),
+        }
+    }
 
+    /// openCypher matches relationships isomorphically: a MATCH binds one
+    /// relationship at most once, across all its patterns (openCypher 9,
+    /// "Uniqueness"; TCK Match3 [15] and [16], Match4 [7]), as GQL's MATCH
+    /// DIFFERENT EDGES does. The relationship patterns of `patterns` that may
+    /// bind one relationship are compared once all are matched, a
+    /// variable-length one by the list of its relationships; the hops of one
+    /// variable-length relationship differ already, as its expand follows
+    /// trails (see [`Self::translate_relationship`]).
+    ///
+    /// Returns the patterns with a name for each anonymous relationship that
+    /// is compared and the condition, or `None` when no two relationship
+    /// patterns can bind one relationship (two of different types never do).
+    fn unique_relationships(
+        &self,
+        patterns: &[ast::Pattern],
+    ) -> Option<(Vec<ast::Pattern>, LogicalExpression)> {
+        let mut edges: Vec<EdgeOccurrence> = patterns
+            .iter()
+            .flat_map(relationship_patterns)
+            .map(|rel| EdgeOccurrence {
+                variable: rel.variable.clone().unwrap_or_default(),
+                group: rel.length.is_some(),
+                types: rel.types.clone(),
+            })
+            .collect();
+        let groups = edges_to_compare(&edges, false);
+        if groups.is_empty() {
+            return None;
+        }
+        let mut named = patterns.to_vec();
+        let mut relationships: Vec<&mut ast::RelationshipPattern> = named
+            .iter_mut()
+            .flat_map(relationship_patterns_mut)
+            .collect();
+        for &index in groups.iter().flatten() {
+            if relationships[index].variable.is_none() {
+                let name = self.next_anon_var();
+                relationships[index].variable = Some(name.clone());
+                edges[index].variable = name;
+            }
+        }
+        let unique = different_edges(&edges, &groups)?;
+        Some((named, unique))
+    }
+
+    /// Translates comma-separated patterns, creating proper joins for shared
+    /// variables instead of cross products (see
+    /// [`Self::translate_comma_patterns`]).
+    fn translate_pattern_parts(
+        &self,
+        patterns: &[ast::Pattern],
+        input: Option<LogicalOperator>,
+    ) -> Result<LogicalOperator> {
         // Single pattern: fast path, no join logic needed
         if patterns.len() == 1 {
             return self.translate_pattern(&patterns[0], input);
@@ -1156,7 +1210,14 @@ impl CypherTranslator {
             max_hops,
             input: Box::new(input),
             path_alias,
-            path_mode: PathMode::Walk,
+            // A variable-length relationship takes a relationship once
+            // (openCypher 9, relationship uniqueness): its hops form a
+            // trail, which ends on its own without the cap of a walk
+            path_mode: if rel.length.is_some() {
+                PathMode::Trail
+            } else {
+                PathMode::Walk
+            },
         });
 
         // For cycle patterns, enforce that expanded target == original source
@@ -1602,16 +1663,22 @@ impl CypherTranslator {
         merge_clause: &ast::MergeClause,
         input: LogicalOperator,
     ) -> Result<LogicalOperator> {
+        // One relationship: a longer pattern would have to be matched or
+        // created as a whole (openCypher 9, MERGE), and merging its first
+        // relationship alone dropped the rest
+        let rel = match path.chain.as_slice() {
+            [rel] => rel,
+            [] => {
+                return Err(Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    "MERGE relationship pattern is empty",
+                )));
+            }
+            _ => return Err(super::common::merge_of_a_longer_path()),
+        };
+
         // The source node, merged first when the pattern defines it
         let (source_variable, current_input) = self.merge_end_node(&path.start, input)?;
-
-        // Extract the first (and only) relationship segment
-        let rel = path.chain.first().ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "MERGE relationship pattern is empty",
-            ))
-        })?;
 
         // Extract relationship variable
         let variable = rel.variable.clone().unwrap_or_else(|| self.next_anon_var());
@@ -1663,49 +1730,27 @@ impl CypherTranslator {
         }))
     }
 
-    /// The variable of an end node of a MERGE relationship pattern, and
-    /// `input` with a MERGE of that node after it when the pattern gives the
-    /// node a label or properties, as in `MERGE (h)-[:R]->(:T {x: 3})`: a
-    /// node without a variable gets a name of its own. One with neither a
-    /// variable nor a label or property could be any node, which the
-    /// relationship MERGE does not support: an error.
+    /// The variable of an end node of a MERGE relationship pattern and the
+    /// plan that binds it (see [`super::common::merge_end_node`]): as in
+    /// `MERGE (h)-[:R]->(:T {x: 3})`, a node the pattern gives a label or
+    /// properties is merged on its own first.
     fn merge_end_node(
         &self,
         node: &ast::NodePattern,
         input: LogicalOperator,
     ) -> Result<(String, LogicalOperator)> {
-        let defined = !node.labels.is_empty() || !node.properties.is_empty();
-        let variable = match &node.variable {
-            Some(name) => name.clone(),
-            None if defined => self.next_anon_var(),
-            None => {
-                return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    "MERGE of a relationship with an anonymous node without a label or \
-                     property is not supported: MATCH or MERGE that node first and use its \
-                     variable",
-                )));
-            }
-        };
-        if !defined {
-            return Ok((variable, input));
-        }
         let match_properties = node
             .properties
             .iter()
             .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
             .collect::<Result<Vec<_>>>()?;
-        let merge = LogicalOperator::Merge(MergeOp {
-            variable: variable.clone(),
-            labels: node.labels.clone(),
+        super::common::merge_end_node(
+            node.variable.as_deref(),
+            &node.labels,
             match_properties,
-            on_create: Vec::new(),
-            on_match: Vec::new(),
-            on_create_labels: Vec::new(),
-            on_match_labels: Vec::new(),
-            input: Box::new(input),
-        });
-        Ok((variable, merge))
+            input,
+            || self.next_anon_var(),
+        )
     }
 
     /// The SET items of an `ON CREATE` or `ON MATCH` (`clause`) of a MERGE
@@ -2062,7 +2107,7 @@ impl CypherTranslator {
                 // Check if the function itself is an aggregate. Its column
                 // gets a name the statement does not spell (a grouping key
                 // named `_agg_0` stays the user's).
-                while self.written.contains(&format!("_agg_{agg_counter}")) {
+                while self.names.is_written(&format!("_agg_{agg_counter}")) {
                     *agg_counter += 1;
                 }
                 let alias = format!("_agg_{agg_counter}");
@@ -2526,55 +2571,43 @@ impl CypherTranslator {
         create_clause: &ast::CreateClause,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        let mut plan = input;
-
-        for pattern in &create_clause.patterns {
-            plan = Some(self.translate_create_pattern(pattern, plan)?);
+        let elements = self.create_elements(&create_clause.patterns)?;
+        if elements.is_empty() {
+            return input.ok_or_else(|| {
+                Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    "Empty CREATE pattern",
+                ))
+            });
         }
-
-        plan.ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Empty CREATE pattern",
-            ))
-        })
+        Ok(LogicalOperator::Create(CreateOp {
+            elements,
+            input: input.map(Box::new),
+        }))
     }
 
-    fn translate_create_pattern(
+    /// The nodes and edges `patterns` create, in order: one [`CreateOp`] for
+    /// the clause, however many patterns it has.
+    fn create_elements(&self, patterns: &[ast::Pattern]) -> Result<Vec<CreateElement>> {
+        let mut elements = Vec::new();
+        for pattern in patterns {
+            self.push_create_pattern(pattern, &mut elements)?;
+        }
+        Ok(elements)
+    }
+
+    fn push_create_pattern(
         &self,
         pattern: &ast::Pattern,
-        input: Option<LogicalOperator>,
-    ) -> Result<LogicalOperator> {
+        elements: &mut Vec<CreateElement>,
+    ) -> Result<()> {
         match pattern {
             ast::Pattern::Node(node) => {
-                let variable = node
-                    .variable
-                    .clone()
-                    .unwrap_or_else(|| self.next_anon_var());
-                let labels = node.labels.clone();
-                let properties: Vec<(String, LogicalExpression)> = node
-                    .properties
-                    .iter()
-                    .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                    .collect::<Result<_>>()?;
-
-                Ok(LogicalOperator::CreateNode(CreateNodeOp {
-                    variable,
-                    labels,
-                    properties,
-                    input: input.map(Box::new),
-                }))
+                self.push_created_node(node, elements)?;
             }
             ast::Pattern::Path(path) => {
-                let mut start = path.start.clone();
                 // The node the next relationship of the chain starts at.
-                let mut previous_variable = start
-                    .variable
-                    .get_or_insert_with(|| self.next_anon_var())
-                    .clone();
-                let mut current =
-                    self.translate_create_pattern(&ast::Pattern::Node(start), input)?;
-
+                let mut previous_variable = self.push_created_node(&path.start, elements)?;
                 for rel in &path.chain {
                     if rel.direction == ast::Direction::Undirected {
                         return Err(Error::Query(QueryError::new(
@@ -2583,38 +2616,12 @@ impl CypherTranslator {
                              (a)-[:TYPE]->(b) or (a)<-[:TYPE]-(b)",
                         )));
                     }
-                    let target_variable = rel
-                        .target
-                        .variable
-                        .clone()
-                        .unwrap_or_else(|| self.next_anon_var());
+                    let target_variable = self.push_created_node(&rel.target, elements)?;
                     let edge_type = rel
                         .types
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "RELATED".to_string());
-
-                    let target_labels = rel.target.labels.clone();
-                    let target_props: Vec<(String, LogicalExpression)> = rel
-                        .target
-                        .properties
-                        .iter()
-                        .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                        .collect::<Result<_>>()?;
-
-                    current = LogicalOperator::CreateNode(CreateNodeOp {
-                        variable: target_variable.clone(),
-                        labels: target_labels,
-                        properties: target_props,
-                        input: Some(Box::new(current)),
-                    });
-
-                    let edge_props: Vec<(String, LogicalExpression)> = rel
-                        .properties
-                        .iter()
-                        .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-                        .collect::<Result<_>>()?;
-
                     // `(a)<-[:T]-(b)` is a relationship from b to a.
                     let (from_variable, to_variable) = if rel.direction == ast::Direction::Incoming
                     {
@@ -2622,35 +2629,63 @@ impl CypherTranslator {
                     } else {
                         (previous_variable, target_variable.clone())
                     };
-                    current = LogicalOperator::CreateEdge(CreateEdgeOp {
+                    elements.push(CreateElement::Edge {
                         variable: rel.variable.clone(),
                         from_variable,
                         to_variable,
                         edge_type,
-                        properties: edge_props,
-                        input: Box::new(current),
+                        properties: self.create_properties(&rel.properties)?,
                     });
                     previous_variable = target_variable;
                 }
-
-                Ok(current)
             }
             ast::Pattern::NamedPath { pattern, .. } => {
-                self.translate_create_pattern(pattern, input)
+                self.push_create_pattern(pattern, elements)?;
             }
         }
+        Ok(())
+    }
+
+    /// Adds the node `node` creates, and returns its variable.
+    fn push_created_node(
+        &self,
+        node: &ast::NodePattern,
+        elements: &mut Vec<CreateElement>,
+    ) -> Result<String> {
+        let variable = node
+            .variable
+            .clone()
+            .unwrap_or_else(|| self.next_anon_var());
+        elements.push(CreateElement::Node {
+            variable: variable.clone(),
+            labels: node.labels.clone(),
+            properties: self.create_properties(&node.properties)?,
+        });
+        Ok(variable)
+    }
+
+    fn create_properties(
+        &self,
+        properties: &[(String, ast::Expression)],
+    ) -> Result<Vec<(String, LogicalExpression)>> {
+        properties
+            .iter()
+            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
+            .collect()
     }
 
     fn translate_create_statement(&self, create: &ast::CreateClause) -> Result<LogicalPlan> {
-        let mut plan: Option<LogicalOperator> = None;
-
-        for pattern in &create.patterns {
-            plan = Some(self.translate_create_pattern(pattern, plan)?);
+        let elements = self.create_elements(&create.patterns)?;
+        if elements.is_empty() {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "Empty CREATE",
+            )));
         }
-
-        let root = plan.ok_or_else(|| {
-            Error::Query(QueryError::new(QueryErrorKind::Semantic, "Empty CREATE"))
-        })?;
+        let root = LogicalOperator::Create(CreateOp {
+            elements,
+            input: None,
+        });
         Ok(LogicalPlan::new(no_result(root)))
     }
 
@@ -2718,13 +2753,13 @@ impl CypherTranslator {
                 } => {
                     // SET n.prop = value
                     let value_expr = self.translate_expression(value)?;
-                    plan = LogicalOperator::SetProperty(SetPropertyOp {
-                        variable: variable.clone(),
-                        properties: vec![(property.clone(), value_expr)],
-                        replace: false,
-                        is_edge: self.is_edge_variable(variable),
-                        input: Box::new(plan),
-                    });
+                    plan = push_set_property(
+                        plan,
+                        variable,
+                        property.clone(),
+                        value_expr,
+                        self.is_edge_variable(variable),
+                    );
                 }
                 ast::SetItem::AllProperties {
                     variable,
@@ -2786,16 +2821,13 @@ impl CypherTranslator {
             match item {
                 ast::RemoveItem::Property { variable, property } => {
                     // REMOVE n.prop sets the property to null
-                    plan = LogicalOperator::SetProperty(SetPropertyOp {
-                        variable: variable.clone(),
-                        properties: vec![(
-                            property.clone(),
-                            LogicalExpression::Literal(Value::Null),
-                        )],
-                        replace: false,
-                        is_edge: self.is_edge_variable(variable),
-                        input: Box::new(plan),
-                    });
+                    plan = push_set_property(
+                        plan,
+                        variable,
+                        property.clone(),
+                        LogicalExpression::Literal(Value::Null),
+                        self.is_edge_variable(variable),
+                    );
                 }
                 ast::RemoveItem::Labels { variable, labels } => {
                     // REMOVE n:Label removes labels from the node
@@ -3002,8 +3034,10 @@ impl CypherTranslator {
                 where_clause,
                 projection,
             } => {
-                // Build a subplan from the pattern
-                let pattern_plan = self.translate_pattern(pattern, None)?;
+                // Build a subplan from the pattern, which binds each
+                // relationship once like the patterns of a MATCH
+                let pattern_plan =
+                    self.translate_comma_patterns(std::slice::from_ref(pattern.as_ref()), None)?;
                 // Apply optional WHERE filter
                 let subplan = if let Some(where_expr) = where_clause {
                     let pred = self.translate_expression(where_expr)?;
@@ -3499,6 +3533,24 @@ fn returns_rows(body: &ast::Query) -> bool {
         .any(|clause| matches!(clause, ast::Clause::Return(_)))
 }
 
+/// The relationship patterns of `pattern`, in order.
+fn relationship_patterns(pattern: &ast::Pattern) -> Vec<&ast::RelationshipPattern> {
+    match pattern {
+        ast::Pattern::Node(_) => Vec::new(),
+        ast::Pattern::Path(path) => path.chain.iter().collect(),
+        ast::Pattern::NamedPath { pattern, .. } => relationship_patterns(pattern),
+    }
+}
+
+/// The relationship patterns of `pattern`, in order, to change.
+fn relationship_patterns_mut(pattern: &mut ast::Pattern) -> Vec<&mut ast::RelationshipPattern> {
+    match pattern {
+        ast::Pattern::Node(_) => Vec::new(),
+        ast::Pattern::Path(path) => path.chain.iter_mut().collect(),
+        ast::Pattern::NamedPath { pattern, .. } => relationship_patterns_mut(pattern),
+    }
+}
+
 /// The labels of a node pattern after the first. A `NodeScan` checks the first
 /// label; the others still have to be checked with a filter.
 fn extra_labels(node: &ast::NodePattern) -> &[String] {
@@ -3616,18 +3668,6 @@ fn pattern_plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
     for child in op.children() {
         pattern_plan_names(child, names);
     }
-}
-
-/// The words of `query` that start with `_`, which is how every name the
-/// translator makes up starts (`_anon_3`): the statement's own variables and
-/// aliases among them, wherever they appear, backquoted or not. A word in a
-/// string literal or a comment is taken too, which only skips a name.
-fn written_names(query: &str) -> HashSet<String> {
-    query
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .filter(|word| word.starts_with('_'))
-        .map(str::to_string)
-        .collect()
 }
 
 /// Checks if an AST expression contains an aggregate function call.
@@ -3849,30 +3889,49 @@ mod tests {
     fn test_translate_create_node() {
         let plan = translate("CREATE (n:Person {name: 'Alix'})").unwrap();
 
-        if let LogicalOperator::CreateNode(create) = without_result(&plan) {
-            assert_eq!(create.variable, "n");
-            assert_eq!(create.labels, vec!["Person".to_string()]);
-            assert_eq!(create.properties.len(), 1);
-            assert_eq!(create.properties[0].0, "name");
-        } else {
-            panic!("Expected CreateNode, got {:?}", without_result(&plan));
-        }
+        let LogicalOperator::Create(create) = without_result(&plan) else {
+            panic!("Expected Create, got {:?}", without_result(&plan));
+        };
+        let [
+            CreateElement::Node {
+                variable,
+                labels,
+                properties,
+            },
+        ] = create.elements.as_slice()
+        else {
+            panic!("Expected one node, got {:?}", create.elements);
+        };
+        assert_eq!(variable, "n");
+        assert_eq!(labels, &vec!["Person".to_string()]);
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties[0].0, "name");
     }
 
     #[test]
     fn test_translate_create_path() {
         let plan = translate("CREATE (a:Person)-[:KNOWS]->(b:Person)").unwrap();
 
-        // Should have CreateEdge at root
-        if let LogicalOperator::CreateEdge(edge) = without_result(&plan) {
-            assert_eq!(edge.edge_type, "KNOWS");
-            // Input should be CreateNode for b
-            if let LogicalOperator::CreateNode(node_b) = edge.input.as_ref() {
-                assert_eq!(node_b.variable, "b");
-            }
-        } else {
-            panic!("Expected CreateEdge, got {:?}", without_result(&plan));
-        }
+        // Both nodes, then the edge between them, in one Create.
+        let LogicalOperator::Create(create) = without_result(&plan) else {
+            panic!("Expected Create, got {:?}", without_result(&plan));
+        };
+        let [
+            CreateElement::Node { variable: a, .. },
+            CreateElement::Node { variable: b, .. },
+            CreateElement::Edge {
+                from_variable,
+                to_variable,
+                edge_type,
+                ..
+            },
+        ] = create.elements.as_slice()
+        else {
+            panic!("Expected two nodes and an edge, got {:?}", create.elements);
+        };
+        assert_eq!((a.as_str(), b.as_str()), ("a", "b"));
+        assert_eq!((from_variable, to_variable), (a, b));
+        assert_eq!(edge_type, "KNOWS");
     }
 
     #[test]
@@ -3912,24 +3971,40 @@ mod tests {
 
     #[test]
     fn test_translate_set_multiple_properties() {
-        let plan = translate("MATCH (n:Person) SET n.name = 'Alix', n.age = 30 RETURN n").unwrap();
+        let plan = translate(
+            "MATCH (n:Person) SET n.name = 'Alix', n.age = 30, n.next = n.age + 1, n.city = $city \
+             RETURN n",
+        )
+        .unwrap();
 
-        if let LogicalOperator::Return(ret) = &plan.root {
-            // SET creates chained SetProperty operators
-            if let LogicalOperator::SetProperty(set2) = ret.input.as_ref() {
-                if let LogicalOperator::SetProperty(set1) = set2.input.as_ref() {
-                    // Properties are set in order
-                    assert_eq!(set1.properties[0].0, "name");
-                    assert_eq!(set2.properties[0].0, "age");
-                } else {
-                    panic!("Expected nested SetProperty");
-                }
-            } else {
-                panic!("Expected SetProperty");
-            }
-        } else {
+        let LogicalOperator::Return(ret) = &plan.root else {
             panic!("Expected Return");
-        }
+        };
+        // Constants set on one node share an operator, in order; a value
+        // that reads the node gets its own, so it reads the earlier writes,
+        // and the constant after it another.
+        let LogicalOperator::SetProperty(city) = ret.input.as_ref() else {
+            panic!("Expected SetProperty");
+        };
+        let LogicalOperator::SetProperty(next) = city.input.as_ref() else {
+            panic!("Expected SetProperty below");
+        };
+        let LogicalOperator::SetProperty(constants) = next.input.as_ref() else {
+            panic!("Expected SetProperty below");
+        };
+        let names = |set: &SetPropertyOp| -> Vec<String> {
+            set.properties
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+        assert_eq!(names(constants), ["name", "age"]);
+        assert_eq!(names(next), ["next"]);
+        assert_eq!(names(city), ["city"]);
+        assert!(matches!(
+            constants.input.as_ref(),
+            LogicalOperator::Filter(_) | LogicalOperator::NodeScan(_)
+        ));
     }
 
     #[test]
@@ -4151,10 +4226,10 @@ mod tests {
         // Test map in CREATE with properties
         let plan = translate("CREATE (n:Person {name: 'Alix', age: 30})").unwrap();
 
-        if let LogicalOperator::CreateNode(create) = without_result(&plan) {
-            assert_eq!(create.properties.len(), 2);
+        if let LogicalOperator::Create(create) = without_result(&plan) {
+            assert_eq!(create.elements[0].properties().len(), 2);
         } else {
-            panic!("Expected CreateNode");
+            panic!("Expected Create");
         }
     }
 

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::query::plan::{BinaryOp, FilterOp, LogicalExpression, LogicalOperator};
+use crate::query::plan::{BinaryOp, CreateElement, FilterOp, LogicalExpression, LogicalOperator};
 
 /// Rewrites every expand that binds a variable its input already binds: a
 /// target node, such as the last hop of `(a)-->(b)-->(a)` or of
@@ -126,6 +126,22 @@ fn plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
         LogicalOperator::CreateEdge(create) => [&create.from_variable, &create.to_variable]
             .into_iter()
             .chain(&create.variable)
+            .collect(),
+        LogicalOperator::Create(create) => create
+            .elements
+            .iter()
+            .flat_map(|element| match element {
+                CreateElement::Node { variable, .. } => vec![variable],
+                CreateElement::Edge {
+                    variable,
+                    from_variable,
+                    to_variable,
+                    ..
+                } => [from_variable, to_variable]
+                    .into_iter()
+                    .chain(variable)
+                    .collect(),
+            })
             .collect(),
         LogicalOperator::Merge(merge) => vec![&merge.variable],
         LogicalOperator::MergeRelationship(merge) => vec![

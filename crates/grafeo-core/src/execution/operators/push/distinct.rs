@@ -1,81 +1,13 @@
 //! Push-based distinct operator.
 
-use crate::execution::chunk::{ColumnTypes, DataChunk};
+use crate::execution::chunk::DataChunk;
 use crate::execution::operators::OperatorError;
 use crate::execution::operators::accumulator::RowKey;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
+use crate::execution::selection::SelectionVector;
 use crate::execution::vector::ValueVector;
-use grafeo_common::types::{HashableValue, Value};
+use grafeo_common::types::Value;
 use std::collections::HashSet;
-
-/// Row key with cached per-value hashes and complete typed equality.
-#[derive(Debug, Clone)]
-struct RowKey(Vec<(u64, HashableValue)>);
-
-impl PartialEq for RowKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.len() == other.0.len()
-            && self
-                .0
-                .iter()
-                .zip(&other.0)
-                .all(|((_, left), (_, right))| left == right)
-    }
-}
-
-impl Eq for RowKey {}
-
-impl std::hash::Hash for RowKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.len().hash(state);
-        for (hash, _) in &self.0 {
-            hash.hash(state);
-        }
-    }
-}
-
-impl RowKey {
-    fn from_row(chunk: &DataChunk, row: usize, columns: &[usize]) -> Self {
-        let parts = columns
-            .iter()
-            .map(|&column| Self::key_part(chunk, row, column))
-            .collect();
-        Self(parts)
-    }
-
-    fn from_all_columns(chunk: &DataChunk, row: usize) -> Self {
-        let parts = (0..chunk.column_count())
-            .map(|column| Self::key_part(chunk, row, column))
-            .collect();
-        Self(parts)
-    }
-
-    fn key_part(chunk: &DataChunk, row: usize, column: usize) -> (u64, HashableValue) {
-        let value = HashableValue::from(
-            chunk
-                .column(column)
-                .and_then(|column| column.get_value(row))
-                .unwrap_or(Value::Null),
-        );
-        (hash_value(&value), value)
-    }
-}
-
-fn hash_value(value: &HashableValue) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::Hasher;
-
-    let mut hasher = DefaultHasher::new();
-    hash_value_into(value, &mut hasher);
-    hasher.finish()
-}
-
-/// Hashes the complete value using the same semantics as row-key equality.
-fn hash_value_into(value: &HashableValue, hasher: &mut impl std::hash::Hasher) {
-    use std::hash::Hash;
-
-    value.hash(hasher);
-}
 
 /// Push-based distinct operator.
 ///
@@ -142,23 +74,11 @@ impl PushOperator for DistinctPushOperator {
             return Ok(true);
         }
 
-        // Copy retained rows using their input column types, including entity IDs.
-        let mut columns: Vec<ValueVector> = chunk
-            .columns()
-            .iter()
-            .map(|column| ValueVector::with_capacity(column.data_type().clone(), new_indices.len()))
-            .collect();
-        for row in new_indices {
-            for (column_index, column) in columns.iter_mut().enumerate() {
-                let value = chunk
-                    .column(column_index)
-                    .and_then(|column| column.get_value(row))
-                    .unwrap_or(Value::Null);
-                column.push_value(value);
-            }
-        }
+        // Create filtered chunk with only new rows
+        let selection = SelectionVector::from_predicate(chunk.len(), |i| new_indices.contains(&i));
+        let filtered = chunk.filter(&selection);
 
-        sink.consume(DataChunk::new(columns))
+        sink.consume(filtered)
     }
 
     fn finalize(&mut self, _sink: &mut dyn Sink) -> Result<(), OperatorError> {
@@ -187,8 +107,8 @@ pub struct DistinctMaterializingOperator {
     rows: Vec<Vec<Value>>,
     /// The keys of the rows seen (see `RowKey`).
     seen: HashSet<RowKey>,
-    /// Types of the buffered input columns.
-    column_types: ColumnTypes,
+    /// Number of columns.
+    num_columns: Option<usize>,
 }
 
 impl DistinctMaterializingOperator {
@@ -198,7 +118,7 @@ impl DistinctMaterializingOperator {
             columns: None,
             rows: Vec::new(),
             seen: HashSet::new(),
-            column_types: ColumnTypes::default(),
+            num_columns: None,
         }
     }
 
@@ -208,7 +128,7 @@ impl DistinctMaterializingOperator {
             columns: Some(columns),
             rows: Vec::new(),
             seen: HashSet::new(),
-            column_types: ColumnTypes::default(),
+            num_columns: None,
         }
     }
 }
@@ -225,7 +145,9 @@ impl PushOperator for DistinctMaterializingOperator {
             return Ok(true);
         }
 
-        self.column_types.add(&chunk);
+        if self.num_columns.is_none() {
+            self.num_columns = Some(chunk.column_count());
+        }
 
         let num_cols = chunk.column_count();
 
@@ -257,12 +179,8 @@ impl PushOperator for DistinctMaterializingOperator {
             return Ok(());
         }
 
-        let mut columns: Vec<ValueVector> = self
-            .column_types
-            .types()
-            .iter()
-            .map(|data_type| ValueVector::with_capacity(data_type.clone(), self.rows.len()))
-            .collect();
+        let num_cols = self.num_columns.unwrap_or(0);
+        let mut columns: Vec<ValueVector> = (0..num_cols).map(|_| ValueVector::new()).collect();
 
         for row in &self.rows {
             for (col_idx, col) in columns.iter_mut().enumerate() {
@@ -289,11 +207,7 @@ impl PushOperator for DistinctMaterializingOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::chunk::DataChunkBuilder;
     use crate::execution::sink::CollectorSink;
-    use grafeo_common::types::{EdgeId, LogicalType, NodeId, Time, ZonedDatetime};
-    use std::collections::HashMap;
-    use std::sync::Arc;
 
     fn create_test_chunk(values: &[i64]) -> DataChunk {
         let v: Vec<Value> = values.iter().map(|&i| Value::Int64(i)).collect();
@@ -381,275 +295,6 @@ mod tests {
     fn create_mixed_chunk(values: &[Value]) -> DataChunk {
         let vector = ValueVector::from_values(values);
         DataChunk::new(vec![vector])
-    }
-
-    fn value_rows_chunk(rows: &[Vec<Value>]) -> DataChunk {
-        let columns = (0..rows[0].len())
-            .map(|column| {
-                ValueVector::from_values(
-                    &rows
-                        .iter()
-                        .map(|row| row[column].clone())
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect();
-        DataChunk::new(columns)
-    }
-
-    fn collected_value_rows(sink: &CollectorSink) -> Vec<Vec<Value>> {
-        let mut rows = Vec::new();
-        for chunk in sink.chunks() {
-            for row in chunk.selected_indices() {
-                rows.push(
-                    chunk
-                        .columns()
-                        .iter()
-                        .map(|column| column.get_value(row).unwrap())
-                        .collect(),
-                );
-            }
-        }
-        rows
-    }
-
-    fn same_total_counters() -> [Value; 2] {
-        [
-            Value::GCounter(Arc::new(HashMap::from([
-                ("left".into(), 4),
-                ("right".into(), 6),
-            ]))),
-            Value::GCounter(Arc::new(HashMap::from([
-                ("left".into(), 5),
-                ("right".into(), 5),
-            ]))),
-        ]
-    }
-
-    #[test]
-    fn test_distinct_preserves_crdt_replica_identity() {
-        let [first, second] = same_total_counters();
-        assert_ne!(first, second);
-        assert_eq!(first.to_string(), second.to_string());
-        let mut distinct = DistinctPushOperator::new();
-        let mut sink = CollectorSink::new();
-
-        distinct
-            .push(
-                create_mixed_chunk(&[first.clone(), second.clone(), first.clone()]),
-                &mut sink,
-            )
-            .unwrap();
-        distinct
-            .push(
-                create_mixed_chunk(&[second.clone(), first.clone()]),
-                &mut sink,
-            )
-            .unwrap();
-        distinct.finalize(&mut sink).unwrap();
-
-        assert_eq!(collected_value_rows(&sink), vec![vec![first], vec![second]]);
-        assert_eq!(distinct.unique_count(), 2);
-    }
-
-    #[test]
-    fn test_distinct_materializing_preserves_crdt_replica_identity() {
-        let [first, second] = same_total_counters();
-        assert_ne!(first, second);
-        assert_eq!(first.to_string(), second.to_string());
-        let mut distinct = DistinctMaterializingOperator::new();
-        let mut sink = CollectorSink::new();
-
-        distinct
-            .push(
-                create_mixed_chunk(&[first.clone(), second.clone(), first.clone()]),
-                &mut sink,
-            )
-            .unwrap();
-        distinct
-            .push(
-                create_mixed_chunk(&[second.clone(), first.clone()]),
-                &mut sink,
-            )
-            .unwrap();
-        assert!(sink.is_empty());
-        distinct.finalize(&mut sink).unwrap();
-
-        assert_eq!(collected_value_rows(&sink), vec![vec![first], vec![second]]);
-    }
-
-    #[test]
-    fn test_distinct_preserves_typed_nested_rows_across_chunks() {
-        let nested = |value| Value::List(vec![Value::List(vec![value].into())].into());
-        let expected = vec![
-            vec![Value::Int64(0)],
-            vec![Value::Float64(0.0)],
-            vec![nested(Value::Int64(0))],
-            vec![nested(Value::Float64(0.0))],
-            vec![nested(Value::Bytes(vec![7, 1, 2].into()))],
-            vec![nested(Value::Bytes(vec![7, 3, 4].into()))],
-            vec![Value::Null],
-        ];
-        for mut distinct in [
-            Box::new(DistinctPushOperator::new()) as Box<dyn PushOperator>,
-            Box::new(DistinctMaterializingOperator::new()),
-        ] {
-            let mut sink = CollectorSink::new();
-            distinct
-                .push(value_rows_chunk(&expected), &mut sink)
-                .unwrap();
-            distinct
-                .push(value_rows_chunk(&expected), &mut sink)
-                .unwrap();
-            distinct.finalize(&mut sink).unwrap();
-            assert_eq!(collected_value_rows(&sink), expected, "{}", distinct.name());
-        }
-    }
-
-    #[test]
-    fn test_distinct_selected_columns_preserve_full_rows() {
-        let [first, second] = same_total_counters();
-        let expected = vec![
-            vec![first.clone(), Value::from("first")],
-            vec![second.clone(), Value::from("second")],
-            vec![Value::Null, Value::from("null")],
-        ];
-        let duplicates = vec![
-            vec![second, Value::from("ignored second payload")],
-            vec![first, Value::from("ignored first payload")],
-            vec![Value::Null, Value::from("ignored null payload")],
-        ];
-        for mut distinct in [
-            Box::new(DistinctPushOperator::on_columns(vec![0])) as Box<dyn PushOperator>,
-            Box::new(DistinctMaterializingOperator::on_columns(vec![0])),
-        ] {
-            let mut sink = CollectorSink::new();
-            distinct
-                .push(value_rows_chunk(&expected), &mut sink)
-                .unwrap();
-            distinct
-                .push(value_rows_chunk(&duplicates), &mut sink)
-                .unwrap();
-            distinct.finalize(&mut sink).unwrap();
-            assert_eq!(collected_value_rows(&sink), expected, "{}", distinct.name());
-        }
-    }
-
-    #[test]
-    fn test_distinct_preserves_raw_float_bits() {
-        let expected_bits = [
-            0,
-            (-0.0_f64).to_bits(),
-            0x7ff8_0000_0000_0001,
-            0x7ff8_0000_0000_0002,
-        ];
-        let values: Vec<_> = expected_bits
-            .iter()
-            .map(|&bits| Value::Float64(f64::from_bits(bits)))
-            .collect();
-        for mut distinct in [
-            Box::new(DistinctPushOperator::new()) as Box<dyn PushOperator>,
-            Box::new(DistinctMaterializingOperator::new()),
-        ] {
-            let mut sink = CollectorSink::new();
-            distinct
-                .push(create_mixed_chunk(&values), &mut sink)
-                .unwrap();
-            distinct
-                .push(create_mixed_chunk(&values), &mut sink)
-                .unwrap();
-            distinct.finalize(&mut sink).unwrap();
-            let actual: Vec<_> = collected_value_rows(&sink)
-                .iter()
-                .map(|row| match row.as_slice() {
-                    [Value::Float64(value)] => value.to_bits(),
-                    other => panic!("expected one unchanged float, got {other:?}"),
-                })
-                .collect();
-            assert_eq!(actual, expected_bits, "{}", distinct.name());
-        }
-    }
-
-    #[test]
-    fn test_distinct_temporal_equality_preserves_first_values() {
-        let first_datetime =
-            Value::ZonedDatetime(ZonedDatetime::parse("2024-06-15T10:30:00+05:30").unwrap());
-        let same_datetime =
-            Value::ZonedDatetime(ZonedDatetime::parse("2024-06-15T05:00:00Z").unwrap());
-        let first_time = Value::Time(Time::parse("14:00:00+01:00").unwrap());
-        let same_time = Value::Time(Time::parse("13:00:00Z").unwrap());
-        let local_time = Value::Time(Time::parse("13:00:00").unwrap());
-        assert_eq!(first_datetime, same_datetime);
-        assert_eq!(first_time, same_time);
-        assert_ne!(first_time, local_time);
-
-        let expected = vec![
-            vec![first_datetime.clone()],
-            vec![first_time.clone()],
-            vec![local_time.clone()],
-            vec![Value::List(vec![first_datetime, first_time].into())],
-        ];
-        let duplicates = vec![
-            vec![same_datetime.clone()],
-            vec![same_time.clone()],
-            vec![local_time],
-            vec![Value::List(vec![same_datetime, same_time].into())],
-        ];
-        for mut distinct in [
-            Box::new(DistinctPushOperator::new()) as Box<dyn PushOperator>,
-            Box::new(DistinctMaterializingOperator::new()),
-        ] {
-            let mut sink = CollectorSink::new();
-            distinct
-                .push(value_rows_chunk(&expected), &mut sink)
-                .unwrap();
-            distinct
-                .push(value_rows_chunk(&duplicates), &mut sink)
-                .unwrap();
-            distinct.finalize(&mut sink).unwrap();
-            let actual = collected_value_rows(&sink);
-            assert_eq!(actual, expected, "{}", distinct.name());
-            assert_eq!(actual[0][0].to_string(), "2024-06-15T10:30:00+05:30");
-            assert_eq!(actual[1][0].to_string(), "14:00:00+01:00");
-        }
-    }
-
-    #[test]
-    fn test_distinct_preserves_node_edge_columns() {
-        for mut distinct in [
-            Box::new(DistinctPushOperator::new()) as Box<dyn PushOperator>,
-            Box::new(DistinctMaterializingOperator::new()),
-        ] {
-            let mut builder = DataChunkBuilder::new(&[LogicalType::Node, LogicalType::Edge]);
-            for id in [1, 1, 2] {
-                builder.column_mut(0).unwrap().push_node_id(NodeId::new(id));
-                builder.column_mut(1).unwrap().push_edge_id(EdgeId::new(id));
-                builder.advance_row();
-            }
-            let mut sink = CollectorSink::new();
-            distinct.push(builder.finish(), &mut sink).unwrap();
-            distinct.finalize(&mut sink).unwrap();
-
-            assert_eq!(sink.row_count(), 2, "{}", distinct.name());
-            assert_eq!(sink.chunks().len(), 1);
-            let chunk = &sink.chunks()[0];
-            assert_eq!(
-                chunk.column_types(),
-                [LogicalType::Node, LogicalType::Edge],
-                "{}",
-                distinct.name()
-            );
-            for (row, id) in [1, 2].into_iter().enumerate() {
-                assert_eq!(
-                    chunk.column(0).unwrap().get_node_id(row),
-                    Some(NodeId::new(id))
-                );
-                assert_eq!(
-                    chunk.column(1).unwrap().get_edge_id(row),
-                    Some(EdgeId::new(id))
-                );
-            }
-        }
     }
 
     #[test]

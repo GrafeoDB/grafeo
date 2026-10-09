@@ -116,8 +116,8 @@ use crate::query::plan::CallProcedureOp;
 use crate::query::plan::TextScanOp;
 use crate::query::plan::{
     AddLabelOp, AggregateFunction as LogicalAggregateFunction, AggregateOp, AntiJoinOp, ApplyOp,
-    BinaryOp, CreateEdgeOp, CreateNodeOp, DeleteEdgeOp, DeleteNodeOp, DistinctOp,
-    EntityKind as LogicalEntityKind, ExceptOp, ExpandDirection, ExpandOp, FilterOp,
+    BinaryOp, CreateEdgeOp, CreateElement, CreateNodeOp, CreateOp, DeleteEdgeOp, DeleteNodeOp,
+    DistinctOp, EntityKind as LogicalEntityKind, ExceptOp, ExpandDirection, ExpandOp, FilterOp,
     HorizontalAggregateOp, IntersectOp, JoinOp, JoinType, LeftJoinOp, LimitOp, LogicalExpression,
     LogicalOperator, LogicalPlan, MapCollectOp, MergeOp, MergeRelationshipOp, MultiWayJoinOp,
     NodeScanOp, OtherwiseOp, PathMode, RemoveLabelOp, ReturnOp, SetPropertyOp, ShortestPathOp,
@@ -132,7 +132,7 @@ use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::AdaptiveContext;
 use grafeo_core::execution::operators::{
     AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, ConstraintValidator,
-    CreateEdgeOperator, CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, EagerOperator,
+    CreateOperator, CreateStep, DeleteEdgeOperator, DeleteNodeOperator, EagerOperator,
     EmptyOperator, EntityKind, EntityValue, ExecutionPathMode, ExpandOperator, ExpandStep,
     ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
     FilterOperator, HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
@@ -291,6 +291,10 @@ pub struct Planner {
     /// reachability search (see [`reachability`]), with their mode, found when
     /// planning starts; `None` with the search turned off, which only tests do.
     reachability_expands: std::cell::RefCell<Option<Vec<(usize, reachability::ReachabilityMode)>>>,
+    /// The bytes one path search may hold: a variable-length expand from
+    /// one input row, or a shortest-path search for one (see
+    /// [`Self::with_path_search_budget`]).
+    path_search_budget: usize,
 }
 
 impl Planner {
@@ -333,6 +337,7 @@ impl Planner {
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
             reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
+            path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
         }
     }
 
@@ -406,6 +411,7 @@ impl Planner {
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
             reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
+            path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
         }
     }
 
@@ -414,6 +420,18 @@ impl Planner {
     #[must_use]
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Sets the bytes one path search of the plan may hold: the paths a
+    /// variable-length expand has found from one input row and not yet
+    /// emitted or extended, and the paths a shortest-path search follows and
+    /// keeps for one. A search that would hold more fails with an error
+    /// that names the ways to need fewer paths. The default is
+    /// [`DEFAULT_PATH_SEARCH_BUDGET`](grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET).
+    #[must_use]
+    pub fn with_path_search_budget(mut self, bytes: usize) -> Self {
+        self.path_search_budget = bytes;
         self
     }
 
@@ -1095,6 +1113,7 @@ impl Planner {
             LogicalOperator::Distinct(distinct) => self.plan_distinct(distinct),
             LogicalOperator::CreateNode(create) => self.plan_create_node(create),
             LogicalOperator::CreateEdge(create) => self.plan_create_edge(create),
+            LogicalOperator::Create(create) => self.plan_create(create),
             LogicalOperator::DeleteNode(delete) => self.plan_delete_node(delete),
             LogicalOperator::DeleteEdge(delete) => self.plan_delete_edge(delete),
             LogicalOperator::LeftJoin(left_join) => self.plan_left_join(left_join),

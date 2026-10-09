@@ -2,14 +2,20 @@
 //!
 //! The parsers bound how deep a statement nests (see
 //! [`MAX_NESTING_DEPTH`](grafeo_adapters::query::limits::MAX_NESTING_DEPTH)),
-//! but a flat statement can still translate to a deep plan: each pattern of
-//! an `INSERT`, each clause and each triple pattern adds an operator on top
-//! of the previous one. Binding, optimizing, planning and running the plan
-//! recurse once per operator and once per level of each expression, so a
-//! plan deeper than the stack allows used to overflow it (#573). Every
-//! translator checks the plan it built with [`check_plan_depth`], and a
-//! translator that walks the plan it is building recursively checks it as it
-//! goes (`check_partial_plan_depth`).
+//! but a flat statement can still translate to a deep plan: each clause,
+//! each hop of a path and each triple pattern adds an operator on top of the
+//! previous one. Binding, optimizing, planning and running the plan recurse
+//! once per operator and once per level of each expression, so a plan deeper
+//! than the stack allows used to overflow it (#573). Every translator checks
+//! the plan it built with [`check_plan_depth`], and a translator that walks
+//! the plan it is building recursively checks it as it goes
+//! (`check_partial_plan_depth`).
+//!
+//! Lists are not deep: the patterns of one `INSERT` or `CREATE` are one
+//! [`CreateOp`](super::plan::CreateOp), a list of `SET` assignments of
+//! constants is one operator, and a list of conditions (`AND`, `OR`, the
+//! entries of a property map) is a balanced tree
+//! ([`LogicalExpression::balanced`]).
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
@@ -22,9 +28,9 @@ use super::plan::{
 /// a leaf, with the levels of an expression or subquery inside one of them.
 ///
 /// A statement whose plan nests deeper fails with an error that names this
-/// limit before anything runs. One `INSERT` of many patterns nests one level
-/// per pattern: split it, or insert the rows of a list parameter with
-/// `UNWIND`.
+/// limit before anything runs: a chain of more than about 120 clauses (`MATCH`,
+/// `WITH`, `UNWIND`, `MERGE`, ...) or path hops. Split it, or run one clause
+/// for the rows of a list parameter with `UNWIND`.
 pub const MAX_PLAN_DEPTH: usize = 128;
 
 /// Returns `plan` when it nests at most [`MAX_PLAN_DEPTH`] levels deep.
@@ -46,6 +52,7 @@ pub fn check_plan_depth(plan: LogicalPlan) -> Result<LogicalPlan> {
 /// [`MAX_PLAN_DEPTH`] already, and then takes it apart (leaving
 /// [`LogicalOperator::Empty`]). A translator checks its plan before each
 /// clause, as translating a clause may walk the plan below it recursively.
+#[cfg(any(feature = "gql", feature = "sparql"))]
 pub(crate) fn check_partial_plan_depth(plan: &mut LogicalOperator) -> Result<()> {
     if plan_depth(plan, MAX_PLAN_DEPTH + 1) <= MAX_PLAN_DEPTH {
         return Ok(());
@@ -61,7 +68,7 @@ pub(crate) fn plan_depth_error() -> Error {
         QueryErrorKind::Semantic,
         format!(
             "the statement nests deeper than the plan depth limit of {MAX_PLAN_DEPTH} levels: \
-             split it into smaller statements (an INSERT of many patterns can UNWIND a list \
+             split it into smaller statements (a chain of many clauses can UNWIND a list \
              parameter instead)"
         ),
     ))
@@ -173,6 +180,7 @@ fn operator_expressions<'a>(
         LogicalOperator::LeftJoin(op) => op.condition.iter().for_each(&mut *visit),
         LogicalOperator::CreateNode(op) => properties(&op.properties),
         LogicalOperator::CreateEdge(op) => properties(&op.properties),
+        LogicalOperator::Create(op) => op.property_values().for_each(&mut *visit),
         LogicalOperator::SetProperty(op) => properties(&op.properties),
         LogicalOperator::Merge(op) => {
             properties(&op.match_properties);
@@ -362,6 +370,7 @@ fn take_operator_expressions(op: &mut LogicalOperator, out: &mut Vec<LogicalExpr
         LogicalOperator::LeftJoin(op) => op.condition.iter_mut().for_each(&mut take),
         LogicalOperator::CreateNode(op) => op.properties.iter_mut().for_each(|(_, e)| take(e)),
         LogicalOperator::CreateEdge(op) => op.properties.iter_mut().for_each(|(_, e)| take(e)),
+        LogicalOperator::Create(op) => op.property_values_mut().for_each(&mut take),
         LogicalOperator::SetProperty(op) => op.properties.iter_mut().for_each(|(_, e)| take(e)),
         LogicalOperator::Merge(op) => op
             .match_properties

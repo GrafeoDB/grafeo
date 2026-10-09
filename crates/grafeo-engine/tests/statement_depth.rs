@@ -248,18 +248,12 @@ fn unwind_chain(size: usize) -> String {
     format!("{clauses} RETURN count(*) AS c")
 }
 
-fn inline_properties(size: usize) -> String {
-    let properties = joined(size, ", ", |i| format!("p{i}: {i}"));
-    format!("MATCH (n:Person {{{properties}}}) RETURN n")
-}
-
-fn set_items(size: usize) -> String {
-    let items = joined(size, ", ", |i| format!("n.p{i} = {i}"));
-    format!("MATCH (n:Person) SET {items} RETURN n")
-}
-
 fn union_chain(size: usize) -> String {
     joined(size, " UNION ALL ", |i| format!("RETURN {i} AS v"))
+}
+
+fn except_chain(size: usize) -> String {
+    joined(size, " EXCEPT ", |i| format!("RETURN {i} AS v"))
 }
 
 fn gql_insert(size: usize) -> String {
@@ -309,7 +303,9 @@ fn cypher_nested_foreach(size: usize) -> String {
 
 /// The expression shapes GQL and Cypher share, each bounded by the nesting
 /// limit, with the size each one runs up to at least: parentheses, lists and
-/// chains nest one level per size, calls, `CASE` and subqueries more.
+/// chains of `+` nest one level per size, calls, `CASE` and subqueries more.
+/// (A chain of `AND`, `OR` or `XOR` is a balanced tree: see
+/// [`chains_of_and_or_and_xor_of_any_length_run_on_a_small_stack`].)
 fn shared_expression_shapes() -> Vec<Shape> {
     vec![
         ("parentheses", parentheses, NESTING, NESTING - 2),
@@ -319,8 +315,8 @@ fn shared_expression_shapes() -> Vec<Shape> {
             NESTING,
             NESTING / 2 - 2,
         ),
-        ("OR chain", or_chain, NESTING, NESTING - 2),
-        ("AND chain", and_chain, NESTING, NESTING - 2),
+        // `+` is not associative (strings, overflow), so its chain is built
+        // from the left, one level per operator.
         ("sum chain", sum_chain, NESTING, NESTING - 2),
         ("key access chain", key_chain, NESTING, NESTING / 2 - 2),
         ("nested lists", nested_lists, NESTING, NESTING - 2),
@@ -350,7 +346,7 @@ fn shared_expression_shapes() -> Vec<Shape> {
 }
 
 /// The clause shapes GQL and Cypher share, each bounded by the plan depth
-/// limit.
+/// limit: each clause is an operator over the one before it.
 fn shared_clause_shapes() -> Vec<Shape> {
     vec![
         ("WITH chain", with_chain, MAX_PLAN_DEPTH, MAX_PLAN_DEPTH - 8),
@@ -367,13 +363,6 @@ fn shared_clause_shapes() -> Vec<Shape> {
             MAX_PLAN_DEPTH,
             MAX_PLAN_DEPTH - 8,
         ),
-        (
-            "inline properties",
-            inline_properties,
-            MAX_PLAN_DEPTH,
-            MAX_PLAN_DEPTH - 8,
-        ),
-        ("SET items", set_items, MAX_PLAN_DEPTH, MAX_PLAN_DEPTH - 8),
     ]
 }
 
@@ -387,27 +376,16 @@ fn gql_expressions_nest_up_to_the_nesting_limit_and_no_deeper() {
         NESTING,
         NESTING / 2 - 2,
     ));
-    // A UNION chain nests in the parser: each set operator is a level.
-    shapes.push(("UNION chain", union_chain, NESTING, NESTING - 2));
+    // EXCEPT is not associative: each one nests a level.
+    shapes.push(("EXCEPT chain", except_chain, NESTING, NESTING - 2));
     assert_bounded(Language::Gql, &shapes);
+    // A UNION of any number of queries is a balanced tree.
+    assert_eq!(run(Language::Gql, union_chain(HUGE)), Ok(HUGE));
 }
 
 #[test]
 fn gql_clauses_nest_up_to_the_plan_depth_limit_and_no_deeper() {
-    let mut shapes = shared_clause_shapes();
-    shapes.push((
-        "INSERT patterns",
-        gql_insert,
-        MAX_PLAN_DEPTH,
-        MAX_PLAN_DEPTH - 8,
-    ));
-    shapes.push((
-        "INSERT path",
-        gql_insert_path,
-        MAX_PLAN_DEPTH,
-        MAX_PLAN_DEPTH / 2 - 8,
-    ));
-    assert_bounded(Language::Gql, &shapes);
+    assert_bounded(Language::Gql, &shared_clause_shapes());
 }
 
 #[cfg(feature = "cypher")]
@@ -432,14 +410,7 @@ fn cypher_expressions_nest_up_to_the_nesting_limit_and_no_deeper() {
 #[cfg(feature = "cypher")]
 #[test]
 fn cypher_clauses_nest_up_to_the_plan_depth_limit_and_no_deeper() {
-    let mut shapes = shared_clause_shapes();
-    shapes.push((
-        "CREATE patterns",
-        cypher_create,
-        MAX_PLAN_DEPTH,
-        MAX_PLAN_DEPTH - 8,
-    ));
-    assert_bounded(Language::Cypher, &shapes);
+    assert_bounded(Language::Cypher, &shared_clause_shapes());
     // A Cypher UNION is flat: its branches are inputs of one operator.
     assert_eq!(run(Language::Cypher, union_chain(HUGE)), Ok(HUGE));
 }
@@ -459,12 +430,6 @@ fn sparql_queries_nest_up_to_their_limits_and_no_deeper() {
         (
             "parentheses",
             |size| filter(&format!("{}?o > 3{}", "(".repeat(size), ")".repeat(size))),
-            NESTING,
-            NESTING - 6,
-        ),
-        (
-            "OR chain",
-            |size| filter(&joined(size, " || ", |i| format!("?o = {i}"))),
             NESTING,
             NESTING - 6,
         ),
@@ -596,15 +561,6 @@ fn graphql_queries_nest_up_to_their_limits_and_no_deeper() {
             NESTING,
             NESTING - 3,
         ),
-        (
-            "arguments",
-            |size| {
-                let arguments = joined(size, ", ", |i| format!("p{i}: {i}"));
-                format!("{{ person({arguments}) {{ name }} }}")
-            },
-            MAX_PLAN_DEPTH,
-            MAX_PLAN_DEPTH / 2 - 8,
-        ),
     ];
     assert_bounded(Language::GraphQl, &shapes);
 }
@@ -619,12 +575,6 @@ fn sql_pgq_queries_nest_up_to_their_limits_and_no_deeper() {
         (
             "parentheses",
             |size| filter(&format!("{}n.v > 3{}", "(".repeat(size), ")".repeat(size))),
-            NESTING,
-            NESTING - 3,
-        ),
-        (
-            "OR chain",
-            |size| filter(&joined(size, " OR ", |i| format!("n.v = {i}"))),
             NESTING,
             NESTING - 3,
         ),
@@ -672,33 +622,354 @@ fn sql_pgq_queries_nest_up_to_their_limits_and_no_deeper() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_reported_statements_fail_with_the_limit_error_or_run() {
+fn the_reported_statements_run() {
     // A 400-pattern INSERT and a 10,000-term OR chain.
-    match run(Language::Gql, gql_insert(400)) {
-        Ok(_) => {}
-        Err(error) => assert!(names_limit(&error, MAX_PLAN_DEPTH), "{error}"),
-    }
-    let error = run(Language::Gql, or_chain(10_000)).expect_err("beyond the nesting limit");
-    assert!(names_limit(&error, NESTING), "{error}");
+    assert_eq!(
+        persons_after(Language::Gql, None, gql_insert(400)),
+        Ok(inserted(400))
+    );
+    assert_eq!(
+        selected(Some(PERSONS), Language::Gql, or_chain(10_000)),
+        Ok(vec![3, 19, 88])
+    );
 }
 
 #[test]
-fn an_insert_at_the_plan_depth_limit_creates_every_node_and_a_refused_one_none() {
-    let largest = largest_accepted(Language::Gql, gql_insert, MAX_PLAN_DEPTH);
-    let count = on_small_stack(move || {
+fn a_statement_refused_at_the_plan_depth_limit_writes_nothing() {
+    let deep = |size: usize| {
+        format!(
+            "INSERT (n:Person {{v: 3}}) {}RETURN n.v",
+            "WITH n ".repeat(size)
+        )
+    };
+    let mut languages = vec![Language::Gql];
+    #[cfg(feature = "cypher")]
+    languages.push(Language::Cypher);
+    for language in languages {
+        let statement = match language {
+            Language::Gql => deep(MAX_PLAN_DEPTH),
+            _ => deep(MAX_PLAN_DEPTH).replacen("INSERT", "CREATE", 1),
+        };
+        let shallow = statement.replacen(&"WITH n ".repeat(MAX_PLAN_DEPTH), "WITH n ", 1);
+        let (error, count) = on_small_stack(move || {
+            let db = GrafeoDB::new_in_memory();
+            let error = execute(&db, language, &statement).expect_err("beyond the plan's limit");
+            let count = db.execute("MATCH (n:Person) RETURN count(n) AS c").unwrap();
+            (error.to_string(), count.rows()[0][0].clone())
+        });
+        assert!(names_limit(&error, MAX_PLAN_DEPTH), "{language:?}: {error}");
+        assert_eq!(
+            count,
+            Value::Int64(0),
+            "{language:?}: the refused statement writes nothing"
+        );
+        // The same statement within the limit creates its node.
+        assert_eq!(
+            persons_after(language, None, shallow),
+            Ok((1, 3)),
+            "{language:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Long chains, many patterns and long lists are not deep
+// ---------------------------------------------------------------------------
+
+/// The persons the long chains select from: `v` is 3, 19, 88 or 100,088.
+const PERSONS: &str =
+    "INSERT (:Person {v: 3}), (:Person {v: 19}), (:Person {v: 88}), (:Person {v: 100088})";
+
+/// Runs `setup` (GQL, when given) and then `statement` on one database on the
+/// small stack, and returns the integers of the first column of its rows in
+/// ascending order, or its error.
+fn selected(
+    setup: Option<&str>,
+    language: Language,
+    statement: String,
+) -> Result<Vec<i64>, String> {
+    let setup = setup.map(str::to_string);
+    on_small_stack(move || {
         let db = GrafeoDB::new_in_memory();
-        db.execute(&gql_insert(largest))
-            .expect("the largest INSERT runs");
-        let refused = db.execute(&gql_insert(largest + 1));
-        assert!(refused.is_err(), "one pattern more is refused");
-        let result = db.execute("MATCH (n:Person) RETURN count(n) AS c").unwrap();
-        result.rows()[0][0].clone()
+        if let Some(setup) = setup {
+            db.execute(&setup).map_err(|e| e.to_string())?;
+        }
+        let rows = execute(&db, language, &statement).map_err(|e| e.to_string())?;
+        let mut values: Vec<i64> = rows
+            .iter()
+            .map(|row| match row.first() {
+                Some(Value::Int64(v)) => *v,
+                other => panic!("{language:?}: an integer, not {other:?}"),
+            })
+            .collect();
+        values.sort_unstable();
+        Ok(values)
+    })
+}
+
+fn xor_chain(size: usize) -> String {
+    let terms = joined(size, " XOR ", |i| format!("n.v = {i}"));
+    format!("MATCH (n:Person) WHERE {terms} RETURN n.v")
+}
+
+/// `n.v > 18 AND n.v > 17 AND ...`: true for a `v` above 18.
+fn range_chain(size: usize) -> String {
+    let terms = joined(size, " AND ", |i| {
+        format!("n.v > {}", 18 - i64::try_from(i).unwrap())
+    });
+    format!("MATCH (n:Person) WHERE {terms} RETURN n.v")
+}
+
+/// An OR chain computed in a projection, then filtered on.
+fn projected_or_chain(size: usize) -> String {
+    let terms = joined(size, " OR ", |i| format!("n.v = {i}"));
+    format!("MATCH (n:Person) WITH n, ({terms}) AS hit WHERE hit RETURN n.v")
+}
+
+#[test]
+fn chains_of_and_or_and_xor_of_any_length_run_on_a_small_stack() {
+    let mut languages = vec![Language::Gql];
+    #[cfg(feature = "cypher")]
+    languages.push(Language::Cypher);
+    for language in languages {
+        let run = |shape: fn(usize) -> String| selected(Some(PERSONS), language, shape(HUGE));
+        assert_eq!(run(or_chain), Ok(vec![3, 19, 88]), "{language:?}: OR");
+        assert_eq!(run(xor_chain), Ok(vec![3, 19, 88]), "{language:?}: XOR");
+        assert_eq!(run(and_chain), Ok(vec![100088]), "{language:?}: AND");
+        assert_eq!(
+            run(range_chain),
+            Ok(vec![19, 88, 100088]),
+            "{language:?}: AND of ranges"
+        );
+        assert_eq!(
+            run(projected_or_chain),
+            Ok(vec![3, 19, 88]),
+            "{language:?}: projected OR"
+        );
+    }
+}
+
+#[cfg(feature = "sql-pgq")]
+#[test]
+fn sql_pgq_chains_of_any_length_run_on_a_small_stack() {
+    let query = |separator: &str, term: fn(usize) -> String| {
+        let terms = joined(HUGE, separator, term);
+        format!("SELECT * FROM GRAPH_TABLE (MATCH (n:Person) WHERE {terms} COLUMNS (n.v AS v))")
+    };
+    assert_eq!(
+        selected(
+            Some(PERSONS),
+            Language::SqlPgq,
+            query(" OR ", |i| format!("n.v = {i}"))
+        ),
+        Ok(vec![3, 19, 88])
+    );
+    assert_eq!(
+        selected(
+            Some(PERSONS),
+            Language::SqlPgq,
+            query(" AND ", |i| format!("n.v <> {i}"))
+        ),
+        Ok(vec![100088])
+    );
+}
+
+#[cfg(feature = "sparql")]
+#[test]
+fn sparql_chains_of_any_length_run_on_a_small_stack() {
+    let filter = |separator: &str, term: fn(usize) -> String| {
+        let terms = joined(HUGE, separator, term);
+        format!("SELECT ?v WHERE {{ ?x <http://ex/v> ?v FILTER({terms}) }}")
+    };
+    let data = "INSERT DATA { <http://ex/alix> <http://ex/v> 3 . <http://ex/gus> <http://ex/v> 19 . \
+                <http://ex/vincent> <http://ex/v> 88 . <http://ex/mia> <http://ex/v> 100088 }";
+    let run = move |statement: String| {
+        on_small_stack(move || {
+            let db = GrafeoDB::new_in_memory();
+            db.execute_sparql(data).map_err(|e| e.to_string())?;
+            let rows = execute(&db, Language::Sparql, &statement).map_err(|e| e.to_string())?;
+            Ok::<_, String>(rows.len())
+        })
+    };
+    assert_eq!(run(filter(" || ", |i| format!("?v = {i}"))), Ok(3));
+    assert_eq!(run(filter(" && ", |i| format!("?v != {i}"))), Ok(1));
+}
+
+/// The node count and the sum of `v` of the persons after `statement`.
+fn persons_after(
+    language: Language,
+    setup: Option<&'static str>,
+    statement: String,
+) -> Result<(i64, i64), String> {
+    on_small_stack(move || {
+        let db = GrafeoDB::new_in_memory();
+        if let Some(setup) = setup {
+            db.execute(setup).map_err(|e| e.to_string())?;
+        }
+        execute(&db, language, &statement).map_err(|e| e.to_string())?;
+        let rows = db
+            .execute("MATCH (n:Person) RETURN count(n) AS c, sum(n.v) AS s")
+            .map_err(|e| e.to_string())?;
+        match rows.rows() {
+            [row] => match (&row[0], &row[1]) {
+                (Value::Int64(count), Value::Int64(sum)) => Ok((*count, *sum)),
+                other => panic!("a count and a sum, not {other:?}"),
+            },
+            other => panic!("one row, not {other:?}"),
+        }
+    })
+}
+
+/// The count and the sum of `v` of the persons [`gql_insert`] of `size` creates.
+fn inserted(size: usize) -> (i64, i64) {
+    let size = i64::try_from(size).unwrap();
+    (size, size * (size - 1) / 2)
+}
+
+#[test]
+fn an_insert_of_any_number_of_patterns_runs_on_a_small_stack() {
+    assert_eq!(
+        persons_after(Language::Gql, None, gql_insert(HUGE)),
+        Ok(inserted(HUGE))
+    );
+    // After a MATCH: each pattern also creates an edge from the anchor.
+    let after_match = format!(
+        "MATCH (a:Anchor) INSERT {}",
+        joined(HUGE, ", ", |i| format!("(a)-[:HAS]->(:Person {{v: {i}}})"))
+    );
+    assert_eq!(
+        persons_after(Language::Gql, Some("INSERT (:Anchor)"), after_match),
+        Ok(inserted(HUGE))
+    );
+    // A path of any length: the nodes are created in order, then counted.
+    let path = gql_insert_path(HUGE);
+    assert_eq!(
+        persons_after(Language::Gql, None, path),
+        Ok((inserted(HUGE).0 + 1, inserted(HUGE).1 - 1))
+    );
+    #[cfg(feature = "cypher")]
+    assert_eq!(
+        persons_after(Language::Cypher, None, cypher_create(HUGE)),
+        Ok(inserted(HUGE))
+    );
+}
+
+#[test]
+fn long_property_maps_and_set_lists_run_on_a_small_stack() {
+    // A property map of 10,000 entries is 10,000 conditions joined by AND.
+    // (The same key each time: a filter reads a property of a node in time
+    // that grows with the node's property count.)
+    let entries = joined(HUGE, ", ", |_| "v: 3".to_string());
+    let items = joined(HUGE, ", ", |i| format!("n.q{i} = {i}"));
+    let mut languages = vec![Language::Gql];
+    #[cfg(feature = "cypher")]
+    languages.push(Language::Cypher);
+    for language in languages {
+        let matched = format!("MATCH (n:Person {{{entries}}}) RETURN n.v");
+        assert_eq!(
+            selected(Some(PERSONS), language, matched),
+            Ok(vec![3]),
+            "{language:?}: map"
+        );
+        // A SET of 10,000 constants on one node is one operator.
+        let set = format!("MATCH (n:Person {{v: 19}}) SET {items} RETURN n.q88");
+        assert_eq!(
+            selected(Some(PERSONS), language, set),
+            Ok(vec![88]),
+            "{language:?}: SET"
+        );
+    }
+    #[cfg(feature = "cypher")]
+    {
+        let person = format!(
+            "INSERT (:Person {{{}}})",
+            joined(HUGE, ", ", |i| format!("p{i}: {i}"))
+        );
+        let removed = joined(HUGE - 1, ", ", |i| format!("n.p{i}"));
+        let remove = format!("MATCH (n:Person) REMOVE {removed} RETURN size(keys(n))");
+        assert_eq!(
+            selected(Some(&person), Language::Cypher, remove),
+            Ok(vec![1])
+        );
+    }
+    #[cfg(feature = "graphql")]
+    {
+        let query = format!("{{ person({entries}) {{ v }} }}");
+        assert_eq!(
+            selected(Some(PERSONS), Language::GraphQl, query),
+            Ok(vec![3])
+        );
+    }
+}
+
+#[test]
+fn a_long_in_list_runs_on_a_small_stack() {
+    let list = joined(100_000, ", ", |i| i.to_string());
+    let query = format!("MATCH (n:Person) WHERE n.v IN [{list}] RETURN n.v");
+    assert_eq!(
+        selected(Some(PERSONS), Language::Gql, query.clone()),
+        Ok(vec![3, 19, 88])
+    );
+    #[cfg(feature = "cypher")]
+    assert_eq!(
+        selected(Some(PERSONS), Language::Cypher, query.clone()),
+        Ok(vec![3, 19, 88])
+    );
+    // Through a property index: one lookup per item.
+    let indexed = on_small_stack(move || {
+        let db = GrafeoDB::new_in_memory();
+        db.execute(PERSONS).unwrap();
+        db.create_property_index("v").unwrap();
+        let mut values: Vec<Value> = db
+            .execute(&query)
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| row[0].clone())
+            .collect();
+        values.sort_by_key(|value| value.as_int64());
+        values
     });
     assert_eq!(
-        count,
-        Value::Int64(i64::try_from(largest).unwrap()),
-        "every pattern of the largest INSERT creates its node, the refused one none"
+        indexed,
+        [Value::Int64(3), Value::Int64(19), Value::Int64(88)]
     );
+}
+
+#[test]
+fn a_flat_insert_or_set_keeps_the_order_of_its_effects() {
+    let mut languages = vec![Language::Gql];
+    #[cfg(feature = "cypher")]
+    languages.push(Language::Cypher);
+    for language in languages {
+        // A pattern reads the nodes the patterns before it in the same clause
+        // created, and an edge connects them.
+        let insert = "INSERT (a:Person {v: 3}), (b:Person {v: a.v + 16}), \
+                      (a)-[:KNOWS]->(b)-[:KNOWS]->(:Person {v: b.v + 69})";
+        let insert = match language {
+            Language::Gql => insert.to_string(),
+            _ => insert.replacen("INSERT", "CREATE", 1),
+        };
+        let path = "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) \
+                    RETURN a.v * 10000 + b.v * 100 + c.v";
+        let rows = on_small_stack(move || {
+            let db = GrafeoDB::new_in_memory();
+            execute(&db, language, &insert).unwrap();
+            db.execute(path).unwrap().rows().to_vec()
+        });
+        assert_eq!(
+            rows,
+            [vec![Value::Int64(31988)]],
+            "{language:?}: 3 -> 19 -> 88"
+        );
+        // A SET item reads what the items before it wrote.
+        let set = "MATCH (n:Person {v: 3}) SET n.a = 19, n.b = n.a + 69, n.c = 3 RETURN n.b";
+        assert_eq!(
+            selected(Some(PERSONS), language, set.to_string()),
+            Ok(vec![88]),
+            "{language:?}"
+        );
+    }
 }
 
 #[test]

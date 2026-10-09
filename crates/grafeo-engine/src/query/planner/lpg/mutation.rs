@@ -1,14 +1,14 @@
 //! Mutation planning (CREATE, DELETE, SET, MERGE, CALL, labels).
 
 use super::{
-    AddLabelOp, AddLabelOperator, AntiJoinOp, Arc, CreateEdgeOp, CreateEdgeOperator, CreateNodeOp,
-    CreateNodeOperator, DeleteEdgeOp, DeleteEdgeOperator, DeleteNodeOp, DeleteNodeOperator,
-    Direction, EagerOperator, EntityValue, Error, ExpandDirection, ExpressionPredicate, HashMap,
-    LeftJoinOp, LogicalExpression, LogicalOperator, LogicalType, MergeConfig, MergeOp,
-    MergeOperator, MergeRelationshipConfig, MergeRelationshipOp, MergeRelationshipOperator,
-    Operator, ProjectExpr, ProjectOperator, PropertySource, RemoveLabelOp, RemoveLabelOperator,
-    Result, SetPropertyOp, SetPropertyOperator, ShortestPathOp, ShortestPathOperator, UnaryOp,
-    UnwindOp, UnwindOperator, Value,
+    AddLabelOp, AddLabelOperator, AntiJoinOp, Arc, CreateEdgeOp, CreateElement, CreateNodeOp,
+    CreateOp, CreateOperator, CreateStep, DeleteEdgeOp, DeleteEdgeOperator, DeleteNodeOp,
+    DeleteNodeOperator, Direction, EagerOperator, EntityValue, Error, ExpandDirection,
+    ExpressionPredicate, HashMap, LeftJoinOp, LogicalExpression, LogicalOperator, LogicalType,
+    MergeConfig, MergeOp, MergeOperator, MergeRelationshipConfig, MergeRelationshipOp,
+    MergeRelationshipOperator, Operator, ProjectExpr, ProjectOperator, PropertySource,
+    RemoveLabelOp, RemoveLabelOperator, Result, SetPropertyOp, SetPropertyOperator, ShortestPathOp,
+    ShortestPathOperator, UnaryOp, UnwindOp, UnwindOperator, Value,
 };
 #[cfg(feature = "algos")]
 use super::{CallProcedureOp, StaticResultOperator};
@@ -19,148 +19,140 @@ use grafeo_core::execution::operators::{
 };
 
 impl super::Planner {
-    /// Plans a CREATE NODE operator.
+    /// Plans a CREATE NODE operator (Gremlin `addV`, a GraphQL mutation): a
+    /// [`CreateOperator`] of one node, as for a [`CreateOp`].
     pub(super) fn plan_create_node(
         &self,
         create: &CreateNodeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Plan input if present. The input is planned in this small frame and
-        // the operator built in another: an INSERT of many patterns is a long
-        // chain of creations, each planning the one below it (see
-        // `crate::query::limits`).
-        let (input_op, columns) = if let Some(ref input) = create.input {
-            let (op, cols) = self.plan_operator(input)?;
-            (Some(op), cols)
-        } else {
-            (None, vec![])
+        let node = CreateElement::Node {
+            variable: create.variable.clone(),
+            labels: create.labels.clone(),
+            properties: create.properties.clone(),
         };
-        self.build_create_node(create, input_op, columns)
+        self.plan_creation(create.input.as_deref(), std::slice::from_ref(&node))
     }
 
-    /// Builds the operator of `create` over its planned input.
-    #[inline(never)]
-    fn build_create_node(
-        &self,
-        create: &CreateNodeOp,
-        mut input_op: Option<Box<dyn Operator>>,
-        mut columns: Vec<String>,
-    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // If the variable already exists in input columns and no labels/properties
-        // are specified, this is a reference to an existing node (e.g., from MATCH).
-        // Skip creating a new node and just pass through.
-        if columns.contains(&create.variable)
-            && create.labels.is_empty()
-            && create.properties.is_empty()
-            && let Some(op) = input_op
-        {
-            return Ok((op, columns));
-        }
-
-        // Output column for the created node
-        let output_column = columns.len();
-        columns.push(create.variable.clone());
-
-        // Convert properties: resolve variables/property access from input
-        // columns, computed values (`toString(i)`) are evaluated per row.
-        let properties =
-            self.row_property_sources(&create.properties, &columns[..output_column])?;
-        if input_op.is_none() && has_computed_source(&properties) {
-            input_op = Some(single_row_input());
-        }
-
-        // Input pass-through columns use generic types (Any); the new node column
-        // gets Node for compact VectorData::NodeId storage.
-        let mut output_schema = self.derive_schema_from_columns(&columns[..output_column]);
-        output_schema.push(LogicalType::Node);
-
-        let op = CreateNodeOperator::new(
-            self.graph_writer()?,
-            input_op,
-            create.labels.clone(),
-            properties,
-            output_schema,
-            output_column,
-        )
-        .with_search_store(Arc::clone(&self.store))
-        .with_session_context(self.session_context.clone());
-
-        let operator = Box::new(op);
-        Ok((operator, columns))
-    }
-
-    /// Plans a CREATE EDGE operator.
+    /// Plans a CREATE EDGE operator: a [`CreateOperator`] of one edge.
     pub(super) fn plan_create_edge(
         &self,
         create: &CreateEdgeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // The input is planned in this small frame, as for a node.
-        let (input_op, columns) = self.plan_operator(&create.input)?;
-        self.build_create_edge(create, input_op, columns)
+        let edge = CreateElement::Edge {
+            variable: create.variable.clone(),
+            from_variable: create.from_variable.clone(),
+            to_variable: create.to_variable.clone(),
+            edge_type: create.edge_type.clone(),
+            properties: create.properties.clone(),
+        };
+        self.plan_creation(Some(&create.input), std::slice::from_ref(&edge))
     }
 
-    /// Builds the operator of `create` over its planned input.
-    #[inline(never)]
-    fn build_create_edge(
+    /// Plans the [`CreateOp`] of an INSERT or CREATE clause: one
+    /// [`CreateOperator`] that creates every node and edge for each row.
+    pub(super) fn plan_create(
         &self,
-        create: &CreateEdgeOp,
-        input_op: Box<dyn Operator>,
-        mut columns: Vec<String>,
+        create: &CreateOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Find source and target columns
-        let from_column = columns
-            .iter()
-            .position(|c| c == &create.from_variable)
-            .ok_or_else(|| {
-                Error::Internal(format!(
-                    "Source variable '{}' not found",
-                    create.from_variable
-                ))
-            })?;
+        self.plan_creation(create.input.as_deref(), &create.elements)
+    }
 
-        let to_column = columns
-            .iter()
-            .position(|c| c == &create.to_variable)
-            .ok_or_else(|| {
-                Error::Internal(format!(
-                    "Target variable '{}' not found",
-                    create.to_variable
-                ))
-            })?;
+    /// Plans a [`CreateOperator`] that creates `elements` for each row of
+    /// `input`. The input is planned in this small frame and the operator
+    /// built in another: a chain of creations (Gremlin `addV` steps) plans
+    /// each one below the next (see `crate::query::limits`).
+    fn plan_creation(
+        &self,
+        input: Option<&LogicalOperator>,
+        elements: &[CreateElement],
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let input = match input {
+            Some(input) => Some(self.plan_operator(input)?),
+            None => None,
+        };
+        self.build_creation(input, elements)
+    }
 
-        // Output column for the created edge (if named)
-        let output_column = create.variable.as_ref().map(|v| {
-            let idx = columns.len();
-            columns.push(v.clone());
-            self.edge_columns.borrow_mut().insert(v.clone());
-            idx
-        });
+    /// Builds the [`CreateOperator`] of `elements` over the planned `input`;
+    /// a clause that starts the statement (no input) runs once, for a single
+    /// row.
+    #[inline(never)]
+    fn build_creation(
+        &self,
+        input: Option<(Box<dyn Operator>, Vec<String>)>,
+        elements: &[CreateElement],
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let has_input = input.is_some();
+        let (input_op, mut columns) = input.unwrap_or_else(|| (single_row_input(), Vec::new()));
+        let input_width = columns.len();
+        // Where each variable is: its first column, as for a single edge.
+        let mut positions: HashMap<String, usize> = HashMap::new();
+        for (position, column) in columns.iter().enumerate() {
+            positions.entry(column.clone()).or_insert(position);
+        }
+        let column_of = |positions: &HashMap<String, usize>, variable: &str, role: &str| {
+            positions
+                .get(variable)
+                .copied()
+                .ok_or_else(|| Error::Internal(format!("{role} variable '{variable}' not found")))
+        };
 
-        // Convert properties: resolve variables/property access from input
-        // columns, computed values (`i * 2`) are evaluated per row.
-        let input_width = output_column.unwrap_or(columns.len());
-        let properties = self.row_property_sources(&create.properties, &columns[..input_width])?;
-
-        let output_schema = self.derive_schema_from_columns(&columns);
-
-        let mut operator = CreateEdgeOperator::new(
-            self.graph_writer()?,
-            input_op,
-            from_column,
-            to_column,
-            create.edge_type.clone(),
-            output_schema,
-        )
-        .with_properties(properties)
-        .with_search_store(Arc::clone(&self.store))
-        .with_session_context(self.session_context.clone());
-
-        if let Some(col) = output_column {
-            operator = operator.with_output_column(col);
+        let mut steps = Vec::with_capacity(elements.len());
+        for element in elements {
+            match element {
+                CreateElement::Node {
+                    variable,
+                    labels,
+                    properties,
+                } => {
+                    // A bare variable of the input rows refers to their node
+                    // (e.g. from MATCH): nothing to create.
+                    if labels.is_empty()
+                        && properties.is_empty()
+                        && positions.contains_key(variable)
+                    {
+                        continue;
+                    }
+                    let properties = self.row_property_sources(properties, &columns)?;
+                    positions.entry(variable.clone()).or_insert(columns.len());
+                    columns.push(variable.clone());
+                    steps.push(CreateStep::node(labels.clone(), properties));
+                }
+                CreateElement::Edge {
+                    variable,
+                    from_variable,
+                    to_variable,
+                    edge_type,
+                    properties,
+                } => {
+                    let from_column = column_of(&positions, from_variable, "Source")?;
+                    let to_column = column_of(&positions, to_variable, "Target")?;
+                    let properties = self.row_property_sources(properties, &columns)?;
+                    if let Some(variable) = variable {
+                        positions.entry(variable.clone()).or_insert(columns.len());
+                        columns.push(variable.clone());
+                        self.edge_columns.borrow_mut().insert(variable.clone());
+                    }
+                    steps.push(CreateStep::edge(
+                        from_column,
+                        to_column,
+                        edge_type.clone(),
+                        properties,
+                        variable.is_some(),
+                    ));
+                }
+            }
         }
 
-        let operator = Box::new(operator);
-
-        Ok((operator, columns))
+        // Nothing to create (only nodes of the input rows): the rows as they
+        // are.
+        if steps.is_empty() && has_input {
+            return Ok((input_op, columns));
+        }
+        let operator = CreateOperator::new(self.graph_writer()?, input_op, input_width, steps)
+            .with_search_store(Arc::clone(&self.store))
+            .with_session_context(self.session_context.clone());
+        Ok((Box::new(operator), columns))
     }
 
     /// Plans a DELETE NODE operator.
@@ -708,6 +700,7 @@ impl super::Planner {
             .with_hop_bounds(sp.min_hops, sp.max_hops)
             .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_read_only(self.read_only)
+            .with_memory_budget(self.path_search_budget)
             .with_path_output();
 
         // The edge condition reads a row of the input columns and the
@@ -816,8 +809,14 @@ impl super::Planner {
             ))
         })?;
 
-        // Evaluate arguments to Parameters
-        let params = procedures::evaluate_arguments(&call.arguments, procedure.parameters());
+        // Evaluate the arguments, constants all, to the procedure's parameters
+        let values = self.procedure_argument_values(
+            &resolved_name,
+            &call.arguments,
+            procedure.parameters(),
+        )?;
+        let params =
+            procedures::evaluate_arguments(&resolved_name, &values, procedure.parameters())?;
 
         // Canonical column names for this procedure (user-facing names)
         let canonical_columns = procedure.output_columns();
@@ -858,6 +857,87 @@ impl super::Planner {
         }
 
         Ok((operator, output_columns))
+    }
+
+    /// The values of a procedure call's arguments, each a constant (see
+    /// [`constant_argument`](Self::constant_argument)). One map argument
+    /// keeps its keys: it names the parameters (see
+    /// [`evaluate_arguments`](crate::procedures::evaluate_arguments)).
+    #[cfg(feature = "algos")]
+    fn procedure_argument_values(
+        &self,
+        procedure: &str,
+        arguments: &[LogicalExpression],
+        param_defs: &[grafeo_adapters::plugins::ParameterDef],
+    ) -> Result<Vec<Value>> {
+        if let [LogicalExpression::Map(entries)] = arguments {
+            let mut named = std::collections::BTreeMap::new();
+            for (key, expression) in entries {
+                let value = self.constant_argument(procedure, key, expression)?;
+                named.insert(grafeo_common::types::PropertyKey::new(key.as_str()), value);
+            }
+            return Ok(vec![Value::Map(Arc::new(named))]);
+        }
+        arguments
+            .iter()
+            .enumerate()
+            .map(|(index, expression)| {
+                let name = crate::procedures::argument_name(param_defs, index);
+                self.constant_argument(procedure, &name, expression)
+            })
+            .collect()
+    }
+
+    /// The value of `expression`, argument `argument` of `procedure`: a
+    /// literal, a parameter (filled in before planning) or an expression of
+    /// them, such as `$d / 2` or `[1.0, 0.0 + 0.0]`.
+    ///
+    /// # Errors
+    ///
+    /// A procedure runs once, before any row, so an argument that reads a row
+    /// (a variable an earlier clause binds) or the graph (a subquery) is an
+    /// error, as is a parameter nobody supplied and an expression that cannot
+    /// be evaluated: the procedure would otherwise run with the default.
+    #[cfg(feature = "algos")]
+    fn constant_argument(
+        &self,
+        procedure: &str,
+        argument: &str,
+        expression: &LogicalExpression,
+    ) -> Result<Value> {
+        let semantic =
+            |message: String| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+        let reads = match first_non_constant(expression, &mut Vec::new()) {
+            None => None,
+            Some(NonConstant::Row(variable)) => Some(format!("the variable '{variable}'")),
+            Some(NonConstant::Graph) => Some("the graph (a subquery or a pattern)".to_string()),
+            Some(NonConstant::Parameter(name)) => {
+                return Err(semantic(format!("Missing parameter: ${name}")));
+            }
+        };
+        if let Some(reads) = reads {
+            return Err(semantic(format!(
+                "Argument '{argument}' of {procedure} reads {reads}: a procedure argument must \
+                 be a constant (a literal, a parameter or an expression of them)"
+            )));
+        }
+        if let LogicalExpression::Literal(value) = expression {
+            return Ok(value.clone());
+        }
+        let evaluator = ExpressionPredicate::new(
+            self.convert_expression(expression)?,
+            HashMap::new(),
+            Arc::clone(&self.store),
+        )
+        .with_transaction_context(self.viewing_epoch, self.transaction_id)
+        .with_session_context(self.session_context.clone());
+        evaluator
+            .eval_at(&grafeo_core::execution::DataChunk::empty(), 0)
+            .ok_or_else(|| {
+                semantic(format!(
+                    "Argument '{argument}' of {procedure} cannot be evaluated"
+                ))
+            })
     }
 
     /// The store a procedure reads: the projection its `projection` argument
@@ -954,16 +1034,10 @@ impl super::Planner {
             )));
         }
 
-        // Evaluate arguments to values
-        let mut arg_values = Vec::new();
-        for arg in &call.arguments {
-            let val = crate::query::planner::eval_constant_expression(arg)?;
-            arg_values.push(val);
-        }
-
-        // Build parameter map: param_name -> value
+        // Build parameter map: param_name -> value, each argument a constant
         let mut param_map = std::collections::HashMap::new();
-        for (param, value) in proc_def.params.iter().zip(arg_values) {
+        for (param, argument) in proc_def.params.iter().zip(&call.arguments) {
+            let value = self.constant_argument(&proc_def.name, &param.0, argument)?;
             param_map.insert(param.0.clone(), value);
         }
 
@@ -1540,5 +1614,128 @@ pub(super) fn read_first_after_a_write(
         Box::new(EagerOperator::new(op))
     } else {
         op
+    }
+}
+
+/// What keeps an expression from being a constant.
+#[cfg(feature = "algos")]
+enum NonConstant {
+    /// It reads this variable of the row.
+    Row(String),
+    /// It reads the graph: a subquery or a pattern.
+    Graph,
+    /// It reads this parameter, which nobody supplied.
+    Parameter(String),
+}
+
+/// The first part of `expression` that keeps it from being a constant, if
+/// any. The variables a list comprehension, a list predicate or a reduce
+/// binds (`local`) are not row variables: `[x IN [1, 2] | x * 2]` is a
+/// constant.
+#[cfg(feature = "algos")]
+fn first_non_constant(
+    expression: &LogicalExpression,
+    local: &mut Vec<String>,
+) -> Option<NonConstant> {
+    let row = |name: &String, local: &[String]| {
+        (!local.contains(name)).then(|| NonConstant::Row(name.clone()))
+    };
+    match expression {
+        LogicalExpression::Literal(_) => None,
+        LogicalExpression::Parameter(name) => Some(NonConstant::Parameter(name.clone())),
+        LogicalExpression::Variable(name)
+        | LogicalExpression::Labels(name)
+        | LogicalExpression::Type(name)
+        | LogicalExpression::Id(name)
+        | LogicalExpression::Property { variable: name, .. } => row(name, local),
+        LogicalExpression::MapProjection { base, entries } => row(base, local).or_else(|| {
+            entries.iter().find_map(|entry| match entry {
+                crate::query::plan::MapProjectionEntry::LiteralEntry(_, value) => {
+                    first_non_constant(value, local)
+                }
+                _ => None,
+            })
+        }),
+        LogicalExpression::ExistsSubquery(_)
+        | LogicalExpression::CountSubquery(_)
+        | LogicalExpression::ValueSubquery(_)
+        | LogicalExpression::PatternComprehension { .. } => Some(NonConstant::Graph),
+        LogicalExpression::Binary { left, right, .. } => {
+            first_non_constant(left, local).or_else(|| first_non_constant(right, local))
+        }
+        LogicalExpression::Unary { operand, .. } => first_non_constant(operand, local),
+        LogicalExpression::FunctionCall { args: items, .. } | LogicalExpression::List(items) => {
+            items
+                .iter()
+                .find_map(|item| first_non_constant(item, local))
+        }
+        LogicalExpression::Map(entries) => entries
+            .iter()
+            .find_map(|(_, value)| first_non_constant(value, local)),
+        LogicalExpression::IndexAccess { base, index } => {
+            first_non_constant(base, local).or_else(|| first_non_constant(index, local))
+        }
+        LogicalExpression::MapAccess { base, .. } => first_non_constant(base, local),
+        LogicalExpression::SliceAccess { base, start, end } => first_non_constant(base, local)
+            .or_else(|| {
+                [start, end]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|bound| first_non_constant(bound, local))
+            }),
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => operand
+            .iter()
+            .chain(else_clause)
+            .find_map(|part| first_non_constant(part, local))
+            .or_else(|| {
+                when_clauses.iter().find_map(|(condition, result)| {
+                    first_non_constant(condition, local)
+                        .or_else(|| first_non_constant(result, local))
+                })
+            }),
+        LogicalExpression::ListComprehension {
+            variable,
+            list_expr,
+            filter_expr,
+            map_expr,
+        } => first_non_constant(list_expr, local).or_else(|| {
+            local.push(variable.clone());
+            let found = filter_expr
+                .iter()
+                .chain(std::iter::once(map_expr))
+                .find_map(|part| first_non_constant(part, local));
+            local.pop();
+            found
+        }),
+        LogicalExpression::ListPredicate {
+            variable,
+            list_expr,
+            predicate,
+            ..
+        } => first_non_constant(list_expr, local).or_else(|| {
+            local.push(variable.clone());
+            let found = first_non_constant(predicate, local);
+            local.pop();
+            found
+        }),
+        LogicalExpression::Reduce {
+            accumulator,
+            initial,
+            variable,
+            list,
+            expression,
+        } => first_non_constant(initial, local)
+            .or_else(|| first_non_constant(list, local))
+            .or_else(|| {
+                local.push(accumulator.clone());
+                local.push(variable.clone());
+                let found = first_non_constant(expression, local);
+                local.truncate(local.len() - 2);
+                found
+            }),
     }
 }

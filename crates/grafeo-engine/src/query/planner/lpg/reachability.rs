@@ -17,12 +17,31 @@
 use std::collections::HashSet;
 
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, ExpandOp, LogicalExpression, LogicalOperator,
-    MapProjectionEntry, PathMode, SortKey,
+    AggregateExpr, AggregateFunction, AggregateOp, ExpandDirection, ExpandOp, LogicalExpression,
+    LogicalOperator, MapProjectionEntry, PathMode, SortKey,
 };
 use crate::query::planner::common::{
     aggregate_column_name, expression_to_string, output_column_name,
 };
+
+/// Whether the paths `expand` follows reach the nodes its walks reach, in
+/// the order its walks first reach them: in WALK mode, and in TRAIL mode (a
+/// Cypher variable-length relationship) for an expand of at most one hop, or
+/// a directed one of at most one hop minimum. A walk first reaches a node
+/// over a shortest path, and back at its source over a cycle, neither of
+/// which repeats an edge. An undirected walk can come back to its source over
+/// the edge it left by, and a longer minimum can need walks that repeat an
+/// edge.
+pub(crate) fn reaches_as_walks(expand: &ExpandOp) -> bool {
+    match expand.path_mode {
+        PathMode::Walk => true,
+        PathMode::Trail => {
+            expand.max_hops.is_some_and(|max| max <= 1)
+                || (expand.min_hops <= 1 && expand.direction != ExpandDirection::Both)
+        }
+        PathMode::Simple | PathMode::Acyclic => false,
+    }
+}
 
 /// How a variable-length expand runs its reachability search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,8 +65,9 @@ impl ReachabilityMode {
 /// The variable-length expands in `root` that run as a reachability search,
 /// and how.
 ///
-/// Such an expand is in WALK mode, and its rows reach a consumer that ignores
-/// duplicate rows through filters, projections and RETURNNs only. The consumer
+/// Such an expand reaches what its walks reach (in WALK mode, and in TRAIL
+/// mode as [`reaches_as_walks`] says), and its rows reach a consumer that
+/// ignores duplicate rows through filters, projections and RETURNNs only. The consumer
 /// is a `RETURN DISTINCT`, a `DISTINCT` over all columns (`WITH DISTINCT`), or
 /// an aggregation whose every aggregate ignores duplicates. Nothing on the way
 /// reads the expand's edge variable or its path (nor the path's length, nodes
@@ -159,7 +179,7 @@ fn consumed_expand<'a>(
         below = next;
     };
     let searchable = expand.is_variable_length()
-        && expand.path_mode == PathMode::Walk
+        && reaches_as_walks(expand)
         && !all_columns
         && expand
             .edge_variable
@@ -643,14 +663,44 @@ mod tests {
             .unwrap()
     }
 
+    /// Asserts that `query` enumerates its paths: no reachability search.
+    fn assert_enumerated(db: &GrafeoDB, language: &str, query: &str) {
+        let plan = plan_text(db, language, &format!("EXPLAIN {query}"), true);
+        assert!(plan.contains("Expand ("), "{language}: {query}\n{plan}");
+        assert!(markers(&plan).is_empty(), "{language}: {query}\n{plan}");
+    }
+
+    /// `tail` with its undirected variable-length patterns made directed for
+    /// Cypher. A Cypher variable-length relationship takes a relationship
+    /// once, so it follows trails, and an undirected trail does not reach
+    /// what an undirected walk reaches (the walk comes back to its source
+    /// over the edge it left by): directed, it still searches.
+    fn directed_for_cypher(language: &str, tail: &str) -> String {
+        if language == "cypher" {
+            tail.replace("]-(", "]->(")
+        } else {
+            tail.to_string()
+        }
+    }
+
     #[test]
     fn duplicate_insensitive_consumers_get_the_rows_of_the_walks_in_order() {
         let db = people();
         let mut checked = 0;
         for language in ["gql", "cypher"] {
-            for hops in ["*1..1", "*1..2", "*1..3", "*2..3", "*0..2"] {
+            for (hops, min, max) in [
+                ("*1..1", 1, 1),
+                ("*1..2", 1, 2),
+                ("*1..3", 1, 3),
+                ("*2..3", 2, 3),
+                ("*0..2", 0, 2),
+            ] {
                 for edge_type in ["", ":KNOWS"] {
                     for (left, right) in [("-[", "]->"), ("<-[", "]-"), ("-[", "]-")] {
+                        // Cypher's trails reach what walks reach for at most
+                        // one hop, or directed from at most one hop
+                        let undirected = left == "-[" && right == "]-";
+                        let searched = language == "gql" || max <= 1 || (min <= 1 && !undirected);
                         for filter in ["", " WHERE m.active = true"] {
                             for (ret, mode) in [
                                 ("DISTINCT m.id", AcrossInputRows),
@@ -664,7 +714,11 @@ mod tests {
                                     "{} MATCH {pattern}{filter} RETURN {ret}",
                                     sources(language)
                                 );
-                                assert_same_rows(&db, language, &query, mode, false);
+                                if searched {
+                                    assert_same_rows(&db, language, &query, mode, false);
+                                } else {
+                                    assert_enumerated(&db, language, &query);
+                                }
                                 checked += 1;
                             }
                         }
@@ -737,6 +791,7 @@ mod tests {
                     AcrossInputRows,
                 ),
             ] {
+                let tail = directed_for_cypher(language, tail);
                 assert_same_rows(&db, language, &format!("{source} {tail}"), mode, false);
             }
             for (tail, mode) in [
@@ -754,6 +809,7 @@ mod tests {
                     AcrossInputRows,
                 ),
             ] {
+                let tail = directed_for_cypher(language, tail);
                 assert_same_rows(&db, language, &format!("{source} {tail}"), mode, true);
             }
             let every_person = "MATCH (n:Person)-[*1..2]->(m) RETURN DISTINCT m.id";
@@ -784,6 +840,7 @@ mod tests {
                 PerInputRow,
             ),
         ] {
+            let tail = directed_for_cypher("cypher", tail);
             assert_same_rows(&db, "cypher", &format!("{cypher} {tail}"), mode, false);
         }
         let gql = sources("gql");
@@ -836,7 +893,13 @@ mod tests {
         }
         for language in ["gql", "cypher"] {
             let query = "MATCH (s:Source)-[:KNOWS*2..3]->(t) RETURN DISTINCT t.name AS t";
-            assert_same_rows(&db, language, query, AcrossInputRows, false);
+            if language == "gql" {
+                assert_same_rows(&db, language, query, AcrossInputRows, false);
+            } else {
+                // A trail of at least two hops can reach less than a walk
+                // (which may go back and forth), so Cypher enumerates them
+                assert_enumerated(&db, language, query);
+            }
             let names: Vec<Value> = ["Django", "Mia", "Butch"].map(Value::from).into();
             let rows: Vec<Value> = run(&db, language, query, true)
                 .into_iter()
@@ -848,8 +911,8 @@ mod tests {
 
     #[test]
     fn an_unbounded_pattern_on_a_cycle_returns_what_short_walks_reach() {
-        // Up to 100 hops round a triangle with a doubled edge: far too many
-        // walks to enumerate, while every node is within six hops
+        // Round a triangle with a doubled edge, as far as the trails of a
+        // Cypher relationship go, while every node is within six hops
         let db = people();
         let query = |hops: &str| {
             format!("MATCH (n) WHERE n.id IN $ids MATCH (n)-[{hops}]->(m) RETURN DISTINCT m.id")
@@ -910,10 +973,11 @@ mod tests {
         let db = people();
         for language in ["gql", "cypher"] {
             let source = sources(language);
+            let pattern = directed_for_cypher(language, "MATCH (n)-[*1..3]-(m)");
             let walks = run(
                 &db,
                 language,
-                &format!("{source} MATCH (n)-[*1..3]-(m) RETURN n.id AS n, m.id AS m"),
+                &format!("{source} {pattern} RETURN n.id AS n, m.id AS m"),
                 true,
             );
             let pairs: HashSet<String> = walks.iter().map(|row| format!("{row:?}")).collect();
@@ -923,13 +987,12 @@ mod tests {
             assert!(pairs.len() > targets.len(), "the sources share targets");
 
             // Each target once over all sources
-            let once = format!("PROFILE {source} MATCH (n)-[*1..3]-(m) RETURN DISTINCT m.id");
+            let once = format!("PROFILE {source} {pattern} RETURN DISTINCT m.id");
             let profile = plan_text(&db, language, &once, true);
             assert_eq!(expand_marker(&profile), Some(AcrossInputRows), "{profile}");
             assert_eq!(expand_rows(&profile), targets.len(), "{profile}");
             // Each target once per source
-            let per_source =
-                format!("PROFILE {source} MATCH (n)-[*1..3]-(m) RETURN DISTINCT n.id, m.id");
+            let per_source = format!("PROFILE {source} {pattern} RETURN DISTINCT n.id, m.id");
             let profile = plan_text(&db, language, &per_source, true);
             assert_eq!(expand_marker(&profile), Some(PerInputRow), "{profile}");
             assert_eq!(expand_rows(&profile), pairs.len(), "{profile}");
@@ -1013,17 +1076,24 @@ mod tests {
         }
         for language in ["gql", "cypher"] {
             let source = sources(language);
+            // Cypher's trails search directed from at most one hop (see
+            // `directed_for_cypher`): there the patterns run back toward Hans
+            let (pattern, longer) = if language == "gql" {
+                ("(n)-[*1..3]-(m)", "(n)-[*2..3]->(m)")
+            } else {
+                ("(n)<-[*1..3]-(m)", "(n)<-[*1..3]-(m)")
+            };
             for (tail, mode) in [
                 (
-                    "MATCH (n)-[*1..3]-(m) RETURN DISTINCT m.id",
+                    format!("MATCH {pattern} RETURN DISTINCT m.id"),
                     AcrossInputRows,
                 ),
                 (
-                    "MATCH (n)-[*1..3]-(m) RETURN DISTINCT n.id, m.id",
+                    format!("MATCH {pattern} RETURN DISTINCT n.id, m.id"),
                     PerInputRow,
                 ),
                 (
-                    "MATCH (n)-[*2..3]->(m) RETURN count(DISTINCT m) AS c",
+                    format!("MATCH {longer} RETURN count(DISTINCT m) AS c"),
                     AcrossInputRows,
                 ),
             ] {
@@ -1033,7 +1103,7 @@ mod tests {
                 assert_eq!(searched, walked, "{language}: {query}");
             }
             // The transaction's writes count: Hans is there, Vincent is gone
-            let query = format!("{source} MATCH (n)-[*1..3]-(m) RETURN DISTINCT m.id");
+            let query = format!("{source} MATCH {pattern} RETURN DISTINCT m.id");
             let (searched, _, _) = rows_in(&mut session, language, &query);
             assert!(searched.contains(&vec![Value::from(6_i64)]), "{language}");
             assert!(!searched.contains(&vec![Value::from(3_i64)]), "{language}");
@@ -1109,13 +1179,13 @@ mod tests {
                     PerInputRow,
                 ),
             ] {
+                let query = &directed_for_cypher(language, query);
                 assert_same_rows(&db, language, query, mode, false);
                 assert!(run(&db, language, query, true).len() >= 3000, "{query}");
             }
         }
         // Sources in descending order of `k`, so the sort reorders them
-        let query =
-            "MATCH (s:Src) WITH s ORDER BY s.k DESC MATCH (s)-[*1..2]-(t) RETURN DISTINCT s.k, t.k";
+        let query = "MATCH (s:Src) WITH s ORDER BY s.k DESC MATCH (s)-[*1..2]->(t) RETURN DISTINCT s.k, t.k";
         assert_same_rows(&db, "cypher", query, PerInputRow, false);
     }
 }

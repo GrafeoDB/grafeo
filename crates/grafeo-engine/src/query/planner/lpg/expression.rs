@@ -18,7 +18,7 @@
 
 use super::{
     Direction, Error, ExpandDirection, FilterExpression, LogicalExpression, LogicalOperator,
-    PathMode, Result, Value, convert_binary_op, convert_unary_op,
+    Result, Value, convert_binary_op, convert_unary_op,
 };
 
 impl super::Planner {
@@ -290,7 +290,8 @@ impl super::Planner {
     ///
     /// Accepts a single edge, like `(n)-[:TYPE]->()`, `(n)-[:TYPE]->(:Label)`
     /// or `()-[:TYPE]->(n)`, and a path of at least one edge with no
-    /// condition on its end, like `(n)-[:TYPE*]->()`, in the WALK path mode.
+    /// condition on its end, like `(n)-[:TYPE*]->()`, in the WALK path mode
+    /// (or a directed TRAIL, which reaches the same nodes).
     /// Everything else goes to the semi-join rewrite in `plan_filter`: a path
     /// with a minimum other than one hop, a labeled end or another path mode,
     /// a label on the start, an inner `WHERE` other than a label on the end,
@@ -316,10 +317,11 @@ impl super::Planner {
                     return Err(unsupported());
                 }
                 let one_edge = expand.max_hops == Some(1) && !expand.quantified;
-                // A path mode other than WALK (TRAIL, SIMPLE, ACYCLIC) limits the
-                // paths of a longer pattern, which the check does not; a single
-                // edge is expanded the same way in every mode.
-                if !one_edge && expand.path_mode != PathMode::Walk {
+                // The check follows walks: a path mode that reaches other nodes
+                // (an undirected TRAIL, SIMPLE, ACYCLIC) limits the paths of a
+                // longer pattern, which the check does not; a single edge is
+                // expanded the same way in every mode.
+                if !one_edge && !super::reachability::reaches_as_walks(expand) {
                     return Err(unsupported());
                 }
 

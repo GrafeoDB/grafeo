@@ -1,0 +1,45 @@
+# Cypher: map and list values keep a property the entity does not have
+#
+# A map literal has one entry per key and a list literal one item per
+# expression, null where the expression has no value (see the rosetta file
+# literals_keep_missing_values.gtest). In Cypher this also reaches a map
+# projection (`p {.w}` is `{w: null}` for a node without `w`), `SET +=` (a
+# null entry removes the property, as openCypher defines it) and UNWIND of a
+# list literal (one row per item). The missing entries and items used to be
+# left out.
+
+meta:
+  language: cypher
+  model: lpg
+  section: "5"
+  title: Missing values in map and list literals
+  dataset: empty
+
+tests:
+
+  - name: a_map_projection_keeps_a_missing_property_as_null
+    setup:
+      - "CREATE (:Person {name: 'Jules', age: 35})"
+    query: "MATCH (p:Person) RETURN p {.name, .w} AS m"
+    expect:
+      rows:
+        - ["{name: Jules, w: null}"]
+
+  - name: set_plus_equals_with_a_missing_value_removes_the_property
+    setup:
+      - "CREATE (:Person {name: 'Jules'}), (:T {a: 3, b: 19})"
+    statements:
+      - "MATCH (p:Person), (t:T) SET t += {a: p.w}"
+      - "MATCH (t:T) RETURN t.a AS a, t.b AS b"
+    expect:
+      rows:
+        - [null, 19]
+
+  - name: unwind_of_a_list_with_a_missing_value_has_a_row_per_item
+    setup:
+      - "CREATE (:Person {name: 'Jules', age: 35})"
+    query: "MATCH (p:Person) UNWIND [p.w, p.age] AS v RETURN v"
+    expect:
+      rows:
+        - [null]
+        - [35]

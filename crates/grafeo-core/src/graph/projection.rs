@@ -546,6 +546,18 @@ impl GraphStore for GraphProjection {
         self.inner.current_epoch()
     }
 
+    // --- Visibility (no node or edge built, as the inner store checks) ---
+
+    fn is_node_visible_at_epoch(&self, id: NodeId, epoch: EpochId) -> bool {
+        self.inner.is_node_visible_at_epoch(id, epoch) && self.node_id_matches(id)
+    }
+
+    fn is_edge_visible_at_epoch(&self, id: EdgeId, epoch: EpochId) -> bool {
+        // `edge_type` applies the type filter and, under a label filter, the
+        // endpoint filter.
+        self.inner.is_edge_visible_at_epoch(id, epoch) && self.edge_type(id).is_some()
+    }
+
     // --- Schema introspection ---
 
     fn all_labels(&self) -> Vec<String> {
@@ -902,6 +914,36 @@ mod tests {
         assert!(proj.get_edge_at_epoch(edges[1], epoch).is_some());
         // KNOWS edge filtered out
         assert!(proj.get_edge_at_epoch(edges[0], epoch).is_none());
+    }
+
+    #[test]
+    fn visibility_at_epoch_respects_the_filters_and_deletes() {
+        let (store, nodes, edges) = setup_social_graph_with_ids();
+        let people = GraphProjection::new(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            ProjectionSpec::new().with_node_labels(["Person"]),
+        );
+        let knows = GraphProjection::new(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            ProjectionSpec::new().with_edge_types(["KNOWS"]),
+        );
+        let epoch = store.current_epoch();
+
+        assert!(people.is_node_visible_at_epoch(nodes[0], epoch));
+        assert!(!people.is_node_visible_at_epoch(nodes[2], epoch), "a City");
+        assert!(people.is_edge_visible_at_epoch(edges[0], epoch), "KNOWS");
+        assert!(
+            !people.is_edge_visible_at_epoch(edges[1], epoch),
+            "to a City"
+        );
+        assert!(knows.is_edge_visible_at_epoch(edges[0], epoch));
+        assert!(!knows.is_edge_visible_at_epoch(edges[1], epoch), "LIVES_IN");
+
+        assert!(store.delete_edge(edges[0]));
+        assert!(store.delete_node(nodes[1]));
+        let epoch = store.current_epoch();
+        assert!(!people.is_node_visible_at_epoch(nodes[1], epoch), "deleted");
+        assert!(!knows.is_edge_visible_at_epoch(edges[0], epoch), "deleted");
     }
 
     // 4. get_edge_property for edges in/out of projection

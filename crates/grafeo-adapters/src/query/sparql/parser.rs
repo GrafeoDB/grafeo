@@ -1512,41 +1512,52 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_conditional_or_expression(&mut self) -> Result<Expression> {
-        let chain = self.begin_chain();
-        let mut expr = self.parse_conditional_and_expression()?;
-
-        while self.current.kind == TokenKind::OrOp {
-            self.advance();
-            let right = self.parse_conditional_and_expression()?;
-            self.link_chain()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator: BinaryOperator::Or,
-                right: Box::new(right),
-            };
-        }
-        self.end_chain(chain);
-
-        Ok(expr)
+        self.parse_balanced_chain(
+            TokenKind::OrOp,
+            BinaryOperator::Or,
+            Self::parse_conditional_and_expression,
+        )
     }
 
     fn parse_conditional_and_expression(&mut self) -> Result<Expression> {
+        self.parse_balanced_chain(
+            TokenKind::AndOp,
+            BinaryOperator::And,
+            Self::parse_value_logical,
+        )
+    }
+
+    /// Parses `operand` joined by `token`, an associative operator, into a
+    /// balanced tree of `operator` (see [`Nesting::join_balanced`]): a chain
+    /// of any length stays shallow.
+    fn parse_balanced_chain(
+        &mut self,
+        token: TokenKind,
+        operator: BinaryOperator,
+        operand: fn(&mut Self) -> Result<Expression>,
+    ) -> Result<Expression> {
         let chain = self.begin_chain();
-        let mut expr = self.parse_value_logical()?;
-
-        while self.current.kind == TokenKind::AndOp {
-            self.advance();
-            let right = self.parse_value_logical()?;
-            self.link_chain()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator: BinaryOperator::And,
-                right: Box::new(right),
-            };
+        let first = operand(self)?;
+        if self.current.kind != token {
+            self.end_chain(chain);
+            return Ok(first);
         }
+        let mut operands = vec![(first, self.nesting.take_operand())];
+        while self.current.kind == token {
+            self.advance();
+            let next = operand(self)?;
+            operands.push((next, self.nesting.take_operand()));
+        }
+        let tree = self
+            .nesting
+            .join_balanced(operands, |left, right| Expression::Binary {
+                left: Box::new(left),
+                operator,
+                right: Box::new(right),
+            })
+            .ok_or_else(|| self.error(&nesting_error_message()));
         self.end_chain(chain);
-
-        Ok(expr)
+        tree
     }
 
     fn parse_value_logical(&mut self) -> Result<Expression> {

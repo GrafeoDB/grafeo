@@ -1,34 +1,131 @@
-//! Self-contained evaluator for CHECK constraint expressions.
+//! CHECK constraint expressions: parsed once, evaluated as a query's WHERE.
 //!
-//! Parses and evaluates a GQL-style boolean expression against an entity's
-//! property map. Supports comparison operators (`=`, `<>`, `<`, `<=`, `>`,
-//! `>=`), boolean operators (`AND`, `OR`, `NOT`), `IS NULL`, `IS NOT NULL`,
-//! parenthesized sub-expressions, and literal values (integers, floats,
-//! strings, booleans, `NULL`).
+//! A CHECK expression is a boolean expression over an entity's properties,
+//! each named by itself (`begins < ends`): comparison operators (`=`, `<>`,
+//! `!=`, `<`, `<=`, `>`, `>=`), `AND`, `OR`, `NOT`, `IS [NOT] NULL`,
+//! `[NOT] IN (...)`, `[NOT] BETWEEN ... AND ...`, arithmetic, parentheses
+//! and literals (integers, floats, strings, booleans, `NULL`).
+//!
+//! The expression is parsed into the query engine's filter expression and
+//! evaluated by the query's evaluator, with each property a variable bound to
+//! its value: a constraint means what the same predicate means in a WHERE
+//! (dates order, `1 = 1.0`, a comparison with null is unknown), and holds
+//! only where that predicate is true, as a WHERE keeps only those rows.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use grafeo_common::types::Value;
+use grafeo_core::execution::DataChunk;
+use grafeo_core::execution::operators::{
+    BinaryFilterOp, ExpressionPredicate, FilterExpression, UnaryFilterOp,
+};
+use grafeo_core::execution::vector::ValueVector;
+use grafeo_core::graph::lpg::LpgStore;
 
-/// Evaluates a CHECK constraint expression against a property map.
-///
-/// Returns `Ok(true)` when the constraint is satisfied, `Ok(false)` when it
-/// is violated, or `Err` if the expression cannot be parsed or evaluated.
-pub(crate) fn evaluate_check(
-    expression: &str,
-    properties: &[(String, Value)],
-) -> Result<bool, String> {
-    let tokens = tokenize(expression)?;
-    let mut pos = 0;
-    let ast = parse_or(&tokens, &mut pos)?;
-    if pos < tokens.len() {
-        return Err(format!(
-            "unexpected token after expression: {:?}",
-            tokens[pos]
-        ));
+/// A parsed CHECK constraint expression, ready to evaluate.
+pub(crate) struct CheckExpression {
+    /// The expression as written, for messages.
+    text: String,
+    /// The properties it reads, in the order of the evaluation row's
+    /// columns.
+    properties: Vec<String>,
+    /// The query evaluator of the expression, each property a variable.
+    predicate: ExpressionPredicate,
+}
+
+impl CheckExpression {
+    /// Parses `text`.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with `text` when it is not an expression.
+    pub(crate) fn parse(text: &str) -> Result<Self, String> {
+        let tokens = tokenize(text)?;
+        let mut pos = 0;
+        let expression = parse_or(&tokens, &mut pos)?;
+        if pos < tokens.len() {
+            return Err(format!(
+                "unexpected token after expression: {:?}",
+                tokens[pos]
+            ));
+        }
+        let mut properties = Vec::new();
+        collect_properties(&expression, &mut properties);
+        let columns = properties
+            .iter()
+            .enumerate()
+            .map(|(column, name)| (name.clone(), column))
+            .collect::<HashMap<_, _>>();
+        let store = no_graph().ok_or("no store to evaluate the expression with")?;
+        Ok(Self {
+            text: text.to_string(),
+            properties,
+            predicate: ExpressionPredicate::new(expression, columns, store),
+        })
     }
-    let props: HashMap<&str, &Value> = properties.iter().map(|(k, v)| (k.as_str(), v)).collect();
-    eval_node(&ast, &props)
+
+    /// Whether `properties` (an entity's property map; a property it does not
+    /// have is null) satisfy the expression: `Ok(true)` when it is true,
+    /// `Ok(false)` when it is false or unknown. Unknown is null, or no value
+    /// at all, which the query evaluator gives for a comparison with null
+    /// and for an operator that does not apply (`'a' < 3`, a division by
+    /// zero, an integer overflow): a WHERE drops the row then too.
+    ///
+    /// # Errors
+    ///
+    /// When the expression gives a value other than a boolean (`x + 1`).
+    pub(crate) fn evaluate(&self, properties: &[(String, Value)]) -> Result<bool, String> {
+        let columns = self
+            .properties
+            .iter()
+            .map(|name| {
+                let value = properties
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map_or(Value::Null, |(_, value)| value.clone());
+                ValueVector::from_values(&[value])
+            })
+            .collect();
+        match self.predicate.eval_at(&DataChunk::new(columns), 0) {
+            Some(Value::Bool(holds)) => Ok(holds),
+            Some(Value::Null) | None => Ok(false),
+            Some(other) => Err(format!("({}) gives {other:?}, not a boolean", self.text)),
+        }
+    }
+}
+
+/// The store an expression evaluator reads graph elements from: an empty
+/// one, since a CHECK expression reads property values only. `None` when it
+/// cannot be made (an arena that does not allocate).
+fn no_graph() -> Option<Arc<LpgStore>> {
+    static NO_GRAPH: OnceLock<Option<Arc<LpgStore>>> = OnceLock::new();
+    NO_GRAPH
+        .get_or_init(|| LpgStore::new().ok().map(Arc::new))
+        .clone()
+}
+
+/// Adds the properties `expression` reads to `properties`, each once.
+fn collect_properties(expression: &FilterExpression, properties: &mut Vec<String>) {
+    match expression {
+        FilterExpression::Variable(name) => {
+            if !properties.contains(name) {
+                properties.push(name.clone());
+            }
+        }
+        FilterExpression::Binary { left, right, .. } => {
+            collect_properties(left, properties);
+            collect_properties(right, properties);
+        }
+        FilterExpression::Unary { operand, .. } => collect_properties(operand, properties),
+        FilterExpression::List(items) => {
+            for item in items {
+                collect_properties(item, properties);
+            }
+        }
+        // The parser below builds no other expression.
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -297,73 +394,28 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 }
 
 // ---------------------------------------------------------------------------
-// AST
+// Expressions
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
-enum Expr {
-    /// Property reference
-    Ident(String),
-    /// Literal value
-    Literal(Value),
-    /// Binary comparison
-    Compare {
-        left: Box<Expr>,
-        op: CmpOp,
-        right: Box<Expr>,
-    },
-    /// Boolean AND
-    And(Box<Expr>, Box<Expr>),
-    /// Boolean OR
-    Or(Box<Expr>, Box<Expr>),
-    /// Boolean NOT
-    Not(Box<Expr>),
-    /// IS NULL
-    IsNull(Box<Expr>),
-    /// IS NOT NULL
-    IsNotNull(Box<Expr>),
-    /// Arithmetic operation
-    Arithmetic {
-        left: Box<Expr>,
-        op: ArithOp,
-        right: Box<Expr>,
-    },
-    /// value IN (list)
-    InList {
-        value: Box<Expr>,
-        list: Vec<Expr>,
-        negated: bool,
-    },
-    /// value BETWEEN low AND high
-    Between {
-        value: Box<Expr>,
-        low: Box<Expr>,
-        high: Box<Expr>,
-        negated: bool,
-    },
+fn binary(left: FilterExpression, op: BinaryFilterOp, right: FilterExpression) -> FilterExpression {
+    FilterExpression::Binary {
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum CmpOp {
-    Eq,
-    Neq,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ArithOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
+fn unary(op: UnaryFilterOp, operand: FilterExpression) -> FilterExpression {
+    FilterExpression::Unary {
+        op,
+        operand: Box::new(operand),
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Recursive-descent parser
+// Recursive-descent parser, into the query engine's filter expressions:
+// `x NOT IN (...)` is `NOT (x IN [...])`, and `x BETWEEN a AND b` is
+// `x >= a AND x <= b` (SQL's definition of BETWEEN).
 //
 // Grammar:
 //   expr        -> or_expr
@@ -381,36 +433,36 @@ enum ArithOp {
 //                | ( expr )
 // ---------------------------------------------------------------------------
 
-fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
+fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<FilterExpression, String> {
     let mut left = parse_and(tokens, pos)?;
     while *pos < tokens.len() && tokens[*pos] == Token::Or {
         *pos += 1;
         let right = parse_and(tokens, pos)?;
-        left = Expr::Or(Box::new(left), Box::new(right));
+        left = binary(left, BinaryFilterOp::Or, right);
     }
     Ok(left)
 }
 
-fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
+fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<FilterExpression, String> {
     let mut left = parse_not(tokens, pos)?;
     while *pos < tokens.len() && tokens[*pos] == Token::And {
         *pos += 1;
         let right = parse_not(tokens, pos)?;
-        left = Expr::And(Box::new(left), Box::new(right));
+        left = binary(left, BinaryFilterOp::And, right);
     }
     Ok(left)
 }
 
-fn parse_not(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
+fn parse_not(tokens: &[Token], pos: &mut usize) -> Result<FilterExpression, String> {
     if *pos < tokens.len() && tokens[*pos] == Token::Not {
         *pos += 1;
         let inner = parse_not(tokens, pos)?;
-        return Ok(Expr::Not(Box::new(inner)));
+        return Ok(unary(UnaryFilterOp::Not, inner));
     }
     parse_comparison(tokens, pos)
 }
 
-fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
+fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<FilterExpression, String> {
     let left = parse_addition(tokens, pos)?;
 
     if *pos < tokens.len() {
@@ -420,30 +472,25 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
             if *pos < tokens.len() && tokens[*pos] == Token::Not {
                 *pos += 1;
                 expect_token(tokens, pos, &Token::Null, "NULL")?;
-                return Ok(Expr::IsNotNull(Box::new(left)));
+                return Ok(unary(UnaryFilterOp::IsNotNull, left));
             }
             expect_token(tokens, pos, &Token::Null, "NULL")?;
-            return Ok(Expr::IsNull(Box::new(left)));
+            return Ok(unary(UnaryFilterOp::IsNull, left));
         }
 
         // [NOT] IN (list)
         if tokens[*pos] == Token::In {
             *pos += 1;
             let list = parse_in_list(tokens, pos)?;
-            return Ok(Expr::InList {
-                value: Box::new(left),
-                list,
-                negated: false,
-            });
+            return Ok(binary(left, BinaryFilterOp::In, list));
         }
         if tokens[*pos] == Token::Not && *pos + 1 < tokens.len() && tokens[*pos + 1] == Token::In {
             *pos += 2;
             let list = parse_in_list(tokens, pos)?;
-            return Ok(Expr::InList {
-                value: Box::new(left),
-                list,
-                negated: true,
-            });
+            return Ok(unary(
+                UnaryFilterOp::Not,
+                binary(left, BinaryFilterOp::In, list),
+            ));
         }
 
         // [NOT] BETWEEN low AND high
@@ -461,29 +508,26 @@ fn parse_comparison(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
 
         // Comparison operators
         let op = match tokens[*pos] {
-            Token::Eq => Some(CmpOp::Eq),
-            Token::Neq => Some(CmpOp::Neq),
-            Token::Lt => Some(CmpOp::Lt),
-            Token::Le => Some(CmpOp::Le),
-            Token::Gt => Some(CmpOp::Gt),
-            Token::Ge => Some(CmpOp::Ge),
+            Token::Eq => Some(BinaryFilterOp::Eq),
+            Token::Neq => Some(BinaryFilterOp::Ne),
+            Token::Lt => Some(BinaryFilterOp::Lt),
+            Token::Le => Some(BinaryFilterOp::Le),
+            Token::Gt => Some(BinaryFilterOp::Gt),
+            Token::Ge => Some(BinaryFilterOp::Ge),
             _ => None,
         };
         if let Some(op) = op {
             *pos += 1;
             let right = parse_addition(tokens, pos)?;
-            return Ok(Expr::Compare {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            });
+            return Ok(binary(left, op, right));
         }
     }
 
     Ok(left)
 }
 
-fn parse_in_list(tokens: &[Token], pos: &mut usize) -> Result<Vec<Expr>, String> {
+/// Reads `( item, ... )` as a list expression.
+fn parse_in_list(tokens: &[Token], pos: &mut usize) -> Result<FilterExpression, String> {
     expect_token(tokens, pos, &Token::LParen, "(")?;
     let mut items = Vec::new();
     if *pos < tokens.len() && tokens[*pos] != Token::RParen {
@@ -494,123 +538,93 @@ fn parse_in_list(tokens: &[Token], pos: &mut usize) -> Result<Vec<Expr>, String>
         }
     }
     expect_token(tokens, pos, &Token::RParen, ")")?;
-    Ok(items)
+    Ok(FilterExpression::List(items))
 }
 
 fn parse_between_rest(
-    value: Expr,
+    value: FilterExpression,
     negated: bool,
     tokens: &[Token],
     pos: &mut usize,
-) -> Result<Expr, String> {
+) -> Result<FilterExpression, String> {
     let low = parse_addition(tokens, pos)?;
     expect_token(tokens, pos, &Token::And, "AND")?;
     let high = parse_addition(tokens, pos)?;
-    Ok(Expr::Between {
-        value: Box::new(value),
-        low: Box::new(low),
-        high: Box::new(high),
-        negated,
+    let between = binary(
+        binary(value.clone(), BinaryFilterOp::Ge, low),
+        BinaryFilterOp::And,
+        binary(value, BinaryFilterOp::Le, high),
+    );
+    Ok(if negated {
+        unary(UnaryFilterOp::Not, between)
+    } else {
+        between
     })
 }
 
-fn parse_addition(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
+fn parse_addition(tokens: &[Token], pos: &mut usize) -> Result<FilterExpression, String> {
     let mut left = parse_multiply(tokens, pos)?;
     while *pos < tokens.len() {
         let op = match tokens[*pos] {
-            Token::Plus => ArithOp::Add,
-            Token::Minus => ArithOp::Sub,
+            Token::Plus => BinaryFilterOp::Add,
+            Token::Minus => BinaryFilterOp::Sub,
             _ => break,
         };
         *pos += 1;
         let right = parse_multiply(tokens, pos)?;
-        left = Expr::Arithmetic {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        };
+        left = binary(left, op, right);
     }
     Ok(left)
 }
 
-fn parse_multiply(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
+fn parse_multiply(tokens: &[Token], pos: &mut usize) -> Result<FilterExpression, String> {
     let mut left = parse_unary(tokens, pos)?;
     while *pos < tokens.len() {
         let op = match tokens[*pos] {
-            Token::Star => ArithOp::Mul,
-            Token::Slash => ArithOp::Div,
-            Token::Percent => ArithOp::Mod,
+            Token::Star => BinaryFilterOp::Mul,
+            Token::Slash => BinaryFilterOp::Div,
+            Token::Percent => BinaryFilterOp::Mod,
             _ => break,
         };
         *pos += 1;
         let right = parse_unary(tokens, pos)?;
-        left = Expr::Arithmetic {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        };
+        left = binary(left, op, right);
     }
     Ok(left)
 }
 
-fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
+fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<FilterExpression, String> {
     if *pos < tokens.len() && tokens[*pos] == Token::Minus {
         *pos += 1;
         let inner = parse_unary(tokens, pos)?;
-        return Ok(Expr::Arithmetic {
-            left: Box::new(Expr::Literal(Value::Int64(0))),
-            op: ArithOp::Sub,
-            right: Box::new(inner),
-        });
+        return Ok(unary(UnaryFilterOp::Neg, inner));
     }
     parse_primary(tokens, pos)
 }
 
-fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
+fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<FilterExpression, String> {
     if *pos >= tokens.len() {
         return Err("unexpected end of expression".to_string());
     }
-    match &tokens[*pos] {
-        Token::Ident(name) => {
-            let name = name.clone();
-            *pos += 1;
-            Ok(Expr::Ident(name))
-        }
-        Token::Integer(n) => {
-            let n = *n;
-            *pos += 1;
-            Ok(Expr::Literal(Value::Int64(n)))
-        }
-        Token::Float(f) => {
-            let f = *f;
-            *pos += 1;
-            Ok(Expr::Literal(Value::Float64(f)))
-        }
-        Token::StringLit(s) => {
-            let s = s.clone();
-            *pos += 1;
-            Ok(Expr::Literal(Value::String(s.into())))
-        }
-        Token::True => {
-            *pos += 1;
-            Ok(Expr::Literal(Value::Bool(true)))
-        }
-        Token::False => {
-            *pos += 1;
-            Ok(Expr::Literal(Value::Bool(false)))
-        }
-        Token::Null => {
-            *pos += 1;
-            Ok(Expr::Literal(Value::Null))
-        }
+    let literal = FilterExpression::Literal;
+    let parsed = match &tokens[*pos] {
         Token::LParen => {
             *pos += 1;
             let inner = parse_or(tokens, pos)?;
             expect_token(tokens, pos, &Token::RParen, ")")?;
-            Ok(inner)
+            return Ok(inner);
         }
-        other => Err(format!("unexpected token: {other:?}")),
-    }
+        Token::Ident(name) => FilterExpression::Variable(name.clone()),
+        Token::Integer(n) => literal(Value::Int64(*n)),
+        Token::Float(f) => literal(Value::Float64(*f)),
+        Token::StringLit(s) => literal(Value::String(s.as_str().into())),
+        Token::True => literal(Value::Bool(true)),
+        Token::False => literal(Value::Bool(false)),
+        Token::Null => literal(Value::Null),
+        other => return Err(format!("unexpected token: {other:?}")),
+    };
+    *pos += 1;
+    Ok(parsed)
 }
 
 fn expect_token(
@@ -630,209 +644,17 @@ fn expect_token(
 }
 
 // ---------------------------------------------------------------------------
-// Evaluator
-// ---------------------------------------------------------------------------
-
-fn eval_node(expr: &Expr, props: &HashMap<&str, &Value>) -> Result<bool, String> {
-    match expr {
-        Expr::Literal(Value::Bool(b)) => Ok(*b),
-        Expr::Literal(Value::Null) => Ok(false),
-        Expr::Literal(_) => Err("non-boolean literal in boolean context".to_string()),
-        Expr::Ident(name) => {
-            let val = props.get(name.as_str()).copied().unwrap_or(&Value::Null);
-            match val {
-                Value::Bool(b) => Ok(*b),
-                Value::Null => Ok(false),
-                _ => Err(format!(
-                    "property '{name}' is not boolean, cannot use directly as a condition"
-                )),
-            }
-        }
-        Expr::And(left, right) => Ok(eval_node(left, props)? && eval_node(right, props)?),
-        Expr::Or(left, right) => Ok(eval_node(left, props)? || eval_node(right, props)?),
-        Expr::Not(inner) => Ok(!eval_node(inner, props)?),
-        Expr::IsNull(inner) => {
-            let val = eval_value(inner, props)?;
-            Ok(val == Value::Null)
-        }
-        Expr::IsNotNull(inner) => {
-            let val = eval_value(inner, props)?;
-            Ok(val != Value::Null)
-        }
-        Expr::Compare { left, op, right } => {
-            let lval = eval_value(left, props)?;
-            let rval = eval_value(right, props)?;
-            // NULL comparisons always yield false (SQL/GQL three-valued logic)
-            if lval == Value::Null || rval == Value::Null {
-                return Ok(false);
-            }
-            eval_compare(&lval, *op, &rval)
-        }
-        Expr::Arithmetic { .. } => {
-            // An arithmetic expression in boolean context: check if it is truthy.
-            // This is not standard GQL, so error out.
-            Err("arithmetic expression in boolean context".to_string())
-        }
-        Expr::InList {
-            value,
-            list,
-            negated,
-        } => {
-            let val = eval_value(value, props)?;
-            if val == Value::Null {
-                return Ok(false);
-            }
-            let mut found = false;
-            for item in list {
-                let item_val = eval_value(item, props)?;
-                if item_val != Value::Null && val == item_val {
-                    found = true;
-                    break;
-                }
-            }
-            Ok(if *negated { !found } else { found })
-        }
-        Expr::Between {
-            value,
-            low,
-            high,
-            negated,
-        } => {
-            let val = eval_value(value, props)?;
-            let lo = eval_value(low, props)?;
-            let hi = eval_value(high, props)?;
-            if val == Value::Null || lo == Value::Null || hi == Value::Null {
-                return Ok(false);
-            }
-            let ge_low = eval_compare(&val, CmpOp::Ge, &lo)?;
-            let le_high = eval_compare(&val, CmpOp::Le, &hi)?;
-            let in_range = ge_low && le_high;
-            Ok(if *negated { !in_range } else { in_range })
-        }
-    }
-}
-
-/// Evaluates an expression to a `Value` (not necessarily boolean).
-fn eval_value(expr: &Expr, props: &HashMap<&str, &Value>) -> Result<Value, String> {
-    match expr {
-        Expr::Literal(v) => Ok(v.clone()),
-        Expr::Ident(name) => {
-            let val = props.get(name.as_str()).copied().unwrap_or(&Value::Null);
-            Ok(val.clone())
-        }
-        Expr::Arithmetic {
-            left, op, right, ..
-        } => {
-            let lval = eval_value(left, props)?;
-            let rval = eval_value(right, props)?;
-            if lval == Value::Null || rval == Value::Null {
-                return Ok(Value::Null);
-            }
-            eval_arithmetic(&lval, *op, &rval)
-        }
-        // Boolean expressions evaluated as a value produce Bool
-        Expr::Compare { .. }
-        | Expr::And(_, _)
-        | Expr::Or(_, _)
-        | Expr::Not(_)
-        | Expr::IsNull(_)
-        | Expr::IsNotNull(_)
-        | Expr::InList { .. }
-        | Expr::Between { .. } => {
-            let b = eval_node(expr, props)?;
-            Ok(Value::Bool(b))
-        }
-    }
-}
-
-fn eval_compare(left: &Value, op: CmpOp, right: &Value) -> Result<bool, String> {
-    match op {
-        CmpOp::Eq => Ok(left == right),
-        CmpOp::Neq => Ok(left != right),
-        _ => {
-            let ordering = compare_values(left, right)
-                .ok_or_else(|| format!("cannot compare {left:?} with {right:?}"))?;
-            Ok(match op {
-                CmpOp::Lt => ordering == std::cmp::Ordering::Less,
-                CmpOp::Le => {
-                    ordering == std::cmp::Ordering::Less || ordering == std::cmp::Ordering::Equal
-                }
-                CmpOp::Gt => ordering == std::cmp::Ordering::Greater,
-                CmpOp::Ge => {
-                    ordering == std::cmp::Ordering::Greater || ordering == std::cmp::Ordering::Equal
-                }
-                CmpOp::Eq | CmpOp::Neq => unreachable!(),
-            })
-        }
-    }
-}
-
-/// Orders two values for relational comparison.
-fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-    match (a, b) {
-        (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
-        (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-        (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
-        (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-        // Cross-type numeric promotion
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
-        (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
-        _ => None,
-    }
-}
-
-fn eval_arithmetic(left: &Value, op: ArithOp, right: &Value) -> Result<Value, String> {
-    match (left, right) {
-        (Value::Int64(a), Value::Int64(b)) => {
-            let result = match op {
-                ArithOp::Add => a.checked_add(*b).ok_or("integer overflow")?,
-                ArithOp::Sub => a.checked_sub(*b).ok_or("integer underflow")?,
-                ArithOp::Mul => a.checked_mul(*b).ok_or("integer overflow")?,
-                ArithOp::Div => {
-                    if *b == 0 {
-                        return Err("division by zero".to_string());
-                    }
-                    a.checked_div(*b).ok_or("integer overflow")?
-                }
-                ArithOp::Mod => {
-                    if *b == 0 {
-                        return Err("modulo by zero".to_string());
-                    }
-                    a.checked_rem(*b).ok_or("integer overflow")?
-                }
-            };
-            Ok(Value::Int64(result))
-        }
-        (Value::Float64(a), Value::Float64(b)) => {
-            let result = match op {
-                ArithOp::Add => a + b,
-                ArithOp::Sub => a - b,
-                ArithOp::Mul => a * b,
-                ArithOp::Div => a / b,
-                ArithOp::Mod => a % b,
-            };
-            Ok(Value::Float64(result))
-        }
-        // Cross-type promotion: Int64 + Float64 -> Float64
-        (Value::Int64(a), Value::Float64(b)) => {
-            eval_arithmetic(&Value::Float64(*a as f64), op, &Value::Float64(*b))
-        }
-        (Value::Float64(a), Value::Int64(b)) => {
-            eval_arithmetic(&Value::Float64(*a), op, &Value::Float64(*b as f64))
-        }
-        _ => Err(format!(
-            "unsupported arithmetic between {left:?} and {right:?}"
-        )),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parses `expression` and evaluates it for `properties`.
+    fn evaluate_check(expression: &str, properties: &[(String, Value)]) -> Result<bool, String> {
+        CheckExpression::parse(expression)?.evaluate(properties)
+    }
 
     fn props(pairs: &[(&str, Value)]) -> Vec<(String, Value)> {
         pairs
@@ -1055,16 +877,20 @@ mod tests {
         assert!(evaluate_check("name = 'oops", &p).is_err());
     }
 
+    /// An operator that does not apply has no value, as in a WHERE, which
+    /// drops the row: the check does not hold.
     #[test]
-    fn test_division_by_zero_error() {
+    fn test_division_by_zero_does_not_hold() {
         let p = props(&[("x", Value::Int64(10))]);
-        assert!(evaluate_check("x / 0 = 1", &p).is_err());
+        assert_eq!(evaluate_check("x / 0 = 1", &p), Ok(false));
+        assert_eq!(evaluate_check("NOT (x / 0 = 1)", &p), Ok(false));
     }
 
     #[test]
-    fn test_incomparable_types_error() {
+    fn test_incomparable_types_do_not_hold() {
         let p = props(&[("x", Value::Bool(true))]);
-        assert!(evaluate_check("x > 5", &p).is_err());
+        assert_eq!(evaluate_check("x > 5", &p), Ok(false));
+        assert_eq!(evaluate_check("NOT (x > 5)", &p), Ok(false));
     }
 
     // -- Arithmetic in boolean context --
@@ -1080,25 +906,25 @@ mod tests {
     #[test]
     fn test_integer_overflow_add() {
         let p = props(&[("x", Value::Int64(i64::MAX))]);
-        assert!(evaluate_check("x + 1 > 0", &p).is_err());
+        assert_eq!(evaluate_check("x + 1 > 0", &p), Ok(false));
     }
 
     #[test]
     fn test_integer_underflow_sub() {
         let p = props(&[("x", Value::Int64(i64::MIN))]);
-        assert!(evaluate_check("x - 1 < 0", &p).is_err());
+        assert_eq!(evaluate_check("x - 1 < 0", &p), Ok(false));
     }
 
     #[test]
     fn test_integer_overflow_mul() {
         let p = props(&[("x", Value::Int64(i64::MAX))]);
-        assert!(evaluate_check("x * 2 > 0", &p).is_err());
+        assert_eq!(evaluate_check("x * 2 > 0", &p), Ok(false));
     }
 
     #[test]
     fn test_modulo_by_zero() {
         let p = props(&[("x", Value::Int64(10))]);
-        assert!(evaluate_check("x % 0 = 0", &p).is_err());
+        assert_eq!(evaluate_check("x % 0 = 0", &p), Ok(false));
     }
 
     // -- Float arithmetic --
@@ -1134,10 +960,20 @@ mod tests {
 
     // -- Unsupported arithmetic types --
 
+    /// A string plus a number is the concatenation, as in a query, so the
+    /// comparison is false; arithmetic on a boolean has no value, so the check does not hold.
     #[test]
-    fn test_arithmetic_on_strings_errors() {
-        let p = props(&[("x", Value::String("hello".into()))]);
-        assert!(evaluate_check("x + 1 = 2", &p).is_err());
+    fn test_arithmetic_on_strings_concatenates() {
+        let p = props(&[
+            ("x", Value::String("hello".into())),
+            ("b", Value::Bool(true)),
+        ]);
+        assert_eq!(evaluate_check("x + 1 = 2", &p), Ok(false));
+        assert_eq!(evaluate_check("x + 1 = 'hello1'", &p), Ok(true));
+        assert_eq!(evaluate_check("b + 1 = 2", &p), Ok(false));
+        // A value that is not a boolean is not a condition.
+        assert!(evaluate_check("b", &p).is_ok());
+        assert!(evaluate_check("x + 1", &p).is_err());
     }
 
     // -- Negated IN and BETWEEN --
@@ -1163,6 +999,59 @@ mod tests {
         let p = props(&[("x", Value::Null)]);
         // NULL + 1 comparison should yield false (not error)
         assert!(!evaluate_check("x > 5", &p).unwrap());
+    }
+
+    // -- What the predicate means in a query --
+
+    /// Dates, times and timestamps order as in a query; every write to a
+    /// node with `CHECK (begins < ends)` on two dates used to fail with
+    /// "cannot compare".
+    #[test]
+    fn temporal_values_compare_as_in_a_query() {
+        use grafeo_common::types::{Date, Time, Timestamp};
+        let p = props(&[
+            ("begins", Value::Date(Date::from_ymd(2024, 3, 19).unwrap())),
+            ("ends", Value::Date(Date::from_ymd(2024, 3, 22).unwrap())),
+            ("opens", Value::Time(Time::from_hms(8, 30, 0).unwrap())),
+            ("closes", Value::Time(Time::from_hms(19, 0, 0).unwrap())),
+            ("sent", Value::Timestamp(Timestamp::from_secs(3))),
+            ("read", Value::Timestamp(Timestamp::from_secs(88))),
+        ]);
+        assert_eq!(evaluate_check("begins < ends", &p), Ok(true));
+        assert_eq!(evaluate_check("ends <= begins", &p), Ok(false));
+        assert_eq!(evaluate_check("opens < closes", &p), Ok(true));
+        assert_eq!(evaluate_check("sent >= read", &p), Ok(false));
+        assert_eq!(
+            evaluate_check("begins BETWEEN begins AND ends", &p),
+            Ok(true)
+        );
+    }
+
+    /// An integer equals the float of the same value, as `=` and `<>` say in
+    /// a query and as `<=` already said here; `1 = 1.0` used to be false.
+    #[test]
+    fn an_integer_equals_the_same_float() {
+        let p = props(&[("x", Value::Int64(1)), ("y", Value::Float64(19.0))]);
+        assert_eq!(evaluate_check("x = 1.0", &p), Ok(true));
+        assert_eq!(evaluate_check("x <> 1.0", &p), Ok(false));
+        assert_eq!(evaluate_check("y = 19", &p), Ok(true));
+        assert_eq!(evaluate_check("x IN (3.0, 1.0)", &p), Ok(true));
+    }
+
+    /// A comparison with null is unknown, and so is its negation: the check
+    /// holds only for a true predicate, as a WHERE keeps only the rows its
+    /// predicate is true for. `NOT (x > 0)` used to hold for a null `x`.
+    #[test]
+    fn an_unknown_predicate_does_not_hold() {
+        let p = props(&[("x", Value::Null), ("y", Value::Int64(3))]);
+        assert_eq!(evaluate_check("NOT (x > 0)", &p), Ok(false));
+        assert_eq!(evaluate_check("NOT (x = 1)", &p), Ok(false));
+        assert_eq!(evaluate_check("x > 0 OR y = 3", &p), Ok(true));
+        assert_eq!(evaluate_check("x IS NULL OR x > 0", &p), Ok(true));
+        // No item matches and one is null: unknown, also negated.
+        assert_eq!(evaluate_check("y NOT IN (1, NULL)", &p), Ok(false));
+        assert_eq!(evaluate_check("y IN (1, NULL)", &p), Ok(false));
+        assert_eq!(evaluate_check("y IN (3, NULL)", &p), Ok(true));
     }
 
     // -- Complex nested boolean --

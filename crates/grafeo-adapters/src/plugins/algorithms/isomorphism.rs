@@ -17,7 +17,7 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::GraphAlgorithm;
+use super::traits::{GraphAlgorithm, visible_edges_from};
 
 /// Counts all subgraph isomorphisms of `pattern` in `target`.
 ///
@@ -348,7 +348,7 @@ fn build_undirected_adj(store: &dyn GraphStore) -> FxHashMap<NodeId, FxHashSet<N
         adj.insert(node, FxHashSet::default());
     }
     for &node in &nodes {
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(set) = adj.get_mut(&node) {
                 set.insert(neighbor);
             }

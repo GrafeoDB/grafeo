@@ -1,0 +1,108 @@
+# Rosetta: an edge pattern names one type, or alternatives joined by |
+#
+# Edge types can carry a namespace (`Graph:CONTAINS`). Quoted, such a name
+# is one type. Unquoted, `-[:Graph:CONTAINS]->` is a syntax error that names
+# both ways to write what was meant: before 0.6.0 it matched the edges of
+# type Graph or CONTAINS, so it returned the wrong rows or none, and CREATE,
+# MERGE and INSERT created an edge of type Graph. openCypher 9 writes a
+# relationship's types as :A, or :A|B (also :A|:B) for alternatives; in GQL
+# they are a label expression (ISO/IEC 39075:2024, 16.8), where | joins
+# alternatives and & labels an edge must all carry, which an edge with one
+# type cannot. An edge created by CREATE, MERGE or INSERT gets one type.
+#
+# Setup (GQL): a repository contains a directory that contains Alix.py over
+# Graph:CONTAINS edges; the directory has a plain CONTAINS edge to Gus.py and
+# the repository a Graph edge to Berlin.py.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Edge types with a colon in their name
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: a_quoted_edge_type_with_a_colon_is_one_type
+    setup:
+      - "INSERT (r:Repository)-[:`Graph:CONTAINS`]->(d:Directory)-[:`Graph:CONTAINS`]->(:File {path: 'Alix.py'}), (d)-[:CONTAINS]->(:File {path: 'Gus.py'}), (r)-[:Graph]->(:File {path: 'Berlin.py'})"
+    variants:
+      gql: "MATCH (:Repository)-[:`Graph:CONTAINS`*]->(f:File) RETURN f.path"
+      cypher: "MATCH (:Repository)-[:`Graph:CONTAINS`*]->(f:File) RETURN f.path"
+    expect:
+      rows:
+        - [Alix.py]
+
+  - name: alternative_edge_types_match_either
+    setup:
+      - "INSERT (r:Repository)-[:`Graph:CONTAINS`]->(d:Directory)-[:`Graph:CONTAINS`]->(:File {path: 'Alix.py'}), (d)-[:CONTAINS]->(:File {path: 'Gus.py'}), (r)-[:Graph]->(:File {path: 'Berlin.py'})"
+    variants:
+      gql: "MATCH (:Directory)-[:`Graph:CONTAINS`|CONTAINS]->(f:File) RETURN f.path"
+      cypher: "MATCH (:Directory)-[:`Graph:CONTAINS`|CONTAINS]->(f:File) RETURN f.path"
+    expect:
+      rows:
+        - [Alix.py]
+        - [Gus.py]
+
+  - name: a_second_colon_in_a_variable_length_edge_is_an_error
+    setup:
+      - "INSERT (r:Repository)-[:`Graph:CONTAINS`]->(d:Directory)-[:`Graph:CONTAINS`]->(:File {path: 'Alix.py'}), (d)-[:CONTAINS]->(:File {path: 'Gus.py'}), (r)-[:Graph]->(:File {path: 'Berlin.py'})"
+    variants:
+      gql: "MATCH (:Repository)-[:Graph:CONTAINS*]->(f:File) RETURN f.path"
+      cypher: "MATCH (:Repository)-[:Graph:CONTAINS*]->(f:File) RETURN f.path"
+    expect:
+      error: "write :`Graph:CONTAINS` for the type named Graph:CONTAINS, or :Graph|CONTAINS to match either type"
+
+  - name: a_second_colon_in_one_edge_is_an_error
+    setup:
+      - "INSERT (r:Repository)-[:`Graph:CONTAINS`]->(d:Directory)-[:`Graph:CONTAINS`]->(:File {path: 'Alix.py'}), (d)-[:CONTAINS]->(:File {path: 'Gus.py'}), (r)-[:Graph]->(:File {path: 'Berlin.py'})"
+    variants:
+      gql: "MATCH (:Repository)-[:Graph:CONTAINS]->(f) RETURN f.path"
+      cypher: "MATCH (:Repository)-[:Graph:CONTAINS]->(f) RETURN f.path"
+    expect:
+      error: "write :`Graph:CONTAINS` for the type named Graph:CONTAINS, or :Graph|CONTAINS to match either type"
+
+  - name: a_second_colon_in_an_exists_pattern_is_an_error
+    setup:
+      - "INSERT (r:Repository)-[:`Graph:CONTAINS`]->(d:Directory)-[:`Graph:CONTAINS`]->(:File {path: 'Alix.py'}), (d)-[:CONTAINS]->(:File {path: 'Gus.py'}), (r)-[:Graph]->(:File {path: 'Berlin.py'})"
+    variants:
+      gql: "MATCH (d:Directory) WHERE EXISTS { MATCH (d)-[:Graph:CONTAINS]->(:File) } RETURN count(d)"
+      cypher: "MATCH (d:Directory) WHERE EXISTS { (d)-[:Graph:CONTAINS]->(:File) } RETURN count(d)"
+    expect:
+      error: "write :`Graph:CONTAINS` for the type named Graph:CONTAINS, or :Graph|CONTAINS to match either type"
+
+  - name: a_second_colon_in_a_created_edge_is_an_error
+    setup:
+      - "INSERT (:Directory)"
+    variants:
+      gql: "MATCH (d:Directory) INSERT (d)-[:Graph:CONTAINS]->(:File {path: 'Paris.py'})"
+      cypher: "MATCH (d:Directory) CREATE (d)-[:Graph:CONTAINS]->(:File {path: 'Paris.py'})"
+    expect:
+      error: "write :`Graph:CONTAINS` for the type named Graph:CONTAINS, or :Graph|CONTAINS to match either type"
+
+  - name: alternative_types_in_a_created_edge_are_an_error
+    setup:
+      - "INSERT (:Directory)"
+    variants:
+      gql: "MATCH (d:Directory) INSERT (d)-[:CONTAINS|LINKS]->(:File {path: 'Paris.py'})"
+      cypher: "MATCH (d:Directory) CREATE (d)-[:CONTAINS|LINKS]->(:File {path: 'Paris.py'})"
+    expect:
+      error: "one type: :CONTAINS|LINKS names alternatives, which only a pattern to match can have"
+
+  - name: alternative_types_in_a_merged_edge_are_an_error
+    setup:
+      - "INSERT (:Directory)"
+    variants:
+      gql: "MATCH (d:Directory) MERGE (d)-[:CONTAINS|LINKS]->(f:File {path: 'Prague.py'})"
+      cypher: "MATCH (d:Directory) MERGE (d)-[:CONTAINS|LINKS]->(f:File {path: 'Prague.py'})"
+    expect:
+      error: "MERGE gives"
+
+  # GQL: an edge of two labels, which an edge with one type never is
+  - name: an_edge_type_conjunction_is_an_error
+    setup:
+      - "INSERT (r:Repository)-[:`Graph:CONTAINS`]->(d:Directory)-[:`Graph:CONTAINS`]->(:File {path: 'Alix.py'}), (d)-[:CONTAINS]->(:File {path: 'Gus.py'}), (r)-[:Graph]->(:File {path: 'Berlin.py'})"
+    variants:
+      gql: "MATCH (:Repository)-[:Graph&CONTAINS]->(f) RETURN f.path"
+    expect:
+      error: "An edge has one type, so :Graph&CONTAINS, an edge of both, matches no edge: write :`Graph&CONTAINS` for the type named Graph&CONTAINS, or :Graph|CONTAINS to match either type"

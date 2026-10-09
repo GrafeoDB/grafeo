@@ -817,13 +817,7 @@ impl SparqlTranslator {
                                     if conditions.is_empty() {
                                         branches.push(plan.clone());
                                     } else {
-                                        let combined = conditions
-                                            .into_iter()
-                                            .reduce(|acc, c| LogicalExpression::Binary {
-                                                left: Box::new(acc),
-                                                op: BinaryOp::And,
-                                                right: Box::new(c),
-                                            })
+                                        let combined = LogicalExpression::conjunction(conditions)
                                             .expect("conditions non-empty");
                                         branches.push(wrap_filter(plan.clone(), combined));
                                     }
@@ -869,13 +863,7 @@ impl SparqlTranslator {
                         .collect::<Result<Vec<_>>>()?;
 
                     // Combine all predicates with AND
-                    let combined = predicates
-                        .into_iter()
-                        .reduce(|acc, pred| LogicalExpression::Binary {
-                            left: Box::new(acc),
-                            op: BinaryOp::And,
-                            right: Box::new(pred),
-                        })
+                    let combined = LogicalExpression::conjunction(predicates)
                         .expect("predicates non-empty after is_empty check");
 
                     plan = wrap_filter(plan, combined);
@@ -1935,13 +1923,7 @@ impl SparqlTranslator {
                 })
                 .collect();
 
-            let predicate = conditions
-                .into_iter()
-                .reduce(|left, right| LogicalExpression::Binary {
-                    left: Box::new(left),
-                    op: BinaryOp::And,
-                    right: Box::new(right),
-                })
+            let predicate = LogicalExpression::conjunction(conditions)
                 .expect("excluded non-empty after is_empty check");
 
             Ok(wrap_filter(scan, predicate))

@@ -9,16 +9,16 @@ mod pattern;
 use std::collections::{HashMap, HashSet};
 
 use super::common::{
-    build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
-    combine_with_and, comma_part_join_variables, comma_part_reads_earlier_rows,
-    expand_subquery_return_star, flatten_and_conjuncts, has_all_labels, is_aggregate_function,
-    is_binary_set_function, join_and_conjuncts, no_result, optional_join, references_any,
-    to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip,
-    wrap_sort,
+    GeneratedNames, build_left_join_with_predicates, check_branch_columns,
+    collect_expression_variables, combine_with_and, comma_part_join_variables,
+    comma_part_reads_earlier_rows, expand_subquery_return_star, flatten_and_conjuncts,
+    has_all_labels, is_aggregate_function, is_binary_set_function, join_and_conjuncts, no_result,
+    optional_join, push_set_property, references_any, to_aggregate_function, wrap_distinct,
+    wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
-    CallProcedureOp, CountExpr, CreateEdgeOp, CreateNodeOp, DeleteNodeOp, EntityKind, ExceptOp,
+    CallProcedureOp, CountExpr, CreateElement, CreateOp, DeleteNodeOp, EntityKind, ExceptOp,
     ExpandDirection, ExpandOp, HorizontalAggregateOp, IntersectOp, JoinCondition, JoinOp, JoinType,
     LeftJoinOp, LoadDataFormat, LoadDataOp, LogicalExpression, LogicalOperator, LogicalPlan,
     MergeOp, MergeRelationshipOp, NodeScanOp, NullsOrdering, OtherwiseOp, ParameterScanOp,
@@ -73,7 +73,7 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 /// Returns an error if the query cannot be parsed or translated.
 pub fn translate_full(query: &str) -> Result<GqlTranslationResult> {
     let statement = gql::parse(query)?;
-    let translator = GqlTranslator::new();
+    let translator = GqlTranslator::new(query);
     match translator.translate_statement_full(&statement)? {
         GqlTranslationResult::Plan(plan) => Ok(GqlTranslationResult::Plan(
             crate::query::limits::check_plan_depth(plan)?,
@@ -93,6 +93,8 @@ struct GqlTranslator {
     /// for (`None` outside one, or when they are not known): what a nested
     /// subquery's `RETURN *` leaves out.
     call_scope: std::cell::RefCell<Option<HashSet<String>>>,
+    /// The names made up for anonymous elements and helper columns.
+    names: GeneratedNames,
 }
 
 /// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
@@ -287,11 +289,19 @@ fn combine_queries(
 }
 
 impl GqlTranslator {
-    fn new() -> Self {
+    /// A translator for the statement `query`, whose text the generated
+    /// names skip.
+    fn new(query: &str) -> Self {
         Self {
             group_list_variables: std::cell::RefCell::new(HashMap::new()),
             call_scope: std::cell::RefCell::new(None),
+            names: GeneratedNames::new(query),
         }
+    }
+
+    /// A name for an anonymous element, one the statement does not spell.
+    fn anonymous_name(&self) -> String {
+        self.names.next("_anon_")
     }
 
     fn translate_statement_full(&self, stmt: &ast::Statement) -> Result<GqlTranslationResult> {
@@ -663,13 +673,13 @@ impl GqlTranslator {
                     ast::QueryClause::Set(set_clause) => {
                         for assignment in &set_clause.assignments {
                             let value = self.translate_expression(&assignment.value)?;
-                            plan = LogicalOperator::SetProperty(SetPropertyOp {
-                                variable: assignment.variable.clone(),
-                                properties: vec![(assignment.property.clone(), value)],
-                                replace: false,
-                                is_edge: false,
-                                input: Box::new(plan),
-                            });
+                            plan = push_set_property(
+                                plan,
+                                &assignment.variable,
+                                assignment.property.clone(),
+                                value,
+                                false,
+                            );
                         }
                         for map_assign in &set_clause.map_assignments {
                             let value = self.translate_expression(&map_assign.map_expr)?;
@@ -824,13 +834,13 @@ impl GqlTranslator {
             for set_clause in &query.set_clauses {
                 for assignment in &set_clause.assignments {
                     let value = self.translate_expression(&assignment.value)?;
-                    plan = LogicalOperator::SetProperty(SetPropertyOp {
-                        variable: assignment.variable.clone(),
-                        properties: vec![(assignment.property.clone(), value)],
-                        replace: false,
-                        is_edge: false,
-                        input: Box::new(plan),
-                    });
+                    plan = push_set_property(
+                        plan,
+                        &assignment.variable,
+                        assignment.property.clone(),
+                        value,
+                        false,
+                    );
                 }
                 for map_assign in &set_clause.map_assignments {
                     let value = self.translate_expression(&map_assign.map_expr)?;
@@ -1282,7 +1292,7 @@ impl GqlTranslator {
         let named_edges;
         let match_clause =
             if different_edges || match_clause.patterns.iter().any(keeps_different_edges) {
-                named_edges = pattern::with_named_edges(match_clause);
+                named_edges = pattern::with_named_edges(match_clause, &self.names);
                 &named_edges
             } else {
                 match_clause
@@ -1843,8 +1853,7 @@ impl GqlTranslator {
         // search can name.
         let named = |node: &ast::NodePattern| {
             let mut node = node.clone();
-            node.variable
-                .get_or_insert_with(|| format!("_anon_{}", rand_id()));
+            node.variable.get_or_insert_with(|| self.anonymous_name());
             node
         };
         let (source_node, target_node) = (named(&path.source), named(&edge.target));
@@ -1866,7 +1875,7 @@ impl GqlTranslator {
         }
         let candidate = match (&edge.variable, bound_edge) {
             (Some(name), None) => name.clone(),
-            _ => format!("_anon_{}", rand_id()),
+            _ => self.anonymous_name(),
         };
         let mut conditions = Vec::new();
         if let Some(name) = bound_edge {
@@ -1907,7 +1916,7 @@ impl GqlTranslator {
             self.translate_node_pattern(&target_node, Some(source_plan))?
         };
 
-        let path_alias = alias.map_or_else(|| format!("_anon_path_{}", rand_id()), String::from);
+        let path_alias = alias.map_or_else(|| self.names.next("_anon_path_"), String::from);
         let edge_variable = edge.variable.clone().filter(|_| bound_edge.is_none());
         // A sum over the edges of the path (`sum(e.w)`) reads its edge column
         if quantified && let Some(name) = &edge_variable {
@@ -2174,10 +2183,10 @@ impl GqlTranslator {
         Ok(LogicalPlan::new(ret))
     }
 
-    /// Builds the CreateNode / CreateEdge chain of an INSERT that starts a
-    /// statement (no input rows). Returns the plan and the last variable
-    /// created. Used for a standalone INSERT and for the first INSERT clause of
-    /// a query such as `INSERT (a) INSERT (b) RETURN a, b`.
+    /// Builds the [`CreateOp`] of an INSERT that starts a statement (no input
+    /// rows). Returns the plan and the last variable created. Used for a
+    /// standalone INSERT and for the first INSERT clause of a query such as
+    /// `INSERT (a) INSERT (b) RETURN a, b`.
     fn insert_chain(&self, patterns: &[ast::Pattern]) -> Result<(LogicalOperator, String)> {
         if patterns.is_empty() {
             return Err(Error::Query(QueryError::new(
@@ -2186,9 +2195,7 @@ impl GqlTranslator {
             )));
         }
 
-        // Chain CreateNode operators for all patterns.
-        // First pattern gets input: None, subsequent ones chain via input: Some(prev).
-        let mut plan: Option<LogicalOperator> = None;
+        let mut elements = Vec::new();
         let mut last_variable = String::new();
         // With no input rows, a variable is bound only if this INSERT created
         // it earlier: `INSERT (a:A), (a)-[:T]->(b)` creates `a` once and `b`.
@@ -2197,55 +2204,33 @@ impl GqlTranslator {
         for pattern in patterns {
             match pattern {
                 ast::Pattern::Node(node) => {
-                    let (variable, is_new) = pattern::insert_endpoint(node, &mut bound, true)?;
+                    let (variable, is_new) =
+                        pattern::insert_endpoint(node, &mut bound, true, &self.names)?;
                     if is_new {
-                        plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
-                            variable: variable.clone(),
-                            labels: node.labels.clone(),
-                            properties: self.insert_properties(&node.properties)?,
-                            input: plan.map(Box::new),
-                        }));
+                        elements.push(self.created_node(&variable, node)?);
                     }
                     last_variable = variable;
                 }
                 ast::Pattern::Path(path) => {
                     let (source_var, is_new) =
-                        pattern::insert_endpoint(&path.source, &mut bound, true)?;
+                        pattern::insert_endpoint(&path.source, &mut bound, true, &self.names)?;
                     if is_new {
-                        plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
-                            variable: source_var.clone(),
-                            labels: path.source.labels.clone(),
-                            properties: self.insert_properties(&path.source.properties)?,
-                            input: plan.map(Box::new),
-                        }));
+                        elements.push(self.created_node(&source_var, &path.source)?);
                     }
 
                     let mut current_src = source_var;
                     for edge in &path.edges {
                         let (target_var, is_new) =
-                            pattern::insert_endpoint(&edge.target, &mut bound, true)?;
+                            pattern::insert_endpoint(&edge.target, &mut bound, true, &self.names)?;
                         if is_new {
-                            plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
-                                variable: target_var.clone(),
-                                labels: edge.target.labels.clone(),
-                                properties: self.insert_properties(&edge.target.properties)?,
-                                input: plan.map(Box::new),
-                            }));
+                            elements.push(self.created_node(&target_var, &edge.target)?);
                         }
 
                         let (from, to) = match edge.direction {
                             ast::EdgeDirection::Incoming => (target_var.clone(), current_src),
                             _ => (current_src, target_var.clone()),
                         };
-
-                        plan = Some(LogicalOperator::CreateEdge(CreateEdgeOp {
-                            variable: edge.variable.clone(),
-                            edge_type: edge.types.first().cloned().unwrap_or_default(),
-                            from_variable: from,
-                            to_variable: to,
-                            properties: self.insert_properties(&edge.properties)?,
-                            input: Box::new(plan.unwrap_or(LogicalOperator::Empty)),
-                        }));
+                        elements.push(self.created_edge(edge, from, to)?);
                         last_variable.clone_from(&target_var);
                         current_src = target_var;
                     }
@@ -2261,12 +2246,16 @@ impl GqlTranslator {
             }
         }
 
-        let plan = plan.ok_or_else(|| {
-            Error::Query(QueryError::new(
+        if elements.is_empty() {
+            return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "INSERT must create at least one node",
-            ))
-        })?;
+            )));
+        }
+        let plan = LogicalOperator::Create(CreateOp {
+            elements,
+            input: None,
+        });
         Ok((plan, last_variable))
     }
 
@@ -2426,13 +2415,6 @@ struct PathSearch {
     selection: plan::PathSelection,
     /// The paths the search follows.
     path_mode: PathMode,
-}
-
-/// Generate a simple random-ish ID for anonymous variables.
-fn rand_id() -> u32 {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 use aggregate::contains_aggregate;
@@ -2785,16 +2767,52 @@ mod tests {
         assert!(result.is_ok());
 
         let plan = result.unwrap();
-        // Find CreateNode
+        // Find the Create that creates the node
         fn find_create(op: &LogicalOperator) -> bool {
             match op {
-                LogicalOperator::CreateNode(_) => true,
+                LogicalOperator::Create(create) => matches!(
+                    create.elements.as_slice(),
+                    [CreateElement::Node { variable, labels, .. }]
+                        if variable == "n" && labels == &["Person"]
+                ),
                 LogicalOperator::Return(r) => find_create(&r.input),
                 _ => false,
             }
         }
 
         assert!(find_create(&plan.root));
+    }
+
+    #[test]
+    fn test_translate_insert_of_many_patterns_is_one_create() {
+        let patterns: Vec<String> = (0..1_000)
+            .map(|i| format!("(:Person {{v: {i}}})-[:KNOWS]->(:Person)"))
+            .collect();
+        let plan = translate(&format!("INSERT {}", patterns.join(", "))).unwrap();
+        let LogicalOperator::Return(ret) = &plan.root else {
+            panic!("a Return over the Create: {:?}", plan.root)
+        };
+        let LogicalOperator::Create(create) = ret.input.as_ref() else {
+            panic!("one Create for every pattern: {:?}", ret.input)
+        };
+        assert!(create.input.is_none());
+        assert_eq!(
+            create.elements.len(),
+            3_000,
+            "two nodes and an edge per pattern"
+        );
+        let CreateElement::Edge {
+            from_variable,
+            to_variable,
+            ..
+        } = &create.elements[2]
+        else {
+            panic!("the edge after its endpoints")
+        };
+        assert_eq!(
+            create.variables().take(2).collect::<Vec<_>>(),
+            [from_variable, to_variable]
+        );
     }
 
     #[test]
@@ -2814,7 +2832,7 @@ mod tests {
     #[test]
     fn test_translate_set() {
         // SET is not a standalone statement in GQL, test the translator method directly
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
         let set_stmt = ast::SetStatement {
             assignments: vec![ast::PropertyAssignment {
                 variable: "n".to_string(),
@@ -2876,7 +2894,7 @@ mod tests {
     #[test]
     fn test_translate_empty_delete_error() {
         // Create translator directly to test empty delete
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
         let delete = ast::DeleteStatement {
             targets: vec![],
             detach: false,
@@ -2888,7 +2906,7 @@ mod tests {
 
     #[test]
     fn test_translate_empty_set_error() {
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
         let set = ast::SetStatement {
             assignments: vec![],
             span: None,
@@ -2899,7 +2917,7 @@ mod tests {
 
     #[test]
     fn test_translate_empty_insert_error() {
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
         let insert = ast::InsertStatement {
             patterns: vec![],
             span: None,
@@ -2962,7 +2980,7 @@ mod tests {
 
     #[test]
     fn test_binary_op_translation() {
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
 
         assert_eq!(
             translator.translate_binary_op(ast::BinaryOp::Eq),
@@ -3028,7 +3046,7 @@ mod tests {
 
     #[test]
     fn test_unary_op_translation() {
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
 
         assert_eq!(
             translator.translate_unary_op(ast::UnaryOp::Not),

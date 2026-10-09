@@ -34,6 +34,162 @@ fn setup_people_db() -> GrafeoDB {
     db
 }
 
+fn setup_mixed_identity_db() -> (GrafeoDB, Vec<Value>) {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let left = Arc::new(HashMap::from([("left".to_owned(), 1_u64)]));
+    let right = Arc::new(HashMap::from([("right".to_owned(), 1_u64)]));
+    let empty = Arc::new(HashMap::new());
+    let values = [
+        Value::Int64(1),
+        Value::Float64(1.0),
+        Value::List(vec![Value::Int64(1)].into()),
+        Value::List(vec![Value::Float64(1.0)].into()),
+        Value::GCounter(Arc::clone(&left)),
+        Value::GCounter(right),
+        Value::OnCounter {
+            pos: Arc::clone(&left),
+            neg: Arc::clone(&empty),
+        },
+        Value::OnCounter {
+            pos: empty,
+            neg: left,
+        },
+        Value::Vector(vec![1.0_f32, 2.0].into()),
+        Value::Vector(vec![1.0_f32, 3.0].into()),
+        Value::Null,
+    ];
+    let expected = [0, 2, 4, 5, 6, 7, 8, 9, 10]
+        .into_iter()
+        .map(|index| values[index].clone())
+        .collect();
+    let db = GrafeoDB::new_in_memory();
+    // 2,816 rows cross the scan's chunk boundary and revisit every identity.
+    for _ in 0..256 {
+        for value in &values {
+            db.create_node_with_props(&["IdentityValue"], [("v", value.clone())])
+                .unwrap();
+        }
+    }
+    (db, expected)
+}
+
+fn mixed_identity_class(value: &Value, expected: &[Value]) -> usize {
+    // Literal fixture values define the oracle, independently of RowKey.
+    let is_one = |value: &Value| {
+        matches!(value, Value::Int64(1))
+            || matches!(value, Value::Float64(number) if number.to_bits() == 1.0_f64.to_bits())
+    };
+    if is_one(value) {
+        return 0;
+    }
+    if let Value::List(items) = value
+        && items.len() == 1
+        && is_one(&items[0])
+    {
+        return 1;
+    }
+    expected
+        .iter()
+        .position(|candidate| candidate == value)
+        .unwrap_or_else(|| panic!("unexpected identity value: {value:?}"))
+}
+
+fn assert_mixed_identity_rows(
+    result: &grafeo_engine::database::QueryResult,
+    expected: &[Value],
+    grouped: bool,
+) {
+    assert_eq!(result.rows().len(), 9);
+    let mut seen = [false; 9];
+    let mut total = 0;
+    for row in result.rows() {
+        assert_eq!(row.len(), if grouped { 2 } else { 1 });
+        let class = mixed_identity_class(&row[0], expected);
+        assert!(!seen[class], "duplicate identity class: {row:?}");
+        seen[class] = true;
+        if grouped {
+            let count = row[1].as_int64().unwrap();
+            assert_eq!(count, if class < 2 { 512 } else { 256 }, "{row:?}");
+            total += count;
+        }
+    }
+    assert!(seen.into_iter().all(|present| present));
+    if grouped {
+        assert_eq!(total, 2816);
+    }
+}
+
+fn assert_profile_operator_rows(
+    result: &grafeo_engine::database::QueryResult,
+    operator: &str,
+    expected_rows: usize,
+) {
+    let report = result.rows()[0][0].as_str().unwrap();
+    let prefix = format!("{operator} ");
+    let operators: Vec<_> = report
+        .lines()
+        .filter(|line| line.trim_start().starts_with(&prefix))
+        .collect();
+    assert!(
+        !operators.is_empty(),
+        "missing {operator} in PROFILE: {report}"
+    );
+    // PROFILE can give an aggregate and its projection the same operator name.
+    for line in operators {
+        let rows = line
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("rows="))
+            .unwrap_or_else(|| panic!("missing row count: {line}"))
+            .parse::<usize>()
+            .unwrap();
+        assert_eq!(rows, expected_rows, "{report}");
+    }
+}
+
+#[test]
+fn native_group_identity_preserves_mixed_values_across_chunks() {
+    let (db, expected) = setup_mixed_identity_db();
+    let session = db.session();
+    let query = "MATCH (n:IdentityValue) RETURN n.v AS key, count(*) AS c";
+    for _ in 0..2 {
+        let result = session.execute(query).unwrap();
+        assert_mixed_identity_rows(&result, &expected, true);
+    }
+    let profile = session.execute(&format!("PROFILE {query}")).unwrap();
+    assert_profile_operator_rows(&profile, "HashAggregate", 9);
+}
+
+#[test]
+fn native_row_distinct_preserves_mixed_values_across_chunks() {
+    let (db, expected) = setup_mixed_identity_db();
+    let session = db.session();
+    let query = "MATCH (n:IdentityValue) RETURN DISTINCT n.v AS key";
+    for _ in 0..2 {
+        let result = session.execute(query).unwrap();
+        assert_mixed_identity_rows(&result, &expected, false);
+    }
+    let profile = session.execute(&format!("PROFILE {query}")).unwrap();
+    assert_profile_operator_rows(&profile, "Distinct", 9);
+}
+
+#[test]
+fn native_count_distinct_preserves_mixed_value_identities() {
+    let (db, _) = setup_mixed_identity_db();
+    let session = db.session();
+    let query = "MATCH (n:IdentityValue) \
+                 RETURN count(DISTINCT n.v) AS distinct_values, count(*) AS total";
+    for _ in 0..2 {
+        let result = session.execute(query).unwrap();
+        assert_eq!(result.rows().len(), 1);
+        assert_eq!(result.rows()[0], vec![Value::Int64(8), Value::Int64(2816)]);
+    }
+    // PROFILE exposes the aggregate's output cardinality, not its count value.
+    let profile = session.execute(&format!("PROFILE {query}")).unwrap();
+    assert_profile_operator_rows(&profile, "SimpleAggregate", 1);
+}
+
 // ── Filter (exercises FilterPushOperator + PredicateAdapter) ─────────
 
 #[test]

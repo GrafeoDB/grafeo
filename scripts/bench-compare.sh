@@ -217,6 +217,14 @@ fi
 echo "" >> "$BODY_FILE"
 echo "<!-- grafeo-bench-comparison -->" >> "$BODY_FILE"
 
+BODY=$(cat "$BODY_FILE")
+rm -f "$BODY_FILE"
+
+# Keep the report available even when a fork token cannot publish comments.
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+  printf '\n%s\n' "$BODY" >> "$GITHUB_STEP_SUMMARY"
+fi
+
 # ── Post or update PR comment ──────────────────────────────────────────
 REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must be set}"
 
@@ -224,15 +232,18 @@ COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
   --jq '.[] | select(.body | contains("<!-- grafeo-bench-comparison -->")) | .id' \
   | head -1) || true
 
-BODY=$(cat "$BODY_FILE")
-rm -f "$BODY_FILE"
-
 if [ -n "$COMMENT_ID" ]; then
-  gh api --method PATCH "repos/${REPO}/issues/comments/${COMMENT_ID}" -f body="$BODY"
-  echo "Updated existing comment $COMMENT_ID"
+  if gh api --method PATCH "repos/${REPO}/issues/comments/${COMMENT_ID}" -f body="$BODY"; then
+    echo "Updated existing comment $COMMENT_ID"
+  else
+    echo "WARNING: Could not update benchmark comment; continuing with benchmark checks." >&2
+  fi
 else
-  gh pr comment "$PR_NUMBER" --body "$BODY"
-  echo "Posted new comment on PR #$PR_NUMBER"
+  if gh pr comment "$PR_NUMBER" --body "$BODY"; then
+    echo "Posted new comment on PR #$PR_NUMBER"
+  else
+    echo "WARNING: Could not post benchmark comment; continuing with benchmark checks." >&2
+  fi
 fi
 
 # ── Exit code ──────────────────────────────────────────────────────────

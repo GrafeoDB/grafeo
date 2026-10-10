@@ -213,11 +213,6 @@ impl<'l> Index<'l> {
     /// one.
     fn add(&mut self, entry: &'l PropertyUndoEntry) {
         match entry {
-            // A tombstone of a compacted base entity is no row of this
-            // store's tables: the deletions section writes only committed
-            // tombstones, so a pending one is left out already.
-            PropertyUndoEntry::BaseNodeDeleted { .. }
-            | PropertyUndoEntry::BaseEdgeDeleted { .. } => {}
             PropertyUndoEntry::NodeCreated { node_id } => {
                 self.created_nodes.insert(*node_id);
             }

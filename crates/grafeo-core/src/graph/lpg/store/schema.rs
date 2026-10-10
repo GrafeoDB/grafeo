@@ -1,5 +1,6 @@
 //! Schema, label, edge-type, and property-key methods for [`LpgStore`].
 
+use super::super::dictionary::NameDictionary;
 use super::{LpgStore, PropertyUndoEntry};
 #[cfg(feature = "temporal")]
 use grafeo_common::types::EpochId;
@@ -182,23 +183,6 @@ impl LpgStore {
             .map_or(0, |set| set.len())
     }
 
-    /// Whether [`nodes_by_label`](Self::nodes_by_label) holds `id` for
-    /// `label`, in O(1) through the label index. Like `nodes_by_label`, it
-    /// reads the labels nodes have now, whatever the transaction or epoch.
-    /// The compacted store's label counts use it.
-    #[cfg(feature = "compact-store")]
-    #[must_use]
-    pub(crate) fn node_in_label(&self, id: NodeId, label: &str) -> bool {
-        let reg = self.label_registry.read();
-        let Some(label_id) = reg.get_id(label) else {
-            return false;
-        };
-        self.label_index
-            .read()
-            .get(label_id as usize)
-            .is_some_and(|set| set.contains_key(&id))
-    }
-
     /// Returns the number of distinct labels in the store.
     #[must_use]
     pub fn label_count(&self) -> usize {
@@ -221,25 +205,24 @@ impl LpgStore {
     /// Returns the number of distinct edge types in the store.
     #[must_use]
     pub fn edge_type_count(&self) -> usize {
-        self.id_to_edge_type.read().len()
+        self.edge_types.read().len()
     }
 
     /// Returns all label names in the database.
     pub fn all_labels(&self) -> Vec<String> {
         self.label_registry
             .read()
-            .names()
             .iter()
-            .map(|s| s.to_string())
+            .map(|(_, name)| name.to_string())
             .collect()
     }
 
     /// Returns all edge type names in the database.
     pub fn all_edge_types(&self) -> Vec<String> {
-        self.id_to_edge_type
+        self.edge_types
             .read()
             .iter()
-            .map(|s| s.to_string())
+            .map(|(_, name)| name.to_string())
             .collect()
     }
 
@@ -255,16 +238,90 @@ impl LpgStore {
         keys.into_iter().collect()
     }
 
-    /// Registers `label` without giving it to a node, as a load does for a
-    /// label its file lists and no node has (one whose nodes were deleted).
-    pub(crate) fn register_label(&self, label: &str) {
-        self.get_or_create_label_id(label);
+    /// The id of `label`, `None` when no node of this graph ever had it.
+    pub(crate) fn label_id(&self, label: &str) -> Option<u32> {
+        self.label_registry.read().get_id(label)
     }
 
-    /// Registers `edge_type` without an edge, as
-    /// [`register_label`](Self::register_label) does for labels.
-    pub(crate) fn register_edge_type(&self, edge_type: &str) {
-        self.get_or_create_edge_type_id(edge_type);
+    /// The id of `edge_type`, `None` when this graph never had it.
+    pub(crate) fn edge_type_id(&self, edge_type: &str) -> Option<u32> {
+        self.edge_types.read().get_id(edge_type)
+    }
+
+    /// The id of property key `key`, given the next id when it has none: a
+    /// checkpoint gives a key its id when it first writes the key's column.
+    pub(crate) fn property_key_id(&self, key: &str) -> u32 {
+        if let Some(id) = self.property_keys.read().get_id(key) {
+            return id;
+        }
+        self.property_keys.write().get_or_create(key)
+    }
+
+    /// This graph's label, edge type and property key dictionaries, as they
+    /// are now.
+    pub(crate) fn name_dictionaries(&self) -> [NameDictionary; 3] {
+        [
+            self.label_registry.read().clone(),
+            self.edge_types.read().clone(),
+            self.property_keys.read().clone(),
+        ]
+    }
+
+    /// Gives this graph `source`'s dictionaries, ids included, as a copy of
+    /// a store does before it creates any node or edge.
+    pub(crate) fn copy_name_dictionaries(&self, source: &LpgStore) {
+        let [labels, edge_types, keys] = source.name_dictionaries();
+        let types = edge_types.next_id() as usize;
+        *self.label_registry.write() = labels;
+        *self.edge_types.write() = edge_types;
+        *self.property_keys.write() = keys;
+        let mut counts = self.edge_type_live_counts.write();
+        if counts.len() < types {
+            counts.resize(types, 0);
+        }
+    }
+
+    /// Restores label `name` with the id `id`, as a load does before any
+    /// node has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns what is wrong when `id` or `name` is taken.
+    pub(crate) fn restore_label(&self, id: u32, name: &str) -> Result<(), String> {
+        self.label_registry.write().insert_at(id, name)
+    }
+
+    /// Restores edge type `name` with the id `id`, as a load does before any
+    /// edge has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns what is wrong when `id` or `name` is taken.
+    pub(crate) fn restore_edge_type(&self, id: u32, name: &str) -> Result<(), String> {
+        self.edge_types.write().insert_at(id, name)?;
+        let mut counts = self.edge_type_live_counts.write();
+        if counts.len() <= id as usize {
+            counts.resize(id as usize + 1, 0);
+        }
+        Ok(())
+    }
+
+    /// Restores property key `name` with the id `id`, as a load does.
+    ///
+    /// # Errors
+    ///
+    /// Returns what is wrong when `id` or `name` is taken.
+    pub(crate) fn restore_property_key(&self, id: u32, name: &str) -> Result<(), String> {
+        self.property_keys.write().insert_at(id, name)
+    }
+
+    /// Makes the next ids of the label, edge type and property key
+    /// dictionaries at least `next`, as a load restores them: the ids below
+    /// are never given out again.
+    pub(crate) fn reserve_name_ids_below(&self, [labels, edge_types, keys]: [u32; 3]) {
+        self.label_registry.write().reserve_below(labels);
+        self.edge_types.write().reserve_below(edge_types);
+        self.property_keys.write().reserve_below(keys);
     }
 
     /// Returns the keys of the node property columns, in key order. A column

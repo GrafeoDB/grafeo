@@ -256,9 +256,9 @@ impl LpgStore {
     #[cfg(not(feature = "tiered-storage"))]
     pub fn edges_with_type<'a>(&'a self, edge_type: &str) -> impl Iterator<Item = Edge> + 'a {
         let epoch = self.current_epoch();
-        let type_to_id = self.edge_type_to_id.read();
+        let edge_types = self.edge_types.read();
 
-        if let Some(&type_id) = type_to_id.get(edge_type) {
+        if let Some(type_id) = edge_types.get_id(edge_type) {
             let edge_ids: Vec<EdgeId> = self
                 .edges
                 .read()
@@ -288,9 +288,9 @@ impl LpgStore {
     #[cfg(feature = "tiered-storage")]
     pub fn edges_with_type<'a>(&'a self, edge_type: &str) -> impl Iterator<Item = Edge> + 'a {
         let epoch = self.current_epoch();
-        let type_to_id = self.edge_type_to_id.read();
+        let edge_types = self.edge_types.read();
 
-        if let Some(&type_id) = type_to_id.get(edge_type) {
+        if let Some(type_id) = edge_types.get_id(edge_type) {
             let versions = self.edge_versions.read();
             let edge_ids: Vec<EdgeId> = versions
                 .iter()

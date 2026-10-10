@@ -11,77 +11,50 @@ use std::sync::Arc;
 #[cfg(feature = "vector-index")]
 use crate::index::vector::VectorIndexKind;
 
-/// Lends the vectors of the compacted base a store is the overlay of (see
-/// [`LpgStore::set_base_vectors`]).
-#[cfg(all(feature = "compact-store", feature = "vector-index"))]
-pub(crate) trait BaseVectors: Send + Sync {
-    /// Calls `f` with the vector in property `key` of base node `id`, and
-    /// returns whether there was one.
-    fn with_base_vector(&self, id: NodeId, key: &PropertyKey, f: &mut dyn FnMut(&[f32])) -> bool;
+/// A vector index of a store with the property whose vectors it indexes: its
+/// upkeep reads them, and so does the removal of a node from it, which
+/// mends the links of the nodes around it (#600).
+#[cfg(feature = "vector-index")]
+#[derive(Clone)]
+pub(crate) struct StoredVectorIndex {
+    /// The indexed property.
+    pub(crate) property: PropertyKey,
+    /// The index.
+    pub(crate) index: Arc<VectorIndexKind>,
 }
 
-/// The vectors the vector indexes of a store read: the store's own, and,
-/// when the store is the overlay of a compacted base, the base's for a node
-/// the store does not hold. An index of an overlay holds base and overlay
-/// nodes in one HNSW graph, so the upkeep links a new vector to its nearest
-/// neighbors among both, and a search measures both.
-///
-/// A copy of a base node takes all of the node's values, so the store's
-/// values are the node's own from then on: a vector the copy removed, or
-/// replaced by a value that is not a vector, is gone, and the base's old one
-/// is never lent for it. The base lends only for the nodes the store holds
-/// no record of.
-///
-/// Lock order: the check that the store holds a node takes the store's node
-/// lock (level 1) for a read, inside whatever lock the index holds while it
-/// reads a vector. No caller holds the node lock while it calls into a vector
-/// index (`LpgStore::adopt_node` syncs the vector indexes after it releases
-/// it).
+#[cfg(feature = "vector-index")]
+impl StoredVectorIndex {
+    /// The label of this index, read from its key `label:property`: the
+    /// index knows its property, so the rest of the key is the label, which
+    /// may hold a ':' (so may the property).
+    fn label_in<'a>(&self, key: &'a str) -> Option<&'a str> {
+        key.strip_suffix(self.property.as_str())?.strip_suffix(':')
+    }
+}
+
+/// The vectors the vector indexes of a store read: the store's values of
+/// the indexed property.
 #[cfg(feature = "vector-index")]
 pub(crate) struct IndexVectors<'a> {
     store: &'a LpgStore,
     key: PropertyKey,
-    #[cfg(feature = "compact-store")]
-    base: Option<Arc<dyn BaseVectors>>,
 }
 
 #[cfg(feature = "vector-index")]
 impl crate::index::vector::VectorAccessor for IndexVectors<'_> {
     fn get_vector(&self, id: NodeId) -> Option<Arc<[f32]>> {
-        if let Some(Value::Vector(vector)) = self.store.node_properties.get(id, &self.key) {
-            return Some(vector);
+        match self.store.node_properties.get(id, &self.key) {
+            Some(Value::Vector(vector)) => Some(vector),
+            _ => None,
         }
-        let mut copied = None;
-        self.with_base_vector(id, &mut |vector| copied = Some(Arc::from(vector)));
-        copied
     }
 
     fn with_vector(&self, id: NodeId, f: &mut dyn FnMut(&[f32])) -> bool {
         self.store
             .node_properties
-            .with_vector(id, &self.key, &mut *f)
+            .with_vector(id, &self.key, f)
             .is_some()
-            || self.with_base_vector(id, f)
-    }
-}
-
-#[cfg(feature = "vector-index")]
-impl IndexVectors<'_> {
-    /// Lends the base's vector of `id`, when the store is an overlay that
-    /// holds no record of `id`: a copy of a base node, whatever its values,
-    /// never lends the base's.
-    fn with_base_vector(&self, id: NodeId, f: &mut dyn FnMut(&[f32])) -> bool {
-        #[cfg(feature = "compact-store")]
-        {
-            self.base.as_ref().is_some_and(|base| {
-                !self.store.holds_node_record(id) && base.with_base_vector(id, &self.key, f)
-            })
-        }
-        #[cfg(not(feature = "compact-store"))]
-        {
-            let _ = (id, f);
-            false
-        }
     }
 }
 
@@ -93,18 +66,7 @@ impl LpgStore {
         IndexVectors {
             store: self,
             key: key.into(),
-            #[cfg(feature = "compact-store")]
-            base: self.base_vectors.read().clone(),
         }
-    }
-
-    /// Makes this store the overlay of a compacted base whose vectors
-    /// `base` lends: its vector indexes read them for the nodes it holds no
-    /// vector for (see [`IndexVectors`]). A [`successor`](Self::successor)
-    /// reads them too.
-    #[cfg(all(feature = "compact-store", feature = "vector-index"))]
-    pub(crate) fn set_base_vectors(&self, base: Arc<dyn BaseVectors>) {
-        *self.base_vectors.write() = Some(base);
     }
 
     /// Creates an index on a node property for O(1) lookups by value.
@@ -205,10 +167,11 @@ impl LpgStore {
         }
     }
 
-    /// Inserts `vector` into `index` when its size fits the index. A vector
-    /// of another size cannot be indexed, so the node is taken out instead:
-    /// writes through the engine reject such a vector before it gets here
-    /// (the schema checks), which leaves replayed and internal writes.
+    /// Inserts `vector` into `index` when the index can measure it: a vector
+    /// of another size, or with a NaN or an infinite value, cannot be
+    /// indexed, so the node is taken out instead. Writes through the engine
+    /// reject such a vector before it gets here (the schema checks), which
+    /// leaves replayed and internal writes.
     #[cfg(feature = "vector-index")]
     fn insert_into_vector_index(
         index: &VectorIndexKind,
@@ -216,11 +179,10 @@ impl LpgStore {
         vector: &[f32],
         accessor: &impl crate::index::vector::VectorAccessor,
     ) {
-        let dimensions = index.config().dimensions;
-        if vector.len() == dimensions {
+        if crate::index::vector::is_indexable(vector, index.config().dimensions) {
             index.insert(node_id, vector, accessor);
         } else {
-            index.remove(node_id);
+            index.remove(node_id, accessor);
         }
     }
 
@@ -240,21 +202,26 @@ impl LpgStore {
             .collect()
     }
 
+    /// The vector indexes on property `key` of the node's labels.
+    #[cfg(feature = "vector-index")]
+    fn vector_indexes_of(&self, node_id: NodeId, key: &str) -> Vec<Arc<VectorIndexKind>> {
+        let all = self.vector_indexes.read();
+        if all.is_empty() {
+            return Vec::new();
+        }
+        self.node_label_names(node_id)
+            .iter()
+            .filter_map(|label| all.get(&format!("{label}:{key}")))
+            .map(|stored| Arc::clone(&stored.index))
+            .collect()
+    }
+
     /// Brings the vector indexes on `key` of the node's labels in line with
     /// the node's current value: a vector is inserted (or replaces the old
     /// one), anything else, or no value, takes the node out.
     #[cfg(feature = "vector-index")]
     pub(super) fn sync_vector_indexes_for_property(&self, node_id: NodeId, key: &str) {
-        let indexes: Vec<Arc<VectorIndexKind>> = {
-            let all = self.vector_indexes.read();
-            if all.is_empty() {
-                return;
-            }
-            self.node_label_names(node_id)
-                .iter()
-                .filter_map(|label| all.get(&format!("{label}:{key}")).cloned())
-                .collect()
-        };
+        let indexes = self.vector_indexes_of(node_id, key);
         if indexes.is_empty() {
             return;
         }
@@ -264,7 +231,7 @@ impl LpgStore {
             match &vector {
                 Some(vector) => Self::insert_into_vector_index(&index, node_id, vector, &accessor),
                 None => {
-                    index.remove(node_id);
+                    index.remove(node_id, &accessor);
                 }
             }
         }
@@ -272,20 +239,12 @@ impl LpgStore {
 
     /// Adds a node to the vector indexes on `key` (of its labels) that do not
     /// hold it yet, with its current vector; one that holds it keeps it,
-    /// unless the vector has another size than the index, which takes it out:
-    /// an index never points at a vector it cannot measure.
+    /// unless the index cannot measure the vector (see
+    /// [`is_indexable`](crate::index::vector::is_indexable)), which takes it
+    /// out: an index never points at a vector it cannot measure.
     #[cfg(feature = "vector-index")]
     pub(super) fn index_vector_if_missing(&self, node_id: NodeId, key: &PropertyKey) {
-        let indexes: Vec<Arc<VectorIndexKind>> = {
-            let all = self.vector_indexes.read();
-            if all.is_empty() {
-                return;
-            }
-            self.node_label_names(node_id)
-                .iter()
-                .filter_map(|label| all.get(&format!("{label}:{}", key.as_str())).cloned())
-                .collect()
-        };
+        let indexes = self.vector_indexes_of(node_id, key.as_str());
         if indexes.is_empty() {
             return;
         }
@@ -294,8 +253,8 @@ impl LpgStore {
             for index in indexes {
                 if !index.contains(node_id) {
                     Self::insert_into_vector_index(&index, node_id, &vector, &accessor);
-                } else if vector.len() != index.config().dimensions {
-                    index.remove(node_id);
+                } else if !crate::index::vector::is_indexable(&vector, index.config().dimensions) {
+                    index.remove(node_id, &accessor);
                 }
             }
         }
@@ -304,9 +263,9 @@ impl LpgStore {
     /// Adds a node to the text and vector indexes of `label`, which it just
     /// got, with its current values.
     pub(super) fn index_node_under_label(&self, node_id: NodeId, label: &str) {
-        let prefix = format!("{label}:");
         #[cfg(feature = "text-index")]
         {
+            let prefix = format!("{label}:");
             let indexes: Vec<(String, Arc<RwLock<crate::index::text::InvertedIndex>>)> = self
                 .text_indexes
                 .read()
@@ -326,54 +285,51 @@ impl LpgStore {
             }
         }
         #[cfg(feature = "vector-index")]
-        {
-            let indexes: Vec<(String, Arc<VectorIndexKind>)> = self
-                .vector_indexes
-                .read()
-                .iter()
-                .filter_map(|(key, index)| {
-                    let property = key.strip_prefix(&prefix)?;
-                    Some((property.to_string(), Arc::clone(index)))
-                })
-                .collect();
-            for (property, index) in indexes {
-                let accessor = self.index_vectors(property.as_str());
-                if let Some(vector) =
-                    crate::index::vector::VectorAccessor::get_vector(&accessor, node_id)
-                {
-                    Self::insert_into_vector_index(&index, node_id, &vector, &accessor);
-                }
+        for stored in self.vector_indexes_of_label(label) {
+            let accessor = self.index_vectors(stored.property);
+            if let Some(vector) =
+                crate::index::vector::VectorAccessor::get_vector(&accessor, node_id)
+            {
+                Self::insert_into_vector_index(&stored.index, node_id, &vector, &accessor);
             }
         }
         #[cfg(not(any(feature = "text-index", feature = "vector-index")))]
-        let _ = (node_id, prefix);
+        let _ = (node_id, label);
+    }
+
+    /// The vector indexes of `label`: those whose key is `label:property`
+    /// for the property they index (a label and a property may hold a ':',
+    /// so the key is not split).
+    #[cfg(feature = "vector-index")]
+    fn vector_indexes_of_label(&self, label: &str) -> Vec<StoredVectorIndex> {
+        self.vector_indexes
+            .read()
+            .iter()
+            .filter(|(key, stored)| stored.label_in(key) == Some(label))
+            .map(|(_, stored)| stored.clone())
+            .collect()
     }
 
     /// Takes a node out of the text and vector indexes of `label`, which it
     /// just lost.
     pub(super) fn unindex_node_under_label(&self, node_id: NodeId, label: &str) {
-        let prefix = format!("{label}:");
         #[cfg(feature = "text-index")]
-        for (key, index) in self.text_indexes.read().iter() {
-            if key.starts_with(&prefix) {
-                index.write().remove(node_id);
+        {
+            let prefix = format!("{label}:");
+            for (key, index) in self.text_indexes.read().iter() {
+                if key.starts_with(&prefix) {
+                    index.write().remove(node_id);
+                }
             }
         }
         #[cfg(feature = "vector-index")]
-        {
-            let indexes: Vec<Arc<VectorIndexKind>> = self
-                .vector_indexes
-                .read()
-                .iter()
-                .filter(|(key, _)| key.starts_with(&prefix))
-                .map(|(_, index)| Arc::clone(index))
-                .collect();
-            for index in indexes {
-                index.remove(node_id);
-            }
+        for stored in self.vector_indexes_of_label(label) {
+            stored
+                .index
+                .remove(node_id, &self.index_vectors(stored.property));
         }
         #[cfg(not(any(feature = "text-index", feature = "vector-index")))]
-        let _ = (node_id, prefix);
+        let _ = (node_id, label);
     }
 
     /// Removes a deleted node from every vector index, so it can no longer be
@@ -381,10 +337,14 @@ impl LpgStore {
     /// the vector, so a leftover entry would still score like a live node).
     #[cfg(feature = "vector-index")]
     pub(super) fn remove_from_all_vector_indexes(&self, node_id: NodeId) {
-        let indexes: Vec<Arc<VectorIndexKind>> =
+        let indexes: Vec<StoredVectorIndex> =
             self.vector_indexes.read().values().cloned().collect();
-        for index in indexes {
-            index.remove(node_id);
+        for stored in indexes {
+            if stored.index.contains(node_id) {
+                stored
+                    .index
+                    .remove(node_id, &self.index_vectors(stored.property));
+            }
         }
     }
 
@@ -393,27 +353,23 @@ impl LpgStore {
     /// store's properties.
     #[cfg(feature = "vector-index")]
     pub(super) fn reinsert_into_vector_indexes(&self, node_id: NodeId, labels: &[String]) {
-        let indexes: Vec<(String, Arc<VectorIndexKind>)> = self
+        let indexes: Vec<StoredVectorIndex> = self
             .vector_indexes
             .read()
             .iter()
-            .map(|(key, index)| (key.clone(), Arc::clone(index)))
+            .filter(|(key, stored)| {
+                stored
+                    .label_in(key)
+                    .is_some_and(|label| labels.iter().any(|candidate| candidate == label))
+            })
+            .map(|(_, stored)| stored.clone())
             .collect();
-        for (key, index) in indexes {
-            // Match the key against the node's labels rather than splitting
-            // on ':', which labels (`` :`a:b` ``) and properties may contain.
-            let Some(property) = labels
-                .iter()
-                .filter_map(|label| key.strip_prefix(label.as_str())?.strip_prefix(':'))
-                .min_by_key(|property| property.len())
-            else {
-                continue;
-            };
-            let accessor = self.index_vectors(property);
+        for stored in indexes {
+            let accessor = self.index_vectors(stored.property);
             if let Some(vector) =
                 crate::index::vector::VectorAccessor::get_vector(&accessor, node_id)
             {
-                Self::insert_into_vector_index(&index, node_id, &vector, &accessor);
+                Self::insert_into_vector_index(&stored.index, node_id, &vector, &accessor);
             }
         }
     }
@@ -508,15 +464,18 @@ impl LpgStore {
     #[cfg(feature = "vector-index")]
     pub fn add_vector_index(&self, label: &str, property: &str, index: Arc<VectorIndexKind>) {
         let key = format!("{label}:{property}");
-        self.vector_indexes.write().insert(key, index);
+        let stored = StoredVectorIndex {
+            property: PropertyKey::new(property),
+            index,
+        };
+        self.vector_indexes.write().insert(key, stored);
     }
 
     /// Retrieves the vector index for a label+property pair.
     #[cfg(feature = "vector-index")]
     #[must_use]
     pub fn get_vector_index(&self, label: &str, property: &str) -> Option<Arc<VectorIndexKind>> {
-        let key = format!("{label}:{property}");
-        self.vector_indexes.read().get(&key).cloned()
+        self.get_vector_index_by_key(&format!("{label}:{property}"))
     }
 
     /// Removes a vector index for a label+property pair.
@@ -537,7 +496,7 @@ impl LpgStore {
         self.vector_indexes
             .read()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(key, stored)| (key.clone(), Arc::clone(&stored.index)))
             .collect()
     }
 
@@ -545,7 +504,10 @@ impl LpgStore {
     #[cfg(feature = "vector-index")]
     #[must_use]
     pub fn get_vector_index_by_key(&self, key: &str) -> Option<Arc<VectorIndexKind>> {
-        self.vector_indexes.read().get(key).cloned()
+        self.vector_indexes
+            .read()
+            .get(key)
+            .map(|stored| Arc::clone(&stored.index))
     }
 
     /// Stores a text index for a label+property pair.
@@ -669,70 +631,4 @@ impl LpgStore {
 /// The searches of the text and vector indexes, which leave out the nodes
 /// that are gone.
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-impl LpgStore {
-    /// The first `k` hits of a search of one of this store's text or vector
-    /// indexes that are still in the graph, best first.
-    ///
-    /// The indexes of a compacted database's overlay hold the nodes of the
-    /// compacted base (see [`successor`](Self::successor)), and a delete of
-    /// one leaves its entries there until the next merge of the overlay
-    /// drops them: the hits of the base nodes whose delete is committed are
-    /// dropped (see [`retain_live_index_hits`](Self::retain_live_index_hits)).
-    ///
-    /// `search` returns the hits of the index, best first, for the number
-    /// of them it is given. It is called with `k`, and again with twice as
-    /// many while it returned as many as it was asked for and hits were
-    /// dropped, so the result has `k` hits whenever the index finds `k`
-    /// nodes that are still there. Every search of these indexes with a
-    /// number of hits goes through here: this store's, the layered store's
-    /// and the database's.
-    pub fn live_index_hits<S>(
-        &self,
-        k: usize,
-        mut search: impl FnMut(usize) -> Vec<(NodeId, S)>,
-    ) -> Vec<(NodeId, S)> {
-        let mut fetch = k;
-        loop {
-            let mut hits = search(fetch);
-            let found = hits.len();
-            self.retain_live_index_hits(&mut hits);
-            // At most `found` were dropped, so twice the hits replace them.
-            if hits.len() >= k || found < fetch {
-                hits.truncate(k);
-                return hits;
-            }
-            fetch = fetch.saturating_mul(2);
-        }
-    }
-
-    /// Drops from `hits`, of a search of one of this store's text or vector
-    /// indexes, the nodes that are gone: the base nodes of the compacted
-    /// base this store is the overlay of whose delete is committed. A delete
-    /// that is not committed yet hides nothing, as for every current read of
-    /// the layered store. A search with a threshold uses this as it is; a
-    /// search for the best `k` uses [`live_index_hits`](Self::live_index_hits).
-    pub fn retain_live_index_hits<S>(&self, hits: &mut Vec<(NodeId, S)>) {
-        #[cfg(feature = "compact-store")]
-        {
-            let tombstones = self.base_tombstones();
-            hits.retain(|(id, _)| !tombstones.node_deleted(*id));
-        }
-        #[cfg(not(feature = "compact-store"))]
-        let _ = hits;
-    }
-
-    /// Whether node `id`, which a text index of this store may hold, is gone
-    /// (see [`retain_live_index_hits`](Self::retain_live_index_hits)).
-    #[cfg(feature = "text-index")]
-    pub(crate) fn is_gone_from_indexes(&self, id: NodeId) -> bool {
-        #[cfg(feature = "compact-store")]
-        {
-            self.base_tombstones().node_deleted(id)
-        }
-        #[cfg(not(feature = "compact-store"))]
-        {
-            let _ = id;
-            false
-        }
-    }
-}
+impl LpgStore {}

@@ -320,7 +320,7 @@ mod tests {
     /// with: those `with_caps` names, or the thread's caps when `new` ran.
     #[test]
     fn a_section_writes_chunks_with_the_caps_it_was_built_with() {
-        use grafeo_common::storage::{ChunkKind, ImageSource, MemoryImage};
+        use grafeo_common::storage::{ChunkKind, ChunkNamespace, ImageSource, MemoryImage};
         use grafeo_common::testing::chunk_caps::with_chunk_caps;
 
         let store = Arc::new(LpgStore::new().unwrap());
@@ -340,7 +340,11 @@ mod tests {
             source
                 .chunks()
                 .iter()
-                .filter(|chunk| chunk.kind == ChunkKind::Column && chunk.column_id == 0)
+                .filter(|chunk| {
+                    chunk.kind == ChunkKind::Column
+                        && chunk.namespace == ChunkNamespace::NodeStructure
+                        && chunk.column_id == 0
+                })
                 .count()
         };
         let built_with = LpgStoreSection::with_caps(Arc::clone(&store), tiny);

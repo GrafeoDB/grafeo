@@ -18,6 +18,8 @@ pub(crate) mod block;
 mod chunked;
 #[cfg(feature = "lpg")]
 mod committed;
+#[cfg(feature = "lpg")]
+mod dictionary;
 mod edge;
 mod node;
 pub mod overlay;
@@ -41,7 +43,5 @@ pub use property::{CompareOp, PropertyStorage};
 // Store and section require the lpg feature
 #[cfg(feature = "lpg")]
 pub use section::LpgStoreSection;
-#[cfg(all(feature = "lpg", feature = "compact-store", feature = "vector-index"))]
-pub(crate) use store::BaseVectors;
 #[cfg(feature = "lpg")]
 pub use store::{LpgStore, PropertyUndoEntry};

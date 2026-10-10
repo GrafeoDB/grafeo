@@ -199,10 +199,10 @@ impl LpgStore {
             use grafeo_common::memory::NamedMemory;
             let vidx = self.vector_indexes.read();
             vidx.iter()
-                .map(|(name, idx)| NamedMemory {
+                .map(|(name, stored)| NamedMemory {
                     name: name.clone(),
-                    bytes: idx.heap_memory_bytes(),
-                    item_count: idx.len(),
+                    bytes: stored.index.heap_memory_bytes(),
+                    item_count: stored.index.len(),
                 })
                 .collect()
         };
@@ -244,21 +244,13 @@ impl LpgStore {
 
     fn string_pool_memory(&self) -> StringPoolMemory {
         let label_reg = self.label_registry.read();
-        let edge_type_to_id = self.edge_type_to_id.read();
-        let id_to_edge_type = self.id_to_edge_type.read();
+        let edge_types = self.edge_types.read();
 
         let label_count = label_reg.len();
-        let edge_type_count = id_to_edge_type.len();
+        let edge_type_count = edge_types.len();
 
         let label_registry_bytes = label_reg.heap_bytes();
-
-        // Same for edge types
-        let et_map_bytes = edge_type_to_id.capacity()
-            * (size_of::<arcstr::ArcStr>() + size_of::<u32>() + 1)
-            + edge_type_to_id.keys().map(|s| s.len()).sum::<usize>();
-        let et_vec_bytes = id_to_edge_type.capacity() * size_of::<arcstr::ArcStr>()
-            + id_to_edge_type.iter().map(|s| s.len()).sum::<usize>();
-        let edge_type_registry_bytes = et_map_bytes + et_vec_bytes;
+        let edge_type_registry_bytes = edge_types.heap_bytes();
 
         let mut sp = StringPoolMemory {
             label_registry_bytes,

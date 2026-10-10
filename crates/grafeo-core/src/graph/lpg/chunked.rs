@@ -1,19 +1,22 @@
 //! The LPG section in chunks (section version 3).
 //!
 //! Per graph in id order (graph 0 is the default graph, then the named graphs
-//! in name order), the section holds its node table and then its edge table.
+//! by their ids), the section holds its node table and then its edge table.
 //! A row is a node or edge id, and a table is written in row groups of
 //! `max_rows` rows, `[k * max_rows, (k + 1) * max_rows)`; only the groups
 //! that hold a node (or an edge) are written, and the chunks of one group come
 //! together. In a group:
 //!
-//! - the node table writes [`COLUMN_LABELS`]: the node's label ids, ascending,
-//!   joined by `,` as a string (`""` for a node without labels);
+//! - the node table writes [`COLUMN_LABELS`] (node structure namespace): the
+//!   node's label ids, ascending, joined by `,` as a string (`""` for a node
+//!   without labels);
 //! - the edge table writes [`COLUMN_SOURCE`], [`COLUMN_TARGET`] and
-//!   [`COLUMN_EDGE_TYPE`]: `Int64` values of the source and target node ids and
-//!   the edge type id, as three chunks of one range in a row;
+//!   [`COLUMN_EDGE_TYPE`] (edge structure namespace): `Int64` values of the
+//!   source and target node ids and the edge type id, as three chunks of one
+//!   range in a row;
 //! - each property column with a value in the group writes `Column` chunks of
-//!   the current values. With `temporal`, a value carries the epoch it was set
+//!   the current values, in the table's property namespace, with the property
+//!   key's id as the column id. With `temporal`, a value carries the epoch it was set
 //!   at, and the older versions go to `History` chunks, each written right
 //!   before the `Column` chunk of its rows: a history value is a list of
 //!   `[epoch, value]` lists, epochs ascending. A property removed last (its
@@ -24,31 +27,33 @@
 //!   range has an older version. Versions of transactions that did not commit
 //!   are not written.
 //!
+//! Ids are permanent: a graph's id, and the ids of each graph's labels, edge
+//! types and property keys, are given once and never reassigned or reused
+//! (see [`NameDictionary`]), so the chunks of one checkpoint and the next
+//! name the same things by the same ids. The labels and edge types are the
+//! graph's own dictionaries; a property key gets its id when a write first
+//! meets its column, and one dictionary of keys serves the node and the edge
+//! table (the namespace tells them apart). A name nothing uses any more keeps
+//! its id, and an id no name holds is a gap. A dropped graph's id is never
+//! given again: a graph created later under its name gets a new one.
+//!
 //! The metadata chunk ([`ChunkMeta::meta`]) comes last: [`LpgMeta`], with the
-//! caps the section was written with, the graphs with their next node and
-//! edge ids, the label and edge type names (a label's or edge type's id in
-//! the file is its position in these lists), and the property columns (ids
-//! from [`FIRST_PROPERTY_COLUMN`]), in the layout of [`encode_lpg_meta`],
-//! which has no size limit of its own: it holds as many names as the store
-//! has. It comes last
-//! because it lists every name the chunks use: commits are held while a
-//! checkpoint writes, but a transaction still open can create a label, an
-//! edge type or a property key meanwhile, and the write meets it. The names
-//! are those the registries held when the write began, sorted (labels and
-//! edge types by name, columns by `(table, key)`), followed by the names met
-//! during the write, in the order met. Each graph also lists the labels and
-//! edge types it has registered that none of its rows use (those of deleted
-//! nodes and edges, or of a transaction that rolled back). A reader fetches
-//! the metadata chunk first, then the others in order, and registers each
-//! graph's unused names in that graph, so every graph's names come back as
-//! they were. A loaded store then writes the same chunks again, with two
-//! exceptions: names appended during a write are sorted into place by the
-//! next write (their ids change), and a property column without a value is
-//! not recreated (the next write lists one column fewer).
+//! caps the section was written with, the id the next graph gets, and each
+//! graph with its id, name, next node and edge ids and its three dictionaries
+//! (each its next id and its names with their ids), in the layout of
+//! [`encode_lpg_meta`], which has no size limit of its own: it holds as many
+//! names as the store has. It comes last because it lists every name the
+//! chunks use, and the dictionaries are read after the rows: commits are held
+//! while a checkpoint writes, but a transaction still open can create a
+//! label, an edge type or a property key meanwhile, and the dictionaries only
+//! grow, so the ones read after the rows hold every id the rows name. A
+//! reader fetches the metadata chunk first, restores every graph and its
+//! dictionaries id for id, then reads the others in order, so the store comes
+//! back with the ids it had.
 //!
 //! The chunk sizes follow [`RowsChunker`]: at most `max_rows` rows and
 //! `max_bytes` bytes, a larger value in a chunk of its own. Every order is
-//! defined (ids, names and keys sorted), so the same data gives the same
+//! defined (graphs, rows and columns by id), so the same store gives the same
 //! bytes.
 //!
 //! The section holds the committed state, also while transactions are open
@@ -72,8 +77,7 @@
 //! sorted ids of each of its property columns (8 bytes per value); it reads
 //! values a batch at a time.
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -85,6 +89,7 @@ use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 
+use super::dictionary::NameDictionary;
 use super::property::{EntityId, PropertyStorage};
 use super::store::{Labels, OpenChanges};
 use super::{Edge, LpgStore};
@@ -103,8 +108,6 @@ pub(crate) const COLUMN_SOURCE: u32 = 1;
 pub(crate) const COLUMN_TARGET: u32 = 2;
 /// The edge table's edge type column.
 pub(crate) const COLUMN_EDGE_TYPE: u32 = 3;
-/// The id of the first property column; ids below it are fixed columns.
-pub(crate) const FIRST_PROPERTY_COLUMN: u32 = 16;
 
 /// The largest epoch a section holds: history values store epochs as
 /// `Int64`.
@@ -125,33 +128,53 @@ pub(crate) struct LpgMeta {
     pub max_bytes: u32,
     /// The store's epoch with `temporal`, 0 without.
     pub epoch: u64,
-    /// Label names; a label's id in the file is its position.
-    pub labels: Vec<String>,
-    /// Edge type names; an edge type's id in the file is its position.
-    pub edge_types: Vec<String>,
-    /// Graph `i` has graph id `i`; graph 0 is the default graph, with an
-    /// empty name. The named graphs follow in name order (one of them may
-    /// have the empty name: the default graph is graph 0 by its position).
+    /// The id the next named graph gets: above every graph id given out.
+    pub next_graph_id: u32,
+    /// The default graph (id 0, an empty name) first, then the named graphs
+    /// by id, ascending (one of them may have the empty name: the default
+    /// graph is the one with id 0).
     pub graphs: Vec<GraphMeta>,
-    /// The property columns, ids ascending from [`FIRST_PROPERTY_COLUMN`].
-    pub columns: Vec<ColumnMeta>,
 }
 
 /// One graph of an LPG section.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct GraphMeta {
+    /// The graph's id: 0 for the default graph.
+    pub id: u32,
     /// The graph's name; empty for the default graph.
     pub name: String,
     /// The id the graph gives its next node: the node table's rows are below it.
     pub next_node_id: u64,
     /// The id the graph gives its next edge: the edge table's rows are below it.
     pub next_edge_id: u64,
-    /// The ids of the labels the graph has registered that none of its nodes
-    /// has, ascending.
-    pub unused_labels: Vec<u32>,
-    /// The ids of the edge types the graph has registered that none of its
-    /// edges has, ascending.
-    pub unused_edge_types: Vec<u32>,
+    /// The graph's labels.
+    pub labels: DictionaryMeta,
+    /// The graph's edge types.
+    pub edge_types: DictionaryMeta,
+    /// The graph's property keys, of the node and the edge table.
+    pub keys: DictionaryMeta,
+}
+
+/// A name dictionary of a graph, as the metadata chunk lists it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct DictionaryMeta {
+    /// The id the next new name gets: above every id given out.
+    pub next_id: u32,
+    /// The names with their ids, ids ascending.
+    pub names: Vec<(u32, String)>,
+}
+
+impl DictionaryMeta {
+    /// `dictionary` as the metadata chunk lists it.
+    fn of(dictionary: &NameDictionary) -> Self {
+        Self {
+            next_id: dictionary.next_id(),
+            names: dictionary
+                .iter()
+                .map(|(id, name)| (id, name.to_string()))
+                .collect(),
+        }
+    }
 }
 
 /// The table a column belongs to.
@@ -189,17 +212,6 @@ impl Table {
     }
 }
 
-/// A property column of an LPG section.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ColumnMeta {
-    /// The column's id in its chunks, at least [`FIRST_PROPERTY_COLUMN`].
-    pub column_id: u32,
-    /// The table whose rows the column holds values for.
-    pub table: Table,
-    /// The property key.
-    pub key: String,
-}
-
 // ── Writing ─────────────────────────────────────────────────────────
 
 /// Writes per graph (in id order) the node table's row groups, then the edge
@@ -224,13 +236,13 @@ pub(crate) fn write_lpg_chunks(
     sink: &mut dyn SectionSink,
 ) -> Result<()> {
     caps.validate()?;
-    let mut graph_names = store.graph_names();
-    graph_names.sort_unstable();
     // A graph dropped since the names were read is left out.
-    let named: Vec<(String, Arc<LpgStore>)> = graph_names
+    let mut named: Vec<(String, Arc<LpgStore>)> = store
+        .graph_names()
         .into_iter()
         .filter_map(|name| store.graph(&name).map(|graph| (name, graph)))
         .collect();
+    named.sort_unstable_by_key(|(_, graph)| graph.graph_id());
     let graphs: Vec<(&str, &LpgStore)> = std::iter::once(("", store))
         .chain(named.iter().map(|(name, graph)| (name.as_str(), &**graph)))
         .collect();
@@ -241,46 +253,41 @@ pub(crate) fn write_lpg_chunks(
             "the store epoch {epoch} is above {MAX_EPOCH}, the largest epoch a section holds"
         )));
     }
-    let names = Names::begin(&graphs);
     let mut graph_metas = Vec::with_capacity(graphs.len());
-    for (index, (name, graph)) in graphs.iter().enumerate() {
+    for (name, graph) in &graphs {
         let place = Place {
-            graph_id: u32::try_from(index).map_err(|_| {
-                Error::Serialization(format!("an LPG section holds {index} graphs or more"))
-            })?,
-            graph: describe_graph(index, name),
+            graph_id: graph.graph_id(),
+            graph: describe_graph(graph.graph_id(), name),
             caps,
         };
         // Each graph is a store with its own undo log.
         let changes = graph.open_changes();
-        let (nodes_end, used_labels) =
-            write_node_table(graph, &changes, epoch, &names, &place, sink)?;
-        let (edges_end, used_edge_types) = write_edge_table(graph, &changes, &names, &place, sink)?;
+        let nodes_end = write_node_table(graph, &changes, epoch, &place, sink)?;
+        let edges_end = write_edge_table(graph, &changes, &place, sink)?;
         // Read after the rows: every row written is below the next ids, and
-        // the registries hold every name the rows use.
+        // the dictionaries, which only grow, hold every id the rows name.
+        let [labels, edge_types, keys] = graph.name_dictionaries();
         graph_metas.push(GraphMeta {
+            id: graph.graph_id(),
             name: (*name).to_string(),
             next_node_id: graph.next_node_id().max(nodes_end),
             next_edge_id: graph.next_edge_id().max(edges_end),
-            unused_labels: unused(graph.all_labels(), &names.labels, &used_labels)?,
-            unused_edge_types: unused(graph.all_edge_types(), &names.edge_types, &used_edge_types)?,
+            labels: DictionaryMeta::of(&labels),
+            edge_types: DictionaryMeta::of(&edge_types),
+            keys: DictionaryMeta::of(&keys),
         });
     }
 
-    let meta = names.finish(caps, epoch, graph_metas)?;
+    let meta = LpgMeta {
+        layout: LPG_META_LAYOUT,
+        max_rows: caps.max_rows,
+        max_bytes: caps.max_bytes,
+        epoch,
+        // Read after the graphs: above every graph id written.
+        next_graph_id: store.next_graph_id(),
+        graphs: graph_metas,
+    };
     sink.write_chunk(ChunkMeta::meta(), &encode_lpg_meta(&meta)?)
-}
-
-/// The ids of the names in `registered` that are not in `used`, ascending.
-fn unused(registered: Vec<String>, list: &NameList, used: &BTreeSet<u32>) -> Result<Vec<u32>> {
-    let mut ids = BTreeSet::new();
-    for name in registered {
-        let id = list.id(&name)?;
-        if !used.contains(&id) {
-            ids.insert(id);
-        }
-    }
-    Ok(ids.into_iter().collect())
 }
 
 /// The nodes of `graph` as committed, ascending: those visible now and those
@@ -339,24 +346,30 @@ pub(super) fn committed_edges<'g>(
         })
 }
 
-/// Writes the node table of `graph`: its [`committed_nodes`]; returns one
-/// past its last row (0 for none) and the ids of the labels its nodes have.
+/// Writes the node table of `graph`: its [`committed_nodes`], each with the
+/// ids its labels have in the graph's label dictionary; returns one past its
+/// last row (0 for none).
 fn write_node_table(
     graph: &LpgStore,
     changes: &OpenChanges,
     epoch: u64,
-    names: &Names,
     place: &Place,
     sink: &mut dyn SectionSink,
-) -> Result<(u64, BTreeSet<u32>)> {
-    let used = RefCell::new(BTreeSet::new());
+) -> Result<u64> {
     let nodes = committed_nodes(graph, changes, epoch)?.map(|(id, labels)| {
         let mut labels = labels
             .iter()
-            .map(|label| names.labels.id(label))
+            .map(|label| {
+                graph.label_id(label).ok_or_else(|| {
+                    Error::Internal(format!(
+                        "{}, node {}: label {label:?} has no id in the graph's labels",
+                        place.graph,
+                        id.as_u64()
+                    ))
+                })
+            })
             .collect::<Result<Vec<u32>>>()?;
         labels.sort_unstable();
-        used.borrow_mut().extend(labels.iter().copied());
         let text = labels
             .iter()
             .map(u32::to_string)
@@ -370,23 +383,20 @@ fn write_node_table(
         properties: &graph.node_properties,
         #[cfg(not(feature = "temporal"))]
         committed: changes.node_values(),
-        names,
+        graph,
     };
-    let end = table.write(place, nodes, sink)?;
-    Ok((end, used.into_inner()))
+    table.write(place, nodes, sink)
 }
 
-/// Writes the edge table of `graph`: its [`committed_edges`]; returns one
-/// past its last row (0 for none) and the ids of the edge types its edges
-/// have.
+/// Writes the edge table of `graph`: its [`committed_edges`], each with the
+/// id its type has in the graph's edge type dictionary; returns one past its
+/// last row (0 for none).
 fn write_edge_table(
     graph: &LpgStore,
     changes: &OpenChanges,
-    names: &Names,
     place: &Place,
     sink: &mut dyn SectionSink,
-) -> Result<(u64, BTreeSet<u32>)> {
-    let used = RefCell::new(BTreeSet::new());
+) -> Result<u64> {
     let edges = committed_edges(graph, changes).map(|edge| {
         let edge = edge?;
         let endpoint = |node: NodeId, end: &str| {
@@ -403,8 +413,14 @@ fn write_edge_table(
         };
         let source = endpoint(edge.src, "source")?;
         let target = endpoint(edge.dst, "target")?;
-        let edge_type = names.edge_types.id(&edge.edge_type)?;
-        used.borrow_mut().insert(edge_type);
+        let edge_type = graph.edge_type_id(&edge.edge_type).ok_or_else(|| {
+            Error::Internal(format!(
+                "{}, edge {}: edge type {:?} has no id in the graph's edge types",
+                place.graph,
+                edge.id.as_u64(),
+                edge.edge_type
+            ))
+        })?;
         Ok((
             edge.id,
             vec![
@@ -424,10 +440,9 @@ fn write_edge_table(
         properties: &graph.edge_properties,
         #[cfg(not(feature = "temporal"))]
         committed: changes.edge_values(),
-        names,
+        graph,
     };
-    let end = table.write(place, edges, sink)?;
-    Ok((end, used.into_inner()))
+    table.write(place, edges, sink)
 }
 
 /// The ids in `visible` and in `deleted` (both ascending), ascending and
@@ -473,9 +488,9 @@ pub(super) fn section_epoch(_store: &LpgStore) -> u64 {
     0
 }
 
-/// How graph `index` (named `name`) is named in errors.
-fn describe_graph(index: usize, name: &str) -> String {
-    if index == 0 {
+/// How the graph with id `graph_id` (named `name`) is named in errors.
+fn describe_graph(graph_id: u32, name: &str) -> String {
+    if graph_id == 0 {
         "the default graph".to_string()
     } else {
         format!("graph {name:?}")
@@ -489,180 +504,6 @@ fn column(namespace: ChunkNamespace, column_id: u32) -> ChunkColumn {
         namespace,
         column_id,
     }
-}
-
-/// The names a write gives ids: those the registries held when it began,
-/// sorted, then those it meets, in the order met.
-struct Names {
-    labels: NameList,
-    edge_types: NameList,
-    columns: ColumnList,
-}
-
-impl Names {
-    /// The names `graphs` hold now: the union over every graph.
-    fn begin(graphs: &[(&str, &LpgStore)]) -> Self {
-        let mut labels = Vec::new();
-        let mut edge_types = Vec::new();
-        let mut columns = BTreeSet::new();
-        for (_, graph) in graphs {
-            labels.extend(graph.all_labels());
-            edge_types.extend(graph.all_edge_types());
-            columns.extend(
-                graph
-                    .node_property_keys()
-                    .into_iter()
-                    .map(|key| (Table::Node, key)),
-            );
-            columns.extend(
-                graph
-                    .edge_property_keys()
-                    .into_iter()
-                    .map(|key| (Table::Edge, key)),
-            );
-        }
-        Self {
-            labels: NameList::new(labels, "label"),
-            edge_types: NameList::new(edge_types, "edge type"),
-            columns: ColumnList {
-                sorted: columns.into_iter().collect(),
-                added: RefCell::new(Vec::new()),
-            },
-        }
-    }
-
-    /// The metadata of a write with these names.
-    fn finish(self, caps: ChunkCaps, epoch: u64, graphs: Vec<GraphMeta>) -> Result<LpgMeta> {
-        Ok(LpgMeta {
-            layout: LPG_META_LAYOUT,
-            max_rows: caps.max_rows,
-            max_bytes: caps.max_bytes,
-            epoch,
-            labels: self.labels.into_names(),
-            edge_types: self.edge_types.into_names(),
-            graphs,
-            columns: self.columns.into_columns()?,
-        })
-    }
-}
-
-/// Label or edge type names with their ids in the file: the names a write
-/// began with, sorted, then those it met, in the order met.
-pub(super) struct NameList {
-    sorted: Vec<String>,
-    added: RefCell<Vec<String>>,
-    /// "label" or "edge type", for errors.
-    what: &'static str,
-}
-
-impl NameList {
-    /// `names`, sorted, each once.
-    pub(super) fn new(names: impl IntoIterator<Item = String>, what: &'static str) -> Self {
-        let sorted: BTreeSet<String> = names.into_iter().collect();
-        Self {
-            sorted: sorted.into_iter().collect(),
-            added: RefCell::new(Vec::new()),
-            what,
-        }
-    }
-
-    /// The id of `name`, given the next free id when the list lacks it.
-    pub(super) fn id(&self, name: &str) -> Result<u32> {
-        let at = match self
-            .sorted
-            .binary_search_by(|known| known.as_str().cmp(name))
-        {
-            Ok(at) => at,
-            Err(_) => {
-                let mut added = self.added.borrow_mut();
-                let position = match added.iter().position(|known| known == name) {
-                    Some(position) => position,
-                    None => {
-                        added.push(name.to_string());
-                        added.len() - 1
-                    }
-                };
-                self.sorted.len() + position
-            }
-        };
-        u32::try_from(at).map_err(|_| {
-            Error::Serialization(format!(
-                "an LPG section holds more than {} {} names",
-                u32::MAX,
-                self.what
-            ))
-        })
-    }
-
-    /// Every name, in id order.
-    pub(super) fn into_names(self) -> Vec<String> {
-        let mut names = self.sorted;
-        names.extend(self.added.into_inner());
-        names
-    }
-}
-
-/// The property columns of a write, like [`NameList`]: those it began with,
-/// by `(table, key)`, then those it met.
-struct ColumnList {
-    sorted: Vec<(Table, PropertyKey)>,
-    added: RefCell<Vec<(Table, PropertyKey)>>,
-}
-
-impl ColumnList {
-    /// The column id of property `key` of `table`, given the next free id
-    /// when the list lacks it.
-    fn id(&self, table: Table, key: &PropertyKey) -> Result<u32> {
-        let at = match self
-            .sorted
-            .binary_search_by(|(known_table, known)| (*known_table, known).cmp(&(table, key)))
-        {
-            Ok(at) => at,
-            Err(_) => {
-                let mut added = self.added.borrow_mut();
-                let position = match added
-                    .iter()
-                    .position(|(known_table, known)| *known_table == table && known == key)
-                {
-                    Some(position) => position,
-                    None => {
-                        added.push((table, key.clone()));
-                        added.len() - 1
-                    }
-                };
-                self.sorted.len() + position
-            }
-        };
-        column_id(at)
-    }
-
-    /// Every column, in id order.
-    fn into_columns(self) -> Result<Vec<ColumnMeta>> {
-        self.sorted
-            .into_iter()
-            .chain(self.added.into_inner())
-            .enumerate()
-            .map(|(at, (table, key))| {
-                Ok(ColumnMeta {
-                    column_id: column_id(at)?,
-                    table,
-                    key: key.as_str().to_string(),
-                })
-            })
-            .collect()
-    }
-}
-
-/// The id of the property column at position `at`.
-fn column_id(at: usize) -> Result<u32> {
-    u32::try_from(at)
-        .ok()
-        .and_then(|at| FIRST_PROPERTY_COLUMN.checked_add(at))
-        .ok_or_else(|| {
-            Error::Serialization(format!(
-                "an LPG section holds {at} property columns or more"
-            ))
-        })
 }
 
 /// Where a table is written.
@@ -687,7 +528,8 @@ struct TableWriter<'s, Id: EntityId> {
     /// none), by id ascending: written instead of the store's value.
     #[cfg(not(feature = "temporal"))]
     committed: &'s BTreeMap<PropertyKey, Vec<(Id, Option<Value>)>>,
-    names: &'s Names,
+    /// The graph whose property keys give the columns their ids.
+    graph: &'s LpgStore,
 }
 
 impl<Id: EntityId> TableWriter<'_, Id> {
@@ -700,6 +542,14 @@ impl<Id: EntityId> TableWriter<'_, Id> {
         sink: &mut dyn SectionSink,
     ) -> Result<u64> {
         let max_rows = u64::from(place.caps.max_rows);
+        // The table's keys get their ids first, in key order, so a store
+        // built the same way gets the same ids whatever order the rows meet
+        // them in.
+        let mut keys = self.properties.keys();
+        keys.sort_unstable();
+        for key in &keys {
+            self.graph.property_key_id(key.as_str());
+        }
         #[cfg(not(feature = "temporal"))]
         let mut cursors = self.cursors()?;
         let mut end = 0;
@@ -776,18 +626,20 @@ impl<'s, Id: EntityId> TableWriter<'s, Id> {
         keys.extend(committed.keys().cloned());
         keys.sort_unstable();
         keys.dedup();
-        keys.into_iter()
-            .map(|key| {
-                Ok(ColumnCursor {
-                    column_id: self.names.columns.id(self.table, &key)?,
-                    ids: self.properties.column_ids(&key),
-                    next: 0,
-                    committed: committed.get(&key).map_or(&[], Vec::as_slice),
-                    next_committed: 0,
-                    key,
-                })
+        let mut cursors: Vec<ColumnCursor<'s, Id>> = keys
+            .into_iter()
+            .map(|key| ColumnCursor {
+                column_id: self.graph.property_key_id(key.as_str()),
+                ids: self.properties.column_ids(&key),
+                next: 0,
+                committed: committed.get(&key).map_or(&[], Vec::as_slice),
+                next_committed: 0,
+                key,
             })
-            .collect()
+            .collect();
+        // In column order: the keys' ids.
+        cursors.sort_unstable_by_key(|cursor| cursor.column_id);
+        Ok(cursors)
     }
 }
 
@@ -860,7 +712,7 @@ impl<'p, Id: EntityId> Group<'p, Id> {
     ) -> Result<()> {
         let mut histories = Vec::new();
         for (key, versions) in committed_versions(table.properties, id) {
-            histories.push((table.names.columns.id(table.table, &key)?, key, versions));
+            histories.push((table.graph.property_key_id(key.as_str()), key, versions));
         }
         histories.sort_unstable_by_key(|(column_id, _, _)| *column_id);
         for (column_id, key, versions) in histories {
@@ -1187,9 +1039,9 @@ pub(super) fn column_rows<'c, Id: EntityId>(
 /// | layout | u8, [`LPG_META_LAYOUT`] |
 /// | max_rows, max_bytes | u32 each |
 /// | epoch | u64 |
-/// | labels, edge types | each a count u32, then per name its length u32 and UTF-8 |
-/// | graphs | a count u32, then per graph its name (as above), next node id u64, next edge id u64, unused label ids and unused edge type ids (each a count u32 and u32 ids) |
-/// | columns | a count u32, then per column its id u32, table u8 (0 node, 1 edge) and key (as above) |
+/// | next graph id | u32 |
+/// | graphs | a count u32, then per graph its id u32, name (its length u32 and UTF-8), next node id u64, next edge id u64, and its labels, edge types and property keys |
+/// | a dictionary | its next id u32, a count u32, then per name its id u32 and the name (as above) |
 ///
 /// Nothing in the layout limits its size: a reader checks every count and
 /// length against the bytes left, so the chunk holds as many names as the
@@ -1204,35 +1056,25 @@ pub(crate) fn encode_lpg_meta(meta: &LpgMeta) -> Result<Vec<u8>> {
     out.extend_from_slice(&meta.max_rows.to_le_bytes());
     out.extend_from_slice(&meta.max_bytes.to_le_bytes());
     out.extend_from_slice(&meta.epoch.to_le_bytes());
-    for (names, what) in [(&meta.labels, "label"), (&meta.edge_types, "edge type")] {
-        put_count(names.len(), what, &mut out)?;
-        for name in names {
-            put_name(name, what, &mut out)?;
-        }
-    }
+    out.extend_from_slice(&meta.next_graph_id.to_le_bytes());
     put_count(meta.graphs.len(), "graph", &mut out)?;
     for graph in &meta.graphs {
+        out.extend_from_slice(&graph.id.to_le_bytes());
         put_name(&graph.name, "graph", &mut out)?;
         out.extend_from_slice(&graph.next_node_id.to_le_bytes());
         out.extend_from_slice(&graph.next_edge_id.to_le_bytes());
-        for (ids, what) in [
-            (&graph.unused_labels, "unused label"),
-            (&graph.unused_edge_types, "unused edge type"),
+        for (dictionary, what) in [
+            (&graph.labels, "label"),
+            (&graph.edge_types, "edge type"),
+            (&graph.keys, "property key"),
         ] {
-            put_count(ids.len(), what, &mut out)?;
-            for id in ids {
+            out.extend_from_slice(&dictionary.next_id.to_le_bytes());
+            put_count(dictionary.names.len(), what, &mut out)?;
+            for (id, name) in &dictionary.names {
                 out.extend_from_slice(&id.to_le_bytes());
+                put_name(name, what, &mut out)?;
             }
         }
-    }
-    put_count(meta.columns.len(), "property column", &mut out)?;
-    for column in &meta.columns {
-        out.extend_from_slice(&column.column_id.to_le_bytes());
-        out.push(match column.table {
-            Table::Node => 0,
-            Table::Edge => 1,
-        });
-        put_name(&column.key, "property", &mut out)?;
     }
     Ok(out)
 }
@@ -1284,40 +1126,20 @@ pub(crate) fn decode_lpg_meta(bytes: &[u8]) -> Result<LpgMeta> {
     let max_rows = reader.u32("max_rows", "")?;
     let max_bytes = reader.u32("max_bytes", "")?;
     let epoch = reader.u64("epoch", "")?;
-    let labels = reader.names("label")?;
-    let edge_types = reader.names("edge type")?;
-    // A name length, two ids and two counts at least.
-    let count = reader.count("graph", 4 + 8 + 8 + 4 + 4)?;
+    let next_graph_id = reader.u32("next graph id", "")?;
+    // An id, a name length, two next ids and three dictionaries (a next id
+    // and a count each) at least.
+    let count = reader.count("graph", 4 + 4 + 8 + 8 + 3 * (4 + 4))?;
     let mut graphs = Vec::with_capacity(count);
     for _ in 0..count {
         graphs.push(GraphMeta {
+            id: reader.u32("graph id", "")?,
             name: reader.name("graph")?,
             next_node_id: reader.u64("next node id", "")?,
             next_edge_id: reader.u64("next edge id", "")?,
-            unused_labels: reader.ids("unused label")?,
-            unused_edge_types: reader.ids("unused edge type")?,
-        });
-    }
-    // An id, a table and a key length at least.
-    let count = reader.count("property column", 4 + 1 + 4)?;
-    let mut columns = Vec::with_capacity(count);
-    for _ in 0..count {
-        let column_id = reader.u32("column id", "")?;
-        let at = reader.pos;
-        let table = match reader.u8("table", "")? {
-            0 => Table::Node,
-            1 => Table::Edge,
-            other => {
-                return Err(reader.refuse(
-                    at,
-                    format!("table {other}, where 0 is the node table and 1 the edge table"),
-                ));
-            }
-        };
-        columns.push(ColumnMeta {
-            column_id,
-            table,
-            key: reader.name("property")?,
+            labels: reader.dictionary("label")?,
+            edge_types: reader.dictionary("edge type")?,
+            keys: reader.dictionary("property key")?,
         });
     }
     if reader.pos != bytes.len() {
@@ -1331,10 +1153,8 @@ pub(crate) fn decode_lpg_meta(bytes: &[u8]) -> Result<LpgMeta> {
         max_rows,
         max_bytes,
         epoch,
-        labels,
-        edge_types,
+        next_graph_id,
         graphs,
-        columns,
     })
 }
 
@@ -1422,24 +1242,16 @@ impl MetaReader<'_> {
         Ok(name)
     }
 
-    /// A list of names.
-    fn names(&mut self, what: &str) -> Result<Vec<String>> {
-        let count = self.count(what, 4)?;
+    /// A dictionary: its next id, then its names with their ids.
+    fn dictionary(&mut self, what: &str) -> Result<DictionaryMeta> {
+        let next_id = self.u32(what, "next id")?;
+        // An id and a name length at least.
+        let count = self.count(what, 4 + 4)?;
         let mut names = Vec::with_capacity(count);
         for _ in 0..count {
-            names.push(self.name(what)?);
+            names.push((self.u32(what, "id")?, self.name(what)?));
         }
-        Ok(names)
-    }
-
-    /// A list of u32 ids.
-    fn ids(&mut self, what: &str) -> Result<Vec<u32>> {
-        let count = self.count(what, 4)?;
-        let mut ids = Vec::with_capacity(count);
-        for _ in 0..count {
-            ids.push(self.u32(what, "id")?);
-        }
-        Ok(ids)
+        Ok(DictionaryMeta { next_id, names })
     }
 }
 
@@ -1452,44 +1264,47 @@ impl MetaReader<'_> {
 ///
 /// 1. The last chunk is the metadata chunk, the only one: layout 1, caps of 1
 ///    to 65,536 rows (the format's row cap) and at least one byte, an epoch
-///    of at most `i64::MAX`, graph 0 without a name, the named graphs in
-///    strictly ascending name order, each label, edge type and
-///    `(table, key)` listed once, property column ids unique and at least
-///    [`FIRST_PROPERTY_COLUMN`].
+///    of at most `i64::MAX`, the default graph first (id 0, no name), the
+///    named graphs with ids from 1, strictly ascending, below the next graph
+///    id, each name once; per graph, each dictionary's ids strictly
+///    ascending and below its next id, each name once.
 /// 2. Every other chunk is a `Column` or `History` chunk (`History` only for
-///    property columns) of a known graph and column, with `1 <= row_count <=
-///    max_rows`, inside one row group, ending below its table's next id.
+///    property columns) of a known graph, in a namespace of the node or the
+///    edge table, of a fixed column of that table or a property key of the
+///    graph, with `1 <= row_count <= max_rows`, inside one row group, ending
+///    below its table's next id.
 /// 3. Chunks come grouped by (graph, table, row group), in that order (the
 ///    node table before the edge table); a change of group closes the one
-///    before. Within a group the chunks of one (kind, column) ascend without
-///    overlap, and a `History` chunk never covers a row of a `Column` chunk of
-///    its column that came before it.
+///    before. Within a group the chunks of one (kind, namespace, column)
+///    ascend without overlap, and a `History` chunk never covers a row of a
+///    `Column` chunk of its column that came before it.
 /// 4. The edge columns 1, 2 and 3 come as three consecutive chunks of one
 ///    range and the same rows.
 /// 5. When a group closes, every row with a property or history value has
 ///    its node (a labels value) or edge (an endpoints value) in the group.
-/// 6. Labels are label ids below the label count, ascending, in decimal
-///    joined by `,`; endpoints are non-negative `Int64`s and types `Int64`s
-///    below the edge type count. Fixed columns and `History` chunks carry no
+/// 6. Labels are ids of the graph's labels, ascending, in decimal joined by
+///    `,`; endpoints are non-negative `Int64`s and types `Int64` ids of the
+///    graph's edge types. Fixed columns and `History` chunks carry no
 ///    epochs; a property value is never null; a history value is a non-empty
 ///    list of `[epoch, value]` lists with `Int64` epochs from 0, never going
 ///    back (equal epochs are versions of one commit), and the value after it
 ///    (if any) has an epoch at least the last one; epochs are at most
 ///    `i64::MAX`.
 ///
-/// Without `temporal` the history versions are checked and not applied, and
-/// values are set without their epochs. At the end each graph's next ids
-/// become the larger of its own and the metadata's, each graph registers the
-/// labels and edge types the metadata lists as its unused ones (refusing one
-/// its rows use), and with `temporal` every graph store's epoch is synced to
-/// the metadata's.
+/// Before any row, every graph is restored with its id (the named ones
+/// created in `store`) and its dictionaries id for id, and the store's next
+/// graph id becomes the metadata's at least. Without `temporal` the history
+/// versions are checked and not applied, and values are set without their
+/// epochs. At the end each graph's next ids become the larger of its own and
+/// the metadata's, and with `temporal` every graph store's epoch is synced
+/// to the metadata's.
 ///
 /// # Errors
 ///
-/// [`Error::Serialization`] for a section the rules refuse, and for a node
-/// or edge the store cannot allocate (naming it); the source's error when a
-/// chunk cannot be fetched; [`Error::Internal`] when the store cannot
-/// allocate a named graph.
+/// [`Error::Serialization`] for a section the rules refuse, for a node or
+/// edge the store cannot allocate (naming it), and for a graph or name the
+/// store holds already with another id; the source's error when a chunk
+/// cannot be fetched.
 pub(crate) fn read_lpg_chunks(store: &LpgStore, source: &dyn SectionSource) -> Result<()> {
     let chunks = source.chunks();
     let Some((last, data)) = chunks.split_last() else {
@@ -1513,18 +1328,19 @@ pub(crate) fn read_lpg_chunks(store: &LpgStore, source: &dyn SectionSource) -> R
     let meta = decode_lpg_meta(&source.fetch(data.len())?)?;
     let layout = Layout::new(&meta)?;
 
-    let mut graphs: Vec<GraphTarget<'_>> = vec![GraphTarget::Default(store)];
-    for graph in &meta.graphs[1..] {
-        store.create_graph(&graph.name).map_err(|error| {
-            Error::Internal(format!("LPG section: graph {:?}: {error}", graph.name))
-        })?;
-        let named = store.graph(&graph.name).ok_or_else(|| {
-            Error::Internal(format!(
-                "LPG section: graph {:?} was not created",
-                graph.name
-            ))
-        })?;
-        graphs.push(GraphTarget::Named(named));
+    // Every graph and its names, id for id, before any row names them.
+    let named: Vec<(u32, &str)> = meta.graphs[1..]
+        .iter()
+        .map(|graph| (graph.id, graph.name.as_str()))
+        .collect();
+    let restored = store
+        .restore_graphs(&named, meta.next_graph_id)
+        .map_err(|error| Error::Serialization(format!("LPG section: {error}")))?;
+    let graphs: Vec<GraphTarget<'_>> = std::iter::once(GraphTarget::Default(store))
+        .chain(restored.into_iter().map(GraphTarget::Named))
+        .collect();
+    for (graph, target) in meta.graphs.iter().zip(&graphs) {
+        restore_dictionaries(target.store(), graph)?;
     }
 
     let mut reader = Reader {
@@ -1538,38 +1354,46 @@ pub(crate) fn read_lpg_chunks(store: &LpgStore, source: &dyn SectionSource) -> R
     }
     reader.close_group()?;
 
-    for (graph_id, (graph, target)) in meta.graphs.iter().zip(&reader.graphs).enumerate() {
+    for (graph, target) in meta.graphs.iter().zip(&reader.graphs) {
         let target = target.store();
         target.set_next_node_id(target.next_node_id().max(graph.next_node_id));
         target.set_next_edge_id(target.next_edge_id().max(graph.next_edge_id));
         #[cfg(feature = "temporal")]
         target.sync_epoch(EpochId::new(meta.epoch));
-        // The graph's names no row uses (a deleted node's label stays
-        // registered): the graph keeps them, so the next write lists them
-        // again. A name its rows use is not unused.
-        let used: FxHashSet<String> = target.all_labels().into_iter().collect();
-        for &id in &graph.unused_labels {
-            let label = &meta.labels[usize::try_from(id).unwrap_or(usize::MAX)];
-            if used.contains(label) {
-                return Err(Error::Serialization(format!(
-                    "LPG section, graph {graph_id}: label {label:?} is listed as unused, but a \
-                     node of the graph has it"
-                )));
-            }
-            target.register_label(label);
-        }
-        let used: FxHashSet<String> = target.all_edge_types().into_iter().collect();
-        for &id in &graph.unused_edge_types {
-            let edge_type = &meta.edge_types[usize::try_from(id).unwrap_or(usize::MAX)];
-            if used.contains(edge_type) {
-                return Err(Error::Serialization(format!(
-                    "LPG section, graph {graph_id}: edge type {edge_type:?} is listed as unused, \
-                     but an edge of the graph has it"
-                )));
-            }
-            target.register_edge_type(edge_type);
-        }
     }
+    Ok(())
+}
+
+/// Gives `target` the dictionaries of `graph`, id for id, and their next ids.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] when `target` holds one of the names, or
+/// one of the ids, already.
+fn restore_dictionaries(target: &LpgStore, graph: &GraphMeta) -> Result<()> {
+    let refuse = |what: &str, error: String| {
+        Error::Serialization(format!("LPG section, graph {}, {what}: {error}", graph.id))
+    };
+    for (id, name) in &graph.labels.names {
+        target
+            .restore_label(*id, name)
+            .map_err(|error| refuse("label", error))?;
+    }
+    for (id, name) in &graph.edge_types.names {
+        target
+            .restore_edge_type(*id, name)
+            .map_err(|error| refuse("edge type", error))?;
+    }
+    for (id, name) in &graph.keys.names {
+        target
+            .restore_property_key(*id, name)
+            .map_err(|error| refuse("property key", error))?;
+    }
+    target.reserve_name_ids_below([
+        graph.labels.next_id,
+        graph.edge_types.next_id,
+        graph.keys.next_id,
+    ]);
     Ok(())
 }
 
@@ -1608,12 +1432,21 @@ impl Role {
     }
 }
 
+/// The names of one graph by id, from the metadata chunk.
+struct GraphNames {
+    labels: FxHashMap<u32, String>,
+    edge_types: FxHashMap<u32, String>,
+    keys: FxHashMap<u32, PropertyKey>,
+}
+
 /// The metadata chunk, checked.
 struct Layout<'m> {
     meta: &'m LpgMeta,
     max_rows: u64,
-    /// The property columns by id.
-    columns: FxHashMap<u32, (Table, PropertyKey)>,
+    /// The position of each graph in `meta.graphs`, by graph id.
+    positions: FxHashMap<u32, usize>,
+    /// The names of each graph, by position.
+    names: Vec<GraphNames>,
 }
 
 impl<'m> Layout<'m> {
@@ -1635,87 +1468,100 @@ impl<'m> Layout<'m> {
             return refuse(format!("epoch {} is above {MAX_EPOCH}", meta.epoch));
         }
         let Some(default) = meta.graphs.first() else {
-            return refuse("no graph, where graph 0 is the default graph".to_string());
+            return refuse("no graph, where the default graph comes first".to_string());
         };
-        if !default.name.is_empty() {
+        if default.id != 0 || !default.name.is_empty() {
             return refuse(format!(
-                "graph 0 is the default graph, without a name, found {:?}",
-                default.name
+                "the first graph is graph {} named {:?}, where the default graph (id 0, without \
+                 a name) comes first",
+                default.id, default.name
             ));
         }
-        if u32::try_from(meta.graphs.len() - 1).is_err() {
-            return refuse(format!("{} graphs", meta.graphs.len()));
-        }
-        for pair in meta.graphs[1..].windows(2) {
-            if pair[0].name >= pair[1].name {
+        let mut names_seen = FxHashSet::default();
+        for pair in meta.graphs.windows(2) {
+            if pair[0].id >= pair[1].id {
                 return refuse(format!(
-                    "named graphs {:?} and {:?} are not in name order, each once",
-                    pair[0].name, pair[1].name
+                    "graph {} comes after graph {}: the graphs come by id, each once",
+                    pair[1].id, pair[0].id
                 ));
             }
         }
-        for (graph_id, graph) in meta.graphs.iter().enumerate() {
-            for (ids, names, what) in [
-                (&graph.unused_labels, &meta.labels, "label"),
-                (&graph.unused_edge_types, &meta.edge_types, "edge type"),
-            ] {
-                let in_order = ids.windows(2).all(|pair| pair[0] < pair[1]);
-                let known = ids
-                    .last()
-                    .is_none_or(|&last| usize::try_from(last).is_ok_and(|last| last < names.len()));
-                if !in_order || !known {
-                    return refuse(format!(
-                        "graph {graph_id}: unused {what} ids {ids:?} are not ascending ids \
-                         below the {} {what}s listed",
-                        names.len()
-                    ));
+        for graph in &meta.graphs[1..] {
+            if graph.id >= meta.next_graph_id {
+                return refuse(format!(
+                    "graph {} is not below the next graph id {}",
+                    graph.id, meta.next_graph_id
+                ));
+            }
+            if !names_seen.insert(graph.name.as_str()) {
+                return refuse(format!("two named graphs are named {:?}", graph.name));
+            }
+        }
+        let mut positions = FxHashMap::default();
+        let mut names = Vec::with_capacity(meta.graphs.len());
+        for (position, graph) in meta.graphs.iter().enumerate() {
+            positions.insert(graph.id, position);
+            let checked = |dictionary: &DictionaryMeta, what: &str| {
+                let mut by_id = FxHashMap::default();
+                let mut seen = FxHashSet::default();
+                for pair in dictionary.names.windows(2) {
+                    if pair[0].0 >= pair[1].0 {
+                        return Err(format!(
+                            "graph {}: {what} id {} comes after {what} id {}: the ids ascend, \
+                             each once",
+                            graph.id, pair[1].0, pair[0].0
+                        ));
+                    }
                 }
-            }
-        }
-        for (names, what) in [(&meta.labels, "label"), (&meta.edge_types, "edge type")] {
-            if u32::try_from(names.len()).is_err() {
-                return refuse(format!("{} {what} names", names.len()));
-            }
-            let mut seen = FxHashSet::default();
-            if let Some(name) = names.iter().find(|name| !seen.insert(name.as_str())) {
-                return refuse(format!("{what} {name:?} is listed twice"));
-            }
-        }
-        let mut columns = FxHashMap::default();
-        let mut keys = FxHashSet::default();
-        for column in &meta.columns {
-            if column.column_id < FIRST_PROPERTY_COLUMN {
-                return refuse(format!(
-                    "property column {} is below {FIRST_PROPERTY_COLUMN}, the first property \
-                     column",
-                    column.column_id
-                ));
-            }
-            if !keys.insert((column.table, column.key.as_str())) {
-                return refuse(format!(
-                    "{} property {:?} has two columns",
-                    column.table.entity(),
-                    column.key
-                ));
-            }
-            let key = PropertyKey::new(column.key.as_str());
-            if columns
-                .insert(column.column_id, (column.table, key))
-                .is_some()
-            {
-                return refuse(format!("column {} is listed twice", column.column_id));
+                for (id, name) in &dictionary.names {
+                    if *id >= dictionary.next_id {
+                        return Err(format!(
+                            "graph {}: {what} id {id} is not below the next {what} id {}",
+                            graph.id, dictionary.next_id
+                        ));
+                    }
+                    if !seen.insert(name.as_str()) {
+                        return Err(format!(
+                            "graph {}: {what} {name:?} is listed twice",
+                            graph.id
+                        ));
+                    }
+                    by_id.insert(*id, name.clone());
+                }
+                Ok(by_id)
+            };
+            let labels = checked(&graph.labels, "label");
+            let edge_types = checked(&graph.edge_types, "edge type");
+            let keys = checked(&graph.keys, "property key");
+            match (labels, edge_types, keys) {
+                (Ok(labels), Ok(edge_types), Ok(keys)) => names.push(GraphNames {
+                    labels,
+                    edge_types,
+                    keys: keys
+                        .into_iter()
+                        .map(|(id, key)| (id, PropertyKey::new(key.as_str())))
+                        .collect(),
+                }),
+                (Err(what), _, _) | (_, Err(what), _) | (_, _, Err(what)) => return refuse(what),
             }
         }
         Ok(Self {
             meta,
             max_rows: u64::from(meta.max_rows),
-            columns,
+            positions,
+            names,
         })
     }
 
-    /// What column `column_id` of `namespace` holds.
-    fn role(&self, namespace: ChunkNamespace, column_id: u32) -> std::result::Result<Role, String> {
-        let properties_of = match namespace {
+    /// What column `column_id` of `namespace` holds in the graph at
+    /// `position`.
+    fn role(
+        &self,
+        position: usize,
+        namespace: ChunkNamespace,
+        column_id: u32,
+    ) -> std::result::Result<Role, String> {
+        let table = match namespace {
             ChunkNamespace::NodeStructure if column_id == COLUMN_LABELS => {
                 return Ok(Role::Labels);
             }
@@ -1747,18 +1593,14 @@ impl<'m> Layout<'m> {
                 ));
             }
         };
-        match self.columns.get(&column_id) {
-            Some((table, key)) if *table == properties_of => Ok(Role::Property {
-                table: *table,
+        match self.names[position].keys.get(&column_id) {
+            Some(key) => Ok(Role::Property {
+                table,
                 key: key.clone(),
             }),
-            Some((table, key)) => Err(format!(
-                "column {column_id} is the {} property {:?}, in the {} property namespace",
-                table.entity(),
-                key.as_str(),
-                properties_of.entity()
+            None => Err(format!(
+                "column {column_id} is no property key of the graph in the metadata chunk"
             )),
-            None => Err(format!("column {column_id} is not in the metadata chunk")),
         }
     }
 }
@@ -1839,13 +1681,15 @@ impl Reader<'_, '_> {
             )));
         }
         let graph_id = chunk.graph_id;
-        let graph_meta = usize::try_from(graph_id)
-            .ok()
-            .and_then(|at| self.layout.meta.graphs.get(at))
+        let position = *self
+            .layout
+            .positions
+            .get(&graph_id)
             .ok_or_else(|| refuse(format!("graph {graph_id} is not in the metadata chunk")))?;
+        let graph_meta = &self.layout.meta.graphs[position];
         let role = self
             .layout
-            .role(chunk.namespace, chunk.column_id)
+            .role(position, chunk.namespace, chunk.column_id)
             .map_err(refuse)?;
         if chunk.kind == ChunkKind::History && !matches!(role, Role::Property { .. }) {
             return Err(refuse(
@@ -1863,7 +1707,7 @@ impl Reader<'_, '_> {
         self.enter_group((graph_id, table, group_number))
             .map_err(refuse)?;
         self.check_order(&chunk, last_row).map_err(refuse)?;
-        let graph_index = usize::try_from(graph_id).unwrap_or(usize::MAX);
+        let graph_index = position;
         match role {
             Role::Labels => {
                 let decoded =
@@ -2035,7 +1879,7 @@ impl Reader<'_, '_> {
         decoded: ColumnChunk,
     ) -> std::result::Result<(), String> {
         no_epochs(&decoded, "the labels column")?;
-        let names = &self.layout.meta.labels;
+        let names = &self.layout.names[graph].labels;
         let target = self.graphs[graph].store();
         let group = self.group.as_mut().ok_or("no row group")?;
         for (offset, value) in decoded.values {
@@ -2046,8 +1890,7 @@ impl Reader<'_, '_> {
                 ));
             };
             let labels =
-                label_ids(text, names.len()).map_err(|error| format!("node {row}: {error}"))?;
-            let labels: Vec<&str> = labels.iter().map(|&id| names[id].as_str()).collect();
+                label_names(text, names).map_err(|error| format!("node {row}: {error}"))?;
             target
                 .create_node_with_id(NodeId::new(row), &labels)
                 .map_err(|error| format!("node {row}: {error}"))?;
@@ -2087,7 +1930,7 @@ impl Reader<'_, '_> {
                  different rows"
             ));
         }
-        let edge_types = &self.layout.meta.edge_types;
+        let edge_types = &self.layout.names[graph].edge_types;
         let target_store = self.graphs[graph].store();
         let group = self.group.as_mut().ok_or("no row group")?;
         for (((offset, source), (_, target)), (_, edge_type)) in sources
@@ -2108,14 +1951,11 @@ impl Reader<'_, '_> {
             let source = id(&source, "source node")?;
             let target = id(&target, "target node")?;
             let type_id = id(&edge_type, "edge type")?;
-            let name = usize::try_from(type_id)
+            let name = u32::try_from(type_id)
                 .ok()
-                .and_then(|at| edge_types.get(at))
+                .and_then(|type_id| edge_types.get(&type_id))
                 .ok_or_else(|| {
-                    format!(
-                        "edge {row}: edge type {type_id} is past the edge type table of {}",
-                        edge_types.len()
-                    )
+                    format!("edge {row}: edge type {type_id} is not an edge type of the graph")
                 })?;
             target_store
                 .create_edge_with_id(
@@ -2254,30 +2094,35 @@ fn no_epochs(chunk: &ColumnChunk, what: &str) -> std::result::Result<(), String>
     Ok(())
 }
 
-/// The label ids of a labels value: decimal ids below `count`, ascending,
-/// joined by `,` (empty for none).
-fn label_ids(text: &str, count: usize) -> std::result::Result<Vec<usize>, String> {
+/// The label names of a labels value: decimal ids of the graph's `labels`,
+/// ascending, joined by `,` (empty for none).
+fn label_names<'n>(
+    text: &str,
+    labels: &'n FxHashMap<u32, String>,
+) -> std::result::Result<Vec<&'n str>, String> {
     if text.is_empty() {
         return Ok(Vec::new());
     }
-    let mut ids: Vec<usize> = Vec::new();
+    let mut names = Vec::new();
+    let mut last: Option<u32> = None;
     for part in text.split(',') {
         let canonical = !part.is_empty()
             && part.bytes().all(|byte| byte.is_ascii_digit())
             && (part == "0" || !part.starts_with('0'));
         let id = canonical
-            .then(|| part.parse::<usize>().ok())
+            .then(|| part.parse::<u32>().ok())
             .flatten()
             .ok_or_else(|| format!("labels {text:?}: {part:?} is not a label id"))?;
-        if id >= count {
-            return Err(format!("label {id} is past the label table of {count}"));
-        }
-        if ids.last().is_some_and(|&last| last >= id) {
+        if last.is_some_and(|last| last >= id) {
             return Err(format!("labels {text:?}: label ids are not ascending"));
         }
-        ids.push(id);
+        last = Some(id);
+        let name = labels
+            .get(&id)
+            .ok_or_else(|| format!("label {id} is not a label of the graph"))?;
+        names.push(name.as_str());
     }
-    Ok(ids)
+    Ok(names)
 }
 
 /// The versions of a history value: `[epoch, value]` lists, epochs from 0
@@ -2326,9 +2171,9 @@ mod tests {
     use grafeo_common::utils::error::{Error, Result};
 
     use super::{
-        COLUMN_EDGE_TYPE, COLUMN_LABELS, COLUMN_SOURCE, COLUMN_TARGET, ColumnMeta,
-        FIRST_PROPERTY_COLUMN, LPG_SECTION_VERSION, LpgMeta, Table, decode_lpg_meta,
-        encode_lpg_meta, read_lpg_chunks, write_lpg_chunks,
+        COLUMN_EDGE_TYPE, COLUMN_LABELS, COLUMN_SOURCE, COLUMN_TARGET, DictionaryMeta, GraphMeta,
+        LPG_SECTION_VERSION, LpgMeta, Table, decode_lpg_meta, encode_lpg_meta, read_lpg_chunks,
+        write_lpg_chunks,
     };
     use crate::codec::column_chunk::{ColumnChunk, decode_column_chunk};
     use crate::graph::lpg::LpgStore;
@@ -2365,13 +2210,66 @@ mod tests {
         &chunks[..chunks.len() - 1]
     }
 
+    /// A column of a chunk: its namespace and its id there.
+    type Column = (ChunkNamespace, u32);
+
+    /// The node table's labels column.
+    const LABELS: Column = (ChunkNamespace::NodeStructure, COLUMN_LABELS);
+    /// The edge table's source column.
+    const SOURCE: Column = (ChunkNamespace::EdgeStructure, COLUMN_SOURCE);
+    /// The edge table's target column.
+    const TARGET: Column = (ChunkNamespace::EdgeStructure, COLUMN_TARGET);
+    /// The edge table's edge type column.
+    const EDGE_TYPE: Column = (ChunkNamespace::EdgeStructure, COLUMN_EDGE_TYPE);
+
+    /// The graph with id `graph` in `meta`.
+    fn graph_of(meta: &LpgMeta, graph: u32) -> &GraphMeta {
+        meta.graphs
+            .iter()
+            .find(|known| known.id == graph)
+            .unwrap_or_else(|| panic!("graph {graph} is not in the metadata"))
+    }
+
+    /// The names of a dictionary, in id order.
+    fn names_of(dictionary: &DictionaryMeta) -> Vec<&str> {
+        dictionary
+            .names
+            .iter()
+            .map(|(_, name)| name.as_str())
+            .collect()
+    }
+
+    /// The id of `name` in `dictionary`.
+    #[cfg(feature = "temporal")]
+    fn id_in(dictionary: &DictionaryMeta, name: &str) -> u32 {
+        dictionary
+            .names
+            .iter()
+            .find(|(_, known)| known == name)
+            .unwrap_or_else(|| panic!("{name:?} is not in {dictionary:?}"))
+            .0
+    }
+
+    /// The column of property `key` of `table` in graph `graph`: its id in
+    /// the graph's keys.
+    fn key_column(meta: &LpgMeta, graph: u32, table: Table, key: &str) -> Column {
+        let id = graph_of(meta, graph)
+            .keys
+            .names
+            .iter()
+            .find(|(_, name)| name == key)
+            .unwrap_or_else(|| panic!("key {key:?} is not a key of graph {graph}"))
+            .0;
+        (table.properties(), id)
+    }
+
     /// The decoded `kind` chunk of `graph`, `column` and first row
     /// `row_start` (exactly one).
     fn decode_kind(
         chunks: &[(ChunkMeta, Bytes)],
         kind: ChunkKind,
         graph: u32,
-        column: u32,
+        (namespace, column): Column,
         row_start: u64,
     ) -> ColumnChunk {
         let found: Vec<&(ChunkMeta, Bytes)> = chunks
@@ -2379,6 +2277,7 @@ mod tests {
             .filter(|(meta, _)| {
                 meta.kind == kind
                     && meta.graph_id == graph
+                    && meta.namespace == namespace
                     && meta.column_id == column
                     && meta.row_start == row_start
             })
@@ -2386,7 +2285,7 @@ mod tests {
         assert_eq!(
             found.len(),
             1,
-            "one {kind:?} chunk of graph {graph}, column {column}, row {row_start}"
+            "one {kind:?} chunk of graph {graph}, {namespace:?} column {column}, row {row_start}"
         );
         let (meta, bytes) = found[0];
         decode_column_chunk(bytes, meta.codec, meta.row_count).unwrap()
@@ -2397,7 +2296,7 @@ mod tests {
     fn decode(
         chunks: &[(ChunkMeta, Bytes)],
         graph: u32,
-        column: u32,
+        column: Column,
         row_start: u64,
     ) -> ColumnChunk {
         decode_kind(chunks, ChunkKind::Column, graph, column, row_start)
@@ -2409,11 +2308,15 @@ mod tests {
         chunks: &[(ChunkMeta, Bytes)],
         kind: ChunkKind,
         graph: u32,
-        column: u32,
+        (namespace, column): Column,
     ) -> Vec<(u64, Value, u64)> {
         let mut cells = Vec::new();
         for (meta, bytes) in chunks {
-            if meta.kind != kind || meta.graph_id != graph || meta.column_id != column {
+            if meta.kind != kind
+                || meta.graph_id != graph
+                || meta.namespace != namespace
+                || meta.column_id != column
+            {
                 continue;
             }
             let chunk = decode_column_chunk(bytes, meta.codec, meta.row_count).unwrap();
@@ -2425,18 +2328,15 @@ mod tests {
         cells
     }
 
-    /// The table of `column` in `meta`.
-    fn table_of(meta: &LpgMeta, column: u32) -> Table {
-        match column {
-            COLUMN_LABELS => Table::Node,
-            COLUMN_SOURCE | COLUMN_TARGET | COLUMN_EDGE_TYPE => Table::Edge,
-            _ => {
-                meta.columns
-                    .iter()
-                    .find(|known| known.column_id == column)
-                    .unwrap_or_else(|| panic!("column {column} is not in the metadata"))
-                    .table
-            }
+    /// The table of a chunk and whether its column is a property column,
+    /// from its namespace.
+    fn table_of(chunk: &ChunkMeta) -> (Table, bool) {
+        match chunk.namespace {
+            ChunkNamespace::NodeStructure => (Table::Node, false),
+            ChunkNamespace::NodeProperties => (Table::Node, true),
+            ChunkNamespace::EdgeStructure => (Table::Edge, false),
+            ChunkNamespace::EdgeProperties => (Table::Edge, true),
+            other => panic!("a chunk in namespace {other:?}"),
         }
     }
 
@@ -2452,17 +2352,18 @@ mod tests {
 
     /// Asserts the rules a reader of the section checks: the metadata chunk
     /// first and only there; every other chunk a `Column` or `History`
-    /// chunk (`History` only for property columns) of a known graph and
-    /// column, inside one row group and below the table's next id; chunks
+    /// chunk (`History` only for property columns) of a known graph, in a
+    /// namespace of the node or edge table, a property column being a key of
+    /// its graph, inside one row group and below the table's next id; chunks
     /// grouped by (graph, table, row group) in that order; each (kind,
-    /// column) ascending without overlap within its group; the edge columns
-    /// as three consecutive chunks of one range and the same rows; and
-    /// every property row's node or edge in its group.
+    /// namespace, column) ascending without overlap within its group; the
+    /// edge columns as three consecutive chunks of one range and the same
+    /// rows; and every property row's node or edge in its group.
     fn assert_layout(chunks: &[(ChunkMeta, Bytes)]) {
         let meta = meta(chunks);
         let max_rows = u64::from(meta.max_rows);
         let mut last_group: Option<(u32, Table, u64)> = None;
-        let mut ends: BTreeMap<(u8, u32), u64> = BTreeMap::new();
+        let mut ends: BTreeMap<(u8, u8, u32), u64> = BTreeMap::new();
         let mut entities: BTreeSet<u64> = BTreeSet::new();
         let mut property_rows: Vec<(u32, u64)> = Vec::new();
         let check_group = |entities: &BTreeSet<u64>, property_rows: &[(u32, u64)]| {
@@ -2487,28 +2388,22 @@ mod tests {
                 "chunk {index} is a {:?} chunk",
                 chunk.kind
             );
-            let graph = meta
-                .graphs
-                .get(chunk.graph_id as usize)
-                .unwrap_or_else(|| panic!("chunk {index}: graph {} is unknown", chunk.graph_id));
-            let table = table_of(&meta, chunk.column_id);
-            let namespace = if chunk.column_id < FIRST_PROPERTY_COLUMN {
-                table.structure()
-            } else {
-                table.properties()
-            };
-            assert_eq!(
-                chunk.namespace,
-                namespace,
-                "chunk {index}: column {} of the {} table",
-                chunk.column_id,
-                table.entity()
-            );
-            if chunk.kind == ChunkKind::History {
+            let graph = graph_of(&meta, chunk.graph_id);
+            let (table, property) = table_of(chunk);
+            if property {
                 assert!(
-                    chunk.column_id >= FIRST_PROPERTY_COLUMN,
-                    "chunk {index}: history of a fixed column"
+                    graph
+                        .keys
+                        .names
+                        .iter()
+                        .any(|(id, _)| *id == chunk.column_id),
+                    "chunk {index}: column {} is a key of graph {}",
+                    chunk.column_id,
+                    graph.id
                 );
+            }
+            if chunk.kind == ChunkKind::History {
+                assert!(property, "chunk {index}: history of a fixed column");
             }
             let next_id = match table {
                 Table::Node => graph.next_node_id,
@@ -2543,7 +2438,11 @@ mod tests {
                 property_rows.clear();
             }
             let end = ends
-                .entry((chunk.kind.to_byte(), chunk.column_id))
+                .entry((
+                    chunk.kind.to_byte(),
+                    chunk.namespace.to_byte(),
+                    chunk.column_id,
+                ))
                 .or_insert(0);
             assert!(
                 chunk.row_start >= *end,
@@ -2551,15 +2450,18 @@ mod tests {
             );
             *end = last_row + 1;
             let rows = rows_of(chunk, bytes);
-            match chunk.column_id {
-                COLUMN_LABELS => entities.extend(rows),
-                COLUMN_SOURCE => {
-                    for (step, column) in [(1, COLUMN_TARGET), (2, COLUMN_EDGE_TYPE)] {
+            match (chunk.namespace, chunk.column_id) {
+                _ if property => {
+                    property_rows.extend(rows.into_iter().map(|row| (chunk.column_id, row)));
+                }
+                LABELS => entities.extend(rows),
+                SOURCE => {
+                    for (step, column) in [(1, TARGET), (2, EDGE_TYPE)] {
                         let (partner, partner_bytes) = &chunks[index + step];
                         assert_eq!(
                             (
                                 partner.kind,
-                                partner.column_id,
+                                (partner.namespace, partner.column_id),
                                 partner.row_start,
                                 partner.row_count
                             ),
@@ -2575,8 +2477,8 @@ mod tests {
                     entities.extend(rows);
                     index += 2;
                 }
-                COLUMN_TARGET | COLUMN_EDGE_TYPE => panic!("chunk {index}: an edge column alone"),
-                column => property_rows.extend(rows.into_iter().map(|row| (column, row))),
+                TARGET | EDGE_TYPE => panic!("chunk {index}: an edge column alone"),
+                other => panic!("chunk {index}: fixed column {other:?}"),
             }
             index += 1;
         }
@@ -2606,10 +2508,23 @@ mod tests {
         assert_eq!(written[0].0, ChunkMeta::meta(), "only the metadata chunk");
         let meta = meta(&written);
         assert_eq!(
-            (meta.layout, meta.graphs.len(), meta.graphs[0].name.as_str()),
-            (1, 1, "")
+            (
+                meta.layout,
+                meta.next_graph_id,
+                meta.graphs.len(),
+                meta.graphs[0].id,
+                meta.graphs[0].name.as_str()
+            ),
+            (1, 1, 1, 0, "")
         );
-        assert!(meta.labels.is_empty() && meta.columns.is_empty());
+        let default = &meta.graphs[0];
+        for dictionary in [&default.labels, &default.edge_types, &default.keys] {
+            assert_eq!(
+                *dictionary,
+                DictionaryMeta::default(),
+                "no names, next id 0"
+            );
+        }
         assert_eq!(
             (meta.max_rows, meta.max_bytes, meta.epoch),
             (ChunkCaps::DEFAULT.max_rows, ChunkCaps::DEFAULT.max_bytes, 0)
@@ -2632,76 +2547,95 @@ mod tests {
         let written = chunks(&store, caps(2, 1 << 20));
         assert_layout(&written);
         let meta = meta(&written);
-        assert_eq!(meta.labels, ["City", "Employee", "Person"]);
-        assert_eq!(meta.edge_types, ["KNOWS"]);
+        let (default, trips) = (&meta.graphs[0], &meta.graphs[1]);
+        // Each graph's own ids: labels and edge types in the order the store
+        // met them, the keys in key order of the node table, then the edge
+        // table's, as the write met them.
+        assert_eq!(
+            default.labels,
+            DictionaryMeta {
+                next_id: 3,
+                names: vec![
+                    (0, "Person".into()),
+                    (1, "Employee".into()),
+                    (2, "City".into())
+                ],
+            }
+        );
+        assert_eq!(names_of(&default.edge_types), ["KNOWS"]);
+        assert_eq!(
+            default.keys,
+            DictionaryMeta {
+                next_id: 3,
+                names: vec![
+                    (0, "name".into()),
+                    (1, "population".into()),
+                    (2, "since".into())
+                ],
+            }
+        );
+        assert_eq!(names_of(&trips.labels), ["City"], "trips' own labels");
+        assert_eq!(trips.keys, DictionaryMeta::default());
         assert_eq!(
             meta.graphs
                 .iter()
-                .map(|g| (g.name.as_str(), g.next_node_id, g.next_edge_id))
+                .map(|g| (g.id, g.name.as_str(), g.next_node_id, g.next_edge_id))
                 .collect::<Vec<_>>(),
-            [("", 3, 1), ("trips", 1, 0)]
+            [(0, "", 3, 1), (1, "trips", 1, 0)]
         );
-        assert_eq!(
-            meta.columns,
-            [
-                ColumnMeta {
-                    column_id: 16,
-                    table: Table::Node,
-                    key: "name".into()
-                },
-                ColumnMeta {
-                    column_id: 17,
-                    table: Table::Node,
-                    key: "population".into()
-                },
-                ColumnMeta {
-                    column_id: 18,
-                    table: Table::Edge,
-                    key: "since".into()
-                },
-            ]
-        );
-        let labels = decode(&written, 0, COLUMN_LABELS, 0);
+        assert_eq!(meta.next_graph_id, 2);
+        let labels = decode(&written, 0, LABELS, 0);
         assert_eq!(
             labels.values,
-            [(0, Value::from("1,2")), (1, Value::from("2"))]
+            [(0, Value::from("0,1")), (1, Value::from("0"))]
         );
         assert_eq!(
-            decode(&written, 0, COLUMN_LABELS, 2).values,
-            [(0, Value::from("0"))]
+            decode(&written, 0, LABELS, 2).values,
+            [(0, Value::from("2"))]
         );
         assert_eq!(
-            decode(&written, 0, 16, 0).values,
+            decode(&written, 0, key_column(&meta, 0, Table::Node, "name"), 0).values,
             [(0, Value::from("Alix")), (1, Value::from("Gus"))]
         );
         assert_eq!(
-            decode(&written, 0, 17, 2).values,
+            decode(
+                &written,
+                0,
+                key_column(&meta, 0, Table::Node, "population"),
+                2
+            )
+            .values,
             [(0, Value::Int64(921_402))]
         );
 
         let edge_columns: Vec<(u32, u64, u32)> = written
             .iter()
-            .filter(|(meta, _)| meta.graph_id == 0 && (1..=3).contains(&meta.column_id))
+            .filter(|(meta, _)| {
+                meta.graph_id == 0 && meta.namespace == ChunkNamespace::EdgeStructure
+            })
             .map(|(meta, _)| (meta.column_id, meta.row_start, meta.row_count))
             .collect();
         assert_eq!(edge_columns, [(1, 0, 1), (2, 0, 1), (3, 0, 1)]);
         assert_eq!(
-            decode(&written, 0, COLUMN_SOURCE, 0).values,
+            decode(&written, 0, SOURCE, 0).values,
             [(0, Value::Int64(0))]
         );
         assert_eq!(
-            decode(&written, 0, COLUMN_TARGET, 0).values,
+            decode(&written, 0, TARGET, 0).values,
             [(0, Value::Int64(1))]
         );
         assert_eq!(
-            decode(&written, 0, COLUMN_EDGE_TYPE, 0).values,
+            decode(&written, 0, EDGE_TYPE, 0).values,
             [(0, Value::Int64(0))]
         );
-        assert_eq!(decode(&written, 0, 18, 0).values, [(0, Value::Int64(2019))]);
-
-        // The named graph has its own labels chunk, with the file's label ids.
         assert_eq!(
-            decode(&written, 1, COLUMN_LABELS, 0).values,
+            decode(&written, 0, key_column(&meta, 0, Table::Edge, "since"), 0).values,
+            [(0, Value::Int64(2019))]
+        );
+
+        // The named graph has its own labels chunk, with its own label ids.
+        assert_eq!(
+            decode(&written, 1, LABELS, 0).values,
             [(0, Value::from("0"))]
         );
         let graph_ids: BTreeSet<u32> = data(&written)
@@ -2719,7 +2653,10 @@ mod tests {
         let written = chunks(&store, ChunkCaps::DEFAULT);
         assert_layout(&written);
         let meta = meta(&written);
-        assert_eq!(meta.graphs[1].name, "travel");
+        assert_eq!(
+            (meta.graphs[1].id, meta.graphs[1].name.as_str()),
+            (1, "travel")
+        );
         assert!(
             data(&written).iter().all(|(chunk, _)| chunk.graph_id == 0),
             "the empty graph has no chunks"
@@ -2787,30 +2724,19 @@ mod tests {
         for (chunk, _) in data(&written) {
             let last = chunk.row_start + u64::from(chunk.row_count) - 1;
             assert_eq!(chunk.row_start / 4, last / 4, "{chunk:?}");
-            let graph = &meta.graphs[chunk.graph_id as usize];
-            let next = if chunk.column_id == COLUMN_LABELS
-                || meta
-                    .columns
-                    .iter()
-                    .any(|c| c.column_id == chunk.column_id && c.table == Table::Node)
-            {
-                graph.next_node_id
-            } else {
-                graph.next_edge_id
+            let graph = graph_of(&meta, chunk.graph_id);
+            let next = match table_of(chunk).0 {
+                Table::Node => graph.next_node_id,
+                Table::Edge => graph.next_edge_id,
             };
             assert!(last < next, "{chunk:?} ends past the next id {next}");
         }
 
         // The byte cap cut some groups: more name chunks than groups with names.
-        let name = meta
-            .columns
-            .iter()
-            .find(|c| c.key == "name")
-            .unwrap()
-            .column_id;
+        let name = key_column(&meta, 0, Table::Node, "name");
         let name_chunks: Vec<u64> = written
             .iter()
-            .filter(|(chunk, _)| chunk.column_id == name)
+            .filter(|(chunk, _)| (chunk.namespace, chunk.column_id) == name)
             .map(|(chunk, _)| chunk.row_start / 4)
             .collect();
         let groups: BTreeSet<u64> = name_chunks.iter().copied().collect();
@@ -2831,40 +2757,40 @@ mod tests {
             .collect();
         assert_eq!(expected.len(), 33);
         assert_eq!(cells(&written, ChunkKind::Column, 0, name), expected);
-        let labels = cells(&written, ChunkKind::Column, 0, COLUMN_LABELS);
+        let labels = cells(&written, ChunkKind::Column, 0, LABELS);
         assert_eq!(labels.len(), 33, "one labels value per live node");
         assert!(
             labels.contains(&(2, Value::from(""), 0)),
             "a node without labels has an empty labels value"
         );
         let deleted: BTreeSet<u64> = [3, 4, 8, 9, 10, 11, 39].into();
-        for column in [name, COLUMN_LABELS] {
+        for column in [name, LABELS] {
             assert!(
                 cells(&written, ChunkKind::Column, 0, column)
                     .iter()
                     .all(|(row, _, _)| !deleted.contains(row)),
-                "column {column} holds a deleted node"
+                "column {column:?} holds a deleted node"
             );
         }
-        let edges = cells(&written, ChunkKind::Column, 0, COLUMN_SOURCE);
+        let edges = cells(&written, ChunkKind::Column, 0, SOURCE);
         assert_eq!(
             edges.len(),
             store.edge_count(),
             "one endpoint value per live edge"
         );
-        assert_eq!(meta.edge_types, ["KNOWS", "VISITED"]);
-        for (row, edge_type, _) in cells(&written, ChunkKind::Column, 0, COLUMN_EDGE_TYPE) {
+        let edge_types = &meta.graphs[0].edge_types;
+        let mut type_names = names_of(edge_types);
+        type_names.sort_unstable();
+        assert_eq!(type_names, ["KNOWS", "VISITED"]);
+        for (row, edge_type, _) in cells(&written, ChunkKind::Column, 0, EDGE_TYPE) {
             let name = store.edge_type(EdgeId::new(row)).unwrap();
-            let id = meta
-                .edge_types
+            let id = edge_types
+                .names
                 .iter()
-                .position(|known| known == name.as_str())
-                .unwrap();
-            assert_eq!(
-                edge_type,
-                Value::Int64(i64::try_from(id).unwrap()),
-                "edge {row}"
-            );
+                .find(|(_, known)| known == name.as_str())
+                .unwrap()
+                .0;
+            assert_eq!(edge_type, Value::Int64(i64::from(id)), "edge {row}");
         }
         for (row, source, _) in edges {
             let edge = store.get_edge(EdgeId::new(row)).unwrap();
@@ -2892,14 +2818,14 @@ mod tests {
         assert_layout(&written);
         let mut sorted = ids.to_vec();
         sorted.sort_unstable();
-        let rows = |column: u32| -> Vec<u64> {
+        let rows = |column: Column| -> Vec<u64> {
             cells(&written, ChunkKind::Column, 0, column)
                 .into_iter()
                 .map(|(row, _, _)| row)
                 .collect()
         };
-        assert_eq!(rows(COLUMN_SOURCE), sorted, "endpoints");
-        let since = meta(&written).columns[0].column_id;
+        assert_eq!(rows(SOURCE), sorted, "endpoints");
+        let since = key_column(&meta(&written), 0, Table::Edge, "since");
         assert_eq!(rows(since), sorted, "the edge property");
     }
 
@@ -2925,18 +2851,19 @@ mod tests {
         let written = chunks(&store, caps(4, 1 << 20));
         assert_layout(&written);
         assert_eq!(
-            cells(&written, ChunkKind::Column, 0, COLUMN_LABELS),
+            cells(&written, ChunkKind::Column, 0, LABELS),
             [(0, Value::from("0"), 0)]
         );
+        let name = key_column(&meta(&written), 0, Table::Node, "name");
         assert_eq!(
-            cells(&written, ChunkKind::Column, 0, 16),
+            cells(&written, ChunkKind::Column, 0, name),
             [(0, Value::from("Alix"), 0)],
             "only the visible node's value"
         );
         assert!(
             data(&written)
                 .iter()
-                .all(|(chunk, _)| chunk.column_id == COLUMN_LABELS || chunk.column_id == 16),
+                .all(|(chunk, _)| [LABELS, name].contains(&(chunk.namespace, chunk.column_id))),
             "no edge chunks: {:?}",
             written
                 .iter()
@@ -3022,8 +2949,9 @@ mod tests {
 
     #[test]
     fn ids_far_above_zero_write_only_the_groups_that_hold_them() {
-        // An overlay above a compacted base starts its ids far above 0, here
-        // in the middle of a row group: the groups stay aligned to max_rows.
+        // Ids far above 0 (a 0.5.x compacted base that kept no ids folds
+        // under ids holding its table number in the high bits), here in the
+        // middle of a row group: the groups stay aligned to max_rows.
         let overlay = LpgStore::new().unwrap();
         overlay.set_next_node_id((1 << 40) + 2);
         overlay.set_next_edge_id(1 << 41);
@@ -3056,7 +2984,7 @@ mod tests {
         let written = chunks(&store, caps(4, 1 << 20));
         assert_layout(&written);
         assert_eq!(
-            decode(&written, 0, COLUMN_LABELS, u64::MAX - 1).values,
+            decode(&written, 0, LABELS, u64::MAX - 1).values,
             [(0, Value::from("0"))]
         );
 
@@ -3158,11 +3086,13 @@ mod tests {
         assert_layout(&written);
         let meta = meta(&written);
         assert_eq!(meta.epoch, 88);
-        let city = 16;
-        let position = |kind: ChunkKind, column: u32| {
+        let city = key_column(&meta, 0, Table::Node, "city");
+        let position = |kind: ChunkKind, column: Column| {
             written
                 .iter()
-                .position(|(chunk, _)| chunk.kind == kind && chunk.column_id == column)
+                .position(|(chunk, _)| {
+                    chunk.kind == kind && (chunk.namespace, chunk.column_id) == column
+                })
                 .unwrap()
         };
         assert_eq!(
@@ -3201,12 +3131,7 @@ mod tests {
         );
         assert_eq!(history.epochs, None, "history values hold their epochs");
 
-        let since = meta
-            .columns
-            .iter()
-            .find(|c| c.key == "since")
-            .unwrap()
-            .column_id;
+        let since = key_column(&meta, 0, Table::Edge, "since");
         assert_eq!(
             cells(&written, ChunkKind::Column, 0, since),
             [(0, Value::Int64(19), 19)]
@@ -3230,9 +3155,10 @@ mod tests {
         store.set_node_property_at_epoch(gus, "city", Value::from("Berlin"), EpochId::new(3));
         let written = chunks(&store, caps(1, 1 << 20));
         assert_layout(&written);
+        let column = key_column(&meta(&written), 0, Table::Node, "city");
         let city: Vec<(ChunkKind, u64, u32)> = written
             .iter()
-            .filter(|(chunk, _)| chunk.column_id == 16)
+            .filter(|(chunk, _)| (chunk.namespace, chunk.column_id) == column)
             .map(|(chunk, _)| (chunk.kind, chunk.row_start, chunk.row_count))
             .collect();
         assert_eq!(
@@ -3243,7 +3169,7 @@ mod tests {
         let version =
             |epoch: i64, value: Value| Value::List(Arc::from(vec![Value::Int64(epoch), value]));
         assert_eq!(
-            decode_kind(&written, ChunkKind::History, 0, 16, 0).values,
+            decode_kind(&written, ChunkKind::History, 0, column, 0).values,
             [(
                 0,
                 Value::List(Arc::from(vec![
@@ -3253,7 +3179,7 @@ mod tests {
             )]
         );
         assert_eq!(
-            decode(&written, 0, 16, 1).values,
+            decode(&written, 0, column, 1).values,
             [(0, Value::from("Berlin"))]
         );
     }
@@ -3347,7 +3273,8 @@ mod tests {
 
         let written = chunks(&store, caps(4, 1 << 20));
         assert_layout(&written);
-        assert_eq!(cells(&written, ChunkKind::Column, 0, 16), expected);
+        let embedding = key_column(&meta(&written), 0, Table::Node, "embedding");
+        assert_eq!(cells(&written, ChunkKind::Column, 0, embedding), expected);
         assert_eq!(
             backing.copies.load(Ordering::Relaxed),
             expected.len(),
@@ -3416,7 +3343,8 @@ mod tests {
         set(Value::Int64(88), 88);
         let written = chunks(&store, ChunkCaps::DEFAULT);
         assert_layout(&written);
-        let history = decode_kind(&written, ChunkKind::History, 0, 16, 0);
+        let trips = key_column(&meta(&written), 0, Table::Node, "trips");
+        let history = decode_kind(&written, ChunkKind::History, 0, trips, 0);
         assert_eq!(
             history.values.len(),
             1,
@@ -3447,8 +3375,8 @@ mod tests {
         }
     }
 
-    /// A named graph may have the empty name: graph 0 is the default graph by
-    /// its position, so the name cannot collide with it.
+    /// A named graph may have the empty name: the default graph is the one
+    /// with id 0, so the name cannot collide with it.
     #[test]
     fn a_named_graph_may_have_the_empty_name() {
         let store = LpgStore::new().unwrap();
@@ -3460,34 +3388,69 @@ mod tests {
         unnamed.create_node(&["City"]);
         let written = chunks(&store, ChunkCaps::DEFAULT);
         assert_layout(&written);
-        let names: Vec<String> = meta(&written).graphs.into_iter().map(|g| g.name).collect();
-        assert_eq!(names, ["", "", "trips"]);
+        let graphs: Vec<(u32, String)> = meta(&written)
+            .graphs
+            .into_iter()
+            .map(|g| (g.id, g.name))
+            .collect();
         assert_eq!(
-            cells(&written, ChunkKind::Column, 0, COLUMN_LABELS).len(),
-            1
+            graphs,
+            [(0, String::new()), (1, String::new()), (2, "trips".into())]
         );
-        assert_eq!(
-            cells(&written, ChunkKind::Column, 1, COLUMN_LABELS).len(),
-            2
-        );
+        assert_eq!(cells(&written, ChunkKind::Column, 0, LABELS).len(), 1);
+        assert_eq!(cells(&written, ChunkKind::Column, 1, LABELS).len(), 2);
     }
 
-    /// Names a write meets that the registries did not hold when it began
-    /// (an open transaction creates them; commits are held) follow the sorted
-    /// names, in the order met; the same name keeps its id.
+    /// Ids are permanent from one write to the next: a label, edge type or
+    /// key added between two writes gets the next id and the names before
+    /// keep theirs, also when the new ones sort before them (before stable
+    /// ids, the next write sorted every name into place and ids moved).
     #[test]
-    fn names_met_during_the_write_follow_the_sorted_names() {
-        let list = super::NameList::new(["Person".to_string(), "City".to_string()], "label");
-        assert_eq!(list.id("City").unwrap(), 0);
-        assert_eq!(list.id("Person").unwrap(), 1);
-        assert_eq!(list.id("Museum").unwrap(), 2);
-        assert_eq!(list.id("Cafe").unwrap(), 3);
+    fn a_name_added_between_two_writes_gets_the_next_id_and_the_others_keep_theirs() {
+        let store = LpgStore::new().unwrap();
+        let mia = store.create_node(&["Person"]);
+        store.set_node_property(mia, "name", Value::from("Mia"));
+        let first = meta(&chunks(&store, ChunkCaps::DEFAULT));
+        assert_eq!(first.graphs[0].labels.names, [(0, "Person".into())]);
+        assert_eq!(first.graphs[0].keys.names, [(0, "name".into())]);
+
+        let gus = store.create_node(&["Artist"]);
+        store.set_node_property(gus, "age", Value::Int64(19));
+        store.create_edge(mia, gus, "ADMIRES");
+        let written = chunks(&store, ChunkCaps::DEFAULT);
+        assert_layout(&written);
+        let second = meta(&written);
+        let graph = &second.graphs[0];
         assert_eq!(
-            list.id("Museum").unwrap(),
-            2,
-            "a name met again keeps its id"
+            graph.labels.names,
+            [(0, "Person".into()), (1, "Artist".into())]
         );
-        assert_eq!(list.into_names(), ["City", "Person", "Museum", "Cafe"]);
+        assert_eq!(graph.keys.names, [(0, "name".into()), (1, "age".into())]);
+        assert_eq!(graph.edge_types.names, [(0, "ADMIRES".into())]);
+        assert_eq!(
+            decode(&written, 0, LABELS, 0).values,
+            [(0, Value::from("0")), (1, Value::from("1"))]
+        );
+        assert_eq!(
+            cells(
+                &written,
+                ChunkKind::Column,
+                0,
+                (ChunkNamespace::NodeProperties, 0)
+            ),
+            [(0, Value::from("Mia"), 0)],
+            "name keeps column 0"
+        );
+        assert_eq!(
+            cells(
+                &written,
+                ChunkKind::Column,
+                0,
+                (ChunkNamespace::NodeProperties, 1)
+            ),
+            [(1, Value::Int64(19), 0)],
+            "age gets column 1"
+        );
     }
 
     /// Runs a hook after the first chunk it passes on.
@@ -3555,15 +3518,17 @@ mod tests {
             .collect();
         assert_layout(&written);
         let meta = meta(&written);
-        // The registry holds the new label (as it does after a rollback): it
-        // is listed after the names the write began with. Without `temporal`
-        // node 5's label set holds it; with it, no row has it, so the graph
-        // lists it as unused.
-        assert_eq!(meta.labels, ["Person", "Traveller"]);
-        #[cfg(not(feature = "temporal"))]
-        assert_eq!(meta.graphs[0].unused_labels, Vec::<u32>::new());
-        #[cfg(feature = "temporal")]
-        assert_eq!(meta.graphs[0].unused_labels, [1]);
+        // The dictionaries, read after the rows, hold the label and the edge
+        // type the transaction created (as they do after a rollback), with
+        // the next ids. The key it set after the node table's columns were
+        // read has no column in this write, so no id yet.
+        let graph = &meta.graphs[0];
+        assert_eq!(
+            graph.labels.names,
+            [(0, "Person".into()), (1, "Traveller".into())]
+        );
+        assert_eq!(graph.edge_types.names, [(0, "VISITED".into())]);
+        assert_eq!(graph.keys.names, [(0, "name".into())]);
         // Without `temporal` the transaction's label set is written in place
         // (the store keeps no versions); with it, the set an open
         // transaction wrote is pending and not written.
@@ -3572,7 +3537,7 @@ mod tests {
         #[cfg(feature = "temporal")]
         let node_5 = "0";
         assert_eq!(
-            decode(&written, 0, COLUMN_LABELS, 4).values,
+            decode(&written, 0, LABELS, 4).values,
             [(0, Value::from("0")), (1, Value::from(node_5))]
         );
     }
@@ -3593,17 +3558,16 @@ mod tests {
         let written = chunks(&store, ChunkCaps::DEFAULT);
         assert_layout(&written);
         let meta = meta(&written);
-        let label = |name: &str| meta.labels.iter().position(|known| known == name).unwrap();
+        let label = |name: &str| id_in(&meta.graphs[0].labels, name);
+        let mut gus = [label("Employee"), label("Person")];
+        gus.sort_unstable();
         assert_eq!(
-            decode(&written, 0, COLUMN_LABELS, 0).values,
+            decode(&written, 0, LABELS, 0).values,
             [
                 (0, Value::from(label("Person").to_string())),
-                (
-                    1,
-                    Value::from(format!("{},{}", label("Employee"), label("Person")))
-                ),
+                (1, Value::from(format!("{},{}", gus[0], gus[1]))),
             ],
-            "the committed label sets"
+            "the committed label sets, ids ascending"
         );
     }
 
@@ -3789,15 +3753,14 @@ mod tests {
     }
 
     /// A key that only a committed value an open transaction replaced has
-    /// (no column of the store holds it) joins the property columns, after
-    /// the names the write began with, and its value is written.
+    /// (no column of the store holds it) joins the property columns with the
+    /// next key id, and its value is written.
     #[cfg(not(feature = "temporal"))]
     #[test]
     fn a_key_only_a_replaced_value_has_joins_the_columns() {
-        use super::{Names, Place, TableWriter, column, describe_graph};
+        use super::{Place, TableWriter, column, describe_graph};
 
         let store = LpgStore::new().unwrap();
-        let names = Names::begin(&[("", &store)]);
         let key = PropertyKey::new("nickname");
         let committed = BTreeMap::from([(key.clone(), vec![(GUS, Some(Value::from("G")))])]);
         let table = TableWriter {
@@ -3805,7 +3768,7 @@ mod tests {
             fixed: vec![column(Table::Node.structure(), COLUMN_LABELS)],
             properties: &store.node_properties,
             committed: &committed,
-            names: &names,
+            graph: &store,
         };
         let place = Place {
             graph_id: 0,
@@ -3825,10 +3788,15 @@ mod tests {
         let written: Vec<(ChunkMeta, Bytes)> = (0..section.chunks().len())
             .map(|index| (section.chunks()[index], section.fetch(index).unwrap()))
             .collect();
-        let column_id = names.columns.id(Table::Node, &key).unwrap();
-        assert_eq!(column_id, FIRST_PROPERTY_COLUMN, "the first column added");
+        let column_id = store.property_key_id(key.as_str());
+        assert_eq!(column_id, 0, "the first key's id");
         assert_eq!(
-            cells(&written, ChunkKind::Column, 0, column_id),
+            cells(
+                &written,
+                ChunkKind::Column,
+                0,
+                (ChunkNamespace::NodeProperties, column_id)
+            ),
             [(1, Value::from("G"), 0)],
             "the committed value of the key"
         );
@@ -3837,13 +3805,19 @@ mod tests {
     #[test]
     fn the_metadata_decoder_refuses_crafted_lengths_layouts_and_trailing_bytes() {
         let mut meta = crafted_meta();
-        meta.labels = vec!["Person".into(), "City".into()];
+        meta.graphs[0].labels = DictionaryMeta {
+            next_id: 2,
+            names: vec![(0, "Person".into()), (1, "City".into())],
+        };
         let bytes = encode_lpg_meta(&meta).unwrap();
         assert_eq!(decode_lpg_meta(&bytes).unwrap(), meta);
-        // layout, max_rows, max_bytes and epoch take 17 bytes; the label
-        // count follows, then the first label's length.
-        let at_count = 17;
-        let at_length = at_count + 4;
+        // Layout, max_rows, max_bytes, epoch and the next graph id take 21
+        // bytes, the graph count 4; graph 0 then has its id, its empty name
+        // (a length), its next node and edge ids (29 bytes up to its labels),
+        // then the labels' next id, their count, the first label's id and its
+        // name's length.
+        let at_count = 21 + 4 + 4 + 4 + 8 + 8 + 4;
+        let at_length = at_count + 4 + 4;
         // Refused at the count or length itself, before anything sized by it
         // is allocated.
         for (at, what, words) in [
@@ -3875,11 +3849,6 @@ mod tests {
         layout[0] = 2;
         let error = decode_lpg_meta(&layout).unwrap_err().to_string();
         assert!(error.contains("layout 2"), "{error}");
-        let mut table = bytes.clone();
-        let at_table = bytes.len() - 4 - "name".len() - 1;
-        table[at_table] = 2;
-        let error = decode_lpg_meta(&table).unwrap_err().to_string();
-        assert!(error.contains("table 2"), "{error}");
         let mut utf8 = bytes.clone();
         utf8[at_length + 4] = 0xFF;
         let error = decode_lpg_meta(&utf8).unwrap_err().to_string();
@@ -3897,10 +3866,16 @@ mod tests {
     #[test]
     fn a_metadata_chunk_past_the_old_size_limit_round_trips() {
         let mut meta = crafted_meta();
-        meta.labels = (0..1_000_000u32).map(|i| format!("L{i:07}")).collect();
-        meta.edge_types = (0..66u8)
-            .map(|i| format!("{i:02}{}", "x".repeat(1 << 20)))
-            .collect();
+        meta.graphs[0].labels = DictionaryMeta {
+            next_id: 1_000_000,
+            names: (0..1_000_000u32).map(|i| (i, format!("L{i:07}"))).collect(),
+        };
+        meta.graphs[0].edge_types = DictionaryMeta {
+            next_id: 66,
+            names: (0..66u8)
+                .map(|i| (u32::from(i), format!("{i:02}{}", "x".repeat(1 << 20))))
+                .collect(),
+        };
         let bytes = encode_lpg_meta(&meta).unwrap();
         assert!(bytes.len() > 1 << 26, "{} bytes", bytes.len());
         assert_eq!(decode_lpg_meta(&bytes).unwrap(), meta);
@@ -4367,8 +4342,9 @@ mod tests {
         store.set_node_property(gus, "visits", Value::Int64(3));
         let written = chunks(&store, ChunkCaps::DEFAULT);
         assert_layout(&written);
+        let visits = key_column(&meta(&written), 0, Table::Node, "visits");
         assert_eq!(
-            cells(&written, ChunkKind::Column, 0, 16),
+            cells(&written, ChunkKind::Column, 0, visits),
             [(1, Value::Int64(3), 0)]
         );
         let back = round_trip(&store, ChunkCaps::DEFAULT);
@@ -4446,29 +4422,31 @@ mod tests {
         let written = chunks(&store, ChunkCaps::DEFAULT);
         assert_layout(&written);
         let meta = meta(&written);
-        let ids = |names: &[String], wanted: &[&str]| -> Vec<u32> {
-            wanted
-                .iter()
-                .map(|name| {
-                    u32::try_from(names.iter().position(|known| known == name).unwrap()).unwrap()
-                })
-                .collect()
-        };
+        // Every name keeps its id in its graph's dictionary, used or not.
+        let (default, trips) = (&meta.graphs[0], &meta.graphs[1]);
         assert_eq!(
-            meta.graphs[0].unused_labels,
-            ids(&meta.labels, &["City", "Ghost"])
+            default.labels.names,
+            [
+                (0, "Person".into()),
+                (1, "Ghost".into()),
+                (2, "City".into())
+            ]
         );
         assert_eq!(
-            meta.graphs[0].unused_edge_types,
-            ids(&meta.edge_types, &["OLD"])
+            default.edge_types.names,
+            [(0, "OLD".into()), (1, "KNOWS".into())]
         );
         assert_eq!(
-            meta.graphs[1].unused_labels,
-            ids(&meta.labels, &["Museum", "Person"])
+            trips.labels.names,
+            [
+                (0, "City".into()),
+                (1, "Museum".into()),
+                (2, "Person".into())
+            ]
         );
         assert_eq!(
-            meta.graphs[1].unused_edge_types,
-            ids(&meta.edge_types, &["FERRY"])
+            trips.edge_types.names,
+            [(0, "FERRY".into()), (1, "KNOWS".into())]
         );
 
         let back = round_trip(&store, ChunkCaps::DEFAULT);
@@ -4478,6 +4456,213 @@ mod tests {
             written,
             "the loaded store writes the same chunks"
         );
+    }
+
+    /// A metadata chunk alone (no rows), loaded into a new store.
+    fn load_meta(meta: &LpgMeta) -> LpgStore {
+        let mut image = MemoryImage::new();
+        image
+            .begin_section(SectionType::LpgStore, LPG_SECTION_VERSION)
+            .unwrap();
+        image
+            .write_chunk(ChunkMeta::meta(), &encode_lpg_meta(meta).unwrap())
+            .unwrap();
+        let source = image.section_source(SectionType::LpgStore).unwrap();
+        let store = LpgStore::new().unwrap();
+        read_lpg_chunks(&store, &*source).unwrap();
+        store
+    }
+
+    /// Graph ids are permanent: a graph created later that sorts first by
+    /// name takes the next id and the others keep theirs (before stable ids
+    /// a graph's id was its position in name order); a dropped graph's id is
+    /// never given again, also after a load, so a graph created again under
+    /// its name gets a new one.
+    #[test]
+    fn graph_ids_are_never_reused_or_renumbered() {
+        let ids = |meta: &LpgMeta| -> Vec<(u32, String)> {
+            meta.graphs
+                .iter()
+                .map(|graph| (graph.id, graph.name.clone()))
+                .collect()
+        };
+        let store = LpgStore::new().unwrap();
+        store.create_graph("trips").unwrap();
+        store.create_graph("travel").unwrap();
+        store.graph("trips").unwrap().create_node(&["City"]);
+        store.create_graph("archive").unwrap();
+        let written = chunks(&store, ChunkCaps::DEFAULT);
+        assert_layout(&written);
+        assert_eq!(
+            ids(&meta(&written)),
+            [
+                (0, String::new()),
+                (1, "trips".into()),
+                (2, "travel".into()),
+                (3, "archive".into())
+            ],
+            "by id, not by name"
+        );
+        assert!(
+            data(&written).iter().all(|(chunk, _)| chunk.graph_id == 1),
+            "trips' rows keep graph id 1 although archive sorts first"
+        );
+
+        assert!(store.drop_graph("travel"));
+        let back = round_trip(&store, ChunkCaps::DEFAULT);
+        let reloaded = meta(&chunks(&back, ChunkCaps::DEFAULT));
+        assert_eq!(
+            ids(&reloaded),
+            [
+                (0, String::new()),
+                (1, "trips".into()),
+                (3, "archive".into())
+            ],
+            "a gap where travel was"
+        );
+        assert_eq!(reloaded.next_graph_id, 4);
+        back.create_graph("travel").unwrap();
+        assert_eq!(
+            back.graph("travel").unwrap().graph_id(),
+            4,
+            "travel created again gets a new id"
+        );
+    }
+
+    /// A load into a store that holds graphs already (an earlier step of the
+    /// open creates some, as the catalog does for a schema's graphs) gives a
+    /// graph the file lists its id from the file, whatever id this process
+    /// gave it, and moves one the file does not list past the file's ids.
+    #[test]
+    fn a_load_gives_graphs_created_before_it_the_file_s_ids() {
+        let mut crafted = crafted_meta();
+        crafted.next_graph_id = 3;
+        crafted.graphs.push(named(1, "social"));
+        crafted.graphs.push(named(2, "reporting"));
+        let mut image = MemoryImage::new();
+        image
+            .begin_section(SectionType::LpgStore, LPG_SECTION_VERSION)
+            .unwrap();
+        image
+            .write_chunk(ChunkMeta::meta(), &encode_lpg_meta(&crafted).unwrap())
+            .unwrap();
+        let source = image.section_source(SectionType::LpgStore).unwrap();
+
+        let store = LpgStore::new().unwrap();
+        store.create_graph("reporting").unwrap();
+        store.create_graph("scratch").unwrap();
+        let reporting = store.graph("reporting").unwrap();
+        assert_eq!(reporting.graph_id(), 1, "before the load");
+        read_lpg_chunks(&store, &*source).unwrap();
+        assert_eq!(
+            (
+                store.graph("social").unwrap().graph_id(),
+                reporting.graph_id(),
+                store.graph("scratch").unwrap().graph_id()
+            ),
+            (1, 2, 3),
+            "the file's ids, and the unlisted graph past them"
+        );
+        assert!(
+            Arc::ptr_eq(&reporting, &store.graph("reporting").unwrap()),
+            "the graph created before the load is the one loaded"
+        );
+        assert_eq!(store.next_graph_id(), 4);
+    }
+
+    /// A file's ids may have gaps (ids no name holds): they load as they
+    /// are, and a new name gets the next id the file names, never a gap's.
+    #[test]
+    fn ids_with_gaps_load_and_are_never_given_again() {
+        let mut crafted = crafted_meta();
+        crafted.graphs[0].labels = DictionaryMeta {
+            next_id: 10,
+            names: vec![
+                (0, "Person".into()),
+                (5, "City".into()),
+                (9, "Museum".into()),
+            ],
+        };
+        crafted.graphs[0].keys = DictionaryMeta {
+            next_id: 12,
+            names: vec![(3, "name".into())],
+        };
+        let store = load_meta(&crafted);
+        assert_eq!(store.label_id("City"), Some(5));
+        let alix = store.create_node(&["Person", "Station"]);
+        assert_eq!(
+            store.label_id("Station"),
+            Some(10),
+            "after the file's next id"
+        );
+        assert_eq!(store.property_key_id("age"), 12);
+        store.set_node_property(alix, "name", Value::from("Alix"));
+        let written = chunks(&store, ChunkCaps::DEFAULT);
+        assert_layout(&written);
+        let graph = &meta(&written).graphs[0];
+        assert_eq!(
+            graph.labels.names,
+            [
+                (0, "Person".into()),
+                (5, "City".into()),
+                (9, "Museum".into()),
+                (10, "Station".into())
+            ]
+        );
+        assert_eq!(graph.labels.next_id, 11);
+        assert_eq!(
+            graph.keys,
+            DictionaryMeta {
+                next_id: 13,
+                names: vec![(3, "name".into()), (12, "age".into())],
+            }
+        );
+        let row = alix.as_u64();
+        assert_eq!(
+            cells(&written, ChunkKind::Column, 0, LABELS),
+            [(row, Value::from("0,10"), 0)]
+        );
+        assert_eq!(
+            cells(
+                &written,
+                ChunkKind::Column,
+                0,
+                (ChunkNamespace::NodeProperties, 3)
+            ),
+            [(row, Value::from("Alix"), 0)],
+            "the key's column is its id from the file"
+        );
+    }
+
+    /// `clear()` keeps the ids: a cleared graph that meets a name again
+    /// gives it its old id, and a new name the next one.
+    #[test]
+    fn clear_keeps_the_name_ids() {
+        let store = LpgStore::new().unwrap();
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["City"]);
+        store.create_edge(alix, gus, "LIVES_IN");
+        store.clear();
+        let mia = store.create_node(&["City"]);
+        let vincent = store.create_node(&["Artist"]);
+        store.create_edge(mia, vincent, "KNOWS");
+        assert_eq!(
+            (
+                store.label_id("Person"),
+                store.label_id("City"),
+                store.label_id("Artist")
+            ),
+            (Some(0), Some(1), Some(2))
+        );
+        assert_eq!(
+            (store.edge_type_id("LIVES_IN"), store.edge_type_id("KNOWS")),
+            (Some(0), Some(1))
+        );
+        let written = chunks(&store, ChunkCaps::DEFAULT);
+        assert_layout(&written);
+        let graph = &meta(&written).graphs[0];
+        assert_eq!(names_of(&graph.labels), ["Person", "City", "Artist"]);
+        assert_eq!(names_of(&graph.edge_types), ["LIVES_IN", "KNOWS"]);
     }
 
     #[test]
@@ -4490,7 +4675,7 @@ mod tests {
         }
         // A key on the last id only.
         store.set_node_property(ids[39], "city", Value::from("Berlin"));
-        // An overlay above a compacted base.
+        // A store whose ids start far above 0.
         let overlay = LpgStore::new().unwrap();
         overlay.set_next_node_id(1_000);
         overlay.create_node(&["City"]);
@@ -4693,25 +4878,41 @@ mod tests {
     /// The metadata chunk of a crafted section: caps of 4 rows and 1 MiB, one
     /// graph (next node id 4, next edge id 2), label "Person", edge type
     /// "KNOWS" and node property column 16 "name".
+    /// The id of property key "name" in [`crafted_meta`].
+    const NAME: u32 = 0;
+
+    /// A named graph `name` with the id `id`, without nodes, edges or names.
+    fn named(id: u32, name: &str) -> GraphMeta {
+        GraphMeta {
+            id,
+            name: name.into(),
+            next_node_id: 0,
+            next_edge_id: 0,
+            labels: DictionaryMeta::default(),
+            edge_types: DictionaryMeta::default(),
+            keys: DictionaryMeta::default(),
+        }
+    }
+
     fn crafted_meta() -> LpgMeta {
+        let one = |name: &str| DictionaryMeta {
+            next_id: 1,
+            names: vec![(0, name.into())],
+        };
         LpgMeta {
             layout: 1,
             max_rows: 4,
             max_bytes: 1 << 20,
             epoch: 0,
-            labels: vec!["Person".into()],
-            edge_types: vec!["KNOWS".into()],
-            graphs: vec![super::GraphMeta {
+            next_graph_id: 1,
+            graphs: vec![GraphMeta {
+                id: 0,
                 name: String::new(),
                 next_node_id: 4,
                 next_edge_id: 2,
-                unused_labels: Vec::new(),
-                unused_edge_types: Vec::new(),
-            }],
-            columns: vec![ColumnMeta {
-                column_id: 16,
-                table: Table::Node,
-                key: "name".into(),
+                labels: one("Person"),
+                edge_types: one("KNOWS"),
+                keys: one("name"),
             }],
         }
     }
@@ -4728,7 +4929,8 @@ mod tests {
             row_count: u32,
             rows: Vec<(u32, &'static str)>,
         },
-        /// A chunk of node property column 16 of graph 0, every row "Alix".
+        /// A chunk of node property column [`NAME`] of graph 0, every row
+        /// "Alix".
         Name {
             row_start: u64,
             row_count: u32,
@@ -4816,7 +5018,7 @@ mod tests {
                         ChunkKind::Column,
                         ChunkNamespace::NodeProperties,
                         0,
-                        16,
+                        NAME,
                         row_start,
                         row_count,
                         &values,
@@ -5019,7 +5221,7 @@ mod tests {
                     column(99, vec![(0, Value::from("Gus"))], None),
                     Meta,
                 ],
-                "column 99 is not in the metadata chunk",
+                "column 99 is no property key of the graph",
             ),
             (
                 "a node structure column other than the labels",
@@ -5047,18 +5249,20 @@ mod tests {
                 "namespace Section",
             ),
             (
-                "a node property column in the edge property namespace",
+                // The namespace says which table a key's column is of: one
+                // in the edge namespace holds edge rows.
+                "a property value in the edge namespace for a row with no edge",
                 vec![
                     two_nodes(),
                     Raw {
-                        meta: ChunkMeta::column(0, 16, 0, 1, 0)
+                        meta: ChunkMeta::column(0, NAME, 0, 1, 0)
                             .in_namespace(ChunkNamespace::EdgeProperties),
                         values: vec![(0, Value::from("Alix"))],
                         epochs: None,
                     },
                     Meta,
                 ],
-                "column 16 is the node property \"name\", in the edge property namespace",
+                "edge 0 has a property or history value",
             ),
             (
                 "rows past the next id",
@@ -5170,7 +5374,7 @@ mod tests {
                 vec![
                     alix(),
                     history(
-                        16,
+                        NAME,
                         vec![(0, history_value(&[(3, Value::from("Gus"))]))],
                         Some(vec![3]),
                     ),
@@ -5180,7 +5384,11 @@ mod tests {
             ),
             (
                 "a history value that is not a list of versions",
-                vec![alix(), history(16, vec![(0, Value::Int64(3))], None), Meta],
+                vec![
+                    alix(),
+                    history(NAME, vec![(0, Value::Int64(3))], None),
+                    Meta,
+                ],
                 "history",
             ),
             (
@@ -5188,7 +5396,7 @@ mod tests {
                 vec![
                     alix(),
                     history(
-                        16,
+                        NAME,
                         vec![(
                             0,
                             history_value(&[(19, Value::from("Gus")), (3, Value::from("Mia"))]),
@@ -5203,9 +5411,9 @@ mod tests {
                 "a history chunk after the column chunk of its rows",
                 vec![
                     alix(),
-                    column(16, vec![(0, Value::from("Alix"))], Some(vec![19])),
+                    column(NAME, vec![(0, Value::from("Alix"))], Some(vec![19])),
                     history(
-                        16,
+                        NAME,
                         vec![(0, history_value(&[(3, Value::from("Gus"))]))],
                         None,
                     ),
@@ -5218,18 +5426,18 @@ mod tests {
                 vec![
                     alix(),
                     history(
-                        16,
+                        NAME,
                         vec![(0, history_value(&[(19, Value::from("Gus"))]))],
                         None,
                     ),
-                    column(16, vec![(0, Value::from("Alix"))], Some(vec![3])),
+                    column(NAME, vec![(0, Value::from("Alix"))], Some(vec![3])),
                     Meta,
                 ],
                 "epoch",
             ),
             (
                 "a null property value",
-                vec![alix(), column(16, vec![(0, Value::Null)], None), Meta],
+                vec![alix(), column(NAME, vec![(0, Value::Null)], None), Meta],
                 "null",
             ),
             (
@@ -5264,19 +5472,23 @@ mod tests {
                 "graph 0",
             ),
             (
-                "named graphs out of name order",
+                "named graphs out of id order",
                 vec![with(|meta| {
-                    for name in ["trips", "travel"] {
-                        meta.graphs.push(super::GraphMeta {
-                            name: name.into(),
-                            next_node_id: 0,
-                            next_edge_id: 0,
-                            unused_labels: Vec::new(),
-                            unused_edge_types: Vec::new(),
-                        });
-                    }
+                    meta.next_graph_id = 3;
+                    meta.graphs.push(named(2, "trips"));
+                    meta.graphs.push(named(1, "travel"));
                 })],
-                "name order",
+                "graph 1 comes after graph 2",
+            ),
+            (
+                "a graph id not below the next graph id",
+                vec![with(|meta| meta.graphs.push(named(1, "trips")))],
+                "not below the next graph id 1",
+            ),
+            (
+                "a default graph that is not first",
+                vec![with(|meta| meta.graphs[0].id = 3)],
+                "the first graph is graph 3",
             ),
             (
                 "edge columns holding different rows",
@@ -5309,7 +5521,7 @@ mod tests {
                 vec![
                     alix(),
                     Raw {
-                        meta: ChunkMeta::history(0, 16, 0, 3, 0)
+                        meta: ChunkMeta::history(0, NAME, 0, 3, 0)
                             .in_namespace(ChunkNamespace::NodeProperties),
                         values: vec![(2, history_value(&[(3, Value::from("Gus"))]))],
                         epochs: None,
@@ -5322,7 +5534,7 @@ mod tests {
                 "a value epoch above i64::MAX",
                 vec![
                     alix(),
-                    column(16, vec![(0, Value::from("Alix"))], Some(vec![u64::MAX])),
+                    column(NAME, vec![(0, Value::from("Alix"))], Some(vec![u64::MAX])),
                     Meta,
                 ],
                 "above",
@@ -5345,70 +5557,74 @@ mod tests {
                 "is not a label id",
             ),
             (
-                "an unused label id past the label table",
-                vec![with(|meta| meta.graphs[0].unused_labels = vec![1])],
-                "unused label ids [1]",
-            ),
-            (
-                "unused edge type ids not ascending",
+                "a label id not below the next label id",
                 vec![with(|meta| {
-                    meta.edge_types.push("VISITED".into());
-                    meta.graphs[0].unused_edge_types = vec![1, 0];
+                    meta.graphs[0].labels.names.push((1, "City".into()));
                 })],
-                "unused edge type ids [1, 0]",
+                "label id 1 is not below the next label id 1",
             ),
             (
-                "a label listed as unused that a node has",
-                vec![alix(), with(|meta| meta.graphs[0].unused_labels = vec![0])],
-                "listed as unused",
-            ),
-            (
-                "an edge type listed as unused that an edge has",
-                [
-                    vec![two_nodes()],
-                    edge_columns(vec![(0, 0, 1, 0)], 1),
-                    vec![with(|meta| meta.graphs[0].unused_edge_types = vec![0])],
-                ]
-                .into_iter()
-                .flatten()
-                .collect(),
-                "listed as unused",
+                "edge type ids not ascending",
+                vec![with(|meta| {
+                    meta.graphs[0].edge_types = DictionaryMeta {
+                        next_id: 2,
+                        names: vec![(1, "VISITED".into()), (0, "KNOWS".into())],
+                    };
+                })],
+                "edge type id 0 comes after edge type id 1",
             ),
             (
                 "a named graph listed twice",
                 vec![with(|meta| {
-                    for _ in 0..2 {
-                        meta.graphs.push(super::GraphMeta {
-                            name: String::new(),
-                            next_node_id: 0,
-                            next_edge_id: 0,
-                            unused_labels: Vec::new(),
-                            unused_edge_types: Vec::new(),
-                        });
-                    }
+                    meta.next_graph_id = 3;
+                    meta.graphs.push(named(1, ""));
+                    meta.graphs.push(named(2, ""));
                 })],
-                "name order",
+                "two named graphs are named \"\"",
             ),
             (
-                "a property column id below 16",
-                vec![with(|meta| meta.columns[0].column_id = 3)],
-                "column 3",
-            ),
-            (
-                "two columns of one key",
+                "a property key listed twice",
                 vec![with(|meta| {
-                    meta.columns.push(ColumnMeta {
-                        column_id: 17,
-                        table: Table::Node,
-                        key: "name".into(),
-                    });
+                    meta.graphs[0].keys = DictionaryMeta {
+                        next_id: 2,
+                        names: vec![(0, "name".into()), (1, "name".into())],
+                    };
                 })],
-                "\"name\"",
+                "property key \"name\" is listed twice",
             ),
             (
                 "a label listed twice",
-                vec![with(|meta| meta.labels.push("Person".into()))],
-                "\"Person\"",
+                vec![with(|meta| {
+                    meta.graphs[0].labels = DictionaryMeta {
+                        next_id: 2,
+                        names: vec![(0, "Person".into()), (1, "Person".into())],
+                    };
+                })],
+                "label \"Person\" is listed twice",
+            ),
+            (
+                "a label the graph does not hold",
+                vec![
+                    Labels {
+                        row_start: 0,
+                        row_count: 1,
+                        rows: vec![(0, "1")],
+                    },
+                    Meta,
+                ],
+                "label 1 is not a label of the graph",
+            ),
+            (
+                "an edge type the graph does not hold",
+                [
+                    vec![two_nodes()],
+                    edge_columns(vec![(0, 0, 1, 5)], 1),
+                    vec![Meta],
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+                "edge type 5 is not an edge type of the graph",
             ),
             (
                 "rows of zero",

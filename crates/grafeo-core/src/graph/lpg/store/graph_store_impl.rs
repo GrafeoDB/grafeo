@@ -280,14 +280,9 @@ impl GraphStoreSearch for LpgStore {
         self.get_text_index(label, property).is_some()
     }
 
-    // The searches of the text and vector indexes leave out the nodes that
-    // are gone (see `LpgStore::live_index_hits`).
     #[cfg(feature = "text-index")]
     fn score_text(&self, node_id: NodeId, label: &str, property: &str, query: &str) -> Option<f64> {
         let index = self.get_text_index(label, property)?;
-        if self.is_gone_from_indexes(node_id) {
-            return None;
-        }
         let score = index.read().score_document(node_id, query);
         Some(score)
     }
@@ -301,7 +296,7 @@ impl GraphStoreSearch for LpgStore {
         k: usize,
     ) -> Vec<(NodeId, f64)> {
         if let Some(index) = self.get_text_index(label, property) {
-            self.live_index_hits(k, |fetch| index.read().search(query, fetch))
+            index.read().search(query, k)
         } else {
             Vec::new()
         }
@@ -316,9 +311,7 @@ impl GraphStoreSearch for LpgStore {
         threshold: f64,
     ) -> Vec<(NodeId, f64)> {
         if let Some(index) = self.get_text_index(label, property) {
-            let mut hits = index.read().search_with_threshold(query, threshold);
-            self.retain_live_index_hits(&mut hits);
-            hits
+            index.read().search_with_threshold(query, threshold)
         } else {
             Vec::new()
         }
@@ -348,15 +341,14 @@ impl GraphStoreSearch for LpgStore {
         k: usize,
         metric: DistanceMetric,
     ) -> Vec<(NodeId, f64)> {
-        // HNSW path: matching index + matching metric. The index measures
-        // with the vectors its upkeep reads, a compacted base's too.
+        // HNSW path: matching index + matching metric.
         if let Some(label_name) = label
             && let Some(index) = self.get_vector_index(label_name, property)
             && index.config().metric == metric
         {
             let accessor = self.index_vectors(property);
-            return self
-                .live_index_hits(k, |fetch| index.search_with_ef(query, fetch, 64, &accessor))
+            return index
+                .search_with_ef(query, k, 64, &accessor)
                 .into_iter()
                 .map(|(id, d)| (id, f64::from(d)))
                 .collect();

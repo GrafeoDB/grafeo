@@ -31,8 +31,9 @@ impl LpgStore {
     /// open transaction deleted, with the labels and values they were
     /// committed with (with `temporal`, the committed versions of each value
     /// and the store's epoch), nothing an open transaction created, and the
-    /// next ids and registered labels and edge types. Indexes are not
-    /// copied.
+    /// next ids. Every graph keeps its id and its label, edge type and
+    /// property key ids, so the copy writes the same ids the store would.
+    /// Indexes are not copied.
     ///
     /// The committed state comes from each store and the undo log of the
     /// transactions open in it, read together. So the caller holds the
@@ -48,27 +49,35 @@ impl LpgStore {
         let copy = Self::new()?;
         let epoch = section_epoch(self);
         copy_graph(self, &copy, epoch)?;
+        // A graph dropped since the names were read is left out.
+        let graphs: Vec<(String, std::sync::Arc<LpgStore>)> = self
+            .graph_names()
+            .into_iter()
+            .filter_map(|name| self.graph(&name).map(|graph| (name, graph)))
+            .collect();
+        let ids: Vec<(u32, &str)> = graphs
+            .iter()
+            .map(|(name, graph)| (graph.graph_id(), name.as_str()))
+            .collect();
+        // Read after the graphs: above every graph id copied.
+        let targets = copy
+            .restore_graphs(&ids, self.next_graph_id())
+            .map_err(|error| Error::Internal(format!("the committed copy: {error}")))?;
         // In any order: each graph is copied on its own.
-        for name in self.graph_names() {
-            // A graph dropped since the names were read is left out.
-            let Some(graph) = self.graph(&name) else {
-                continue;
-            };
-            copy.create_graph(&name)?;
-            let target = copy.graph(&name).ok_or_else(|| {
-                Error::Internal(format!("the committed copy did not create graph {name:?}"))
-            })?;
-            copy_graph(&graph, &target, epoch)?;
+        for ((_, graph), target) in graphs.iter().zip(&targets) {
+            copy_graph(graph, target, epoch)?;
         }
         Ok(copy)
     }
 }
 
 /// Copies the committed state of `graph` (one store, with its own undo log)
-/// into `target`, a new store: its nodes, then its edges, then their values,
-/// then its next ids, its registered names and, with `temporal`, `epoch`
-/// (the root store's).
+/// into `target`, a new store: its name dictionaries (ids included, so the
+/// nodes and edges find their names' ids), its nodes, then its edges, then
+/// their values, then its next ids and, with `temporal`, `epoch` (the root
+/// store's).
 fn copy_graph(graph: &LpgStore, target: &LpgStore, epoch: u64) -> Result<()> {
+    target.copy_name_dictionaries(graph);
     let changes = graph.open_changes();
     let mut nodes = Vec::new();
     for (id, labels) in committed_nodes(graph, &changes, epoch)? {
@@ -119,14 +128,6 @@ fn copy_graph(graph: &LpgStore, target: &LpgStore, epoch: u64) -> Result<()> {
 
     target.set_next_node_id(target.next_node_id().max(graph.next_node_id()));
     target.set_next_edge_id(target.next_edge_id().max(graph.next_edge_id()));
-    // The names no committed node or edge uses (a deleted node's label stays
-    // registered) are kept, as a load keeps them.
-    for label in graph.all_labels() {
-        target.register_label(&label);
-    }
-    for edge_type in graph.all_edge_types() {
-        target.register_edge_type(&edge_type);
-    }
     Ok(())
 }
 

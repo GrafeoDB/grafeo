@@ -1,6 +1,4 @@
-#[cfg(feature = "compact-store")]
-use super::BaseTombstones;
-use super::{BaseTombstone, LpgStore, PropertyUndoEntry};
+use super::{LpgStore, PropertyUndoEntry};
 use crate::graph::lpg::{EdgeRecord, NodeRecord};
 use grafeo_common::memory::AllocError;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
@@ -19,17 +17,13 @@ use grafeo_common::mvcc::VersionChain;
 #[cfg(feature = "tiered-storage")]
 use grafeo_common::mvcc::{ColdVersionRef, HotVersionRef, VersionIndex};
 
-/// What a transaction gave a version or a tombstone, for its commit to stamp.
+/// What a transaction gave a version, for its commit to stamp.
 #[derive(Default)]
 struct VersionedBy {
     /// Nodes it created or deleted.
     nodes: Vec<NodeId>,
     /// Edges it created or deleted.
     edges: Vec<EdgeId>,
-    /// Nodes of a compacted base it deleted.
-    base_nodes: Vec<NodeId>,
-    /// Edges of a compacted base it deleted.
-    base_edges: Vec<EdgeId>,
 }
 
 impl LpgStore {
@@ -57,9 +51,8 @@ impl LpgStore {
         self.rollback_transaction_properties(transaction_id);
     }
 
-    /// What `transaction_id` gave a version or a tombstone: the nodes and
-    /// edges it created or deleted, and the base nodes and edges of a
-    /// compacted store it deleted.
+    /// What `transaction_id` gave a version: the nodes and edges it created
+    /// or deleted.
     fn versioned_by(&self, transaction_id: TransactionId) -> VersionedBy {
         let mut versioned = VersionedBy::default();
         if let Some(entries) = self.property_undo_log.read().get(&transaction_id) {
@@ -72,12 +65,6 @@ impl LpgStore {
                     PropertyUndoEntry::EdgeCreated { edge_id }
                     | PropertyUndoEntry::EdgeDeleted { edge_id, .. } => {
                         versioned.edges.push(*edge_id);
-                    }
-                    PropertyUndoEntry::BaseNodeDeleted { node_id } => {
-                        versioned.base_nodes.push(*node_id);
-                    }
-                    PropertyUndoEntry::BaseEdgeDeleted { edge_id } => {
-                        versioned.base_edges.push(*edge_id);
                     }
                     PropertyUndoEntry::NodeProperty { .. }
                     | PropertyUndoEntry::EdgeProperty { .. }
@@ -99,10 +86,7 @@ impl LpgStore {
         let VersionedBy {
             nodes: node_ids,
             edges: edge_ids,
-            base_nodes,
-            base_edges,
         } = self.versioned_by(transaction_id);
-        self.stamp_base_tombstones(transaction_id, commit_epoch, &base_nodes, &base_edges);
 
         #[cfg(not(feature = "tiered-storage"))]
         {
@@ -180,9 +164,7 @@ impl LpgStore {
                         edge_values
                             .extend(properties.iter().map(|(key, _)| (*edge_id, key.clone())));
                     }
-                    PropertyUndoEntry::EdgeCreated { .. }
-                    | PropertyUndoEntry::BaseNodeDeleted { .. }
-                    | PropertyUndoEntry::BaseEdgeDeleted { .. } => {}
+                    PropertyUndoEntry::EdgeCreated { .. } => {}
                 }
             }
         }
@@ -209,63 +191,6 @@ impl LpgStore {
                     log.finalize_pending(commit_epoch);
                 }
             }
-        }
-    }
-
-    /// Stamps the tombstones `transaction_id` wrote for base `nodes` and
-    /// `edges` with its commit epoch, so readers from that epoch on miss the
-    /// entities and the deletion log takes them.
-    fn stamp_base_tombstones(
-        &self,
-        transaction_id: TransactionId,
-        commit_epoch: EpochId,
-        nodes: &[NodeId],
-        edges: &[EdgeId],
-    ) {
-        if nodes.is_empty() && edges.is_empty() {
-            return;
-        }
-        let stamp = |tombstone: Option<&mut BaseTombstone>| match tombstone {
-            Some(tombstone) if tombstone.by == transaction_id && !tombstone.is_committed() => {
-                tombstone.epoch = commit_epoch;
-                true
-            }
-            _ => false,
-        };
-        let mut tombstones = self.base_tombstones.write();
-        let mut stamped = false;
-        for id in nodes {
-            stamped |= stamp(tombstones.nodes.get_mut(id));
-        }
-        for id in edges {
-            stamped |= stamp(tombstones.edges.get_mut(id));
-        }
-        tombstones.changed |= stamped;
-    }
-
-    /// Removes the pending tombstone `transaction_id` wrote for base node
-    /// `id` (rollback): every reader sees the node again.
-    pub(super) fn discard_base_node_tombstone(&self, id: NodeId, transaction_id: TransactionId) {
-        let mut tombstones = self.base_tombstones.write();
-        if tombstones
-            .nodes
-            .get(&id)
-            .is_some_and(|tombstone| tombstone.by == transaction_id && !tombstone.is_committed())
-        {
-            tombstones.nodes.remove(&id);
-        }
-    }
-
-    /// [`discard_base_node_tombstone`](Self::discard_base_node_tombstone) for
-    /// a base edge.
-    pub(super) fn discard_base_edge_tombstone(&self, id: EdgeId, transaction_id: TransactionId) {
-        let mut tombstones = self.base_tombstones.write();
-        if tombstones
-            .edges
-            .get(&id)
-            .is_some_and(|tombstone| tombstone.by == transaction_id && !tombstone.is_committed())
-        {
-            tombstones.edges.remove(&id);
         }
     }
 
@@ -805,229 +730,5 @@ impl LpgStore {
     #[doc(hidden)]
     pub fn set_epoch(&self, epoch: EpochId) {
         self.current_epoch.store(epoch.as_u64(), Ordering::SeqCst);
-    }
-}
-
-/// The tombstones of a compacted base, for the layered store this store is
-/// the overlay of.
-#[cfg(feature = "compact-store")]
-impl LpgStore {
-    /// Writes a tombstone for node `id` of the compacted base this store is
-    /// the overlay of. For a transaction it is pending and listed in its undo
-    /// log, so its commit stamps it and its rollback removes it; outside a
-    /// transaction (`TransactionId::SYSTEM`) it is committed at `epoch`.
-    ///
-    /// Returns `false`, writing nothing, when the node has a tombstone
-    /// already: it is deleted, or another transaction is deleting it.
-    pub(crate) fn tombstone_base_node(
-        &self,
-        id: NodeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> bool {
-        let tombstone = self.written_tombstone(epoch, transaction_id);
-        {
-            let mut tombstones = self.base_tombstones.write();
-            if tombstones.nodes.contains_key(&id) {
-                return false;
-            }
-            tombstones.nodes.insert(id, tombstone);
-            tombstones.changed |= tombstone.is_committed();
-        }
-        self.record_change(
-            transaction_id,
-            PropertyUndoEntry::BaseNodeDeleted { node_id: id },
-        );
-        true
-    }
-
-    /// [`tombstone_base_node`](Self::tombstone_base_node) for a base edge.
-    pub(crate) fn tombstone_base_edge(
-        &self,
-        id: EdgeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> bool {
-        let tombstone = self.written_tombstone(epoch, transaction_id);
-        {
-            let mut tombstones = self.base_tombstones.write();
-            if tombstones.edges.contains_key(&id) {
-                return false;
-            }
-            tombstones.edges.insert(id, tombstone);
-            tombstones.changed |= tombstone.is_committed();
-        }
-        self.record_change(
-            transaction_id,
-            PropertyUndoEntry::BaseEdgeDeleted { edge_id: id },
-        );
-        true
-    }
-
-    /// The tombstone `transaction_id` writes: pending for a transaction,
-    /// committed at `epoch` outside one (at the current epoch when `epoch`
-    /// is the pending one, which no commit would ever stamp).
-    fn written_tombstone(&self, epoch: EpochId, transaction_id: TransactionId) -> BaseTombstone {
-        let epoch = if transaction_id != TransactionId::SYSTEM {
-            EpochId::PENDING
-        } else if epoch == EpochId::PENDING {
-            self.current_epoch()
-        } else {
-            epoch
-        };
-        BaseTombstone {
-            epoch,
-            by: transaction_id,
-        }
-    }
-
-    /// The tombstones of the compacted base, for a read. The guard must not
-    /// be held while another of this store's tombstone calls runs.
-    pub(crate) fn base_tombstones(&self) -> parking_lot::RwLockReadGuard<'_, BaseTombstones> {
-        self.base_tombstones.read()
-    }
-
-    /// Replaces the tombstones with committed ones for `nodes` and `edges`,
-    /// deleted at every epoch: the deletion log a file holds, which is
-    /// written already.
-    pub(crate) fn seed_base_tombstones(
-        &self,
-        nodes: impl IntoIterator<Item = NodeId>,
-        edges: impl IntoIterator<Item = EdgeId>,
-    ) {
-        let loaded = BaseTombstone {
-            epoch: EpochId::INITIAL,
-            by: TransactionId::SYSTEM,
-        };
-        let mut tombstones = self.base_tombstones.write();
-        tombstones.nodes = nodes.into_iter().map(|id| (id, loaded)).collect();
-        tombstones.edges = edges.into_iter().map(|id| (id, loaded)).collect();
-        tombstones.changed = false;
-    }
-
-    /// Whether a committed tombstone was added since
-    /// [`mark_base_tombstones_written`](Self::mark_base_tombstones_written).
-    pub(crate) fn base_tombstones_changed(&self) -> bool {
-        self.base_tombstones.read().changed
-    }
-
-    /// Notes that the deletion log holds the committed tombstones.
-    pub(crate) fn mark_base_tombstones_written(&self) {
-        self.base_tombstones.write().changed = false;
-    }
-}
-
-#[cfg(feature = "compact-store")]
-impl BaseTombstone {
-    /// Whether a reader at `epoch` misses the entity: the delete is
-    /// committed at or before it.
-    #[must_use]
-    fn hides_at(self, epoch: EpochId) -> bool {
-        self.is_committed() && self.epoch <= epoch
-    }
-
-    /// Whether `transaction_id`, reading at `epoch`, misses the entity: its
-    /// own delete is still pending, or the delete is committed at or before
-    /// `epoch` (as a version deleted by the reading transaction is invisible
-    /// to it, see `VersionInfo::is_visible_to`).
-    ///
-    /// Only a pending tombstone goes by who wrote it: a committed one goes
-    /// by its epoch for every reader, its writer too. A delete outside a
-    /// transaction is committed at once by [`TransactionId::SYSTEM`], which
-    /// also reads every statement outside a transaction, so a read at an
-    /// epoch before that delete still sees the entity.
-    #[must_use]
-    fn hides_from(self, epoch: EpochId, transaction_id: TransactionId) -> bool {
-        (!self.is_committed() && self.by == transaction_id) || self.hides_at(epoch)
-    }
-}
-
-#[cfg(feature = "compact-store")]
-impl BaseTombstones {
-    /// Whether base node `id` has a tombstone, pending or committed.
-    #[must_use]
-    pub(crate) fn has_node(&self, id: NodeId) -> bool {
-        self.nodes.contains_key(&id)
-    }
-
-    /// Whether base edge `id` has a tombstone, pending or committed.
-    #[must_use]
-    pub(crate) fn has_edge(&self, id: EdgeId) -> bool {
-        self.edges.contains_key(&id)
-    }
-
-    /// Whether base node `id` is deleted for current reads: its delete is
-    /// committed.
-    #[must_use]
-    pub(crate) fn node_deleted(&self, id: NodeId) -> bool {
-        self.nodes.get(&id).is_some_and(|t| t.is_committed())
-    }
-
-    /// Whether base edge `id` is deleted for current reads.
-    #[must_use]
-    pub(crate) fn edge_deleted(&self, id: EdgeId) -> bool {
-        self.edges.get(&id).is_some_and(|t| t.is_committed())
-    }
-
-    /// Whether base node `id` is deleted for a read at `epoch`.
-    #[must_use]
-    pub(crate) fn node_deleted_at(&self, id: NodeId, epoch: EpochId) -> bool {
-        self.nodes.get(&id).is_some_and(|t| t.hides_at(epoch))
-    }
-
-    /// Whether base edge `id` is deleted for a read at `epoch`.
-    #[must_use]
-    pub(crate) fn edge_deleted_at(&self, id: EdgeId, epoch: EpochId) -> bool {
-        self.edges.get(&id).is_some_and(|t| t.hides_at(epoch))
-    }
-
-    /// Whether base node `id` is deleted for `transaction_id` reading at
-    /// `epoch`.
-    #[must_use]
-    pub(crate) fn node_deleted_for(
-        &self,
-        id: NodeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> bool {
-        self.nodes
-            .get(&id)
-            .is_some_and(|t| t.hides_from(epoch, transaction_id))
-    }
-
-    /// Whether base edge `id` is deleted for `transaction_id` reading at
-    /// `epoch`.
-    #[must_use]
-    pub(crate) fn edge_deleted_for(
-        &self,
-        id: EdgeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> bool {
-        self.edges
-            .get(&id)
-            .is_some_and(|t| t.hides_from(epoch, transaction_id))
-    }
-
-    /// The base nodes whose delete is committed.
-    pub(crate) fn deleted_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.nodes
-            .iter()
-            .filter(|(_, t)| t.is_committed())
-            .map(|(id, _)| *id)
-    }
-
-    /// The base edges whose delete is committed.
-    pub(crate) fn deleted_edges(&self) -> impl Iterator<Item = EdgeId> + '_ {
-        self.edges
-            .iter()
-            .filter(|(_, t)| t.is_committed())
-            .map(|(id, _)| *id)
-    }
-
-    /// The number of tombstones, pending ones included.
-    #[must_use]
-    pub(crate) fn count(&self) -> usize {
-        self.nodes.len() + self.edges.len()
     }
 }

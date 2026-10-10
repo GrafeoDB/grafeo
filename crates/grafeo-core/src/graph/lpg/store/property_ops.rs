@@ -528,12 +528,6 @@ impl LpgStore {
                     PropertyUndoEntry::EdgeCreated { edge_id } => {
                         self.discard_created_edge(edge_id, transaction_id);
                     }
-                    PropertyUndoEntry::BaseNodeDeleted { node_id } => {
-                        self.discard_base_node_tombstone(node_id, transaction_id);
-                    }
-                    PropertyUndoEntry::BaseEdgeDeleted { edge_id } => {
-                        self.discard_base_edge_tombstone(edge_id, transaction_id);
-                    }
                     PropertyUndoEntry::NodeProperty {
                         node_id,
                         key,
@@ -619,12 +613,6 @@ impl LpgStore {
                     PropertyUndoEntry::EdgeCreated { edge_id } => {
                         self.discard_created_edge(edge_id, transaction_id);
                     }
-                    PropertyUndoEntry::BaseNodeDeleted { node_id } => {
-                        self.discard_base_node_tombstone(node_id, transaction_id);
-                    }
-                    PropertyUndoEntry::BaseEdgeDeleted { edge_id } => {
-                        self.discard_base_edge_tombstone(edge_id, transaction_id);
-                    }
                     PropertyUndoEntry::NodeProperty { node_id, key, .. } => {
                         node_props.insert((node_id, key));
                     }
@@ -674,6 +662,12 @@ impl LpgStore {
                     }
                 }
                 self.reconcile_property_indexes(before);
+                // The vector indexes follow the restored values: a rolled
+                // back removal of a vector puts it back (#600).
+                #[cfg(feature = "vector-index")]
+                for (node_id, key) in &node_props {
+                    self.sync_vector_indexes_for_property(*node_id, key.as_str());
+                }
             }
 
             if !edge_props.is_empty() {
@@ -776,12 +770,6 @@ impl LpgStore {
                     PropertyUndoEntry::EdgeCreated { edge_id } => {
                         self.discard_created_edge(edge_id, transaction_id);
                     }
-                    PropertyUndoEntry::BaseNodeDeleted { node_id } => {
-                        self.discard_base_node_tombstone(node_id, transaction_id);
-                    }
-                    PropertyUndoEntry::BaseEdgeDeleted { edge_id } => {
-                        self.discard_base_edge_tombstone(edge_id, transaction_id);
-                    }
                     PropertyUndoEntry::NodeProperty {
                         node_id,
                         key,
@@ -873,12 +861,6 @@ impl LpgStore {
                     PropertyUndoEntry::EdgeCreated { edge_id } => {
                         self.discard_created_edge(edge_id, transaction_id);
                     }
-                    PropertyUndoEntry::BaseNodeDeleted { node_id } => {
-                        self.discard_base_node_tombstone(node_id, transaction_id);
-                    }
-                    PropertyUndoEntry::BaseEdgeDeleted { edge_id } => {
-                        self.discard_base_edge_tombstone(edge_id, transaction_id);
-                    }
                     PropertyUndoEntry::NodeProperty { node_id, key, .. } => {
                         *node_prop_counts.entry((node_id, key)).or_default() += 1;
                     }
@@ -928,6 +910,11 @@ impl LpgStore {
                     }
                 }
                 self.reconcile_property_indexes(before);
+                // The vector indexes follow the restored values (#600).
+                #[cfg(feature = "vector-index")]
+                for (node_id, key) in node_prop_counts.keys() {
+                    self.sync_vector_indexes_for_property(*node_id, key.as_str());
+                }
             }
 
             // Pop PENDING entries from edge property version logs
@@ -1098,8 +1085,8 @@ impl LpgStore {
 
         // Restore edge type count
         let type_id = {
-            let type_map = self.edge_type_to_id.read();
-            type_map.get(edge_type).copied()
+            let type_map = self.edge_types.read();
+            type_map.get_id(edge_type)
         };
         if let Some(type_id) = type_id {
             self.increment_edge_type_count(type_id);

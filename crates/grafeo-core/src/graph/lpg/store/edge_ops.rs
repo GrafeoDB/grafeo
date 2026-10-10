@@ -20,39 +20,12 @@ fn unreadable_edge_record(id: EdgeId) -> grafeo_common::utils::error::Error {
     ))
 }
 
-#[cfg(all(test, feature = "compact-store"))]
-thread_local! {
-    /// What an edge adoption on this thread runs between its steps, for the
-    /// tests that read the store there.
-    static ADOPT_EDGE_STEP: std::cell::RefCell<Option<Box<dyn Fn()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(all(test, feature = "compact-store"))]
-impl LpgStore {
-    /// Sets what each edge adoption on this thread runs between its steps
-    /// (`None` runs nothing).
-    pub(crate) fn set_adopt_edge_step_hook(hook: Option<Box<dyn Fn()>>) {
-        ADOPT_EDGE_STEP.with(|step| *step.borrow_mut() = hook);
-    }
-}
-
-/// Runs the hook of `LpgStore::set_adopt_edge_step_hook`, if one is set.
-#[cfg(all(test, feature = "compact-store"))]
-fn run_adopt_edge_step() {
-    ADOPT_EDGE_STEP.with(|step| {
-        if let Some(hook) = step.borrow().as_ref() {
-            hook();
-        }
-    });
-}
-
 impl LpgStore {
     /// Builds an `Edge` from a record, resolving the type name and loading properties.
     fn build_edge(&self, id: EdgeId, record: &EdgeRecord) -> Option<Edge> {
         let edge_type = {
-            let id_to_type = self.id_to_edge_type.read();
-            id_to_type.get(record.type_id as usize)?.clone()
+            let edge_types = self.edge_types.read();
+            edge_types.get_name(record.type_id)?.clone()
         };
         let mut edge = Edge::new(id, record.src, record.dst, edge_type);
         edge.properties = self.edge_properties.get_all(id).into_iter().collect();
@@ -63,8 +36,8 @@ impl LpgStore {
     #[cfg(feature = "temporal")]
     fn build_edge_at(&self, id: EdgeId, record: &EdgeRecord, epoch: EpochId) -> Option<Edge> {
         let edge_type = {
-            let id_to_type = self.id_to_edge_type.read();
-            id_to_type.get(record.type_id as usize)?.clone()
+            let edge_types = self.edge_types.read();
+            edge_types.get_name(record.type_id)?.clone()
         };
         let mut edge = Edge::new(id, record.src, record.dst, edge_type);
         edge.properties = self
@@ -351,7 +324,7 @@ impl LpgStore {
             return Vec::new();
         };
 
-        let id_to_type = self.id_to_edge_type.read();
+        let edge_types = self.edge_types.read();
 
         #[cfg(not(feature = "temporal"))]
         {
@@ -360,7 +333,7 @@ impl LpgStore {
             chain
                 .history()
                 .filter_map(|(info, record)| {
-                    let edge_type = id_to_type.get(record.type_id as usize)?.clone();
+                    let edge_type = edge_types.get_name(record.type_id)?.clone();
                     let mut edge = Edge::new(id, record.src, record.dst, edge_type);
                     edge.properties.clone_from(&properties);
                     Some((info.created_epoch, info.deleted_epoch, edge))
@@ -373,7 +346,7 @@ impl LpgStore {
             chain
                 .history()
                 .filter_map(|(info, record)| {
-                    let edge_type = id_to_type.get(record.type_id as usize)?.clone();
+                    let edge_type = edge_types.get_name(record.type_id)?.clone();
                     let mut edge = Edge::new(id, record.src, record.dst, edge_type);
                     edge.properties = self
                         .edge_properties
@@ -396,7 +369,7 @@ impl LpgStore {
             return Vec::new();
         };
 
-        let id_to_type = self.id_to_edge_type.read();
+        let edge_types = self.edge_types.read();
         let properties: grafeo_common::types::PropertyMap =
             self.edge_properties.get_all(id).into_iter().collect();
 
@@ -405,7 +378,7 @@ impl LpgStore {
             .into_iter()
             .filter_map(|(created, deleted, vref)| {
                 let record = self.read_edge_record(&vref)?;
-                let edge_type = id_to_type.get(record.type_id as usize)?.clone();
+                let edge_type = edge_types.get_name(record.type_id)?.clone();
                 let mut edge = Edge::new(id, record.src, record.dst, edge_type);
                 edge.properties.clone_from(&properties);
                 Some((created, deleted, edge))
@@ -539,9 +512,9 @@ impl LpgStore {
 
             // Get edge type name for undo log
             let edge_type_name = {
-                let id_to_type = self.id_to_edge_type.read();
-                id_to_type
-                    .get(type_id as usize)
+                let edge_types = self.edge_types.read();
+                edge_types
+                    .get_name(type_id)
                     .map(|s| s.to_string())
                     .unwrap_or_default()
             };
@@ -619,9 +592,9 @@ impl LpgStore {
 
             // Get edge type name for undo log
             let edge_type_name = {
-                let id_to_type = self.id_to_edge_type.read();
-                id_to_type
-                    .get(type_id as usize)
+                let edge_types = self.edge_types.read();
+                edge_types
+                    .get_name(type_id)
                     .map(|s| s.to_string())
                     .unwrap_or_default()
             };
@@ -813,9 +786,9 @@ impl LpgStore {
             return Ok(None);
         }
         let edge_type = self
-            .id_to_edge_type
+            .edge_types
             .read()
-            .get(record.type_id as usize)
+            .get_name(record.type_id)
             .cloned()
             .ok_or_else(|| {
                 grafeo_common::utils::error::Error::Internal(format!(
@@ -992,8 +965,8 @@ impl LpgStore {
         let chain = edges.get(&id)?;
         let epoch = self.current_epoch();
         let record = chain.visible_at(epoch)?;
-        let id_to_type = self.id_to_edge_type.read();
-        id_to_type.get(record.type_id as usize).cloned()
+        let edge_types = self.edge_types.read();
+        edge_types.get_name(record.type_id).cloned()
     }
 
     /// Gets the type of an edge by ID.
@@ -1006,8 +979,8 @@ impl LpgStore {
         let epoch = self.current_epoch();
         let vref = index.visible_at(epoch)?;
         let record = self.read_edge_record(&vref)?;
-        let id_to_type = self.id_to_edge_type.read();
-        id_to_type.get(record.type_id as usize).cloned()
+        let edge_types = self.edge_types.read();
+        edge_types.get_name(record.type_id).cloned()
     }
 
     /// Gets the type of an edge visible to a specific transaction.
@@ -1024,8 +997,8 @@ impl LpgStore {
         let edges = self.edges.read();
         let chain = edges.get(&id)?;
         let record = chain.visible_to(epoch, transaction_id)?;
-        let id_to_type = self.id_to_edge_type.read();
-        id_to_type.get(record.type_id as usize).cloned()
+        let edge_types = self.edge_types.read();
+        edge_types.get_name(record.type_id).cloned()
     }
 
     /// Gets the type of an edge visible to a specific transaction.
@@ -1042,8 +1015,8 @@ impl LpgStore {
         let index = versions.get(&id)?;
         let vref = index.visible_to(epoch, transaction_id)?;
         let record = self.read_edge_record(&vref)?;
-        let id_to_type = self.id_to_edge_type.read();
-        id_to_type.get(record.type_id as usize).cloned()
+        let edge_types = self.edge_types.read();
+        edge_types.get_name(record.type_id).cloned()
     }
 
     // --- Visibility checks (no type resolution or property loading) ---
@@ -1108,250 +1081,5 @@ impl LpgStore {
                     .is_some_and(|r| !r.is_deleted())
             })
         })
-    }
-}
-
-/// Copies of a compacted base's edges, for the layered store this store is
-/// the overlay of.
-#[cfg(feature = "compact-store")]
-impl LpgStore {
-    /// Adopts edge `id` of the compacted base this store is the overlay of,
-    /// from `src` to `dst`, before a write changes it, as
-    /// [`adopt_node`](Self::adopt_node) adopts a node: created at
-    /// [`EpochId::INITIAL`] by the system with its `properties` (with
-    /// `temporal`, at that epoch too), in the adjacency lists and the live
-    /// counts (of all edges and of its type), without touching the id
-    /// allocator, whole or not at all for every reader, and only if the
-    /// store does not hold `id` yet. The caller adopts the endpoints first.
-    ///
-    /// Returns `false`, changing nothing but registering the type name,
-    /// when the store holds `id` already.
-    #[cfg(not(feature = "tiered-storage"))]
-    pub(crate) fn adopt_edge(
-        &self,
-        id: EdgeId,
-        src: NodeId,
-        dst: NodeId,
-        edge_type: &str,
-        properties: impl IntoIterator<Item = (PropertyKey, Value)>,
-    ) -> bool {
-        // The type before the edge lock: its own locks, which an adoption
-        // that loses the race below takes for a name the winner registers
-        // as well.
-        let type_id = self.get_or_create_edge_type_id(edge_type);
-        let mut edges = self.edges.write();
-        if edges.contains_key(&id) {
-            return false;
-        }
-        let record = EdgeRecord::new(id, src, dst, type_id, EpochId::INITIAL);
-        edges.insert(
-            id,
-            VersionChain::with_initial(record, EpochId::INITIAL, TransactionId::SYSTEM),
-        );
-        self.fill_adopted_edge(id, src, dst, type_id, properties);
-        drop(edges);
-        true
-    }
-
-    /// Adopts edge `id` of the compacted base this store is the overlay of.
-    /// (Tiered storage version: see the version without it.)
-    ///
-    /// The record goes into the current epoch's arena before the version
-    /// lock is taken (see the lock order on `arena_allocator`); an adoption
-    /// that then finds `id` taken leaves its record unused there.
-    #[cfg(feature = "tiered-storage")]
-    pub(crate) fn adopt_edge(
-        &self,
-        id: EdgeId,
-        src: NodeId,
-        dst: NodeId,
-        edge_type: &str,
-        properties: impl IntoIterator<Item = (PropertyKey, Value)>,
-    ) -> bool {
-        if self.edge_versions.read().contains_key(&id) {
-            return false;
-        }
-        let type_id = self.get_or_create_edge_type_id(edge_type);
-        let arena_epoch = self.current_epoch();
-        let (offset, _stored) = self
-            .arena_allocator
-            .arena_or_create(arena_epoch)
-            .expect("failed to create arena for epoch")
-            .alloc_value_with_offset(EdgeRecord::new(id, src, dst, type_id, EpochId::INITIAL))
-            .expect("arena allocation failed for edge record");
-        let mut versions = self.edge_versions.write();
-        if versions.contains_key(&id) {
-            return false;
-        }
-        let hot_ref =
-            HotVersionRef::new(EpochId::INITIAL, arena_epoch, offset, TransactionId::SYSTEM);
-        versions.insert(id, VersionIndex::with_initial(hot_ref));
-        self.fill_adopted_edge(id, src, dst, type_id, properties);
-        drop(versions);
-        true
-    }
-
-    /// Gives an edge being adopted its values at the initial epoch, counts
-    /// it live, and then puts it in both adjacency lists at once. The caller
-    /// holds the edge lock, which comes before every lock this takes: a
-    /// reader of the edge's record waits for the whole copy, and a reader of
-    /// the adjacency lists, which takes no edge lock, finds the edge in both
-    /// lists with its values, or in neither.
-    fn fill_adopted_edge(
-        &self,
-        id: EdgeId,
-        src: NodeId,
-        dst: NodeId,
-        type_id: u32,
-        properties: impl IntoIterator<Item = (PropertyKey, Value)>,
-    ) {
-        for (key, value) in properties {
-            #[cfg(not(feature = "temporal"))]
-            self.edge_properties.set(id, key, value);
-            #[cfg(feature = "temporal")]
-            self.edge_properties.set(id, key, value, EpochId::INITIAL);
-        }
-        self.live_edge_count.fetch_add(1, Ordering::Relaxed);
-        self.increment_edge_type_count(type_id);
-        #[cfg(test)]
-        run_adopt_edge_step();
-        // Last, and into both lists at once: the adjacency readers take no
-        // edge lock, so they find the edge only once it is whole.
-        self.forward_adj
-            .add_edge_both_ways(self.backward_adj.as_ref(), src, dst, id);
-        #[cfg(test)]
-        run_adopt_edge_step();
-    }
-}
-
-#[cfg(all(test, feature = "compact-store"))]
-mod adopt_tests {
-    use std::sync::{Arc, Barrier};
-
-    use super::*;
-    use crate::graph::Direction;
-
-    /// Alix and Gus, adopted, for the edge between them.
-    fn alix_and_gus(store: &LpgStore) -> (NodeId, NodeId) {
-        let (alix, gus) = (NodeId::new(3), NodeId::new(19));
-        assert!(store.adopt_node(alix, &["Person"], []));
-        assert!(store.adopt_node(gus, &["Person"], []));
-        (alix, gus)
-    }
-
-    /// The edge's value, as the compacted base holds it.
-    fn since() -> [(PropertyKey, Value); 1] {
-        [(PropertyKey::new("since"), Value::Int64(1988))]
-    }
-
-    /// An adopted edge is there at every epoch with its type and value, in
-    /// both adjacency lists, and counted live (also by its type); the id
-    /// allocator is left alone.
-    #[test]
-    fn an_adopted_edge_is_there_at_every_epoch() {
-        let store = LpgStore::new().unwrap();
-        store.set_next_edge_id(19);
-        store.sync_epoch(EpochId::new(19));
-        let (alix, gus) = alix_and_gus(&store);
-        let knows = EdgeId::new(88);
-        assert!(store.adopt_edge(knows, alix, gus, "KNOWS", since()));
-
-        for epoch in [EpochId::INITIAL, EpochId::new(3), EpochId::new(19)] {
-            for (reader, edge) in [
-                ("a read at the epoch", store.get_edge_at_epoch(knows, epoch)),
-                (
-                    "a transaction",
-                    store.get_edge_versioned(knows, epoch, TransactionId::new(88)),
-                ),
-            ] {
-                let edge = edge.unwrap_or_else(|| panic!("{reader} at {epoch:?} misses the edge"));
-                assert_eq!((edge.src, edge.dst), (alix, gus), "{reader} at {epoch:?}");
-                assert_eq!(edge.edge_type.as_str(), "KNOWS");
-                assert_eq!(edge.get_property("since"), Some(&Value::Int64(1988)));
-            }
-            assert!(store.is_edge_visible_at_epoch(knows, epoch));
-        }
-        assert_eq!(
-            store
-                .edges_from(alix, Direction::Outgoing)
-                .collect::<Vec<_>>(),
-            vec![(gus, knows)]
-        );
-        assert_eq!(store.edges_to(gus), vec![(alix, knows)]);
-        assert_eq!(store.edge_count(), 1);
-        store.compute_statistics();
-        let statistics = store.statistics();
-        assert_eq!(statistics.total_edges, 1, "the live count");
-        assert_eq!(
-            statistics
-                .edge_types
-                .get("KNOWS")
-                .map(|knows| knows.edge_count),
-            Some(1),
-            "the live count of its type"
-        );
-        assert_eq!(store.next_edge_id(), 19, "the allocator is left alone");
-        assert_eq!(store.create_edge(gus, alix, "KNOWS"), EdgeId::new(19));
-    }
-
-    /// Adopting an id the store holds changes nothing: the edge keeps the
-    /// value written since, and one adjacency entry.
-    #[test]
-    fn adopting_a_held_edge_id_changes_nothing() {
-        let store = LpgStore::new().unwrap();
-        let (alix, gus) = alix_and_gus(&store);
-        let knows = EdgeId::new(88);
-        assert!(store.adopt_edge(knows, alix, gus, "KNOWS", since()));
-        store.set_edge_property(knows, "since", Value::Int64(2019));
-        assert!(!store.adopt_edge(knows, alix, gus, "KNOWS", since()));
-
-        let edge = store.get_edge(knows).unwrap();
-        assert_eq!(edge.get_property("since"), Some(&Value::Int64(2019)));
-        assert_eq!(store.edges_from(alix, Direction::Outgoing).count(), 1);
-        assert_eq!(store.edges_to(gus).len(), 1);
-        store.compute_statistics();
-        assert_eq!(store.statistics().total_edges, 1, "the live count");
-    }
-
-    /// Threads adopting one edge id at the same time: one inserts, with one
-    /// entry in each adjacency list and one in the live counts.
-    #[test]
-    fn concurrent_adoptions_of_one_edge_id_insert_once() {
-        const THREADS: usize = 3;
-        let store = Arc::new(LpgStore::new().unwrap());
-        let (alix, gus) = alix_and_gus(&store);
-        for round in 0..88_u64 {
-            let id = EdgeId::new(round);
-            let start = Arc::new(Barrier::new(THREADS));
-            let adopters: Vec<_> = (0..THREADS)
-                .map(|_| {
-                    let (store, start) = (Arc::clone(&store), Arc::clone(&start));
-                    std::thread::spawn(move || {
-                        start.wait();
-                        store.adopt_edge(id, alix, gus, "KNOWS", since())
-                    })
-                })
-                .collect();
-            let inserted = adopters
-                .into_iter()
-                .map(|adopter| adopter.join().unwrap())
-                .filter(|&inserted| inserted)
-                .count();
-            assert_eq!(inserted, 1, "round {round}: one adoption inserts");
-        }
-        assert_eq!(store.edge_count(), 88);
-        assert_eq!(store.edges_from(alix, Direction::Outgoing).count(), 88);
-        assert_eq!(store.edges_to(gus).len(), 88);
-        store.compute_statistics();
-        let statistics = store.statistics();
-        assert_eq!(statistics.total_edges, 88, "the live count");
-        assert_eq!(
-            statistics
-                .edge_types
-                .get("KNOWS")
-                .map(|knows| knows.edge_count),
-            Some(88),
-            "the live count of the type"
-        );
     }
 }

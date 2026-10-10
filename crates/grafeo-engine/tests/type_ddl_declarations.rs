@@ -499,3 +499,51 @@ fn edge_type_defaults_survive_a_checkpoint_and_a_reopen() {
     let (_dir, db) = reopened_after_checkpoint(ROUTES);
     assert_route_defaults(&db);
 }
+
+// ── Inline element type defaults ────────────────────────────────────
+
+/// The three forms of a graph type's inline element types, each with a node
+/// type default (`zone`) and an edge type default (`minutes`).
+const INLINE_DEFAULTS: &[(&str, &str)] = &[
+    (
+        "paren",
+        "CREATE GRAPH TYPE trips ((:Stop {name STRING, zone STRING DEFAULT 'A'})\
+         -[:LEG {minutes INT64 DEFAULT 19}]->(:Stop))",
+    ),
+    (
+        "brace",
+        "CREATE GRAPH TYPE trips { (:Stop {name STRING, zone STRING DEFAULT 'A'})\
+         -[:LEG {minutes INT64 DEFAULT 19}]->(:Stop) }",
+    ),
+    (
+        "verbose",
+        "CREATE GRAPH TYPE trips (NODE TYPE Stop (name STRING, zone STRING DEFAULT 'A'), \
+         EDGE TYPE LEG (minutes INT64 DEFAULT 19))",
+    ),
+];
+
+fn assert_inline_defaults(form: &str, db: &GrafeoDB) {
+    assert_eq!(
+        rows(
+            db,
+            "INSERT (a:Stop {name: 'Berlin'})-[l:LEG]->(b:Stop {name: 'Prague', zone: 'B'}) \
+             RETURN a.zone, l.minutes, b.zone"
+        ),
+        [[Value::from("A"), Value::Int64(19), Value::from("B")]],
+        "{form} form"
+    );
+}
+
+/// A default in an inline element type of a graph type fills a property an
+/// insert leaves out, as one in CREATE NODE TYPE or CREATE EDGE TYPE does: in
+/// the paren, brace and verbose forms, and after a checkpoint and a reopen.
+#[test]
+fn inline_element_type_defaults_fill_missing_properties() {
+    for (form, ddl) in INLINE_DEFAULTS {
+        let db = GrafeoDB::new_in_memory();
+        db.execute(ddl).unwrap();
+        assert_inline_defaults(form, &db);
+        let (_dir, db) = reopened_after_checkpoint(&[ddl]);
+        assert_inline_defaults(form, &db);
+    }
+}

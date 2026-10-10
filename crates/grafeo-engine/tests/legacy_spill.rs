@@ -280,13 +280,8 @@ fn an_encrypting_migration_keeps_the_spilled_embeddings() {
     let (dir, path) = fixture("0.5.44");
     let spill_files = files(&spill_dir(&path));
     let chain = Arc::new(KeyChain::new([19; 32]));
-    let keyed = || {
-        let mut config = Config::persistent(&path);
-        config.encryption = Some(EncryptionConfig {
-            key_chain: Arc::clone(&chain),
-        });
-        config
-    };
+    let keyed =
+        || Config::persistent(&path).with_encryption(EncryptionConfig::new(Arc::clone(&chain)));
 
     let db = GrafeoDB::with_config(keyed()).unwrap();
     assert_eq!(embeddings(&db), folded());

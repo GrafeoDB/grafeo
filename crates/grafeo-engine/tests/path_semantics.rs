@@ -4,6 +4,10 @@
 //! shortest-path search binds its edge variable and keeps an element pattern
 //! `WHERE` inside the search (#572).
 //!
+//! Queries quoted from Microsoft Fabric's GQL documentation
+//! (<https://learn.microsoft.com/en-us/fabric/graph/>) are MIT, Copyright (c)
+//! Microsoft Corporation.
+//!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test path_semantics
 //! ```

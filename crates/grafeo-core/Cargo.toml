@@ -96,3 +96,8 @@ required-features = ["vector-index"]
 [[bench]]
 name = "top_k"
 harness = false
+
+[[bench]]
+name = "morsel_pipeline"
+harness = false
+required-features = ["parallel"]

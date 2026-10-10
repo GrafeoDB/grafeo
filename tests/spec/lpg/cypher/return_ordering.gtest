@@ -31,6 +31,21 @@ tests:
       rows:
         - [Alix]
 
+  # openCypher orders null as the largest value: last ascending, first
+  # descending (GQL puts it last both ways, #571)
+  - name: order_by_desc_puts_nulls_first
+    setup:
+      - "CREATE (:Item {name: 'A', rank: 1})"
+      - "CREATE (:Item {name: 'B'})"
+      - "CREATE (:Item {name: 'C', rank: 3})"
+    query: MATCH (n:Item) RETURN n.name, n.rank ORDER BY n.rank DESC
+    expect:
+      ordered: true
+      rows:
+        - [B, null]
+        - [C, 3]
+        - [A, 1]
+
   - name: return_distinct
     setup:
       - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"

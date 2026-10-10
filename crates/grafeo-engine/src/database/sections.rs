@@ -2188,10 +2188,13 @@ mod tests {
         }
 
         fn fetch(&self, _index: usize) -> Result<bytes::Bytes> {
-            Err(grafeo_common::utils::error::Error::Serialization(format!(
-                "chunk of section {:?} at offset 16384 fails its checksum",
-                self.0
-            )))
+            Err(grafeo_common::utils::error::Error::corruption_at(
+                format!(
+                    "chunk of section {:?} at offset 16384 fails its checksum",
+                    self.0
+                ),
+                16384,
+            ))
         }
 
         fn stored_length(&self, index: usize) -> Result<u64> {

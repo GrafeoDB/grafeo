@@ -761,11 +761,11 @@ fn encode_catalog_key(key: &CatalogKey, out: &mut PayloadWriter<'_>) -> Result<(
 /// Splits a catalog record's or key's kind from what follows it.
 fn catalog_kind<'a>(what: &str, payload: &'a [u8]) -> Result<(u8, &'a [u8])> {
     match payload.split_first() {
-        Some((&0, _)) => Err(Error::Serialization(format!(
+        Some((&0, _)) => Err(Error::corruption(format!(
             "a {what} of kind 0, which is never written"
         ))),
         Some((&kind, rest)) => Ok((kind, rest)),
-        None => Err(Error::Serialization(format!(
+        None => Err(Error::corruption(format!(
             "the payload is empty: it holds no {what} kind"
         ))),
     }
@@ -789,7 +789,7 @@ fn decode_catalog_record(required: bool, payload: &[u8]) -> Result<Option<Catalo
     if !u32::try_from(catalog_payload.len())
         .is_ok_and(|length| length <= MAX_CATALOG_RECORD_PAYLOAD)
     {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "a {WHAT} of {} bytes, more than the {MAX_CATALOG_RECORD_PAYLOAD} a {WHAT} may hold",
             catalog_payload.len()
         )));
@@ -836,18 +836,20 @@ fn decode_catalog_key(required: bool, payload: &[u8]) -> Result<Option<CatalogKe
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the record (its index, from 0,
-/// and the byte of `payload` it starts at) for:
+/// Returns [`Error::Corruption`] naming the record (its index, from 0, and
+/// the byte of `payload` it starts at) for:
 ///
-/// - kind 0, or a flag among bits 0 to 3 other than [`RECORD_REQUIRED`]
-///   (bits 4 to 7 are ignored);
-/// - an unknown kind, or a catalog record of an unknown kind, with the
-///   required flag set;
+/// - kind 0, or a catalog record or key of kind 0 or without a kind;
 /// - a framed record longer than [`MAX_RECORD_BYTES`], or a catalog record
 ///   longer than [`MAX_CATALOG_RECORD_PAYLOAD`];
 /// - a payload that ends inside a record's header or payload;
 /// - a record payload that does not decode as its kind's fields, or has
 ///   bytes left over.
+///
+/// Returns [`Error::Serialization`] naming the record for what a newer
+/// release wrote: a flag among bits 0 to 3 other than [`RECORD_REQUIRED`]
+/// (bits 4 to 7 are ignored), or an unknown kind, or a catalog record of an
+/// unknown kind, with the required flag set.
 ///
 /// An error of `apply` comes back as it is and stops the read.
 pub fn read_log_records(
@@ -873,16 +875,16 @@ pub fn read_log_records(
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] when the payload does not decode or has
+/// Returns [`Error::Corruption`] when the payload does not decode or has
 /// bytes left over.
 fn decode<T: DeserializeOwned>(payload: &[u8]) -> Result<T> {
     match bincode::serde::decode_from_slice::<T, _>(payload, bincode::config::standard()) {
         Ok((record, used)) if used == payload.len() => Ok(record),
-        Ok((_, used)) => Err(Error::Serialization(format!(
+        Ok((_, used)) => Err(Error::corruption(format!(
             "the payload decodes from {used} of its {} bytes; the rest is left over",
             payload.len()
         ))),
-        Err(error) => Err(Error::Serialization(format!(
+        Err(error) => Err(Error::corruption(format!(
             "the payload does not decode: {error}"
         ))),
     }
@@ -2278,6 +2280,30 @@ mod tests {
                     "kind {kind}, flags {flags}: {error}"
                 );
             }
+        }
+    }
+
+    /// Damage is a corruption naming the record; a catalog record of a kind
+    /// a newer release wrote is refused as such, never as damage.
+    #[test]
+    fn damage_is_corruption_and_a_newer_catalog_kind_is_not() {
+        let newer = [KIND_PUT_CATALOG, RECORD_REQUIRED, 4, 0, 0, 0, 12, 3, 19, 88];
+        let error = read_all(&newer).unwrap_err();
+        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        let group = framed(&one_of_each()[0]);
+        for (case, bytes) in [
+            (
+                "a catalog kind 0",
+                vec![KIND_PUT_CATALOG, 0, 2, 0, 0, 0, 0, 88],
+            ),
+            ("a cut payload", group[..group.len() - 1].to_vec()),
+        ] {
+            let error = read_all(&bytes).unwrap_err();
+            assert!(
+                matches!(&error, Error::Corruption(corruption)
+                    if corruption.what.starts_with("log record 0 at byte 0: ")),
+                "{case}: {error:?}"
+            );
         }
     }
 

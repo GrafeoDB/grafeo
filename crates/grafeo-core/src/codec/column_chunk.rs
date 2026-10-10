@@ -350,8 +350,8 @@ pub fn encode_column_chunk(
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the byte offset in the chunk of
-/// what is wrong: a codec or row count other than the entry's, more rows
+/// Returns [`Error::Corruption`] naming the byte offset in the chunk of what
+/// is wrong: a codec or row count other than the entry's, more rows
 /// than the format's row cap (65,536), an unknown flag bit, no value or more
 /// values than rows, a presence bitmap that is missing, needless or does not
 /// mark exactly as many rows as there are
@@ -679,7 +679,7 @@ pub(crate) fn read_f32_vector_body(
 }
 
 fn corrupt(at: usize, what: impl Display) -> Error {
-    Error::Serialization(format!("column chunk, byte {at}: {what}"))
+    Error::corruption(format!("column chunk, byte {at}: {what}"))
 }
 
 fn put_u32(out: &mut Vec<u8>, value: usize, what: &str) -> Result<()> {

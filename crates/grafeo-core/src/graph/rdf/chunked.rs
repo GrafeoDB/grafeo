@@ -228,7 +228,7 @@ pub(crate) fn encode_rdf_meta(meta: &RdfMeta) -> Result<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] for another layout than
+/// Returns [`Error::Corruption`] for another layout than
 /// [`RDF_META_LAYOUT`], a count or name length past the bytes left (naming
 /// the byte offset), a name that is not UTF-8, bytes after the metadata,
 /// caps of zero or of more rows than the format's row cap, no graph, a named
@@ -259,7 +259,7 @@ pub(crate) fn decode_rdf_meta(bytes: &[u8]) -> Result<RdfMeta> {
         ));
     }
 
-    let corrupt = |what: String| Error::Serialization(format!("RDF metadata chunk: {what}"));
+    let corrupt = |what: String| Error::corruption(format!("RDF metadata chunk: {what}"));
     let caps = ChunkCaps {
         max_rows,
         max_bytes,
@@ -309,7 +309,7 @@ struct MetaReader<'b> {
 impl MetaReader<'_> {
     /// The error of what is wrong at byte `at`.
     fn refuse(&self, at: usize, what: String) -> Error {
-        Error::Serialization(format!("RDF metadata chunk, byte {at}: {what}"))
+        Error::corruption(format!("RDF metadata chunk, byte {at}: {what}"))
     }
 
     /// The bytes after the read position.
@@ -400,7 +400,7 @@ fn describe_graph(graph_id: u32, name: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the graph and rows of what the
+/// Returns [`Error::Corruption`] naming the graph and rows of what the
 /// module documentation lists as refused, and any error from fetching a
 /// chunk.
 pub(crate) fn read_rdf_chunks(store: &RdfStore, source: &dyn SectionSource) -> Result<()> {
@@ -408,15 +408,15 @@ pub(crate) fn read_rdf_chunks(store: &RdfStore, source: &dyn SectionSource) -> R
     match chunks.first() {
         Some(first) if *first == ChunkMeta::meta() => {}
         Some(first) => {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "RDF section: the first chunk is a {:?} chunk of graph {}, column {}, not the \
                  metadata chunk",
                 first.kind, first.graph_id, first.column_id
             )));
         }
         None => {
-            return Err(Error::Serialization(
-                "RDF section: no chunk, where the metadata chunk comes first".to_string(),
+            return Err(Error::corruption(
+                "RDF section: no chunk, where the metadata chunk comes first",
             ));
         }
     }
@@ -434,7 +434,7 @@ pub(crate) fn read_rdf_chunks(store: &RdfStore, source: &dyn SectionSource) -> R
         let head = chunks[index];
         let place = Place::of(&meta, &head);
         if head.kind == ChunkKind::Meta {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "RDF section: chunk {index} is a second metadata chunk"
             )));
         }
@@ -478,7 +478,7 @@ pub(crate) fn read_rdf_chunks(store: &RdfStore, source: &dyn SectionSource) -> R
     }
     for ((graph_id, graph), read) in (0u32..).zip(&meta.graphs).zip(rows_read) {
         if read != graph.triples {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "RDF section, {}: its chunks end at row {read}, where the metadata counts {} \
                  triples",
                 describe_graph(graph_id, &graph.name),
@@ -519,7 +519,7 @@ impl Place {
 
     /// An error about the whole range.
     fn error(&self, what: impl std::fmt::Display) -> Error {
-        Error::Serialization(format!(
+        Error::corruption(format!(
             "RDF section, {}, rows [{}, {}): {what}",
             self.graph, self.row_start, self.row_end
         ))
@@ -527,7 +527,7 @@ impl Place {
 
     /// An error about row `row` of the range, in column `column`.
     fn row_error(&self, row: u64, column: &str, what: impl std::fmt::Display) -> Error {
-        Error::Serialization(format!(
+        Error::corruption(format!(
             "RDF section, {}, row {row}, {column}: {what}",
             self.graph
         ))
@@ -1655,7 +1655,7 @@ mod tests {
             bytes
         };
         let refused = |bytes: &[u8]| match decode_rdf_meta(bytes) {
-            Err(grafeo_common::utils::error::Error::Serialization(message)) => message,
+            Err(grafeo_common::utils::error::Error::Corruption(corruption)) => corruption.what,
             other => panic!("{other:?}"),
         };
 

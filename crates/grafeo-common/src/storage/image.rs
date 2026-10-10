@@ -97,14 +97,14 @@ impl MemoryImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Serialization`] naming the section when a section
-    /// type is listed twice, which only a corrupt 0.5.x file does: neither
-    /// copy is chosen over the other.
+    /// Returns [`Error::Corruption`] naming the section when a section type
+    /// is listed twice, which only a corrupt 0.5.x file does: neither copy is
+    /// chosen over the other.
     pub fn from_raw(sections: Vec<(SectionType, Vec<u8>)>) -> Result<Self> {
         let mut image = Self::new();
         for (section_type, bytes) in sections {
             if image.has_section(section_type) {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "a 0.5.x file lists section {section_type:?} twice"
                 )));
             }
@@ -561,7 +561,7 @@ mod tests {
             (SectionType::Catalog, b"Prague".to_vec()),
         ])
         .unwrap_err();
-        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        assert!(matches!(error, Error::Corruption(_)), "{error:?}");
         let error = error.to_string();
         assert!(
             error.contains("Catalog") && error.contains("twice"),

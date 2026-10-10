@@ -113,12 +113,18 @@ impl SegmentHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`WalError::SegmentHeader`] naming `path` when the bytes are
-    /// shorter than a header, the magic is wrong, the version is not 2, the
-    /// checksum is wrong, the header length is not 128, or an incompatible
-    /// feature flag this build does not know is set.
+    /// Returns [`WalError::UnsupportedSegment`] naming `path` when the
+    /// version is above 2 or an incompatible feature flag this build does
+    /// not know is set, and [`WalError::SegmentHeader`] (damage) when the
+    /// bytes are shorter than a header, the magic is wrong, the version is
+    /// below 2 (no release writes one with this magic), the checksum is
+    /// wrong or the header length is not 128.
     pub fn decode(bytes: &[u8], path: &Path) -> Result<Self, WalError> {
         let invalid = |reason: String| WalError::SegmentHeader {
+            path: path.to_path_buf(),
+            reason,
+        };
+        let unsupported = |reason: String| WalError::UnsupportedSegment {
             path: path.to_path_buf(),
             reason,
         };
@@ -132,14 +138,14 @@ impl SegmentHeader {
             return Err(invalid("not a WAL v2 segment (wrong magic)".to_string()));
         }
         let version = read_u16(bytes, 8);
+        if version > SEGMENT_VERSION {
+            return Err(unsupported(format!(
+                "segment version {version}, this version reads {SEGMENT_VERSION}"
+            )));
+        }
         if version != SEGMENT_VERSION {
             return Err(invalid(format!(
-                "unsupported segment version {version}, expected {SEGMENT_VERSION}{}",
-                if version > SEGMENT_VERSION {
-                    ": the WAL needs a newer version of Grafeo"
-                } else {
-                    ""
-                }
+                "segment version {version}, expected {SEGMENT_VERSION}"
             )));
         }
         let stored = read_u32(bytes, CRC_OFFSET);
@@ -158,9 +164,8 @@ impl SegmentHeader {
         let flags = read_u32(bytes, 12);
         let unknown = flags & INCOMPATIBLE_FLAGS & !KNOWN_INCOMPATIBLE_FLAGS;
         if unknown != 0 {
-            return Err(invalid(format!(
-                "unknown incompatible feature flags {unknown:#06x} ({}): the WAL needs a newer \
-                 version of Grafeo",
+            return Err(unsupported(format!(
+                "unknown incompatible feature flags {unknown:#06x} ({})",
                 describe_bits(unknown)
             )));
         }
@@ -396,9 +401,13 @@ mod tests {
 
     #[test]
     fn unknown_incompatible_flags_are_refused() {
-        let error = SegmentHeader::decode(&with_flags(FLAG_ENCRYPTED | 1 << 5), &path())
-            .unwrap_err()
-            .to_string();
+        let error =
+            SegmentHeader::decode(&with_flags(FLAG_ENCRYPTED | 1 << 5), &path()).unwrap_err();
+        assert!(
+            matches!(error, WalError::UnsupportedSegment { .. }),
+            "not damage: {error}"
+        );
+        let error = error.to_string();
         assert!(
             error.contains("bit 5") && error.contains("newer version"),
             "names the bit: {error}"
@@ -422,14 +431,21 @@ mod tests {
         for index in 0..CRC_OFFSET + 4 {
             let mut bytes = known_header().encode();
             bytes[index] ^= 0x40;
-            let error = SegmentHeader::decode(&bytes, &path())
-                .unwrap_err()
-                .to_string();
+            let error = SegmentHeader::decode(&bytes, &path()).unwrap_err();
             let expected = match index {
                 0..8 => "magic",
                 8..10 => "version",
                 _ => "checksum",
             };
+            // A flipped version byte reads as a later version: the version
+            // is read before the checksum (see the next test).
+            let damaged = !(8..10).contains(&index);
+            assert_eq!(
+                matches!(error, WalError::SegmentHeader { .. }),
+                damaged,
+                "byte {index}: {error}"
+            );
+            let error = error.to_string();
             assert!(error.contains(expected), "byte {index}: {error}");
         }
         // The reserved bytes are covered by the checksum but carry nothing.
@@ -441,18 +457,22 @@ mod tests {
 
     #[test]
     fn another_version_or_header_length_is_refused() {
-        for (offset, value, expected) in [
-            (8, 3u16, "newer version"),
-            (8, 1u16, "version 1"),
-            (10, 256u16, "header length 256"),
+        for (offset, value, expected, damaged) in [
+            (8, 3u16, "newer version", false),
+            (8, 1u16, "version 1", true),
+            (10, 256u16, "header length 256", true),
         ] {
             let mut bytes = known_header().encode();
             bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
             let crc = crc32fast::hash(&bytes[..CRC_OFFSET]);
             bytes[CRC_OFFSET..].copy_from_slice(&crc.to_le_bytes());
-            let error = SegmentHeader::decode(&bytes, &path())
-                .unwrap_err()
-                .to_string();
+            let error = SegmentHeader::decode(&bytes, &path()).unwrap_err();
+            assert_eq!(
+                matches!(error, WalError::SegmentHeader { .. }),
+                damaged,
+                "{expected}: {error}"
+            );
+            let error = error.to_string();
             assert!(error.contains(expected), "{expected}: {error}");
         }
     }

@@ -1113,7 +1113,7 @@ fn put_name(name: &str, what: &str, out: &mut Vec<u8>) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the byte offset of what is wrong:
+/// Returns [`Error::Corruption`] naming the byte offset of what is wrong:
 /// another layout than [`LPG_META_LAYOUT`], a count or length past the bytes
 /// left, a name that is not UTF-8, an unknown table, bytes after the
 /// metadata.
@@ -1170,7 +1170,7 @@ struct MetaReader<'b> {
 impl MetaReader<'_> {
     /// The error of what is wrong at byte `at`.
     fn refuse(&self, at: usize, what: String) -> Error {
-        Error::Serialization(format!("LPG metadata chunk, byte {at}: {what}"))
+        Error::corruption(format!("LPG metadata chunk, byte {at}: {what}"))
     }
 
     /// The next `N` bytes, the field `what` (followed by `part`, when not
@@ -1262,8 +1262,8 @@ impl MetaReader<'_> {
 /// a time: the metadata chunk (the last one) first, then the others in order,
 /// each fetched when it is reached.
 ///
-/// Rules (every failure an [`Error::Serialization`] naming the graph, the
-/// column and the rows):
+/// Rules (every failure an [`Error::Corruption`] naming the graph, the column
+/// and the rows):
 ///
 /// 1. The last chunk is the metadata chunk, the only one: layout 1, caps of 1
 ///    to 65,536 rows (the format's row cap) and at least one byte, an epoch
@@ -1304,26 +1304,26 @@ impl MetaReader<'_> {
 ///
 /// # Errors
 ///
-/// [`Error::Serialization`] for a section the rules refuse, for a node or
-/// edge the store cannot allocate (naming it), and for a graph or name the
-/// store holds already with another id; the source's error when a chunk
-/// cannot be fetched.
+/// [`Error::Corruption`] for a section the rules refuse, for a node or edge
+/// the store cannot allocate (naming it), and for a graph or name the store
+/// holds already with another id; the source's error when a chunk cannot be
+/// fetched.
 pub(crate) fn read_lpg_chunks(store: &LpgStore, source: &dyn SectionSource) -> Result<()> {
     let chunks = source.chunks();
     let Some((last, data)) = chunks.split_last() else {
-        return Err(Error::Serialization(
-            "LPG section: no chunk, where the last chunk is the metadata chunk".to_string(),
+        return Err(Error::corruption(
+            "LPG section: no chunk, where the last chunk is the metadata chunk",
         ));
     };
     if *last != ChunkMeta::meta() {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "LPG section: the last chunk is a {:?} chunk of graph {}, column {}, first row {}, \
              where the metadata chunk comes last",
             last.kind, last.graph_id, last.column_id, last.row_start
         )));
     }
     if let Some(index) = data.iter().position(|chunk| chunk.kind == ChunkKind::Meta) {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "LPG section: chunk {index} is a second metadata chunk, where only the last chunk \
              is one"
         )));
@@ -1338,7 +1338,7 @@ pub(crate) fn read_lpg_chunks(store: &LpgStore, source: &dyn SectionSource) -> R
         .collect();
     let restored = store
         .restore_graphs(&named, meta.next_graph_id)
-        .map_err(|error| Error::Serialization(format!("LPG section: {error}")))?;
+        .map_err(|error| Error::corruption(format!("LPG section: {error}")))?;
     let graphs: Vec<GraphTarget<'_>> = std::iter::once(GraphTarget::Default(store))
         .chain(restored.into_iter().map(GraphTarget::Named))
         .collect();
@@ -1371,11 +1371,11 @@ pub(crate) fn read_lpg_chunks(store: &LpgStore, source: &dyn SectionSource) -> R
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] when `target` holds one of the names, or
-/// one of the ids, already.
+/// Returns [`Error::Corruption`] when `target` holds one of the names, or one
+/// of the ids, already.
 fn restore_dictionaries(target: &LpgStore, graph: &GraphMeta) -> Result<()> {
     let refuse = |what: &str, error: String| {
-        Error::Serialization(format!("LPG section, graph {}, {what}: {error}", graph.id))
+        Error::corruption(format!("LPG section, graph {}, {what}: {error}", graph.id))
     };
     for (id, name) in &graph.labels.names {
         target
@@ -1455,8 +1455,7 @@ struct Layout<'m> {
 impl<'m> Layout<'m> {
     /// Checks rule 1 on `meta`.
     fn new(meta: &'m LpgMeta) -> Result<Self> {
-        let refuse =
-            |what: String| Err(Error::Serialization(format!("LPG metadata chunk: {what}")));
+        let refuse = |what: String| Err(Error::corruption(format!("LPG metadata chunk: {what}")));
         let caps = ChunkCaps {
             max_rows: meta.max_rows,
             max_bytes: meta.max_bytes,
@@ -1675,7 +1674,7 @@ impl Reader<'_, '_> {
             "LPG section, chunk {index} (graph {}, namespace {:?}, column {}, rows from {})",
             chunk.graph_id, chunk.namespace, chunk.column_id, chunk.row_start
         );
-        let refuse = |what: String| Error::Serialization(format!("{place}: {what}"));
+        let refuse = |what: String| Error::corruption(format!("{place}: {what}"));
         if !matches!(chunk.kind, ChunkKind::Column | ChunkKind::History) {
             return Err(refuse(format!(
                 "a {:?} chunk, where the chunks before the metadata chunk are Column and \
@@ -1829,7 +1828,7 @@ impl Reader<'_, '_> {
             let (graph, table, _) = group.key;
             let entity = table.entity();
             let row = group.start + offset;
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "LPG section, graph {graph}: {entity} {row} has a property or history value, \
                  but its row group holds no {entity} {row}"
             )));
@@ -2079,10 +2078,11 @@ fn decode(source: &dyn SectionSource, index: usize, chunk: &ChunkMeta) -> Result
     decode_column_chunk_bytes(&bytes, chunk.codec, chunk.row_count)
 }
 
-/// `error` with `place` before its message, when it is a serialization error.
+/// `error` with `place` before its message, when it is a decoding error
+/// (damage, or what a newer release wrote).
 fn prefixed(place: &str, error: Error) -> Error {
     match error {
-        Error::Serialization(message) => Error::Serialization(format!("{place}: {message}")),
+        Error::Serialization(_) | Error::Corruption(_) => error.wrapped(place),
         other => other,
     }
 }
@@ -3861,10 +3861,7 @@ mod tests {
             let mut crafted = bytes.clone();
             crafted[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
             let error = decode_lpg_meta(&crafted).unwrap_err();
-            assert!(
-                matches!(error, Error::Serialization(_)),
-                "{what}: {error:?}"
-            );
+            assert!(matches!(error, Error::Corruption(_)), "{what}: {error:?}");
             let error = error.to_string();
             assert!(
                 error.contains(words) && error.contains(&format!("byte {at}")),
@@ -5707,10 +5704,7 @@ mod tests {
         ));
         for (name, chunks, words) in cases {
             let error = load_crafted(chunks).expect_err(name);
-            assert!(
-                matches!(error, Error::Serialization(_)),
-                "{name}: {error:?}"
-            );
+            assert!(matches!(error, Error::Corruption(_)), "{name}: {error:?}");
             let error = error.to_string();
             assert!(error.contains(words), "{name}: {error}");
         }

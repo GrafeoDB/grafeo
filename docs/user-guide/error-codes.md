@@ -57,7 +57,7 @@ Categories:
 | Code          | Name                  | Retryable | Meaning                                                    |
 | ------------- | --------------------- | --------- | ---------------------------------------------------------- |
 | `GRAFEO-S001` | StorageFull           | no        | Buffer budget, disk, or memory limit reached. |
-| `GRAFEO-S002` | StorageCorrupted      | no        | WAL or section checksum mismatch. The database may need restore from backup. |
+| `GRAFEO-S002` | StorageCorrupted      | no        | A file Grafeo wrote is damaged: a checksum, a header, a section or a WAL record that does not read back as written. The message names the file and, when known, the byte. Python raises `GrafeoCorruptionError`, a subclass of `GrafeoError`; the C API returns `GRAFEO_ERROR_STORAGE`. The database may need a restore from a backup. |
 | `GRAFEO-S003` | StorageRecoveryFailed | no        | WAL replay failed during `GrafeoDB::open`. Inspect the logs. |
 
 ## Validation (V)

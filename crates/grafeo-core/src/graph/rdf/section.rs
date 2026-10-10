@@ -238,14 +238,10 @@ fn write_rdf_blocks(store: &RdfStore, named_graphs: &[(String, Arc<RdfStore>)]) 
 /// Reads the block format into `store`; `graph` names the graph in errors.
 fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
     if data.len() < HEADER_SIZE {
-        return Err(Error::Serialization(
-            "RDF block section too short for header".to_string(),
-        ));
+        return Err(Error::corruption("RDF block section too short for header"));
     }
     if data[0..4] != RDF_BLOCK_MAGIC {
-        return Err(Error::Serialization(
-            "invalid RDF block magic bytes".to_string(),
-        ));
+        return Err(Error::corruption("invalid RDF block magic bytes"));
     }
     // data[4] = version, data[5] = flags (reserved for future use)
     let triple_count = u32::from_le_bytes(data[6..10].try_into().unwrap()) as usize;
@@ -255,15 +251,15 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
 
     // Read string table block
     if pos + 4 > data.len() {
-        return Err(Error::Serialization(
-            "RDF section truncated at string table length".to_string(),
+        return Err(Error::corruption(
+            "RDF section truncated at string table length",
         ));
     }
     let st_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
     pos += 4;
     if pos + st_len + 4 > data.len() {
-        return Err(Error::Serialization(
-            "RDF section truncated at string table data".to_string(),
+        return Err(Error::corruption(
+            "RDF section truncated at string table data",
         ));
     }
     let st_data = &data[pos..pos + st_len];
@@ -271,34 +267,32 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
     let expected_crc = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     let actual_crc = crc32fast::hash(st_data);
     if expected_crc != actual_crc {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "RDF string table CRC mismatch: expected {expected_crc:08x}, got {actual_crc:08x}"
         )));
     }
     pos += 4;
 
     let strings = StringTableReader::new(st_data)
-        .ok_or_else(|| Error::Serialization("invalid RDF string table".to_string()))?;
+        .ok_or_else(|| Error::corruption("invalid RDF string table"))?;
 
     // Read triple data block
     if pos + 4 > data.len() {
-        return Err(Error::Serialization(
-            "RDF section truncated at triple data length".to_string(),
+        return Err(Error::corruption(
+            "RDF section truncated at triple data length",
         ));
     }
     let td_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
     pos += 4;
     if pos + td_len + 4 > data.len() {
-        return Err(Error::Serialization(
-            "RDF section truncated at triple data".to_string(),
-        ));
+        return Err(Error::corruption("RDF section truncated at triple data"));
     }
     let triple_data = &data[pos..pos + td_len];
     pos += td_len;
     let expected_crc = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     let actual_crc = crc32fast::hash(triple_data);
     if expected_crc != actual_crc {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "RDF triple data CRC mismatch: expected {expected_crc:08x}, got {actual_crc:08x}"
         )));
     }
@@ -308,9 +302,7 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
     let mut tp = 0;
     for index in 0..triple_count {
         if tp + 12 > triple_data.len() {
-            return Err(Error::Serialization(
-                "RDF triple data truncated".to_string(),
-            ));
+            return Err(Error::corruption("RDF triple data truncated"));
         }
         let s_idx = u32::from_le_bytes(triple_data[tp..tp + 4].try_into().unwrap());
         tp += 4;
@@ -321,17 +313,17 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
 
         let s_str = strings
             .get(s_idx)
-            .ok_or_else(|| Error::Serialization(format!("invalid subject string index {s_idx}")))?;
-        let p_str = strings.get(p_idx).ok_or_else(|| {
-            Error::Serialization(format!("invalid predicate string index {p_idx}"))
-        })?;
+            .ok_or_else(|| Error::corruption(format!("invalid subject string index {s_idx}")))?;
+        let p_str = strings
+            .get(p_idx)
+            .ok_or_else(|| Error::corruption(format!("invalid predicate string index {p_idx}")))?;
         let o_str = strings
             .get(o_idx)
-            .ok_or_else(|| Error::Serialization(format!("invalid object string index {o_idx}")))?;
+            .ok_or_else(|| Error::corruption(format!("invalid object string index {o_idx}")))?;
 
         let term = |text: &str, role: &str| {
             Term::from_ntriples(text).map_err(|error| {
-                Error::Serialization(format!(
+                Error::corruption(format!(
                     "RDF section (0.5.x), {graph}, triple {index}, {role}: {error}"
                 ))
             })
@@ -347,8 +339,8 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
     // Read named graphs
     for _ in 0..graph_count {
         if pos + 8 > data.len() {
-            return Err(Error::Serialization(
-                "RDF section truncated at named graph header".to_string(),
+            return Err(Error::corruption(
+                "RDF section truncated at named graph header",
             ));
         }
         let name_idx = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
@@ -356,8 +348,8 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
         let graph_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
         if pos + graph_len + 4 > data.len() {
-            return Err(Error::Serialization(
-                "RDF section truncated at named graph data".to_string(),
+            return Err(Error::corruption(
+                "RDF section truncated at named graph data",
             ));
         }
         let graph_data = &data[pos..pos + graph_len];
@@ -365,14 +357,14 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
         let expected_crc = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
         let actual_crc = crc32fast::hash(graph_data);
         if expected_crc != actual_crc {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "RDF named graph CRC mismatch: expected {expected_crc:08x}, got {actual_crc:08x}"
             )));
         }
         pos += 4;
 
         let graph_name = strings.get(name_idx).ok_or_else(|| {
-            Error::Serialization(format!("invalid graph name string index {name_idx}"))
+            Error::corruption(format!("invalid graph name string index {name_idx}"))
         })?;
 
         store.create_graph(graph_name);

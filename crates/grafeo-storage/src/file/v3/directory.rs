@@ -176,9 +176,9 @@ impl DirectoryEntry {
         // directory is read), so an unknown byte is damage, not news.
         let namespace_byte = bytes[NAMESPACE_AT];
         let Some(namespace) = ChunkNamespace::from_byte(namespace_byte) else {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "directory entry of section {section_type:?}, chunk kind {kind:?}, has \
-                 namespace {namespace_byte}, which no Grafeo writes: the file is damaged"
+                 namespace {namespace_byte}, which no Grafeo writes"
             )));
         };
         Ok(DecodedEntry::Known(Self {
@@ -344,27 +344,40 @@ pub fn encode_blocks_raw(
     Ok((next, blocks))
 }
 
+/// `error`, raised while the directory block at `offset` was read or
+/// decoded, naming the block: damage at the block's offset (unless it has
+/// one), any other error with the block's offset in its message.
+pub(super) fn in_block(error: Error, offset: u64) -> Error {
+    match error {
+        Error::Corruption(_) => error.wrapped("directory block").at(offset),
+        other => other.wrapped(format_args!("directory block at offset {offset}")),
+    }
+}
+
 /// Checks a block pointer before it is read, so a corrupt pointer never
 /// allocates a huge buffer.
 fn check_pointer(pointer: BlockRef) -> Result<()> {
     let offset = pointer.offset;
     if !offset.is_multiple_of(PAGE_SIZE) {
-        return Err(Error::Serialization(format!(
-            "directory block at offset {offset} is not page aligned"
-        )));
+        return Err(Error::corruption_at(
+            format!("directory block at offset {offset} is not page aligned"),
+            offset,
+        ));
     }
     if offset < DATA_START_PAGE * PAGE_SIZE {
-        return Err(Error::Serialization(format!(
-            "directory block at offset {offset} lies before the data area"
-        )));
+        return Err(Error::corruption_at(
+            format!("directory block at offset {offset} lies before the data area"),
+            offset,
+        ));
     }
     let length = pointer.length as usize;
     if !(BLOCK_HEADER_SIZE..=MAX_BLOCK_SIZE).contains(&length)
         || !(length - BLOCK_HEADER_SIZE).is_multiple_of(ENTRY_SIZE)
     {
-        return Err(Error::Serialization(format!(
-            "directory block at offset {offset} has invalid length {length}"
-        )));
+        return Err(Error::corruption_at(
+            format!("directory block at offset {offset} has invalid length {length}"),
+            offset,
+        ));
     }
     Ok(())
 }
@@ -382,10 +395,11 @@ fn check_pointer(pointer: BlockRef) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the block offset when a pointer is misaligned, out
-/// of range or revisited, when a block fails its CRC, magic or length
-/// checks, or when one of its entries is refused. Errors from `read` are
-/// passed through.
+/// Returns [`Error::Corruption`] at the block offset when a pointer is
+/// misaligned, out of range or revisited, or when a block fails its CRC,
+/// magic or length checks. An entry that is refused gives the error of
+/// [`DirectoryEntry::decode`], a corruption at the block offset or an
+/// error naming the block. Errors from `read` are passed through.
 pub fn decode_chain(
     root: BlockRef,
     overhead: u32,
@@ -402,41 +416,49 @@ pub fn decode_chain(
     loop {
         let offset = pointer.offset;
         if !visited.insert(offset) {
-            return Err(Error::Serialization(format!(
-                "directory chain revisits the block at offset {offset}"
-            )));
+            return Err(Error::corruption_at(
+                format!("directory chain revisits the block at offset {offset}"),
+                offset,
+            ));
         }
         check_pointer(pointer)?;
         let bytes = read(offset, pointer.length)?;
         if bytes.len() != pointer.length as usize {
-            return Err(Error::Serialization(format!(
-                "directory block at offset {offset} read {} bytes, expected {}",
-                bytes.len(),
-                pointer.length
-            )));
+            return Err(Error::corruption_at(
+                format!(
+                    "directory block at offset {offset} read {} bytes, expected {}",
+                    bytes.len(),
+                    pointer.length
+                ),
+                offset,
+            ));
         }
         if crc32fast::hash(&bytes) != pointer.crc {
-            return Err(Error::Serialization(format!(
-                "directory block at offset {offset} fails its checksum"
-            )));
+            return Err(Error::corruption_at(
+                format!("directory block at offset {offset} fails its checksum"),
+                offset,
+            ));
         }
         if bytes[0..4] != BLOCK_MAGIC {
-            return Err(Error::Serialization(format!(
-                "directory block at offset {offset} has a bad magic"
-            )));
+            return Err(Error::corruption_at(
+                format!("directory block at offset {offset} has a bad magic"),
+                offset,
+            ));
         }
         let count = u32_at(&bytes, 4) as usize;
         if count > ENTRIES_PER_BLOCK || BLOCK_HEADER_SIZE + count * ENTRY_SIZE != bytes.len() {
-            return Err(Error::Serialization(format!(
-                "directory block at offset {offset} declares {count} entries but holds {} bytes",
-                bytes.len()
-            )));
+            return Err(Error::corruption_at(
+                format!(
+                    "directory block at offset {offset} declares {count} entries but holds {} \
+                     bytes",
+                    bytes.len()
+                ),
+                offset,
+            ));
         }
         let (slots, _) = bytes[BLOCK_HEADER_SIZE..].as_chunks::<ENTRY_SIZE>();
         for slot in slots {
-            let decoded = DirectoryEntry::decode(slot).map_err(|error| {
-                Error::Serialization(format!("directory block at offset {offset}: {error}"))
-            })?;
+            let decoded = DirectoryEntry::decode(slot).map_err(|error| in_block(error, offset))?;
             match decoded {
                 DecodedEntry::Known(entry) => entries.push(entry),
                 DecodedEntry::Skipped(entry) => skipped.push(entry),

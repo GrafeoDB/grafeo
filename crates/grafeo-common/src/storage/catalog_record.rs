@@ -931,9 +931,9 @@ impl CatalogRecord {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Serialization`] when the payload does not decode as
-    /// the kind's record type, claims more memory than the decode limit, or
-    /// has bytes left over.
+    /// Returns [`Error::Corruption`] when the payload does not decode as the
+    /// kind's record type, claims more memory than the decode limit, or has
+    /// bytes left over.
     pub(crate) fn decode_payload(kind: u8, payload: &[u8]) -> Result<Option<Self>> {
         fn decode<T: DeserializeOwned>(payload: &[u8]) -> Result<T> {
             decode_bincode_payload::<T, CATALOG_DECODE_LIMIT>(payload)
@@ -964,16 +964,18 @@ impl CatalogRecord {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the record (its index, from 0,
-/// and the byte it starts at) for:
+/// Returns [`Error::Corruption`] naming the record (its index, from 0, and
+/// the byte it starts at) for:
 ///
-/// - kind 0, or a flag among bits 0 to 3 other than [`RECORD_REQUIRED`]
-///   (bits 4 to 7 are ignored);
-/// - an unknown kind with the required flag set;
+/// - kind 0;
 /// - a payload longer than [`MAX_CATALOG_RECORD_PAYLOAD`];
 /// - a stream that ends inside a record's header or payload;
 /// - a payload that does not decode as its kind's record type, or has bytes
 ///   left over.
+///
+/// Returns [`Error::Serialization`] naming the record for what a newer
+/// release wrote: a flag among bits 0 to 3 other than [`RECORD_REQUIRED`]
+/// (bits 4 to 7 are ignored), or an unknown kind with the required flag set.
 ///
 /// An error of `apply` comes back as it is and stops the read, and so does
 /// an error of `reader`: the [`Error`] it carries when it carries one (as a
@@ -1008,9 +1010,20 @@ pub(crate) const CATALOG_FRAMING: RecordFraming = RecordFraming {
 };
 
 impl RecordFraming {
-    /// An error about record `index`, which starts at byte `offset`.
-    fn error(&self, index: u64, offset: u64, message: impl fmt::Display) -> Error {
-        Error::Serialization(format!("{} {index} at byte {offset}: {message}", self.what))
+    /// Where record `index` is, which starts at byte `offset` of the stream.
+    fn record(&self, index: u64, offset: u64) -> String {
+        format!("{} {index} at byte {offset}", self.what)
+    }
+
+    /// Damage in record `index`, which starts at byte `offset`.
+    fn damage(&self, index: u64, offset: u64, message: impl fmt::Display) -> Error {
+        Error::corruption(format!("{}: {message}", self.record(index, offset)))
+    }
+
+    /// Record `index`, which starts at byte `offset`, holds something a
+    /// newer release wrote.
+    fn refusal(&self, index: u64, offset: u64, message: impl fmt::Display) -> Error {
+        Error::Serialization(format!("{}: {message}", self.record(index, offset)))
     }
 }
 
@@ -1137,7 +1150,7 @@ pub(crate) fn encode_bincode_payload<T: Serialize>(
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] when the payload does not decode, claims
+/// Returns [`Error::Corruption`] when the payload does not decode, claims
 /// more than `LIMIT`, or has bytes left over.
 pub(crate) fn decode_bincode_payload<T: DeserializeOwned, const LIMIT: usize>(
     payload: &[u8],
@@ -1145,14 +1158,14 @@ pub(crate) fn decode_bincode_payload<T: DeserializeOwned, const LIMIT: usize>(
     let config = bincode::config::standard().with_limit::<LIMIT>();
     match bincode::serde::decode_from_slice::<T, _>(payload, config) {
         Ok((record, used)) if used == payload.len() => Ok(record),
-        Ok((_, used)) => Err(Error::Serialization(format!(
+        Ok((_, used)) => Err(Error::corruption(format!(
             "the payload decodes from {used} of its {} bytes; the rest is left over",
             payload.len()
         ))),
-        Err(bincode::error::DecodeError::LimitExceeded) => Err(Error::Serialization(format!(
+        Err(bincode::error::DecodeError::LimitExceeded) => Err(Error::corruption(format!(
             "a length inside the payload claims more than the decode limit of {LIMIT} bytes"
         ))),
-        Err(error) => Err(Error::Serialization(format!(
+        Err(error) => Err(Error::corruption(format!(
             "the payload does not decode: {error}"
         ))),
     }
@@ -1212,8 +1225,9 @@ impl<'de> Deserialize<'de> for Text {
 ///
 /// # Errors
 ///
-/// As [`read_catalog_records`] lists: [`Error::Serialization`] naming the
-/// record for what the framing refuses, an error of `decode` of that variant
+/// As [`read_catalog_records`] lists: [`Error::Corruption`] naming the
+/// record for damage the framing finds, [`Error::Serialization`] naming it
+/// for what a newer release wrote, an error of `decode` of those variants
 /// with the record named, and the errors of `apply` and `reader` as they are.
 pub(crate) fn read_framed_records<T>(
     framing: &RecordFraming,
@@ -1231,7 +1245,7 @@ pub(crate) fn read_framed_records<T>(
             return Ok(());
         }
         if filled < RECORD_HEADER_BYTES {
-            return Err(framing.error(
+            return Err(framing.damage(
                 index,
                 offset,
                 format_args!(
@@ -1243,7 +1257,7 @@ pub(crate) fn read_framed_records<T>(
         let [kind, flags, length @ ..] = header;
         let length = u32::from_le_bytes(length);
         if flags & INCOMPATIBLE_FLAGS & !KNOWN_FLAGS != 0 {
-            return Err(framing.error(
+            return Err(framing.refusal(
                 index,
                 offset,
                 format_args!(
@@ -1253,10 +1267,10 @@ pub(crate) fn read_framed_records<T>(
             ));
         }
         if kind == 0 {
-            return Err(framing.error(index, offset, "kind 0 is never written"));
+            return Err(framing.damage(index, offset, "kind 0 is never written"));
         }
         if length > framing.max_payload {
-            return Err(framing.error(
+            return Err(framing.damage(
                 index,
                 offset,
                 format_args!(
@@ -1270,7 +1284,7 @@ pub(crate) fn read_framed_records<T>(
             .read_to_end(&mut payload)
             .map_err(reader_error)?;
         if (read as u64) < u64::from(length) {
-            return Err(framing.error(
+            return Err(framing.damage(
                 index,
                 offset,
                 format_args!(
@@ -1281,14 +1295,18 @@ pub(crate) fn read_framed_records<T>(
         let required = flags & RECORD_REQUIRED != 0;
         let decoded = decode(kind, required, &payload).map_err(|error| match error {
             Error::Serialization(message) => {
-                framing.error(index, offset, format_args!("kind {kind}: {message}"))
+                framing.refusal(index, offset, format_args!("kind {kind}: {message}"))
             }
+            Error::Corruption(_) => error.wrapped(format_args!(
+                "{}: kind {kind}",
+                framing.record(index, offset)
+            )),
             other => other,
         })?;
         match decoded {
             Some(record) => apply(record)?,
             None if required => {
-                return Err(framing.error(
+                return Err(framing.refusal(
                     index,
                     offset,
                     format_args!(
@@ -2008,6 +2026,48 @@ mod tests {
             assert!(
                 error.contains("kind 0") && error.contains("record 0 at byte 0"),
                 "flags {flags}: {error}"
+            );
+        }
+    }
+
+    /// Damage is a corruption naming the record; what a newer release wrote
+    /// is refused as such (a newer Grafeo reads it), never as damage.
+    #[test]
+    fn damage_is_corruption_and_a_newer_record_is_not() {
+        let schema = framed(&schema("Amsterdam"));
+        let mut left_over = schema.clone();
+        left_over[2] += 1;
+        left_over.push(88);
+        let mut unknown_flag = schema.clone();
+        unknown_flag[1] = 0x04;
+        for (case, bytes) in [
+            ("kind 0", [&[0u8, 0, 0, 0, 0, 0][..], &schema].concat()),
+            ("a cut header", schema[..3].to_vec()),
+            ("a cut payload", schema[..schema.len() - 1].to_vec()),
+            ("bytes left over", left_over),
+            (
+                "an overlong payload",
+                vec![1u8, RECORD_REQUIRED, 0xFF, 0xFF, 0xFF, 0x7F, 6],
+            ),
+        ] {
+            let error = read_all(&bytes).unwrap_err();
+            assert!(
+                matches!(&error, Error::Corruption(corruption)
+                    if corruption.what.starts_with("catalog record 0 at byte 0: ")),
+                "{case}: {error:?}"
+            );
+        }
+        for (case, bytes) in [
+            (
+                "an unknown required kind",
+                [&[99u8, RECORD_REQUIRED, 0, 0, 0, 0][..], &schema].concat(),
+            ),
+            ("an unknown flag", unknown_flag),
+        ] {
+            let error = read_all(&bytes).unwrap_err();
+            assert!(
+                matches!(error, Error::Serialization(_)),
+                "{case}: {error:?}"
             );
         }
     }

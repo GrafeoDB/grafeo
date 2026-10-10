@@ -401,9 +401,7 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
 /// Decodes a `Value` from the binary format.
 fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -> Result<Value> {
     if *pos >= data.len() {
-        return Err(Error::Serialization(
-            "unexpected end of data in value".to_string(),
-        ));
+        return Err(Error::corruption("unexpected end of data in value"));
     }
     let tag = data[*pos];
     *pos += 1;
@@ -438,7 +436,7 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
             *pos += 4;
             let s = strings
                 .get(idx)
-                .ok_or_else(|| Error::Serialization(format!("invalid string index {idx}")))?;
+                .ok_or_else(|| Error::corruption(format!("invalid string index {idx}")))?;
             Ok(Value::String(s.into()))
         }
         5 => {
@@ -530,7 +528,7 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
                 let key_idx = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
                 *pos += 4;
                 let key_str = strings.get(key_idx).ok_or_else(|| {
-                    Error::Serialization(format!("invalid map key string index {key_idx}"))
+                    Error::corruption(format!("invalid map key string index {key_idx}"))
                 })?;
                 let val = decode_value(data, pos, strings)?;
                 map.insert(key_str.into(), val);
@@ -544,7 +542,7 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
             *pos += 4;
             let byte_len = count
                 .checked_mul(4)
-                .ok_or_else(|| Error::Serialization("vector length overflow".to_string()))?;
+                .ok_or_else(|| Error::corruption("vector length overflow"))?;
             ensure_remaining(data, *pos, byte_len)?;
             let mut floats = Vec::with_capacity(count.min(data.len() / 4));
             for _ in 0..count {
@@ -575,18 +573,18 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
                 edges: edges.into(),
             })
         }
-        other => Err(Error::Serialization(format!("unknown value tag {other}"))),
+        other => Err(Error::corruption(format!("unknown value tag {other}"))),
     }
 }
 
 fn ensure_remaining(data: &[u8], pos: usize, need: usize) -> Result<()> {
     let end = pos.checked_add(need).ok_or_else(|| {
-        Error::Serialization(format!(
+        Error::corruption(format!(
             "integer overflow: offset {pos} + need {need} exceeds usize"
         ))
     })?;
     if end > data.len() {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "unexpected end of data: need {} bytes at offset {}, have {}",
             need,
             pos,
@@ -923,7 +921,7 @@ pub(crate) fn read_blocks(
     ) -> Result<()>,
 ) -> Result<()> {
     let header = SectionHeader::read_from(data)
-        .ok_or_else(|| Error::Serialization("invalid LPG block section header".to_string()))?;
+        .ok_or_else(|| Error::corruption("invalid LPG block section header"))?;
 
     if header.version > LPG_BLOCK_VERSION {
         return Err(Error::Serialization(format!(
@@ -937,8 +935,8 @@ pub(crate) fn read_blocks(
     let dir_end = dir_start + block_count * BlockDirEntry::SIZE;
 
     if data.len() < dir_end {
-        return Err(Error::Serialization(
-            "LPG block section too short for directory".to_string(),
+        return Err(Error::corruption(
+            "LPG block section too short for directory",
         ));
     }
 
@@ -947,7 +945,7 @@ pub(crate) fn read_blocks(
     for i in 0..block_count {
         let entry_start = dir_start + i * BlockDirEntry::SIZE;
         let entry = BlockDirEntry::read_from(&data[entry_start..])
-            .ok_or_else(|| Error::Serialization(format!("invalid block directory entry {i}")))?;
+            .ok_or_else(|| Error::corruption(format!("invalid block directory entry {i}")))?;
         dir_entries.push(entry);
     }
 
@@ -955,13 +953,13 @@ pub(crate) fn read_blocks(
     for (i, entry) in dir_entries.iter().enumerate() {
         let (start, end) = (entry.range().start, entry.range().end);
         if end > data.len() {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "block {i} extends past end of data"
             )));
         }
         let actual_crc = crc32fast::hash(&data[start..end]);
         if actual_crc != entry.checksum {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "block {i} CRC mismatch: expected {:08x}, got {actual_crc:08x}",
                 entry.checksum
             )));
@@ -972,10 +970,10 @@ pub(crate) fn read_blocks(
     let st_entry = dir_entries
         .iter()
         .find(|e| e.block_type == BlockType::StringTable as u8)
-        .ok_or_else(|| Error::Serialization("missing string table block".to_string()))?;
+        .ok_or_else(|| Error::corruption("missing string table block"))?;
     let st_data = &data[st_entry.range()];
-    let strings = StringTableReader::new(st_data)
-        .ok_or_else(|| Error::Serialization("invalid string table".to_string()))?;
+    let strings =
+        StringTableReader::new(st_data).ok_or_else(|| Error::corruption("invalid string table"))?;
 
     // Read node data (cap capacity to prevent OOM from untrusted header)
     let node_count = usize::try_from(header.node_count).unwrap_or(usize::MAX);
@@ -1018,7 +1016,7 @@ pub(crate) fn read_blocks(
             let edge_type = strings
                 .get(type_idx)
                 .ok_or_else(|| {
-                    Error::Serialization(format!("invalid edge type string index {type_idx}"))
+                    Error::corruption(format!("invalid edge type string index {type_idx}"))
                 })?
                 .to_owned();
             edges.push(BlockEdge {
@@ -1052,7 +1050,7 @@ pub(crate) fn read_blocks(
                 let idx = u32::from_le_bytes(block[pos..pos + 4].try_into().unwrap());
                 pos += 4;
                 let label = strings.get(idx).ok_or_else(|| {
-                    Error::Serialization(format!("invalid label string index {idx}"))
+                    Error::corruption(format!("invalid label string index {idx}"))
                 })?;
                 labels.push(label.to_owned());
             }
@@ -1079,7 +1077,7 @@ pub(crate) fn read_blocks(
         }
         let block = &data[entry.range()];
         let key_name = strings.get(entry.key_string_index).ok_or_else(|| {
-            Error::Serialization(format!(
+            Error::corruption(format!(
                 "invalid property key string index {}",
                 entry.key_string_index
             ))
@@ -1127,7 +1125,7 @@ pub(crate) fn read_blocks(
         }
         let block = &data[entry.range()];
         let graph_name = strings.get(entry.key_string_index).ok_or_else(|| {
-            Error::Serialization(format!(
+            Error::corruption(format!(
                 "invalid graph name string index {}",
                 entry.key_string_index
             ))

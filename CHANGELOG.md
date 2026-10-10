@@ -10,6 +10,7 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Added
 
+- **Error code `GRAFEO-S002` for a damaged database file**: a file Grafeo wrote whose bytes do not read back (a header, directory, chunk or WAL checksum, a section or record that does not decode) fails with it, naming the file and, when known, the byte. Python raises the new `GrafeoCorruptionError` (a `GrafeoError`); the other bindings report their storage error with the code. These were serialization or internal errors before. A file or WAL written by a newer Grafeo, or a wrong key, is not reported as damage.
 - **Rust (`grafeo-engine`): `QueryProcessor::with_graph`** names the graph a processor's store holds; a processor in a transaction records its writes in that transaction, which commits or rolls them back.
 - **Graph algorithms on a projection or a named graph** ([#566](https://github.com/GrafeoDB/grafeo/issues/566)): `db.algorithms` methods take `projection=`, algorithm procedures a `projection` argument (`CALL grafeo.pagerank({projection: 'people'})`), and `db.graph(name).algorithms` runs on that graph. Rust: `GrafeoDB::selected_graph_store` and `GraphHandle::graph_store`.
 - **Undirected PageRank** ([#566](https://github.com/GrafeoDB/grafeo/issues/566)): `directed=False` in `db.algorithms.pagerank()` and `as_solvor().pagerank()`, or `CALL grafeo.pagerank({directed: false})`, counts each pair of connected nodes once in both directions, whatever the number or types of edges between them; self-loops are ignored. The default stays directed.
@@ -25,6 +26,7 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Changed
 
+- **Breaking (Rust): a damaged file is `Error::Corruption`** (`Corruption { what, file, offset }`), and `StorageError::Corruption` is removed.
 - **`DROP GRAPH` refuses a graph an open transaction changed**: `DROP GRAPH` and `drop_graph` fail with a write conflict (`GRAFEO-T001`) while an open transaction has changes in the graph; drop it once that transaction commits or rolls back. A write that found the graph before it was dropped now fails instead of writing into it.
 - **`create_vector_index` in a build without the `vector-index` feature returns an error** instead of succeeding without building an index.
 - **Change data capture timestamps a commit's events when the commit is published**: ordered by timestamp, events follow commit order, also across concurrent sessions and direct calls.

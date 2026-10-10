@@ -25,9 +25,10 @@ const FORMAT_VERSION: u8 = 1;
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the section when its bytes do not
-/// decode, and when the section is not one raw chunk: only a 0.6.0
-/// development build wrote it otherwise.
+/// Returns [`Error::Corruption`] naming the section when its bytes do not
+/// decode, and [`Error::Serialization`] when the section is not one raw
+/// chunk (only a 0.6.0 development build wrote it otherwise) or of another
+/// layout version.
 pub(super) fn read_deletions(source: &dyn SectionSource) -> Result<(Vec<NodeId>, Vec<EdgeId>)> {
     let Some(bytes) =
         legacy_bytes(source).map_err(|e| in_section(SectionType::OverlayDeletions, e))?
@@ -43,12 +44,10 @@ pub(super) fn read_deletions(source: &dyn SectionSource) -> Result<(Vec<NodeId>,
 
 fn decode(data: &[u8]) -> Result<(Vec<NodeId>, Vec<EdgeId>)> {
     if data.len() < 8 + 8 + 8 + 4 {
-        return Err(Error::Serialization(
-            "OverlayDeletions section too short".into(),
-        ));
+        return Err(Error::corruption("OverlayDeletions section too short"));
     }
     if data[..4] != MAGIC {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "OverlayDeletions magic mismatch: expected {MAGIC:?}, got {:?}",
             &data[..4],
         )));
@@ -65,7 +64,7 @@ fn decode(data: &[u8]) -> Result<(Vec<NodeId>, Vec<EdgeId>)> {
     let stored_crc = u32::from_le_bytes(data[data.len() - 4..].try_into().unwrap());
     let actual_crc = crc32fast::hash(payload);
     if stored_crc != actual_crc {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "OverlayDeletions CRC mismatch: stored {stored_crc:#010X}, computed {actual_crc:#010X}",
         )));
     }
@@ -73,9 +72,7 @@ fn decode(data: &[u8]) -> Result<(Vec<NodeId>, Vec<EdgeId>)> {
     let mut pos = 8usize;
     let read_u64 = |buf: &[u8], pos: &mut usize| -> Result<u64> {
         if *pos + 8 > buf.len() {
-            return Err(Error::Serialization(
-                "OverlayDeletions truncated mid-entry".into(),
-            ));
+            return Err(Error::corruption("OverlayDeletions truncated mid-entry"));
         }
         let v = u64::from_le_bytes(buf[*pos..*pos + 8].try_into().unwrap());
         *pos += 8;
@@ -95,7 +92,7 @@ fn decode(data: &[u8]) -> Result<(Vec<NodeId>, Vec<EdgeId>)> {
         .checked_mul(8)
         .map_or(true, |n| pos + n + 8 + 4 > data.len())
     {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "OverlayDeletions node_count {node_count} exceeds section size",
         )));
     }
@@ -114,7 +111,7 @@ fn decode(data: &[u8]) -> Result<(Vec<NodeId>, Vec<EdgeId>)> {
         .checked_mul(8)
         .map_or(true, |n| pos + n + 4 > data.len())
     {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "OverlayDeletions edge_count {edge_count} exceeds section size",
         )));
     }

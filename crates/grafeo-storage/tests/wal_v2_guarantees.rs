@@ -687,6 +687,34 @@ fn a_synced_group_more_than_a_window_past_a_hole_makes_it_damage() {
     }
 }
 
+/// Damage reaches the crate-wide error as a corruption naming the segment
+/// file and the byte offset of the damaged frame, so a caller that
+/// propagates it with `?` reports where the WAL is damaged.
+#[test]
+fn damage_becomes_a_corruption_naming_the_segment_and_the_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal = Wal::open(dir.path(), options(0, DurabilityMode::Sync)).unwrap();
+    let damaged = write_group(&wal, 1, &["Alix"]);
+    write_group(&wal, 2, &["Gus"]);
+    drop(wal);
+    let path = segment_path(dir.path(), 0);
+    let frame = 128 + damaged.start_lsn;
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[usize::try_from(frame).unwrap() + 30] ^= 0x5A;
+    std::fs::write(&path, &bytes).unwrap();
+
+    let error = scan_all(dir.path(), ScanOptions::new(DATABASE, 0)).expect_err("damage");
+    assert!(matches!(error, WalError::Damaged { .. }), "{error}");
+    let error = grafeo_common::utils::error::Error::from(error);
+    let grafeo_common::utils::error::Error::Corruption(corruption) = &error else {
+        panic!("damage is a corruption: {error:?}");
+    };
+    assert_eq!(corruption.file.as_deref(), Some(path.as_path()), "{error}");
+    assert_eq!(corruption.offset, Some(frame), "the damaged frame: {error}");
+    assert!(corruption.what.contains("LSN"), "{error}");
+    assert!(error.to_string().starts_with("GRAFEO-S002"), "{error}");
+}
+
 /// In a plaintext segment the checksum covers the frame's LSN, so a whole
 /// frame copied to another position (a duplicated block) passes its
 /// checksum; the position check keeps it from being replayed a second time.

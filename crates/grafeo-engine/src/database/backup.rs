@@ -146,7 +146,8 @@ const BACKUP_CURSOR_FILENAME: &str = "backup_cursor.meta";
 ///
 /// # Errors
 ///
-/// Returns an error if the manifest file exists but cannot be read or parsed.
+/// Returns an error if the manifest file exists but cannot be read, and
+/// [`Error::Corruption`] naming it if it does not parse.
 pub fn read_manifest(backup_dir: &Path) -> Result<Option<BackupManifest>> {
     let path = backup_dir.join(MANIFEST_FILENAME);
     if !path.exists() {
@@ -155,8 +156,9 @@ pub fn read_manifest(backup_dir: &Path) -> Result<Option<BackupManifest>> {
     let data = std::fs::read(&path)
         .map_err(|e| Error::Internal(format!("failed to read backup manifest: {e}")))?;
     let (manifest, _): (BackupManifest, _) =
-        bincode::serde::decode_from_slice(&data, bincode::config::standard())
-            .map_err(|e| Error::Internal(format!("failed to parse backup manifest: {e}")))?;
+        bincode::serde::decode_from_slice(&data, bincode::config::standard()).map_err(|e| {
+            Error::corruption(format!("the backup manifest does not parse: {e}")).in_file(&path)
+        })?;
     Ok(Some(manifest))
 }
 
@@ -193,7 +195,8 @@ pub fn write_manifest(backup_dir: &Path, manifest: &BackupManifest) -> Result<()
 ///
 /// # Errors
 ///
-/// Returns an error if the cursor file exists but cannot be read.
+/// Returns an error if the cursor file exists but cannot be read, and
+/// [`Error::Corruption`] naming it if it does not parse.
 pub fn read_backup_cursor(wal_dir: &Path) -> Result<Option<BackupCursor>> {
     let path = wal_dir.join(BACKUP_CURSOR_FILENAME);
     if !path.exists() {
@@ -204,7 +207,9 @@ pub fn read_backup_cursor(wal_dir: &Path) -> Result<Option<BackupCursor>> {
     let cursor: BackupCursor =
         bincode::serde::decode_from_slice(&data, bincode::config::standard())
             .map(|(c, _)| c)
-            .map_err(|e| Error::Internal(format!("failed to parse backup cursor: {e}")))?;
+            .map_err(|e| {
+                Error::corruption(format!("the backup cursor does not parse: {e}")).in_file(&path)
+            })?;
     Ok(Some(cursor))
 }
 
@@ -421,15 +426,16 @@ fn active_epoch(file_data: &[u8], path: &Path) -> Result<EpochId> {
     };
     let (_, header) = active_header([DbHeaderV3::decode(page(1)), DbHeaderV3::decode(page(2))])
         .and_then(|active| {
-            active.ok_or_else(|| {
-                Error::Serialization("both database header slots are empty".to_string())
-            })
+            active.ok_or_else(|| Error::corruption("both database header slots are empty"))
         })
-        .map_err(|e| {
-            Error::Internal(format!(
-                "full backup {}: cannot read the copied file's database header: {e}",
+        .map_err(|e| match e {
+            Error::Corruption(_) => e
+                .wrapped("full backup: the copied file's database header")
+                .in_file(path),
+            other => Error::Internal(format!(
+                "full backup {}: cannot read the copied file's database header: {other}",
                 path.display()
-            ))
+            )),
         })?;
     Ok(EpochId::new(header.epoch))
 }
@@ -761,8 +767,9 @@ fn restore_ciphers(path: &Path, keys: &DatabaseKeys, has_segments: bool) -> Resu
                         path.display()
                     ))
                 })?;
-            let header = FileHeaderV3::decode(&page).map_err(|e| {
-                Error::Serialization(format!("full backup {}: {e}", path.display()))
+            let header = FileHeaderV3::decode(&page).map_err(|e| match e {
+                Error::Corruption(_) => e.wrapped("full backup").in_file(path),
+                other => other.wrapped(format_args!("full backup {}", path.display())),
             })?;
             header.encrypted.then_some(header.database_id)
         }

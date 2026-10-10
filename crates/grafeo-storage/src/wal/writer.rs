@@ -192,8 +192,9 @@ impl Wal {
     ///
     /// - [`WalError::Misplaced`] when a segment reaches past the start: scan
     ///   the log and cut its torn tail first.
-    /// - [`WalError::SegmentHeader`], [`WalError::ForeignDatabase`],
-    ///   [`WalError::WrongKey`], [`WalError::MissingKey`] or
+    /// - [`WalError::SegmentHeader`], [`WalError::UnsupportedSegment`],
+    ///   [`WalError::ForeignDatabase`], [`WalError::WrongKey`],
+    ///   [`WalError::MissingKey`] or
     ///   [`WalError::NotEncrypted`] for a newest segment the writer cannot
     ///   append to.
     /// - [`WalError::Encryption`] for a cipher without the `encryption`

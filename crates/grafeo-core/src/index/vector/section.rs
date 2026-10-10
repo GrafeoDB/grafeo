@@ -293,14 +293,10 @@ fn deserialize_v2(data: &[u8], indexes: &mut [(String, Arc<VectorIndexKind>)]) -
     let bincode_config = bincode::config::standard();
 
     if data.len() < V2_HEADER_SIZE {
-        return Err(Error::Serialization(
-            "Vector Store v2 header truncated".to_string(),
-        ));
+        return Err(Error::corruption("Vector Store v2 header truncated"));
     }
     if &data[0..4] != V2_MAGIC {
-        return Err(Error::Serialization(
-            "Vector Store v2 bad magic".to_string(),
-        ));
+        return Err(Error::corruption("Vector Store v2 bad magic"));
     }
     let version = data[4];
     if version != ENVELOPE_VERSION {
@@ -313,17 +309,16 @@ fn deserialize_v2(data: &[u8], indexes: &mut [(String, Arc<VectorIndexKind>)]) -
             .try_into()
             .expect("slice length 8 fits u64 array"),
     );
-    let n =
-        usize::try_from(n_u64).map_err(|_| Error::Serialization("v2 n_indexes overflow".into()))?;
+    let n = usize::try_from(n_u64).map_err(|_| Error::corruption("v2 n_indexes overflow"))?;
 
     let dir_size = n
         .checked_mul(V2_DIR_ENTRY_SIZE)
-        .ok_or_else(|| Error::Serialization("v2 directory size overflow".into()))?;
+        .ok_or_else(|| Error::corruption("v2 directory size overflow"))?;
     let body_start = V2_HEADER_SIZE
         .checked_add(dir_size)
-        .ok_or_else(|| Error::Serialization("v2 directory size overflow".into()))?;
+        .ok_or_else(|| Error::corruption("v2 directory size overflow"))?;
     if data.len() < body_start {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "Vector Store v2 directory truncated: expected {body_start} bytes, got {}",
             data.len()
         )));
@@ -352,23 +347,23 @@ fn deserialize_v2(data: &[u8], indexes: &mut [(String, Arc<VectorIndexKind>)]) -
                 .expect("slice length 8 fits u64 array"),
         );
 
-        let meta_off_usize = usize::try_from(meta_off)
-            .map_err(|_| Error::Serialization("v2 meta_off overflow".into()))?;
-        let meta_len_usize = usize::try_from(meta_len)
-            .map_err(|_| Error::Serialization("v2 meta_len overflow".into()))?;
+        let meta_off_usize =
+            usize::try_from(meta_off).map_err(|_| Error::corruption("v2 meta_off overflow"))?;
+        let meta_len_usize =
+            usize::try_from(meta_len).map_err(|_| Error::corruption("v2 meta_len overflow"))?;
         let topology_off_usize = usize::try_from(topology_off)
-            .map_err(|_| Error::Serialization("v2 topology_off overflow".into()))?;
+            .map_err(|_| Error::corruption("v2 topology_off overflow"))?;
         let topology_len_usize = usize::try_from(topology_len)
-            .map_err(|_| Error::Serialization("v2 topology_len overflow".into()))?;
+            .map_err(|_| Error::corruption("v2 topology_len overflow"))?;
 
         let meta_end = meta_off_usize
             .checked_add(meta_len_usize)
-            .ok_or_else(|| Error::Serialization("v2 meta range overflow".into()))?;
+            .ok_or_else(|| Error::corruption("v2 meta range overflow"))?;
         let topology_end = topology_off_usize
             .checked_add(topology_len_usize)
-            .ok_or_else(|| Error::Serialization("v2 topology range overflow".into()))?;
+            .ok_or_else(|| Error::corruption("v2 topology range overflow"))?;
         if meta_end > data.len() || topology_end > data.len() {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "Vector Store v2 directory entry {i} out of range"
             )));
         }
@@ -376,7 +371,7 @@ fn deserialize_v2(data: &[u8], indexes: &mut [(String, Arc<VectorIndexKind>)]) -
         let meta_bytes = &data[meta_off_usize..meta_end];
         let (meta, _): (IndexMetaV2, _) =
             bincode::serde::decode_from_slice(meta_bytes, bincode_config).map_err(|e| {
-                Error::Serialization(format!("Vector Store v2 meta deserialization failed: {e}"))
+                Error::corruption(format!("Vector Store v2 meta deserialization failed: {e}"))
             })?;
 
         // Find the matching index by key. v2 doesn't require ordering;
@@ -388,7 +383,7 @@ fn deserialize_v2(data: &[u8], indexes: &mut [(String, Arc<VectorIndexKind>)]) -
             let topology_bytes = Bytes::copy_from_slice(&data[topology_off_usize..topology_end]);
             let (entry_point, max_level, nodes) =
                 deserialize_topology(topology_bytes).map_err(|e| {
-                    Error::Serialization(format!(
+                    Error::corruption(format!(
                         "Vector Store v2 topology decode failed for key '{}': {e}",
                         meta.key
                     ))
@@ -404,9 +399,7 @@ fn deserialize_v2(data: &[u8], indexes: &mut [(String, Arc<VectorIndexKind>)]) -
 fn deserialize_v1(data: &[u8], indexes: &mut [(String, Arc<VectorIndexKind>)]) -> Result<()> {
     let config = bincode::config::standard();
     let (snapshot, _): (VectorStoreSnapshotV1, _) = bincode::serde::decode_from_slice(data, config)
-        .map_err(|e| {
-            Error::Serialization(format!("Vector Store v1 deserialization failed: {e}"))
-        })?;
+        .map_err(|e| Error::corruption(format!("Vector Store v1 deserialization failed: {e}")))?;
 
     for idx_snap in snapshot.indexes {
         if let Some((_, index)) = indexes.iter().find(|(k, _)| *k == idx_snap.key) {
@@ -436,7 +429,7 @@ fn metric_of(byte: u8, key: &str) -> Result<DistanceMetric> {
         1 => Ok(DistanceMetric::Euclidean),
         2 => Ok(DistanceMetric::DotProduct),
         3 => Ok(DistanceMetric::Manhattan),
-        other => Err(Error::Serialization(format!(
+        other => Err(Error::corruption(format!(
             "section VectorStore: vector index '{key}' has metric {other}, which is none of 0 \
              (cosine), 1 (Euclidean), 2 (dot product) and 3 (Manhattan)"
         ))),
@@ -449,6 +442,10 @@ fn in_index(error: Error, key: &str, stream: usize) -> Error {
     let place = format!("in the topology of vector index '{key}' (stream {stream})");
     match error {
         Error::Serialization(message) => Error::Serialization(format!("{message}, {place}")),
+        Error::Corruption(mut corruption) => {
+            corruption.what = format!("{}, {place}", corruption.what);
+            Error::Corruption(corruption)
+        }
         Error::Internal(message) => Error::Internal(format!("{message}, {place}")),
         Error::InvalidValue(message) => Error::InvalidValue(format!("{message}, {place}")),
         Error::Io(inner) => Error::Io(io::Error::new(inner.kind(), format!("{inner}, {place}"))),
@@ -575,21 +572,21 @@ fn read_meta(source: &dyn SectionSource) -> Result<VectorMeta> {
     match chunks.first() {
         Some(first) if *first == ChunkMeta::meta() => {}
         Some(first) if first.kind == ChunkKind::Meta => {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section VectorStore: the metadata chunk has codec {}, graph {}, column {}, \
                  first row {} and rows {}, where all are 0",
                 first.codec, first.graph_id, first.column_id, first.row_start, first.row_count
             )));
         }
         Some(first) => {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section VectorStore: the first chunk is of kind {:?}, where the metadata chunk \
                  comes first",
                 first.kind
             )));
         }
         None => {
-            return Err(Error::Serialization(
+            return Err(Error::corruption(
                 "section VectorStore: the section holds no chunk, not even its metadata chunk"
                     .to_string(),
             ));
@@ -601,19 +598,19 @@ fn read_meta(source: &dyn SectionSource) -> Result<VectorMeta> {
         bincode::config::standard().with_limit::<META_DECODE_LIMIT>(),
     )
     .map_err(|error| {
-        Error::Serialization(format!(
+        Error::corruption(format!(
             "section VectorStore: the metadata chunk does not decode: {error}"
         ))
     })?;
     if read != bytes.len() {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "section VectorStore: the metadata chunk holds {} bytes after its {read} bytes of \
              metadata",
             bytes.len() - read
         )));
     }
     if meta.layout != META_LAYOUT {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "section VectorStore: the metadata chunk has layout {}, this build reads layout \
              {META_LAYOUT}",
             meta.layout
@@ -621,7 +618,7 @@ fn read_meta(source: &dyn SectionSource) -> Result<VectorMeta> {
     }
     for pair in meta.indexes.windows(2) {
         if pair[0].key >= pair[1].key {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section VectorStore: the metadata lists vector index '{}' after '{}', but keys \
                  are strictly increasing",
                 pair[1].key, pair[0].key
@@ -635,7 +632,7 @@ fn read_meta(source: &dyn SectionSource) -> Result<VectorMeta> {
         let listed =
             usize::try_from(chunk.column_id).is_ok_and(|stream| stream < meta.indexes.len());
         if chunk.kind != ChunkKind::Stream || chunk.graph_id != 0 || !listed {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section VectorStore: a chunk of kind {:?} for graph {}, stream {}, where only \
                  pieces of the {} streams of graph 0 (one per index) follow the metadata chunk",
                 chunk.kind,
@@ -653,7 +650,7 @@ fn read_meta(source: &dyn SectionSource) -> Result<VectorMeta> {
 fn check_config(meta: &VectorIndexMeta, config: &HnswConfig) -> Result<()> {
     let metric = metric_of(meta.metric, &meta.key)?;
     if meta.dimensions != config.dimensions as u64 || metric != config.metric {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "section VectorStore: vector index '{}' was written with {} dimensions and metric \
              {metric:?}, the index to restore has {} dimensions and metric {:?}",
             meta.key, meta.dimensions, config.dimensions, config.metric
@@ -698,8 +695,8 @@ impl TopologyReader<'_> {
         let mut probe = [0u8; 1];
         match self.stream.read(&mut probe) {
             Ok(0) => Ok(()),
-            Ok(_) => Err(Error::Serialization(
-                "section VectorStore: the stream holds bytes after its last node".to_string(),
+            Ok(_) => Err(Error::corruption(
+                "section VectorStore: the stream holds bytes after its last node",
             )),
             Err(error) => Err(stream_error(SectionType::VectorStore, error)),
         }
@@ -718,26 +715,26 @@ impl TopologyReader<'_> {
         let node_count = self.u64()?;
         let entry_point = match flag {
             0 if node_count > 0 => {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section VectorStore: the stream has no entry point but {node_count} \
                      nodes, where every topology with nodes has one"
                 )));
             }
             0 if entry_value != 0 => {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section VectorStore: the stream has no entry point but entry point value \
                      {entry_value}, where the writer writes 0"
                 )));
             }
             0 => None,
             1 if node_count == 0 => {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section VectorStore: the stream has entry point {entry_value} but no nodes"
                 )));
             }
             1 => Some(NodeId::new(entry_value)),
             flag => {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section VectorStore: the stream has entry point flag {flag}, which is \
                      neither 0 nor 1"
                 )));
@@ -755,7 +752,7 @@ impl TopologyReader<'_> {
             if let Some(previous) = previous
                 && id <= previous
             {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section VectorStore: node {} follows node {}, but node ids are strictly \
                      increasing",
                     id.as_u64(),
@@ -764,7 +761,7 @@ impl TopologyReader<'_> {
             }
             let level_count = self.u32()?;
             if level_count == 0 || u64::from(level_count) > levels {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section VectorStore: node {} has {level_count} levels, where every node \
                      has 1 to {levels} (the top level {top_level} plus one)",
                     id.as_u64()
@@ -789,13 +786,13 @@ impl TopologyReader<'_> {
         if let Some(entry_point) = entry_point {
             match entry_levels {
                 None => {
-                    return Err(Error::Serialization(format!(
+                    return Err(Error::corruption(format!(
                         "section VectorStore: entry point {} is not a node of the stream",
                         entry_point.as_u64()
                     )));
                 }
                 Some(count) if u64::from(count) != levels => {
-                    return Err(Error::Serialization(format!(
+                    return Err(Error::corruption(format!(
                         "section VectorStore: entry point {} has {count} levels, where the top \
                          level {top_level} needs {levels}",
                         entry_point.as_u64()
@@ -832,7 +829,7 @@ fn check_links(index: &VectorIndexKind) -> Result<()> {
             ),
         }
     };
-    Err(Error::Serialization(format!("section VectorStore: {what}")))
+    Err(Error::corruption(format!("section VectorStore: {what}")))
 }
 
 /// Restores `index` from stream `stream`; on an error, leaves it empty.
@@ -904,16 +901,15 @@ impl Section for VectorStoreSection {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Serialization`] for a section of another version, a
-    /// metadata chunk or a chunk sequence this writer does not produce, an
+    /// Returns [`Error::Serialization`] for a section of another version, and
+    /// [`Error::Corruption`] for a metadata chunk or a chunk sequence this
+    /// writer does not produce, an
     /// index of other dimensions or another metric, or a stream that does not
     /// hold its topology exactly (the index named, and left empty); any error
     /// from fetching a chunk.
     fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
         let legacy = legacy_bytes(source).map_err(|error| match error {
-            Error::Serialization(message) => {
-                Error::Serialization(format!("section VectorStore: {message}"))
-            }
+            Error::Serialization(_) | Error::Corruption(_) => error.wrapped("section VectorStore"),
             other => other,
         })?;
         if let Some(bytes) = legacy {
@@ -928,7 +924,7 @@ impl Section for VectorStoreSection {
             };
             check_config(index_meta, index.config())?;
             let stream = u32::try_from(position).map_err(|_| {
-                Error::Serialization(format!(
+                Error::corruption(format!(
                     "section VectorStore: the metadata lists {position} indexes, more than \
                      32-bit stream numbers reach"
                 ))
@@ -1200,7 +1196,7 @@ mod tests {
             .deserialize(truncated)
             .expect_err("must reject truncated v2");
         match err {
-            Error::Serialization(_) => {}
+            Error::Corruption(_) => {}
             other => panic!("unexpected error variant: {other:?}"),
         }
     }
@@ -1550,10 +1546,7 @@ mod tests {
         for (case, source) in [("truncated", &truncated), ("overlong", &overlong)] {
             let restored = shells(&indexes);
             let error = read_into(&restored, source).unwrap_err();
-            assert!(
-                matches!(error, Error::Serialization(_)),
-                "{case}: {error:?}"
-            );
+            assert!(matches!(error, Error::Corruption(_)), "{case}: {error:?}");
             let message = error.to_string();
             assert!(
                 message.contains("VectorStore") && message.contains("'Doc:emb'"),
@@ -1675,7 +1668,7 @@ mod tests {
             let shell = Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(config)));
             let error =
                 read_into(&[("Doc:emb".to_string(), Arc::clone(&shell))], &written).unwrap_err();
-            assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+            assert!(matches!(error, Error::Corruption(_)), "{error:?}");
             let message = error.to_string();
             assert!(
                 message.contains("'Doc:emb'") && message.contains(needle),
@@ -1742,10 +1735,15 @@ mod tests {
         ];
         for (case, source, needle) in cases {
             let error = read_into(&shells(&indexes), &source).unwrap_err();
-            assert!(
-                matches!(error, Error::Serialization(_)),
-                "{case}: {error:?}"
-            );
+            // Another version is another build's section, not damage.
+            if case == "another version" {
+                assert!(
+                    matches!(error, Error::Serialization(_)),
+                    "{case}: {error:?}"
+                );
+            } else {
+                assert!(matches!(error, Error::Corruption(_)), "{case}: {error:?}");
+            }
             let message = error.to_string();
             assert!(
                 message.contains("VectorStore") && message.contains(needle),
@@ -1783,7 +1781,7 @@ mod tests {
             claimed.chunks[0] = Bytes::from(bytes);
             let error = read_into(&doc_shell(), &claimed).unwrap_err();
             assert!(
-                matches!(&error, Error::Serialization(message) if message.contains("does not decode")),
+                matches!(&error, Error::Corruption(corruption) if corruption.what.contains("does not decode")),
                 "{case}: {error:?}"
             );
         }
@@ -1914,10 +1912,7 @@ mod tests {
         ] {
             let target = doc_shell();
             let error = read_into(&target, &source).unwrap_err();
-            assert!(
-                matches!(error, Error::Serialization(_)),
-                "{case}: {error:?}"
-            );
+            assert!(matches!(error, Error::Corruption(_)), "{case}: {error:?}");
             let message = error.to_string();
             assert!(
                 message.contains("'Doc:emb'") && message.contains(needle),
@@ -1965,7 +1960,7 @@ mod tests {
             }
             let error = read_into(&doc_shell(), &doc_section_with_stream(&bytes)).unwrap_err();
             assert!(
-                matches!(&error, Error::Serialization(message) if message.contains("ends before")),
+                matches!(&error, Error::Corruption(corruption) if corruption.what.contains("ends before")),
                 "{case}: {error:?}"
             );
         }

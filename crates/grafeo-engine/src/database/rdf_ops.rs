@@ -247,7 +247,7 @@ impl GrafeoDB {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`](grafeo_common::utils::error::Error::Serialization)
+/// Returns [`Error::Corruption`](grafeo_common::utils::error::Error::Corruption)
 /// naming the record, its graph and the term when a triple's term is not an
 /// N-Triples term: replay never drops a triple.
 #[cfg(feature = "wal")]
@@ -332,7 +332,7 @@ fn wal_triple(
                 || "the default graph".to_string(),
                 |name| format!("graph {name:?}"),
             );
-            Error::Serialization(format!("WAL record {record} in {graph}, {role}: {error}"))
+            Error::corruption(format!("WAL record {record} in {graph}, {role}: {error}"))
         })
     };
     // Unchecked: the store holds what the statement gave it, as it was

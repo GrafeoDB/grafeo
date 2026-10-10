@@ -268,9 +268,13 @@ impl Section for LpgStoreSection {
             let _ = epoch;
 
             for graph in &named_graphs {
-                store
-                    .create_graph(&graph.name)
-                    .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
+                // A 0.5.x file names each graph once.
+                store.create_graph(&graph.name).map_err(|e| {
+                    grafeo_common::utils::error::Error::corruption(format!(
+                        "LPG section (0.5.x): graph {:?}: {e}",
+                        graph.name
+                    ))
+                })?;
                 if let Some(graph_store) = store.graph(&graph.name) {
                     populate_store(&graph_store, &graph.nodes, &graph.edges)?;
                     #[cfg(feature = "temporal")]

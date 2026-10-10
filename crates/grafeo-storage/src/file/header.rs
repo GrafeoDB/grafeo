@@ -43,7 +43,8 @@ pub fn write_file_header(file: &mut File, header: &FileHeader) -> Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error if the I/O read or deserialization fails.
+/// Returns an error if the I/O read fails, and [`Error::Corruption`] at
+/// byte 0 if the header does not decode.
 pub fn read_file_header(file: &mut File) -> Result<FileHeader> {
     // reason: FILE_HEADER_SIZE is 4096, a constant that fits in usize on all targets
     #[allow(clippy::cast_possible_truncation)]
@@ -53,7 +54,7 @@ pub fn read_file_header(file: &mut File) -> Result<FileHeader> {
 
     let (header, _): (FileHeader, _) =
         bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+            .map_err(|e| Error::corruption_at(format!("file header does not decode: {e}"), 0))?;
     Ok(header)
 }
 
@@ -115,7 +116,8 @@ pub fn write_db_header(file: &mut File, slot: u8, header: &DbHeader) -> Result<(
     Ok(())
 }
 
-/// Reads a single [`DbHeader`] from the given slot.
+/// Reads a single [`DbHeader`] from the given slot: a header that does not
+/// decode is an [`Error::Corruption`] at the slot.
 fn read_db_header(file: &mut File, slot: u8) -> Result<DbHeader> {
     debug_assert!(slot < 2, "db header slot must be 0 or 1");
 
@@ -126,8 +128,12 @@ fn read_db_header(file: &mut File, slot: u8) -> Result<DbHeader> {
     file.read_exact(&mut buf)?;
 
     let (header, _): (DbHeader, _) =
-        bincode::serde::decode_from_slice(&buf, bincode::config::standard())
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        bincode::serde::decode_from_slice(&buf, bincode::config::standard()).map_err(|e| {
+            Error::corruption_at(
+                format!("database header slot {slot} does not decode: {e}"),
+                db_header_offset(slot),
+            )
+        })?;
     Ok(header)
 }
 

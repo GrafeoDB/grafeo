@@ -315,7 +315,7 @@ impl<'s> ChunkStreamReader<'s> {
             ))
         })?;
         if meta.codec != 0 {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "stream {} of graph {}: the piece at offset {} has codec {}, but stream pieces \
                  have none",
                 self.stream, self.graph_id, meta.row_start, meta.codec
@@ -327,7 +327,7 @@ impl<'s> ChunkStreamReader<'s> {
     /// Refuses a piece that does not start where the pieces read so far end.
     fn check_offset(&self, meta: &ChunkMeta) -> Result<()> {
         if meta.row_start != self.offset {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "stream {} of graph {}: a piece starts at offset {}, expected {} (the length \
                  of the pieces before it)",
                 self.stream, self.graph_id, meta.row_start, self.offset
@@ -352,7 +352,7 @@ impl<'s> ChunkStreamReader<'s> {
         for position in 1..self.indices.len() {
             let (index, meta) = self.piece_meta(position)?;
             if meta.row_start <= start {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "stream {} of graph {}: a piece starts at offset {}, expected more than \
                      {start} (every piece but the last holds at least one byte)",
                     self.stream, self.graph_id, meta.row_start
@@ -360,7 +360,7 @@ impl<'s> ChunkStreamReader<'s> {
             }
             let reach = start.saturating_add(holds);
             if meta.row_start > reach {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "stream {} of graph {}: a piece starts at offset {}, expected {reach} at \
                      most (the pieces before it hold at most {reach} bytes)",
                     self.stream, self.graph_id, meta.row_start
@@ -485,31 +485,26 @@ fn join_pieces(reader: &mut ChunkStreamReader<'_>, first: Bytes) -> Result<Vec<u
 ///
 /// An error of the reader itself (a misplaced piece, a piece with a codec, a
 /// failed fetch) comes back as its own variant, with the section named
-/// instead of wrapped in [`Error::Io`]. Any other I/O error, such as a stream
+/// instead of wrapped in [`Error::Io`]. Any other error, such as a stream
 /// that ends before the section's encoding does, is corrupt section data:
-/// [`Error::Serialization`].
+/// [`Error::Corruption`].
 #[must_use]
 pub fn stream_error(section_type: SectionType, error: io::Error) -> Error {
     let kind = error.kind();
     let text = error.to_string();
+    let context = format!("section {section_type:?}");
     match error.into_inner().map(|inner| inner.downcast::<Error>()) {
         Some(Ok(inner)) => match *inner {
-            Error::Serialization(message) => {
-                Error::Serialization(format!("section {section_type:?}: {message}"))
-            }
-            Error::Internal(message) => {
-                Error::Internal(format!("section {section_type:?}: {message}"))
-            }
-            Error::Io(inner) => Error::Io(io::Error::new(
-                inner.kind(),
-                format!("section {section_type:?}: {inner}"),
-            )),
-            other => Error::Serialization(format!("section {section_type:?}: {other}")),
+            inner @ (Error::Corruption(_)
+            | Error::Serialization(_)
+            | Error::Internal(_)
+            | Error::Io(_)) => inner.wrapped(context),
+            other => Error::corruption(format!("{context}: {other}")),
         },
-        _ if kind == io::ErrorKind::UnexpectedEof => Error::Serialization(format!(
-            "section {section_type:?}: a stream ends before the section's encoding does ({text})"
+        _ if kind == io::ErrorKind::UnexpectedEof => Error::corruption(format!(
+            "{context}: a stream ends before the section's encoding does ({text})"
         )),
-        _ => Error::Serialization(format!("section {section_type:?}: {text}")),
+        _ => Error::corruption(format!("{context}: {text}")),
     }
 }
 
@@ -1012,10 +1007,7 @@ mod tests {
             }
             let section = image.section_source(SectionType::CompactStore).unwrap();
             let error = read_stream(&*section, 0, 0).unwrap_err();
-            assert!(
-                matches!(error, Error::Serialization(_)),
-                "{case}: {error:?}"
-            );
+            assert!(matches!(error, Error::Corruption(_)), "{case}: {error:?}");
             let text = error.to_string();
             assert!(
                 text.contains(&format!("offset {last_offset}")) && text.contains("32 bytes"),
@@ -1136,7 +1128,7 @@ mod tests {
         pieces.push((EMPTY * FIRST, Bytes::from_static(b"Gus")));
         let crafted = Crafted::exact(pieces);
         let error = read_stream(&crafted, 0, 0).unwrap_err();
-        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        assert!(matches!(error, Error::Corruption(_)), "{error:?}");
         let text = error.to_string();
         assert!(
             text.contains("offset 33554432") && text.contains("expected 16777216 at most"),
@@ -1181,10 +1173,7 @@ mod tests {
         for (case, pieces, expected) in cases {
             let crafted = Crafted::exact(pieces);
             let error = read_stream(&crafted, 0, 0).unwrap_err();
-            assert!(
-                matches!(error, Error::Serialization(_)),
-                "{case}: {error:?}"
-            );
+            assert!(matches!(error, Error::Corruption(_)), "{case}: {error:?}");
             let text = error.to_string();
             assert!(text.contains(expected), "{case}: {text}");
         }
@@ -1241,7 +1230,7 @@ mod tests {
         let mut reader = ChunkStreamReader::new(&*section, 0, 0);
         let error = std::io::Read::read_to_end(&mut reader, &mut Vec::new()).unwrap_err();
         let error = stream_error(SectionType::TextIndex, error);
-        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        assert!(matches!(error, Error::Corruption(_)), "{error:?}");
         let text = error.to_string();
         assert!(
             text.contains("section TextIndex: stream 0 of graph 0")
@@ -1253,7 +1242,7 @@ mod tests {
         let mut reader = ChunkStreamReader::new(&*section, 3, 19);
         let error = std::io::Read::read_exact(&mut reader, &mut [0u8; 3]).unwrap_err();
         let error = stream_error(SectionType::VectorStore, error);
-        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        assert!(matches!(error, Error::Corruption(_)), "{error:?}");
         let text = error.to_string();
         assert!(
             text.contains("section VectorStore") && text.contains("ends"),
@@ -1277,20 +1266,37 @@ mod tests {
                     && inner.to_string() == "section RdfRing: Gus"),
             "{error:?}"
         );
+        // A newer version's refusal stays one, with the section named.
+        let newer = std::io::Error::other(Error::Serialization("Butch".to_string()));
+        let error = stream_error(SectionType::RdfRing, newer);
+        assert!(
+            matches!(&error, Error::Serialization(message) if message == "section RdfRing: Butch"),
+            "{error:?}"
+        );
         // A grafeo error of another variant, and an I/O error that is not the
         // reader's: corrupt section data, with the section named.
         let invalid = std::io::Error::other(Error::InvalidValue("Mia".to_string()));
         let error = stream_error(SectionType::RdfRing, invalid);
         assert!(
-            matches!(&error, Error::Serialization(message)
-                if message.starts_with("section RdfRing: ") && message.contains("Mia")),
+            matches!(&error, Error::Corruption(corruption)
+                if corruption.what.starts_with("section RdfRing: ")
+                    && corruption.what.contains("Mia")),
             "{error:?}"
         );
         let foreign = std::io::Error::new(std::io::ErrorKind::InvalidData, "Jules");
         let error = stream_error(SectionType::RdfRing, foreign);
         assert!(
-            matches!(&error, Error::Serialization(message)
-                if message.starts_with("section RdfRing: ") && message.contains("Jules")),
+            matches!(&error, Error::Corruption(corruption)
+                if corruption.what.starts_with("section RdfRing: ")
+                    && corruption.what.contains("Jules")),
+            "{error:?}"
+        );
+        // Damage found under the reader keeps its kind, with the section named.
+        let damaged = std::io::Error::other(Error::corruption_at("Hans", 4096));
+        let error = stream_error(SectionType::RdfRing, damaged);
+        assert!(
+            matches!(&error, Error::Corruption(corruption)
+                if corruption.what == "section RdfRing: Hans" && corruption.offset == Some(4096)),
             "{error:?}"
         );
     }

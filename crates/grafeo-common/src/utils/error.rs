@@ -191,8 +191,14 @@ pub enum Error {
     /// Query error.
     Query(QueryError),
 
-    /// Serialization error.
+    /// Serialization error: input that does not decode as expected (query
+    /// parameters, JSON, imports, snapshots), or a value a file cannot hold.
     Serialization(String),
+
+    /// A file Grafeo wrote is damaged: its bytes do not read back as Grafeo
+    /// writes them (a checksum, a header, a section or a record that does
+    /// not decode). Boxed so the error stays small.
+    Corruption(Box<Corruption>),
 
     /// I/O error.
     Io(std::io::Error),
@@ -201,7 +207,113 @@ pub enum Error {
     Internal(String),
 }
 
+/// What is damaged in a file Grafeo wrote, and where (see
+/// [`Error::Corruption`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Corruption {
+    /// What is damaged and how.
+    pub what: String,
+    /// The file, when the reader knows it.
+    pub file: Option<std::path::PathBuf>,
+    /// The byte offset in the file, when the reader knows it.
+    pub offset: Option<u64>,
+}
+
+impl Corruption {
+    /// Damage described by `what`, in no file and at no offset yet.
+    #[must_use]
+    pub fn new(what: impl Into<String>) -> Self {
+        Self {
+            what: what.into(),
+            file: None,
+            offset: None,
+        }
+    }
+
+    /// The same damage at byte `offset` of the file.
+    #[must_use]
+    pub fn at(self, offset: u64) -> Self {
+        Self {
+            offset: Some(offset),
+            ..self
+        }
+    }
+}
+
+impl fmt::Display for Corruption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the file ")?;
+        if let Some(file) = &self.file {
+            write!(f, "{} ", file.display())?;
+        }
+        f.write_str("is damaged")?;
+        if let Some(offset) = self.offset {
+            write!(f, " at byte {offset}")?;
+        }
+        write!(f, ": {}", self.what)
+    }
+}
+
 impl Error {
+    /// A [`Corruption`] described by `what`.
+    #[must_use]
+    pub fn corruption(what: impl Into<String>) -> Self {
+        Self::Corruption(Box::new(Corruption::new(what)))
+    }
+
+    /// A [`Corruption`] described by `what`, at byte `offset` of the file.
+    #[must_use]
+    pub fn corruption_at(what: impl Into<String>, offset: u64) -> Self {
+        Self::Corruption(Box::new(Corruption::new(what).at(offset)))
+    }
+
+    /// This error with `context` in front of its message, as a reader
+    /// reports what failed under it. It keeps its kind: a [`Corruption`]
+    /// keeps its file and offset, an I/O error its kind. Errors without a
+    /// free-form message come back as they are.
+    #[must_use]
+    pub fn wrapped(self, context: impl fmt::Display) -> Self {
+        match self {
+            Self::Corruption(mut corruption) => {
+                corruption.what = format!("{context}: {}", corruption.what);
+                Self::Corruption(corruption)
+            }
+            Self::Serialization(message) => Self::Serialization(format!("{context}: {message}")),
+            Self::Internal(message) => Self::Internal(format!("{context}: {message}")),
+            Self::Io(error) => Self::Io(std::io::Error::new(
+                error.kind(),
+                format!("{context}: {error}"),
+            )),
+            other => other,
+        }
+    }
+
+    /// This error, at byte `offset` of its file when it is a [`Corruption`]
+    /// that names no offset yet; any other error comes back as it is.
+    #[must_use]
+    pub fn at(self, offset: u64) -> Self {
+        match self {
+            Self::Corruption(mut corruption) if corruption.offset.is_none() => {
+                corruption.offset = Some(offset);
+                Self::Corruption(corruption)
+            }
+            other => other,
+        }
+    }
+
+    /// This error, naming `file` when it is a [`Corruption`] that names no
+    /// file yet; any other error comes back as it is.
+    #[must_use]
+    pub fn in_file(self, file: &std::path::Path) -> Self {
+        match self {
+            Self::Corruption(mut corruption) if corruption.file.is_none() => {
+                corruption.file = Some(file.to_path_buf());
+                Self::Corruption(corruption)
+            }
+            other => other,
+        }
+    }
+
     /// Returns the machine-readable error code for this error.
     #[must_use]
     pub fn error_code(&self) -> ErrorCode {
@@ -216,6 +328,7 @@ impl Error {
             Error::Storage(e) => e.error_code(),
             Error::Query(e) => e.error_code(),
             Error::Serialization(_) => ErrorCode::SerializationError,
+            Error::Corruption(_) => ErrorCode::StorageCorrupted,
             Error::Io(_) => ErrorCode::IoError,
             Error::Internal(_) => ErrorCode::Internal,
         }
@@ -241,6 +354,7 @@ impl fmt::Display for Error {
             Error::Storage(e) => write!(f, "{code}: {e}"),
             Error::Query(e) => write!(f, "{e}"),
             Error::Serialization(msg) => write!(f, "{code}: Serialization error: {msg}"),
+            Error::Corruption(corruption) => write!(f, "{code}: {corruption}"),
             Error::Io(e) => write!(f, "{code}: I/O error: {e}"),
             Error::Internal(msg) => write!(f, "{code}: Internal error: {msg}"),
         }
@@ -362,13 +476,10 @@ impl From<TransactionError> for Error {
     }
 }
 
-/// Storage-specific errors.
+/// Storage-specific errors. A damaged file is an [`Error::Corruption`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum StorageError {
-    /// Corruption detected in storage.
-    Corruption(String),
-
     /// Storage is full.
     Full,
 
@@ -387,7 +498,6 @@ impl StorageError {
     #[must_use]
     pub const fn error_code(&self) -> ErrorCode {
         match self {
-            Self::Corruption(_) => ErrorCode::StorageCorrupted,
             Self::Full => ErrorCode::StorageFull,
             Self::InvalidWalEntry(_) | Self::CheckpointFailed(_) => ErrorCode::StorageCorrupted,
             Self::RecoveryFailed(_) => ErrorCode::StorageRecoveryFailed,
@@ -398,7 +508,6 @@ impl StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StorageError::Corruption(msg) => write!(f, "Storage corruption: {msg}"),
             StorageError::Full => write!(f, "Storage is full"),
             StorageError::InvalidWalEntry(msg) => write!(f, "Invalid WAL entry: {msg}"),
             StorageError::RecoveryFailed(msg) => write!(f, "Recovery failed: {msg}"),

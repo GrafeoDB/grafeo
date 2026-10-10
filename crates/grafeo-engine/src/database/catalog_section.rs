@@ -510,15 +510,16 @@ impl CatalogSection {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Serialization`] naming the record when it repeats or
-    /// does not follow the record of its kind before it, when its edge type's
-    /// endpoints are not a product, or when the catalog refuses it; the error
-    /// of creating a schema's default graph.
+    /// Returns [`Error::Corruption`] naming the record when it repeats or does
+    /// not follow the record of its kind before it, or when the catalog
+    /// refuses it; [`Error::Serialization`] when its edge type's endpoints are
+    /// not a product (a later release may store those); the error of creating
+    /// a schema's default graph.
     fn apply_record(&self, record: CatalogRecord, loading: &mut Loading) -> Result<()> {
         let name = record_name(&record);
         loading.check_order(&record, &name)?;
         let refused = |error: CatalogError| {
-            Error::Serialization(format!("{name} does not apply to the catalog: {error}"))
+            Error::corruption(format!("{name} does not apply to the catalog: {error}"))
         };
         match record {
             CatalogRecord::Schema(SchemaRecord { name: schema }) => {
@@ -660,7 +661,7 @@ fn follow<K: Ord>(last: &mut Option<K>, key: K, name: &str) -> Result<()> {
 /// The error of a record that repeats or comes before the one of its kind
 /// before it.
 fn out_of_order(name: &str) -> Error {
-    Error::Serialization(format!(
+    Error::corruption(format!(
         "{name} is out of order: it repeats the record of its kind before it or comes before \
          it, where each kind's records come once each, in increasing order"
     ))
@@ -718,17 +719,14 @@ fn in_entry(what: &str, error: Error) -> Error {
 
 /// `error` with the section in front of its message, as
 /// [`stream_error`] names it in a stream's errors: corrupt section data
+/// ([`Error::Corruption`]), what a newer release wrote
 /// ([`Error::Serialization`]), a misused source ([`Error::Internal`]) or a
 /// failed read ([`Error::Io`]). Any other error as it is.
 fn in_section(error: Error) -> Error {
-    let section = SectionType::Catalog;
     match error {
-        Error::Serialization(text) => Error::Serialization(format!("section {section:?}: {text}")),
-        Error::Internal(text) => Error::Internal(format!("section {section:?}: {text}")),
-        Error::Io(inner) => Error::Io(std::io::Error::new(
-            inner.kind(),
-            format!("section {section:?}: {inner}"),
-        )),
+        Error::Corruption(_) | Error::Serialization(_) | Error::Internal(_) | Error::Io(_) => {
+            error.wrapped(format_args!("section {:?}", SectionType::Catalog))
+        }
         other => other,
     }
 }
@@ -740,11 +738,11 @@ fn in_section(error: Error) -> Error {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the section and the chunk for any
+/// Returns [`Error::Corruption`] naming the section and the chunk for any
 /// other sequence or metadata, or the error of fetching the metadata chunk.
 fn read_meta(source: &dyn SectionSource) -> Result<CatalogMeta> {
     let refuse =
-        |what: String| Error::Serialization(format!("section {:?}: {what}", SectionType::Catalog));
+        |what: String| Error::corruption(format!("section {:?}: {what}", SectionType::Catalog));
     let chunks = source.chunks();
     match chunks.first() {
         Some(first) if *first == ChunkMeta::meta() => {}
@@ -866,7 +864,7 @@ impl Section for CatalogSection {
         let config = bincode::config::standard();
         let (snapshot, read): (CatalogSnapshot, _) =
             bincode::serde::decode_from_slice(data, config).map_err(|e| {
-                Error::Serialization(format!("Catalog section deserialization failed: {e}"))
+                Error::corruption(format!("Catalog section deserialization failed: {e}"))
             })?;
 
         // Restore schema definitions
@@ -895,7 +893,7 @@ impl Section for CatalogSection {
         if !rest.is_empty() {
             let (names, read): (ConstraintNames, _) =
                 bincode::serde::decode_from_slice(rest, config).map_err(|e| {
-                    Error::Serialization(format!("Constraint names deserialization failed: {e}"))
+                    Error::corruption(format!("Constraint names deserialization failed: {e}"))
                 })?;
             self.catalog.restore_constraint_names(names.constraints);
             rest = &rest[read..];
@@ -911,9 +909,8 @@ impl Section for CatalogSection {
             }
         } else {
             let (extension, _): (IndexExtension, _) =
-                bincode::serde::decode_from_slice(rest, config).map_err(|e| {
-                    Error::Serialization(format!("Index deserialization failed: {e}"))
-                })?;
+                bincode::serde::decode_from_slice(rest, config)
+                    .map_err(|e| Error::corruption(format!("Index deserialization failed: {e}")))?;
             self.restore_index_names(extension.names);
             extension.graphs
         };

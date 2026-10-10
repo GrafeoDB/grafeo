@@ -188,6 +188,10 @@ fn in_index(error: Error, key: &str) -> Error {
     let place = format!("in the stream of text index '{key}'");
     match error {
         Error::Serialization(message) => Error::Serialization(format!("{message}, {place}")),
+        Error::Corruption(mut corruption) => {
+            corruption.what = format!("{}, {place}", corruption.what);
+            Error::Corruption(corruption)
+        }
         Error::Internal(message) => Error::Internal(format!("{message}, {place}")),
         Error::InvalidValue(message) => Error::InvalidValue(format!("{message}, {place}")),
         Error::Io(inner) => Error::Io(io::Error::new(inner.kind(), format!("{inner}, {place}"))),
@@ -363,21 +367,21 @@ fn read_meta(source: &dyn SectionSource) -> Result<TextMeta> {
     match chunks.first() {
         Some(first) if *first == ChunkMeta::meta() => {}
         Some(first) if first.kind == ChunkKind::Meta => {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section TextIndex: the metadata chunk has codec {}, graph {}, column {}, first \
                  row {} and rows {}, where all are 0",
                 first.codec, first.graph_id, first.column_id, first.row_start, first.row_count
             )));
         }
         Some(first) => {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section TextIndex: the first chunk is of kind {:?}, where the metadata chunk \
                  comes first",
                 first.kind
             )));
         }
         None => {
-            return Err(Error::Serialization(
+            return Err(Error::corruption(
                 "section TextIndex: the section holds no chunk, not even its metadata chunk"
                     .to_string(),
             ));
@@ -389,19 +393,19 @@ fn read_meta(source: &dyn SectionSource) -> Result<TextMeta> {
         bincode::config::standard().with_limit::<META_DECODE_LIMIT>(),
     )
     .map_err(|error| {
-        Error::Serialization(format!(
+        Error::corruption(format!(
             "section TextIndex: the metadata chunk does not decode: {error}"
         ))
     })?;
     if read != bytes.len() {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "section TextIndex: the metadata chunk holds {} bytes after its {read} bytes of \
              metadata",
             bytes.len() - read
         )));
     }
     if meta.layout != META_LAYOUT {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "section TextIndex: the metadata chunk has layout {}, this build reads layout \
              {META_LAYOUT}",
             meta.layout
@@ -409,7 +413,7 @@ fn read_meta(source: &dyn SectionSource) -> Result<TextMeta> {
     }
     for pair in meta.keys.windows(2) {
         if pair[0] >= pair[1] {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section TextIndex: the metadata lists text index '{}' after '{}', but keys are \
                  strictly increasing",
                 pair[1], pair[0]
@@ -419,7 +423,7 @@ fn read_meta(source: &dyn SectionSource) -> Result<TextMeta> {
     for chunk in &chunks[1..] {
         let listed = usize::try_from(chunk.column_id).is_ok_and(|stream| stream < meta.keys.len());
         if chunk.kind != ChunkKind::Stream || chunk.graph_id != 0 || !listed {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section TextIndex: a chunk of kind {:?} for graph {}, stream {}, where only \
                  pieces of the {} streams of graph 0 (one per index) follow the metadata chunk",
                 chunk.kind,
@@ -480,7 +484,7 @@ impl PostingsReader<'_> {
                 .map_err(|error| stream_error(SectionType::TextIndex, error))?;
         }
         String::from_utf8(bytes).map_err(|error| {
-            Error::Serialization(format!("section TextIndex: a term is not UTF-8 ({error})"))
+            Error::corruption(format!("section TextIndex: a term is not UTF-8 ({error})"))
         })
     }
 
@@ -489,8 +493,8 @@ impl PostingsReader<'_> {
         let mut probe = [0u8; 1];
         match self.stream.read(&mut probe) {
             Ok(0) => Ok(()),
-            Ok(_) => Err(Error::Serialization(
-                "section TextIndex: the stream holds bytes after its last posting list".to_string(),
+            Ok(_) => Err(Error::corruption(
+                "section TextIndex: the stream holds bytes after its last posting list",
             )),
             Err(error) => Err(stream_error(SectionType::TextIndex, error)),
         }
@@ -503,7 +507,7 @@ impl PostingsReader<'_> {
         let k1 = self.f64()?;
         let b = self.f64()?;
         if !k1.is_finite() || !b.is_finite() {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section TextIndex: the BM25 parameters k1 {k1} and b {b} are not both finite"
             )));
         }
@@ -535,7 +539,7 @@ impl PostingsReader<'_> {
             if let Some(previous) = previous
                 && node <= previous
             {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section TextIndex: document {} follows document {}, but node ids are \
                      strictly increasing",
                     node.as_u64(),
@@ -544,7 +548,7 @@ impl PostingsReader<'_> {
             }
             let length = self.u32()?;
             if length == 0 {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section TextIndex: document {} has length 0, but an indexed document has \
                      at least one token",
                     node.as_u64()
@@ -560,7 +564,7 @@ impl PostingsReader<'_> {
             previous = Some(node);
         }
         if sum != u128::from(total_length) {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section TextIndex: the document lengths add up to {sum}, the stream gives a \
                  total length {total_length}"
             )));
@@ -584,14 +588,14 @@ impl PostingsReader<'_> {
             if let Some(previous) = &previous
                 && term <= *previous
             {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section TextIndex: the term '{term}' follows '{previous}', but terms are \
                      strictly increasing"
                 )));
             }
             let count = Self::usize(self.u64()?, "a posting count of")?;
             if count == 0 {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section TextIndex: the posting list of term '{term}' is empty"
                 )));
             }
@@ -603,7 +607,7 @@ impl PostingsReader<'_> {
                 if let Some(previous_node) = previous_node
                     && node <= previous_node
                 {
-                    return Err(Error::Serialization(format!(
+                    return Err(Error::corruption(format!(
                         "section TextIndex: the posting list of term '{term}' holds node {} \
                          after node {}, but its nodes are strictly increasing",
                         node.as_u64(),
@@ -612,14 +616,14 @@ impl PostingsReader<'_> {
                 }
                 let Ok(position) = documents.binary_search_by_key(&node, |document| document.node)
                 else {
-                    return Err(Error::Serialization(format!(
+                    return Err(Error::corruption(format!(
                         "section TextIndex: the posting list of term '{term}' holds node {}, \
                          which has no document length",
                         node.as_u64()
                     )));
                 };
                 if frequency == 0 {
-                    return Err(Error::Serialization(format!(
+                    return Err(Error::corruption(format!(
                         "section TextIndex: the posting list of term '{term}' gives node {} a \
                          term frequency of 0",
                         node.as_u64()
@@ -628,7 +632,7 @@ impl PostingsReader<'_> {
                 let document = &mut documents[position];
                 if frequency > document.left {
                     let reached = u64::from(document.length - document.left) + u64::from(frequency);
-                    return Err(Error::Serialization(format!(
+                    return Err(Error::corruption(format!(
                         "section TextIndex: the posting list of term '{term}' brings the term \
                          frequencies of document {} to {reached}, above its length {}",
                         node.as_u64(),
@@ -643,7 +647,7 @@ impl PostingsReader<'_> {
             previous = Some(term);
         }
         if let Some(document) = documents.iter().find(|document| document.left != 0) {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section TextIndex: document {} has length {}, but its term frequencies add up \
                  to {}",
                 document.node.as_u64(),
@@ -722,7 +726,7 @@ impl Section for TextIndexSection {
         let config = bincode::config::standard();
         let (snapshot, _): (TextIndexSnapshot, _) = bincode::serde::decode_from_slice(data, config)
             .map_err(|e| {
-                Error::Serialization(format!("Text Index section deserialization failed: {e}"))
+                Error::corruption(format!("Text Index section deserialization failed: {e}"))
             })?;
 
         for idx_snap in snapshot.indexes {
@@ -785,15 +789,14 @@ impl Section for TextIndexSection {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Serialization`] for a section of another version, a
-    /// metadata chunk or a chunk sequence this writer does not produce, or a
-    /// stream that does not hold its index exactly (the index named, and left
-    /// empty); any error from fetching a chunk.
+    /// Returns [`Error::Serialization`] for a section of another version, and
+    /// [`Error::Corruption`] for a metadata chunk or a chunk sequence this
+    /// writer does not produce, or a stream that does not hold its index
+    /// exactly (the index named, and left empty); any error from fetching a
+    /// chunk.
     fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
         let legacy = legacy_bytes(source).map_err(|error| match error {
-            Error::Serialization(message) => {
-                Error::Serialization(format!("section TextIndex: {message}"))
-            }
+            Error::Serialization(_) | Error::Corruption(_) => error.wrapped("section TextIndex"),
             other => other,
         })?;
         if let Some(bytes) = legacy {
@@ -806,7 +809,7 @@ impl Section for TextIndexSection {
                 continue;
             };
             let stream = u32::try_from(position).map_err(|_| {
-                Error::Serialization(format!(
+                Error::corruption(format!(
                     "section TextIndex: the metadata lists {position} indexes, more than 32-bit \
                      stream numbers reach"
                 ))
@@ -1271,10 +1274,7 @@ mod tests {
             let (read, restored) = read_back(&image, &keys);
             let error = read.expect_err(case);
             let message = error.to_string();
-            assert!(
-                matches!(error, Error::Serialization(_)),
-                "{case}: {error:?}"
-            );
+            assert!(matches!(error, Error::Corruption(_)), "{case}: {error:?}");
             assert!(
                 message.contains("TextIndex")
                     && message.contains(keys[failed])
@@ -1596,10 +1596,15 @@ mod tests {
             let (read, restored) = read_back(&image, &["Doc:body", "Note:text"]);
             let error = read.expect_err(case);
             let message = error.to_string();
-            assert!(
-                matches!(error, Error::Serialization(_)),
-                "{case}: {error:?}"
-            );
+            // Another version is another build's section, not damage.
+            if case == "another version" {
+                assert!(
+                    matches!(error, Error::Serialization(_)),
+                    "{case}: {error:?}"
+                );
+            } else {
+                assert!(matches!(error, Error::Corruption(_)), "{case}: {error:?}");
+            }
             assert!(
                 message.contains("TextIndex") && message.contains(reason),
                 "{case}: {message}"
@@ -1717,10 +1722,7 @@ mod tests {
             let (read, restored) = read_back(&image, &["Doc:body"]);
             let error = read.expect_err(case);
             let message = error.to_string();
-            assert!(
-                matches!(error, Error::Serialization(_)),
-                "{case}: {error:?}"
-            );
+            assert!(matches!(error, Error::Corruption(_)), "{case}: {error:?}");
             assert!(
                 message.contains("TextIndex")
                     && message.contains("Doc:body")
@@ -1863,7 +1865,7 @@ mod tests {
             let error = read_back(&image, &["Doc:body"]).0.unwrap_err();
             let message = error.to_string();
             assert!(
-                matches!(error, Error::Serialization(_))
+                matches!(error, Error::Corruption(_))
                     && message.contains("does not decode")
                     && message.contains(reason),
                 "{case}: {message}"

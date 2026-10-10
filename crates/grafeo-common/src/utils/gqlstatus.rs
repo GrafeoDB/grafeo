@@ -233,7 +233,7 @@ impl From<&super::error::Error> for GqlStatus {
                 GqlStatus::SYNTAX_INVALID_REFERENCE
             }
             Error::Storage(_) => GqlStatus::DATA_EXCEPTION,
-            Error::Serialization(_) => GqlStatus::DATA_EXCEPTION,
+            Error::Serialization(_) | Error::Corruption(_) => GqlStatus::DATA_EXCEPTION,
             Error::Io(_) => GqlStatus::DATA_EXCEPTION,
             Error::Internal(_) => GqlStatus::DATA_EXCEPTION,
         }

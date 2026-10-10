@@ -542,7 +542,7 @@ pub trait SectionSource {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] when raw chunks come several or next to
+/// Returns [`Error::Corruption`] when raw chunks come several or next to
 /// chunks of other kinds, or when the one raw chunk has a codec, a graph, a
 /// column or rows; any error from fetching the chunk.
 pub fn legacy_bytes(source: &dyn SectionSource) -> Result<Option<bytes::Bytes>> {
@@ -554,12 +554,12 @@ pub fn legacy_bytes(source: &dyn SectionSource) -> Result<Option<bytes::Bytes>> 
     match chunks {
         _ if raw == 0 => Ok(None),
         [meta] if *meta == ChunkMeta::raw() => Ok(Some(source.fetch(0)?)),
-        [meta] => Err(Error::Serialization(format!(
+        [meta] => Err(Error::corruption(format!(
             "the raw chunk of a section has codec {}, graph {}, column {}, first row {}, \
              rows {}; the raw chunk of 0.5.x section bytes has all of them 0",
             meta.codec, meta.graph_id, meta.column_id, meta.row_start, meta.row_count
         ))),
-        _ => Err(Error::Serialization(format!(
+        _ => Err(Error::corruption(format!(
             "a section holds {raw} raw chunks among {} chunks; 0.5.x section bytes are \
              exactly one raw chunk",
             chunks.len()
@@ -610,7 +610,7 @@ pub fn write_raw(section: &dyn Section, sink: &mut dyn SectionSink) -> Result<()
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the section unless `source` holds
+/// Returns [`Error::Corruption`] naming the section unless `source` holds
 /// exactly that one chunk; any error from fetching or deserializing it.
 pub fn read_raw(section: &mut dyn Section, source: &dyn SectionSource) -> Result<()> {
     let section_type = section.section_type();
@@ -619,16 +619,16 @@ pub fn read_raw(section: &mut dyn Section, source: &dyn SectionSource) -> Result
             let bytes = source.fetch(0)?;
             section.deserialize(&bytes)
         }
-        [meta] if meta.kind == ChunkKind::Raw => Err(Error::Serialization(format!(
+        [meta] if meta.kind == ChunkKind::Raw => Err(Error::corruption(format!(
             "section {section_type:?}: the raw chunk has codec {}, graph {}, column {}, first \
              row {} and rows {}, where a raw chunk has all of them 0",
             meta.codec, meta.graph_id, meta.column_id, meta.row_start, meta.row_count
         ))),
-        [meta] => Err(Error::Serialization(format!(
+        [meta] => Err(Error::corruption(format!(
             "section {section_type:?}: expected one raw chunk, found one chunk of kind {:?}",
             meta.kind
         ))),
-        chunks => Err(Error::Serialization(format!(
+        chunks => Err(Error::corruption(format!(
             "section {section_type:?}: expected one raw chunk, found {} chunks",
             chunks.len()
         ))),
@@ -700,8 +700,8 @@ pub trait Section: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Serialization`] for chunks the section does not read,
-    /// or any error from fetching or decoding them.
+    /// Returns [`Error::Corruption`] for chunks the section does not read or
+    /// that do not decode, or any error from fetching them.
     fn read_from(&mut self, source: &dyn SectionSource) -> Result<()>;
 
     /// Whether this section has been modified since the last flush.

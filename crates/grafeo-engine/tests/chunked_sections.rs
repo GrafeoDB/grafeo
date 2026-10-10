@@ -1570,9 +1570,10 @@ mod moved_chunks {
             &chain,
         )));
         assert!(
-            error.contains("chunk of section LpgStore at offset")
-                && error.contains("decryption failed"),
-            "{error}"
+            error.starts_with("GRAFEO-S002")
+                && error.contains("chunk of section LpgStore at offset")
+                && error.contains("does not decrypt"),
+            "a damaged file: {error}"
         );
     }
 
@@ -1628,7 +1629,12 @@ mod moved_chunks {
             })
             .collect();
         rewrite_directory(&path, &cipher, (slot, &header), &moved, &runs);
-        let error = fetch(edge_meta).unwrap_err().to_string();
-        assert!(error.contains("decryption failed"), "{error}");
+        let error = fetch(edge_meta).unwrap_err();
+        assert!(
+            matches!(&error, grafeo_common::utils::error::Error::Corruption(corruption)
+                if corruption.offset == Some(node.offset)
+                    && corruption.what.contains("does not decrypt")),
+            "{error:?}"
+        );
     }
 }

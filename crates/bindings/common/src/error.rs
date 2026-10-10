@@ -22,8 +22,10 @@ pub enum ErrorCategory {
     Storage,
     /// I/O error (file, network).
     Io,
-    /// Serialization/deserialization failure.
+    /// Serialization/deserialization failure of outside input.
     Serialization,
+    /// A file Grafeo wrote is damaged (error code `GRAFEO-S002`).
+    Corruption,
     /// Internal error (should not happen in normal operation).
     Internal,
     /// Catch-all for other database errors (not found, type mismatch, a
@@ -43,6 +45,7 @@ pub fn classify_error(err: &Error) -> ErrorCategory {
         Error::Storage(_) => ErrorCategory::Storage,
         Error::Io(_) => ErrorCategory::Io,
         Error::Serialization(_) => ErrorCategory::Serialization,
+        Error::Corruption(_) => ErrorCategory::Corruption,
         Error::Internal(_) => ErrorCategory::Internal,
         _ => ErrorCategory::Database,
     }
@@ -122,6 +125,8 @@ mod tests {
     fn classifies_serialization_error() {
         let err = Error::Serialization("bad bytes".into());
         assert_eq!(classify_error(&err), ErrorCategory::Serialization);
+        let err = Error::corruption("chunk checksum mismatch");
+        assert_eq!(classify_error(&err), ErrorCategory::Corruption);
     }
 
     #[test]

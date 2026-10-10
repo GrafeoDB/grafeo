@@ -14,19 +14,38 @@ use grafeo_common::utils::hash::FxHashMap;
 
 use super::alloc::{PageAllocator, PageRun};
 use super::cipher::{ChunkCipher, ENCRYPTION_OVERHEAD};
-use super::directory::{DirectoryEntry, SkippedEntry, decode_chain};
+use super::directory::{DirectoryEntry, SkippedEntry, decode_chain, in_block};
 use super::header::{BlockRef, DATA_START_PAGE, PAGE_SIZE};
 
+/// The error of a read of `length` bytes at `offset` that failed with
+/// `error`: a file that ends before them is damaged, anything else is I/O.
+#[cfg(any(unix, windows))]
+fn read_failed(error: &std::io::Error, offset: u64, length: usize) -> Error {
+    if error.kind() == std::io::ErrorKind::UnexpectedEof {
+        Error::corruption_at(
+            format!("the file ends within the {length} bytes at offset {offset}"),
+            offset,
+        )
+    } else {
+        Error::Io(std::io::Error::new(
+            error.kind(),
+            format!("cannot read {length} bytes at offset {offset}: {error}"),
+        ))
+    }
+}
+
 /// Reads exactly `length` bytes at `offset`.
+///
+/// # Errors
+///
+/// Returns [`Error::Corruption`] when the file ends before them, and
+/// [`Error::Io`] when the read fails.
 fn read_at(file: &File, offset: u64, length: usize) -> Result<Vec<u8>> {
     let mut buffer = vec![0u8; length];
     #[cfg(unix)]
     {
-        std::os::unix::fs::FileExt::read_exact_at(file, &mut buffer, offset).map_err(|error| {
-            Error::Serialization(format!(
-                "cannot read {length} bytes at offset {offset}: {error}"
-            ))
-        })?;
+        std::os::unix::fs::FileExt::read_exact_at(file, &mut buffer, offset)
+            .map_err(|error| read_failed(&error, offset, length))?;
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -41,15 +60,10 @@ fn read_at(file: &File, offset: u64, length: usize) -> Result<Vec<u8>> {
         while done < length {
             let at = offset + done as u64;
             let read = std::os::windows::fs::FileExt::seek_read(file, &mut buffer[done..], at)
-                .map_err(|error| {
-                    Error::Serialization(format!(
-                        "cannot read {length} bytes at offset {offset}: {error}"
-                    ))
-                })?;
+                .map_err(|error| read_failed(&error, offset, length))?;
             if read == 0 {
-                return Err(Error::Serialization(format!(
-                    "cannot read {length} bytes at offset {offset}: unexpected end of file"
-                )));
+                let error = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
+                return Err(read_failed(&error, offset, length));
             }
             done += read;
         }
@@ -67,6 +81,17 @@ fn stored_at(entry: &DirectoryEntry) -> String {
     }
 }
 
+/// Damage described by `what` in the chunk of `entry`, at the chunk's offset
+/// when it has bytes.
+fn chunk_damage(entry: &DirectoryEntry, what: String) -> Error {
+    let error = Error::corruption(what);
+    if entry.length == 0 {
+        error
+    } else {
+        error.at(entry.offset)
+    }
+}
+
 /// Every chunk of one section carries one version, and no identity repeats
 /// within a section.
 ///
@@ -77,7 +102,7 @@ fn stored_at(entry: &DirectoryEntry) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the section and the chunk that
+/// Returns [`Error::Corruption`] naming the section and the chunk that
 /// breaks a rule (its offset, or "without bytes"): "versions {first} and
 /// {other}" with the kind, graph, column and first row of a chunk of
 /// another version than the section's first, "two chunks of kind ..." for
@@ -91,25 +116,28 @@ pub(super) fn check_sections(entries: &[DirectoryEntry]) -> Result<()> {
             .or_insert_with(|| (entry.section_version, ChunkIdentities::default()));
         if entry.section_version != *version {
             let meta = &entry.meta;
-            return Err(Error::Serialization(format!(
-                "section {section_type:?} has chunks of versions {} and {}: the chunk of kind \
-                 {:?} for graph {}, column {}, first row {} ({}) has version {}, but every \
-                 chunk of a section carries one version",
-                *version,
-                entry.section_version,
-                meta.kind,
-                meta.graph_id,
-                meta.column_id,
-                meta.row_start,
-                stored_at(entry),
-                entry.section_version
-            )));
+            return Err(chunk_damage(
+                entry,
+                format!(
+                    "section {section_type:?} has chunks of versions {} and {}: the chunk of \
+                     kind {:?} for graph {}, column {}, first row {} ({}) has version {}, but \
+                     every chunk of a section carries one version",
+                    *version,
+                    entry.section_version,
+                    meta.kind,
+                    meta.graph_id,
+                    meta.column_id,
+                    meta.row_start,
+                    stored_at(entry),
+                    entry.section_version
+                ),
+            ));
         }
         identities
             .insert(section_type, &entry.meta)
             .map_err(|error| match error {
                 Error::Serialization(message) => {
-                    Error::Serialization(format!("{message}, the second {}", stored_at(entry)))
+                    chunk_damage(entry, format!("{message}, the second {}", stored_at(entry)))
                 }
                 other => other,
             })?;
@@ -134,11 +162,14 @@ fn check_placement(
         || offset < DATA_START_PAGE * PAGE_SIZE
         || end.is_none_or(|end| end > file_length)
     {
-        return Err(Error::Serialization(format!(
-            "{} at offset {offset} (length {length}) is misplaced or lies beyond the end of the \
-             file ({file_length} bytes)",
-            what()
-        )));
+        return Err(Error::corruption_at(
+            format!(
+                "{} at offset {offset} (length {length}) is misplaced or lies beyond the end of \
+                 the file ({file_length} bytes)",
+                what()
+            ),
+            offset,
+        ));
     }
     Ok(())
 }
@@ -169,14 +200,17 @@ impl<'f> ImageReader<'f> {
     ///
     /// # Errors
     ///
-    /// Returns an error when a directory block cannot be read, fails its
-    /// checks or (for an encrypted image) cannot be decrypted with `cipher`,
-    /// when an entry has an unknown section type or chunk kind that it does
-    /// not mark optional, or an unknown flag among bits 0 to 3, when a chunk
-    /// (a skipped one included) is misplaced or lies beyond the end of the
-    /// file, when the chunks of a section carry two versions or two of them
-    /// share an identity ([`ChunkMeta::identity`]), or when two chunks or
-    /// directory blocks share a page.
+    /// Returns [`Error::Corruption`] when a directory block fails its checks,
+    /// a block after the root does not decrypt, a chunk (a skipped one
+    /// included) is misplaced or lies beyond the end of the file, the chunks
+    /// of a section carry two versions or two of them share an identity
+    /// ([`ChunkMeta::identity`]), or two chunks or directory blocks share a
+    /// page. Returns [`Error::Serialization`] when the root block does not
+    /// decrypt with `cipher` (a wrong key, or a damaged block: the container
+    /// cannot tell them apart) and when an entry has an unknown section type
+    /// or chunk kind that it does not mark optional, or an unknown flag among
+    /// bits 0 to 3 (a newer version wrote it), and [`Error::Io`] when a read
+    /// fails.
     pub fn open(
         file: &'f mut File,
         root: BlockRef,
@@ -193,15 +227,29 @@ impl<'f> ImageReader<'f> {
             Error::Internal(format!("encryption overhead {extra} does not fit a u32"))
         })?;
         let (entries, skipped, runs) = decode_chain(root, overhead, |offset, length| {
-            let stored = read_at(file, offset, length as usize + extra).map_err(|error| {
-                Error::Serialization(format!("directory block at offset {offset}: {error}"))
-            })?;
+            let stored = read_at(file, offset, length as usize + extra)
+                .map_err(|error| in_block(error, offset))?;
             #[cfg(feature = "encryption")]
             if let Some(cipher) = cipher {
                 return cipher
                     .decrypt(&stored, &super::cipher::directory_aad(offset))
-                    .map_err(|error| {
-                        Error::Serialization(format!("directory block at offset {offset}: {error}"))
+                    .map_err(|_| {
+                        // The root block is the first thing the key decrypts.
+                        // Every later block's pointer was in a block that
+                        // decrypted and passed its checksum, so the key is
+                        // right and the block is damaged.
+                        if offset == root.offset {
+                            Error::Serialization(format!(
+                                "the directory block at offset {offset} does not decrypt: a \
+                                 wrong key, or a damaged block"
+                            ))
+                        } else {
+                            Error::corruption_at(
+                                "a directory block after the first does not decrypt with the \
+                                 key that decrypted the first",
+                                offset,
+                            )
+                        }
                     });
             }
             #[cfg(not(feature = "encryption"))]
@@ -246,11 +294,12 @@ impl<'f> ImageReader<'f> {
         // The next checkpoint builds its allocator from these runs (the
         // skipped chunks' included); refuse an image whose pages overlap now
         // rather than when it is replaced.
-        PageAllocator::from_used(reader.used_runs()).map_err(|error| {
-            Error::Serialization(format!(
-                "image with its directory at offset {}: {error}",
+        PageAllocator::from_used(reader.used_runs()).map_err(|error| match error {
+            Error::Serialization(message) => Error::corruption(format!(
+                "the image with its directory at offset {}: {message}",
                 root.offset
-            ))
+            )),
+            other => other,
         })?;
         Ok(reader)
     }
@@ -362,18 +411,25 @@ impl SectionSource for SectionChunks<'_> {
         })?;
         let stored = read_at(self.file, offset, length)?;
         if crc32fast::hash(&stored) != entry.crc {
-            return Err(Error::Serialization(format!(
-                "chunk of section {section_type:?} at offset {offset} fails its checksum"
-            )));
+            return Err(Error::corruption_at(
+                format!("chunk of section {section_type:?} at offset {offset} fails its checksum"),
+                offset,
+            ));
         }
+        // The key decrypted the directory, and the stored bytes match their
+        // checksum: a chunk that does not decrypt was written as it is.
         #[cfg(feature = "encryption")]
         if let Some(cipher) = self.cipher {
             let plain = cipher
                 .decrypt(&stored, &super::cipher::chunk_aad(entry))
-                .map_err(|error| {
-                    Error::Serialization(format!(
-                        "chunk of section {section_type:?} at offset {offset}: {error}"
-                    ))
+                .map_err(|_| {
+                    Error::corruption_at(
+                        format!(
+                            "chunk of section {section_type:?} at offset {offset} does not \
+                             decrypt with the key that decrypted the directory"
+                        ),
+                        offset,
+                    )
                 })?;
             return Ok(Bytes::from(plain));
         }
@@ -434,7 +490,10 @@ mod tests {
         .unwrap();
         let repeated = check_sections(&[entry(3, ChunkMeta::meta()), entry(3, ChunkMeta::meta())])
             .unwrap_err();
-        assert!(matches!(repeated, Error::Serialization(_)), "{repeated:?}");
+        assert!(
+            matches!(&repeated, Error::Corruption(corruption) if corruption.offset.is_none()),
+            "a chunk without bytes has no offset: {repeated:?}"
+        );
         assert!(
             repeated.to_string().contains("two chunks")
                 && repeated.to_string().contains("the second without bytes"),
@@ -445,7 +504,7 @@ mod tests {
             entry(2, ChunkMeta::column(0, 19, 88, 3, 2)),
         ])
         .unwrap_err();
-        assert!(matches!(mixed, Error::Serialization(_)), "{mixed:?}");
+        assert!(matches!(mixed, Error::Corruption(_)), "{mixed:?}");
         assert!(mixed.to_string().contains("versions 3 and 2"), "{mixed}");
         assert!(
             mixed.to_string().contains(

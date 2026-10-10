@@ -143,35 +143,35 @@ fn check_chunks(chunks: &[ChunkMeta]) -> Result<()> {
     match chunks.first() {
         Some(first) if *first == ChunkMeta::meta() => {}
         Some(first) => {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section RdfRing: the first chunk is a {:?} chunk of graph {}, column {}, not \
                  the metadata chunk",
                 first.kind, first.graph_id, first.column_id
             )));
         }
         None => {
-            return Err(Error::Serialization(
-                "section RdfRing: no metadata chunk, the section has no chunks".to_string(),
+            return Err(Error::corruption(
+                "section RdfRing: no metadata chunk, the section has no chunks",
             ));
         }
     }
     for (index, meta) in chunks.iter().enumerate().skip(1) {
         if meta.kind != ChunkKind::Stream {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section RdfRing: chunk {index} is a {:?} chunk; after its metadata chunk a ring \
                  section holds only pieces of streams 0 to 5 of graph 0",
                 meta.kind
             )));
         }
         if meta.graph_id != 0 || meta.column_id as usize >= PARTS.len() {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section RdfRing: chunk {index} is a piece of stream {} of graph {}; a ring \
                  section holds streams 0 to 5 of graph 0",
                 meta.column_id, meta.graph_id
             )));
         }
         if meta.row_count != 0 {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section RdfRing: chunk {index}, a piece of stream {}, has {} rows; stream \
                  pieces have none",
                 meta.column_id, meta.row_count
@@ -193,18 +193,18 @@ fn decode_meta(bytes: &[u8]) -> Result<RingMeta> {
     let config = bincode::config::standard().with_limit::<META_LIMIT>();
     let (meta, used): (RingMeta, usize) = bincode::serde::decode_from_slice(bytes, config)
         .map_err(|error| {
-            Error::Serialization(format!(
+            Error::corruption(format!(
                 "section RdfRing: the metadata chunk does not decode: {error}"
             ))
         })?;
     if used != bytes.len() {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "section RdfRing: the metadata chunk holds {} bytes, its record {used}",
             bytes.len()
         )));
     }
     if meta.layout != RING_LAYOUT {
-        return Err(Error::Serialization(format!(
+        return Err(Error::corruption(format!(
             "section RdfRing: layout {}, this build reads layout {RING_LAYOUT}",
             meta.layout
         )));
@@ -237,12 +237,12 @@ impl Section for RdfRingSection {
         // Phase 6g: detect v2 packed vs v1 bincode by magic bytes.
         let ring = if data.len() >= 4 && &data[0..4] == V2_MAGIC {
             super::deserialize_triple_ring(bytes::Bytes::copy_from_slice(data))
-                .map_err(|e| Error::Serialization(e.to_string()))?
+                .map_err(|e| Error::corruption(e.to_string()))?
         } else {
             // v1 fallback: bincode-encoded TripleRing. Existing files keep
             // loading; the next checkpoint flushes them out as v2.
             super::TripleRing::load_from_bytes(data)
-                .map_err(|e| Error::Serialization(e.to_string()))?
+                .map_err(|e| Error::corruption(e.to_string()))?
         };
         self.store.set_ring(ring);
         Ok(())
@@ -325,7 +325,7 @@ impl Section for RdfRingSection {
                 stream_error(SectionType::RdfRing, std::io::Error::other(error))
             })?;
             if bytes.is_empty() {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "section RdfRing: stream {stream} ({part}) is missing"
                 )));
             }
@@ -353,7 +353,7 @@ impl Section for RdfRingSection {
             spo_to_pos,
             spo_to_osp,
         )
-        .map_err(|error| Error::Serialization(format!("section RdfRing: {error}")))?;
+        .map_err(|error| Error::corruption(format!("section RdfRing: {error}")))?;
         self.store.set_ring(ring);
         Ok(())
     }

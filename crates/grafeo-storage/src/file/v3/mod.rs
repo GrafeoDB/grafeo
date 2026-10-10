@@ -18,6 +18,7 @@ mod tests {
     use std::fs::File;
 
     use grafeo_common::storage::{ChunkMeta, SectionSink, SectionSource, SectionType};
+    use grafeo_common::utils::error::Error;
 
     use super::alloc::{PageAllocator, PageRun};
     use super::directory::{
@@ -459,10 +460,15 @@ mod tests {
             .unwrap();
         let error = ImageReader::open(&mut file, root, None)
             .map(|_| ())
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
+        let Error::Corruption(corruption) = &error else {
+            panic!("a truncated file is damaged: {error:?}");
+        };
+        assert_eq!(corruption.offset, Some(root.offset), "{error}");
         assert!(
-            error.contains(&format!("directory block at offset {}", root.offset)),
+            corruption
+                .what
+                .starts_with("directory block: the file ends within"),
             "{error}"
         );
     }

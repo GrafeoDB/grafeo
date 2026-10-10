@@ -492,7 +492,7 @@ pub(super) fn load_snapshot_into_store(
     let config = bincode::config::standard();
     let (snapshot, _) =
         bincode::serde::decode_from_slice::<Snapshot, _>(data, config).map_err(|e| {
-            Error::Serialization(format!("failed to decode snapshot from .grafeo file: {e}"))
+            Error::corruption(format!("failed to decode snapshot from .grafeo file: {e}"))
         })?;
     #[cfg(feature = "triple-store")]
     let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;

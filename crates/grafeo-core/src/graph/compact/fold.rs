@@ -11,7 +11,7 @@
 use arcstr::ArcStr;
 use grafeo_common::storage::SectionSource;
 use grafeo_common::types::{EdgeId, NodeId};
-use grafeo_common::utils::error::{Error, Result, StorageError};
+use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashSet;
 
 use super::{CompactStore, labels_of_unescaped_key};
@@ -88,11 +88,10 @@ fn fold_into(
     deleted_edges: &[EdgeId],
 ) -> Result<Folded> {
     if !base.preserves_ids() && (store.node_count() > 0 || store.edge_count() > 0) {
-        return Err(Error::Storage(StorageError::Corruption(
+        return Err(Error::corruption(
             "the compacted base does not keep the ids of its nodes and edges, and the data \
-             written after it would mix with them"
-                .to_string(),
-        )));
+             written after it would mix with them",
+        ));
     }
     let deleted_nodes: FxHashSet<NodeId> = deleted_nodes.iter().copied().collect();
     let deleted_edges: FxHashSet<EdgeId> = deleted_edges.iter().copied().collect();
@@ -591,10 +590,7 @@ mod tests {
 
         let (store, folded) = fold(&image(&base_without_ids(), None, Some(OVERLAY)));
         let error = folded.unwrap_err();
-        assert!(
-            matches!(error, Error::Storage(StorageError::Corruption(_))),
-            "{error}"
-        );
+        assert!(matches!(error, Error::Corruption(_)), "{error}");
         assert_eq!(
             names(&store, "Person"),
             ["Alix", "Mia"],

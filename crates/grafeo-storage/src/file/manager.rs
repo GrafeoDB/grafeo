@@ -25,7 +25,7 @@ use super::v3::alloc::{PageAllocator, PageRun};
 use super::v3::directory::SkippedEntry;
 use super::v3::header::{
     DATA_START_PAGE, DbHeaderV3, FORMAT_REVISION, FileHeaderV3, PAGE_SIZE, active_header,
-    check_format_revision, new_database_id,
+    check_format_revision, new_database_id, slot_offset,
 };
 use super::v3::{CheckpointWriter, ChunkCipher, ImageReader};
 
@@ -513,11 +513,15 @@ impl GrafeoFileManager {
     /// Opens the reader of the active image under the file lock and runs
     /// `read` on it. The lock order (the file, then the active image for as
     /// long as it takes to read its root) is the order of `write_checkpoint`.
+    ///
+    /// Damage found in the image, by the reader or by `read`, names this
+    /// file.
     fn with_active_reader<T>(&self, read: impl FnOnce(&ImageReader<'_>) -> Result<T>) -> Result<T> {
         let mut file = self.file.lock();
         let root = self.active.lock().header.root;
-        let reader = ImageReader::open(&mut file, root, self.cipher.as_ref())?;
-        read(&reader)
+        let reader = ImageReader::open(&mut file, root, self.cipher.as_ref())
+            .map_err(|error| error.in_file(&self.path))?;
+        read(&reader).map_err(|error| error.in_file(&self.path))
     }
 
     /// Returns the path for the sidecar WAL directory.
@@ -695,8 +699,11 @@ fn read_active_image(
             path.display()
         )));
     }
-    let context =
-        |error: Error| Error::Serialization(format!("cannot open {}: {error}", path.display()));
+    // Damage names the file; anything else says what could not be opened.
+    let context = |error: Error| match error {
+        Error::Corruption(_) => error.in_file(path),
+        other => other.wrapped(format_args!("cannot open {}", path.display())),
+    };
     let file_header = FileHeaderV3::decode(page_of(&prefix, 0)).map_err(context)?;
     let cipher = cipher_for(file_header.database_id);
     match (file_header.encrypted, cipher.is_some()) {
@@ -718,11 +725,10 @@ fn read_active_image(
         DbHeaderV3::decode(page_of(&prefix, 1)),
         DbHeaderV3::decode(page_of(&prefix, 2)),
     ];
+    // `create` writes a valid header before it returns, so an existing
+    // database file never has two empty slots.
     let (slot, header) = active_header(slots).map_err(context)?.ok_or_else(|| {
-        Error::Serialization(format!(
-            "cannot open {}: both database header slots are empty",
-            path.display()
-        ))
+        Error::corruption_at("both database header slots are empty", slot_offset(0)).in_file(path)
     })?;
     // Before the directory: a revision this build does not know may use a
     // directory or chunks it cannot read.
@@ -731,20 +737,29 @@ fn read_active_image(
     // encrypted file would open with any key (nothing to decrypt), and the
     // next checkpoint would write with that key.
     if header.root.length == 0 {
-        return Err(Error::Serialization(format!(
-            "cannot open {}: the active database header (iteration {}, slot {slot}) \
-             has no directory block",
-            path.display(),
-            header.iteration
-        )));
+        return Err(Error::corruption_at(
+            format!(
+                "the active database header (iteration {}, slot {slot}) has no directory block",
+                header.iteration
+            ),
+            slot_offset(slot),
+        )
+        .in_file(path));
     }
-    let reader = ImageReader::open(file, header.root, cipher.as_ref()).map_err(|error| {
-        Error::Serialization(format!(
-            "cannot read the active image of {} (iteration {}): {error}",
-            path.display(),
-            header.iteration
-        ))
-    })?;
+    let reader =
+        ImageReader::open(file, header.root, cipher.as_ref()).map_err(|error| match error {
+            Error::Corruption(_) => error
+                .wrapped(format_args!(
+                    "the active image (iteration {})",
+                    header.iteration
+                ))
+                .in_file(path),
+            other => other.wrapped(format_args!(
+                "cannot read the active image of {} (iteration {})",
+                path.display(),
+                header.iteration
+            )),
+        })?;
     // The only warning: later readers see this image or one without
     // skipped entries.
     warn_skipped(reader.skipped());
@@ -817,11 +832,6 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
-}
-
-/// Byte offset of database header slot 0 or 1.
-fn slot_offset(slot: u8) -> u64 {
-    PAGE_SIZE * (1 + u64::from(slot))
 }
 
 /// Writes `bytes` at `offset`.
@@ -1104,6 +1114,76 @@ mod tests {
         file.write_all(bytes).unwrap();
     }
 
+    /// Asserts that `error` is a corruption of the file at `path`, at
+    /// `offset`, whose description holds `what`.
+    fn assert_corruption(error: &Error, path: &Path, offset: Option<u64>, what: &str) {
+        let Error::Corruption(corruption) = error else {
+            panic!("damage is a corruption: {error:?}");
+        };
+        assert_eq!(corruption.file.as_deref(), Some(path), "{error}");
+        assert_eq!(corruption.offset, offset, "{error}");
+        assert!(corruption.what.contains(what), "{error}");
+        let message = error.to_string();
+        assert!(
+            message.starts_with("GRAFEO-S002") && message.contains(&path.display().to_string()),
+            "the message names the code and the file: {message}"
+        );
+    }
+
+    /// The offset of the first page that holds `needle`.
+    fn page_holding(bytes: &[u8], needle: &[u8]) -> u64 {
+        let at = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("the bytes are in the file");
+        let at = u64::try_from(at).unwrap();
+        at - at % PAGE_SIZE
+    }
+
+    #[test]
+    fn a_damaged_chunk_is_a_corruption_naming_the_file_and_its_offset() {
+        let dir = test_dir();
+        let path = dir.path().join("prague.grafeo");
+        let manager = GrafeoFileManager::create(&path, None).unwrap();
+        checkpoint(&manager, &[fixed(SectionType::Catalog, "Shosanna")], 1).unwrap();
+        drop(manager);
+        let chunk = page_holding(&fs::read(&path).unwrap(), b"Shosanna");
+        overwrite(&path, chunk, b"s");
+
+        // The directory is intact, so the file opens; the chunk does not read.
+        let manager = GrafeoFileManager::open(&path, None).unwrap();
+        let error = raw_section(&manager, SectionType::Catalog).unwrap_err();
+        assert_corruption(&error, &path, Some(chunk), "fails its checksum");
+    }
+
+    #[test]
+    fn a_damaged_directory_block_is_a_corruption_naming_the_file_and_the_block() {
+        let dir = test_dir();
+        let path = dir.path().join("barcelona.grafeo");
+        let manager = GrafeoFileManager::create(&path, None).unwrap();
+        checkpoint(&manager, &[fixed(SectionType::Catalog, "Beatrix")], 1).unwrap();
+        drop(manager);
+        let mut bytes = fs::read(&path).unwrap();
+        let root = active_slot_of(&bytes).1.root;
+        let at = usize::try_from(root.offset).unwrap() + 30;
+        bytes[at] ^= 0xFF;
+        overwrite(&path, root.offset + 30, &bytes[at..=at]);
+
+        for read_only in [false, true] {
+            let result = if read_only {
+                GrafeoFileManager::open_read_only(&path, None)
+            } else {
+                GrafeoFileManager::open(&path, None)
+            };
+            let error = result.map(|_| ()).unwrap_err();
+            assert_corruption(&error, &path, Some(root.offset), "fails its checksum");
+        }
+        assert!(
+            fs::read(&path).unwrap() == bytes,
+            "a refused open writes nothing"
+        );
+    }
+
     #[test]
     fn a_new_database_reopens_at_iteration_0_without_sections() {
         let dir = test_dir();
@@ -1299,12 +1379,8 @@ mod tests {
             overwrite(&path, slot_offset(0), &slot_0);
             let error = GrafeoFileManager::open(&path, None)
                 .map(|_| ())
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains(&path.display().to_string()) && error.contains(expected),
-                "{name}: the error names the file and what is wrong with its headers: {error}"
-            );
+                .unwrap_err();
+            assert_corruption(&error, &path, Some(slot_offset(0)), expected);
         }
     }
 
@@ -1322,11 +1398,8 @@ mod tests {
             } else {
                 GrafeoFileManager::open(&path, None)
             };
-            let error = result.map(|_| ()).unwrap_err().to_string();
-            assert!(
-                error.contains("no directory block"),
-                "read-only {read_only}: {error}"
-            );
+            let error = result.map(|_| ()).unwrap_err();
+            assert_corruption(&error, &path, Some(slot_offset(0)), "no directory block");
         }
 
         // Without a block to decrypt, any key would open an encrypted file.

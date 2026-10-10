@@ -337,8 +337,8 @@ fn saturating_total(start: usize, parts: impl Iterator<Item = usize>) -> usize {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the byte offset in `data` of what
-/// is wrong, and leaves `*pos` as it was:
+/// Returns [`Error::Corruption`] naming the byte offset in `data` of what is
+/// wrong (`data` is bytes Grafeo wrote), and leaves `*pos` as it was:
 ///
 /// - an unknown tag;
 /// - a time of day of a full day or more;
@@ -371,7 +371,7 @@ struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     fn error(at: usize, message: impl fmt::Display) -> Error {
-        Error::Serialization(format!("value codec, byte {at}: {message}"))
+        Error::corruption(format!("value codec, byte {at}: {message}"))
     }
 
     fn remaining(&self) -> usize {
@@ -1175,7 +1175,7 @@ mod tests {
     fn malformed_fields_are_refused_with_their_offset() {
         let refused = |bytes: &[u8], at: usize| {
             let error = decode_value(bytes, &mut 0).unwrap_err();
-            assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+            assert!(matches!(error, Error::Corruption(_)), "{error:?}");
             let error = error.to_string();
             assert!(error.contains(&format!("byte {at}:")), "{bytes:?}: {error}");
         };

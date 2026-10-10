@@ -27,6 +27,12 @@ pub const PAGE_SIZE: u64 = 4096;
 /// First page after the file header and the two database headers.
 pub const DATA_START_PAGE: u64 = 3;
 
+/// Byte offset of database header slot 0 or 1.
+#[must_use]
+pub fn slot_offset(slot: u8) -> u64 {
+    PAGE_SIZE * (1 + u64::from(slot))
+}
+
 const PAGE_BYTES: usize = 4096;
 const FILE_MAGIC: [u8; 4] = *b"GRAF";
 const DB_MAGIC: [u8; 4] = *b"GDBH";
@@ -127,28 +133,37 @@ impl FileHeaderV3 {
     ///
     /// # Errors
     ///
-    /// Returns an error when the page is too short, the magic or checksum is
-    /// wrong, the format version is not 3, the page size is not 4096, or an
-    /// incompatible feature flag this build does not know is set.
+    /// Returns [`Error::Serialization`] when the magic is wrong (not a Grafeo
+    /// database), the format version is not 3, the page size is not 4096, or
+    /// an incompatible feature flag this build does not know is set, and
+    /// [`Error::Corruption`] at byte 0 when the page is too short for a
+    /// header or its checksum is wrong.
     pub fn decode(page: &[u8]) -> Result<Self> {
-        if page.len() < FILE_CRC_OFFSET + 4 {
-            return Err(Error::Serialization(format!(
-                "file header is {} bytes, expected at least {}",
-                page.len(),
-                FILE_CRC_OFFSET + 4
-            )));
-        }
-        if page[0..4] != FILE_MAGIC {
+        if page.get(0..4) != Some(FILE_MAGIC.as_slice()) {
             return Err(Error::Serialization(
                 "invalid file header magic, not a Grafeo database".to_string(),
+            ));
+        }
+        if page.len() < FILE_CRC_OFFSET + 4 {
+            return Err(Error::corruption_at(
+                format!(
+                    "file header is {} bytes, expected at least {}",
+                    page.len(),
+                    FILE_CRC_OFFSET + 4
+                ),
+                0,
             ));
         }
         let stored = read_u32(page, FILE_CRC_OFFSET);
         let computed = crc32fast::hash(&page[..FILE_CRC_OFFSET]);
         if stored != computed {
-            return Err(Error::Serialization(format!(
-                "file header checksum mismatch: stored {stored:#010x}, computed {computed:#010x}"
-            )));
+            return Err(Error::corruption_at(
+                format!(
+                    "file header checksum mismatch: stored {stored:#010x}, computed \
+                     {computed:#010x}"
+                ),
+                0,
+            ));
         }
         let format = read_u32(page, 4);
         if format != FORMAT_V3 {
@@ -331,7 +346,8 @@ pub enum HeaderSlot {
 ///
 /// # Errors
 ///
-/// Returns an error when no slot is valid and at least one is damaged.
+/// Returns [`Error::Corruption`] at the first damaged slot when no slot is
+/// valid and at least one is damaged.
 pub fn active_header(slots: [HeaderSlot; 2]) -> Result<Option<(u8, DbHeaderV3)>> {
     use HeaderSlot::{Damaged, Empty, Valid};
     match slots {
@@ -343,14 +359,17 @@ pub fn active_header(slots: [HeaderSlot; 2]) -> Result<Option<(u8, DbHeaderV3)>>
         [Valid(first), _] => Ok(Some((0, first))),
         [_, Valid(second)] => Ok(Some((1, second))),
         [Empty, Empty] => Ok(None),
-        [Damaged, Damaged] => Err(Error::Serialization(
-            "both database headers are damaged".to_string(),
+        [Damaged, Damaged] => Err(Error::corruption_at(
+            "both database headers are damaged",
+            slot_offset(0),
         )),
-        [Damaged, Empty] => Err(Error::Serialization(
-            "database header slot 0 is damaged and slot 1 was never written".to_string(),
+        [Damaged, Empty] => Err(Error::corruption_at(
+            "database header slot 0 is damaged and slot 1 was never written",
+            slot_offset(0),
         )),
-        [Empty, Damaged] => Err(Error::Serialization(
-            "database header slot 1 is damaged and slot 0 was never written".to_string(),
+        [Empty, Damaged] => Err(Error::corruption_at(
+            "database header slot 1 is damaged and slot 0 was never written",
+            slot_offset(1),
         )),
     }
 }

@@ -26,13 +26,27 @@ pub enum WalError {
         source: std::io::Error,
     },
 
-    /// A segment header is damaged, or of a version or with a feature this
-    /// build cannot read.
-    #[error("the WAL segment {} has an invalid header: {reason}", .path.display())]
+    /// A segment header is damaged: no release writes it as it is.
+    #[error("the WAL segment {} has a damaged header: {reason}", .path.display())]
     SegmentHeader {
         /// The segment file.
         path: PathBuf,
         /// What is wrong with the header.
+        reason: String,
+    },
+
+    /// A segment header of a later version, or with an incompatible feature
+    /// of a later release. Refused, also when salvaging: it is not damage,
+    /// and a newer version of Grafeo reads it.
+    #[error(
+        "the WAL segment {} has a header this version cannot read: {reason}; the WAL needs a \
+         newer version of Grafeo",
+        .path.display()
+    )]
+    UnsupportedSegment {
+        /// The segment file.
+        path: PathBuf,
+        /// What this build does not know.
         reason: String,
     },
 
@@ -232,13 +246,22 @@ impl From<WalError> for Error {
                 source.kind(),
                 format!("WAL {}: {source}", path.display()),
             )),
-            WalError::SegmentHeader { .. } | WalError::Gap { .. } | WalError::Damaged { .. } => {
-                Error::Storage(StorageError::Corruption(error.to_string()))
+            WalError::SegmentHeader { path, reason } => {
+                Error::corruption_at(format!("WAL segment header: {reason}"), 0).in_file(&path)
             }
+            WalError::Damaged {
+                path,
+                offset,
+                lsn,
+                reason,
+            } => Error::corruption_at(format!("WAL frame at LSN {lsn}: {reason}"), offset)
+                .in_file(&path),
+            WalError::Gap { .. } => Error::corruption(error.to_string()),
             WalError::ForeignDatabase { .. }
             | WalError::WrongKey { .. }
             | WalError::MissingKey { .. }
             | WalError::NotEncrypted { .. }
+            | WalError::UnsupportedSegment { .. }
             | WalError::UnsupportedFrame { .. }
             | WalError::Misplaced { .. } => {
                 Error::Storage(StorageError::RecoveryFailed(error.to_string()))
@@ -291,9 +314,20 @@ mod tests {
             "{message}"
         );
         let converted = Error::from(error);
-        assert!(
-            matches!(converted, Error::Storage(StorageError::Corruption(_))),
-            "damage is corruption: {converted:?}"
+        let Error::Corruption(corruption) = &converted else {
+            panic!("damage is corruption: {converted:?}");
+        };
+        assert_eq!(
+            (corruption.file.as_deref(), corruption.offset),
+            (
+                Some(
+                    PathBuf::from("Amsterdam")
+                        .join("wal_00000000000000000319.log")
+                        .as_path()
+                ),
+                Some(1988)
+            ),
+            "it names the segment and the offset"
         );
     }
 

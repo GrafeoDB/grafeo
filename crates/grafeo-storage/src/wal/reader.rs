@@ -20,6 +20,7 @@
 //! | A whole frame at the checkpoint LSN that does not start a group | any | damage: the log does not fit the image |
 //! | A FIRST frame whose `synced_lsn` lies past its own position | any | damage |
 //! | A whole frame (checksum right) with a flag of a later release | any | refused: the WAL needs a newer version, also with salvage |
+//! | A segment header of a later version or with an incompatible flag of a later release | any | refused: the WAL needs a newer version, also with salvage |
 //! | A segment shorter than its header, or zeros from its first byte to its last | newest segment | cut off while it was created: removed by the cut |
 //! | A header of zeros with other bytes behind it | any | refused: the header is damaged (it is synced before any frame) |
 //!
@@ -338,9 +339,11 @@ impl WalScan {
     /// # Errors
     ///
     /// - [`WalError::SegmentHeader`] for a damaged header (a header of zeros
-    ///   with other bytes behind it included), another version or an unknown
-    ///   incompatible feature, or a first LSN that differs from the file
-    ///   name. Also with `salvage`: a damaged header is never set aside.
+    ///   with other bytes behind it included) or a first LSN that differs
+    ///   from the file name. Also with `salvage`: a damaged header is never
+    ///   set aside.
+    /// - [`WalError::UnsupportedSegment`] for a header of a later version or
+    ///   with an unknown incompatible feature, also with `salvage`.
     /// - [`WalError::ForeignDatabase`] for a segment of another database.
     /// - [`WalError::WrongKey`], [`WalError::MissingKey`] or
     ///   [`WalError::NotEncrypted`] when the key does not fit a segment the

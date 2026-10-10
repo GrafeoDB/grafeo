@@ -44,9 +44,9 @@ const READABLE_ENCODINGS: [u8; 2] = [FORMAT_VERSION_V1, FORMAT_VERSION_V3];
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the section when its bytes do not
-/// decode, and when the section is not one raw chunk: only a 0.6.0
-/// development build wrote it otherwise.
+/// Returns [`Error::Corruption`] naming the section when its bytes do not
+/// decode, and [`Error::Serialization`] when the section is not one raw
+/// chunk: only a 0.6.0 development build wrote it otherwise.
 pub(super) fn read_base(
     source: &dyn SectionSource,
 ) -> grafeo_common::utils::error::Result<CompactStore> {
@@ -59,15 +59,16 @@ pub(super) fn read_base(
         ));
     };
     deserialize_compact_store(&bytes, &READABLE_ENCODINGS)
-        .map_err(|e| Error::Serialization(format!("section CompactStore: {e}")))
+        .map_err(|e| Error::corruption(format!("section CompactStore: {e}")))
 }
 
-/// `error` with `section_type` in front of its message when it is a
-/// [`Error::Serialization`] (corrupt section data); any other error as it is.
+/// `error` with `section_type` in front of its message when it is an
+/// [`Error::Corruption`] or an [`Error::Serialization`]; any other error as
+/// it is.
 pub(super) fn in_section(section_type: SectionType, error: Error) -> Error {
     match error {
-        Error::Serialization(message) => {
-            Error::Serialization(format!("section {section_type:?}: {message}"))
+        Error::Corruption(_) | Error::Serialization(_) => {
+            error.wrapped(format_args!("section {section_type:?}"))
         }
         other => other,
     }

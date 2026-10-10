@@ -153,8 +153,10 @@ impl super::Planner {
                             "type" => {
                                 // type(r) returns the edge type string
                                 if args.len() != 1 {
-                                    return Err(Error::Internal(
-                                        "type() requires exactly one argument".to_string(),
+                                    return Err(grafeo_common::utils::error::Error::Query(
+                                        grafeo_common::utils::error::QueryError::semantic(
+                                            "type() takes exactly one argument",
+                                        ),
                                     ));
                                 }
                                 if let LogicalExpression::Variable(var_name) = &args[0] {
@@ -183,8 +185,10 @@ impl super::Planner {
                                 // or delegates to the expression evaluator for other
                                 // arguments (e.g. length(a.name) on strings/lists).
                                 if args.len() != 1 {
-                                    return Err(Error::Internal(
-                                        "length() requires exactly one argument".to_string(),
+                                    return Err(grafeo_common::utils::error::Error::Query(
+                                        grafeo_common::utils::error::QueryError::semantic(
+                                            "length() takes exactly one argument",
+                                        ),
                                     ));
                                 }
                                 // The length column of a path its pattern
@@ -213,10 +217,11 @@ impl super::Planner {
                                 // nodes(p) / edges(p) / relationships(p) returns path components
                                 let func_name = name.to_lowercase();
                                 if args.len() != 1 {
-                                    return Err(Error::Internal(format!(
-                                        "{}() requires exactly one argument",
-                                        name
-                                    )));
+                                    return Err(grafeo_common::utils::error::Error::Query(
+                                        grafeo_common::utils::error::QueryError::semantic(format!(
+                                            "{name}() takes exactly one argument"
+                                        )),
+                                    ));
                                 }
                                 if let LogicalExpression::Variable(var_name) = &args[0] {
                                     // Read the path's internal column, and return
@@ -248,10 +253,11 @@ impl super::Planner {
                                     });
                                     output_types.push(LogicalType::Any);
                                 } else {
-                                    return Err(Error::Internal(format!(
-                                        "{}() argument must be a variable",
-                                        name
-                                    )));
+                                    return Err(grafeo_common::utils::error::Error::Query(
+                                        grafeo_common::utils::error::QueryError::semantic(format!(
+                                            "the argument of {name}() must be a variable"
+                                        )),
+                                    ));
                                 }
                             }
                             // For other functions (head, tail, size, etc.), use expression evaluation.

@@ -914,8 +914,10 @@ impl Planner {
             #[cfg(feature = "algos")]
             LogicalOperator::CallProcedure(call) => self.plan_call_procedure(call),
             #[cfg(not(feature = "algos"))]
-            LogicalOperator::CallProcedure(_) => Err(Error::Internal(
-                "CALL procedures require the 'algos' feature".to_string(),
+            LogicalOperator::CallProcedure(_) => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no procedures (the `algos` feature)",
+                ),
             )),
             LogicalOperator::ParameterScan(param_scan) => self.plan_parameter_scan(param_scan),
             LogicalOperator::MultiWayJoin(mwj) => self.plan_multi_way_join(mwj),
@@ -925,17 +927,23 @@ impl Planner {
             #[cfg(feature = "vector-index")]
             LogicalOperator::VectorScan(scan) => self.plan_vector_scan(scan),
             #[cfg(not(feature = "vector-index"))]
-            LogicalOperator::VectorScan(_) => Err(Error::Internal(
-                "VectorScan requires vector-index feature".to_string(),
+            LogicalOperator::VectorScan(_) => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no vector indexes (the `vector-index` feature)",
+                ),
             )),
-            LogicalOperator::VectorJoin(_) => Err(Error::Internal(
-                "VectorJoin requires vector-index feature".to_string(),
+            LogicalOperator::VectorJoin(_) => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no vector indexes (the `vector-index` feature)",
+                ),
             )),
             #[cfg(feature = "text-index")]
             LogicalOperator::TextScan(scan) => self.plan_text_scan(scan),
             #[cfg(not(feature = "text-index"))]
-            LogicalOperator::TextScan(_) => Err(Error::Internal(
-                "TextScan requires text-index feature".to_string(),
+            LogicalOperator::TextScan(_) => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no text indexes (the `text-index` feature)",
+                ),
             )),
             _ => Err(Error::Internal(format!(
                 "Unsupported operator: {:?}",
@@ -1050,8 +1058,10 @@ impl Planner {
                 )));
             }
             _ => {
-                return Err(Error::Internal(
-                    "TextScan query must be a string literal or parameter".to_string(),
+                return Err(grafeo_common::utils::error::Error::Query(
+                    grafeo_common::utils::error::QueryError::semantic(
+                        "a text search query must be a string literal or a parameter",
+                    ),
                 ));
             }
         };

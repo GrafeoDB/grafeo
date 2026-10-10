@@ -241,7 +241,7 @@ fn validate_snapshot_data(nodes: &[SnapshotNode], edges: &[SnapshotEdge]) -> Res
     let mut node_ids = HashSet::with_capacity(nodes.len());
     for node in nodes {
         if !node_ids.insert(node.id) {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "snapshot contains duplicate node ID {}",
                 node.id
             )));
@@ -251,20 +251,20 @@ fn validate_snapshot_data(nodes: &[SnapshotNode], edges: &[SnapshotEdge]) -> Res
     let mut edge_ids = HashSet::with_capacity(edges.len());
     for edge in edges {
         if !edge_ids.insert(edge.id) {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "snapshot contains duplicate edge ID {}",
                 edge.id
             )));
         }
         refuse_too_deep("edge", edge.id.as_u64(), &edge.properties)?;
         if !node_ids.contains(&edge.src) {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "snapshot edge {} references non-existent source node {}",
                 edge.id, edge.src
             )));
         }
         if !node_ids.contains(&edge.dst) {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "snapshot edge {} references non-existent destination node {}",
                 edge.id, edge.dst
             )));
@@ -1040,7 +1040,9 @@ impl super::GrafeoDB {
             .checkpoint_sources()
             .committed(&commits)?
             .ok_or_else(|| {
-                Error::Internal("export_snapshot needs the built-in LPG store".to_string())
+                Error::Query(grafeo_common::utils::error::QueryError::unsupported(
+                    "a snapshot export needs the built-in LPG store",
+                ))
             })?;
         let store = &committed.store;
         let (nodes, edges) = (
@@ -1128,19 +1130,19 @@ impl super::GrafeoDB {
     /// feature, if it holds data this build cannot read.
     pub fn import_snapshot(data: &[u8]) -> Result<Self> {
         if data.is_empty() {
-            return Err(Error::Internal("empty snapshot data".to_string()));
+            return Err(Error::InvalidValue("empty snapshot data".to_string()));
         }
 
         let version = data[0];
         if version != 4 {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "unsupported snapshot version: {version} (expected 4)"
             )));
         }
 
         let config = bincode::config::standard();
         let (snapshot, _): (Snapshot, _) = bincode::serde::decode_from_slice(data, config)
-            .map_err(|e| Error::Internal(format!("snapshot import failed: {e}")))?;
+            .map_err(|e| Error::Serialization(format!("snapshot import failed: {e}")))?;
         // Before the database is created: this build would import the
         // snapshot without the data it cannot read.
         refuse_unreadable_snapshot(&snapshot, "import")?;
@@ -1240,19 +1242,19 @@ impl super::GrafeoDB {
         self.transaction_manager.check_no_incomplete_commit()?;
         self.transaction_manager.check_open()?;
         if data.is_empty() {
-            return Err(Error::Internal("empty snapshot data".to_string()));
+            return Err(Error::InvalidValue("empty snapshot data".to_string()));
         }
 
         let version = data[0];
         if version != 4 {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "unsupported snapshot version: {version} (expected 4)"
             )));
         }
 
         let config = bincode::config::standard();
         let (snapshot, _): (Snapshot, _) = bincode::serde::decode_from_slice(data, config)
-            .map_err(|e| Error::Internal(format!("snapshot restore failed: {e}")))?;
+            .map_err(|e| Error::Serialization(format!("snapshot restore failed: {e}")))?;
 
         // Validate all data before making any changes, and refuse data this
         // build cannot read, which it would restore the database without.

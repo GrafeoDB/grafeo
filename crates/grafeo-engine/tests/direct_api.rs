@@ -543,7 +543,10 @@ fn a_batch_of_edges_is_all_or_nothing() {
             BatchEdge::new(alix, missing, "KNOWS"),
         ])
         .unwrap_err();
-    assert!(err.to_string().contains("does not exist"), "{err}");
+    assert!(
+        matches!(err, grafeo_common::utils::error::Error::NodeNotFound(id) if id == missing),
+        "{err}"
+    );
     assert_eq!(
         db.execute("MATCH ()-[r]->() RETURN count(r)")
             .unwrap()

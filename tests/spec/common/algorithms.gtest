@@ -509,14 +509,14 @@ tests:
   - name: call_unknown_procedure
     query: "CALL grafeo.nonexistent()"
     expect:
-      error: "Unknown procedure"
+      error: "unknown procedure 'grafeo.nonexistent'"
 
   - name: call_yield_nonexistent_column
     setup:
       - "INSERT (:Person {name: 'Alix'})"
     query: "CALL grafeo.pagerank() YIELD fake_column"
     expect:
-      error: "not found"
+      error: "'fake_column' is no column of the procedure"
 
   # ---------------------------------------------------------------------------
   # Procedure Listing

@@ -1031,7 +1031,7 @@ impl GraphWriter {
                     .create_node(labels, values, writer)
                     .map_err(store_refused)?;
                 let DataOp::CreateNode { id, .. } = op else {
-                    return Err(OperatorError::Execution(
+                    return Err(OperatorError::Internal(
                         "an external store's node create gave another op".to_string(),
                     ));
                 };
@@ -1039,7 +1039,7 @@ impl GraphWriter {
             }
         };
         if !record_applied(recording, op, applied)? {
-            return Err(OperatorError::Execution(format!(
+            return Err(OperatorError::Internal(format!(
                 "the store created no node {}",
                 id.as_u64()
             )));
@@ -1108,7 +1108,7 @@ impl GraphWriter {
                     .create_edge(src, dst, edge_type, values, writer)
                     .map_err(store_refused)?;
                 let DataOp::CreateEdge { id, .. } = op else {
-                    return Err(OperatorError::Execution(
+                    return Err(OperatorError::Internal(
                         "an external store's edge create gave another op".to_string(),
                     ));
                 };
@@ -1116,7 +1116,7 @@ impl GraphWriter {
             }
         };
         if !record_applied(recording, op, applied)? {
-            return Err(OperatorError::Execution(format!(
+            return Err(OperatorError::Internal(format!(
                 "the store created no edge {}",
                 id.as_u64()
             )));
@@ -1252,7 +1252,7 @@ impl GraphWriter {
 /// The statement error of a write the store refused, such as a spilled
 /// property value whose file cannot be read, which a rollback would lose.
 fn refused(error: grafeo_common::utils::error::Error) -> OperatorError {
-    OperatorError::Execution(error.to_string())
+    OperatorError::from(error)
 }
 
 /// A write the store refused: a write conflict stays one (a compacted store

@@ -82,8 +82,10 @@ impl GrafeoDB {
                 return Ok(());
             }
             let Some(ref fm) = db.file_manager else {
-                return Err(Error::Internal(
-                    "no file manager configured for snapshot write".to_string(),
+                return Err(Error::Query(
+                    grafeo_common::utils::error::QueryError::unsupported(
+                        "a snapshot write needs a persistent database",
+                    ),
                 ));
             };
             db.checkpoint_to_file(fm).map(|_| ())

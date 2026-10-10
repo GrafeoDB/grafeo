@@ -92,14 +92,10 @@ impl ProcedureCallOperator {
         let result = self
             .procedure
             .execute(&ctx, &self.params)
-            .map_err(|e| match e {
-                // A mistake in the arguments stays one (a query vector the index
-                // cannot measure, #593), with the procedure's own message.
-                grafeo_common::utils::error::Error::InvalidValue(message) => {
-                    OperatorError::InvalidValue(message)
-                }
-                other => OperatorError::Execution(format!("Procedure execution failed: {other}")),
-            })?;
+            // The procedure's error keeps its code: a mistake in the
+            // arguments stays one (a query vector the index cannot measure,
+            // #593), with the procedure's own message.
+            .map_err(OperatorError::from)?;
 
         // Use canonical column names if available (same length as result columns),
         // otherwise fall back to the algorithm's own column names.
@@ -116,10 +112,14 @@ impl ProcedureCallOperator {
                     .iter()
                     .position(|c| c == field_name)
                     .ok_or_else(|| {
-                        OperatorError::ColumnNotFound(format!(
-                            "YIELD column '{}' not found in procedure result (available: {})",
-                            field_name,
-                            display_columns.join(", ")
+                        // A mistake in the query text: the procedure has no
+                        // such column.
+                        OperatorError::from(grafeo_common::utils::error::Error::Query(
+                            grafeo_common::utils::error::QueryError::semantic(format!(
+                                "YIELD column '{}' is no column of the procedure (it has: {})",
+                                field_name,
+                                display_columns.join(", ")
+                            )),
                         ))
                     })?;
                 self.column_indices.push(idx);

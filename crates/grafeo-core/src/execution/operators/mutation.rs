@@ -292,7 +292,7 @@ impl PropertyExpressions {
                     continue;
                 };
                 let search_store = self.search_store.as_ref().ok_or_else(|| {
-                    OperatorError::Execution(
+                    OperatorError::Internal(
                         "computed property value requires a search store; planner did not attach one"
                             .to_string(),
                     )

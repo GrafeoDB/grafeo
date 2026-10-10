@@ -106,12 +106,18 @@ impl Executor {
         if let Some(deadline) = self.deadline
             && Instant::now() >= deadline
         {
-            return Err(Error::Query(match self.query_timeout {
-                Some(d) => QueryError::timeout_with_limit(d),
-                None => QueryError::timeout(),
-            }));
+            return Err(self.timeout_error());
         }
         Ok(())
+    }
+
+    /// The error of a query that ran past its deadline, naming the limit
+    /// when the executor knows it.
+    fn timeout_error(&self) -> Error {
+        Error::Query(match self.query_timeout {
+            Some(d) => QueryError::timeout_with_limit(d),
+            None => QueryError::timeout(),
+        })
     }
 
     /// Executes a physical operator and collects all results.
@@ -176,7 +182,10 @@ impl Executor {
         // Build and execute the pipeline with deadline enforcement
         let mut pipeline = Pipeline::new(source, push_ops, Box::new(collector));
         pipeline.set_deadline(self.deadline);
-        pipeline.execute().map_err(convert_operator_error)?;
+        pipeline.execute().map_err(|error| match error {
+            OperatorError::Timeout => self.timeout_error(),
+            other => convert_operator_error(other),
+        })?;
 
         // Extract the sink (ChunkCollector) and get the chunks
         // Safety: we know the sink is a ChunkCollector because we just created it
@@ -315,13 +324,22 @@ impl Default for Executor {
 }
 
 /// Converts an operator error to a common error.
+///
+/// A statement that fails while it runs is a query execution error
+/// (`GRAFEO-Q006`); only a broken invariant ([`OperatorError::Internal`]) is
+/// an internal error, and an error raised below the operator keeps its own.
 pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
     match err {
         OperatorError::TypeMismatch { expected, found } => Error::TypeMismatch { expected, found },
-        OperatorError::ColumnNotFound(name) => {
-            Error::InvalidValue(format!("Column not found: {name}"))
-        }
-        OperatorError::Execution(msg) => Error::Internal(msg),
+        // A column an operator expects and its input lacks: the planner
+        // and the operator disagree, a bug.
+        OperatorError::ColumnNotFound(name) => Error::Internal(format!("Column not found: {name}")),
+        OperatorError::Execution(msg) => Error::Query(QueryError::new(
+            grafeo_common::utils::error::QueryErrorKind::Execution,
+            msg,
+        )),
+        OperatorError::Internal(msg) => Error::Internal(msg),
+        OperatorError::Wrapped(error) => *error,
         OperatorError::ConstraintViolation(msg) => {
             Error::InvalidValue(format!("Constraint violation: {msg}"))
         }
@@ -333,6 +351,7 @@ pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
             grafeo_common::utils::error::QueryErrorKind::Execution,
             msg,
         )),
+        OperatorError::Timeout => Error::Query(QueryError::timeout()),
         _ => Error::Internal(format!("{err}")),
     }
 }
@@ -341,6 +360,7 @@ pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
 mod tests {
     use super::*;
     use grafeo_common::types::LogicalType;
+    use grafeo_common::utils::error::ErrorCode;
     use grafeo_core::execution::DataChunk;
 
     /// A mock operator that generates chunks with integer data on demand.
@@ -635,11 +655,22 @@ mod tests {
         assert!(matches!(err, Error::TypeMismatch { .. }));
 
         let err = convert_operator_error(OperatorError::ColumnNotFound("col_x".to_string()));
-        assert!(matches!(err, Error::InvalidValue(_)));
+        assert!(matches!(err, Error::Internal(_)));
         assert!(err.to_string().contains("col_x"));
 
-        let err = convert_operator_error(OperatorError::Execution("internal issue".to_string()));
+        let err = convert_operator_error(OperatorError::Execution("Alix left".to_string()));
+        assert_eq!(err.error_code(), ErrorCode::QueryExecution, "{err}");
+
+        let err = convert_operator_error(OperatorError::Internal("internal issue".to_string()));
         assert!(matches!(err, Error::Internal(_)));
+
+        let err = convert_operator_error(OperatorError::from(Error::NodeNotFound(
+            grafeo_common::types::NodeId::new(3),
+        )));
+        assert!(
+            matches!(err, Error::NodeNotFound(_)),
+            "kept as it is: {err}"
+        );
 
         let err = convert_operator_error(OperatorError::ConstraintViolation("unique".to_string()));
         assert!(matches!(err, Error::InvalidValue(_)));
@@ -708,5 +739,9 @@ mod tests {
             err.to_string().contains("Query exceeded timeout"),
             "Expected timeout error, got: {err}"
         );
+        // A timeout in a push pipeline is the timeout a pulled plan reports:
+        // retryable, never an internal error.
+        assert_eq!(err.error_code(), ErrorCode::QueryTimeout, "{err}");
+        assert!(err.error_code().is_retryable());
     }
 }

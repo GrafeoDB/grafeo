@@ -2722,11 +2722,16 @@ impl CypherTranslator {
         delete_clause: &ast::DeleteClause,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
+        // Without a clause before it, nothing binds what DELETE names.
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "DELETE requires input",
-            ))
+            let message = match delete_clause.expressions.first() {
+                Some(ast::Expression::Variable(variable)) => format!(
+                    "Undefined variable '{variable}': DELETE needs a clause before it that \
+                     binds it, such as MATCH"
+                ),
+                _ => "DELETE requires input".to_string(),
+            };
+            Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
         })?;
 
         let mut plan = input;

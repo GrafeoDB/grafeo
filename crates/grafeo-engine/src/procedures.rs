@@ -245,10 +245,11 @@ impl Procedure for PropertyKeysProcedure {
 #[cfg(all(feature = "lpg", feature = "vector-index"))]
 fn require_lpg_store<'a>(ctx: &ProcedureContext<'a>, proc_name: &str) -> Result<&'a LpgStore> {
     ctx.lpg_store.ok_or_else(|| {
-        grafeo_common::utils::error::Error::Internal(format!(
-            "{proc_name} requires an LPG store. Ensure the session is backed by an LPG database \
-             (not a pure RDF store or external custom store)."
-        ))
+        grafeo_common::utils::error::Error::Query(
+            grafeo_common::utils::error::QueryError::unsupported(format!(
+                "{proc_name} needs an LPG database"
+            )),
+        )
     })
 }
 
@@ -266,16 +267,17 @@ fn coerce_params_to_vector(params: &Parameters, key: &str) -> Result<Vec<f32>> {
                 Value::Float64(f) => out.push(*f as f32),
                 Value::Int64(i) => out.push(*i as f32),
                 other => {
-                    return Err(grafeo_common::utils::error::Error::Internal(format!(
-                        "Expected numeric list for vector parameter '{key}', found {other:?}"
+                    return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+                        "the vector parameter '{key}' must be a list of numbers, but holds \
+                         {other}"
                     )));
                 }
             }
         }
         return Ok(out);
     }
-    Err(grafeo_common::utils::error::Error::Internal(format!(
-        "Missing required vector parameter '{key}'"
+    Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+        "the vector parameter '{key}' is missing or is not a list of numbers"
     )))
 }
 
@@ -363,12 +365,12 @@ impl Procedure for SearchVectorProcedure {
 
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.vector")?;
         let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.vector: missing required parameter 'label'".into(),
             )
         })?;
         let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.vector: missing required parameter 'property'".into(),
             )
         })?;
@@ -376,8 +378,8 @@ impl Procedure for SearchVectorProcedure {
         let k = k_limit(params, 10);
 
         let index = lpg.get_vector_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "No vector index found for :{label}({property}). Call CREATE VECTOR INDEX first."
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no vector index on :{label}({property}); create one first"
             ))
         })?;
         grafeo_core::index::vector::check_query_vector(
@@ -489,12 +491,12 @@ impl Procedure for SearchMmrProcedure {
 
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.mmr")?;
         let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.mmr: missing required parameter 'label'".into(),
             )
         })?;
         let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.mmr: missing required parameter 'property'".into(),
             )
         })?;
@@ -512,8 +514,8 @@ impl Procedure for SearchMmrProcedure {
         let lambda = params.get_float("lambda").unwrap_or(0.5) as f32;
 
         let index = lpg.get_vector_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "No vector index found for :{label}({property}). Call CREATE VECTOR INDEX first."
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no vector index on :{label}({property}); create one first"
             ))
         })?;
         grafeo_core::index::vector::check_query_vector(
@@ -624,30 +626,32 @@ impl Procedure for SearchTextProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
         let lpg = ctx.lpg_store.ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
-                "CALL grafeo.search.text requires an LPG store".into(),
+            grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "CALL grafeo.search.text needs an LPG database",
+                ),
             )
         })?;
         let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.text: missing required parameter 'label'".into(),
             )
         })?;
         let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.text: missing required parameter 'property'".into(),
             )
         })?;
         let query = params.get_string("query").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.text: missing required parameter 'query'".into(),
             )
         })?;
         let k = k_limit(params, 10);
 
         let index = lpg.get_text_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "No text index found for :{label}({property}). Call CREATE TEXT INDEX first."
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no text index on :{label}({property}); create one first"
             ))
         })?;
 
@@ -1515,8 +1519,8 @@ mod tests {
         let params = Parameters::new();
         let err = coerce_params_to_vector(&params, "query").unwrap_err();
         assert!(
-            err.to_string()
-                .contains("Missing required vector parameter"),
+            matches!(err, grafeo_common::utils::error::Error::InvalidValue(_))
+                && err.to_string().contains("'query' is missing"),
             "error must name the parameter: {err}"
         );
     }
@@ -1531,7 +1535,8 @@ mod tests {
         );
         let err = coerce_params_to_vector(&params, "query").unwrap_err();
         assert!(
-            err.to_string().contains("Expected numeric list"),
+            matches!(err, grafeo_common::utils::error::Error::InvalidValue(_))
+                && err.to_string().contains("must be a list of numbers"),
             "error must describe expected type: {err}"
         );
     }

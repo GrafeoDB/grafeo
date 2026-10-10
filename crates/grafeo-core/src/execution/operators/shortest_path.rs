@@ -1018,7 +1018,7 @@ impl PathSearch<'_> {
 fn entity_id(id: u64) -> Result<Value, OperatorError> {
     i64::try_from(id)
         .map(Value::Int64)
-        .map_err(|_| OperatorError::Execution(format!("id {id} exceeds the i64 range")))
+        .map_err(|_| OperatorError::Internal(format!("id {id} exceeds the i64 range")))
 }
 
 /// The paths of `length` edges from the source to `end`, read back from
@@ -1212,7 +1212,7 @@ impl Operator for ShortestPathOperator {
 
                     // Add path length column
                     let length = i64::try_from(path.edges.len()).map_err(|_| {
-                        OperatorError::Execution(format!(
+                        OperatorError::Internal(format!(
                             "a shortest path of {} edges is too long",
                             path.edges.len()
                         ))

@@ -489,7 +489,7 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution("Store required for property access".to_string())
+                        OperatorError::Internal("Store required for property access".to_string())
                     })?;
 
                     // Extract property for each row.
@@ -564,7 +564,7 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution("Store required for edge type access".to_string())
+                        OperatorError::Internal("Store required for edge type access".to_string())
                     })?;
 
                     let epoch = self.viewing_epoch;
@@ -592,7 +592,7 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution(
+                        OperatorError::Internal(
                             "Store required for expression evaluation".to_string(),
                         )
                     })?;
@@ -631,7 +631,7 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution("Store required for entity resolution".to_string())
+                        OperatorError::Internal("Store required for entity resolution".to_string())
                     })?;
 
                     // The planner says by name whether the column holds nodes
@@ -682,7 +682,7 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution(
+                        OperatorError::Internal(
                             "Store required for expression evaluation".to_string(),
                         )
                     })?;

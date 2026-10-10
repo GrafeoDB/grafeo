@@ -363,6 +363,25 @@ pub enum OperatorError {
     /// the memory of a path search; the message says what to change.
     #[error("{0}")]
     LimitExceeded(String),
+    /// The query ran past its deadline (a retryable timeout, not a failure).
+    #[error("Query exceeded timeout")]
+    Timeout,
+    /// A broken invariant of the engine: a bug in Grafeo, not a mistake in
+    /// the statement or its data. [`Execution`](Self::Execution) is the
+    /// statement's failure.
+    #[error("{0}")]
+    Internal(String),
+    /// An error raised below the operator (a store that refuses a write, a
+    /// procedure, a statement run inside the operator), kept as it is so its
+    /// code reaches the caller.
+    #[error(transparent)]
+    Wrapped(Box<grafeo_common::utils::error::Error>),
+}
+
+impl From<grafeo_common::utils::error::Error> for OperatorError {
+    fn from(error: grafeo_common::utils::error::Error) -> Self {
+        Self::Wrapped(Box::new(error))
+    }
 }
 
 /// The core trait for pull-based operators.

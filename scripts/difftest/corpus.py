@@ -1411,4 +1411,17 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages, "writes")
 
+# BS: a mistake in the query text is a semantic error that names it (#588), never an
+#     internal error: an unknown procedure (BS1), an unknown YIELD column (BS2), a
+#     function called with no argument (BS3), a Cypher DELETE of a variable nothing
+#     binds (BS4, which said only "DELETE requires input"; a write, so on the `writes`
+#     fixture after the BR cases).
+for case_id, query, languages in [
+    ("BS1", "CALL grafeo.vincent()", BOTH),
+    ("BS2", "CALL grafeo.procedures() YIELD mia", GQL),
+    ("BS3", "MATCH (p:Person)-[r]->(q) RETURN type()", BOTH),
+]:
+    case(case_id, query, languages)
+case("BS4", "DELETE w", CYPHER, "writes")
+
 # fmt: on

@@ -469,7 +469,7 @@ impl VariableLengthExpandOperator {
                 })?;
 
                 let source_node = col.get_node_id(row_idx).ok_or_else(|| {
-                    OperatorError::Execution("Expected node ID in source column".into())
+                    OperatorError::Internal("Expected node ID in source column".into())
                 })?;
 
                 // Materialize all columns
@@ -915,7 +915,7 @@ impl Operator for VariableLengthExpandOperator {
                         .iter()
                         .map(|id| {
                             let signed = i64::try_from(id.0).map_err(|_| {
-                                OperatorError::Execution(format!(
+                                OperatorError::Internal(format!(
                                     "NodeId {} exceeds i64 range",
                                     id.0
                                 ))
@@ -941,7 +941,7 @@ impl Operator for VariableLengthExpandOperator {
                         .iter()
                         .map(|id| {
                             let signed = i64::try_from(id.0).map_err(|_| {
-                                OperatorError::Execution(format!(
+                                OperatorError::Internal(format!(
                                     "NodeId {} exceeds i64 range",
                                     id.0
                                 ))
@@ -956,7 +956,7 @@ impl Operator for VariableLengthExpandOperator {
                         .iter()
                         .map(|id| {
                             let signed = i64::try_from(id.0).map_err(|_| {
-                                OperatorError::Execution(format!(
+                                OperatorError::Internal(format!(
                                     "EdgeId {} exceeds i64 range",
                                     id.0
                                 ))
@@ -1003,7 +1003,7 @@ fn edge_id_list(edges: &[EdgeId]) -> Result<Vec<grafeo_common::types::Value>, Op
         .map(|id| {
             i64::try_from(id.0)
                 .map(grafeo_common::types::Value::Int64)
-                .map_err(|_| OperatorError::Execution(format!("EdgeId {} exceeds i64 range", id.0)))
+                .map_err(|_| OperatorError::Internal(format!("EdgeId {} exceeds i64 range", id.0)))
         })
         .collect()
 }

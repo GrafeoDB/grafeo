@@ -236,7 +236,7 @@ impl MergeOperator {
                     variable_columns,
                 } => {
                     let search_store = self.search_store.as_ref().ok_or_else(|| {
-                        super::OperatorError::Execution(
+                        super::OperatorError::Internal(
                             "MERGE expression source requires search store; planner did not attach one"
                                 .to_string(),
                         )
@@ -671,7 +671,7 @@ impl MergeRelationshipOperator {
                     variable_columns,
                 } => {
                     let search_store = self.search_store.as_ref().ok_or_else(|| {
-                        super::OperatorError::Execution(
+                        super::OperatorError::Internal(
                             "MERGE expression source requires search store; planner did not attach one"
                                 .to_string(),
                         )
@@ -922,7 +922,7 @@ fn resolve_match_properties(
         ));
     }
     let chunk = chunk.ok_or_else(|| {
-        OperatorError::Execution(
+        OperatorError::Internal(
             "computed MERGE property without an input row; planner did not provide one".to_string(),
         )
     })?;

@@ -4,7 +4,7 @@
 //! every node (0.5.44 too), through every entry point, in a transaction and
 //! in a stored procedure's body; in 0.5.44 so did one after `NEXT` from a
 //! statement that does not pass `w` on. A Cypher `DELETE w` without input
-//! already failed ("DELETE requires input").
+//! already failed ("DELETE requires input"); it now names `w` as well.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test delete_of_an_unbound_variable
@@ -127,18 +127,16 @@ fn every_entry_point_refuses_it() {
     }
 }
 
-/// A stored procedure's body skips the binder: its `DELETE w` fails when it
-/// is planned (it deleted every node), and deletes nothing.
+/// A stored procedure's body is bound when the call is planned, as a
+/// statement is: its `DELETE w` is a semantic error naming `w` (it deleted
+/// every node, then failed as an internal error), and deletes nothing.
 #[test]
 fn a_procedure_body_with_it_deletes_nothing() {
     let db = GrafeoDB::new_in_memory();
     db.execute(SETUP).unwrap();
     db.execute("CREATE PROCEDURE wipe() AS { DETACH DELETE w }")
         .unwrap();
-    assert!(
-        db.execute("CALL wipe()").is_err(),
-        "a body that deletes an unbound variable fails"
-    );
+    assert_refused(db.execute("CALL wipe()"), "'w'", "`CALL wipe()`");
     assert_eq!(
         graph(&db),
         [Value::Int64(3), Value::Int64(19)],
@@ -146,13 +144,13 @@ fn a_procedure_body_with_it_deletes_nothing() {
     );
 }
 
-/// Cypher refused it already; it stays so.
+/// Cypher refused it already; it stays so, naming the variable.
 #[test]
 fn a_cypher_delete_without_input_deletes_nothing() {
     for query in ["DELETE w", "DETACH DELETE w"] {
         let db = GrafeoDB::new_in_memory();
         db.execute(SETUP).unwrap();
-        assert_refused(db.execute_cypher(query), "DELETE", &format!("`{query}`"));
+        assert_refused(db.execute_cypher(query), "'w'", &format!("`{query}`"));
         assert_eq!(
             graph(&db),
             [Value::Int64(3), Value::Int64(19)],

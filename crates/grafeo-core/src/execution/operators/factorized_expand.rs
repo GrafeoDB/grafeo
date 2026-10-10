@@ -147,7 +147,7 @@ impl FactorizedExpandOperator {
 
         for row_idx in 0..row_count {
             let source_id = source_col.get_node_id(row_idx).ok_or_else(|| {
-                OperatorError::Execution("Expected node ID in source column".into())
+                OperatorError::Internal("Expected node ID in source column".into())
             })?;
 
             let neighbors = self.get_neighbors(source_id);
@@ -428,7 +428,7 @@ impl FactorizedExpandChain {
         let deepest_level = chunk.level_count() - 1;
         let level = chunk
             .level(deepest_level)
-            .ok_or_else(|| OperatorError::Execution("No levels in factorized chunk".into()))?;
+            .ok_or_else(|| OperatorError::Internal("No levels in factorized chunk".into()))?;
 
         // Check if the source column exists in this level
         // If not, it means the previous expansion produced no edges (no level 1 was added)
@@ -449,7 +449,7 @@ impl FactorizedExpandChain {
         // Iterate through all physical values in the source column
         for idx in 0..source_len {
             let source_id = source_col.data().get_node_id(idx).ok_or_else(|| {
-                OperatorError::Execution("Expected node ID in source column".into())
+                OperatorError::Internal("Expected node ID in source column".into())
             })?;
 
             // Get neighbors with filtering
@@ -632,11 +632,7 @@ impl LazyFactorizedChainOperator {
 
         // Execute each expand step
         for step in &self.steps {
-            chain = chain
-                .expand(step.source_column, step.direction, step.edge_types.clone())
-                .map_err(|e| {
-                    OperatorError::Execution(format!("Factorized expand failed: {}", e))
-                })?;
+            chain = chain.expand(step.source_column, step.direction, step.edge_types.clone())?;
         }
 
         // Return the factorized result (not flattened)

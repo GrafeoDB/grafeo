@@ -129,8 +129,8 @@ impl super::GrafeoDB {
     ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
         let store = self.lpg_store();
         let index = store.get_vector_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "No vector index found for :{label}({property}). Call create_vector_index() first."
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no vector index on :{label}({property}); create one first"
             ))
         })?;
         check_query_vector(query, index.config().dimensions, label, property)?;
@@ -179,8 +179,8 @@ impl super::GrafeoDB {
     ) -> Result<Vec<Vec<(grafeo_common::types::NodeId, f32)>>> {
         let store = self.lpg_store();
         let index = store.get_vector_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "No vector index found for :{label}({property}). Call create_vector_index() first."
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no vector index on :{label}({property}); create one first"
             ))
         })?;
         for query in queries {
@@ -248,8 +248,8 @@ impl super::GrafeoDB {
 
         let store = self.lpg_store();
         let index = store.get_vector_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "No vector index found for :{label}({property}). Call create_vector_index() first."
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no vector index on :{label}({property}); create one first"
             ))
         })?;
         check_query_vector(query, index.config().dimensions, label, property)?;
@@ -307,8 +307,8 @@ impl super::GrafeoDB {
     ) -> Result<Vec<(NodeId, f64)>> {
         let store = self.lpg_store();
         let index = store.get_text_index(label, property).ok_or_else(|| {
-            Error::Internal(format!(
-                "No text index found for :{label}({property}). Call create_text_index() first."
+            Error::InvalidValue(format!(
+                "there is no text index on :{label}({property}); create one first"
             ))
         })?;
 

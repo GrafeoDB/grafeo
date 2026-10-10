@@ -1,7 +1,9 @@
 # Error Codes
 
 Every error Grafeo raises carries a machine-readable code of the form
-`GRAFEO-<Category><Number>`. The code is stable across releases: once a
+`GRAFEO-<Category><Number>`, and its message starts with that code
+(`GRAFEO-Q002: semantic error: ...`), so every binding can tell the kind of
+an error from its message. The code is stable across releases: once a
 number is assigned to a failure mode, it does not move.
 
 In Python, catch `grafeo.GrafeoError` (subclass of `RuntimeError`) to inspect
@@ -33,11 +35,11 @@ Categories:
 | Code          | Name                | Retryable | Meaning                                                    |
 | ------------- | ------------------- | --------- | ---------------------------------------------------------- |
 | `GRAFEO-Q001` | QuerySyntax         | no        | Parser rejected the query. Check the reported line/column. |
-| `GRAFEO-Q002` | QuerySemantic       | no        | Parsed but invalid: unknown label, unknown graph, type mismatch in a function call, etc. |
+| `GRAFEO-Q002` | QuerySemantic       | no        | Parsed but invalid: unknown label, graph or procedure, a variable nothing binds (in a stored procedure's body too), a call with another number of arguments, an unknown `YIELD` column, type mismatch in a function call, etc. |
 | `GRAFEO-Q003` | QueryTimeout        | **yes**   | Query exceeded its deadline. Raise `query_timeout` or narrow the pattern. |
-| `GRAFEO-Q004` | QueryUnsupported    | no        | Feature not implemented for this query language (e.g. a SPARQL-only function used from GQL). |
+| `GRAFEO-Q004` | QueryUnsupported    | no        | The database or this build cannot run the statement: a feature the build leaves out (vector or text indexes, procedures, RDF, an import format), a language of another graph model (GQL on an RDF database), or an operation the database cannot do (a backup of an in-memory database). |
 | `GRAFEO-Q005` | QueryOptimization   | no        | Optimizer could not produce a plan. Report with the query text if you hit this. |
-| `GRAFEO-Q006` | QueryExecution      | no        | A physical operator failed at runtime. |
+| `GRAFEO-Q006` | QueryExecution      | no        | A valid statement failed while it ran, on its data: a file to load that cannot be read, a SPARQL graph that exists already or does not exist, a write to a node the transaction deleted. |
 
 ## Transaction (T)
 
@@ -64,9 +66,9 @@ Categories:
 
 | Code          | Name             | Retryable | Meaning                                                    |
 | ------------- | ---------------- | --------- | ---------------------------------------------------------- |
-| `GRAFEO-V001` | InvalidInput     | no        | Argument or property value failed validation (e.g. wrong vector dimensionality, oversized property). |
-| `GRAFEO-V002` | NodeNotFound     | no        | `NodeId` does not exist in the current graph. |
-| `GRAFEO-V003` | EdgeNotFound     | no        | `EdgeId` does not exist in the current graph. |
+| `GRAFEO-V001` | InvalidInput     | no        | A value or name a call gives does not fit: wrong vector dimensionality, oversized property, a missing or ill-typed procedure argument, an index, named graph or embedding model that does not exist, an invalid setting, an import line or snapshot that is not valid. |
+| `GRAFEO-V002` | NodeNotFound     | no        | `NodeId` does not exist in the current graph (a direct write to it, or an edge to it). |
+| `GRAFEO-V003` | EdgeNotFound     | no        | `EdgeId` does not exist in the current graph (a direct write to it). |
 | `GRAFEO-V004` | PropertyNotFound | no        | Referenced property key is not declared for this label/type. |
 | `GRAFEO-V005` | LabelNotFound    | no        | Referenced label is not declared. |
 | `GRAFEO-V006` | TypeMismatch     | no        | Value type does not match the schema declaration. |
@@ -75,7 +77,7 @@ Categories:
 
 | Code          | Name                | Retryable | Meaning                                                    |
 | ------------- | ------------------- | --------- | ---------------------------------------------------------- |
-| `GRAFEO-X001` | Internal            | no        | Unexpected internal error. Please file a bug with the query and stack trace. |
+| `GRAFEO-X001` | Internal            | no        | A bug in Grafeo: an invariant of the engine does not hold. A mistake in a query, a call or its input never has this code. Please file a bug with the query and stack trace. |
 | `GRAFEO-X002` | SerializationError  | no        | Could not encode/decode a value (snapshot, WAL, or binding boundary). |
 | `GRAFEO-X003` | IoError             | no        | Underlying I/O call failed. |
 

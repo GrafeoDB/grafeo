@@ -223,13 +223,12 @@ def test_cases_name_known_languages_and_fixtures():
 def test_only_the_writes_fixture_has_writing_cases():
     # Each fixture is built once and shared by its cases, so a write would change
     # what later cases see. The `writes` fixture is the one exception: an empty
-    # database of its own, whose cases (section BR) run in order and read what the
+    # database of its own, whose cases run in corpus order and read what the
     # writes before them left.
     writes = re.compile(
         r"\b(INSERT|CREATE|SET|REMOVE|DELETE|MERGE|DROP)\b", re.IGNORECASE
     )
     for case in corpus.CASES:
         if case.fixture == "writes":
-            assert case.id.startswith("BR"), case.id
             continue
         assert not writes.search(case.query), case.id

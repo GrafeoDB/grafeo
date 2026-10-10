@@ -125,10 +125,16 @@ fn test_gql_call_unknown_procedure() {
     let session = db.session();
     let result = session.execute("CALL grafeo.nonexistent()");
     assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.error_code(),
+        grafeo_common::utils::error::ErrorCode::QuerySemantic,
+        "{err}"
+    );
+    let err = err.to_string();
     assert!(
-        err.contains("Unknown procedure"),
-        "Expected 'Unknown procedure' error, got: {}",
+        err.contains("unknown procedure 'grafeo.nonexistent'"),
+        "Expected 'unknown procedure' error, got: {}",
         err
     );
 }
@@ -315,9 +321,15 @@ fn test_call_yield_nonexistent_column() {
     let session = db.session();
     let result = session.execute("CALL grafeo.pagerank() YIELD nonexistent_column");
     assert!(result.is_err(), "YIELD of nonexistent column should fail");
-    let err = result.unwrap_err().to_string();
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.error_code(),
+        grafeo_common::utils::error::ErrorCode::QuerySemantic,
+        "{err}"
+    );
+    let err = err.to_string();
     assert!(
-        err.contains("not found"),
+        err.contains("'nonexistent_column' is no column of the procedure"),
         "Error should mention column not found, got: {}",
         err
     );

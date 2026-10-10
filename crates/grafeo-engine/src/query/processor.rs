@@ -321,8 +321,10 @@ impl QueryProcessor {
             }
             #[cfg(not(feature = "triple-store"))]
             {
-                Err(Error::Internal(
-                    "RDF support not enabled. Compile with --features rdf".to_string(),
+                Err(grafeo_common::utils::error::Error::Query(
+                    grafeo_common::utils::error::QueryError::unsupported(
+                        "this build has no RDF support (the `triple-store` feature)",
+                    ),
                 ))
             }
         }

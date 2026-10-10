@@ -352,11 +352,37 @@ impl fmt::Display for Error {
             Error::InvalidValue(msg) => write!(f, "{code}: Invalid value: {msg}"),
             Error::Transaction(e) => write!(f, "{code}: {e}"),
             Error::Storage(e) => write!(f, "{code}: {e}"),
-            Error::Query(e) => write!(f, "{e}"),
+            Error::Query(e) => write!(f, "{code}: {e}"),
             Error::Serialization(msg) => write!(f, "{code}: Serialization error: {msg}"),
             Error::Corruption(corruption) => write!(f, "{code}: {corruption}"),
             Error::Io(e) => write!(f, "{code}: I/O error: {e}"),
             Error::Internal(msg) => write!(f, "{code}: Internal error: {msg}"),
+        }
+    }
+}
+
+/// A copy of the error with the same variant, code and message. An I/O error
+/// is copied as a new one of the same kind and message: `std::io::Error` has
+/// no clone, so the copy drops the error it wraps, if any.
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        match self {
+            Error::NodeNotFound(id) => Error::NodeNotFound(*id),
+            Error::EdgeNotFound(id) => Error::EdgeNotFound(*id),
+            Error::PropertyNotFound(key) => Error::PropertyNotFound(key.clone()),
+            Error::LabelNotFound(label) => Error::LabelNotFound(label.clone()),
+            Error::TypeMismatch { expected, found } => Error::TypeMismatch {
+                expected: expected.clone(),
+                found: found.clone(),
+            },
+            Error::InvalidValue(message) => Error::InvalidValue(message.clone()),
+            Error::Transaction(error) => Error::Transaction(error.clone()),
+            Error::Storage(error) => Error::Storage(error.clone()),
+            Error::Query(error) => Error::Query(error.clone()),
+            Error::Serialization(message) => Error::Serialization(message.clone()),
+            Error::Corruption(corruption) => Error::Corruption(corruption.clone()),
+            Error::Io(error) => Error::Io(std::io::Error::new(error.kind(), error.to_string())),
+            Error::Internal(message) => Error::Internal(message.clone()),
         }
     }
 }
@@ -555,6 +581,21 @@ impl QueryError {
         }
     }
 
+    /// A semantic error (`GRAFEO-Q002`): the query text itself is wrong, such
+    /// as an unknown procedure or a call with another number of arguments.
+    #[must_use]
+    pub fn semantic(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::Semantic, message)
+    }
+
+    /// The database or the build cannot run the statement
+    /// (`GRAFEO-Q004`): a feature not built in, or a language of another
+    /// graph model.
+    #[must_use]
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::Unsupported, message)
+    }
+
     /// Creates a query timeout error.
     #[must_use]
     pub fn timeout() -> Self {
@@ -575,8 +616,7 @@ impl QueryError {
             format!("Query exceeded the {timeout_display} timeout"),
         )
         .with_hint(
-            "Increase with Config::with_query_timeout() or disable with Config::without_query_timeout()"
-                .to_string(),
+            "Increase the query timeout in the database configuration, or disable it".to_string(),
         )
     }
 
@@ -589,6 +629,7 @@ impl QueryError {
             QueryErrorKind::Optimization => ErrorCode::QueryOptimization,
             QueryErrorKind::Execution => ErrorCode::QueryExecution,
             QueryErrorKind::Timeout => ErrorCode::QueryTimeout,
+            QueryErrorKind::Unsupported => ErrorCode::QueryUnsupported,
         }
     }
 
@@ -669,6 +710,9 @@ pub enum QueryErrorKind {
     Execution,
     /// Timeout error (query exceeded configured time limit).
     Timeout,
+    /// The database or the build cannot run the statement: a feature not
+    /// built in, or a language of another graph model.
+    Unsupported,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -680,6 +724,7 @@ impl fmt::Display for QueryErrorKind {
             QueryErrorKind::Optimization => write!(f, "optimization error"),
             QueryErrorKind::Execution => write!(f, "execution error"),
             QueryErrorKind::Timeout => write!(f, "timeout error"),
+            QueryErrorKind::Unsupported => write!(f, "unsupported"),
         }
     }
 }

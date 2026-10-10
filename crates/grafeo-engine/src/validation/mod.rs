@@ -186,8 +186,8 @@ pub fn validate_shacl(
     shapes_graph_name: &str,
 ) -> grafeo_common::utils::error::Result<ValidationReport> {
     let shapes_store = rdf_store.graph(shapes_graph_name).ok_or_else(|| {
-        grafeo_common::utils::error::Error::Internal(format!(
-            "Named graph '{shapes_graph_name}' not found"
+        grafeo_common::utils::error::Error::InvalidValue(format!(
+            "there is no named graph '{shapes_graph_name}' to read the shapes from"
         ))
     })?;
 

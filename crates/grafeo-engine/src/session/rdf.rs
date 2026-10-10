@@ -449,13 +449,13 @@ impl Session {
         shapes_graph_name: &str,
     ) -> Result<grafeo_core::graph::rdf::shacl::ValidationReport> {
         let data_store = self.rdf_store.graph(data_graph_name).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "Named graph '{data_graph_name}' not found"
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no named graph '{data_graph_name}' to validate"
             ))
         })?;
         let shapes_store = self.rdf_store.graph(shapes_graph_name).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "Named graph '{shapes_graph_name}' not found"
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no named graph '{shapes_graph_name}' to read the shapes from"
             ))
         })?;
         let executor =

@@ -2254,6 +2254,44 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    /// A damaged database file fails the open with the storage status, and
+    /// the last error starts with its code, `GRAFEO-S002`, and names the
+    /// file: the Go, C# and Dart wrappers read both.
+    #[test]
+    fn a_damaged_file_fails_the_open_with_the_storage_status_and_code() {
+        let dir = std::env::temp_dir().join(format!("grafeo-c-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("prague.grafeo");
+        let path = CString::new(file.to_str().unwrap()).unwrap();
+        let db = grafeo_open(path.as_ptr());
+        assert!(!db.is_null());
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok);
+        grafeo_free_database(db);
+        // Inside the database id, which the file header checksum covers.
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes[20] ^= 0x5A;
+        std::fs::write(&file, &bytes).unwrap();
+
+        assert!(
+            grafeo_open(path.as_ptr()).is_null(),
+            "a damaged file does not open"
+        );
+        // SAFETY: the pointer is valid until the next call on this thread.
+        let message = unsafe { std::ffi::CStr::from_ptr(crate::error::grafeo_last_error()) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            message.starts_with("GRAFEO-S002") && message.contains("prague.grafeo"),
+            "{message}"
+        );
+        assert_eq!(
+            GrafeoStatus::from(&grafeo_common::utils::error::Error::corruption("Butch")),
+            GrafeoStatus::ErrorStorage
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// After `grafeo_close` the handle lives on until `grafeo_free_database`:
     /// the index calls on it fail, and a drop returns -1 (not 0, "nothing to
     /// drop"), which the Go, Dart and C# wrappers read as an error.

@@ -308,7 +308,7 @@ impl fmt::Display for ConfigError {
             Self::ZeroThreads => write!(f, "threads must be greater than zero"),
             Self::ZeroAdaptiveFlushInterval => write!(
                 f,
-                "the target_interval_ms of DurabilityMode::Adaptive must be greater than zero"
+                "the target interval of the adaptive durability mode must be greater than zero"
             ),
             Self::RdfFeatureRequired => {
                 write!(
@@ -328,7 +328,7 @@ impl fmt::Display for ConfigError {
             ),
             Self::EncryptionWithForceDisk(section_type) => write!(
                 f,
-                "encryption at rest cannot be combined with TierOverride::ForceDisk for the \
+                "encryption at rest cannot be combined with a disk tier override for the \
                  {section_type:?} section: an encrypted database spills nothing to disk"
             ),
         }
@@ -1536,7 +1536,7 @@ mod tests {
             .expect_err("a section forced to disk on an encrypted database")
             .to_string();
         assert!(
-            error.contains("ForceDisk") && error.contains("CompactStore"),
+            error.contains("disk tier override") && error.contains("CompactStore"),
             "the error names the override and the section: {error}"
         );
         assert_eq!(

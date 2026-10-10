@@ -199,7 +199,7 @@ mod tests {
         for (name, arguments, expected) in cases {
             assert_eq!(
                 message(check_function_call(name, arguments)),
-                format!("semantic error: {expected}"),
+                format!("GRAFEO-Q002: semantic error: {expected}"),
                 "{name} with {arguments}"
             );
         }

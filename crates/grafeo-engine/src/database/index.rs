@@ -471,8 +471,10 @@ impl super::GrafeoDB {
                 ef_construction,
                 quantization,
             );
-            Err(Error::Internal(
-                "Vector index support requires the 'vector-index' feature".to_string(),
+            Err(Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no vector indexes (the `vector-index` feature)",
+                ),
             ))
         }
     }
@@ -558,8 +560,8 @@ impl super::GrafeoDB {
             Some("scalar") => Ok(QuantizationType::Scalar),
             Some("binary") => Ok(QuantizationType::Binary),
             Some("product") => Ok(QuantizationType::Product { num_subvectors: 8 }),
-            Some(other) => Err(grafeo_common::utils::error::Error::Internal(format!(
-                "Unknown quantization type '{other}'. Use: scalar, binary, product"
+            Some(other) => Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+                "unknown quantization '{other}': use none, scalar, binary or product"
             ))),
         }
     }

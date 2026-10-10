@@ -433,9 +433,7 @@ impl GrafeoDB {
         let database_path = config.path.as_deref().map(normalize_path).transpose()?;
 
         // Validate configuration before proceeding
-        config
-            .validate()
-            .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
+        config.validate().map_err(config_error)?;
 
         // An encrypted database spills nothing: a spill file would hold its
         // data in plaintext (`validate` refuses an explicit spill path).
@@ -530,7 +528,7 @@ impl GrafeoDB {
             // Read-only mode: load the file (and replay its sidecar WAL)
             // under a shared lock and write nothing; no WAL is opened.
             let Some(ref db_path) = database_path else {
-                return Err(grafeo_common::utils::error::Error::Internal(
+                return Err(grafeo_common::utils::error::Error::InvalidValue(
                     "read-only mode requires a database path".to_string(),
                 ));
             };
@@ -644,7 +642,7 @@ impl GrafeoDB {
                     Some(Arc::new(fm))
                 }
                 OnDisk::Missing => {
-                    return Err(grafeo_common::utils::error::Error::Internal(format!(
+                    return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
                         "read-only open requires an existing database: {} does not exist",
                         db_path.display()
                     )));
@@ -1001,9 +999,7 @@ impl GrafeoDB {
     ///
     /// [`GraphStoreMut`]: grafeo_core::graph::GraphStoreMut
     pub fn with_store(store: Arc<dyn GraphStoreMut>, config: Config) -> Result<Self> {
-        config
-            .validate()
-            .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
+        config.validate().map_err(config_error)?;
 
         // Commits continue from the epoch the store is at.
         let transaction_manager = Arc::new(TransactionManager::new());
@@ -1098,9 +1094,7 @@ impl GrafeoDB {
     ///
     /// [`GraphStore`]: grafeo_core::graph::GraphStore
     pub fn with_read_store(store: Arc<dyn GraphStoreSearch>, config: Config) -> Result<Self> {
-        config
-            .validate()
-            .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
+        config.validate().map_err(config_error)?;
 
         // Commits continue from the epoch the store is at.
         let transaction_manager = Arc::new(TransactionManager::new());
@@ -1433,21 +1427,24 @@ impl GrafeoDB {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) if !dir.is_dir() => {
-                return Err(Error::Internal(format!(
-                    "cannot inspect {}: {error}",
-                    dir.display()
+                return Err(Error::Io(std::io::Error::new(
+                    error.kind(),
+                    format!("cannot inspect {}: {error}", dir.display()),
                 )));
             }
             Err(error) => {
-                return Err(Error::Internal(format!(
-                    "cannot list {}: {error}",
-                    dir.display()
+                return Err(Error::Io(std::io::Error::new(
+                    error.kind(),
+                    format!("cannot list {}: {error}", dir.display()),
                 )));
             }
         };
         for entry in entries {
             let entry = entry.map_err(|error| {
-                Error::Internal(format!("cannot list {}: {error}", dir.display()))
+                Error::Io(std::io::Error::new(
+                    error.kind(),
+                    format!("cannot list {}: {error}", dir.display()),
+                ))
             })?;
             if entry.path().is_file() {
                 return Ok(true);
@@ -1472,7 +1469,7 @@ impl GrafeoDB {
         if !Self::holds_files(&wal)? {
             return Ok(());
         }
-        Err(Error::Internal(format!(
+        Err(Error::InvalidValue(format!(
             "cannot create a database at {}: the sidecar WAL {} holds files of another \
              database; move it away, or open it with the database it belongs to",
             db_path.display(),
@@ -1497,7 +1494,10 @@ impl GrafeoDB {
     fn refuse_unreplayable_sidecar_wal(db_path: &std::path::Path) -> Result<()> {
         let wal = grafeo_storage::file::detect::sidecar_wal_path(db_path);
         let cannot_list = |error: std::io::Error| {
-            Error::Internal(format!("cannot list {}: {error}", wal.display()))
+            Error::Io(std::io::Error::new(
+                error.kind(),
+                format!("cannot list {}: {error}", wal.display()),
+            ))
         };
         let entries = match std::fs::read_dir(&wal) {
             Ok(entries) => entries,
@@ -1518,13 +1518,15 @@ impl GrafeoDB {
             return Ok(());
         }
         logs.sort();
-        Err(Error::Internal(format!(
-            "{} has records in its sidecar WAL {} (log files {}), commits that only a build with \
+        Err(Error::Query(
+            grafeo_common::utils::error::QueryError::unsupported(format!(
+                "{} has records in its sidecar WAL {} (log files {}), commits that only a build with \
              the `wal` feature can replay: open it with such a build",
-            db_path.display(),
-            wal.display(),
-            logs.join(", ")
-        )))
+                db_path.display(),
+                wal.display(),
+                logs.join(", ")
+            )),
+        ))
     }
 
     /// Loads a 0.5.x WAL-directory database (the directory `path` holding its
@@ -1562,11 +1564,13 @@ impl GrafeoDB {
             let _ = (store, catalog);
             #[cfg(feature = "triple-store")]
             let _ = rdf_store;
-            Err(Error::Internal(format!(
-                "{} is a 0.5.x WAL-directory database, whose data only a build with the `wal` \
+            Err(Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(format!(
+                    "{} is a 0.5.x WAL-directory database, whose data only a build with the `wal` \
                  feature can replay: open or migrate it with such a build",
-                path.display()
-            )))
+                    path.display()
+                )),
+            ))
         }
         #[cfg(feature = "wal")]
         {
@@ -2896,10 +2900,11 @@ impl GrafeoDB {
     #[cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
     pub fn backup_full(&self, backup_dir: &std::path::Path) -> Result<backup::BackupSegment> {
         let _open = self.hold_open()?;
-        let fm = self
-            .file_manager
-            .as_ref()
-            .ok_or_else(|| Error::Internal("backup requires a persistent database".to_string()))?;
+        let fm = self.file_manager.as_ref().ok_or_else(|| {
+            Error::Query(grafeo_common::utils::error::QueryError::unsupported(
+                "a backup needs a persistent database",
+            ))
+        })?;
 
         // Checkpoint to ensure the container has the latest data.
         // Skip for read-only databases: the on-disk file is already a valid
@@ -2925,10 +2930,11 @@ impl GrafeoDB {
         backup_dir: &std::path::Path,
     ) -> Result<backup::BackupSegment> {
         let _open = self.hold_open()?;
-        let wal = self
-            .wal
-            .as_ref()
-            .ok_or_else(|| Error::Internal("incremental backup requires WAL".to_string()))?;
+        let wal = self.wal.as_ref().ok_or_else(|| {
+            Error::Query(grafeo_common::utils::error::QueryError::unsupported(
+                "an incremental backup needs a database with a WAL",
+            ))
+        })?;
 
         let current_epoch = self.transaction_manager.current_epoch();
         backup::do_backup_incremental(backup_dir, wal, current_epoch)
@@ -3128,6 +3134,18 @@ fn wal_directories_are_no_longer_created(path: &std::path::Path) -> Error {
          any path",
         path.display()
     ))
+}
+
+/// The error of a configuration [`Config::validate`] refuses: a setting the
+/// caller gave that does not fit is invalid input, and a graph model this
+/// build cannot run is unsupported.
+fn config_error(error: crate::config::ConfigError) -> Error {
+    match error {
+        crate::config::ConfigError::RdfFeatureRequired => Error::Query(
+            grafeo_common::utils::error::QueryError::unsupported(error.to_string()),
+        ),
+        other => Error::InvalidValue(other.to_string()),
+    }
 }
 
 /// The error of an open of a path that holds neither a database file nor a

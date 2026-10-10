@@ -110,7 +110,7 @@ impl LoadDataOperator {
         let reader = self
             .reader
             .as_mut()
-            .ok_or_else(|| OperatorError::Execution("CSV reader not initialized".to_string()))?;
+            .ok_or_else(|| OperatorError::Internal("CSV reader not initialized".to_string()))?;
 
         let mut line = String::new();
         loop {
@@ -169,7 +169,7 @@ impl LoadDataOperator {
         let reader = self
             .reader
             .as_mut()
-            .ok_or_else(|| OperatorError::Execution("JSONL reader not initialized".to_string()))?;
+            .ok_or_else(|| OperatorError::Internal("JSONL reader not initialized".to_string()))?;
 
         let mut line = String::new();
         loop {
@@ -198,8 +198,13 @@ impl LoadDataOperator {
     /// Reads the next JSONL record (stub when feature disabled).
     #[cfg(not(feature = "jsonl-import"))]
     fn next_jsonl(&mut self) -> OperatorResult {
-        Err(OperatorError::Execution(
-            "JSONL import not enabled (compile with --features jsonl-import)".to_string(),
+        Err(OperatorError::from(
+            grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Unsupported,
+                    "this build cannot load JSONL files (the `jsonl-import` feature)",
+                ),
+            ),
         ))
     }
 
@@ -243,9 +248,10 @@ impl LoadDataOperator {
     /// Reads the next buffered Parquet record.
     #[cfg(feature = "parquet-import")]
     fn next_parquet(&mut self) -> OperatorResult {
-        let rows = self.parquet_rows.as_mut().ok_or_else(|| {
-            OperatorError::Execution("Parquet reader not initialized".to_string())
-        })?;
+        let rows = self
+            .parquet_rows
+            .as_mut()
+            .ok_or_else(|| OperatorError::Internal("Parquet reader not initialized".to_string()))?;
 
         match rows.next() {
             Some(row_value) => Ok(Some(build_single_row_chunk(row_value))),
@@ -278,9 +284,13 @@ impl Operator for LoadDataOperator {
                     self.next_parquet()
                 }
                 #[cfg(not(feature = "parquet-import"))]
-                Err(OperatorError::Execution(
-                    "Parquet import not enabled (compile with --features parquet-import)"
-                        .to_string(),
+                Err(OperatorError::from(
+                    grafeo_common::utils::error::Error::Query(
+                        grafeo_common::utils::error::QueryError::new(
+                            grafeo_common::utils::error::QueryErrorKind::Unsupported,
+                            "this build cannot load Parquet files (the `parquet-import` feature)",
+                        ),
+                    ),
                 ))
             }
         }

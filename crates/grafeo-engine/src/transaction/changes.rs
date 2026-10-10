@@ -476,7 +476,7 @@ impl ChangeRecorder for GraphRecorder {
                     "transaction {:?} could not record a change it applied: {error}",
                     self.changes.id
                 ));
-                OperatorError::Execution(error.to_string())
+                OperatorError::Internal(error.to_string())
             })
     }
 }

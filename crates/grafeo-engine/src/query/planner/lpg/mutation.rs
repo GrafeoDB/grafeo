@@ -803,10 +803,12 @@ impl super::Planner {
 
         // Look up the procedure
         let procedure = registry.get(&call.name).ok_or_else(|| {
-            Error::Internal(format!(
-                "Unknown procedure: '{}'. Use CALL grafeo.procedures() to list available procedures.",
-                call.name.join(".")
-            ))
+            grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::semantic(format!(
+                    "unknown procedure '{}'; CALL grafeo.procedures() lists the procedures",
+                    call.name.join(".")
+                )),
+            )
         })?;
 
         // Evaluate the arguments, constants all, to the procedure's parameters
@@ -982,11 +984,13 @@ impl super::Planner {
                     .iter()
                     .position(|c| c == &item.field_name)
                     .ok_or_else(|| {
-                        Error::Internal(format!(
-                            "YIELD column '{}' not found (available: {})",
-                            item.field_name,
-                            result.columns.join(", ")
-                        ))
+                        grafeo_common::utils::error::Error::Query(
+                            grafeo_common::utils::error::QueryError::semantic(format!(
+                                "YIELD column '{}' is no column of the procedure (it has: {})",
+                                item.field_name,
+                                result.columns.join(", ")
+                            )),
+                        )
                     })?;
                 indices.push(idx);
                 cols.push(
@@ -1022,16 +1026,20 @@ impl super::Planner {
         call: &CallProcedureOp,
         proc_def: &crate::catalog::ProcedureDefinition,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        use crate::query::executor::user_procedure::{ProcedureContext, UserProcedureOperator};
+        use crate::query::executor::user_procedure::{
+            ProcedureContext, UserProcedureOperator, bind_body,
+        };
 
         // Validate argument count
         if call.arguments.len() != proc_def.params.len() {
-            return Err(Error::Internal(format!(
-                "Procedure '{}' expects {} arguments, got {}",
-                proc_def.name,
-                proc_def.params.len(),
-                call.arguments.len()
-            )));
+            return Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::semantic(format!(
+                    "procedure '{}' takes {} arguments, the call gives {}",
+                    proc_def.name,
+                    proc_def.params.len(),
+                    call.arguments.len()
+                )),
+            ));
         }
 
         // Build parameter map: param_name -> value, each argument a constant
@@ -1064,9 +1072,9 @@ impl super::Planner {
                 .collect::<Vec<_>>()
         });
 
+        let plan = bind_body(&proc_def.name, &proc_def.body, &param_map)?;
         let operator = Box::new(UserProcedureOperator::new(
-            proc_def.body.clone(),
-            param_map,
+            plan,
             return_columns,
             yield_columns,
             ProcedureContext {

@@ -78,8 +78,12 @@ impl super::GrafeoDB {
         // Refused before the file is opened: a refused import does no work.
         self.check_import_allowed()?;
         let path = path.as_ref();
-        let file = std::fs::File::open(path)
-            .map_err(|e| Error::Internal(format!("failed to open {}: {}", path.display(), e)))?;
+        let file = std::fs::File::open(path).map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot open {}: {e}", path.display()),
+            ))
+        })?;
 
         let reader = BufReader::new(file);
         let edges = parse_edge_list(reader)?;
@@ -149,8 +153,12 @@ impl super::GrafeoDB {
     pub fn import_mmio(&self, path: impl AsRef<Path>, edge_type: &str) -> Result<(usize, usize)> {
         self.check_import_allowed()?;
         let path = path.as_ref();
-        let file = std::fs::File::open(path)
-            .map_err(|e| Error::Internal(format!("failed to open {}: {}", path.display(), e)))?;
+        let file = std::fs::File::open(path).map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot open {}: {e}", path.display()),
+            ))
+        })?;
 
         let reader = BufReader::new(file);
         let (edges, symmetric) = parse_mmio(reader)?;
@@ -248,8 +256,12 @@ impl super::GrafeoDB {
         // Refused before the file is opened: a refused import does no work.
         self.check_import_allowed()?;
         let path = path.as_ref();
-        let file = std::fs::File::open(path)
-            .map_err(|e| Error::Internal(format!("failed to open {}: {}", path.display(), e)))?;
+        let file = std::fs::File::open(path).map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot open {}: {e}", path.display()),
+            ))
+        })?;
 
         let reader = BufReader::new(file);
         let edges = parse_edge_list(reader)?;
@@ -285,8 +297,12 @@ fn parse_edge_list(reader: impl BufRead) -> Result<Vec<(u64, u64)>> {
     let mut edges = Vec::new();
 
     for (line_num, line) in reader.lines().enumerate() {
-        let line = line
-            .map_err(|e| Error::Internal(format!("read error at line {}: {}", line_num + 1, e)))?;
+        let line = line.map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot read line {}: {e}", line_num + 1),
+            ))
+        })?;
         let trimmed = line.trim();
 
         // Skip comments and empty lines.
@@ -295,22 +311,22 @@ fn parse_edge_list(reader: impl BufRead) -> Result<Vec<(u64, u64)>> {
         }
 
         let mut parts = trimmed.split_whitespace();
-        let src_str = parts
-            .next()
-            .ok_or_else(|| Error::Internal(format!("line {}: missing source ID", line_num + 1)))?;
-        let dst_str = parts
-            .next()
-            .ok_or_else(|| Error::Internal(format!("line {}: missing target ID", line_num + 1)))?;
+        let src_str = parts.next().ok_or_else(|| {
+            Error::InvalidValue(format!("line {}: missing source ID", line_num + 1))
+        })?;
+        let dst_str = parts.next().ok_or_else(|| {
+            Error::InvalidValue(format!("line {}: missing target ID", line_num + 1))
+        })?;
 
         let src: u64 = src_str.parse().map_err(|_| {
-            Error::Internal(format!(
+            Error::InvalidValue(format!(
                 "line {}: invalid source ID '{}'",
                 line_num + 1,
                 src_str
             ))
         })?;
         let dst: u64 = dst_str.parse().map_err(|_| {
-            Error::Internal(format!(
+            Error::InvalidValue(format!(
                 "line {}: invalid target ID '{}'",
                 line_num + 1,
                 dst_str
@@ -333,11 +349,16 @@ fn parse_mmio(reader: impl BufRead) -> Result<(Vec<(u64, u64)>, bool)> {
     // Parse header line.
     let header = lines
         .next()
-        .ok_or_else(|| Error::Internal("empty MMIO file".into()))?
-        .map_err(|e| Error::Internal(format!("MMIO header read error: {e}")))?;
+        .ok_or_else(|| Error::InvalidValue("empty MMIO file".into()))?
+        .map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot read the MatrixMarket header: {e}"),
+            ))
+        })?;
 
     if !header.starts_with("%%MatrixMarket") {
-        return Err(Error::Internal(
+        return Err(Error::InvalidValue(
             "invalid MMIO file: missing %%MatrixMarket header".into(),
         ));
     }
@@ -350,7 +371,12 @@ fn parse_mmio(reader: impl BufRead) -> Result<(Vec<(u64, u64)>, bool)> {
     // Skip comment lines, find the size line.
     let mut size_line = String::new();
     for line in &mut lines {
-        let line = line.map_err(|e| Error::Internal(format!("MMIO read error: {e}")))?;
+        let line = line.map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot read a MatrixMarket line: {e}"),
+            ))
+        })?;
         let trimmed = line.trim();
         if trimmed.starts_with('%') || trimmed.is_empty() {
             continue;
@@ -362,16 +388,21 @@ fn parse_mmio(reader: impl BufRead) -> Result<(Vec<(u64, u64)>, bool)> {
     // Parse size line: rows cols nnz
     let size_parts: Vec<&str> = size_line.split_whitespace().collect();
     if size_parts.len() < 3 {
-        return Err(Error::Internal("invalid MMIO size line".into()));
+        return Err(Error::InvalidValue("invalid MMIO size line".into()));
     }
     let nnz: usize = size_parts[2]
         .parse()
-        .map_err(|_| Error::Internal(format!("invalid nnz count: '{}'", size_parts[2])))?;
+        .map_err(|_| Error::InvalidValue(format!("invalid nnz count: '{}'", size_parts[2])))?;
 
     // Parse data lines.
     let mut edges = Vec::with_capacity(nnz);
     for line in lines {
-        let line = line.map_err(|e| Error::Internal(format!("MMIO read error: {e}")))?;
+        let line = line.map_err(|e| {
+            Error::Io(std::io::Error::new(
+                e.kind(),
+                format!("cannot read a MatrixMarket line: {e}"),
+            ))
+        })?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -383,10 +414,10 @@ fn parse_mmio(reader: impl BufRead) -> Result<(Vec<(u64, u64)>, bool)> {
 
         let row: u64 = row_str
             .parse()
-            .map_err(|_| Error::Internal(format!("invalid MMIO row: '{row_str}'")))?;
+            .map_err(|_| Error::InvalidValue(format!("invalid MMIO row: '{row_str}'")))?;
         let col: u64 = col_str
             .parse()
-            .map_err(|_| Error::Internal(format!("invalid MMIO col: '{col_str}'")))?;
+            .map_err(|_| Error::InvalidValue(format!("invalid MMIO col: '{col_str}'")))?;
 
         edges.push((row, col));
     }

@@ -844,9 +844,11 @@ impl Session {
     /// Checks that the session's graph model supports LPG operations.
     fn require_lpg(&self, language: &str) -> Result<()> {
         if self.graph_model == GraphModel::Rdf {
-            return Err(grafeo_common::utils::error::Error::Internal(format!(
-                "This is an RDF database. {language} queries require an LPG database."
-            )));
+            return Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(format!(
+                    "this is an RDF database: {language} queries need an LPG database"
+                )),
+            ));
         }
         Ok(())
     }
@@ -1328,8 +1330,10 @@ impl Session {
                 })
             }
             #[cfg(not(feature = "lpg"))]
-            _ => Err(grafeo_common::utils::error::Error::Internal(
-                "This command requires the `lpg` feature".to_string(),
+            _ => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no labeled property graph (the `lpg` feature)",
+                ),
             )),
         }
     }
@@ -2179,8 +2183,10 @@ impl Session {
         #[cfg(not(feature = "vector-index"))]
         {
             let _ = (change, label, property, dimensions, metric);
-            Err(grafeo_common::utils::error::Error::Internal(
-                "Vector index support requires the 'vector-index' feature".to_string(),
+            Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no vector indexes (the `vector-index` feature)",
+                ),
             ))
         }
     }
@@ -2218,8 +2224,10 @@ impl Session {
         #[cfg(not(feature = "text-index"))]
         {
             let _ = (change, label, property);
-            Err(grafeo_common::utils::error::Error::Internal(
-                "Text index support requires the 'text-index' feature".to_string(),
+            Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no text indexes (the `text-index` feature)",
+                ),
             ))
         }
     }
@@ -2657,8 +2665,10 @@ impl Session {
                 }
                 #[cfg(not(feature = "lpg"))]
                 gql::GqlTranslationResult::SchemaCommand(_) => {
-                    return Err(grafeo_common::utils::error::Error::Internal(
-                        "Schema commands require the `lpg` feature".to_string(),
+                    return Err(grafeo_common::utils::error::Error::Query(
+                        grafeo_common::utils::error::QueryError::unsupported(
+                            "this build has no labeled property graph (the `lpg` feature)",
+                        ),
                     ));
                 }
                 gql::GqlTranslationResult::Plan(plan) => {
@@ -3094,8 +3104,10 @@ impl Session {
         _query: &str,
         _params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        Err(grafeo_common::utils::error::Error::Internal(
-            "No query language enabled".to_string(),
+        Err(grafeo_common::utils::error::Error::Query(
+            grafeo_common::utils::error::QueryError::unsupported(
+                "this build has no query language (the `gql` or `cypher` feature)",
+            ),
         ))
     }
 
@@ -3106,8 +3118,10 @@ impl Session {
     /// Returns an error if no query language is enabled.
     #[cfg(not(any(feature = "gql", feature = "cypher")))]
     pub fn execute(&self, _query: &str) -> Result<QueryResult> {
-        Err(grafeo_common::utils::error::Error::Internal(
-            "No query language enabled".to_string(),
+        Err(grafeo_common::utils::error::Error::Query(
+            grafeo_common::utils::error::QueryError::unsupported(
+                "this build has no query language (the `gql` or `cypher` feature)",
+            ),
         ))
     }
 
@@ -3174,8 +3188,10 @@ impl Session {
                 }
                 #[cfg(not(feature = "lpg"))]
                 cypher::CypherTranslationResult::SchemaCommand(_) => {
-                    return Err(grafeo_common::utils::error::Error::Internal(
-                        "Schema DDL requires the `lpg` feature".to_string(),
+                    return Err(grafeo_common::utils::error::Error::Query(
+                        grafeo_common::utils::error::QueryError::unsupported(
+                            "this build has no labeled property graph (the `lpg` feature)",
+                        ),
                     ));
                 }
                 cypher::CypherTranslationResult::ShowIndexes => {
@@ -4844,9 +4860,9 @@ impl Session {
             }
             Err(e) => {
                 record_metric!(self.metrics, query_errors, inc);
-                // Detect timeout errors
-                let msg = e.to_string();
-                if msg.contains("exceeded timeout") {
+                // A timeout names its limit when one is set, so its code
+                // tells it apart, not its message.
+                if e.error_code() == grafeo_common::utils::error::ErrorCode::QueryTimeout {
                     record_metric!(self.metrics, query_timeouts, inc);
                 }
             }

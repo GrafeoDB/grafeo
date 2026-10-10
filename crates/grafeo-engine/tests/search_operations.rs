@@ -1089,7 +1089,7 @@ mod quantized_vector {
         assert!(result.is_err(), "invalid quantization type should error");
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("Unknown quantization type"),
+            err_msg.contains("unknown quantization 'invalid_type'"),
             "error should mention unknown type: {err_msg}"
         );
     }

@@ -165,10 +165,17 @@ fn resolve_mutation_graph(
 ) -> std::result::Result<Option<Arc<RdfStore>>, OperatorError> {
     match graph_name {
         None => Ok(Some(Arc::clone(store))),
-        Some(name) if name.starts_with('?') => Err(OperatorError::Execution(format!(
-            "SPARQL Update cannot target a variable graph ({name}); \
-             use a concrete graph IRI or a WITH clause"
-        ))),
+        Some(name) if name.starts_with('?') => Err(OperatorError::from(
+            grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    format!(
+                        "SPARQL Update cannot target a variable graph ({name}); use a concrete \
+                     graph IRI or a WITH clause"
+                    ),
+                ),
+            ),
+        )),
         Some(name) if create => Ok(Some(store.graph_or_create(name))),
         Some(name) => Ok(store.graph(name)),
     }

@@ -30,7 +30,10 @@ fn test_set_property_on_nonexistent_node() {
     let err = db
         .set_node_property(NodeId::new(999), "key", Value::Int64(1))
         .unwrap_err();
-    assert!(err.to_string().contains("node 999 does not exist"), "{err}");
+    assert!(
+        matches!(err, grafeo_common::utils::error::Error::NodeNotFound(id) if id == NodeId::new(999)),
+        "{err}"
+    );
     assert!(db.get_node(NodeId::new(999)).is_none());
 }
 
@@ -387,10 +390,16 @@ fn test_gql_unknown_procedure_error_code() {
     let session = db.session();
     let result = session.execute("CALL grafeo.nonexistent()");
     assert!(result.is_err());
-    let err_str = result.unwrap_err().to_string();
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.error_code(),
+        grafeo_common::utils::error::ErrorCode::QuerySemantic,
+        "{err}"
+    );
+    let err_str = err.to_string();
     assert!(
-        err_str.contains("Unknown procedure"),
-        "Should say 'Unknown procedure', got: {}",
+        err_str.contains("unknown procedure"),
+        "Should say 'unknown procedure', got: {}",
         err_str
     );
 }
@@ -402,9 +411,15 @@ fn test_gql_yield_nonexistent_column_error() {
     let session = db.session();
     let result = session.execute("CALL grafeo.pagerank() YIELD nonexistent_column");
     assert!(result.is_err());
-    let err_str = result.unwrap_err().to_string();
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.error_code(),
+        grafeo_common::utils::error::ErrorCode::QuerySemantic,
+        "{err}"
+    );
+    let err_str = err.to_string();
     assert!(
-        err_str.contains("not found"),
+        err_str.contains("'nonexistent_column' is no column of the procedure"),
         "Should mention column not found, got: {}",
         err_str
     );

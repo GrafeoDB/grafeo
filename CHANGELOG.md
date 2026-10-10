@@ -10,6 +10,7 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Added
 
+- **Rust (`grafeo-common`): `QueryErrorKind::Unsupported` (`GRAFEO-Q004`), `QueryError::semantic` and `QueryError::unsupported`**, and `Error` is `Clone`.
 - **Error code `GRAFEO-S002` for a damaged database file**: a file Grafeo wrote whose bytes do not read back (a header, directory, chunk or WAL checksum, a section or record that does not decode) fails with it, naming the file and, when known, the byte. Python raises the new `GrafeoCorruptionError` (a `GrafeoError`); the other bindings report their storage error with the code. These were serialization or internal errors before. A file or WAL written by a newer Grafeo, or a wrong key, is not reported as damage.
 - **Rust (`grafeo-engine`): `QueryProcessor::with_graph`** names the graph a processor's store holds; a processor in a transaction records its writes in that transaction, which commits or rolls them back.
 - **Graph algorithms on a projection or a named graph** ([#566](https://github.com/GrafeoDB/grafeo/issues/566)): `db.algorithms` methods take `projection=`, algorithm procedures a `projection` argument (`CALL grafeo.pagerank({projection: 'people'})`), and `db.graph(name).algorithms` runs on that graph. Rust: `GrafeoDB::selected_graph_store` and `GraphHandle::graph_store`.
@@ -26,6 +27,8 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Changed
 
+- **User mistakes are reported with the code of their kind, not `GRAFEO-X001`** ([#588](https://github.com/GrafeoDB/grafeo/issues/588)): a mistake in the query text is `GRAFEO-Q002` (an unknown procedure, a call with another number of arguments, an unknown `YIELD` column), what the database or the build cannot run `GRAFEO-Q004` (a feature the build leaves out, GQL on an RDF database, a backup of an in-memory database), a value or name a call gives that does not fit `GRAFEO-V001` (a missing vector or text index, an unknown quantization or embedding model, an invalid setting, a malformed import line), a statement that fails on its data `GRAFEO-Q006`, and a direct write to a missing node or edge `GRAFEO-V002` or `GRAFEO-V003`. `GRAFEO-X001` now means a bug in Grafeo. Messages name no Rust method.
+- **Every query error message starts with its code** (`GRAFEO-Q002: semantic error: ...`), as the messages of other errors do, so every binding can tell the kind of an error from its message.
 - **Breaking (Rust): a damaged file is `Error::Corruption`** (`Corruption { what, file, offset }`), and `StorageError::Corruption` is removed.
 - **`DROP GRAPH` refuses a graph an open transaction changed**: `DROP GRAPH` and `drop_graph` fail with a write conflict (`GRAFEO-T001`) while an open transaction has changes in the graph; drop it once that transaction commits or rolls back. A write that found the graph before it was dropped now fails instead of writing into it.
 - **`create_vector_index` in a build without the `vector-index` feature returns an error** instead of succeeding without building an index.
@@ -70,6 +73,7 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Fixed
 
+- **A query past its timeout is the retryable `GRAFEO-Q003` in every plan**: one that timed out inside a pipeline (sorts, aggregates) was `GRAFEO-X001`; and the `query_timeouts` metric counts the timeouts of a database with a query timeout set, which it missed.
 - **Indexes created or dropped since the last checkpoint did not survive a crash or a reopen of a WAL-backed database** ([#401](https://github.com/GrafeoDB/grafeo/issues/401)): property, text and vector indexes, made with the API or DDL, in any graph, are replayed, and vector indexes keep all their parameters.
 - **Schema changes made since the last checkpoint lost parts of their definition in a crash**: default values, parent types, edge type endpoints, KEY labels of inline element types, and properties added by ALTER with their defaults now survive.
 - **A named graph dropped while a transaction had written to it came back after a crash.**

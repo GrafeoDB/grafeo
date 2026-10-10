@@ -149,7 +149,7 @@ impl ChangeRecorder for ImmediateRecorder {
             self.manager.poison(&format!(
                 "a direct write could not record a change it committed: {error}"
             ));
-            OperatorError::Execution(error.to_string())
+            OperatorError::Internal(error.to_string())
         })
     }
 }
@@ -823,10 +823,7 @@ pub(crate) fn set_edge_property(
     value: Value,
 ) -> std::result::Result<(), OperatorError> {
     if !writer.has_edge(id) {
-        return Err(OperatorError::Execution(format!(
-            "edge {} does not exist",
-            id.as_u64()
-        )));
+        return Err(OperatorError::from(Error::EdgeNotFound(id)));
     }
     writer.set_edge_properties(id, &[(key.to_string(), value)], false)
 }
@@ -921,7 +918,7 @@ pub(crate) fn direct_properties(
 
 /// The error for a direct write to a node that does not exist.
 fn missing_node(id: NodeId) -> OperatorError {
-    OperatorError::Execution(format!("node {} does not exist", id.as_u64()))
+    OperatorError::from(Error::NodeNotFound(id))
 }
 
 /// The error for a graph handle whose graph does not exist.

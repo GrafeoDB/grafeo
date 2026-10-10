@@ -69,6 +69,37 @@ describe('database lifecycle', () => {
     expect(() => db.close()).not.toThrow()
   })
 
+  it('should report a damaged database file as GRAFEO-S002, naming the file', async () => {
+    const fs = await import('fs')
+    const os = await import('os')
+    const path = await import('path')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grafeo-test-'))
+    const dbPath = path.join(dir, 'paris.grafeo')
+
+    const db = GrafeoDB.create(dbPath)
+    db.createNode(['Person'], { name: 'Shosanna' })
+    db.close()
+    // Inside the database id, which the file header checksum covers.
+    const bytes = fs.readFileSync(dbPath)
+    bytes[20] ^= 0x5a
+    fs.writeFileSync(dbPath, bytes)
+
+    expect(() => GrafeoDB.open(dbPath)).toThrow(/GRAFEO-S002: the file .*paris\.grafeo is damaged at byte 0/)
+
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
+  })
+
+  it('should report a vector search without a vector index as GRAFEO-V001', async () => {
+    const db = GrafeoDB.create()
+    db.createNode(['Paper'], { title: 'Graphs in Amsterdam' })
+    const error = await db.vectorSearch('Paper', 'embedding', [0.3, 0.19, 0.88], 3).catch((e) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toMatch(/GRAFEO-V001: .*no vector index on :Paper\(embedding\)/)
+    // It names no Rust method, as JavaScript spells them otherwise.
+    expect(error.message).not.toMatch(/create_vector_index|\(\)/)
+    db.close()
+  })
+
   it('should refuse writes after close of a persistent database', async () => {
     const fs = await import('fs')
     const os = await import('os')
@@ -1756,7 +1787,7 @@ describe('batch writes', () => {
         { src: alix, dst: gus, type: 'KNOWS' },
         { src: alix, dst: 999, type: 'KNOWS' },
       ])
-    ).rejects.toThrow(/does not exist/)
+    ).rejects.toThrow(/GRAFEO-V002: Node not found: 999/)
     expect(db.edgeCount()).toBe(0)
   })
 })

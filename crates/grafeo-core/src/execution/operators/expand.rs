@@ -145,7 +145,7 @@ impl ExpandOperator {
 
         let source_id = col
             .get_node_id(self.current_row)
-            .ok_or_else(|| OperatorError::Execution("Expected node ID in source column".into()))?;
+            .ok_or_else(|| OperatorError::Internal("Expected node ID in source column".into()))?;
 
         self.current_edges = visible_edges_from(
             self.store.as_ref(),

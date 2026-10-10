@@ -565,13 +565,26 @@ mod tests {
         let transaction_manager = Arc::new(TransactionManager::new());
         let transaction_id = transaction_manager.begin();
         let epoch = transaction_manager.current_epoch();
+        // The transaction's writers record in its change set.
+        let recording = transaction_manager
+            .changes(transaction_id)
+            .unwrap()
+            .recording(
+                &transaction_manager,
+                None,
+                grafeo_core::execution::operators::WriteTarget::Store(
+                    Arc::clone(&store) as Arc<dyn grafeo_core::graph::apply::ChangeTarget>
+                ),
+            )
+            .unwrap();
         let planner = Planner::with_context(
             Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
             Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>),
             Arc::clone(&transaction_manager),
             Some(transaction_id),
             epoch,
-        );
+        )
+        .with_recording(Some(recording));
         let write = LogicalOperator::Project(ProjectOp {
             projections: vec![Projection {
                 expression: LogicalExpression::Variable("h".to_string()),

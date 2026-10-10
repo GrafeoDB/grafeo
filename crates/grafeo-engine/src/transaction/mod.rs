@@ -202,8 +202,7 @@ mod prepared;
 pub(crate) mod v1_group;
 
 pub(crate) use changes::{
-    TransactionChanges, TransactionClaims, UndoFailure, is_kept_by_external_store,
-    kept_by_external_store,
+    TransactionChanges, UndoFailure, is_kept_by_external_store, kept_by_external_store,
 };
 pub(crate) use manager::CommitsHeld;
 pub use manager::{

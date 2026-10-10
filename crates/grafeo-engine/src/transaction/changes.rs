@@ -382,10 +382,8 @@ pub(crate) fn is_kept_by_external_store(error: &Error) -> bool {
 
 /// The claims of a transaction's writes to one graph, through the
 /// transaction manager (first writer wins), and the write freeze around
-/// them. A writer of a transaction gets them with its recording; one that
-/// writes through the store's versioned methods (a `QueryProcessor` with a
-/// transaction context) gets them alone.
-pub(crate) struct TransactionClaims {
+/// them. A writer of a transaction gets them with its recording.
+struct TransactionClaims {
     manager: Arc<TransactionManager>,
     transaction: TransactionId,
     /// The graph's storage key; `None` for the default graph.
@@ -394,7 +392,7 @@ pub(crate) struct TransactionClaims {
 
 impl TransactionClaims {
     /// The claims of `transaction` in the graph with storage key `graph`.
-    pub(crate) fn new(
+    fn new(
         manager: Arc<TransactionManager>,
         transaction: TransactionId,
         graph: Option<&str>,

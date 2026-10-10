@@ -223,7 +223,7 @@ impl GraphWriter {
 
     /// Writes as `transaction_id` through the store's versioned methods,
     /// reading at `epoch`, without claims or a record of what it changed:
-    /// the caller stamps or discards the versions itself (a writer of a
+    /// nothing stamps or undoes the versions it writes (a writer of a
     /// transaction the engine runs gets a [`Recording`] instead, see
     /// [`with_recording`](Self::with_recording)).
     #[must_use]

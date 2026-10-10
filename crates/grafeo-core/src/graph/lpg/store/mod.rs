@@ -40,7 +40,7 @@ use crate::index::adjacency::ChunkedAdjacency;
 use crate::statistics::Statistics;
 #[cfg(not(feature = "tiered-storage"))]
 use grafeo_common::mvcc::VersionChain;
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::RwLock;
 use std::cmp::Ordering as CmpOrdering;
@@ -56,79 +56,6 @@ use grafeo_common::memory::arena::ArenaAllocator;
 use grafeo_common::mvcc::VersionIndex;
 #[cfg(feature = "temporal")]
 use grafeo_common::temporal::VersionLog;
-
-/// One change made by a transaction, with what rollback needs to undo it.
-///
-/// The entries of a transaction list everything it touched in this store, so
-/// commit and rollback walk them instead of scanning every entity.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum PropertyUndoEntry {
-    /// A node was created.
-    NodeCreated {
-        /// The new node.
-        node_id: NodeId,
-    },
-    /// An edge was created.
-    EdgeCreated {
-        /// The new edge.
-        edge_id: EdgeId,
-    },
-    /// A node property was changed or added.
-    NodeProperty {
-        /// The node that was modified.
-        node_id: NodeId,
-        /// The property key that was set or removed.
-        key: PropertyKey,
-        /// The previous value, or `None` if the property did not exist before.
-        old_value: Option<Value>,
-    },
-    /// An edge property was changed or added.
-    EdgeProperty {
-        /// The edge that was modified.
-        edge_id: EdgeId,
-        /// The property key that was set or removed.
-        key: PropertyKey,
-        /// The previous value, or `None` if the property did not exist before.
-        old_value: Option<Value>,
-    },
-    /// A label was added to a node.
-    LabelAdded {
-        /// The node that had a label added.
-        node_id: NodeId,
-        /// The label string that was added.
-        label: String,
-    },
-    /// A label was removed from a node.
-    LabelRemoved {
-        /// The node that had a label removed.
-        node_id: NodeId,
-        /// The label string that was removed.
-        label: String,
-    },
-    /// A node was deleted (for rollback restoration).
-    NodeDeleted {
-        /// The node that was deleted.
-        node_id: NodeId,
-        /// The labels the node had before deletion.
-        labels: Vec<String>,
-        /// The properties the node had before deletion.
-        properties: Vec<(PropertyKey, Value)>,
-    },
-    /// An edge was deleted (for rollback restoration).
-    EdgeDeleted {
-        /// The edge that was deleted.
-        edge_id: EdgeId,
-        /// The source node.
-        src: NodeId,
-        /// The destination node.
-        dst: NodeId,
-        /// The edge type name.
-        edge_type: String,
-        /// The properties the edge had before deletion.
-        properties: Vec<(PropertyKey, Value)>,
-    },
-}
 
 /// Compares two values for ordering (used for range checks).
 pub(super) fn compare_values_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
@@ -438,15 +365,6 @@ pub struct LpgStore {
     /// Zero overhead for single-graph databases (empty HashMap).
     /// Lock order: 9 (after statistics)
     named_graphs: RwLock<FxHashMap<String, Arc<LpgStore>>>,
-
-    /// What each open transaction changed in this store.
-    ///
-    /// Maps transaction IDs to their changes in order: created and deleted
-    /// entities, property and label changes with the previous state. Commit
-    /// finalizes the versions of the entities listed there and discards the
-    /// entries; rollback replays them in reverse. Both cost O(changes).
-    /// Lock order: 10 (after named_graphs, independent of other locks)
-    property_undo_log: RwLock<FxHashMap<TransactionId, Vec<PropertyUndoEntry>>>,
 }
 
 impl LpgStore {
@@ -512,7 +430,6 @@ impl LpgStore {
             edge_type_live_counts: RwLock::new(Vec::new()),
             statistics: RwLock::new(Arc::new(Statistics::new())),
             named_graphs: RwLock::new(FxHashMap::default()),
-            property_undo_log: RwLock::new(FxHashMap::default()),
         })
     }
 
@@ -620,9 +537,6 @@ impl LpgStore {
         self.live_edge_count.store(0, Ordering::Release);
         self.edge_type_live_counts.write().clear();
         *self.statistics.write() = Arc::new(Statistics::new());
-
-        // Level 5: Undo log
-        self.property_undo_log.write().clear();
     }
 
     /// Returns whether backward adjacency (incoming edge index) is available.

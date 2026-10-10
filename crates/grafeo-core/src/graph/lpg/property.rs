@@ -528,7 +528,7 @@ impl<Id: EntityId> PropertyStorage<Id> {
 
     /// [`get`](Self::get) as a fallible read: a spilled value that cannot be
     /// read is an error. For the readers that must not lose it, such as the
-    /// undo log of a transactional write.
+    /// before-image of a transaction's write.
     ///
     /// # Errors
     ///
@@ -2634,16 +2634,6 @@ impl<Id: EntityId> PropertyColumn<Id> {
         dropped
     }
 
-    /// Removes PENDING entries for a specific entity (targeted rollback).
-    pub fn remove_pending_for(&mut self, id: Id) {
-        if let Some(log) = self.values.get_mut(&id) {
-            log.remove_pending();
-            if log.is_empty() {
-                self.values.remove(&id);
-            }
-        }
-    }
-
     /// Removes up to `n` PENDING entries for a specific entity.
     ///
     /// Used by savepoint rollback to pop only the entries added after the
@@ -3497,7 +3487,7 @@ mod tests {
         assert_eq!(storage.get(gus, &key), Some(vector(&[88.0, 3.19])));
     }
 
-    /// Removing a spilled value hides it, returns it (the undo log records
+    /// Removing a spilled value hides it, returns it (a change set records
     /// it), and it stays removed after the reload: the bug where a reload
     /// brought it back.
     #[test]

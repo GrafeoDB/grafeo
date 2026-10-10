@@ -36,24 +36,25 @@ impl LpgStore {
     /// property key ids, so the copy writes the same ids the store would.
     /// Indexes are not copied.
     ///
-    /// The committed state comes from each store and the undo log of the
-    /// transactions open in it, read together. So the caller holds the
-    /// transactional writes and rollbacks of the stores and their commits for
-    /// the whole copy, as a checkpoint does: a change made meanwhile may be
-    /// copied in part. The copy costs as much memory as the committed data.
+    /// This copies the stores as they are, which is their committed state
+    /// while no transaction is open; [`committed_copy_with`](Self::committed_copy_with)
+    /// takes what open transactions changed. The copy costs as much memory
+    /// as the committed data.
     ///
     /// # Errors
     ///
     /// Returns the error of reading a node or edge record or a spilled
     /// property value, and an allocation error of the copy.
     pub fn committed_copy(&self) -> Result<Self> {
-        self.committed_copy_from(OpenChangeSource::UndoLogs)
+        self.committed_copy_from(OpenChangeSource::None)
     }
 
-    /// [`committed_copy`](Self::committed_copy), reading what the open
-    /// transactions changed from `changes`, indexed from their change sets,
-    /// instead of from the stores' undo logs. The caller holds their writes,
-    /// rollbacks and commits for the whole copy (see [`OpenChangesByGraph`]).
+    /// [`committed_copy`](Self::committed_copy) while transactions are open,
+    /// reading what they changed from `changes`, indexed from their change
+    /// sets: the stores and the change sets are read together, so the caller
+    /// holds their writes, rollbacks and commits for the whole copy, as a
+    /// checkpoint does (see [`OpenChangesByGraph`]); a change made meanwhile
+    /// may be copied in part.
     ///
     /// # Errors
     ///
@@ -65,7 +66,7 @@ impl LpgStore {
     fn committed_copy_from(&self, open: OpenChangeSource<'_>) -> Result<Self> {
         let copy = Self::new()?;
         let epoch = section_epoch(self);
-        copy_graph(self, &copy, epoch, &open.changes_of(self, None))?;
+        copy_graph(self, &copy, epoch, &open.changes_of(None))?;
         // A graph dropped since the names were read is left out.
         let graphs: Vec<(String, std::sync::Arc<LpgStore>)> = self
             .graph_names()
@@ -82,12 +83,7 @@ impl LpgStore {
             .map_err(|error| Error::Internal(format!("the committed copy: {error}")))?;
         // In any order: each graph is copied on its own.
         for ((name, graph), target) in graphs.iter().zip(&targets) {
-            copy_graph(
-                graph,
-                target,
-                epoch,
-                &open.changes_of(graph, Some(name.as_str())),
-            )?;
+            copy_graph(graph, target, epoch, &open.changes_of(Some(name.as_str())))?;
         }
         Ok(copy)
     }

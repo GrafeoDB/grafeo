@@ -1,7 +1,7 @@
 //! Tests for CDC recording through the direct CRUD API (`db.create_node()` etc.).
 //!
-//! These exercise the CDC paths in `crud.rs` that record events directly to
-//! the `CdcLog` (as opposed to session-driven mutations via `CdcGraphStore`).
+//! Each direct call records its changes in the `CdcLog` when it commits, as
+//! a session's commit records its transaction's changes.
 //!
 //! ```bash
 //! cargo test --features "cdc" -p grafeo-engine --test cdc_crud_api

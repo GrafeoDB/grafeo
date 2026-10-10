@@ -1,7 +1,7 @@
 //! Schema, label, edge-type, and property-key methods for [`LpgStore`].
 
 use super::super::dictionary::NameDictionary;
-use super::{LpgStore, PropertyUndoEntry};
+use super::LpgStore;
 use grafeo_common::types::{EpochId, NodeId, PropertyKey, TransactionId};
 use grafeo_common::utils::hash::FxHashMap;
 
@@ -400,8 +400,9 @@ impl LpgStore {
         self.next_edge_id.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Adds a label to a node within a transaction, recording the change
-    /// in the undo log so it can be reversed on rollback.
+    /// Adds a label to a node as `transaction_id`. Nothing records the
+    /// change (a transaction the engine runs writes through the store's
+    /// change target, see `ChangeTarget::apply`).
     ///
     /// Returns false if the transaction does not see the node (it sees the
     /// nodes it created itself) or the node already has the label.
@@ -412,24 +413,12 @@ impl LpgStore {
         label: &str,
         transaction_id: TransactionId,
     ) -> bool {
-        let added = self.is_node_visible_versioned(node_id, self.current_epoch(), transaction_id)
-            && self.add_label_to_existing(node_id, label);
-        if added {
-            self.property_undo_log
-                .write()
-                .entry(transaction_id)
-                .or_default()
-                .push(PropertyUndoEntry::LabelAdded {
-                    node_id,
-                    label: label.to_string(),
-                });
-        }
-        added
+        self.is_node_visible_versioned(node_id, self.current_epoch(), transaction_id)
+            && self.add_label_to_existing(node_id, label)
     }
 
-    /// Adds a label to a node within a transaction (temporal version).
-    ///
-    /// Uses `EpochId::PENDING` for the version log entry, finalized on commit.
+    /// Adds a label to a node as `transaction_id` (temporal version): a
+    /// PENDING label set, which nothing records.
     /// Returns false if the transaction does not see the node (it sees the
     /// nodes it created itself) or the node already has the label.
     #[cfg(feature = "temporal")]
@@ -466,22 +455,11 @@ impl LpgStore {
         index[label_id as usize].insert(node_id, ());
         drop(index);
         self.index_node_under_label(node_id, label);
-
-        // Record in undo log
-        self.property_undo_log
-            .write()
-            .entry(transaction_id)
-            .or_default()
-            .push(PropertyUndoEntry::LabelAdded {
-                node_id,
-                label: label.to_string(),
-            });
-
         true
     }
 
-    /// Removes a label from a node within a transaction, recording the change
-    /// in the undo log so it can be restored on rollback.
+    /// Removes a label from a node as `transaction_id`. Nothing records the
+    /// change.
     ///
     /// Returns false if the transaction does not see the node (it sees the
     /// nodes it created itself) or the node doesn't have the label.
@@ -492,22 +470,12 @@ impl LpgStore {
         label: &str,
         transaction_id: TransactionId,
     ) -> bool {
-        let removed = self.is_node_visible_versioned(node_id, self.current_epoch(), transaction_id)
-            && self.remove_label_from_existing(node_id, label);
-        if removed {
-            self.property_undo_log
-                .write()
-                .entry(transaction_id)
-                .or_default()
-                .push(PropertyUndoEntry::LabelRemoved {
-                    node_id,
-                    label: label.to_string(),
-                });
-        }
-        removed
+        self.is_node_visible_versioned(node_id, self.current_epoch(), transaction_id)
+            && self.remove_label_from_existing(node_id, label)
     }
 
-    /// Removes a label from a node within a transaction (temporal version).
+    /// Removes a label from a node as `transaction_id` (temporal version): a
+    /// PENDING label set, which nothing records.
     ///
     /// Returns false if the transaction does not see the node (it sees the
     /// nodes it created itself) or the node doesn't have the label.
@@ -550,17 +518,6 @@ impl LpgStore {
         }
         drop(index);
         self.unindex_node_under_label(node_id, label);
-
-        // Record in undo log
-        self.property_undo_log
-            .write()
-            .entry(transaction_id)
-            .or_default()
-            .push(PropertyUndoEntry::LabelRemoved {
-                node_id,
-                label: label.to_string(),
-            });
-
         true
     }
 }

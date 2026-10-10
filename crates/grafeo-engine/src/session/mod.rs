@@ -252,17 +252,17 @@ pub struct Session {
     commit_counter: Arc<AtomicUsize>,
     /// GC every N commits (0 = disabled).
     gc_interval: usize,
-    /// This session's WAL records, written as one group per transaction
-    /// (`None` without a WAL).
+    /// The WAL this session's commits write their groups to, with the RDF
+    /// records of the open transaction until its commit (`None` without a
+    /// WAL).
     #[cfg(feature = "wal")]
     wal: Option<Arc<crate::transaction::wal_buffer::WalBuffer>>,
     /// CDC log for change tracking.
     #[cfg(feature = "cdc")]
     cdc_log: Arc<crate::cdc::CdcLog>,
-    /// Buffered CDC events for the current transaction.
-    /// Flushed to `cdc_log` on commit, discarded on rollback.
+    /// Whether this session's commits report their changes to `cdc_log`.
     #[cfg(feature = "cdc")]
-    cdc_pending_events: Option<Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>>,
+    records_cdc: bool,
     /// Current graph name (for multi-graph USE GRAPH support). None = default graph.
     current_graph: parking_lot::Mutex<Option<String>>,
     /// Current schema name (ISO/IEC 39075 Section 4.7.3: independent from session graph).
@@ -313,8 +313,7 @@ pub struct Session {
 #[cfg(feature = "lpg")]
 #[derive(Clone, Copy)]
 enum LpgBackend {
-    /// The internal `LpgStore` is the session's active backing store (possibly
-    /// wrapped by WAL/CDC decorators on the read/write path). Search
+    /// The internal `LpgStore` is the session's active backing store. Search
     /// procedures can reach its HNSW/BM25 indexes.
     Active,
     /// The internal `LpgStore` is an empty placeholder because the session is
@@ -330,12 +329,8 @@ struct SavepointState {
     name: String,
     /// The position in the transaction's change set.
     mark: grafeo_common::change::ChangeMark,
-    /// CDC event buffer position at savepoint creation.
-    /// On rollback-to-savepoint, the buffer is truncated to this position.
-    #[cfg(feature = "cdc")]
-    cdc_event_position: usize,
-    /// WAL buffer position at savepoint creation.
-    /// On rollback-to-savepoint, the buffer is truncated to this position.
+    /// The number of RDF records the WAL buffer held when the savepoint was
+    /// taken: a rollback to it drops the later ones.
     #[cfg(feature = "wal")]
     wal_position: usize,
 }
@@ -378,7 +373,7 @@ impl Session {
             #[cfg(feature = "cdc")]
             cdc_log: Arc::new(crate::cdc::CdcLog::new()),
             #[cfg(feature = "cdc")]
-            cdc_pending_events: None,
+            records_cdc: false,
             current_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
             time_zone: parking_lot::Mutex::new(None),
@@ -412,27 +407,19 @@ impl Session {
 
     /// Sets the WAL for this session (shared with the database).
     ///
-    /// The session gets its own [`WalBuffer`](crate::transaction::wal_buffer::WalBuffer),
-    /// written to the WAL as one group per transaction: a commit writes the
-    /// records of its change set (see `transaction::v1_group`) and then
-    /// those the buffer holds (RDF). `graph_store` is wrapped in a
-    /// [`WalGraphStore`] for the writes outside a transaction (auto-commit
-    /// off), which record into the buffer as they happen.
+    /// Each commit writes one group: the records of its change set (see
+    /// `transaction::v1_group`), then the RDF records the session's
+    /// [`WalBuffer`](crate::transaction::wal_buffer::WalBuffer) holds.
     #[cfg(all(feature = "wal", feature = "lpg"))]
     pub(crate) fn set_wal(&mut self, wal: Arc<grafeo_storage::wal::LpgWal>) {
-        let buffer = Arc::new(crate::transaction::wal_buffer::WalBuffer::new(wal));
-        let wal_store = Arc::new(crate::database::wal_store::WalGraphStore::new(
-            self.root_store(),
-            Arc::clone(&buffer),
-        ));
-        self.graph_store = Arc::clone(&wal_store) as Arc<dyn GraphStoreSearch>;
-        self.graph_store_mut = Some(wal_store as Arc<dyn GraphStoreMut>);
-        self.wal = Some(buffer);
+        self.wal = Some(Arc::new(crate::transaction::wal_buffer::WalBuffer::new(
+            wal,
+        )));
     }
 
-    /// Writes records made outside a transaction to the WAL as an implicit
-    /// group with its own commit marker. Does nothing inside a transaction,
-    /// whose records are written at commit.
+    /// Writes the RDF records of an update outside a transaction to the WAL
+    /// as an implicit group with its own commit marker. Does nothing inside
+    /// a transaction, whose records are written at commit.
     ///
     /// WAL write failures are logged via `grafeo_warn!` and not propagated.
     #[cfg(feature = "wal")]
@@ -445,26 +432,13 @@ impl Session {
         }
     }
 
-    /// Sets the CDC log for this session (shared with the database).
-    ///
-    /// A commit reports the events of its change set to the `CdcLog` (see
-    /// `cdc::events_for_changes`). The write store is wrapped with a
-    /// `CdcGraphStore` decorator for the writes outside a transaction
-    /// (auto-commit off), which buffer their events; the buffer is flushed
-    /// to the `CdcLog` on the next commit and discarded on rollback.
+    /// Sets the CDC log for this session (shared with the database): each
+    /// commit reports the changes of its change set to it when it is
+    /// published (see `CdcLog::record_commit`).
     #[cfg(feature = "cdc")]
     pub(crate) fn set_cdc_log(&mut self, cdc_log: Arc<crate::cdc::CdcLog>) {
-        // Wrap the WRITE store only with CdcGraphStore to intercept mutations.
-        // The read store (self.graph_store) is left unchanged for zero read overhead.
-        if let Some(ref write_store) = self.graph_store_mut {
-            let cdc_store = Arc::new(crate::database::cdc_store::CdcGraphStore::new(
-                Arc::clone(write_store),
-                Arc::clone(&cdc_log),
-            ));
-            self.cdc_pending_events = Some(cdc_store.pending_events());
-            self.graph_store_mut = Some(cdc_store as Arc<dyn grafeo_core::graph::GraphStoreMut>);
-        }
         self.cdc_log = cdc_log;
+        self.records_cdc = true;
     }
 
     /// Sets the metrics registry for this session (shared with the database).
@@ -526,7 +500,7 @@ impl Session {
             #[cfg(feature = "cdc")]
             cdc_log: Arc::new(crate::cdc::CdcLog::new()),
             #[cfg(feature = "cdc")]
-            cdc_pending_events: None,
+            records_cdc: false,
             current_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
             time_zone: parking_lot::Mutex::new(None),
@@ -644,13 +618,11 @@ impl Session {
         graph_storage_key(schema.as_deref(), graph.as_deref())
     }
 
-    /// Returns the graph store for the currently active graph.
-    ///
-    /// If `current_graph` is `None` or `"default"`, returns the session's
-    /// default `graph_store` (already WAL-wrapped for the default graph).
-    /// Otherwise looks up the named graph in the root store and wraps it
-    /// in a [`WalGraphStore`] so mutations are WAL-logged with the correct
-    /// graph context.
+    /// Returns the graph store for the currently active graph: the session's
+    /// default `graph_store` when no graph is selected, otherwise the named
+    /// graph's store from the root store. Writes go through a transaction's
+    /// recording (see [`recording_for`](Self::recording_for)), which logs
+    /// them and reports them to change data capture at commit.
     fn active_store(&self) -> Arc<dyn GraphStoreSearch> {
         self.store_for_key(self.active_graph_storage_key().as_deref())
     }
@@ -662,17 +634,7 @@ impl Session {
             None => Arc::clone(&self.graph_store),
             #[cfg(feature = "lpg")]
             Some(name) => match self.root_store().graph(name) {
-                Some(named_store) => {
-                    #[cfg(feature = "wal")]
-                    if let Some(wal) = self.wal() {
-                        return Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
-                            named_store,
-                            Arc::clone(wal),
-                            name.to_string(),
-                        )) as Arc<dyn GraphStoreSearch>;
-                    }
-                    named_store as Arc<dyn GraphStoreSearch>
-                }
+                Some(named_store) => named_store as Arc<dyn GraphStoreSearch>,
                 // Dropped meanwhile: no data, never the default graph's (the
                 // graph check before a statement reports the drop).
                 None => Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStoreSearch>,
@@ -684,8 +646,7 @@ impl Session {
 
     /// Returns the writable store for the active graph, if available.
     ///
-    /// Returns `None` for read-only databases. For named graphs, wraps
-    /// the store with WAL logging when durability is enabled.
+    /// Returns `None` for read-only databases.
     fn active_write_store(&self) -> Option<Arc<dyn GraphStoreMut>> {
         self.write_store_for_key(self.active_graph_storage_key().as_deref())
     }
@@ -696,41 +657,12 @@ impl Session {
         match key {
             None => self.graph_store_mut.as_ref().map(Arc::clone),
             #[cfg(feature = "lpg")]
-            Some(name) => match self.root_store().graph(name) {
-                Some(named_store) => {
-                    let store: Arc<dyn GraphStoreMut> = Arc::clone(&named_store) as _;
-
-                    #[cfg(feature = "wal")]
-                    let store: Arc<dyn GraphStoreMut> = match self.wal() {
-                        Some(wal) => {
-                            Arc::new(crate::database::wal_store::WalGraphStore::new_for_graph(
-                                named_store,
-                                Arc::clone(wal),
-                                name.to_string(),
-                            ))
-                        }
-                        None => store,
-                    };
-
-                    #[cfg(feature = "cdc")]
-                    let store: Arc<dyn GraphStoreMut> = match &self.cdc_pending_events {
-                        Some(pending) => Arc::new(
-                            crate::database::cdc_store::CdcGraphStore::wrap(
-                                store,
-                                Arc::clone(&self.cdc_log),
-                                Arc::clone(pending),
-                            )
-                            .for_graph(name.to_string()),
-                        ),
-                        None => store,
-                    };
-
-                    Some(store)
-                }
+            Some(name) => self
+                .root_store()
+                .graph(name)
                 // Dropped meanwhile: nothing to write to, never the default
                 // graph (see `store_for_key`).
-                None => None,
-            },
+                .map(|named_store| named_store as Arc<dyn GraphStoreMut>),
             #[cfg(not(feature = "lpg"))]
             Some(_) => self.graph_store_mut.as_ref().map(Arc::clone),
         }
@@ -3050,7 +2982,7 @@ impl Session {
         // blocking. Admin sessions in auto-commit mode skip the tree walk.
         let read_only = *self.read_only_tx.lock();
         let need_check = read_only || !self.identity.can_admin();
-        let is_mutation = need_check && logical_plan.root.has_mutations();
+        let is_mutation = need_check && self.statement_writes(&logical_plan.root);
         if is_mutation {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
@@ -3088,7 +3020,7 @@ impl Session {
         if optimized_plan.explain {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
             #[cfg(feature = "lpg")]
-            self.check_graph_access(optimized_plan.root.has_mutations())?;
+            self.check_graph_access(self.statement_writes(&optimized_plan.root))?;
             let mut plan = optimized_plan;
             annotate_pushdown_hints(
                 &mut plan.root,
@@ -3100,7 +3032,7 @@ impl Session {
 
         // PROFILE: execute with per-operator instrumentation
         if optimized_plan.profile {
-            let has_mutations = optimized_plan.root.has_mutations();
+            let has_mutations = self.statement_writes(&optimized_plan.root);
             return self.with_auto_commit(has_mutations, || {
                 let (viewing_epoch, transaction_id) = self.get_transaction_context();
                 let planner = self.create_planner_for_store(
@@ -3136,7 +3068,7 @@ impl Session {
             });
         }
 
-        let has_mutations = optimized_plan.root.has_mutations();
+        let has_mutations = self.statement_writes(&optimized_plan.root);
 
         let result = self.with_auto_commit(has_mutations, || {
             // Get transaction context for MVCC visibility
@@ -3290,7 +3222,7 @@ impl Session {
                 ));
             }
             gql::GqlTranslationResult::Plan(plan) => {
-                if plan.root.has_mutations() {
+                if self.statement_writes(&plan.root) {
                     return Err(grafeo_common::utils::error::Error::Query(
                         grafeo_common::utils::error::QueryError::new(
                             grafeo_common::utils::error::QueryErrorKind::Semantic,
@@ -3593,7 +3525,7 @@ impl Session {
         };
 
         // Check role-based permission for mutations
-        if optimized_plan.root.has_mutations() {
+        if self.statement_writes(&optimized_plan.root) {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
 
@@ -3604,7 +3536,7 @@ impl Session {
         if optimized_plan.explain {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
             #[cfg(feature = "lpg")]
-            self.check_graph_access(optimized_plan.root.has_mutations())?;
+            self.check_graph_access(self.statement_writes(&optimized_plan.root))?;
             let mut plan = optimized_plan;
             annotate_pushdown_hints(
                 &mut plan.root,
@@ -3616,7 +3548,7 @@ impl Session {
 
         // PROFILE
         if optimized_plan.profile {
-            let has_mutations = optimized_plan.root.has_mutations();
+            let has_mutations = self.statement_writes(&optimized_plan.root);
             return self.with_auto_commit(has_mutations, || {
                 let (viewing_epoch, transaction_id) = self.get_transaction_context();
                 let planner = self.create_planner_for_store(
@@ -3652,7 +3584,7 @@ impl Session {
             });
         }
 
-        let has_mutations = optimized_plan.root.has_mutations();
+        let has_mutations = self.statement_writes(&optimized_plan.root);
 
         let result = self.with_auto_commit(has_mutations, || {
             // Get transaction context for MVCC visibility
@@ -3730,7 +3662,7 @@ impl Session {
         let optimizer = Optimizer::from_graph_store(&*active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
-        let has_mutations = optimized_plan.root.has_mutations();
+        let has_mutations = self.statement_writes(&optimized_plan.root);
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
@@ -3797,7 +3729,7 @@ impl Session {
         let optimizer = Optimizer::from_graph_store(&*active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
-        let has_mutations = optimized_plan.root.has_mutations();
+        let has_mutations = self.statement_writes(&optimized_plan.root);
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
@@ -3871,7 +3803,7 @@ impl Session {
         let active = self.active_store();
         let optimizer = Optimizer::from_graph_store(&*active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
-        let has_mutations = optimized_plan.root.has_mutations();
+        let has_mutations = self.statement_writes(&optimized_plan.root);
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
@@ -3939,7 +3871,7 @@ impl Session {
         let optimizer = Optimizer::from_graph_store(&*active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
-        let has_mutations = optimized_plan.root.has_mutations();
+        let has_mutations = self.statement_writes(&optimized_plan.root);
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
@@ -4064,7 +3996,7 @@ impl Session {
         };
 
         let active = self.active_store();
-        let has_mutations = optimized_plan.root.has_mutations();
+        let has_mutations = self.statement_writes(&optimized_plan.root);
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
@@ -4376,8 +4308,8 @@ impl Session {
             }
         };
         let commit_epoch = commit.epoch();
-        // Until the WAL group is written, a panic leaves the commit's records
-        // and events in this session's buffers, from which a later flush of
+        // Until the WAL group is written, a panic leaves the commit's RDF
+        // records in this session's WAL buffer, from which a later flush of
         // records outside a transaction (or the session's drop) would write
         // a commit that never completed: the guard drops them on unwind.
         let unwritten = UnwrittenCommit::new(self);
@@ -4404,21 +4336,14 @@ impl Session {
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_stamped();
 
-        // Report the changes to CDC at the commit epoch: the events of writes
-        // outside a transaction buffered since the last commit, then those of
-        // the change set, folded into the creates.
+        // Report the changes to CDC at the commit epoch, in the commit's
+        // ordered step (no other commit runs until this one is complete), so
+        // the events' timestamps follow the commit epochs.
         #[cfg(feature = "cdc")]
-        if let Some(ref pending) = self.cdc_pending_events {
-            let mut events: Vec<crate::cdc::ChangeEvent> = pending.lock().drain(..).collect();
-            if let Some(changes) = &changes {
-                events
-                    .extend(changes.read(|set| crate::cdc::events_for_changes(set, &self.cdc_log)));
-            }
-            let events = crate::cdc::fold_into_creates(events);
-            self.cdc_log.record_batch(events.into_iter().map(|mut e| {
-                e.epoch = commit_epoch;
-                e
-            }));
+        if self.records_cdc
+            && let Some(changes) = &changes
+        {
+            changes.read(|set| self.cdc_log.record_commit(set, commit_epoch));
         }
 
         // Write the transaction's records to the WAL as one group, closed by
@@ -4586,9 +4511,10 @@ impl Session {
 
     /// Aborts a transaction that has already been taken out of
     /// `current_transaction`: undoes what it changed (`changes`), in every
-    /// graph it wrote, its RDF changes and buffered CDC events, marks it
-    /// aborted in the transaction manager and drops its buffered WAL
-    /// records.
+    /// graph it wrote, and its RDF changes, marks it aborted in the
+    /// transaction manager and drops its buffered RDF records. Nothing of it
+    /// reached the WAL or change data capture, which hear of a transaction
+    /// at its commit.
     ///
     /// Shared by rollback and by a commit that fails validation, so a failed
     /// commit leaves no active transaction holding its entities.
@@ -4621,17 +4547,13 @@ impl Session {
         #[cfg(feature = "triple-store")]
         self.rollback_rdf_transaction(transaction_id);
 
-        #[cfg(feature = "cdc")]
-        if let Some(ref pending) = self.cdc_pending_events {
-            pending.lock().clear();
-        }
-
         self.savepoints.lock().clear();
 
         let result = self.transaction_manager.abort(transaction_id);
 
-        // The transaction's WAL records were only buffered: drop them. Nothing
-        // of it reached the WAL, so there is nothing to undo on replay.
+        // The transaction's RDF records were only buffered: drop them.
+        // Nothing of it reached the WAL, so there is nothing to undo on
+        // replay.
         #[cfg(feature = "wal")]
         if let Some(wal) = self.wal() {
             wal.clear();
@@ -4694,8 +4616,8 @@ impl Session {
     }
 
     /// The state a savepoint named `name` restores: how far the open
-    /// transaction's changes reach, and the lengths of the CDC and WAL
-    /// buffers.
+    /// transaction's changes reach, and how many RDF records its WAL buffer
+    /// holds.
     #[cfg(feature = "lpg")]
     fn capture_savepoint(&self, name: &str) -> SavepointState {
         let mark = self.changes.lock().as_ref().map_or_else(
@@ -4705,11 +4627,6 @@ impl Session {
         SavepointState {
             name: name.to_string(),
             mark,
-            #[cfg(feature = "cdc")]
-            cdc_event_position: self
-                .cdc_pending_events
-                .as_ref()
-                .map_or(0, |p| p.lock().len()),
             #[cfg(feature = "wal")]
             wal_position: self.wal().map_or(0, |w| w.len()),
         }
@@ -4757,8 +4674,7 @@ impl Session {
     }
 
     /// Undoes what transaction `transaction_id` did after `sp_state` was
-    /// captured: its changes in every graph, its CDC events and its
-    /// buffered WAL records.
+    /// captured: its changes in every graph and its buffered RDF records.
     ///
     /// # Errors
     ///
@@ -4788,13 +4704,7 @@ impl Session {
             return Err(crate::transaction::kept_by_external_store(graph));
         }
 
-        // Truncate CDC event buffer to the savepoint position.
-        #[cfg(feature = "cdc")]
-        if let Some(ref pending) = self.cdc_pending_events {
-            pending.lock().truncate(sp_state.cdc_event_position);
-        }
-
-        // Drop the WAL records buffered after the savepoint.
+        // Drop the RDF records buffered after the savepoint.
         #[cfg(feature = "wal")]
         if let Some(wal) = self.wal() {
             wal.truncate(sp_state.wal_position);
@@ -4897,23 +4807,85 @@ impl Session {
         crate::transaction::PreparedCommit::new(self)
     }
 
-    /// Sets auto-commit mode.
+    /// Sets auto-commit mode, which no longer changes how writes run.
+    ///
+    /// With no transaction open, every write statement and direct write
+    /// runs as a transaction of its own in either mode (#536): it commits
+    /// when it succeeds, and one that fails leaves nothing. Open a
+    /// transaction with [`begin_transaction`](Self::begin_transaction) to
+    /// make several writes commit together.
+    #[deprecated(
+        since = "0.6.0",
+        note = "writes outside a transaction always commit on their own (#536); \
+                use `begin_transaction` to group writes. Removed in 0.7.0"
+    )]
     pub fn set_auto_commit(&mut self, auto_commit: bool) {
         self.auto_commit = auto_commit;
     }
 
-    /// Returns whether auto-commit is enabled.
+    /// Returns the auto-commit setting, which no longer changes how writes
+    /// run (see [`set_auto_commit`](Self::set_auto_commit)).
+    #[deprecated(
+        since = "0.6.0",
+        note = "writes outside a transaction always commit on their own (#536). \
+                Removed in 0.7.0"
+    )]
     #[must_use]
     pub fn auto_commit(&self) -> bool {
         self.auto_commit
     }
 
-    /// Returns `true` if auto-commit should wrap this execution.
-    ///
-    /// Auto-commit kicks in when: the session is in auto-commit mode,
-    /// no explicit transaction is active, and the query mutates data.
+    /// Returns `true` if a write runs in a transaction of its own: it writes
+    /// and no transaction is open, whatever the auto-commit setting (#536).
     fn needs_auto_commit(&self, has_mutations: bool) -> bool {
-        self.auto_commit && has_mutations && self.current_transaction.lock().is_none()
+        has_mutations && self.current_transaction.lock().is_none()
+    }
+
+    /// Whether the statement with the plan `root` writes: a write in the
+    /// plan, or a call of a stored procedure whose body writes, which the
+    /// plan does not show. Such a statement is checked and runs as a write
+    /// (in a transaction, see [`with_auto_commit`](Self::with_auto_commit)),
+    /// so its writes are recorded, logged and undone like any other.
+    fn statement_writes(&self, root: &crate::query::plan::LogicalOperator) -> bool {
+        root.has_mutations() || self.calls_writing_procedure(root, 0)
+    }
+
+    /// Whether `op` or an operator below it calls a stored procedure whose
+    /// body writes, directly or through the procedures it calls (up to a
+    /// depth that no procedure that runs reaches).
+    #[cfg(all(feature = "algos", feature = "gql"))]
+    fn calls_writing_procedure(&self, op: &crate::query::plan::LogicalOperator, depth: u8) -> bool {
+        use crate::query::plan::LogicalOperator;
+
+        /// Calls nested deeper than this are taken to write.
+        const MAX_DEPTH: u8 = 16;
+
+        if let LogicalOperator::CallProcedure(call) = op
+            // The planner looks a stored procedure up by its last name part.
+            && let Some(name) = call.name.last()
+            && let Some(procedure) = self.catalog.get_procedure(name)
+        {
+            if depth >= MAX_DEPTH {
+                return true;
+            }
+            // A body that does not translate fails when the call is planned.
+            return crate::query::translators::gql::translate(&procedure.body).is_ok_and(|body| {
+                body.root.has_mutations() || self.calls_writing_procedure(&body.root, depth + 1)
+            });
+        }
+        op.children()
+            .into_iter()
+            .any(|child| self.calls_writing_procedure(child, depth))
+    }
+
+    /// Without stored procedures, no call writes.
+    #[cfg(not(all(feature = "algos", feature = "gql")))]
+    fn calls_writing_procedure(
+        &self,
+        _op: &crate::query::plan::LogicalOperator,
+        _depth: u8,
+    ) -> bool {
+        false
     }
 
     /// Wraps `body` in an automatic begin/commit when [`needs_auto_commit`]
@@ -4946,23 +4918,20 @@ impl Session {
             let start = transaction
                 .filter(|_| has_mutations)
                 .map(|tx| (tx, self.capture_savepoint("statement")));
-            let result = match (body(), &start) {
+            match (body(), &start) {
                 (Err(error), Some((tx, start))) => Err(with_kept_writes(
                     error,
                     self.restore_savepoint(*tx, start, false),
                 )),
                 (result, _) => result,
-            };
-            #[cfg(feature = "wal")]
-            self.flush_wal_outside_transaction();
-            result
+            }
         }
     }
 
     /// Runs `body`, which may run several statements, as one write: in a
-    /// transaction of its own when none is open (whatever the auto-commit
-    /// setting), otherwise inside the open one. An error undoes everything
-    /// `body` wrote; an open transaction goes on.
+    /// transaction of its own when none is open, otherwise inside the open
+    /// one. An error undoes everything `body` wrote; an open transaction
+    /// goes on.
     #[cfg(all(feature = "lpg", feature = "gql"))]
     pub(crate) fn as_one_write<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
         if self.current_transaction.lock().is_some() {
@@ -6050,11 +6019,12 @@ fn with_kept_writes(
     }
 }
 
-/// The WAL records and CDC events of a commit that are not written yet (see
+/// The RDF records of a commit that are not written yet (see
 /// `commit_inner`). Dropped before [`written`](Self::written), which happens
-/// only when the commit unwinds, it drops them from the session's buffers:
-/// written later as records outside a transaction, they would make a commit
-/// that never completed durable.
+/// only when the commit unwinds, it drops them from the session's WAL
+/// buffer: written later as records outside a transaction, they would make a
+/// commit that never completed durable. (RDF changes join the change set
+/// with W3.6, and this goes with the buffer.)
 #[cfg(feature = "lpg")]
 struct UnwrittenCommit<'a> {
     session: &'a Session,
@@ -6086,11 +6056,7 @@ impl Drop for UnwrittenCommit<'_> {
         if let Some(ref wal) = self.session.wal {
             wal.clear();
         }
-        #[cfg(feature = "cdc")]
-        if let Some(ref pending) = self.session.cdc_pending_events {
-            pending.lock().clear();
-        }
-        #[cfg(not(any(feature = "wal", feature = "cdc")))]
+        #[cfg(not(feature = "wal"))]
         let _ = self.session;
     }
 }
@@ -6104,8 +6070,8 @@ impl Drop for Session {
             let _ = self.rollback_inner();
         }
 
-        // Records made outside a transaction that no statement boundary wrote
-        // yet.
+        // RDF records made outside a transaction that no statement boundary
+        // wrote yet.
         #[cfg(feature = "wal")]
         self.flush_wal_outside_transaction();
 
@@ -6949,6 +6915,7 @@ mod tests {
         }
 
         #[test]
+        #[expect(deprecated, reason = "the deprecated setting is what this tests")]
         fn test_auto_commit_setting() {
             let db = GrafeoDB::new_in_memory();
             let mut session = db.session();

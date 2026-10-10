@@ -2,16 +2,13 @@
 //! (#412).
 //!
 //! A transaction changes the store as it goes and records each change, with
-//! what it replaced: in the store's undo log ([`PropertyUndoEntry`]), or in
-//! its change set ([`Change`], once the engine records those). A delete
-//! hides the node or edge at once and takes its labels (and, without
-//! `temporal`, its values) out of the store, and without `temporal` values
-//! and labels change in place. The first entry an open transaction recorded
-//! for a value, a label or a deleted node or edge holds what was committed,
-//! so [`LpgStore::open_changes`] (from the undo logs) and
-//! [`OpenChangesByGraph::index`] (from the change sets) index those first
-//! entries by entity, and a checkpoint writes the committed state from them
-//! and the store.
+//! what it replaced, in its change set ([`Change`]). A delete hides the node
+//! or edge at once and takes its labels (and, without `temporal`, its
+//! values) out of the store, and without `temporal` values and labels change
+//! in place. The first entry an open transaction recorded for a value, a
+//! label or a deleted node or edge holds what was committed, so
+//! [`OpenChangesByGraph::index`] indexes those first entries by entity, and
+//! a checkpoint writes the committed state from them and the store.
 
 use std::borrow::Cow;
 #[cfg(not(feature = "temporal"))]
@@ -25,8 +22,6 @@ use grafeo_common::types::{EdgeId, NodeId};
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-
-use super::{LpgStore, PropertyUndoEntry};
 
 /// The labels of a node, as [`Node::labels`](crate::graph::lpg::Node) holds
 /// them.
@@ -46,13 +41,12 @@ pub(crate) struct DeletedEdge {
 }
 
 /// The committed state of what the transactions open in one store changed,
-/// from their undo logs: the nodes and edges they deleted, the labels of the
-/// nodes whose labels they changed and, without `temporal` (where values
+/// from their change sets: the nodes and edges they deleted, the labels of
+/// the nodes whose labels they changed and, without `temporal` (where values
 /// change in place), the values they replaced. What an open transaction
 /// created is left out: it was never committed.
 ///
-/// Built by [`LpgStore::open_changes`] or [`OpenChangesByGraph::index`]. It
-/// costs O(open changes) memory: an id and a value per value replaced (a
+/// Built by [`OpenChangesByGraph::index`]. It costs O(open changes) memory: an id and a value per value replaced (a
 /// [`Value`] clone shares its data), the labels and endpoints of each
 /// deleted node and edge, and one copy of each label and edge type name.
 #[derive(Debug, Default, Clone)]
@@ -157,200 +151,7 @@ impl OpenChanges {
     }
 }
 
-impl LpgStore {
-    /// The committed state of what the transactions open in this store
-    /// changed (see [`OpenChanges`]), so a checkpoint writes what was
-    /// committed while transactions are open. A named graph has its own
-    /// store and log.
-    ///
-    /// The caller holds the transactional writes and rollbacks of this store
-    /// (a checkpoint's write freeze) and commits from before this call until
-    /// it has read the store: a change made in between is in the store but
-    /// not here. Every entry of the log then belongs to a transaction that is
-    /// still open, and at most one of them changed any one node or edge (the
-    /// first writer wins). The log's read lock is held only while it is
-    /// indexed.
-    #[must_use]
-    pub(crate) fn open_changes(&self) -> OpenChanges {
-        let log = self.property_undo_log.read();
-        let mut index = Index::default();
-        for entries in log.values() {
-            for entry in entries {
-                index.add(entry);
-            }
-        }
-        index.finish()
-    }
-}
-
-/// Builds an [`OpenChanges`] from undo log entries, in log order.
-#[derive(Default)]
-struct Index<'l> {
-    changes: OpenChanges,
-    /// The nodes and edges an open transaction created: none of their
-    /// entries is committed state.
-    created_nodes: FxHashSet<NodeId>,
-    created_edges: FxHashSet<EdgeId>,
-    /// One shared copy of each label and edge type name met.
-    names: FxHashMap<&'l str, ArcStr>,
-}
-
-impl<'l> Index<'l> {
-    /// Adds an entry; within a transaction, entries come in the order they
-    /// were recorded, so a creation comes before every other entry of what
-    /// it created, and the first entry of a value or label is the committed
-    /// one.
-    fn add(&mut self, entry: &'l PropertyUndoEntry) {
-        match entry {
-            PropertyUndoEntry::NodeCreated { node_id } => {
-                self.created_nodes.insert(*node_id);
-            }
-            PropertyUndoEntry::EdgeCreated { edge_id } => {
-                self.created_edges.insert(*edge_id);
-            }
-            PropertyUndoEntry::NodeProperty {
-                node_id,
-                key,
-                old_value,
-            } => {
-                if self.created_nodes.contains(node_id) {
-                    return;
-                }
-                #[cfg(not(feature = "temporal"))]
-                push_value(
-                    &mut self.changes.node_values,
-                    key,
-                    *node_id,
-                    old_value.clone(),
-                );
-                #[cfg(feature = "temporal")]
-                let _ = (key, old_value);
-            }
-            PropertyUndoEntry::EdgeProperty {
-                edge_id,
-                key,
-                old_value,
-            } => {
-                if self.created_edges.contains(edge_id) {
-                    return;
-                }
-                #[cfg(not(feature = "temporal"))]
-                push_value(
-                    &mut self.changes.edge_values,
-                    key,
-                    *edge_id,
-                    old_value.clone(),
-                );
-                #[cfg(feature = "temporal")]
-                let _ = (key, old_value);
-            }
-            PropertyUndoEntry::LabelAdded { node_id, label } => {
-                self.label(*node_id, label, false);
-            }
-            PropertyUndoEntry::LabelRemoved { node_id, label } => {
-                self.label(*node_id, label, true);
-            }
-            PropertyUndoEntry::NodeDeleted {
-                node_id,
-                labels,
-                properties,
-            } => {
-                if self.created_nodes.contains(node_id) {
-                    return;
-                }
-                self.changes.deleted_nodes.push(*node_id);
-                let labels: Labels = labels.iter().map(|label| self.name(label)).collect();
-                self.changes
-                    .labels
-                    .entry(*node_id)
-                    .or_default()
-                    .deleted
-                    .get_or_insert(labels);
-                #[cfg(not(feature = "temporal"))]
-                for (key, value) in properties {
-                    push_value(
-                        &mut self.changes.node_values,
-                        key,
-                        *node_id,
-                        Some(value.clone()),
-                    );
-                }
-                #[cfg(feature = "temporal")]
-                let _ = properties;
-            }
-            PropertyUndoEntry::EdgeDeleted {
-                edge_id,
-                src,
-                dst,
-                edge_type,
-                properties,
-            } => {
-                if self.created_edges.contains(edge_id) {
-                    return;
-                }
-                let edge_type = self.name(edge_type);
-                self.changes.deleted_edges.push(DeletedEdge {
-                    id: *edge_id,
-                    src: *src,
-                    dst: *dst,
-                    edge_type,
-                });
-                #[cfg(not(feature = "temporal"))]
-                for (key, value) in properties {
-                    push_value(
-                        &mut self.changes.edge_values,
-                        key,
-                        *edge_id,
-                        Some(value.clone()),
-                    );
-                }
-                #[cfg(feature = "temporal")]
-                let _ = properties;
-            }
-        }
-    }
-
-    /// Notes the change of `label` on `node_id` (`removed`, or added) if it
-    /// is the label's first.
-    fn label(&mut self, node_id: NodeId, label: &'l str, removed: bool) {
-        if self.created_nodes.contains(&node_id) {
-            return;
-        }
-        let label = self.name(label);
-        let changes = self.changes.labels.entry(node_id).or_default();
-        if !changes.first.iter().any(|(known, _)| *known == label) {
-            changes.first.push((label, removed));
-        }
-    }
-
-    /// The shared copy of `name`.
-    fn name(&mut self, name: &'l str) -> ArcStr {
-        self.names
-            .entry(name)
-            .or_insert_with(|| ArcStr::from(name))
-            .clone()
-    }
-
-    /// Sorts what was indexed by id, keeping each value's first entry.
-    fn finish(self) -> OpenChanges {
-        self.changes.sorted()
-    }
-}
-
 impl OpenChanges {
-    /// The view with each deleted node's labels sorted: two views of the
-    /// same changes then compare equal whatever order the labels came in.
-    #[cfg(test)]
-    pub(crate) fn normalized(&self) -> Self {
-        let mut view = self.clone();
-        for changes in view.labels.values_mut() {
-            if let Some(labels) = &mut changes.deleted {
-                labels.sort();
-            }
-        }
-        view
-    }
-
     /// Sorts what was indexed in recorded order by id, keeping each value's
     /// first entry.
     fn sorted(mut self) -> Self {
@@ -375,10 +176,11 @@ impl OpenChanges {
 /// named graphs changed, indexed from their change sets: what a checkpoint
 /// writes for them while they stay open (see
 /// [`LpgStoreSection::with_open_changes`](crate::graph::lpg::LpgStoreSection::with_open_changes)
-/// and [`LpgStore::committed_copy_with`]). Per graph: the nodes and edges
-/// they deleted, as committed, the labels of the nodes whose labels they
-/// changed and, without `temporal` (where values change in place), the
-/// values they replaced; what they created is left out.
+/// and [`LpgStore::committed_copy_with`](crate::graph::lpg::LpgStore::committed_copy_with)).
+/// Per graph: the nodes and edges they deleted, as committed, the labels of
+/// the nodes whose labels they changed and, without `temporal` (where values
+/// change in place), the values they replaced; what they created is left
+/// out.
 ///
 /// The caller indexes the change sets of every open transaction while it
 /// holds their writes, rollbacks and commits (a checkpoint's write freeze
@@ -437,23 +239,22 @@ impl OpenChangesByGraph {
 /// still open changed.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum OpenChangeSource<'v> {
-    /// Each store's undo log ([`LpgStore::open_changes`]): the engine's
-    /// writes today.
-    UndoLogs,
+    /// No transaction is open: the stores hold the committed state.
+    None,
     /// The open transactions' change sets, indexed.
     ChangeSets(&'v OpenChangesByGraph),
 }
 
 impl<'v> OpenChangeSource<'v> {
-    /// What open transactions changed in `store`, the graph named `graph`
-    /// (`None` for the default graph).
-    pub(crate) fn changes_of(self, store: &LpgStore, graph: Option<&str>) -> Cow<'v, OpenChanges> {
+    /// What open transactions changed in the graph named `graph` (`None`
+    /// for the default graph).
+    pub(crate) fn changes_of(self, graph: Option<&str>) -> Cow<'v, OpenChanges> {
         match self {
-            Self::UndoLogs => Cow::Owned(store.open_changes()),
             Self::ChangeSets(view) => match view.of(graph) {
                 Some(changes) => Cow::Borrowed(changes),
                 None => Cow::Owned(OpenChanges::default()),
             },
+            Self::None => Cow::Owned(OpenChanges::default()),
         }
     }
 }
@@ -461,7 +262,7 @@ impl<'v> OpenChangeSource<'v> {
 /// Builds an [`OpenChanges`] from change-set entries: each transaction's in
 /// recorded order, so a create comes before every other entry of what it
 /// created, and the first entry of a value or label holds the committed
-/// state. Entry by entry what [`Index`] does with undo log entries.
+/// state.
 #[derive(Default)]
 struct EntryIndex {
     changes: OpenChanges,

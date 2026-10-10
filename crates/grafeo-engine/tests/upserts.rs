@@ -239,6 +239,10 @@ fn duplicate_keyed_edges_are_all_updated() {
 /// An endpoint key that more than one node has names no single endpoint:
 /// the row is skipped and reported, and writes no edge at all.
 #[test]
+#[expect(
+    deprecated,
+    reason = "the deprecated setting no longer changes how writes run, which this checks"
+)]
 fn a_row_with_an_ambiguous_endpoint_is_skipped() {
     let db = GrafeoDB::new_in_memory();
     db.create_property_index("id").unwrap();

@@ -146,7 +146,7 @@ pub struct LpgStoreSection {
     dirty: AtomicBool,
     caps: ChunkCaps,
     /// What the transactions open while the section is written changed,
-    /// from their change sets; `None` to read it from the stores' undo logs.
+    /// from their change sets; `None` while no transaction is open.
     open_changes: Option<OpenChangesByGraph>,
 }
 
@@ -170,9 +170,9 @@ impl LpgStoreSection {
     }
 
     /// Writes the committed state of what the open transactions changed
-    /// from `changes`, indexed from their change sets, instead of from the
-    /// stores' undo logs. The caller holds their writes, rollbacks and
-    /// commits until the section is written (see [`OpenChangesByGraph`]).
+    /// from `changes`, indexed from their change sets. The caller holds
+    /// their writes, rollbacks and commits until the section is written (see
+    /// [`OpenChangesByGraph`]).
     #[must_use]
     pub fn with_open_changes(mut self, changes: OpenChangesByGraph) -> Self {
         self.open_changes = Some(changes);
@@ -228,14 +228,14 @@ impl Section for LpgStoreSection {
 
     /// Streams the store's committed state as chunks of version 3: per graph
     /// the node and edge tables in row groups, then the metadata chunk. What
-    /// open transactions changed is written as it was committed, from their
-    /// undo logs or the change sets the section was given, so the caller
-    /// holds their writes and rollbacks and commits for the whole write (a
-    /// checkpoint's write freeze).
+    /// open transactions changed is written as it was committed, from the
+    /// change sets the section was given, so the caller holds their writes
+    /// and rollbacks and commits for the whole write (a checkpoint's write
+    /// freeze). Without them, the store is written as it is.
     fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
         let open = match &self.open_changes {
             Some(changes) => OpenChangeSource::ChangeSets(changes),
-            None => OpenChangeSource::UndoLogs,
+            None => OpenChangeSource::None,
         };
         write_lpg_chunks(&self.store, self.caps, open, sink)
     }

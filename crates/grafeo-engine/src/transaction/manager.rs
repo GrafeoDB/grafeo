@@ -707,9 +707,28 @@ impl TransactionManager {
     /// - An earlier commit did not complete (see [`TransactionManager`]): no
     ///   transaction commits until the database is reopened
     /// - The database is closed: `close()` of a persistent database started
+    /// - A store fails to stamp the transaction's changes: the commit does
+    ///   not complete, which poisons the manager
+    ///
+    /// The changes the transaction recorded (the writes of a
+    /// [`QueryProcessor`](crate::query::QueryProcessor) with its transaction
+    /// context) are stamped with the commit epoch, so they are visible once
+    /// it is published. They are not logged: a session's commit logs its
+    /// transaction.
     pub fn commit(&self, transaction_id: TransactionId) -> Result<EpochId> {
+        let changes = self.changes(transaction_id);
         let commit = self.start_commit(transaction_id)?;
         let epoch = commit.epoch();
+        if let Some(changes) = changes {
+            // A store that fails leaves the commit half stamped: the guard,
+            // dropped uncompleted, poisons the manager.
+            changes.stamp(epoch).map_err(|error| {
+                Error::Internal(format!(
+                    "the commit of transaction {transaction_id:?} could not stamp its changes: \
+                     {error}"
+                ))
+            })?;
+        }
         commit.complete();
         Ok(epoch)
     }
@@ -977,12 +996,44 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Aborts a transaction.
+    /// Aborts a transaction, undoing the changes it recorded that nobody
+    /// undid yet (the writes of a
+    /// [`QueryProcessor`](crate::query::QueryProcessor) with its transaction
+    /// context; a session and a direct call undo their own first).
     ///
     /// # Errors
     ///
-    /// Returns an error if the transaction is not active.
+    /// Returns an error if the transaction is not active, or when a store
+    /// fails to undo a change, which poisons the manager (the transaction is
+    /// aborted either way).
     pub fn abort(&self, transaction_id: TransactionId) -> Result<()> {
+        let undone = match self.changes(transaction_id) {
+            Some(changes) => {
+                // A store change in progress: a checkpoint never reads the
+                // store or the change set halfway through the undo.
+                let _writing = self.write_in_progress();
+                changes.undo_after(changes.start(), false)
+            }
+            None => Ok(None),
+        };
+        let undo_error = match undone {
+            Err(super::UndoFailure::Broken(error)) => {
+                let message = format!(
+                    "the abort of transaction {transaction_id:?} could not undo its changes: \
+                     {error}"
+                );
+                self.poison(&message);
+                Some(Error::Internal(message))
+            }
+            // A store without undo keeps its writes: the caller chose it.
+            Ok(_) | Err(super::UndoFailure::External(_)) => None,
+        };
+        self.abort_registered(transaction_id)?;
+        undo_error.map_or(Ok(()), Err)
+    }
+
+    /// Marks transaction `transaction_id` aborted.
+    fn abort_registered(&self, transaction_id: TransactionId) -> Result<()> {
         let mut txns = self.transactions.write();
 
         let info = txns.get_mut(&transaction_id).ok_or_else(|| {

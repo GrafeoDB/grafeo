@@ -6,12 +6,52 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{EpochId, Value};
+use grafeo_common::change::{ChangeSet, DataModel, DataOp, GraphRef};
+use grafeo_common::types::{EpochId, NodeId, TransactionId, Value};
+use grafeo_core::graph::apply::{Applied, ChangeTarget, Writer};
 use grafeo_core::graph::lpg::LpgStore;
 use grafeo_engine::{
     GrafeoDB,
     transaction::{TransactionManager, TransactionState},
 };
+
+/// Creates a node labeled `label` in `store` as `transaction`, which reads
+/// at `snapshot`, recording the create in `changes` as the engine's writer
+/// does: the change set is what the transaction's commit stamps and its
+/// rollback undoes.
+fn create_recorded(
+    store: &LpgStore,
+    changes: &mut ChangeSet,
+    (snapshot, transaction): (EpochId, TransactionId),
+    label: &str,
+) -> NodeId {
+    let id = NodeId::new(store.reserve_node_ids(1).unwrap().start);
+    let op = DataOp::CreateNode {
+        id,
+        labels: [label.into()].into_iter().collect(),
+        properties: Vec::new(),
+    };
+    let Applied::Changed { before, version } = store
+        .apply(
+            &op,
+            Writer::Transaction {
+                id: transaction,
+                snapshot,
+            },
+        )
+        .unwrap()
+    else {
+        panic!("a create changes the store");
+    };
+    let slot = changes
+        .slot(GraphRef {
+            model: DataModel::Lpg,
+            key: None,
+        })
+        .unwrap();
+    changes.push(slot, op, before, version).unwrap();
+    id
+}
 
 /// Helper to create a test store with some initial data.
 fn create_test_store() -> Arc<LpgStore> {
@@ -100,12 +140,16 @@ fn test_committed_writes_visible_to_new_transactions() {
     let store = Arc::new(LpgStore::new().unwrap());
     let tx_manager = Arc::new(TransactionManager::new());
 
-    // T1 creates and commits
+    // T1 creates and commits: its change set is stamped with the commit
+    // epoch.
     let tx1 = tx_manager.begin();
     let epoch1 = tx_manager.current_epoch();
-    let node_id = store.create_node_versioned(&["Committed"], epoch1, tx1);
+    let mut changes = ChangeSet::new();
+    let node_id = create_recorded(&store, &mut changes, (epoch1, tx1), "Committed");
     let commit_epoch = tx_manager.commit(tx1).unwrap();
-    store.finalize_version_epochs(tx1, commit_epoch);
+    store
+        .stamp(tx1, &mut changes.entries().iter(), commit_epoch)
+        .unwrap();
 
     // T2 starts after commit
     let tx2 = tx_manager.begin();
@@ -248,14 +292,13 @@ fn test_rollback_makes_writes_invisible() {
     // T1 creates a node
     let tx1 = tx_manager.begin();
     let epoch = tx_manager.current_epoch();
-    let node_id = store.create_node_versioned(&["Rollback"], epoch, tx1);
+    let mut changes = ChangeSet::new();
+    let node_id = create_recorded(&store, &mut changes, (epoch, tx1), "Rollback");
     tx_manager.record_write(tx1, node_id).unwrap();
 
-    // Abort T1
+    // Abort T1, undoing its change set
     tx_manager.abort(tx1).unwrap();
-
-    // Discard uncommitted versions for this transaction
-    store.discard_uncommitted_versions(tx1);
+    store.undo(tx1, &mut changes.entries().iter()).unwrap();
 
     // New transaction should not see the aborted node
     let tx2 = tx_manager.begin();
@@ -525,6 +568,7 @@ fn test_multiple_sessions_independent() {
 }
 
 #[test]
+#[expect(deprecated, reason = "the deprecated setting is what this tests")]
 fn test_session_auto_commit_mode() {
     // Verify auto-commit mode works correctly
     let db = GrafeoDB::new_in_memory();

@@ -602,9 +602,8 @@ pub trait GraphStoreMut: GraphStoreSearch {
     ///
     /// # Errors
     ///
-    /// Returns an error, and deletes nothing, when the node's properties
-    /// (which a rollback restores) cannot be read: a spilled value whose file
-    /// cannot be read.
+    /// Returns an error, and deletes nothing, when the store cannot read the
+    /// node it would delete (a record or value it cannot read).
     fn delete_node_versioned(
         &self,
         id: NodeId,
@@ -634,8 +633,8 @@ pub trait GraphStoreMut: GraphStoreSearch {
     /// Sets a property on an edge.
     fn set_edge_property(&self, id: EdgeId, key: &str, value: Value);
 
-    /// Sets a node property within a transaction, recording the previous value
-    /// so it can be restored on rollback.
+    /// Sets a node property within a transaction context: a store that keeps
+    /// versions writes the value as the transaction's.
     ///
     /// Default delegates to [`set_node_property`](Self::set_node_property).
     ///
@@ -655,8 +654,7 @@ pub trait GraphStoreMut: GraphStoreSearch {
         Ok(())
     }
 
-    /// Sets an edge property within a transaction, recording the previous value
-    /// so it can be restored on rollback.
+    /// Sets an edge property within a transaction context.
     ///
     /// Default delegates to [`set_edge_property`](Self::set_edge_property).
     fn set_edge_property_versioned(
@@ -686,9 +684,8 @@ pub trait GraphStoreMut: GraphStoreSearch {
     /// as [`remove_node_property`](Self::remove_node_property) does.
     fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>>;
 
-    /// Removes a node property within a transaction, recording the previous value
-    /// so it can be restored on rollback. Returns the previous value if it
-    /// existed.
+    /// Removes a node property within a transaction context. Returns the
+    /// previous value if it existed.
     ///
     /// Default delegates to [`remove_node_property`](Self::remove_node_property).
     ///
@@ -705,8 +702,7 @@ pub trait GraphStoreMut: GraphStoreSearch {
         self.remove_node_property(id, key)
     }
 
-    /// Removes an edge property within a transaction, recording the previous value
-    /// so it can be restored on rollback.
+    /// Removes an edge property within a transaction context.
     ///
     /// Default delegates to [`remove_edge_property`](Self::remove_edge_property).
     ///
@@ -731,7 +727,7 @@ pub trait GraphStoreMut: GraphStoreSearch {
     /// Removes a label from a node. Returns `true` if the label existed.
     fn remove_label(&self, node_id: NodeId, label: &str) -> bool;
 
-    /// Adds a label within a transaction, recording the change for rollback.
+    /// Adds a label within a transaction context.
     ///
     /// Default delegates to [`add_label`](Self::add_label).
     fn add_label_versioned(
@@ -743,7 +739,7 @@ pub trait GraphStoreMut: GraphStoreSearch {
         self.add_label(node_id, label)
     }
 
-    /// Removes a label within a transaction, recording the change for rollback.
+    /// Removes a label within a transaction context.
     ///
     /// Default delegates to [`remove_label`](Self::remove_label).
     fn remove_label_versioned(

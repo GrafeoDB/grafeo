@@ -348,32 +348,6 @@ impl LpgStore {
         }
     }
 
-    /// Re-inserts a node whose delete was rolled back into the vector indexes
-    /// of its labels (keys are `label:property`), reading vectors from the
-    /// store's properties.
-    #[cfg(feature = "vector-index")]
-    pub(super) fn reinsert_into_vector_indexes(&self, node_id: NodeId, labels: &[String]) {
-        let indexes: Vec<StoredVectorIndex> = self
-            .vector_indexes
-            .read()
-            .iter()
-            .filter(|(key, stored)| {
-                stored
-                    .label_in(key)
-                    .is_some_and(|label| labels.iter().any(|candidate| candidate == label))
-            })
-            .map(|(_, stored)| stored.clone())
-            .collect();
-        for stored in indexes {
-            let accessor = self.index_vectors(stored.property);
-            if let Some(vector) =
-                crate::index::vector::VectorAccessor::get_vector(&accessor, node_id)
-            {
-                Self::insert_into_vector_index(&stored.index, node_id, &vector, &accessor);
-            }
-        }
-    }
-
     /// Removes a node from every property index. Called when the node is
     /// deleted, before its properties are dropped: the index is keyed by value.
     /// A rollback of the delete re-adds the entries through `set_node_property`.

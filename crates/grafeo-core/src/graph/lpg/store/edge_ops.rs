@@ -93,10 +93,6 @@ impl LpgStore {
 
         self.live_edge_count.fetch_add(1, Ordering::Relaxed);
         self.increment_edge_type_count(type_id);
-        self.record_change(
-            transaction_id,
-            super::PropertyUndoEntry::EdgeCreated { edge_id: id },
-        );
         id
     }
 
@@ -156,10 +152,6 @@ impl LpgStore {
 
         self.live_edge_count.fetch_add(1, Ordering::Relaxed);
         self.increment_edge_type_count(type_id);
-        self.record_change(
-            transaction_id,
-            super::PropertyUndoEntry::EdgeCreated { edge_id: id },
-        );
         id
     }
 
@@ -484,7 +476,8 @@ impl LpgStore {
         }
     }
 
-    /// Deletes an edge within a transaction, capturing undo information for rollback.
+    /// Deletes an edge as `transaction_id`: marks its version deleted by the
+    /// transaction. Nothing records what it deleted.
     #[cfg(not(feature = "tiered-storage"))]
     pub(crate) fn delete_edge_transactional(
         &self,
@@ -510,19 +503,6 @@ impl LpgStore {
             chain.mark_deleted(epoch, transaction_id);
             drop(edges);
 
-            // Get edge type name for undo log
-            let edge_type_name = {
-                let edge_types = self.edge_types.read();
-                edge_types
-                    .get_name(type_id)
-                    .map(|s| s.to_string())
-                    .unwrap_or_default()
-            };
-
-            // Capture properties for undo log
-            let properties: Vec<(PropertyKey, Value)> =
-                self.edge_properties.get_all(id).into_iter().collect();
-
             // Mark as deleted in adjacency (soft delete)
             self.forward_adj.mark_deleted(src, id);
             if let Some(ref backward) = self.backward_adj {
@@ -540,27 +520,14 @@ impl LpgStore {
             self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
             self.decrement_edge_type_count(type_id);
 
-            // Record undo entry for rollback
-            self.property_undo_log
-                .write()
-                .entry(transaction_id)
-                .or_default()
-                .push(super::PropertyUndoEntry::EdgeDeleted {
-                    edge_id: id,
-                    src,
-                    dst,
-                    edge_type: edge_type_name,
-                    properties,
-                });
-
             true
         } else {
             false
         }
     }
 
-    /// Deletes an edge within a transaction, capturing undo information for rollback.
-    /// (Tiered storage version)
+    /// Deletes an edge as `transaction_id` (tiered storage version), as the
+    /// other build does; nothing records what it deleted.
     #[cfg(feature = "tiered-storage")]
     pub(crate) fn delete_edge_transactional(
         &self,
@@ -590,19 +557,6 @@ impl LpgStore {
             index.mark_deleted(epoch, transaction_id);
             drop(versions);
 
-            // Get edge type name for undo log
-            let edge_type_name = {
-                let edge_types = self.edge_types.read();
-                edge_types
-                    .get_name(type_id)
-                    .map(|s| s.to_string())
-                    .unwrap_or_default()
-            };
-
-            // Capture properties for undo log
-            let properties: Vec<(PropertyKey, Value)> =
-                self.edge_properties.get_all(id).into_iter().collect();
-
             // Mark as deleted in adjacency
             self.forward_adj.mark_deleted(src, id);
             if let Some(ref backward) = self.backward_adj {
@@ -619,19 +573,6 @@ impl LpgStore {
 
             self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
             self.decrement_edge_type_count(type_id);
-
-            // Record undo entry for rollback
-            self.property_undo_log
-                .write()
-                .entry(transaction_id)
-                .or_default()
-                .push(super::PropertyUndoEntry::EdgeDeleted {
-                    edge_id: id,
-                    src,
-                    dst,
-                    edge_type: edge_type_name,
-                    properties,
-                });
 
             true
         } else {

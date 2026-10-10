@@ -1,7 +1,33 @@
 use super::*;
 use crate::graph::Direction;
+use crate::graph::apply::ChangeTarget;
 use crate::graph::lpg::property::CompareOp;
+use crate::graph::lpg::store::testing::{Recorder, transaction};
+use grafeo_common::change::{ChangeSet, DataModel, GraphRef};
 use grafeo_common::types::TransactionId;
+
+/// A writer of transaction `id` on the default graph of `store`, recording
+/// into `set`, as the engine's writer does.
+fn recorder<'s>(store: &'s LpgStore, set: &mut ChangeSet, id: u64) -> Recorder<'s> {
+    let slot = set
+        .slot(GraphRef {
+            model: DataModel::Lpg,
+            key: None,
+        })
+        .unwrap();
+    Recorder {
+        store,
+        slot,
+        writer: transaction(id, store.current_epoch()),
+    }
+}
+
+/// Rolls transaction `id` back: undoes every entry of `set`, last to first.
+fn undo_all(store: &LpgStore, id: u64, set: &ChangeSet) {
+    store
+        .undo(TransactionId::new(id), &mut set.entries().iter())
+        .unwrap();
+}
 
 /// Deleting a node while its embedding column is spilled leaves no value: not
 /// while spilled, not after the reload, and not in the column's ids (#594).
@@ -63,23 +89,22 @@ fn a_rollback_while_spilled_restores_the_spilled_values() {
     let snapshot = store.node_property_column_entries(&key).unwrap();
     assert!(store.spill_node_property_column(&key, MemoryBacking::of(&snapshot), &snapshot));
 
-    let transaction_id = TransactionId::new(19);
-    let epoch = store.current_epoch();
-    store
-        .set_node_property_versioned(alix, "embedding", v(3.19), transaction_id)
-        .unwrap();
-    assert_eq!(
-        store
-            .remove_node_property_versioned(gus, "embedding", transaction_id)
-            .unwrap(),
-        Some(v(19.0))
-    );
+    let mut set = ChangeSet::new();
+    let writes = recorder(&store, &mut set, 19);
+    writes.set_node(&mut set, alix, "embedding", v(3.19));
+    writes.remove_node(&mut set, gus, "embedding");
+    writes.delete_node(&mut set, vincent);
     assert!(
-        store
-            .delete_node_transactional(vincent, epoch, transaction_id)
-            .unwrap()
+        matches!(
+            &set.entries()[1],
+            grafeo_common::change::Change::Data {
+                before: grafeo_common::change::Before::Value(Some(value)),
+                ..
+            } if *value == v(19.0)
+        ),
+        "the removal read the spilled value"
     );
-    store.rollback_transaction_properties(transaction_id);
+    undo_all(&store, 19, &set);
 
     for (id, x) in [(alix, 3.0), (gus, 19.0), (vincent, 88.0)] {
         assert_eq!(
@@ -99,8 +124,8 @@ fn a_rollback_while_spilled_restores_the_spilled_values() {
 }
 
 /// A transactional write whose old value cannot be read (a spilled value
-/// whose file cannot be read) is refused before it changes anything: the undo
-/// log would miss the value and a rollback would lose it (#594).
+/// whose file cannot be read) is refused before it changes anything: its
+/// change set would miss the value and a rollback would lose it (#594).
 #[cfg(not(feature = "temporal"))]
 #[test]
 fn a_write_whose_old_value_cannot_be_read_is_refused() {
@@ -117,28 +142,27 @@ fn a_write_whose_old_value_cannot_be_read_is_refused() {
     assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
 
     backing.fail_reads(true);
-    let transaction_id = TransactionId::new(19);
-    let epoch = store.current_epoch();
-    assert!(
-        store
-            .set_node_property_versioned(alix, "embedding", v(3.19), transaction_id)
-            .is_err()
-    );
-    assert!(
-        store
-            .remove_node_property_versioned(gus, "embedding", transaction_id)
-            .is_err()
-    );
-    assert!(
-        store
-            .delete_node_transactional(vincent, epoch, transaction_id)
-            .is_err()
-    );
+    let mut set = ChangeSet::new();
+    let writes = recorder(&store, &mut set, 19);
+    for op in [
+        grafeo_common::change::DataOp::SetNodeProperty {
+            id: alix,
+            key: key.clone(),
+            value: v(3.19),
+        },
+        grafeo_common::change::DataOp::RemoveNodeProperty {
+            id: gus,
+            key: key.clone(),
+        },
+        grafeo_common::change::DataOp::DeleteNode { id: vincent },
+    ] {
+        assert!(writes.write(&mut set, op.clone()).is_err(), "{op:?}");
+    }
+    assert!(set.is_empty(), "a refused write records nothing");
     assert!(
         store.get_node(vincent).is_some(),
         "the node was not deleted"
     );
-    store.rollback_transaction_properties(transaction_id);
 
     backing.fail_reads(false);
     for (id, x) in [(alix, 3.0), (gus, 19.0), (vincent, 88.0)] {
@@ -204,16 +228,14 @@ fn a_rollback_takes_back_a_set_value_it_cannot_read() {
     let v = |x: f32| Value::Vector(vec![x, 3.0].into());
     let alix = store.create_node_with_props(&["Item"], [("embedding", v(3.0))]);
     let gus = store.create_node(&["Item"]);
-    let transaction_id = TransactionId::new(19);
-    store
-        .set_node_property_versioned(gus, "embedding", v(88.0), transaction_id)
-        .unwrap();
+    let mut set = ChangeSet::new();
+    recorder(&store, &mut set, 19).set_node(&mut set, gus, "embedding", v(88.0));
     let snapshot = store.node_property_column_entries(&key).unwrap();
     let backing = MemoryBacking::of(&snapshot);
     assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
 
     backing.fail_reads(true);
-    store.rollback_transaction_properties(transaction_id);
+    undo_all(&store, 19, &set);
     assert_eq!(store.node_property_column_ids(&key), vec![alix]);
     backing.fail_reads(false);
     assert_eq!(store.get_node_property(gus, &key), None);
@@ -1497,33 +1519,32 @@ fn test_node_with_props_versioned() {
     );
 }
 
+/// A rolled back create leaves nothing: the node its transaction saw is
+/// gone, also for that transaction.
 #[test]
-fn test_discard_uncommitted_versions() {
+fn an_undone_create_leaves_nothing() {
     let store = LpgStore::new().unwrap();
-
     let epoch = store.new_epoch();
     let transaction_id = TransactionId::new(42);
 
-    // Create node with specific tx (uses PENDING epoch, invisible to get_node)
-    let node_id = store.create_node_versioned(&["Person"], epoch, transaction_id);
-    // Verify the node exists via versioned lookup (own tx can see its PENDING writes)
+    let mut set = ChangeSet::new();
+    let node_id = recorder(&store, &mut set, 42).create_node(&mut set, &["Person"], &[]);
     assert!(
         store
             .get_node_versioned(node_id, epoch, transaction_id)
             .is_some(),
         "Node should be visible to its own transaction"
     );
+    assert!(store.get_node(node_id).is_none(), "and to nobody else");
 
-    // Discard uncommitted versions for this tx
-    store.discard_uncommitted_versions(transaction_id);
-
-    // Node should be gone (version chain was removed)
+    undo_all(&store, 42, &set);
     assert!(
         store
             .get_node_versioned(node_id, epoch, transaction_id)
             .is_none(),
-        "Node should be gone after discard"
+        "Node should be gone after the rollback"
     );
+    assert_eq!(store.node_count(), 0);
 }
 
 /// Labels a transaction adds to or removes from a node it created itself
@@ -1690,14 +1711,12 @@ fn test_property_index_drops_deleted_nodes() {
 
 #[test]
 fn test_property_index_restored_when_delete_rolls_back() {
-    use crate::graph::GraphStoreMut;
-
     let store = LpgStore::new().unwrap();
     store.create_property_index("id");
     let node = store.create_node_with_props(&["Graph"], [("id", Value::from("a"))]);
 
-    let tx = TransactionId::new(9);
-    assert!(GraphStoreMut::delete_node_versioned(&store, node, store.current_epoch(), tx).unwrap());
+    let mut set = ChangeSet::new();
+    recorder(&store, &mut set, 9).delete_node(&mut set, node);
     assert!(
         store
             .find_nodes_by_property("id", &Value::from("a"))
@@ -1705,7 +1724,7 @@ fn test_property_index_restored_when_delete_rolls_back() {
         "expected no nodes"
     );
 
-    store.rollback_transaction_properties(tx);
+    undo_all(&store, 9, &set);
     assert_eq!(
         store.find_nodes_by_property("id", &Value::from("a")),
         vec![node]
@@ -1714,21 +1733,19 @@ fn test_property_index_restored_when_delete_rolls_back() {
 
 #[test]
 fn test_property_index_restored_when_set_rolls_back() {
-    use crate::graph::GraphStoreMut;
-
     let store = LpgStore::new().unwrap();
     store.create_property_index("id");
     let node = store.create_node_with_props(&["Graph"], [("id", Value::from("a"))]);
     store.new_epoch();
 
-    let tx = TransactionId::new(9);
-    GraphStoreMut::set_node_property_versioned(&store, node, "id", Value::from("b"), tx).unwrap();
+    let mut set = ChangeSet::new();
+    recorder(&store, &mut set, 9).set_node(&mut set, node, "id", Value::from("b"));
     assert_eq!(
         store.find_nodes_by_property("id", &Value::from("b")),
         vec![node]
     );
 
-    store.rollback_transaction_properties(tx);
+    undo_all(&store, 9, &set);
     assert_eq!(
         store.find_nodes_by_property("id", &Value::from("a")),
         vec![node]
@@ -2482,20 +2499,20 @@ fn a_search_skips_a_node_without_a_vector() {
 mod rollback_lock_order {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::*;
 
-    /// How long `undo` gets to reach the label locks once it runs: it needs
-    /// microseconds.
+    /// How long `undo` gets to reach the label locks once it runs (it needs
+    /// microseconds), and how long this thread waits for the node labels.
     const WINDOW: Duration = Duration::from_millis(250);
 
     /// Runs `undo` on another thread while this one holds the label index,
-    /// as a delete does before it takes the node labels, and returns whether
-    /// `undo` took the node labels meanwhile: it would then wait for the
-    /// index while holding them, and the delete for them while holding the
-    /// index.
-    fn takes_the_node_labels_before_the_index(
+    /// then takes the node labels, as a delete does (the index, then the
+    /// labels), and returns whether it could not: `undo` then holds the
+    /// node labels while it waits for the index, and the two would wait for
+    /// each other for good.
+    fn holds_the_node_labels_while_waiting_for_the_index(
         store: &Arc<LpgStore>,
         undo: impl FnOnce(&LpgStore) + Send + 'static,
     ) -> bool {
@@ -2512,30 +2529,27 @@ mod rollback_lock_order {
         while !started.load(Ordering::Acquire) {
             std::thread::yield_now();
         }
-        let until = Instant::now() + WINDOW;
-        let mut out_of_order = false;
-        while !out_of_order && Instant::now() < until {
-            out_of_order = store.node_labels.is_locked();
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        // Gives `undo` the time to reach the label locks.
+        std::thread::sleep(WINDOW);
+        let deadlocked = store.node_labels.try_write_for(WINDOW).is_none();
         drop(index);
         undoing.join().unwrap();
-        out_of_order
+        deadlocked
     }
 
     #[test]
-    fn a_rollback_takes_the_label_index_before_the_node_labels() {
+    fn a_rollback_never_holds_the_node_labels_while_it_waits_for_the_label_index() {
         let store = Arc::new(LpgStore::new().unwrap());
         let alix = store.create_node(&["Person"]);
-        let transaction = TransactionId::new(19);
-        assert!(store.add_label_versioned(alix, "Employee", transaction));
+        let mut set = ChangeSet::new();
+        recorder(&store, &mut set, 19).add_label(&mut set, alix, "Employee");
 
-        let out_of_order = takes_the_node_labels_before_the_index(&store, move |store| {
-            store.rollback_transaction_properties(transaction);
+        let deadlocked = holds_the_node_labels_while_waiting_for_the_index(&store, move |store| {
+            undo_all(store, 19, &set);
         });
         assert!(
-            !out_of_order,
-            "the rollback took the node labels while waiting for the label index"
+            !deadlocked,
+            "the rollback held the node labels while waiting for the label index"
         );
         assert!(
             !store.get_node(alix).unwrap().has_label("Employee"),
@@ -2546,20 +2560,24 @@ mod rollback_lock_order {
     }
 
     #[test]
-    fn a_rollback_to_a_savepoint_takes_the_label_index_before_the_node_labels() {
+    fn a_rollback_to_a_savepoint_never_holds_the_node_labels_while_it_waits_for_the_label_index() {
         let store = Arc::new(LpgStore::new().unwrap());
         let gus = store.create_node(&["Person"]);
-        let transaction = TransactionId::new(88);
-        assert!(store.add_label_versioned(gus, "Employee", transaction));
-        let savepoint = store.property_undo_log_position(transaction);
-        assert!(store.add_label_versioned(gus, "Manager", transaction));
+        let mut set = ChangeSet::new();
+        let writes = recorder(&store, &mut set, 88);
+        writes.add_label(&mut set, gus, "Employee");
+        let savepoint = set.mark();
+        writes.add_label(&mut set, gus, "Manager");
+        let tail = set.split_off(savepoint);
 
-        let out_of_order = takes_the_node_labels_before_the_index(&store, move |store| {
-            store.rollback_transaction_properties_to(transaction, savepoint);
+        let deadlocked = holds_the_node_labels_while_waiting_for_the_index(&store, move |store| {
+            store
+                .undo(TransactionId::new(88), &mut tail.iter())
+                .unwrap();
         });
         assert!(
-            !out_of_order,
-            "the rollback to the savepoint took the node labels while waiting for the label index"
+            !deadlocked,
+            "the rollback to the savepoint held the node labels while waiting for the label index"
         );
         let node = store.get_node(gus).unwrap();
         assert!(

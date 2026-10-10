@@ -267,13 +267,9 @@ pub struct Planner {
     profile_entries: std::cell::RefCell<Vec<crate::query::profile::ProfileEntry>>,
     /// Where the plan's writers write and record their writes: the active
     /// graph's store and the transaction's changes in it. `None` outside a
-    /// transaction, where writers write through the write store.
+    /// transaction, where writers write through the write store; a plan in
+    /// a transaction without one cannot write (see `graph_writer`).
     recording: Option<grafeo_core::execution::operators::Recording>,
-    /// The claims of a plan in a transaction whose writers write without a
-    /// recording, through the write store's versioned methods (a
-    /// `QueryProcessor` with a transaction context): the default graph's,
-    /// through the transaction manager.
-    claims: Option<Arc<dyn grafeo_core::execution::operators::WriteClaims>>,
     /// Counts the writes of the plan's writers.
     write_counter: Arc<grafeo_core::execution::operators::WriteCounter>,
     /// Session context for introspection functions (info, schema, current_schema, etc.).
@@ -338,7 +334,6 @@ impl Planner {
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             recording: None,
-            claims: None,
             write_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
@@ -369,15 +364,6 @@ impl Planner {
         transaction_id: Option<TransactionId>,
         viewing_epoch: EpochId,
     ) -> Self {
-        // A plan in a transaction claims what it writes, in the default
-        // graph, unless the caller gives it a recording.
-        let claims = transaction_id.map(|transaction| {
-            Arc::new(crate::transaction::TransactionClaims::new(
-                Arc::clone(&transaction_manager),
-                transaction,
-                None,
-            )) as Arc<dyn grafeo_core::execution::operators::WriteClaims>
-        });
         Self {
             store,
             write_store,
@@ -405,7 +391,6 @@ impl Planner {
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             recording: None,
-            claims,
             write_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
@@ -448,12 +433,26 @@ impl Planner {
     /// A writer for this statement's mutations: the writable store with the
     /// transaction context, the transaction's recording and the constraint
     /// validator.
+    ///
+    /// # Errors
+    ///
+    /// Fails without a writable store, and in a transaction without its
+    /// recording (the transaction is no longer open): a write there would
+    /// be neither claimed nor recorded, so no commit could publish it and no
+    /// rollback undo it.
     fn graph_writer(&self) -> Result<grafeo_core::execution::operators::GraphWriter> {
         let mut writer = grafeo_core::execution::operators::GraphWriter::new(self.write_store()?)
             .with_transaction_context(self.viewing_epoch, self.transaction_id);
-        match (&self.recording, &self.claims) {
+        match (&self.recording, self.transaction_id) {
             (Some(recording), _) => writer = writer.with_recording(recording.clone()),
-            (None, Some(claims)) => writer = writer.with_claims(Arc::clone(claims)),
+            (None, Some(transaction)) => {
+                return Err(Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::InvalidState(format!(
+                        "transaction {} is not open: it cannot write",
+                        transaction.as_u64()
+                    )),
+                ));
+            }
             (None, None) => {}
         }
         if let Some(ref validator) = self.validator {

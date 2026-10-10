@@ -3169,7 +3169,7 @@ fn test_viewing_epoch_limits_visibility() {
 }
 
 // ---------------------------------------------------------------------------
-// Coverage: wal_store.rs conditional logging
+// Coverage: writes that change nothing
 // ---------------------------------------------------------------------------
 
 #[test]

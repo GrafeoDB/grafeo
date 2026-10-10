@@ -10,6 +10,7 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Added
 
+- **Rust (`grafeo-engine`): `QueryProcessor::with_graph`** names the graph a processor's store holds; a processor in a transaction records its writes in that transaction, which commits or rolls them back.
 - **Graph algorithms on a projection or a named graph** ([#566](https://github.com/GrafeoDB/grafeo/issues/566)): `db.algorithms` methods take `projection=`, algorithm procedures a `projection` argument (`CALL grafeo.pagerank({projection: 'people'})`), and `db.graph(name).algorithms` runs on that graph. Rust: `GrafeoDB::selected_graph_store` and `GraphHandle::graph_store`.
 - **Undirected PageRank** ([#566](https://github.com/GrafeoDB/grafeo/issues/566)): `directed=False` in `db.algorithms.pagerank()` and `as_solvor().pagerank()`, or `CALL grafeo.pagerank({directed: false})`, counts each pair of connected nodes once in both directions, whatever the number or types of edges between them; self-loops are ignored. The default stays directed.
 - **Algorithm results keyed by a node property** ([#566](https://github.com/GrafeoDB/grafeo/issues/566)): the per-node methods of `db.algorithms` take `key=` to key their results by a node property, such as an id from outside the database. PageRank, Louvain and label propagation then also run in key order, so their results do not depend on the load order. A missing, duplicate or unhashable key raises an error before the run (see [Determinism](https://grafeo.dev/algorithms/#determinism)).
@@ -24,6 +25,8 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Changed
 
+- **Change data capture timestamps a commit's events when the commit is published**: ordered by timestamp, events follow commit order, also across concurrent sessions and direct calls.
+- **Breaking (Rust, reachable through `GrafeoDB::store()`): `LpgStore` keeps no per-transaction undo log**: `PropertyUndoEntry`, `finalize_version_epochs`, `discard_uncommitted_versions`, `rollback_transaction_properties`, `rollback_transaction_properties_to` and `property_undo_log_position` are removed; a transaction's changes live in its change set.
 - **Direct writes made while a transaction is open are transactions of their own**: `create_node`, `set_node_property`, `create_edge`, graph handles and every batch call run beside the open transaction and fail with a write conflict (`GRAFEO-T001`) on a node or edge it changed first; a call that fails or panics leaves nothing. With no transaction open, a single call commits at once, as before.
 - **The planner's statistics count committed data**: a transaction's own creates and deletes count once it commits.
 - **On a database built with `with_store`, a rollback no longer reports success**: it fails with an error naming the graph whose store keeps the transaction's writes (that store has no undo); the other graphs are rolled back. A rollback to a savepoint with such writes after it is refused and changes nothing.
@@ -63,6 +66,8 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Fixed
 
+- **With auto-commit off and no transaction open, a failed statement kept its partial writes** ([#536](https://github.com/GrafeoDB/grafeo/issues/536)): each write statement and each session direct or batch write now runs as a transaction of its own, so a failure leaves nothing; it conflicts (`GRAFEO-T001`) with an open transaction that changed the same node or edge first, and its change events are reported at once.
+- **A `CALL` of a stored procedure whose body writes ran outside any transaction**: a failed call kept its earlier writes, a read-only transaction, role or database could write through it, and `execute_streaming` ran it. It now commits as a transaction, leaves nothing when it fails, and is refused where writes are.
 - **A rollback to a savepoint of the delete of a node created in the same transaction brought the node back without its labels.**
 - **With `temporal`, a deleted node lost its label history**, so a query at an earlier epoch saw it without labels.
 - **With `temporal`, a rollback left the text index with the values and labels it undid.**
@@ -224,6 +229,7 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Deprecated
 
+- **Rust: `Session::set_auto_commit` and `Session::auto_commit`**: the setting no longer changes how writes run, since a write outside a transaction always commits on its own ([#536](https://github.com/GrafeoDB/grafeo/issues/536)). Group writes with `begin_transaction`. Removed in 0.7.0.
 - **Rust (`grafeo-engine`): `StorageFormat::SingleFile` and `StorageFormat::WalDirectory`**, removed in 0.7.0: every database is a single file, so `SingleFile` does the same as `Auto` (the default), and `WalDirectory` only opens an existing 0.5.x WAL directory, by migrating it, and fails at a new path. `Auto` now only decides what a new path becomes.
 - **C, Go and Dart: `grafeo_open_single_file`, `OpenSingleFile` and `GrafeoDB.openSingleFile`**, removed in 0.7.0: they do the same as `grafeo_open`, `Open` and `GrafeoDB.open`, and compilers and analyzers warn on their use.
 - **Rust: `Config::adaptive`, `Config::with_adaptive`, `Config::without_adaptive` and `AdaptiveConfig`**, removed in 0.7.0: adaptive execution was never wired in, and these settings have no effect.

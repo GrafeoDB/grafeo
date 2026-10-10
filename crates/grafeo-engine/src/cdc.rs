@@ -41,25 +41,20 @@
 //! timestamp from the embedded [`HlcClock`]. The clock guarantees
 //! strictly-increasing timestamps across all threads within a process
 //! (wall-clock ms in the upper 48 bits, logical counter in the lower
-//! 16, with the logical bits bumped on collision). Timestamps are
-//! assigned inside the write lock, so readers never observe an event
-//! out of timestamp order.
+//! 16, with the logical bits bumped on collision).
 //!
 //! # Integration with the commit path
 //!
-//! Recording happens inline in `database::crud` and the
-//! MutationOperator: each write calls one of the `record_*` methods on
-//! [`CdcLog`] immediately after the corresponding mutation lands in the
-//! store, still holding the writer's logical frame. That means
-//! CDC event visibility tracks LpgStore visibility: a reader that sees
-//! the mutation via MVCC also sees the event, and vice versa. There is
-//! no asynchronous flush queue between the write and the log; the
-//! guarantee is "at the time of commit, events are already recorded."
-//!
-//! WAL wrapping (via `CdcGraphStore`) buffers events per-transaction and
-//! flushes on commit so rolled-back work does not pollute the log. In
-//! the embedded in-process path the store is the source of truth for
-//! ordering; the log records after the store call returns.
+//! A transaction's writes (statements, the direct API of a session or of
+//! the database, batches) are recorded in its change set; nothing reaches
+//! the log while it runs. Its commit builds its events from the change set
+//! (one per change, folded into the creates of the entities it created)
+//! and records them in the commit's ordered step, before its epoch is
+//! published: commits complete one at a time in epoch order, so the events
+//! carry the commit epoch and timestamps that follow the epochs, and a
+//! reader that sees a commit through MVCC also sees its events. A rollback,
+//! a rollback to a savepoint and a statement that fails report nothing.
+//! Bulk imports report no events.
 //!
 //! # CDC epoch vs. MVCC epoch
 //!
@@ -369,8 +364,6 @@ impl CdcLog {
     }
 
     /// Returns the next HLC timestamp from this log's clock.
-    ///
-    /// Used by `CdcGraphStore` to assign timestamps to buffered events.
     pub fn next_timestamp(&self) -> HlcTimestamp {
         self.clock.now()
     }
@@ -833,17 +826,32 @@ fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>
     h.finish()
 }
 
-/// The change events of a transaction's change set, one per entry in
-/// recorded order (bulk ranges and triples have none: their writers report
-/// their own), at [`EpochId::PENDING`] with timestamps from `log`'s clock
-/// in that order: the events `CdcGraphStore` buffered for the same writes,
-/// built from each entry's op and before-image instead of reads of the
-/// store. A create carries its labels or type and endpoints and the values
-/// it was created with; [`fold_into_creates`] then folds the transaction's
-/// later changes to it in, as it does for buffered events.
-pub(crate) fn events_for_changes(
+impl CdcLog {
+    /// Records the events of a commit at `epoch` that changed what `set`
+    /// holds (see [`events_for_commit`]). Called in the commit's ordered
+    /// step, where no other commit runs: the timestamps the log's clock
+    /// gives follow the commit epochs, so a later commit's events never
+    /// carry an earlier timestamp.
+    pub(crate) fn record_commit(&self, set: &grafeo_common::change::ChangeSet, epoch: EpochId) {
+        if set.is_empty() {
+            return;
+        }
+        self.record_batch(events_for_commit(set, epoch, &self.clock));
+    }
+}
+
+/// The change events of a commit at `epoch` from its change set, one per
+/// entry in recorded order (bulk ranges and triples have none: their
+/// writers report their own), each naming its graph, timestamped by `clock`
+/// in that order. An event is built from its entry's op and before-image: a
+/// create carries its labels or type and endpoints and the values it was
+/// created with, a delete what the entity held, an update the value or the
+/// labels before and after. The transaction's later changes to an entity it
+/// created are then folded into the create (see [`fold_into_creates`]).
+pub(crate) fn events_for_commit(
     set: &grafeo_common::change::ChangeSet,
-    log: &CdcLog,
+    epoch: EpochId,
+    clock: &HlcClock,
 ) -> Vec<ChangeEvent> {
     use grafeo_common::change::{Before, Change, DataOp};
 
@@ -889,8 +897,8 @@ pub(crate) fn events_for_changes(
                 .graph(*graph)
                 .and_then(|graph| graph.key.as_ref().map(ToString::to_string)),
             kind,
-            epoch: EpochId::PENDING,
-            timestamp: log.next_timestamp(),
+            epoch,
+            timestamp: clock.now(),
             before: None,
             after: None,
             labels: None,
@@ -975,7 +983,7 @@ pub(crate) fn events_for_changes(
         }
         events.push(event);
     }
-    events
+    fold_into_creates(events)
 }
 
 /// Folds a transaction's changes to the entities it created into their
@@ -987,7 +995,7 @@ pub(crate) fn events_for_changes(
 /// event without properties followed by one update per property.
 /// Changes to entities that existed before the transaction stay as they are.
 /// Entity ids repeat across graphs, so the folding stays within one graph.
-pub(crate) fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
+fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
     let mut folded: Vec<ChangeEvent> = Vec::with_capacity(events.len());
     let mut created: HashMap<(Option<String>, EntityId), usize> = HashMap::new();
     for event in events {

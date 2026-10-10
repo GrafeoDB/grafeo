@@ -1,4 +1,5 @@
-//! Per-session buffer of WAL records.
+//! Per-session buffer of RDF WAL records, and the writer of a commit's WAL
+//! group.
 //!
 //! Records carry no transaction id, and recovery keeps a single buffer of
 //! pending records that the next commit or abort marker closes. If sessions
@@ -6,16 +7,21 @@
 //! would interleave and one session's marker would commit or discard another
 //! session's records (#411).
 //!
-//! A [`WalBuffer`] collects a session's records instead, and writes them as
-//! one contiguous group at commit, followed by the commit marker. A rollback
-//! clears the buffer and writes nothing; a rollback to a savepoint truncates
-//! it. Writes outside a transaction are written as an implicit group with its
-//! own commit marker.
+//! A commit writes its records as one contiguous group, followed by the
+//! commit marker: the records of its change set (see `v1_group`), then the
+//! RDF records the session's [`WalBuffer`] collected while the transaction
+//! ran. A rollback clears the buffer and writes nothing; a rollback to a
+//! savepoint truncates it. An RDF update outside a transaction is written
+//! as an implicit group with its own commit marker.
 //!
 //! Each group carries its own named-graph context: it emits `SwitchGraph`
 //! before records of another graph and switches back to the default graph
 //! before its markers, so replay of every group starts and ends in the
 //! default graph.
+//!
+//! Labeled property graph writes never reach the buffer: they are recorded in
+//! the transaction's change set. Once RDF changes are recorded there too, the
+//! buffer goes, and a commit writes its group from the set alone.
 
 use std::sync::Arc;
 
@@ -28,7 +34,7 @@ use parking_lot::Mutex;
 /// (`None` = default graph).
 pub(crate) type PendingRecord = (Option<String>, WalRecord);
 
-/// Buffers one session's WAL records until they are written as a group.
+/// Buffers one session's RDF WAL records until they are written as a group.
 pub(crate) struct WalBuffer {
     wal: Arc<LpgWal>,
     pending: Mutex<Vec<PendingRecord>>,
@@ -49,6 +55,7 @@ impl WalBuffer {
     }
 
     /// Adds a record for `graph` (`None` = default graph).
+    #[cfg(any(feature = "triple-store", test))]
     pub(crate) fn push(&self, graph: Option<String>, record: WalRecord) {
         self.pending.lock().push((graph, record));
     }
@@ -66,19 +73,6 @@ impl WalBuffer {
     /// Drops every buffered record (rollback).
     pub(crate) fn clear(&self) {
         self.pending.lock().clear();
-    }
-
-    /// Writes the buffered records as one group, closed by `markers`.
-    ///
-    /// The markers are written even when no record is buffered.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the WAL write fails. The buffered records are
-    /// dropped either way.
-    #[cfg(test)]
-    pub(crate) fn flush(&self, markers: &[WalRecord]) -> Result<()> {
-        self.write_group(&mut self.pending.lock(), markers)
     }
 
     /// Writes `first` (a committing transaction's records of its change
@@ -101,8 +95,9 @@ impl WalBuffer {
         self.write_group(&mut records, markers)
     }
 
-    /// Writes buffered records from outside a transaction as an implicit
-    /// group with its own commit marker. Does nothing when the buffer is empty.
+    /// Writes the records of an RDF update outside a transaction as an
+    /// implicit group with its own commit marker. Does nothing when the
+    /// buffer is empty.
     ///
     /// # Errors
     ///

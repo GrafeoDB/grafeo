@@ -423,22 +423,17 @@ impl GrafeoDB {
                 grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
             }
         }
-        self.transaction_manager.sync_epoch(epoch);
-        drop(commits);
+        // Reported before the epoch is published, while commits are held
+        // off: in epoch order, as a commit reports its changes.
         #[cfg(feature = "cdc")]
-        if self.cdc_active() && !changes.is_empty() {
-            let events = crate::cdc::events_for_changes(&changes, &self.cdc_log);
-            self.cdc_log
-                .record_batch(crate::cdc::fold_into_creates(events).into_iter().map(
-                    |mut event| {
-                        event.epoch = epoch;
-                        event
-                    },
-                ));
+        if self.cdc_active() {
+            self.cdc_log.record_commit(&changes, epoch);
         }
         // A build without the log and change data capture keeps no entries.
         #[cfg(not(any(feature = "wal", feature = "cdc")))]
         drop(changes);
+        self.transaction_manager.sync_epoch(epoch);
+        drop(commits);
         self.prune_versions(&root, store);
     }
 
@@ -620,16 +615,11 @@ impl GrafeoDB {
             }
         }
 
+        // Reported in the commit's ordered step, before its epoch is
+        // published.
         #[cfg(feature = "cdc")]
-        if self.cdc_active() && !changes.is_empty() {
-            let events = changes.read(|set| crate::cdc::events_for_changes(set, &self.cdc_log));
-            self.cdc_log
-                .record_batch(crate::cdc::fold_into_creates(events).into_iter().map(
-                    |mut event| {
-                        event.epoch = epoch;
-                        event
-                    },
-                ));
+        if self.cdc_active() {
+            changes.read(|set| self.cdc_log.record_commit(set, epoch));
         }
 
         // The database has one epoch: the root store follows every commit

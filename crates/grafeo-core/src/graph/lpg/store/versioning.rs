@@ -1,4 +1,4 @@
-use super::{LpgStore, PropertyUndoEntry};
+use super::LpgStore;
 use crate::graph::lpg::{EdgeRecord, NodeRecord};
 use grafeo_common::memory::AllocError;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
@@ -8,201 +8,13 @@ use grafeo_common::utils::hash::FxHashMap;
 use grafeo_common::{temporal::VersionLog, utils::hash::FxHashSet};
 use std::sync::atomic::Ordering;
 
-#[cfg(feature = "temporal")]
-use grafeo_common::types::PropertyKey;
-
 #[cfg(not(feature = "tiered-storage"))]
 use grafeo_common::mvcc::VersionChain;
 
 #[cfg(feature = "tiered-storage")]
 use grafeo_common::mvcc::{ColdVersionRef, HotVersionRef, VersionIndex};
 
-/// What a transaction gave a version, for its commit to stamp.
-#[derive(Default)]
-struct VersionedBy {
-    /// Nodes it created or deleted.
-    nodes: Vec<NodeId>,
-    /// Edges it created or deleted.
-    edges: Vec<EdgeId>,
-}
-
 impl LpgStore {
-    /// Records a change of `transaction_id`, for its commit and rollback.
-    ///
-    /// Writes outside a transaction (`TransactionId::SYSTEM`) are final when
-    /// they happen and record nothing.
-    pub(super) fn record_change(&self, transaction_id: TransactionId, entry: PropertyUndoEntry) {
-        if transaction_id == TransactionId::SYSTEM {
-            return;
-        }
-        self.property_undo_log
-            .write()
-            .entry(transaction_id)
-            .or_default()
-            .push(entry);
-    }
-
-    /// Discards everything a transaction changed in this store (rollback).
-    ///
-    /// Replays the transaction's changes in reverse, so the cost is
-    /// O(changes), and leaves the counters and statistics as they were.
-    #[doc(hidden)]
-    pub fn discard_uncommitted_versions(&self, transaction_id: TransactionId) {
-        self.rollback_transaction_properties(transaction_id);
-    }
-
-    /// What `transaction_id` gave a version: the nodes and edges it created
-    /// or deleted.
-    fn versioned_by(&self, transaction_id: TransactionId) -> VersionedBy {
-        let mut versioned = VersionedBy::default();
-        if let Some(entries) = self.property_undo_log.read().get(&transaction_id) {
-            for entry in entries {
-                match entry {
-                    PropertyUndoEntry::NodeCreated { node_id }
-                    | PropertyUndoEntry::NodeDeleted { node_id, .. } => {
-                        versioned.nodes.push(*node_id);
-                    }
-                    PropertyUndoEntry::EdgeCreated { edge_id }
-                    | PropertyUndoEntry::EdgeDeleted { edge_id, .. } => {
-                        versioned.edges.push(*edge_id);
-                    }
-                    PropertyUndoEntry::NodeProperty { .. }
-                    | PropertyUndoEntry::EdgeProperty { .. }
-                    | PropertyUndoEntry::LabelAdded { .. }
-                    | PropertyUndoEntry::LabelRemoved { .. } => {}
-                }
-            }
-        }
-        versioned
-    }
-
-    /// Makes a transaction's versions visible at `commit_epoch` (commit).
-    ///
-    /// Walks the transaction's changes, so the cost is O(changes). Also
-    /// advances the store's epoch so non-transactional reads can see the
-    /// newly committed versions.
-    #[doc(hidden)]
-    pub fn finalize_version_epochs(&self, transaction_id: TransactionId, commit_epoch: EpochId) {
-        let VersionedBy {
-            nodes: node_ids,
-            edges: edge_ids,
-        } = self.versioned_by(transaction_id);
-
-        #[cfg(not(feature = "tiered-storage"))]
-        {
-            let mut nodes = self.nodes.write();
-            for id in &node_ids {
-                if let Some(chain) = nodes.get_mut(id) {
-                    chain.finalize_epochs(transaction_id, commit_epoch);
-                }
-            }
-            drop(nodes);
-            let mut edges = self.edges.write();
-            for id in &edge_ids {
-                if let Some(chain) = edges.get_mut(id) {
-                    chain.finalize_epochs(transaction_id, commit_epoch);
-                }
-            }
-        }
-        #[cfg(feature = "tiered-storage")]
-        {
-            let mut versions = self.node_versions.write();
-            for id in &node_ids {
-                if let Some(index) = versions.get_mut(id) {
-                    index.finalize_epochs(transaction_id, commit_epoch);
-                }
-            }
-            drop(versions);
-            let mut versions = self.edge_versions.write();
-            for id in &edge_ids {
-                if let Some(index) = versions.get_mut(id) {
-                    index.finalize_epochs(transaction_id, commit_epoch);
-                }
-            }
-        }
-
-        #[cfg(feature = "temporal")]
-        self.finalize_pending_values(transaction_id, commit_epoch);
-
-        self.sync_epoch(commit_epoch);
-    }
-
-    /// Replaces the PENDING epochs of the property and label versions a
-    /// transaction wrote with its commit epoch. Only its own entities are
-    /// touched, so other open transactions' writes stay pending.
-    #[cfg(feature = "temporal")]
-    fn finalize_pending_values(&self, transaction_id: TransactionId, commit_epoch: EpochId) {
-        let mut node_values: Vec<(NodeId, PropertyKey)> = Vec::new();
-        let mut edge_values: Vec<(EdgeId, PropertyKey)> = Vec::new();
-        let mut label_nodes: Vec<NodeId> = Vec::new();
-        if let Some(entries) = self.property_undo_log.read().get(&transaction_id) {
-            for entry in entries {
-                match entry {
-                    PropertyUndoEntry::NodeProperty { node_id, key, .. } => {
-                        node_values.push((*node_id, key.clone()));
-                    }
-                    PropertyUndoEntry::EdgeProperty { edge_id, key, .. } => {
-                        edge_values.push((*edge_id, key.clone()));
-                    }
-                    PropertyUndoEntry::NodeCreated { node_id }
-                    | PropertyUndoEntry::LabelAdded { node_id, .. }
-                    | PropertyUndoEntry::LabelRemoved { node_id, .. } => label_nodes.push(*node_id),
-                    // A delete writes a PENDING tombstone for each value it removed.
-                    PropertyUndoEntry::NodeDeleted {
-                        node_id,
-                        properties,
-                        ..
-                    } => {
-                        node_values
-                            .extend(properties.iter().map(|(key, _)| (*node_id, key.clone())));
-                    }
-                    PropertyUndoEntry::EdgeDeleted {
-                        edge_id,
-                        properties,
-                        ..
-                    } => {
-                        edge_values
-                            .extend(properties.iter().map(|(key, _)| (*edge_id, key.clone())));
-                    }
-                    PropertyUndoEntry::EdgeCreated { .. } => {}
-                }
-            }
-        }
-        if !node_values.is_empty() {
-            let mut columns = self.node_properties.columns_write();
-            for (id, key) in &node_values {
-                if let Some(column) = columns.get_mut(key) {
-                    column.finalize_pending_for(*id, commit_epoch);
-                }
-            }
-        }
-        if !edge_values.is_empty() {
-            let mut columns = self.edge_properties.columns_write();
-            for (id, key) in &edge_values {
-                if let Some(column) = columns.get_mut(key) {
-                    column.finalize_pending_for(*id, commit_epoch);
-                }
-            }
-        }
-        if !label_nodes.is_empty() {
-            let mut labels = self.node_labels.write();
-            for id in &label_nodes {
-                if let Some(log) = labels.get_mut(id) {
-                    log.finalize_pending(commit_epoch);
-                }
-            }
-        }
-    }
-
-    /// Removes a node that `transaction_id` created, when the transaction
-    /// rolls back: its version, labels, properties, index entries and count.
-    /// Nothing of it was ever visible to others.
-    pub(super) fn discard_created_node(&self, id: NodeId, transaction_id: TransactionId) {
-        if self.remove_created_node(id, transaction_id) {
-            self.live_node_count.fetch_sub(1, Ordering::Relaxed);
-        }
-    }
-
     /// Removes a node that `transaction_id` created: its version, labels,
     /// properties and index entries, not the counters (a change set's create
     /// counts at commit). Returns whether the node was there and is gone.
@@ -247,15 +59,6 @@ impl LpgStore {
         drop(label_index);
         self.node_labels.write().remove(&id);
         true
-    }
-
-    /// Removes an edge that `transaction_id` created, when the transaction
-    /// rolls back: its version, adjacency entries, properties and counts.
-    pub(super) fn discard_created_edge(&self, id: EdgeId, transaction_id: TransactionId) {
-        if let Some(type_id) = self.remove_created_edge(id, transaction_id) {
-            self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
-            self.decrement_edge_type_count(type_id);
-        }
     }
 
     /// Removes an edge that `transaction_id` created: its version, adjacency

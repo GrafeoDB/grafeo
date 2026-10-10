@@ -12,6 +12,8 @@ use std::sync::Arc;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{EpochId, TransactionId, Value};
 use grafeo_common::utils::error::{Error, Result};
+use grafeo_core::execution::operators::{Recording, WriteTarget};
+use grafeo_core::graph::apply::{ChangeTarget, ExternalTarget};
 #[cfg(feature = "lpg")]
 use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
@@ -107,6 +109,9 @@ pub struct QueryProcessor {
     graph_store: Arc<dyn GraphStoreSearch>,
     /// Writable graph store (None when read-only).
     write_store: Option<Arc<dyn GraphStoreMut>>,
+    /// The write store as a transaction's writes change it and record their
+    /// changes (see [`with_transaction_context`](Self::with_transaction_context)).
+    write_target: Option<WriteTarget>,
     /// Transaction manager for MVCC operations.
     transaction_manager: Arc<TransactionManager>,
     /// Catalog for schema and index metadata.
@@ -115,6 +120,9 @@ pub struct QueryProcessor {
     optimizer: Optimizer,
     /// Current transaction context (if any).
     transaction_context: Option<(EpochId, TransactionId)>,
+    /// The storage key of the graph the store holds (`None`: the default
+    /// graph), see [`with_graph`](Self::with_graph).
+    graph: Option<String>,
     /// RDF store for triple pattern queries (optional).
     #[cfg(feature = "triple-store")]
     rdf_store: Option<Arc<grafeo_core::graph::rdf::RdfStore>>,
@@ -128,14 +136,19 @@ impl QueryProcessor {
         let optimizer = Optimizer::from_store(&store);
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
         let write_store = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
+        let write_target = Some(WriteTarget::Store(
+            Arc::clone(&store) as Arc<dyn ChangeTarget>
+        ));
         Self {
             lpg_store: store,
             graph_store,
             write_store,
+            write_target,
             transaction_manager: Arc::new(TransactionManager::new()),
             catalog: Arc::new(Catalog::new()),
             optimizer,
             transaction_context: None,
+            graph: None,
             #[cfg(feature = "triple-store")]
             rdf_store: None,
         }
@@ -151,14 +164,19 @@ impl QueryProcessor {
         let optimizer = Optimizer::from_store(&store);
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
         let write_store = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
+        let write_target = Some(WriteTarget::Store(
+            Arc::clone(&store) as Arc<dyn ChangeTarget>
+        ));
         Self {
             lpg_store: store,
             graph_store,
             write_store,
+            write_target,
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
             optimizer,
             transaction_context: None,
+            graph: None,
             #[cfg(feature = "triple-store")]
             rdf_store: None,
         }
@@ -175,15 +193,20 @@ impl QueryProcessor {
     ) -> Result<Self> {
         let optimizer = Optimizer::from_graph_store(&*store);
         let read_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
+        let write_target = Some(WriteTarget::External(Arc::new(ExternalTarget::new(
+            Arc::clone(&store),
+        ))));
         Ok(Self {
             #[cfg(feature = "lpg")]
             lpg_store: Arc::new(LpgStore::new()?),
             graph_store: read_store,
             write_store: Some(store),
+            write_target,
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
             optimizer,
             transaction_context: None,
+            graph: None,
             #[cfg(feature = "triple-store")]
             rdf_store: None,
         })
@@ -200,23 +223,34 @@ impl QueryProcessor {
         transaction_manager: Arc<TransactionManager>,
     ) -> Result<Self> {
         let optimizer = Optimizer::from_graph_store(&*read_store);
+        let write_target = write_store
+            .as_ref()
+            .map(|store| WriteTarget::External(Arc::new(ExternalTarget::new(Arc::clone(store)))));
         Ok(Self {
             #[cfg(feature = "lpg")]
             lpg_store: Arc::new(LpgStore::new()?),
             graph_store: read_store,
             write_store,
+            write_target,
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
             optimizer,
             transaction_context: None,
+            graph: None,
             #[cfg(feature = "triple-store")]
             rdf_store: None,
         })
     }
 
-    /// Sets the transaction context for MVCC visibility.
-    ///
-    /// This should be called when the processor is used within a transaction.
+    /// Sets the transaction context: the processor reads at `viewing_epoch`
+    /// and writes as `transaction_id`, a transaction of its transaction
+    /// manager. Its writes are claimed against other open transactions'
+    /// (first writer wins) in the graph [`with_graph`](Self::with_graph)
+    /// names, and recorded in the transaction's change set: committing the
+    /// transaction (a session's commit, or
+    /// [`TransactionManager::commit`]) makes them visible at its epoch,
+    /// aborting it undoes them. A write once the transaction is no longer
+    /// open fails.
     #[must_use]
     pub fn with_transaction_context(
         mut self,
@@ -224,6 +258,18 @@ impl QueryProcessor {
         transaction_id: TransactionId,
     ) -> Self {
         self.transaction_context = Some((viewing_epoch, transaction_id));
+        self
+    }
+
+    /// Names the graph the processor's store holds, by its storage key
+    /// (`name`, or `schema/name` for a graph of a schema): a processor in a
+    /// transaction claims what it writes in that graph, so it conflicts with
+    /// a session's transaction that writes the same node or edge there, and
+    /// never with one that writes the same id in another graph. Without
+    /// it, the store is the default graph's.
+    #[must_use]
+    pub fn with_graph(mut self, graph: impl Into<String>) -> Self {
+        self.graph = Some(graph.into());
         self
     }
 
@@ -348,6 +394,7 @@ impl QueryProcessor {
                 Some(transaction_id),
                 epoch,
             )
+            .with_recording(self.recording(transaction_id)?)
         } else {
             Planner::with_context(
                 Arc::clone(&self.graph_store),
@@ -374,6 +421,30 @@ impl QueryProcessor {
         result.rows_scanned = Some(rows_scanned);
 
         Ok(result)
+    }
+
+    /// Where the writes of `transaction_id` go and are recorded: the write
+    /// store and the transaction's changes in the processor's graph. `None`
+    /// without a write store, or when the transaction is not open (a write
+    /// then fails).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction wrote the graph through another store.
+    fn recording(&self, transaction_id: TransactionId) -> Result<Option<Recording>> {
+        let Some(target) = &self.write_target else {
+            return Ok(None);
+        };
+        let Some(changes) = self.transaction_manager.changes(transaction_id) else {
+            return Ok(None);
+        };
+        changes
+            .recording(
+                &self.transaction_manager,
+                self.graph.as_deref(),
+                target.clone(),
+            )
+            .map(Some)
     }
 
     /// Translates an LPG query to a logical plan.
@@ -458,14 +529,19 @@ impl QueryProcessor {
         let optimizer = Optimizer::from_store(&lpg_store);
         let graph_store = Arc::clone(&lpg_store) as Arc<dyn GraphStoreSearch>;
         let write_store = Some(Arc::clone(&lpg_store) as Arc<dyn GraphStoreMut>);
+        let write_target = Some(WriteTarget::Store(
+            Arc::clone(&lpg_store) as Arc<dyn ChangeTarget>
+        ));
         Self {
             lpg_store,
             graph_store,
             write_store,
+            write_target,
             transaction_manager: Arc::new(TransactionManager::new()),
             catalog: Arc::new(Catalog::new()),
             optimizer,
             transaction_context: None,
+            graph: None,
             rdf_store: Some(rdf_store),
         }
     }

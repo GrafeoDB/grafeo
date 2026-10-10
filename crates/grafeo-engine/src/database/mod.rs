@@ -17,16 +17,12 @@ mod admin;
 pub mod arrow;
 #[cfg(all(feature = "async-storage", feature = "lpg"))]
 mod async_ops;
-#[cfg(all(feature = "async-storage", feature = "lpg"))]
-pub(crate) mod async_wal_store;
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 pub mod backup;
 #[cfg(feature = "lpg")]
 pub(crate) mod catalog_records;
 #[cfg(feature = "lpg")]
 pub(crate) mod catalog_section;
-#[cfg(feature = "cdc")]
-pub(crate) mod cdc_store;
 #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
 mod checkpoint_timer;
 #[cfg(feature = "lpg")]
@@ -61,6 +57,8 @@ mod legacy_spill;
 mod migration;
 #[cfg(feature = "lpg")]
 mod persistence;
+#[cfg(all(test, feature = "lpg", feature = "gql"))]
+mod processor_claims_tests;
 mod query;
 #[cfg(feature = "triple-store")]
 mod rdf_ops;
@@ -82,8 +80,6 @@ mod upsert;
     not(feature = "temporal")
 ))]
 mod vector_spill;
-#[cfg(all(feature = "wal", feature = "lpg"))]
-pub(crate) mod wal_store;
 
 use grafeo_common::grafeo_error;
 #[cfg(feature = "wal")]

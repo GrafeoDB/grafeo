@@ -16,7 +16,7 @@
 //! | row count | u32 | equal to the directory entry's, at most 65,536 (the format's row cap) |
 //! | value count | u32 | at least 1, at most the row count |
 //! | presence bitmap | `ceil(rows / 64)` u64 words | only when the value count is below the row count: bit `r` is set when row `r` has a value, bits past the rows are 0 |
-//! | zone map | two values | minimum and maximum, in the value codec |
+//! | zone map | see below | bounds of the values, for the kinds that have them |
 //! | epochs | a bit-packed body | one u64 per value, only when one of them is not 0 |
 //! | body | | the values, in the codec's body |
 //!
@@ -37,11 +37,23 @@
 //! an `Int64`. The bodies of codecs 1 to 6 are those the compact store's
 //! `ColumnCodec` writes after its discriminant, through the same functions.
 //!
-//! The zone map holds the minimum and maximum of `Int64`, `Float64` (NaN
-//! left out, and no zone map when every value is NaN), `Bool` and `String`
-//! values (only when both are at most [`ZONE_MAP_STRING_LIMIT`] bytes); other
-//! chunks have none. The decoder refuses a zone map other than the one the
-//! values give, so a reader can trust it.
+//! The zone map of an `Int64`, `Float64` (NaN left out, and no zone map when
+//! every value is NaN) or `Bool` chunk is its minimum and maximum, two values
+//! in the value codec. Every `String` chunk has a [`StringZoneMap`], by the
+//! strings' UTF-8 bytes (the order of `str`):
+//!
+//! | Field | Size | Meaning |
+//! | --- | --- | --- |
+//! | minimum | length u8, bytes | the smallest string, cut to at most [`STRING_ZONE_PREFIX`] bytes |
+//! | maximum | length u8, bytes | the largest string; when longer than [`STRING_ZONE_PREFIX`] bytes, its first ones with the last raised by one |
+//! | flags | u8 | bit 0: the minimum was not cut, bit 1: the maximum was not cut; other bits are refused |
+//! | shortest, longest | u32 each | the lengths in bytes of the shortest and the longest string |
+//!
+//! A cut maximum is raised so it stays an upper bound: every string that
+//! starts with the cut bytes is below it (UTF-8 holds no `0xFF` byte, so the
+//! last byte can always be raised). Other chunks have no zone map. The
+//! decoder refuses a zone map other than the one the values give, so a
+//! reader can trust it.
 
 use std::cmp::Ordering;
 use std::fmt::Display;
@@ -57,8 +69,18 @@ use grafeo_common::utils::error::{Error, Result};
 use super::limits::{checked_u16, checked_u32};
 use super::{BitPackedInts, BitVector, DictionaryBuilder, DictionaryEncoding};
 
-/// Strings longer than this get no zone map.
-pub const ZONE_MAP_STRING_LIMIT: usize = 64;
+/// The most bytes of each bound of a [`StringZoneMap`]: longer strings are
+/// cut to this many.
+pub const STRING_ZONE_PREFIX: usize = 16;
+
+/// The most bytes a zone map takes: a string zone map's two bounds with
+/// their length bytes, its flags and its two lengths (the two values of the
+/// other kinds take fewer).
+const ZONE_MAP_MAX_LEN: usize = 2 * (1 + STRING_ZONE_PREFIX) + 1 + 4 + 4;
+/// String zone map flag bit 0: the minimum is the smallest string.
+const MIN_EXACT: u8 = 1;
+/// String zone map flag bit 1: the maximum is the largest string.
+const MAX_EXACT: u8 = 2;
 
 /// The most rows a chunk holds: the format's row cap, which no writer
 /// passes ([`ChunkCaps::validate`]). A chunk decodes into one value per row,
@@ -131,8 +153,85 @@ pub struct ColumnChunk {
     pub values: Vec<(u32, Value)>,
     /// One epoch per value, when the chunk carries epochs.
     pub epochs: Option<Vec<u64>>,
-    /// The minimum and maximum of the values, for the kinds that have one.
-    pub zone_map: Option<(Value, Value)>,
+    /// The bounds of the values, for the kinds that have them.
+    pub zone_map: Option<ZoneMap>,
+}
+
+/// The bounds of a chunk's values (see the module docs).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ZoneMap {
+    /// The minimum and maximum of `Int64`, `Float64` (NaN left out) or
+    /// `Bool` values.
+    Values(Value, Value),
+    /// The bounds of `String` values.
+    Strings(StringZoneMap),
+}
+
+/// The bounds of a chunk's strings, by their UTF-8 bytes (the order of
+/// `str`): no string of the chunk is below `min` or above `max` (below it
+/// when `max` was cut), and each is from `min_len` to `max_len` bytes long.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringZoneMap {
+    /// The smallest string, cut to at most [`STRING_ZONE_PREFIX`] bytes.
+    pub min: Vec<u8>,
+    /// Whether `min` is the smallest string (it was not cut).
+    pub min_exact: bool,
+    /// The largest string when `max_exact`; else its first
+    /// [`STRING_ZONE_PREFIX`] bytes with the last raised by one, which every
+    /// string of the chunk is below (these bytes need not be UTF-8).
+    pub max: Vec<u8>,
+    /// Whether `max` is the largest string (it was not cut).
+    pub max_exact: bool,
+    /// The length in bytes of the shortest string.
+    pub min_len: u32,
+    /// The length in bytes of the longest string.
+    pub max_len: u32,
+}
+
+impl StringZoneMap {
+    /// The zone map of `strings`, `None` for no string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Serialization`] for a string longer than `u32::MAX`
+    /// bytes, which no chunk holds.
+    fn of<'s>(strings: impl Iterator<Item = &'s str> + Clone) -> Result<Option<Self>> {
+        let Some((min, max)) = min_max(strings.clone(), |a: &&str, b: &&str| a.cmp(b)) else {
+            return Ok(None);
+        };
+        let Some((shortest, longest)) = min_max(strings.map(str::len), usize::cmp) else {
+            return Ok(None);
+        };
+        let min_exact = min.len() <= STRING_ZONE_PREFIX;
+        let max_exact = max.len() <= STRING_ZONE_PREFIX;
+        let mut max = max.as_bytes()[..max.len().min(STRING_ZONE_PREFIX)].to_vec();
+        if !max_exact && let Some(last) = max.last_mut() {
+            // A UTF-8 byte is at most 0xF4, so it can be raised by one.
+            *last += 1;
+        }
+        Ok(Some(Self {
+            min: min.as_bytes()[..min.len().min(STRING_ZONE_PREFIX)].to_vec(),
+            min_exact,
+            max,
+            max_exact,
+            min_len: checked_u32(shortest, "string length")?,
+            max_len: checked_u32(longest, "string length")?,
+        }))
+    }
+
+    /// Whether `value` may be one of the chunk's strings: `false` only when
+    /// the zone map shows it is not.
+    #[must_use]
+    pub fn may_hold(&self, value: &str) -> bool {
+        let bytes = value.as_bytes();
+        let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+        let below_max = if self.max_exact {
+            bytes <= self.max.as_slice()
+        } else {
+            bytes < self.max.as_slice()
+        };
+        (self.min_len..=self.max_len).contains(&length) && bytes >= self.min.as_slice() && below_max
+    }
 }
 
 /// The codec for these values: a typed codec only when every value has its
@@ -203,7 +302,7 @@ pub fn encode_column_chunk(
     let value_count = checked_u32(values.len(), "column chunk value count")?;
     let epochs = epochs.filter(|epochs| epochs.iter().any(|&epoch| epoch != 0));
     let codec = choose_codec(values.iter().map(|(_, value)| value));
-    let zone_map = zone_map(codec, values.iter().map(|(_, value)| value));
+    let zone_map = zone_map(codec, values.iter().map(|(_, value)| value))?;
     let sparse = value_count < row_count;
     let mut flags = 0;
     if sparse {
@@ -230,9 +329,8 @@ pub fn encode_column_chunk(
             out.extend_from_slice(&word.to_le_bytes());
         }
     }
-    if let Some((min, max)) = &zone_map {
-        encode_value(min, &mut out)?;
-        encode_value(max, &mut out)?;
+    if let Some(zone_map) = &zone_map {
+        encode_zone_map(zone_map, &mut out)?;
     }
     if let Some(epochs) = epochs {
         write_bitpacked_body(&BitPackedInts::pack(epochs), &mut out)?;
@@ -288,10 +386,8 @@ pub fn decode_column_chunk_bytes(data: &Bytes, codec: u8, row_count: u32) -> Res
     };
     let zone_start = pos;
     if flags & FLAG_ZONE_MAP != 0 {
-        for _ in 0..2 {
-            decode_value(bytes, &mut pos)
-                .map_err(|error| corrupt(zone_start, format!("zone map: {error}")))?;
-        }
+        skip_zone_map(codec, bytes, &mut pos)
+            .map_err(|error| corrupt(zone_start, format!("zone map: {error}")))?;
     }
     let zone_end = pos;
     let epochs = if flags & FLAG_EPOCHS == 0 {
@@ -306,16 +402,15 @@ pub fn decode_column_chunk_bytes(data: &Bytes, codec: u8, row_count: u32) -> Res
             format!("{} bytes after the end of the values", bytes.len() - pos),
         ));
     }
-    let zone_map = zone_map(codec, values.iter());
+    let zone_map = zone_map(codec, values.iter())?;
     let mut expected = Vec::new();
-    if let Some((min, max)) = &zone_map {
-        encode_value(min, &mut expected)?;
-        encode_value(max, &mut expected)?;
+    if let Some(zone_map) = &zone_map {
+        encode_zone_map(zone_map, &mut expected)?;
     }
     if bytes[zone_start..zone_end] != expected[..] {
         return Err(corrupt(
             zone_start,
-            format!("the zone map is not the values' minimum and maximum {zone_map:?}"),
+            format!("the zone map is not the values' bounds {zone_map:?}"),
         ));
     }
     let values = match rows {
@@ -425,12 +520,12 @@ pub fn value_bound(value: &Value) -> usize {
 
 /// An upper bound of a chunk's size besides its values' bounds: the header
 /// (12), the presence bitmap (`8 * ceil(row_count / 64)`), the zone map
-/// (`2 * (1 + 4 + ZONE_MAP_STRING_LIMIT)`), the codec body's own counts (16),
+/// (at most 43 bytes, a string zone map's), the codec body's own counts (16),
 /// and with epochs `17 + 8 * value_count`.
 #[must_use]
 pub fn chunk_overhead(row_count: u32, value_count: usize, with_epochs: bool) -> usize {
     let presence = 8 * presence_words(row_count);
-    let zone_map = 2 * (1 + 4 + ZONE_MAP_STRING_LIMIT);
+    let zone_map = ZONE_MAP_MAX_LEN;
     let epochs = if with_epochs {
         EPOCHS_COUNTS_LEN.saturating_add(value_count.saturating_mul(8))
     } else {
@@ -947,36 +1042,112 @@ fn write_values(codec: ChunkCodec, values: &[(u32, Value)], out: &mut Vec<u8>) -
     }
 }
 
-/// The minimum and maximum of `values`, when their codec has a zone map:
-/// `Int64`, `Float64` without NaN (by total order, so -0.0 is below 0.0),
-/// `Bool`, and strings when both are at most [`ZONE_MAP_STRING_LIMIT`] bytes.
+/// The zone map of `values`, when their codec has one: the minimum and
+/// maximum of `Int64`, `Float64` without NaN (by total order, so -0.0 is
+/// below 0.0) and `Bool`, and the [`StringZoneMap`] of strings.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] for a string longer than `u32::MAX`
+/// bytes.
 fn zone_map<'v>(
     codec: ChunkCodec,
-    values: impl Iterator<Item = &'v Value>,
-) -> Option<(Value, Value)> {
-    match codec {
+    values: impl Iterator<Item = &'v Value> + Clone,
+) -> Result<Option<ZoneMap>> {
+    Ok(match codec {
         ChunkCodec::BitPacked | ChunkCodec::RawI64 => {
-            let (min, max) = min_max(values.filter_map(Value::as_int64), i64::cmp)?;
-            Some((Value::Int64(min), Value::Int64(max)))
+            min_max(values.filter_map(Value::as_int64), i64::cmp)
+                .map(|(min, max)| ZoneMap::Values(Value::Int64(min), Value::Int64(max)))
         }
         ChunkCodec::Float64 => {
             let floats = values
                 .filter_map(Value::as_float64)
                 .filter(|float| !float.is_nan());
-            let (min, max) = min_max(floats, f64::total_cmp)?;
-            Some((Value::Float64(min), Value::Float64(max)))
+            min_max(floats, f64::total_cmp)
+                .map(|(min, max)| ZoneMap::Values(Value::Float64(min), Value::Float64(max)))
         }
-        ChunkCodec::Bitmap => {
-            let (min, max) = min_max(values.filter_map(Value::as_bool), bool::cmp)?;
-            Some((Value::Bool(min), Value::Bool(max)))
-        }
+        ChunkCodec::Bitmap => min_max(values.filter_map(Value::as_bool), bool::cmp)
+            .map(|(min, max)| ZoneMap::Values(Value::Bool(min), Value::Bool(max))),
         ChunkCodec::Dict => {
-            let (min, max) = min_max(values.filter_map(Value::as_str), |a, b| a.cmp(b))?;
-            (min.len() <= ZONE_MAP_STRING_LIMIT && max.len() <= ZONE_MAP_STRING_LIMIT)
-                .then(|| (Value::from(min), Value::from(max)))
+            StringZoneMap::of(values.filter_map(Value::as_str))?.map(ZoneMap::Strings)
         }
         ChunkCodec::Float32Vector | ChunkCodec::Values => None,
+    })
+}
+
+/// Appends `zone_map` in its layout (see the module docs).
+///
+/// # Errors
+///
+/// Returns the value codec's error for a value it cannot encode.
+fn encode_zone_map(zone_map: &ZoneMap, out: &mut Vec<u8>) -> Result<()> {
+    match zone_map {
+        ZoneMap::Values(min, max) => {
+            encode_value(min, out)?;
+            encode_value(max, out)?;
+        }
+        ZoneMap::Strings(strings) => {
+            for bound in [&strings.min, &strings.max] {
+                out.push(checked_u8(bound.len())?);
+                out.extend_from_slice(bound);
+            }
+            let mut flags = 0;
+            if strings.min_exact {
+                flags |= MIN_EXACT;
+            }
+            if strings.max_exact {
+                flags |= MAX_EXACT;
+            }
+            out.push(flags);
+            out.extend_from_slice(&strings.min_len.to_le_bytes());
+            out.extend_from_slice(&strings.max_len.to_le_bytes());
+        }
     }
+    Ok(())
+}
+
+/// The length byte of a string zone map bound, at most
+/// [`STRING_ZONE_PREFIX`].
+fn checked_u8(length: usize) -> Result<u8> {
+    u8::try_from(length)
+        .ok()
+        .filter(|&length| usize::from(length) <= STRING_ZONE_PREFIX)
+        .ok_or_else(|| {
+            Error::Serialization(format!(
+                "a string zone map bound of {length} bytes, past {STRING_ZONE_PREFIX}"
+            ))
+        })
+}
+
+/// Moves `pos` past the zone map of a `codec` chunk at `pos` in `bytes`,
+/// refusing a bound longer than [`STRING_ZONE_PREFIX`] and unknown string
+/// zone map flags; the caller then compares its bytes with the values'.
+fn skip_zone_map(
+    codec: ChunkCodec,
+    bytes: &[u8],
+    pos: &mut usize,
+) -> std::result::Result<(), String> {
+    if codec != ChunkCodec::Dict {
+        for _ in 0..2 {
+            decode_value(bytes, pos).map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+    for bound in ["minimum", "maximum"] {
+        let length = usize::from(*bytes.get(*pos).ok_or("truncated string zone map")?);
+        if length > STRING_ZONE_PREFIX {
+            return Err(format!(
+                "a {bound} of {length} bytes, past {STRING_ZONE_PREFIX}"
+            ));
+        }
+        *pos = end_of(bytes, *pos + 1, length).ok_or("truncated string zone map")?;
+    }
+    let flags = *bytes.get(*pos).ok_or("truncated string zone map")?;
+    if flags & !(MIN_EXACT | MAX_EXACT) != 0 {
+        return Err(format!("unknown string zone map flags {flags:#04x}"));
+    }
+    *pos = end_of(bytes, *pos + 1, 8).ok_or("truncated string zone map")?;
+    Ok(())
 }
 
 fn min_max<T: Copy>(
@@ -1337,13 +1508,14 @@ mod tests {
                 .unwrap()
                 .zone_map
         };
+        let values = |min: Value, max: Value| Some(ZoneMap::Values(min, max));
         assert_eq!(
             zone(vec![Value::Int64(19), Value::Int64(-3), Value::Int64(88)]),
-            Some((Value::Int64(-3), Value::Int64(88)))
+            values(Value::Int64(-3), Value::Int64(88))
         );
         assert_eq!(
             zone(vec![Value::Int64(19), Value::Int64(3), Value::Int64(88)]),
-            Some((Value::Int64(3), Value::Int64(88)))
+            values(Value::Int64(3), Value::Int64(88))
         );
         assert_eq!(
             zone(vec![
@@ -1351,7 +1523,7 @@ mod tests {
                 Value::Float64(3.0),
                 Value::Float64(1.88)
             ]),
-            Some((Value::Float64(1.88), Value::Float64(3.0)))
+            values(Value::Float64(1.88), Value::Float64(3.0))
         );
         assert_eq!(
             zone(vec![Value::Float64(f64::NAN), Value::Float64(f64::NAN)]),
@@ -1360,40 +1532,156 @@ mod tests {
         );
         assert_eq!(
             zone(vec![Value::Bool(true), Value::Bool(false)]),
-            Some((Value::Bool(false), Value::Bool(true)))
+            values(Value::Bool(false), Value::Bool(true))
         );
         assert_eq!(
             zone(vec![Value::from("Prague"), Value::from("Amsterdam")]),
-            Some((Value::from("Amsterdam"), Value::from("Prague")))
+            Some(ZoneMap::Strings(StringZoneMap {
+                min: b"Amsterdam".to_vec(),
+                min_exact: true,
+                max: b"Prague".to_vec(),
+                max_exact: true,
+                min_len: 6,
+                max_len: 9,
+            })),
+            "short strings: exact bounds"
         );
         assert_eq!(
             zone(vec![Value::from("Berlin"), Value::from("x".repeat(65))]),
-            None
+            Some(ZoneMap::Strings(StringZoneMap {
+                min: b"Berlin".to_vec(),
+                min_exact: true,
+                max: b"xxxxxxxxxxxxxxxy".to_vec(),
+                max_exact: false,
+                min_len: 6,
+                max_len: 65,
+            })),
+            "a long maximum is cut to 16 bytes and raised"
         );
         assert_eq!(
             zone(vec![Value::from("A".repeat(65)), Value::from("B")]),
-            None,
-            "a minimum past the limit"
-        );
-        assert_eq!(
-            zone(vec![
-                Value::from("Berlin"),
-                Value::from("Paris".repeat(19)),
-                Value::from("x".repeat(64))
-            ]),
-            Some((Value::from("Berlin"), Value::from("x".repeat(64)))),
-            "only the minimum and maximum must fit the limit"
+            Some(ZoneMap::Strings(StringZoneMap {
+                min: b"AAAAAAAAAAAAAAAA".to_vec(),
+                min_exact: false,
+                max: b"B".to_vec(),
+                max_exact: true,
+                min_len: 1,
+                max_len: 65,
+            })),
+            "a long minimum is cut to 16 bytes"
         );
         assert_eq!(zone(vec![Value::Date(Date::from_days(3))]), None);
         assert_eq!(zone(vec![vector(&[3.0, 19.0])]), None);
+    }
+
+    /// A string zone map cuts on bytes, also inside a character: the cut
+    /// maximum need not be UTF-8, and is above every string the chunk holds.
+    #[test]
+    fn a_cut_maximum_is_raised_inside_a_character() {
+        // 21 bytes: 5A, then C3 A9 ten times; the 16th byte is a C3 that
+        // starts a character.
+        let long = format!("Z{}", "\u{e9}".repeat(10));
+        let rows = dense(vec![Value::from(long.as_str()), Value::from("Gus")]);
+        let (codec, bytes) = encode_column_chunk(2, &rows, None).unwrap();
+        let Some(ZoneMap::Strings(strings)) = decode_column_chunk(&bytes, codec.to_byte(), 2)
+            .unwrap()
+            .zone_map
+        else {
+            panic!("a string chunk has a string zone map");
+        };
+        let mut raised = long.as_bytes()[..16].to_vec();
+        raised[15] += 1;
+        assert_eq!(strings.max, raised, "5A C3 A9 ... C4");
+        assert!(std::str::from_utf8(&strings.max).is_err(), "not UTF-8");
+        assert!(!strings.max_exact);
+        assert!(strings.may_hold(&long));
+    }
+
+    /// The guarantee a reader prunes by: every string of a chunk is within
+    /// its zone map, whatever the strings (empty, multi-byte, long, sharing
+    /// their first 16 bytes with the maximum), and a string the bounds or
+    /// lengths rule out is not.
+    #[test]
+    fn every_string_of_a_chunk_is_within_its_zone_map() {
+        // 16 bytes: a bicycle (F0 9F 9A B2), the highest first character.
+        let shared = "\u{1f6b2}abcdefghijkl";
+        let strings: Vec<String> = vec![
+            String::new(),
+            "Amsterdam".into(),
+            "\u{c5}rhus".into(),
+            "\u{1f6b2} Berlin".into(),
+            format!("{shared}Z"),
+            format!("{shared}ZZZZ"),
+            "Prague".repeat(5),
+            shared.to_string(),
+        ];
+        let rows = dense(
+            strings
+                .iter()
+                .map(|text| Value::from(text.as_str()))
+                .collect(),
+        );
+        let row_count = row_count_of(&rows);
+        let (codec, bytes) = encode_column_chunk(row_count, &rows, None).unwrap();
+        let Some(ZoneMap::Strings(zone)) = decode_column_chunk(&bytes, codec.to_byte(), row_count)
+            .unwrap()
+            .zone_map
+        else {
+            panic!("a string chunk has a string zone map");
+        };
+        for text in &strings {
+            assert!(zone.may_hold(text), "{text:?} is in the chunk");
+        }
+        assert_eq!((zone.min_len, zone.max_len), (0, 30));
+        assert!(
+            zone.min_exact && zone.min.is_empty(),
+            "the empty string is the minimum"
+        );
+        // The largest string starts with the shared 16 bytes: a longer one
+        // with the same start may be there, one past the raised bound not.
+        assert!(!zone.max_exact);
+        assert!(zone.may_hold(&format!("{shared}ZZZZZZ")), "same 16 bytes");
+        assert!(
+            !zone.may_hold("\u{1f6b2}abcdefghijkm"),
+            "at the raised bound"
+        );
+        assert!(!zone.may_hold("\u{1f6b3}"), "above every string");
+        assert!(!zone.may_hold(&"A".repeat(31)), "longer than the longest");
+    }
+
+    /// The decoder refuses a string zone map other than the strings', a bound
+    /// past 16 bytes and an unknown flag bit.
+    #[test]
+    fn a_string_zone_map_other_than_the_strings_is_refused() {
+        let rows = dense(vec![Value::from("Berlin"), Value::from("Prague")]);
+        let (codec, bytes) = encode_column_chunk(2, &rows, None).unwrap();
+        assert_eq!(codec, ChunkCodec::Dict);
+        // header (12), then the minimum's length at 12, "Berlin" at 13..19,
+        // the maximum's length at 19, "Prague" at 20..26, the flags at 26.
+        assert_eq!(bytes[12], 6);
+        assert_eq!(&bytes[13..19], b"Berlin");
+        assert_eq!(bytes[26], MIN_EXACT | MAX_EXACT);
+        let refused = |at: usize, byte: u8, what: &str| {
+            let mut crafted = bytes.clone();
+            crafted[at] = byte;
+            let error = error_of(&crafted, codec, 2);
+            assert!(error.contains("zone map"), "{what}: {error}");
+        };
+        refused(13, b'A', "another minimum");
+        refused(26, MIN_EXACT, "a maximum marked cut");
+        refused(26, MIN_EXACT | MAX_EXACT | 4, "an unknown flag bit");
+        refused(12, 17, "a minimum past 16 bytes");
+        refused(27, 7, "another shortest length");
     }
 
     /// The decoder rebuilds the zone map and refuses any other, so its order
     /// is part of the format: floats in total order, where -0.0 is below 0.0.
     #[test]
     fn negative_zero_is_below_zero_in_a_float_zone_map() {
-        let bits = |zone: Option<(Value, Value)>| match zone {
-            Some((Value::Float64(min), Value::Float64(max))) => (min.to_bits(), max.to_bits()),
+        let bits = |zone: Option<ZoneMap>| match zone {
+            Some(ZoneMap::Values(Value::Float64(min), Value::Float64(max))) => {
+                (min.to_bits(), max.to_bits())
+            }
             other => panic!("not a Float64 zone map: {other:?}"),
         };
         for floats in [[0.0, -0.0], [-0.0, 0.0]] {
@@ -1622,7 +1910,7 @@ mod tests {
                 row_count: 2,
                 values: values.clone(),
                 epochs: Some(vec![0, 88]),
-                zone_map: Some((Value::Int64(3), Value::Int64(19))),
+                zone_map: Some(ZoneMap::Values(Value::Int64(3), Value::Int64(19))),
             }
         );
         let zeros = with_epochs(&BitPackedInts::pack(&[0, 0]));
@@ -1730,7 +2018,14 @@ mod tests {
         // the zone map the one value gives, so only the code count can be wrong
         let mia = Value::from("Mia");
         let chunk = |codes: Vec<u32>| {
-            let mut rest = [encoded(&mia), encoded(&mia)].concat();
+            let mut rest = Vec::new();
+            encode_zone_map(
+                &zone_map(ChunkCodec::Dict, [&mia].into_iter())
+                    .unwrap()
+                    .unwrap(),
+                &mut rest,
+            )
+            .unwrap();
             let dict = DictionaryEncoding::new(Arc::from(vec![Arc::<str>::from("Mia")]), codes);
             write_dict_body(&dict, &mut rest).unwrap();
             crafted(ChunkCodec::Dict, 2, 1, 1, &rest)
@@ -1892,11 +2187,11 @@ mod tests {
         assert_eq!(value_bound(&Value::Int64(3)), 9 + 4);
         assert_eq!(
             chunk_overhead(65, 3, false),
-            12 + 16 + 2 * (1 + 4 + ZONE_MAP_STRING_LIMIT) + 16
+            12 + 16 + (2 * (1 + 16) + 1 + 4 + 4) + 16
         );
         assert_eq!(
             chunk_overhead(64, 3, true),
-            12 + 8 + 2 * (1 + 4 + ZONE_MAP_STRING_LIMIT) + 16 + 17 + 24
+            12 + 8 + (2 * (1 + 16) + 1 + 4 + 4) + 16 + 17 + 24
         );
     }
 

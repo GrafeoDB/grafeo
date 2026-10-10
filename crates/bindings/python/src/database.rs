@@ -1315,7 +1315,7 @@ impl PyGrafeoDB {
             ef_construction,
             quantization,
         )
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        .map_err(|e| PyGrafeoError::from(e).into())
     }
 
     /// Drop a vector index for the given label and property.
@@ -1358,7 +1358,7 @@ impl PyGrafeoDB {
     fn rebuild_vector_index(&self, label: &str, property: &str) -> PyResult<()> {
         let db = self.inner.read();
         db.rebuild_vector_index(label, property)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| PyGrafeoError::from(e).into())
     }
 
     /// Search for the k nearest neighbors of a query vector.
@@ -1399,7 +1399,7 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let results = db
             .vector_search(label, property, &query, k, ef, filter_map.as_ref())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|(id, dist)| (id.as_u64(), dist))
@@ -1509,14 +1509,13 @@ impl PyGrafeoDB {
         dst_field: &str,
         replace: bool,
     ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let options = grafeo_engine::database::EdgeUpsertOptions {
-            key: key.to_string(),
-            endpoint_key: endpoint_key.to_string(),
-            endpoint_labels: endpoint_labels.unwrap_or_default(),
-            src_field: src_field.to_string(),
-            dst_field: dst_field.to_string(),
-            replace,
-        };
+        let options = grafeo_engine::database::EdgeUpsertOptions::new()
+            .with_key(key)
+            .with_endpoint_key(endpoint_key)
+            .with_endpoint_labels(endpoint_labels.unwrap_or_default())
+            .with_src_field(src_field)
+            .with_dst_field(dst_field)
+            .with_replace(replace);
         let db = self.inner.read();
         crate::direct::upsert_edges(py, &*db, edge_type, rows, &options)
     }
@@ -1615,7 +1614,7 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let results = db
             .batch_vector_search(label, property, &queries, k, ef, filter_map.as_ref())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|inner| {
@@ -1678,7 +1677,7 @@ impl PyGrafeoDB {
                 ef,
                 filter_map.as_ref(),
             )
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|(id, dist)| (id.as_u64(), dist))
@@ -1705,7 +1704,7 @@ impl PyGrafeoDB {
     fn create_text_index(&self, label: &str, property: &str) -> PyResult<()> {
         let db = self.inner.read();
         db.create_text_index(label, property)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| PyGrafeoError::from(e).into())
     }
 
     /// Drop a text index for the given label and property.
@@ -1736,7 +1735,7 @@ impl PyGrafeoDB {
     fn rebuild_text_index(&self, label: &str, property: &str) -> PyResult<()> {
         let db = self.inner.read();
         db.rebuild_text_index(label, property)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| PyGrafeoError::from(e).into())
     }
 
     /// Search a text index using BM25 scoring.
@@ -1770,7 +1769,7 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let results = db
             .text_search(label, property, query, k)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|(id, score)| (id.as_u64(), score))
@@ -1841,7 +1840,7 @@ impl PyGrafeoDB {
                 k,
                 fusion_method,
             )
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|(id, score)| (id.as_u64(), score))
@@ -1937,7 +1936,7 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let results = db
             .vector_search_text(label, property, model_name, query_text, k, ef)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|(id, dist)| (id.as_u64(), dist))

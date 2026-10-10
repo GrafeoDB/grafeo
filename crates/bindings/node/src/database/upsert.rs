@@ -67,6 +67,31 @@ impl From<EngineUpsertSummary> for UpsertSummary {
     }
 }
 
+/// The engine options for `upsertEdges`: each option given, the default for
+/// the rest.
+fn edge_options(options: UpsertEdgesOptions) -> EdgeUpsertOptions {
+    let mut edge = EdgeUpsertOptions::new();
+    if let Some(key) = options.key {
+        edge = edge.with_key(key);
+    }
+    if let Some(endpoint_key) = options.endpoint_key {
+        edge = edge.with_endpoint_key(endpoint_key);
+    }
+    if let Some(labels) = options.endpoint_labels {
+        edge = edge.with_endpoint_labels(labels);
+    }
+    if let Some(src_field) = options.src_field {
+        edge = edge.with_src_field(src_field);
+    }
+    if let Some(dst_field) = options.dst_field {
+        edge = edge.with_dst_field(dst_field);
+    }
+    if let Some(replace) = options.replace {
+        edge = edge.with_replace(replace);
+    }
+    edge
+}
+
 /// Rows of properties from JSON objects.
 pub(super) fn rows(rows: &[serde_json::Value]) -> Result<Vec<HashMap<PropertyKey, Value>>> {
     rows.iter()
@@ -135,18 +160,7 @@ impl JsGrafeoDB {
         options: Option<UpsertEdgesOptions>,
     ) -> Result<UpsertSummary> {
         let rows = self::rows(&rows)?;
-        let defaults = EdgeUpsertOptions::default();
-        let options = match options {
-            Some(options) => EdgeUpsertOptions {
-                key: options.key.unwrap_or(defaults.key),
-                endpoint_key: options.endpoint_key.unwrap_or(defaults.endpoint_key),
-                endpoint_labels: options.endpoint_labels.unwrap_or_default(),
-                src_field: options.src_field.unwrap_or(defaults.src_field),
-                dst_field: options.dst_field.unwrap_or(defaults.dst_field),
-                replace: options.replace.unwrap_or(false),
-            },
-            None => defaults,
-        };
+        let options = options.map_or_else(EdgeUpsertOptions::new, edge_options);
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             db.read()

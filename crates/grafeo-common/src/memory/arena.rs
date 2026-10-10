@@ -34,6 +34,12 @@ pub enum AllocError {
     InsufficientSpace,
     /// Alignment must be a non-zero power of two.
     InvalidAlignment(usize),
+    /// Every `u32` id of the kind `what` (a named graph's, say) was given
+    /// out: ids are never reused, so no more can be created.
+    IdsExhausted {
+        /// What the ids number, for the message.
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for AllocError {
@@ -46,6 +52,12 @@ impl fmt::Display for AllocError {
             }
             Self::InvalidAlignment(align) => {
                 write!(f, "alignment must be a non-zero power of two, got {align}")
+            }
+            Self::IdsExhausted { what } => {
+                write!(
+                    f,
+                    "every {what} id was given out, so no {what} can be created"
+                )
             }
         }
     }
@@ -65,6 +77,7 @@ impl From<AllocError> for crate::Error {
             AllocError::InvalidAlignment(align) => crate::Error::Internal(format!(
                 "alignment must be a non-zero power of two, got {align}"
             )),
+            AllocError::IdsExhausted { .. } => crate::Error::InvalidValue(e.to_string()),
         }
     }
 }

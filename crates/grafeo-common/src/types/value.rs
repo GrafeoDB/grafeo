@@ -282,6 +282,28 @@ impl Value {
         }
     }
 
+    /// The instant a datetime denotes: a zoned datetime's UTC instant, or a
+    /// timestamp (a UTC instant itself). `None` for every other value.
+    #[inline]
+    #[must_use]
+    pub const fn as_instant(&self) -> Option<Timestamp> {
+        match self {
+            Value::Timestamp(ts) => Some(*ts),
+            Value::ZonedDatetime(zdt) => Some(zdt.as_timestamp()),
+            _ => None,
+        }
+    }
+
+    /// Orders two datetimes by the instant they denote (see
+    /// [`as_instant`](Self::as_instant)): zoned datetimes at any offset and
+    /// timestamps compare with each other, as ISO/IEC 39075 compares
+    /// datetimes. `None` unless both values are datetimes.
+    #[inline]
+    #[must_use]
+    pub fn compare_instants(&self, other: &Value) -> Option<std::cmp::Ordering> {
+        Some(self.as_instant()?.cmp(&other.as_instant()?))
+    }
+
     /// Returns the list value if this is a List, otherwise None.
     #[inline]
     #[must_use]

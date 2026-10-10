@@ -63,7 +63,7 @@ impl super::Planner {
             LogicalExpression::FunctionCall { name, args, .. } => {
                 // The evaluator answers a call it cannot compute with a null
                 // for every row: refuse it here, before any row is read.
-                check_function_call(name)?;
+                check_function_call(name, args.len())?;
                 let filter_args: Vec<FilterExpression> = args
                     .iter()
                     .map(|a| self.convert_expression(a))

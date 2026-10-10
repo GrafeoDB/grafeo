@@ -129,7 +129,6 @@ use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{EpochId, TransactionId};
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::execution::AdaptiveContext;
 use grafeo_core::execution::operators::{
     AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, ConstraintValidator,
     CreateOperator, CreateStep, DeleteEdgeOperator, DeleteNodeOperator, EagerOperator,
@@ -742,11 +741,7 @@ impl Planner {
         self.find_reachability_expands(&logical_plan.root);
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
         let operator = self.shuffled_root(logical_plan, operator);
-        Ok(PhysicalPlan {
-            operator,
-            columns,
-            adaptive_context: None,
-        })
+        Ok(PhysicalPlan { operator, columns })
     }
 
     /// Plans a logical plan with profiling: each physical operator is wrapped
@@ -773,35 +768,7 @@ impl Planner {
         let (operator, columns) = result?;
         let entries = self.profile_entries.borrow_mut().drain(..).collect();
 
-        Ok((
-            PhysicalPlan {
-                operator,
-                columns,
-                adaptive_context: None,
-            },
-            entries,
-        ))
-    }
-
-    /// Plans a logical plan with adaptive execution support.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the logical plan contains unsupported operators
-    /// or invalid expressions.
-    pub fn plan_adaptive(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
-        self.find_reachability_expands(&logical_plan.root);
-        let (operator, columns) = self.plan_operator(&logical_plan.root)?;
-        let operator = self.shuffled_root(logical_plan, operator);
-
-        let mut adaptive_context = AdaptiveContext::new();
-        self.collect_cardinality_estimates(&logical_plan.root, &mut adaptive_context, 0);
-
-        Ok(PhysicalPlan {
-            operator,
-            columns,
-            adaptive_context: Some(adaptive_context),
-        })
+        Ok((PhysicalPlan { operator, columns }, entries))
     }
 
     /// Finds the variable-length expands of `root` that run as a
@@ -826,193 +793,6 @@ impl Planner {
             .iter()
             .find(|(found, _)| *found == address)
             .map(|(_, mode)| *mode)
-    }
-
-    /// Collects cardinality estimates from the logical plan into an adaptive context.
-    fn collect_cardinality_estimates(
-        &self,
-        op: &LogicalOperator,
-        ctx: &mut AdaptiveContext,
-        depth: usize,
-    ) {
-        match op {
-            LogicalOperator::NodeScan(scan) => {
-                let estimate = if let Some(label) = &scan.label {
-                    self.store.nodes_by_label_count(label) as f64
-                } else {
-                    self.store.node_count() as f64
-                };
-                let id = format!("scan_{}", scan.variable);
-                ctx.set_estimate(&id, estimate);
-
-                if let Some(input) = &scan.input {
-                    self.collect_cardinality_estimates(input, ctx, depth + 1);
-                }
-            }
-            LogicalOperator::Filter(filter) => {
-                let input_estimate = self.estimate_cardinality(&filter.input);
-                let estimate = input_estimate * 0.3;
-                let id = format!("filter_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&filter.input, ctx, depth + 1);
-            }
-            LogicalOperator::Expand(expand) => {
-                let input_estimate = self.estimate_cardinality(&expand.input);
-                let stats = self.store.statistics();
-                let avg_degree = self.estimate_expand_degree(&stats, expand);
-                let estimate = input_estimate * avg_degree;
-                let id = format!("expand_{}", expand.to_variable);
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&expand.input, ctx, depth + 1);
-            }
-            LogicalOperator::Join(join) => {
-                let left_est = self.estimate_cardinality(&join.left);
-                let right_est = self.estimate_cardinality(&join.right);
-                let estimate = (left_est * right_est).sqrt();
-                let id = format!("join_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&join.left, ctx, depth + 1);
-                self.collect_cardinality_estimates(&join.right, ctx, depth + 1);
-            }
-            LogicalOperator::Aggregate(agg) => {
-                let input_estimate = self.estimate_cardinality(&agg.input);
-                let estimate = if agg.group_by.is_empty() {
-                    1.0
-                } else {
-                    (input_estimate * 0.1).max(1.0)
-                };
-                let id = format!("aggregate_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&agg.input, ctx, depth + 1);
-            }
-            LogicalOperator::Distinct(distinct) => {
-                let input_estimate = self.estimate_cardinality(&distinct.input);
-                let estimate = (input_estimate * 0.5).max(1.0);
-                let id = format!("distinct_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&distinct.input, ctx, depth + 1);
-            }
-            LogicalOperator::Return(ret) => {
-                self.collect_cardinality_estimates(&ret.input, ctx, depth + 1);
-            }
-            LogicalOperator::Limit(limit) => {
-                let input_estimate = self.estimate_cardinality(&limit.input);
-                let estimate = (input_estimate).min(limit.count.estimate());
-                let id = format!("limit_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&limit.input, ctx, depth + 1);
-            }
-            LogicalOperator::Skip(skip) => {
-                let input_estimate = self.estimate_cardinality(&skip.input);
-                let estimate = (input_estimate - skip.count.estimate()).max(0.0);
-                let id = format!("skip_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&skip.input, ctx, depth + 1);
-            }
-            LogicalOperator::Sort(sort) => {
-                self.collect_cardinality_estimates(&sort.input, ctx, depth + 1);
-            }
-            LogicalOperator::Union(union) => {
-                let estimate: f64 = union
-                    .inputs
-                    .iter()
-                    .map(|input| self.estimate_cardinality(input))
-                    .sum();
-                let id = format!("union_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                for input in &union.inputs {
-                    self.collect_cardinality_estimates(input, ctx, depth + 1);
-                }
-            }
-            _ => {
-                // For other operators, try to recurse into known input patterns
-            }
-        }
-    }
-
-    /// Estimates cardinality for a logical operator subtree.
-    fn estimate_cardinality(&self, op: &LogicalOperator) -> f64 {
-        match op {
-            LogicalOperator::NodeScan(scan) => {
-                if let Some(label) = &scan.label {
-                    self.store.nodes_by_label_count(label) as f64
-                } else {
-                    self.store.node_count() as f64
-                }
-            }
-            LogicalOperator::Filter(filter) => self.estimate_cardinality(&filter.input) * 0.3,
-            LogicalOperator::Expand(expand) => {
-                let stats = self.store.statistics();
-                let avg_degree = self.estimate_expand_degree(&stats, expand);
-                self.estimate_cardinality(&expand.input) * avg_degree
-            }
-            LogicalOperator::Join(join) => {
-                let left = self.estimate_cardinality(&join.left);
-                let right = self.estimate_cardinality(&join.right);
-                (left * right).sqrt()
-            }
-            LogicalOperator::Aggregate(agg) => {
-                if agg.group_by.is_empty() {
-                    1.0
-                } else {
-                    (self.estimate_cardinality(&agg.input) * 0.1).max(1.0)
-                }
-            }
-            LogicalOperator::Distinct(distinct) => {
-                (self.estimate_cardinality(&distinct.input) * 0.5).max(1.0)
-            }
-            LogicalOperator::Return(ret) => self.estimate_cardinality(&ret.input),
-            LogicalOperator::Limit(limit) => self
-                .estimate_cardinality(&limit.input)
-                .min(limit.count.estimate()),
-            LogicalOperator::Skip(skip) => {
-                (self.estimate_cardinality(&skip.input) - skip.count.estimate()).max(0.0)
-            }
-            LogicalOperator::Sort(sort) => self.estimate_cardinality(&sort.input),
-            LogicalOperator::Union(union) => union
-                .inputs
-                .iter()
-                .map(|input| self.estimate_cardinality(input))
-                .sum(),
-            LogicalOperator::Except(except) => {
-                let left = self.estimate_cardinality(&except.left);
-                let right = self.estimate_cardinality(&except.right);
-                (left - right).max(0.0)
-            }
-            LogicalOperator::Intersect(intersect) => {
-                let left = self.estimate_cardinality(&intersect.left);
-                let right = self.estimate_cardinality(&intersect.right);
-                left.min(right)
-            }
-            LogicalOperator::Otherwise(otherwise) => self
-                .estimate_cardinality(&otherwise.left)
-                .max(self.estimate_cardinality(&otherwise.right)),
-            _ => 1000.0,
-        }
-    }
-
-    /// Estimates the average edge degree for an expand operation using store statistics.
-    fn estimate_expand_degree(
-        &self,
-        stats: &grafeo_core::statistics::Statistics,
-        expand: &ExpandOp,
-    ) -> f64 {
-        let outgoing = !matches!(expand.direction, ExpandDirection::Incoming);
-        if expand.edge_types.len() == 1 {
-            stats.estimate_avg_degree(&expand.edge_types[0], outgoing)
-        } else if stats.total_nodes > 0 {
-            (stats.total_edges as f64 / stats.total_nodes as f64).max(1.0)
-        } else {
-            10.0
-        }
     }
 
     /// If profiling is enabled, wraps a planned result in `ProfiledOperator`
@@ -1346,15 +1126,30 @@ impl Planner {
             )
         });
 
+        // A query vector the index cannot measure is an error that names the
+        // index (#593), whichever metric the predicate asks for: a search of
+        // the index, or a scan of its vectors, would find nothing (or measure
+        // NaN), where the predicate evaluated per node gives NULL.
+        let index = scan.label.as_ref().and_then(|label| {
+            self.store
+                .vector_index_config(label, &scan.property)
+                .map(|config| (label, config))
+        });
+        match &index {
+            Some((label, config)) => grafeo_core::index::vector::check_query_vector(
+                &query_vec,
+                config.dimensions,
+                label,
+                &scan.property,
+            )?,
+            None => grafeo_core::index::vector::check_query_values(&query_vec)?,
+        }
+
         // Pick the metric we'll execute under. When the user asked for a
         // specific one, honor it. Otherwise inherit the index's metric (so a
         // cosine-built index drives cosine scoring) or default to Cosine for
         // the unindexed brute-force path.
-        let index_metric = scan
-            .label
-            .as_ref()
-            .and_then(|label| self.store.vector_index_config(label, &scan.property))
-            .map(|config| config.metric);
+        let index_metric = index.map(|(_, config)| config.metric);
         let metric = requested_metric
             .or(index_metric)
             .unwrap_or(DistanceMetric::Cosine);
@@ -2758,309 +2553,6 @@ mod tests {
         let _ = physical.into_operator();
     }
 
-    // ==================== Adaptive Planning Tests ====================
-
-    #[test]
-    fn test_plan_adaptive_with_scan() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        // MATCH (n:Person) RETURN n
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                variable: "n".to_string(),
-                label: Some("Person".to_string()),
-                input: None,
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert_eq!(physical.columns(), &["n"]);
-        // Should have adaptive context with estimates
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_filter() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        // MATCH (n) WHERE n.age > 30 RETURN n
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Filter(FilterOp {
-                predicate: LogicalExpression::Binary {
-                    left: Box::new(LogicalExpression::Property {
-                        variable: "n".to_string(),
-                        property: "age".to_string(),
-                    }),
-                    op: BinaryOp::Gt,
-                    right: Box::new(LogicalExpression::Literal(Value::Int64(30))),
-                },
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "n".to_string(),
-                    label: None,
-                    input: None,
-                })),
-                pushdown_hint: None,
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_expand() {
-        let store = create_test_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>)
-            .with_factorized_execution(false);
-
-        // MATCH (a)-[:KNOWS]->(b) RETURN a, b
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![
-                ReturnItem {
-                    expression: LogicalExpression::Variable("a".to_string()),
-                    alias: None,
-                },
-                ReturnItem {
-                    expression: LogicalExpression::Variable("b".to_string()),
-                    alias: None,
-                },
-            ],
-            distinct: false,
-            input: Box::new(LogicalOperator::Expand(ExpandOp {
-                quantified: false,
-                from_variable: "a".to_string(),
-                to_variable: "b".to_string(),
-                edge_variable: None,
-                direction: ExpandDirection::Outgoing,
-                edge_types: vec!["KNOWS".to_string()],
-                min_hops: 1,
-                max_hops: Some(1),
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "a".to_string(),
-                    label: None,
-                    input: None,
-                })),
-                path_alias: None,
-                path_mode: PathMode::Walk,
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_join() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![
-                ReturnItem {
-                    expression: LogicalExpression::Variable("a".to_string()),
-                    alias: None,
-                },
-                ReturnItem {
-                    expression: LogicalExpression::Variable("b".to_string()),
-                    alias: None,
-                },
-            ],
-            distinct: false,
-            input: Box::new(LogicalOperator::Join(JoinOp {
-                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "a".to_string(),
-                    label: None,
-                    input: None,
-                })),
-                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "b".to_string(),
-                    label: None,
-                    input: None,
-                })),
-                join_type: JoinType::Cross,
-                conditions: vec![],
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_aggregate() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Aggregate(AggregateOp {
-            group_by: vec![],
-            aggregates: vec![LogicalAggregateExpr {
-                function: LogicalAggregateFunction::Count,
-                expression: Some(LogicalExpression::Variable("n".to_string())),
-                expression2: None,
-                distinct: false,
-                alias: Some("cnt".to_string()),
-                percentile: None,
-                separator: None,
-            }],
-            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                variable: "n".to_string(),
-                label: None,
-                input: None,
-            })),
-            having: None,
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_distinct() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Distinct(LogicalDistinctOp {
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "n".to_string(),
-                    label: None,
-                    input: None,
-                })),
-                columns: None,
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_limit() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Limit(LogicalLimitOp {
-                count: 10.into(),
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "n".to_string(),
-                    label: None,
-                    input: None,
-                })),
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_skip() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Skip(LogicalSkipOp {
-                count: 5.into(),
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "n".to_string(),
-                    label: None,
-                    input: None,
-                })),
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_sort() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Sort(SortOp {
-                keys: vec![SortKey {
-                    expression: LogicalExpression::Variable("n".to_string()),
-                    order: SortOrder::Ascending,
-                    nulls: None,
-                }],
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "n".to_string(),
-                    label: None,
-                    input: None,
-                })),
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_union() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Union(UnionOp {
-                inputs: vec![
-                    LogicalOperator::NodeScan(NodeScanOp {
-                        variable: "n".to_string(),
-                        label: Some("Person".to_string()),
-                        input: None,
-                    }),
-                    LogicalOperator::NodeScan(NodeScanOp {
-                        variable: "n".to_string(),
-                        label: Some("Company".to_string()),
-                        input: None,
-                    }),
-                ],
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
     // ==================== Variable Length Path Tests ====================
 
     #[test]
@@ -4084,46 +3576,6 @@ mod tests {
         ));
         let physical = planner.plan(&logical).unwrap();
         assert!(physical.columns().contains(&"edge_count".to_string()));
-    }
-
-    // ==================== Cardinality estimation branches ====================
-
-    #[test]
-    fn test_plan_adaptive_with_except() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-        let logical = LogicalPlan::new(LogicalOperator::Except(ExceptOp {
-            left: Box::new(scan_person("n")),
-            right: Box::new(scan_person("n")),
-            all: false,
-        }));
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_intersect() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-        let logical = LogicalPlan::new(LogicalOperator::Intersect(IntersectOp {
-            left: Box::new(scan_person("n")),
-            right: Box::new(scan_any("n")),
-            all: false,
-        }));
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_otherwise() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-        let logical = LogicalPlan::new(LogicalOperator::Otherwise(OtherwiseOp {
-            left: Box::new(scan_person("n")),
-            right: Box::new(scan_any("n")),
-        }));
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
     }
 
     // ==================== count_expand_chain edge case ====================

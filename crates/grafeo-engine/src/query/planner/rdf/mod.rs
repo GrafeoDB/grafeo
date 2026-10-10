@@ -322,11 +322,7 @@ impl RdfPlanner {
             } else {
                 operator
             };
-        Ok(PhysicalPlan {
-            operator,
-            columns,
-            adaptive_context: None,
-        })
+        Ok(PhysicalPlan { operator, columns })
     }
 
     /// Plans a logical plan with profiling: each physical operator is wrapped
@@ -351,14 +347,7 @@ impl RdfPlanner {
         let (operator, columns) = strip_internal_columns(operator, columns);
         let entries = self.profile_entries.borrow_mut().drain(..).collect();
 
-        Ok((
-            PhysicalPlan {
-                operator,
-                columns,
-                adaptive_context: None,
-            },
-            entries,
-        ))
+        Ok((PhysicalPlan { operator, columns }, entries))
     }
 
     /// If profiling is enabled, wraps a planned result in `ProfiledOperator`

@@ -210,10 +210,15 @@ impl VectorIndexKind {
         }
     }
 
-    /// Removes a vector from the index.
-    pub fn remove(&self, id: NodeId) -> bool {
+    /// Removes a vector from the index, mending the links of the nodes that
+    /// led to it (see [`HnswIndex::remove`]).
+    ///
+    /// For `Hnsw`, the accessor reads the vectors of those nodes. For
+    /// `Quantized`, the index reads its own copies and the accessor is
+    /// unused.
+    pub fn remove(&self, id: NodeId, accessor: &impl VectorAccessor) -> bool {
         match self {
-            Self::Hnsw(idx) => idx.remove(id),
+            Self::Hnsw(idx) => idx.remove(id, accessor),
             Self::Quantized(idx) => idx.remove(id),
         }
     }
@@ -511,6 +516,67 @@ impl Default for VectorConfig {
     }
 }
 
+/// The first value of `vector` that is NaN or infinite, with its position.
+#[must_use]
+pub fn first_non_finite(vector: &[f32]) -> Option<(usize, f32)> {
+    vector
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+}
+
+/// Whether an index of `dimensions` can measure `vector`: it has that many
+/// values, and none of them is NaN or infinite (a distance to such a vector
+/// is NaN, which orders before or after every other distance at random).
+#[must_use]
+pub fn is_indexable(vector: &[f32], dimensions: usize) -> bool {
+    vector.len() == dimensions && first_non_finite(vector).is_none()
+}
+
+/// Checks that a query vector has only finite values: a NaN or an infinity
+/// makes every distance to it NaN, so a search would return its vectors in
+/// no order, without distances.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidValue`](grafeo_common::utils::error::Error::InvalidValue)
+/// naming the position and the value of the first NaN or infinite value.
+pub fn check_query_values(query: &[f32]) -> grafeo_common::utils::error::Result<()> {
+    match first_non_finite(query) {
+        Some((position, value)) => Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+            "the query vector has {value} at position {position}: a vector search takes \
+                 finite numbers only"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Checks a query vector for a search of the vector index on
+/// `:label(property)`, whose vectors have `dimensions` values: it must have
+/// as many, all of them finite (see [`check_query_values`]). A search with
+/// another size cannot measure a single vector of the index.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidValue`](grafeo_common::utils::error::Error::InvalidValue)
+/// naming the index and both sizes, or the first NaN or infinite value.
+pub fn check_query_vector(
+    query: &[f32],
+    dimensions: usize,
+    label: &str,
+    property: &str,
+) -> grafeo_common::utils::error::Result<()> {
+    if query.len() != dimensions {
+        return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+            "the query vector has {} dimensions; the index on :{label}({property}) expects \
+             {dimensions}",
+            query.len()
+        )));
+    }
+    check_query_values(query)
+}
+
 /// Performs brute-force k-nearest neighbor search.
 ///
 /// This is O(n) where n is the number of vectors. Use this for:
@@ -529,7 +595,9 @@ impl Default for VectorConfig {
 ///
 /// # Returns
 ///
-/// Vector of (id, distance) pairs sorted by distance (ascending).
+/// Vector of (id, distance) pairs sorted by distance (ascending). A vector
+/// with another number of values than `query` has no distance to it and is
+/// left out.
 ///
 /// # Example
 ///
@@ -559,6 +627,7 @@ where
     I: Iterator<Item = (NodeId, &'a [f32])>,
 {
     let mut results: Vec<(NodeId, f32)> = vectors
+        .filter(|(_, vec)| vec.len() == query.len())
         .map(|(id, vec)| (id, compute_distance(query, vec, metric)))
         .collect();
 
@@ -584,7 +653,8 @@ where
 ///
 /// # Returns
 ///
-/// Vector of (id, distance) pairs sorted by distance (ascending).
+/// Vector of (id, distance) pairs sorted by distance (ascending). A vector
+/// with another number of values than `query` is left out.
 pub fn brute_force_knn_filtered<'a, I, F>(
     vectors: I,
     query: &[f32],
@@ -597,7 +667,7 @@ where
     F: Fn(NodeId) -> bool,
 {
     let mut results: Vec<(NodeId, f32)> = vectors
-        .filter(|(id, _)| predicate(*id))
+        .filter(|(id, vec)| vec.len() == query.len() && predicate(*id))
         .map(|(id, vec)| (id, compute_distance(query, vec, metric)))
         .collect();
 
@@ -665,6 +735,7 @@ pub(crate) fn scan_within(
 ) -> Vec<(NodeId, f64)> {
     let mut results: Vec<(NodeId, f64)> = scanned_vectors(store, label, property)
         .into_iter()
+        .filter(|(_, vector)| vector.len() == query.len())
         .filter_map(|(id, vector)| {
             let distance = f64::from(compute_distance(query, &vector, metric));
             (distance <= threshold).then_some((id, distance))
@@ -915,7 +986,7 @@ mod tests {
         #[test]
         fn quantized_kind_remove() {
             let kind = build_quantized_kind(5);
-            assert!(kind.remove(NodeId::new(1)));
+            assert!(kind.remove(NodeId::new(1), &NoopAccessor));
             assert_eq!(kind.len(), 4);
             assert!(!kind.contains(NodeId::new(1)));
         }

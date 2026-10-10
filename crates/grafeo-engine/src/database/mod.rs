@@ -46,11 +46,7 @@ pub use upsert::{EdgeUpsertOptions, UpsertSummary};
 #[cfg(feature = "lpg")]
 mod import;
 #[cfg(feature = "lpg")]
-mod index;
-#[cfg(all(feature = "lpg", feature = "gql", feature = "vector-index"))]
-pub(crate) use index::{
-    check_vector_for_index, check_vector_index_dimensions, vector_index_metric,
-};
+pub(crate) mod index;
 #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
 mod legacy_spill;
 #[cfg(feature = "grafeo-file")]
@@ -69,6 +65,8 @@ mod search;
 pub(crate) mod section_consumer;
 mod sections;
 mod spill_directory;
+#[cfg(feature = "lpg")]
+pub(crate) mod standalone;
 #[cfg(all(test, feature = "lpg", not(feature = "temporal")))]
 pub(crate) mod test_backing;
 #[cfg(all(feature = "lpg", feature = "gql"))]
@@ -640,6 +638,7 @@ impl GrafeoDB {
                             #[cfg(feature = "triple-store")]
                             &rdf_store,
                             &recovered.records,
+                            loaded_sections.unbuilt_mut(),
                         )?;
                     }
                     Some(Arc::new(fm))
@@ -757,6 +756,7 @@ impl GrafeoDB {
                     #[cfg(feature = "triple-store")]
                     &rdf_store,
                     &recovered.records,
+                    loaded_sections.unbuilt_mut(),
                 )?;
                 wal_torn_tail = recovered.torn_tail;
                 wal_in_named_graph = Self::ends_in_named_graph(&recovered.records);
@@ -1234,27 +1234,30 @@ impl GrafeoDB {
     /// `SwitchGraph` context markers, replaying mutations into the correct
     /// named graph (or the default graph when cursor is `None`).
     ///
+    /// Graph commands and catalog changes (standalone changes) are applied
+    /// as the statements that logged them applied them (see
+    /// [`standalone::apply`]); the vector and text indexes they put are left
+    /// in `unbuilt`, which also loses those they drop, built from the data
+    /// once the database is built.
+    ///
     /// # Errors
     ///
-    /// Returns an error if a record cannot be applied, and, in a build
-    /// without the `triple-store` feature, at an RDF record, naming the WAL:
-    /// the triples would be lost (see [`sections::FeatureData`]).
+    /// Returns an error if a record cannot be applied, naming the WAL for a
+    /// standalone change, and at data this build cannot read (an RDF record
+    /// without the `triple-store` feature, a vector or text index without
+    /// its feature): it would be lost (see [`sections::FeatureData`]).
     #[cfg(all(feature = "wal", feature = "lpg"))]
-    #[cfg_attr(
-        feature = "triple-store",
-        expect(
-            unused_variables,
-            reason = "only a build without `triple-store` refuses records, naming the WAL"
-        )
-    )]
     fn apply_wal_records(
         wal: &std::path::Path,
         store: &Arc<LpgStore>,
         catalog: &Catalog,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         records: &[WalRecord],
+        unbuilt: &mut Vec<catalog_section::GraphIndexes>,
     ) -> Result<()> {
+        use grafeo_common::change::StandaloneOp;
         use grafeo_common::utils::error::Error;
+        use standalone::Applying;
 
         // Graph cursor: tracks which named graph receives data mutations.
         // `None` means the default graph.
@@ -1263,12 +1266,26 @@ impl GrafeoDB {
 
         for record in records {
             match record {
-                // --- Named graph lifecycle ---
+                // --- Standalone changes: as the statement applied them ---
                 WalRecord::CreateNamedGraph { name } => {
-                    let _ = store.create_graph(name);
+                    let op = StandaloneOp::CreateGraph { name: name.clone() };
+                    standalone::apply(
+                        &op,
+                        None,
+                        store,
+                        catalog,
+                        &mut Applying::Replay { unbuilt },
+                    )?;
                 }
                 WalRecord::DropNamedGraph { name } => {
-                    store.drop_graph(name);
+                    let op = StandaloneOp::DropGraph { name: name.clone() };
+                    standalone::apply(
+                        &op,
+                        None,
+                        store,
+                        catalog,
+                        &mut Applying::Replay { unbuilt },
+                    )?;
                     // Reset cursor if the dropped graph was active
                     if current_graph.as_deref() == Some(name.as_str()) {
                         current_graph = None;
@@ -1352,8 +1369,9 @@ impl GrafeoDB {
                     schema_replay::apply_schema_record(catalog, record)?;
                 }
                 WalRecord::CreateIndex { .. } | WalRecord::DropIndex { .. } => {
-                    // Index recreation is handled by the store on startup
-                    // (indexes are rebuilt from data, not WAL)
+                    // Logged by 0.5.x without what the index needs (its graph,
+                    // its vector parameters): never replayed. This release logs
+                    // an index as a standalone change (`Standalone` below).
                 }
 
                 // --- RDF triple replay ---
@@ -1395,6 +1413,9 @@ impl GrafeoDB {
                 WalRecord::EpochAdvance { .. } => {
                     // Metadata record: no store mutation needed.
                     // Used by incremental backup and point-in-time recovery.
+                }
+                WalRecord::Standalone { record } => {
+                    standalone::replay(record, wal, store, catalog, unbuilt)?;
                 }
             }
         }
@@ -1560,6 +1581,9 @@ impl GrafeoDB {
                 #[cfg(feature = "triple-store")]
                 rdf_store,
                 &recovered?.records,
+                // A 0.5.x log puts no index of its own: its indexes are
+                // rebuilt from the data.
+                &mut Vec::new(),
             )
         }
     }
@@ -1661,6 +1685,7 @@ impl GrafeoDB {
                     #[cfg(feature = "triple-store")]
                     rdf_store,
                     &recovered.records,
+                    loaded.unbuilt_mut(),
                 )?;
             }
         }
@@ -2050,9 +2075,10 @@ impl GrafeoDB {
 
     /// Creates a named graph. Returns `true` if created, `false` if it already exists.
     ///
-    /// The graph exists at once, outside any transaction, and is logged as a
-    /// change of its own: commits are held off meanwhile, so a checkpoint or
-    /// `close()` sees all of it or none of it.
+    /// The graph exists at once, outside any transaction (also while one is
+    /// open, whose rollback keeps it), and is logged as a change of its own:
+    /// commits are held off meanwhile, so a checkpoint or `close()` sees all
+    /// of it or none of it.
     ///
     /// # Errors
     ///
@@ -2071,18 +2097,17 @@ impl GrafeoDB {
                 ),
             ));
         }
-        let _held = self.transaction_manager.hold_commits_for_change()?;
-        // Tests start a checkpoint or `close()` here, which must wait.
-        #[cfg(feature = "testing-statement-injection")]
-        grafeo_common::testing::commit_hook::run_during_held_change();
-        let created = self.lpg_store().create_graph(name)?;
-        #[cfg(feature = "wal")]
-        if created {
-            self.log_graph_change(WalRecord::CreateNamedGraph {
-                name: name.to_string(),
-            });
+        let held = self.hold_for_standalone(false)?;
+        // Checked under the hold, as every standalone change.
+        if self.lpg_store().graph(name).is_some() {
+            return Ok(false);
         }
-        Ok(created)
+        let mut change = crate::transaction::StandaloneChange::new();
+        change.push(grafeo_common::change::StandaloneOp::CreateGraph {
+            name: name.to_string(),
+        });
+        self.commit_standalone(change, &held)?;
+        Ok(true)
     }
 
     /// Drops a named graph. Returns `true` if dropped, `false` if it did not
@@ -2090,38 +2115,42 @@ impl GrafeoDB {
     ///
     /// If the dropped graph was the active graph context, the context is reset
     /// to the default graph. As [`create_graph`](Self::create_graph), it holds
-    /// commits off while it runs.
+    /// commits off while it runs, and it also waits for the writes of open
+    /// transactions in progress: a graph an open transaction has changes in
+    /// is not dropped (the transaction would commit into a graph that no
+    /// longer exists), and a write that resolved the graph before the drop
+    /// fails after it.
     ///
     /// # Errors
     ///
-    /// Returns the database-closed error after `close()` of a persistent
-    /// database, and the incomplete-commit error after a commit that did not
-    /// complete.
+    /// Returns a write conflict while an open transaction has changes in the
+    /// graph (drop it once that transaction commits or rolls back); the
+    /// database-closed error after `close()` of a persistent database, and
+    /// the incomplete-commit error after a commit that did not complete.
     #[cfg(feature = "lpg")]
     pub fn drop_graph(&self, name: &str) -> Result<bool> {
         if self.root_store().is_none() {
             return Ok(false);
         }
-        let _held = self.transaction_manager.hold_commits_for_change()?;
-        // Tests start a checkpoint or `close()` here, which must wait.
-        #[cfg(feature = "testing-statement-injection")]
-        grafeo_common::testing::commit_hook::run_during_held_change();
-        // Resolved under the hold, as in `create_graph`.
-        let dropped = self.lpg_store().drop_graph(name);
-        if dropped {
-            #[cfg(feature = "wal")]
-            self.log_graph_change(WalRecord::DropNamedGraph {
-                name: name.to_string(),
-            });
-            let mut current = self.current_graph.write();
-            if current
-                .as_deref()
-                .is_some_and(|g| g.eq_ignore_ascii_case(name))
-            {
-                *current = None;
-            }
+        let held = self.hold_for_standalone(true)?;
+        // Checked under the hold, as every standalone change.
+        if self.lpg_store().graph(name).is_none() {
+            return Ok(false);
         }
-        Ok(dropped)
+        standalone::refuse_drop_with_open_changes(&self.transaction_manager, &held, name)?;
+        let mut change = crate::transaction::StandaloneChange::new();
+        change.push(grafeo_common::change::StandaloneOp::DropGraph {
+            name: name.to_string(),
+        });
+        self.commit_standalone(change, &held)?;
+        let mut current = self.current_graph.write();
+        if current
+            .as_deref()
+            .is_some_and(|g| g.eq_ignore_ascii_case(name))
+        {
+            *current = None;
+        }
+        Ok(true)
     }
 
     /// Returns all named graph names (none on an external store).
@@ -2585,20 +2614,46 @@ impl GrafeoDB {
         self.wal.as_ref()
     }
 
-    /// Logs a change to the set of named graphs as a committed group of its
-    /// own, as `CREATE GRAPH` and `DROP GRAPH` do.
-    #[cfg(all(feature = "wal", feature = "lpg"))]
-    fn log_graph_change(&self, record: WalRecord) {
-        if let Some(wal) = &self.wal
-            && let Err(e) = wal.log_batch(&[
-                record,
-                WalRecord::TransactionCommit {
-                    transaction_id: grafeo_common::types::TransactionId::SYSTEM,
-                },
-            ])
-        {
-            grafeo_common::grafeo_warn!("Failed to log a graph change to the WAL: {}", e);
-        }
+    /// Holds commits off for a standalone change (a graph command or an
+    /// index call, see [`standalone`]) for as long as the guard lives, so a
+    /// checkpoint or `close()` sees all of it or none of it. With
+    /// `writes_too` (a graph drop) it also waits for the writes of open
+    /// transactions in progress and keeps new ones out meanwhile, so what
+    /// their change sets hold is what the stores hold.
+    ///
+    /// # Errors
+    ///
+    /// The database-closed error after `close()` of a persistent database,
+    /// and the incomplete-commit error after a commit that did not complete.
+    #[cfg(feature = "lpg")]
+    pub(crate) fn hold_for_standalone(
+        &self,
+        writes_too: bool,
+    ) -> Result<crate::transaction::CommitsHeld<'_>> {
+        standalone::hold(&self.transaction_manager, writes_too)
+    }
+
+    /// Logs `change` as a WAL group of its own and applies it (see
+    /// [`standalone::commit`]), holding commits off (`held`).
+    ///
+    /// # Errors
+    ///
+    /// As [`standalone::commit`].
+    #[cfg(feature = "lpg")]
+    pub(crate) fn commit_standalone(
+        &self,
+        change: crate::transaction::StandaloneChange,
+        held: &crate::transaction::CommitsHeld<'_>,
+    ) -> Result<()> {
+        standalone::commit(
+            change,
+            held,
+            #[cfg(feature = "wal")]
+            self.wal.as_deref(),
+            &self.lpg_store(),
+            &self.catalog,
+            &self.transaction_manager,
+        )
     }
 
     /// Registers storage sections as [`MemoryConsumer`]s with the BufferManager.

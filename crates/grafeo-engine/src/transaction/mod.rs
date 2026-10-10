@@ -201,6 +201,8 @@ mod prepared;
 #[cfg(feature = "wal")]
 pub(crate) mod v1_group;
 
+#[cfg(feature = "lpg")]
+pub(crate) use changes::{BuiltIndex, StandaloneChange};
 pub(crate) use changes::{
     TransactionChanges, UndoFailure, is_kept_by_external_store, kept_by_external_store,
 };

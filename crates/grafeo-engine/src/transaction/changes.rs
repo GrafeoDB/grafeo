@@ -19,9 +19,16 @@
 //! that handle and never look the graph up by name again, so a graph dropped
 //! and created again under its name meanwhile is never stamped or undone
 //! with ids that mean other entities there.
+//!
+//! Graph commands, schema statements and the index API change nothing a
+//! change set holds: each statement or call collects its changes in a
+//! [`StandaloneChange`], which is checked, logged as a group of its own and
+//! applied at once, also inside a transaction, whose rollback keeps it.
 
 use std::sync::Arc;
 
+#[cfg(feature = "lpg")]
+use grafeo_common::change::StandaloneOp;
 use grafeo_common::change::{
     Before, Change, ChangeMark, ChangeSet, DataModel, DataOp, Entity, GraphRef, GraphSlot,
     PendingVersion,
@@ -311,7 +318,7 @@ impl TransactionChanges {
 
     /// Whether the transaction has an entry in the labeled property graph
     /// with storage key `key` (`None` for the default graph).
-    #[cfg(any(feature = "vector-index", feature = "text-index"))]
+    #[cfg(any(feature = "lpg", feature = "vector-index", feature = "text-index"))]
     pub(crate) fn writes_graph(&self, key: Option<&str>) -> bool {
         self.writes_where(|graph| graph == key)
     }
@@ -472,4 +479,70 @@ impl ChangeRecorder for GraphRecorder {
                 OperatorError::Execution(error.to_string())
             })
     }
+}
+
+/// What one statement or call changes outside every change set: a named
+/// graph created or dropped, catalog records put or dropped (types,
+/// constraints, procedures, schemas, indexes and their names). The
+/// statement checks it against the catalog and the store while it holds
+/// commits off, then it is logged as one group of its own and applied op by
+/// op, through the function replay applies its records with (validate, log,
+/// apply). It takes effect at once, also inside a transaction, whose
+/// rollback keeps it.
+#[cfg(feature = "lpg")]
+#[derive(Default)]
+pub(crate) struct StandaloneChange {
+    /// The ops, in the order they apply, each with the index a statement
+    /// built for it (a vector or text index put), installed as it applies.
+    ops: Vec<(StandaloneOp, Option<BuiltIndex>)>,
+}
+
+#[cfg(feature = "lpg")]
+impl StandaloneChange {
+    /// A change of nothing yet.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds `op`, applied after the ops added before it.
+    pub(crate) fn push(&mut self, op: StandaloneOp) {
+        self.ops.push((op, None));
+    }
+
+    /// Adds `op`, the put of an index record, with the index the statement
+    /// built for it from the data: the op installs it instead of building
+    /// it again.
+    #[cfg(any(feature = "vector-index", feature = "text-index"))]
+    pub(crate) fn push_built(&mut self, op: StandaloneOp, index: BuiltIndex) {
+        self.ops.push((op, Some(index)));
+    }
+
+    /// Whether the change changes nothing: it logs no group then.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+
+    /// The ops, in the order they apply.
+    #[cfg(feature = "wal")]
+    pub(crate) fn ops(&self) -> impl Iterator<Item = &StandaloneOp> {
+        self.ops.iter().map(|(op, _)| op)
+    }
+
+    /// The ops with the indexes built for them, in the order they apply.
+    pub(crate) fn into_ops(self) -> Vec<(StandaloneOp, Option<BuiltIndex>)> {
+        self.ops
+    }
+}
+
+/// An index a statement built from the data while it checked its change,
+/// installed when the op that puts its record applies. Replay builds the
+/// index from the data again.
+#[cfg(feature = "lpg")]
+pub(crate) enum BuiltIndex {
+    /// A vector index.
+    #[cfg(feature = "vector-index")]
+    Vector(grafeo_core::index::vector::VectorIndexKind),
+    /// A text index.
+    #[cfg(feature = "text-index")]
+    Text(grafeo_core::index::text::InvertedIndex),
 }

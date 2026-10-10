@@ -54,6 +54,8 @@ COMMIT
 ROLLBACK
 ```
 
+Schema statements (creating, altering and dropping types, constraints, indexes and procedures) and graph commands (`CREATE GRAPH`, `DROP GRAPH`) take effect immediately, also inside a transaction, and a rollback does not undo them.
+
 ### Savepoints
 
 Create named savepoints within a transaction for partial rollback:

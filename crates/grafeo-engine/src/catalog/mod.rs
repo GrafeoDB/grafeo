@@ -1701,6 +1701,56 @@ pub struct ProcedureDefinition {
 
 // === Schema Catalog ===
 
+/// Adds `property` to the properties of the node or edge type `type_name`,
+/// as `ALTER ... ADD PROPERTY` does: the statement checks it on a copy of
+/// the type before anything changes, and the catalog applies it.
+///
+/// # Errors
+///
+/// * `CatalogError::TypeAlreadyExists` if the type has a property of that name.
+/// * `CatalogError::TooManyListLevels` if the type's property types would
+///   nest more `LIST<...>` levels in all than its catalog record holds.
+///
+/// Nothing changes on an error.
+pub(crate) fn add_property(
+    type_name: &str,
+    properties: &mut Vec<TypedProperty>,
+    property: TypedProperty,
+) -> Result<(), CatalogError> {
+    if properties.iter().any(|p| p.name == property.name) {
+        return Err(CatalogError::TypeAlreadyExists(format!(
+            "property {} on {}",
+            property.name, type_name
+        )));
+    }
+    TypedProperty::check_list_levels(properties.iter().chain([&property]))?;
+    properties.push(property);
+    Ok(())
+}
+
+/// Drops the property `property_name` from the properties of the node or
+/// edge type `type_name`, as `ALTER ... DROP PROPERTY` does (see
+/// [`add_property`]).
+///
+/// # Errors
+///
+/// `CatalogError::TypeNotFound` if the type has no property of that name;
+/// nothing changes then.
+pub(crate) fn drop_property(
+    type_name: &str,
+    properties: &mut Vec<TypedProperty>,
+    property_name: &str,
+) -> Result<(), CatalogError> {
+    let len_before = properties.len();
+    properties.retain(|p| p.name != property_name);
+    if properties.len() == len_before {
+        return Err(CatalogError::TypeNotFound(format!(
+            "property {property_name} on {type_name}"
+        )));
+    }
+    Ok(())
+}
+
 /// The name the parent type `parent` of the node type `child` is registered
 /// under: a type created in a schema is named `schema/Type`, and names its
 /// parents (`EXTENDS Base`) in that schema.
@@ -2114,15 +2164,7 @@ impl SchemaCatalog {
         let def = types
             .get_mut(type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(type_name.to_string()))?;
-        if def.properties.iter().any(|p| p.name == property.name) {
-            return Err(CatalogError::TypeAlreadyExists(format!(
-                "property {} on {}",
-                property.name, type_name
-            )));
-        }
-        TypedProperty::check_list_levels(def.properties.iter().chain([&property]))?;
-        def.properties.push(property);
-        Ok(())
+        add_property(type_name, &mut def.properties, property)
     }
 
     /// Drops a property from an existing node type.
@@ -2139,15 +2181,7 @@ impl SchemaCatalog {
         let def = types
             .get_mut(type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(type_name.to_string()))?;
-        let len_before = def.properties.len();
-        def.properties.retain(|p| p.name != property_name);
-        if def.properties.len() == len_before {
-            return Err(CatalogError::TypeNotFound(format!(
-                "property {} on {}",
-                property_name, type_name
-            )));
-        }
-        Ok(())
+        drop_property(type_name, &mut def.properties, property_name)
     }
 
     /// Adds a property to an existing edge type.
@@ -2167,15 +2201,7 @@ impl SchemaCatalog {
         let def = types
             .get_mut(type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(type_name.to_string()))?;
-        if def.properties.iter().any(|p| p.name == property.name) {
-            return Err(CatalogError::TypeAlreadyExists(format!(
-                "property {} on {}",
-                property.name, type_name
-            )));
-        }
-        TypedProperty::check_list_levels(def.properties.iter().chain([&property]))?;
-        def.properties.push(property);
-        Ok(())
+        add_property(type_name, &mut def.properties, property)
     }
 
     /// Drops a property from an existing edge type.
@@ -2192,15 +2218,7 @@ impl SchemaCatalog {
         let def = types
             .get_mut(type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(type_name.to_string()))?;
-        let len_before = def.properties.len();
-        def.properties.retain(|p| p.name != property_name);
-        if def.properties.len() == len_before {
-            return Err(CatalogError::TypeNotFound(format!(
-                "property {} on {}",
-                property_name, type_name
-            )));
-        }
-        Ok(())
+        drop_property(type_name, &mut def.properties, property_name)
     }
 
     /// Adds a node type to a graph type.

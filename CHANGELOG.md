@@ -25,6 +25,8 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Changed
 
+- **`DROP GRAPH` refuses a graph an open transaction changed**: `DROP GRAPH` and `drop_graph` fail with a write conflict (`GRAFEO-T001`) while an open transaction has changes in the graph; drop it once that transaction commits or rolls back. A write that found the graph before it was dropped now fails instead of writing into it.
+- **`create_vector_index` in a build without the `vector-index` feature returns an error** instead of succeeding without building an index.
 - **Change data capture timestamps a commit's events when the commit is published**: ordered by timestamp, events follow commit order, also across concurrent sessions and direct calls.
 - **Breaking (Rust, reachable through `GrafeoDB::store()`): `LpgStore` keeps no per-transaction undo log**: `PropertyUndoEntry`, `finalize_version_epochs`, `discard_uncommitted_versions`, `rollback_transaction_properties`, `rollback_transaction_properties_to` and `property_undo_log_position` are removed; a transaction's changes live in its change set.
 - **Direct writes made while a transaction is open are transactions of their own**: `create_node`, `set_node_property`, `create_edge`, graph handles and every batch call run beside the open transaction and fail with a write conflict (`GRAFEO-T001`) on a node or edge it changed first; a call that fails or panics leaves nothing. With no transaction open, a single call commits at once, as before.
@@ -66,6 +68,10 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Fixed
 
+- **Indexes created or dropped since the last checkpoint did not survive a crash or a reopen of a WAL-backed database** ([#401](https://github.com/GrafeoDB/grafeo/issues/401)): property, text and vector indexes, made with the API or DDL, in any graph, are replayed, and vector indexes keep all their parameters.
+- **Schema changes made since the last checkpoint lost parts of their definition in a crash**: default values, parent types, edge type endpoints, KEY labels of inline element types, and properties added by ALTER with their defaults now survive.
+- **A named graph dropped while a transaction had written to it came back after a crash.**
+- **A refused schema or graph statement could still change something**: `CREATE GRAPH g TYPED t` with no type `t` created `g`, a refused `CREATE GRAPH TYPE` (or `IF NOT EXISTS` on an existing one) declared its element types, repeating a `CREATE INDEX` listed its name twice, and a schema change whose WAL record could not be written only logged a warning. They now change nothing.
 - **With auto-commit off and no transaction open, a failed statement kept its partial writes** ([#536](https://github.com/GrafeoDB/grafeo/issues/536)): each write statement and each session direct or batch write now runs as a transaction of its own, so a failure leaves nothing; it conflicts (`GRAFEO-T001`) with an open transaction that changed the same node or edge first, and its change events are reported at once.
 - **A `CALL` of a stored procedure whose body writes ran outside any transaction**: a failed call kept its earlier writes, a read-only transaction, role or database could write through it, and `execute_streaming` ran it. It now commits as a transaction, leaves nothing when it fails, and is refused where writes are.
 - **A rollback to a savepoint of the delete of a node created in the same transaction brought the node back without its labels.**

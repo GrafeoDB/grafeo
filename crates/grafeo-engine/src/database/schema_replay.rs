@@ -1,5 +1,9 @@
 //! Replays schema records from the WAL into the catalog (#422).
 //!
+//! These records are only read: 0.5.x logs hold them. A schema statement of
+//! this release logs its catalog records as a standalone change, which
+//! [`standalone`](super::standalone) replays.
+//!
 //! Replay makes the same catalog calls as the statements that wrote the
 //! records. Kinds are parsed through the WAL's kind enums, so a kind this
 //! version does not know fails the open instead of being skipped or guessed.

@@ -282,6 +282,12 @@ pub struct LpgStore {
     /// store); it only grows, so a dropped graph's id is never given again.
     next_graph_id: std::sync::atomic::AtomicU32,
 
+    /// Whether this store is a named graph that was dropped (see
+    /// [`drop_graph`](Self::drop_graph)): its [`ChangeTarget`](crate::graph::apply::ChangeTarget)
+    /// refuses every write from then on, so a writer that resolved the graph
+    /// before the drop changes nothing a commit would log for it.
+    dropped: std::sync::atomic::AtomicBool,
+
     /// Forward adjacency lists (outgoing edges).
     pub(super) forward_adj: ChunkedAdjacency,
 
@@ -411,6 +417,7 @@ impl LpgStore {
             property_keys: RwLock::new(NameDictionary::new()),
             graph_id: std::sync::atomic::AtomicU32::new(0),
             next_graph_id: std::sync::atomic::AtomicU32::new(1),
+            dropped: std::sync::atomic::AtomicBool::new(false),
             forward_adj: ChunkedAdjacency::new(),
             backward_adj,
             label_index: RwLock::new(Vec::with_capacity(16)),
@@ -684,8 +691,24 @@ impl LpgStore {
     /// Drops a named graph. Returns `false` if it did not exist. Its id is
     /// not given out again: a graph created later under the same name gets
     /// a new one.
+    ///
+    /// The dropped graph's store refuses every write through its
+    /// [`ChangeTarget`](crate::graph::apply::ChangeTarget) from now on (see
+    /// [`is_dropped`](Self::is_dropped)): a writer that resolved the graph
+    /// before the drop and writes after it changes nothing.
     pub fn drop_graph(&self, name: &str) -> bool {
-        self.named_graphs.write().remove(name).is_some()
+        let removed = self.named_graphs.write().remove(name);
+        if let Some(graph) = &removed {
+            graph.dropped.store(true, Ordering::Release);
+        }
+        removed.is_some()
+    }
+
+    /// Whether this store is a named graph that was dropped (see
+    /// [`drop_graph`](Self::drop_graph)).
+    #[must_use]
+    pub fn is_dropped(&self) -> bool {
+        self.dropped.load(Ordering::Acquire)
     }
 
     /// Returns all named graph names.

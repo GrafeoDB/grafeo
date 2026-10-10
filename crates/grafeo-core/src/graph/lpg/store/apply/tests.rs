@@ -1396,3 +1396,69 @@ fn an_immediate_write_is_committed_at_once_with_its_before_image() {
     );
     assert_eq!(store.current_epoch(), EpochId::new(3));
 }
+
+/// A dropped named graph takes no write from any writer, also one that
+/// resolved the graph before the drop, and the refusal changes nothing; the
+/// graph created again under its name is a new store that takes writes.
+#[test]
+fn a_dropped_graph_takes_no_more_writes() {
+    let root = LpgStore::new().unwrap();
+    assert!(root.create_graph("trips").unwrap());
+    let trips = root.graph("trips").unwrap();
+    let (recorder, mut set) = begin(&trips, 3);
+    let alix = recorder.create_node(&mut set, &["Person"], &[]);
+    commit(&trips, TransactionId::new(3), &set);
+    assert!(!trips.is_dropped());
+
+    assert!(root.drop_graph("trips"));
+    assert!(trips.is_dropped(), "the handle resolved before the drop");
+    let epoch = EpochId::new(trips.current_epoch().as_u64() + 1);
+    let writers = [
+        transaction(19, trips.current_epoch()),
+        Writer::Immediate {
+            epoch,
+            before_images: true,
+        },
+        Writer::Replay { epoch },
+    ];
+    let gus = NodeId::new(trips.reserve_node_ids(1).unwrap().start);
+    for writer in writers {
+        for op in [
+            DataOp::SetNodeProperty {
+                id: alix,
+                key: PropertyKey::new("city"),
+                value: Value::from("Amsterdam"),
+            },
+            DataOp::CreateNode {
+                id: gus,
+                labels: labels(&["Person"]),
+                properties: properties(&[]),
+            },
+        ] {
+            assert!(
+                matches!(trips.apply(&op, writer), Err(ApplyError::Refused(_))),
+                "{writer:?} wrote {op:?} into a dropped graph"
+            );
+        }
+    }
+    assert_eq!(
+        image(&trips, None)
+            .nodes
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        [alix.as_u64()],
+        "the refused writes changed nothing"
+    );
+    assert!(
+        image(&trips, None).nodes[&alix.as_u64()].1.is_empty(),
+        "no value was set"
+    );
+
+    assert!(root.create_graph("trips").unwrap());
+    let again = root.graph("trips").unwrap();
+    assert!(!again.is_dropped(), "a graph created again is a new store");
+    let (recorder, mut set) = begin(&again, 88);
+    recorder.create_node(&mut set, &["Person"], &[]);
+    assert_eq!(set.len(), 1);
+}

@@ -8,9 +8,59 @@
 //! other entry is one record. Each record carries the storage key of its
 //! graph (`None` for the default graph), for the `SwitchGraph` records the
 //! group gets where the graph changes.
+//!
+//! A standalone change (a graph command, a schema statement, an index call)
+//! is a group of its own ([`standalone_group`]): a named graph created or
+//! dropped is the record it was before, and every other op is a
+//! [`WalRecord::Standalone`] holding its WAL v2 log record, which carries
+//! the whole catalog record (defaults, parent types, endpoints, every vector
+//! index parameter, the graph of an index) that the 0.5 schema records left
+//! out.
 
+#[cfg(feature = "lpg")]
+use grafeo_common::change::StandaloneOp;
 use grafeo_common::change::{Change, ChangeSet, DataOp};
+#[cfg(feature = "lpg")]
+use grafeo_common::storage::LogRecordRef;
+#[cfg(feature = "lpg")]
+use grafeo_common::types::TransactionId;
+#[cfg(feature = "lpg")]
+use grafeo_common::utils::error::Result;
 use grafeo_storage::wal::WalRecord;
+
+#[cfg(feature = "lpg")]
+use super::StandaloneChange;
+
+/// The group of records `change` logs: one record per op, in order, then
+/// the commit marker that makes replay apply them all or none.
+///
+/// # Errors
+///
+/// The error of a catalog record that does not encode (one past a record's
+/// limits): nothing is logged or applied then.
+#[cfg(feature = "lpg")]
+pub(crate) fn standalone_group(change: &StandaloneChange) -> Result<Vec<WalRecord>> {
+    let mut records = Vec::new();
+    for op in change.ops() {
+        records.push(match op {
+            StandaloneOp::CreateGraph { name } => {
+                WalRecord::CreateNamedGraph { name: name.clone() }
+            }
+            StandaloneOp::DropGraph { name } => WalRecord::DropNamedGraph { name: name.clone() },
+            StandaloneOp::PutCatalog(_)
+            | StandaloneOp::DropCatalog(_)
+            | StandaloneOp::RdfGraph(_) => {
+                let mut record = Vec::new();
+                LogRecordRef::Standalone(op).encode_framed(&mut record)?;
+                WalRecord::Standalone { record }
+            }
+        });
+    }
+    records.push(WalRecord::TransactionCommit {
+        transaction_id: TransactionId::SYSTEM,
+    });
+    Ok(records)
+}
 
 /// The v1 records of `set`'s entries, in recorded order, each with its
 /// graph's storage key. Bulk ranges and triples have none: a bulk write
@@ -104,7 +154,7 @@ mod tests {
     use grafeo_common::change::{
         Before, ChangeSet, DataModel, DataOp, GraphRef, NodeImage, PendingVersion,
     };
-    use grafeo_common::types::{ArcStr, EdgeId, NodeId, PropertyKey, Value};
+    use grafeo_common::types::{ArcStr, EdgeId, NodeId, PropertyKey, TransactionId, Value};
     use grafeo_storage::wal::WalRecord;
 
     use super::v1_records;
@@ -226,5 +276,80 @@ mod tests {
                 (None, WalRecord::DeleteNode { id: gus }),
             ])
         );
+    }
+
+    /// A graph command logs the record it logged before; every other op
+    /// logs its whole WAL v2 log record, which decodes to the op itself (a
+    /// default value and an index's graph included); the group ends with
+    /// the commit marker, so replay applies all of it or none.
+    #[cfg(feature = "lpg")]
+    #[test]
+    fn a_standalone_change_is_one_record_per_op_then_a_commit() {
+        use grafeo_common::change::StandaloneOp;
+        use grafeo_common::storage::catalog_record::{
+            CatalogKey, CatalogRecord, IndexKeyRecord, IndexKindRecord, IndexRecord,
+            NodeTypeRecord, PropertyRecord, PropertyTypeRecord,
+        };
+        use grafeo_common::storage::{LogRecord, read_log_records};
+
+        use super::super::StandaloneChange;
+        use super::standalone_group;
+
+        let city = StandaloneOp::PutCatalog(CatalogRecord::NodeType(NodeTypeRecord {
+            name: "City".to_string(),
+            properties: vec![PropertyRecord {
+                name: "country".to_string(),
+                data_type: PropertyTypeRecord::String,
+                nullable: true,
+                default_value: Some(Value::from("NL")),
+            }],
+            constraints: Vec::new(),
+            parent_types: Vec::new(),
+            key_labels: Vec::new(),
+        }));
+        let index = StandaloneOp::PutCatalog(CatalogRecord::Index(IndexRecord {
+            graph: Some("trips".to_string()),
+            index: IndexKindRecord::Property {
+                key: "name".to_string(),
+            },
+        }));
+        let dropped = StandaloneOp::DropCatalog(CatalogKey::Index {
+            graph: None,
+            index: IndexKeyRecord::Text {
+                label: "Doc".to_string(),
+                property: "body".to_string(),
+            },
+        });
+        let mut change = StandaloneChange::new();
+        change.push(StandaloneOp::CreateGraph {
+            name: "trips".to_string(),
+        });
+        for op in [&city, &index, &dropped] {
+            change.push(op.clone());
+        }
+        change.push(StandaloneOp::DropGraph {
+            name: "archive".to_string(),
+        });
+
+        let group = standalone_group(&change).unwrap();
+        assert_eq!(group.len(), 6, "{group:?}");
+        assert!(matches!(&group[0], WalRecord::CreateNamedGraph { name } if name == "trips"));
+        assert!(matches!(&group[4], WalRecord::DropNamedGraph { name } if name == "archive"));
+        assert!(matches!(
+            group[5],
+            WalRecord::TransactionCommit { transaction_id } if transaction_id == TransactionId::SYSTEM
+        ));
+        for (record, op) in group[1..4].iter().zip([city, index, dropped]) {
+            let WalRecord::Standalone { record } = record else {
+                panic!("{record:?} holds no log record");
+            };
+            let mut decoded = Vec::new();
+            read_log_records(record, &mut |record| {
+                decoded.push(record);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(decoded, [LogRecord::Standalone(op)]);
+        }
     }
 }

@@ -197,6 +197,14 @@ impl ChangeTarget for LpgStore {
 
     fn apply(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
         let mode = Mode::of(writer)?;
+        // A writer that resolved the graph before it was dropped: a commit
+        // would log the write under the graph's name, and replay would
+        // create the graph again for it.
+        if self.is_dropped() {
+            return Err(ApplyError::Refused(
+                "the graph was dropped: it takes no more writes".to_string(),
+            ));
+        }
         let applied = match op {
             DataOp::CreateNode {
                 id,

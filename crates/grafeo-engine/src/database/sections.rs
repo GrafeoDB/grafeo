@@ -220,6 +220,17 @@ pub(super) struct LoadedSections {
     unbuilt: Vec<GraphIndexes>,
 }
 
+#[cfg(feature = "lpg")]
+impl LoadedSections {
+    /// The vector and text indexes left to build once the database is
+    /// built: WAL replay adds those its records put, and removes those its
+    /// records drop (or whose graph they drop).
+    #[cfg(feature = "wal")]
+    pub(super) fn unbuilt_mut(&mut self) -> &mut Vec<GraphIndexes> {
+        &mut self.unbuilt
+    }
+}
+
 /// Data a database can hold that a build reads only with a feature. A build
 /// without the feature would open the database without it, and its next
 /// checkpoint would write the file without it, losing it for good (also

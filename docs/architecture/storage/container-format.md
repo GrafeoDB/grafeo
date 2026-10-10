@@ -794,11 +794,11 @@ and removes the WAL, the torn tail with it. A build without the `wal` feature ca
 replay: it refuses to open a database whose sidecar WAL holds commits (a non-empty log
 file), read-only or not, and leaves the WAL as it is. Likewise a build refuses a file
 that holds data only a feature it lacks reads, which it would load without and its next
-checkpoint drop: without `compact-store` a compacted base (a `CompactStore` or
-`OverlayDeletions` section), without `triple-store` RDF triples (an `RdfStore` or
-`RdfRing` section, or RDF records in the sidecar WAL), without `vector-index` or
-`text-index` the definition of such an index in the catalog; a 0.5.x database (also a
-WAL directory or a container v1 snapshot) the same way. It refuses them read-only or
+checkpoint drop: without `triple-store` RDF triples (an `RdfStore` or `RdfRing`
+section, or RDF records in the sidecar WAL), without `vector-index` or `text-index` the
+definition of such an index in the catalog; a 0.5.x database (also a WAL directory or a
+container v1 snapshot) the same way. A compacted base of a 0.5.x file is read by every
+build that opens files. It refuses them read-only or
 not, and changes nothing: it looks at the sections of the image and at the catalog
 before it loads any other section, and at the records of a WAL as it replays them into
 memory.

@@ -52,6 +52,14 @@ migrates every 0.5.x file (see [Persistent Mode](persistence/persistent.md)), so
 migrated file holds one store; a read-only open folds the base in memory and leaves the
 file as it is.
 
+When the process exited without `close()` after `compact()`, the file's WAL holds the
+direct calls made after its last checkpoint (`set_node_property()`, `delete_node()` and the
+like). The open replays them onto the folded base, also those that changed nodes and edges
+of the base, which 0.5.44 lost when it reopened such a file (as long as no 0.5.x release
+opened it since). 0.5.x did not log queries after `compact()`
+([#558](https://github.com/GrafeoDB/grafeo/issues/558)), so what they changed is not in the
+WAL and cannot be recovered.
+
 A node with several labels comes back with each of them
 ([#595](https://github.com/GrafeoDB/grafeo/issues/595)). Those versions stored its labels
 as one name (`"Actor|Person"`), also on the node when a write after `compact()` found it
@@ -76,23 +84,8 @@ What those versions stored differently stays as they stored it:
 
 ## Feature Flag
 
-Reading a compacted base needs the `compact-store` feature. It is **not** included in the
-engine-level named profiles (`embedded`, `browser`, `server`, `full`), but it is included
-in the binding-level defaults:
-
-| Binding | Profile | Includes `compact-store` |
-|---------|---------|--------------------------|
-| Python (`grafeo-python`) | `embedded` | Yes |
-| Node.js (`grafeo-node`) | `embedded` | Yes |
-| C (`grafeo-c`) | `embedded` | Yes |
-| WASM (`grafeo-wasm`) | `edge` | Yes |
-
-For custom Rust builds: `cargo build --features compact-store`.
-
-A build without the feature cannot read the base, so it refuses a compacted file: a
-read-write open, a read-only open and `open_in_memory()` fail with an error that names the
-`compact-store` feature, and nothing on disk changes. The `grafeo` Rust crate (unless you
-add the `compact-store` feature) and the `grafeo` command line tool are such builds: open
-these files with the Python, Node.js or C bindings, or with a Rust build that has the
-feature. Before 0.6.0 such a build opened the file without its compacted base, and its
-next checkpoint lost the base for good.
+Since 0.6.0, every build that opens database files reads a compacted base, the `grafeo`
+Rust crate and the `grafeo` command line tool included. The `compact-store` feature is
+deprecated and enables nothing; it is removed in 0.7.0, so drop it from your build. In
+0.5.x, a build without the feature opened a compacted file without its base, and its next
+checkpoint lost the base for good.

@@ -93,7 +93,7 @@ Structured memory for LLMs, agents and RAG pipelines: vector and text retrieval 
 edge = ["grafeo-engine/lpg", "gql", "regex-lite"]
 ```
 
-Minimal profile for browsers, mobile and other constrained environments, with the smallest possible binary. Add `compact-store` for pre-built read-only datasets.
+Minimal profile for browsers, mobile and other constrained environments, with the smallest possible binary.
 
 ### Enterprise
 
@@ -110,7 +110,7 @@ Production operations. In the engine this enables observability and the async st
 
 | Deprecated name | Use instead | Notes |
 | --- | --- | --- |
-| `embedded` | `lpg` + `ai` + `algos` + `parallel` + `arrow-export` | Currently still the default of the facade and the Python, Node.js and C bindings. `lpg` adds Cypher, Gremlin, SQL/PGQ and the rest of `storage`; the bindings' `embedded` also includes `compact-store` |
+| `embedded` | `lpg` + `ai` + `algos` + `parallel` + `arrow-export` | Currently still the default of the facade and the Python, Node.js and C bindings. `lpg` adds Cypher, Gremlin, SQL/PGQ and the rest of `storage` |
 | `browser` | `edge` | Currently still the default of the WASM binding |
 | `server` | `lpg` + `rdf` + `ai` + `algos` + `parallel` + `arrow-export` + `async-storage` + `tracing` | `enterprise` without `metrics`; no bulk import |
 | `full` | same as `server` | In the facade, `full` is an alias of `server`. The bindings' `full` is all languages, `ai`, `algos` and the RDF triple store |
@@ -144,8 +144,7 @@ The profile names are consistent across every project. The table below shows whi
 The bindings use the same profile names, with a few differences from the facade:
 
 - **C** (and C#, Dart, Go): `rdf` has no SHACL validation.
-- **WASM**: `lpg` and `rdf` have no storage, `rdf` has no SHACL and uses the lightweight regex engine, `ai` has no change data capture, `analytics` is `ai` plus `algos` (no bulk import), and `edge` includes `compact-store`.
-- **Python, Node.js, C**: `embedded` also includes `compact-store`.
+- **WASM**: `lpg` and `rdf` have no storage, `rdf` has no SHACL and uses the lightweight regex engine, `ai` has no change data capture, and `analytics` is `ai` plus `algos` (no bulk import).
 
 ### AI / Agent Ecosystem
 
@@ -212,7 +211,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 | `spill` | (storage) | Out-of-core disk spilling | Implemented |
 | `mmap` | (storage) | Memory-mapped file storage | Implemented |
 | `async-storage` | Enterprise | Async WAL backend (tokio) | Implemented |
-| `compact-store` | (standalone); in the bindings' `embedded` and in WASM `edge` | Reads databases compacted by 0.5.44 or older | Implemented |
+| `compact-store` | (standalone) | Enables nothing since 0.6.0: every build that opens files reads databases compacted by 0.5.44 or older; removed in 0.7.0 | Deprecated |
 
 ### Graph Model
 

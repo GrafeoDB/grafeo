@@ -283,8 +283,6 @@ BK5|gql 097931792c A procedure argument without a value is an error; it ran with
 BK6|cypher d3c27a13f4 A procedure argument read from a row is an error that names it; it failed as a missing start parameter.
 BK7|cypher 3c3845ed65 A procedure argument of the wrong type is an error; it ran with the default.
 BK7|gql 3c3845ed65 A procedure argument of the wrong type is an error; it ran with the default.
-BK8|cypher 6c0424314e A computed list element is part of the query vector, so three elements no longer fit the 2-dimensional index; 0.0 + 0.0 was dropped.
-BK8|gql 6c0424314e A computed list element is part of the query vector, so three elements no longer fit the 2-dimensional index; 0.0 + 0.0 was dropped.
 BK9|cypher 79f40f49e6 A constant expression in a required procedure argument runs; it failed as a missing start parameter.
 BK9|gql 79f40f49e6 A constant expression in a required procedure argument runs; it failed as a missing start parameter.
 BM1|cypher 1737c2301d A list literal keeps a null item for a property of an unmatched OPTIONAL MATCH variable; it was [] (size 0).
@@ -317,3 +315,57 @@ BO6|cypher b93a6e4ba7 A call to an unknown function is an error; it was null, so
 BO6|gql b93a6e4ba7 A call to an unknown function is an error; it was null, so the WHERE kept no rows.
 BO8|cypher 59ee27e748 A call to an unknown function is an error, also in a list comprehension; it was null.
 BO8|gql 59ee27e748 A call to an unknown function is an error, also in a list comprehension; it was null.
+BK8|cypher 125eb8ba01 A computed list element is part of the query vector, so three elements no longer fit the 2-dimensional index; 0.0 + 0.0 was dropped.
+BK8|gql 125eb8ba01 A computed list element is part of the query vector, so three elements no longer fit the 2-dimensional index; 0.0 + 0.0 was dropped.
+AS1|cypher 18908d5658 Zoned datetimes compare by their instant with every ordering operator; <, <=, > and >= gave null.
+AS1|gql 18908d5658 Zoned datetimes compare by their instant with every ordering operator; <, <=, > and >= gave null.
+AS2|cypher 7df1f205be A timestamp and a zoned datetime compare as instants; = was false and < gave null.
+AS2|gql 7df1f205be A timestamp and a zoned datetime compare as instants; = was false and < gave null.
+AS3|cypher b67e533bac min and max of zoned datetimes are the earliest and latest instant; they returned the first value.
+AS3|gql b67e533bac min and max of zoned datetimes are the earliest and latest instant; they returned the first value.
+AT1|gql 4291ff266c GQL sorts nulls last by default in both directions; descending put them first.
+AT2|gql 6afb8152e7 GQL sorts nulls last by default in both directions; a descending top-K kept the nulls.
+AU1|cypher 11df581d54 A call of an unknown function fails with its name; it returned null.
+AU1|gql 11df581d54 A call of an unknown function fails with its name; it returned null.
+AU2|cypher 3cec27fdb8 toStringOrNull is not a Grafeo function: the call fails instead of returning null, which filtered out every row.
+AU2|gql 3cec27fdb8 toStringOrNull is not a Grafeo function: the call fails instead of returning null, which filtered out every row.
+AU3|cypher 7fe8d7e883 A call with a number of arguments the function does not take fails; it returned null.
+AU3|gql 7fe8d7e883 A call with a number of arguments the function does not take fails; it returned null.
+AU4|cypher 7d3617d7d7 path_length(p) is the number of edges of p; it returned null.
+AU4|gql 7d3617d7d7 path_length(p) is the number of edges of p; it returned null.
+G2|gql 6dbd77cf15 GQL sorts nulls last by default in both directions; descending put them first.
+L2|gql d80e3904a1 GQL sorts nulls last by default in both directions; descending put them first.
+L4|gql 16a470385a GQL sorts nulls last by default in both directions; descending put them first.
+L13|gql 1d7265c1b1 GQL sorts nulls last by default in both directions; a descending top-K kept the nulls.
+L19|gql 71201aa33f GQL sorts nulls last by default in both directions; descending put them first.
+L20|gql 4d8a472ac3 GQL sorts nulls last by default in both directions; descending put them first.
+BP1|cypher 5edb4e9a23 An import of a CALL subquery stays in scope after a WITH in its body that leaves it out; it failed with "Undefined variable".
+BP1|gql 5edb4e9a23 An import of a CALL subquery stays in scope after a WITH in its body that leaves it out; it failed with "Undefined variable".
+BP2|cypher 39f11a96ea After an aggregating WITH in a CALL body the import stays in scope and a count over no match is one row; it failed with "Undefined variable".
+BP2|gql 39f11a96ea After an aggregating WITH in a CALL body the import stays in scope and a count over no match is one row; it failed with "Undefined variable".
+BP3|cypher e63736f06a The variables an importing WITH names stay in scope after a later WITH; it failed with "Undefined variable".
+BP4|gql e63736f06a The outer row GQL imports into a CALL body stays in scope after a WITH; it failed with "Undefined variable".
+BP5|cypher 831549b908 The WHERE of a WITH in a CALL body reads an import; it failed with "Undefined variable".
+BP5|gql 831549b908 The WHERE of a WITH in a CALL body reads an import; it failed with "Undefined variable".
+BP6|cypher d72f656474 The WHERE of an aggregating WITH in a CALL body reads an import; it failed with "Undefined variable".
+BP6|gql d72f656474 The WHERE of an aggregating WITH in a CALL body reads an import; it failed with "Undefined variable".
+BP7|cypher 21ece2149b An EXISTS after a WITH in a CALL body matches from the import; it matched from any node, so every row was true.
+BP7|gql 21ece2149b An EXISTS after a WITH in a CALL body matches from the import; it matched from any node, so every row was true.
+BP8|cypher 705ff6c759 An imported edge stays in scope, as an edge, after an aggregating WITH; it failed with "Undefined variable".
+BP8|gql 705ff6c759 An imported edge stays in scope, as an edge, after an aggregating WITH; it failed with "Undefined variable".
+BP9|cypher 02d73c1794 Nested CALL subqueries keep their imports after a WITH in each body; it failed with "Undefined variable".
+BP9|gql 02d73c1794 Nested CALL subqueries keep their imports after a WITH in each body; it failed with "Undefined variable".
+BP10|gql 5fb0589251 An OPTIONAL CALL keeps its import after a WITH in its body; it failed with "Undefined variable".
+BP11|cypher 11c3f9415f An import stays in scope after a WITH with ORDER BY and LIMIT in a CALL body; it failed with "Undefined variable".
+BP12|cypher 09285efc8f Each part of a UNION in a CALL body keeps its imports after a WITH; it failed with "Undefined variable".
+BP12|gql 09285efc8f Each part of a UNION in a CALL body keeps its imports after a WITH; it failed with "Undefined variable".
+BP13|cypher ccefc5eb01 An imported value stays in scope after an aggregating WITH; it failed with "Undefined variable".
+BP13|gql ccefc5eb01 An imported value stays in scope after an aggregating WITH; it failed with "Undefined variable".
+BQ1|gql 66cce5c5c8 Grouping keys beside an aggregate over a property come back as their values; they came back as 0 and the four groups merged into one.
+BQ2|gql a535c3e44d String grouping keys beside aggregates over properties keep their groups; the names became 0 and every group merged into one.
+BQ3|gql cb90edfb0c Grouping keys beside aggregates over properties come back as their values, in ORDER BY order; they came back as 0 and the four groups merged into one.
+BQ4|gql 6f86ec6c27 String grouping keys beside aggregates over an expression and a CASE keep their groups; the names became 0 and every group merged into one.
+BQ5|cypher 9588c5d565 Grouping keys named by a WITH beside aggregates over a property, an expression and a CASE come back as their values; they came back as 0 and the four groups merged into one.
+BQ5|gql 9588c5d565 Grouping keys named by a WITH beside aggregates over a property, an expression and a CASE come back as their values; they came back as 0 and the four groups merged into one.
+BQ6|cypher 4341952581 A string grouping key named by a WITH beside aggregates over properties and a CASE keeps its groups; the names became 0 and every group merged into one.
+BQ6|gql 4341952581 A string grouping key named by a WITH beside aggregates over properties and a CASE keeps its groups; the names became 0 and every group merged into one.

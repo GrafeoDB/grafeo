@@ -1311,4 +1311,74 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages)
 
+# AS: zoned datetimes compare by their instant with every ordering operator, also against
+#     a timestamp (they gave null, and `=` against a timestamp was false); min and max of
+#     zoned values are the earliest and latest instant (they returned the first value)
+for case_id, query in [
+    ("AS1", "RETURN zoned_datetime('2022-01-01T00:00:00+01:00') < zoned_datetime('2021-12-31T23:30:00Z') AS lt, zoned_datetime('2022-01-01T00:00:00+01:00') >= zoned_datetime('2021-12-31T23:00:00Z') AS ge"),
+    ("AS2", "RETURN datetime('2024-03-15T10:30:00Z') = zoned_datetime('2024-03-15T11:30:00+01:00') AS eq, datetime('2024-03-15T10:30:00Z') < zoned_datetime('2024-03-15T11:31:00+01:00') AS lt"),
+    ("AS3", "UNWIND [zoned_datetime('2024-03-15T10:30:00+01:00'), zoned_datetime('2019-03-15T10:30:00Z')] AS x RETURN min(x) = zoned_datetime('2019-03-15T10:30:00Z') AS lo, max(x) = zoned_datetime('2024-03-15T09:30:00Z') AS hi"),
+]:
+    case(case_id, query, BOTH, "empty")
+
+# AT: GQL puts nulls last by default in both directions; Cypher keeps them first when
+#     descending (openCypher); a top-K keeps the largest values in GQL
+for case_id, query in [
+    ("AT1", "MATCH (n:Person) RETURN n.name AS name, n.w AS w ORDER BY w DESC, name"),
+    ("AT2", "MATCH (n:Person) RETURN n.name AS name ORDER BY n.w DESC LIMIT 3"),
+]:
+    ordered(case_id, query, BOTH)
+
+# AU: a call of an unknown function, or with a number of arguments the function does not
+#     take, fails with its name (it gave null); path_length(p) is the number of edges
+for case_id, query in [
+    ("AU1", "RETURN nope(1) AS v"),
+    ("AU2", "MATCH (n:Person) WHERE toStringOrNull(n.age) = '30' RETURN n.name AS n"),
+    ("AU3", "RETURN toUpper('a', 'b') AS v"),
+    ("AU4", "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->(b) RETURN b.name AS b, path_length(p) AS hops"),
+]:
+    case(case_id, query, BOTH)
+
+# BP: the variables a CALL subquery imports stay in scope after a WITH in its body that
+#     leaves them out (#545; it failed with "Undefined variable"): a scope clause, Cypher's
+#     importing WITH (BP3), GQL's import of the whole row (BP4), an aggregating WITH whose
+#     count over no match is one row (BP2), a WHERE that reads an import (BP5, BP6), an
+#     EXISTS that matches from it (BP7: it matched from any node), an imported edge (BP8)
+#     and value (BP13), nested and OPTIONAL calls (BP9, BP10), ORDER BY and LIMIT (BP11), a
+#     UNION in the body (BP12). BP14: a WITH that binds the import's name to a value of its
+#     own; BP15: a variable that is not imported stays out of scope
+for case_id, query, languages in [
+    ("BP1", "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.name AS n, a.w AS w, x } RETURN n, w, x", BOTH),
+    ("BP2", "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, a.w AS w, k } RETURN n, w, k", BOTH),
+    ("BP3", "MATCH (a:Person) CALL { WITH a MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, k } RETURN n, k", CYPHER),
+    ("BP4", "MATCH (a:Person) CALL { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, k } RETURN n, k", GQL),
+    ("BP5", "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH b WHERE b.age > a.age RETURN b.name AS older } RETURN a.name AS a, older", BOTH),
+    ("BP6", "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k WHERE k = 0 OR a.age > 35 RETURN a.name AS n, k } RETURN n, k", BOTH),
+    ("BP7", "MATCH (a:Person) CALL (a) { WITH 1 AS x RETURN EXISTS { MATCH (a)-[:LIVES_IN]->(:City) } AS housed } RETURN a.name AS n, housed", BOTH),
+    ("BP8", "MATCH (:Person {name: 'Alix'})-[r:KNOWS]->(:Person {name: 'Gus'}) CALL (r) { MATCH (c:City) WITH count(c) AS k RETURN type(r) AS t, r.w AS w, k } RETURN t, w, k", BOTH),
+    ("BP9", "MATCH (a:Person) CALL (a) { CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN k } WITH k + 1 AS s RETURN a.name AS n, s } RETURN n, s", BOTH),
+    ("BP10", "MATCH (a:Person) OPTIONAL CALL (a) { MATCH (a)-[:LIVES_IN]->(c) WITH c RETURN a.name || ' in ' || c.name AS s } RETURN a.name AS a, s", GQL),
+    ("BP11", "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH b ORDER BY b.age DESC LIMIT 1 RETURN a.name AS n, b.name AS f } RETURN n, f", CYPHER),
+    ("BP12", "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.name AS n, x UNION ALL WITH 2 AS x RETURN a.name AS n, x } RETURN n, x", BOTH),
+    ("BP13", "UNWIND [3, 19] AS v CALL (v) { MATCH (p:Person) WITH count(p) AS k RETURN v + k AS s } RETURN s", BOTH),
+    ("BP14", "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 3 AS a RETURN a AS v } RETURN v", BOTH),
+    ("BP15", "MATCH (a:Person {name: 'Alix'}), (c:City {name: 'Paris'}) CALL (a) { WITH 1 AS x RETURN c.name AS m } RETURN m", BOTH),
+]:
+    case(case_id, query, languages)
+
+# BQ: grouping keys beside an aggregate over a property, an expression or a CASE come
+#     back as their values, in the groups count(*) alone gives (#589; they came back as 0
+#     and every group merged into one): GQL LET keys with GROUP BY (BQ1 to BQ4; BQ3 has
+#     the shape of Microsoft Fabric's multi-column grouping example) and a WITH that
+#     names the keys (BQ5, BQ6)
+for case_id, query, languages, is_ordered in [
+    ("BQ1", "MATCH (p:Person) LET older = p.age > 28 LET weighted = p.w IS NOT NULL RETURN older, weighted, count(*) AS n, avg(p.age) AS a GROUP BY older, weighted", GQL, False),
+    ("BQ2", "MATCH (a:Person)-[k:KNOWS]-(b:Person) LET who = a.name RETURN who, count(*) AS n, avg(b.age) AS age, min(k.since) AS first, max(b.w) AS w GROUP BY who", GQL, False),
+    ("BQ3", "MATCH (p:Person) LET older = p.age > 28 LET weighted = p.w IS NOT NULL RETURN older, weighted, count(*) AS n, avg(p.age) AS a, min(p.name) AS first, max(p.w) AS w GROUP BY older, weighted ORDER BY a DESC, first LIMIT 10", GQL, True),
+    ("BQ4", "MATCH (a:Person)-[k:KNOWS]-(b:Person) LET who = a.name RETURN who, sum(a.age + b.age) AS ages, sum(CASE WHEN b.age > 28 THEN 1 ELSE 0 END) AS older, count(DISTINCT CASE WHEN k.since > 2011 THEN b.name END) AS late GROUP BY who", GQL, False),
+    ("BQ5", "MATCH (p:Person) WITH p, p.age > 28 AS older, p.w IS NOT NULL AS weighted RETURN older, weighted, count(*) AS n, avg(p.age) AS a, sum(p.age * 2) AS twice, sum(CASE WHEN p.name < 'K' THEN 1 ELSE 0 END) AS early", BOTH, False),
+    ("BQ6", "MATCH (a:Person)-[k:KNOWS]->(b:Person) WITH a.name AS who, b, k RETURN who, count(*) AS n, avg(b.age) AS age, max(k.since) AS last, count(DISTINCT CASE WHEN b.w IS NULL THEN b.name END) AS unweighted", BOTH, False),
+]:
+    case(case_id, query, languages, "social", is_ordered)
+
 # fmt: on

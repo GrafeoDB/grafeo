@@ -354,14 +354,16 @@ jobs:
   # --all-features too: encryption at rest with only the features it needs,
   # the migration of 0.5.x files in a build without `wal` (the default
   # `embedded` profile of the Node.js, C, Go, C# and Dart bindings), the
-  # refusal of 0.5.x files in a build without `lpg` (the `rdf` profile), and the
-  # refusal of files with data a build cannot read: compacted files without
+  # refusal of 0.5.x files in a build without `lpg`, the refusal of files with
+  # data a build cannot read: compacted files without
   # `compact-store` (the `grafeo` crate, the CLI), triples without
   # `triple-store` (in the file, its WAL or a 0.5.x WAL directory, so also with
   # `wal`) and vector and text indexes without `vector-index` and `text-index`
   # (the engine's default build, the CLI), and of snapshots with such triples
-  # or indexes (import and restore). A job of its own: the rust-test
-  # runners are near their disk limit, and these are extra engine builds.
+  # or indexes (import and restore), and RDF triples that survive a reopen and
+  # a crash in the feature matrix's `rdf` engine build (#544). A job of its
+  # own: the rust-test runners are near their disk limit, and these are extra
+  # engine builds.
   minimal-features:
     name: Minimal Features
     needs: [rust-check]
@@ -404,6 +406,15 @@ jobs:
 
       - name: Test 0.5.x files without the lpg feature
         run: cargo nextest run -p grafeo-engine --no-default-features --features gql,grafeo-file,wal --test legacy_without_lpg
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+      # The engine features of the feature matrix's `rdf` profile, which name
+      # no `lpg`: `triple-store` brings it (#544).
+      - name: Test RDF persistence with the rdf engine features
+        run: cargo nextest run -p grafeo-engine --no-default-features --features gql,sparql,graphql,triple-store,shacl,wal,grafeo-file,spill,mmap,regex,testing-crash-injection --test rdf_persistence
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -722,7 +733,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ['3.12', '3.13', '3.14']
+        python: ['3.12', '3.13', '3.14', '3.15']
     steps:
       - uses: actions/checkout@v7
 
@@ -730,6 +741,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
+          # Takes the newest release candidate until the setup-python manifest lists a final release.
+          allow-prereleases: true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7

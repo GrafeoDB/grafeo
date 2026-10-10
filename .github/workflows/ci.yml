@@ -26,9 +26,8 @@ env:
 #    bindings each pull in "full" through their crate dependencies.
 #    Used by: python-test, node-test, go-test.
 #
-# 4. Shipped profile (grafeo-engine's "full" plus "compact-store" and
-#    "arrow-export", which the packages' default "embedded" adds; it leaves out
-#    "temporal"): the Rust side of what the Python and Node.js packages build. Profile 1
+# 4. Shipped profile (grafeo-engine's "full" plus "arrow-export", which the
+#    packages' default "embedded" adds; it leaves out "temporal"): the Rust side of what the Python and Node.js packages build. Profile 1
 #    turns "temporal" on, which compiles every cfg(not(feature = "temporal"))
 #    path out, so clippy and rustdoc for grafeo-core and grafeo-engine, and the
 #    grafeo-engine tests, run once more with exactly these features (the
@@ -354,10 +353,10 @@ jobs:
   # --all-features too: encryption at rest with only the features it needs,
   # the migration of 0.5.x files in a build without `wal` (the default
   # `embedded` profile of the Node.js, C, Go, C# and Dart bindings), the
-  # refusal of 0.5.x files in a build without `lpg`, the refusal of files with
-  # data a build cannot read: compacted files without
-  # `compact-store` (the `grafeo` crate, the CLI), triples without
-  # `triple-store` (in the file, its WAL or a 0.5.x WAL directory, so also with
+  # refusal of 0.5.x files in a build without `lpg`, the migration of files
+  # compacted by 0.5.x in a build without the old `compact-store` feature (the
+  # `grafeo` crate, the CLI), the refusal of files with data a build cannot
+  # read: triples without `triple-store` (in the file, its WAL or a 0.5.x WAL directory, so also with
   # `wal`) and vector and text indexes without `vector-index` and `text-index`
   # (the engine's default build, the CLI), and of snapshots with such triples
   # or indexes (import and restore), and RDF triples that survive a reopen and
@@ -398,7 +397,7 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
       - name: Test migration and close without the wal feature, files and snapshots with data this build cannot read, functions without their features
-        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close --test compacted_file_without_compact_store --test rdf_file_without_triple_store --test search_indexes_without_their_features --test snapshot_without_its_features --test functions_without_their_features
+        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close --test compacted_file_in_every_build --test rdf_file_without_triple_store --test search_indexes_without_their_features --test snapshot_without_its_features --test functions_without_their_features
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -465,15 +464,15 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Run clippy (shipped profile)
-        run: cargo clippy -p grafeo-core -p grafeo-engine --all-targets --features grafeo-engine/full,grafeo-engine/compact-store,grafeo-engine/arrow-export -- -D warnings
+        run: cargo clippy -p grafeo-core -p grafeo-engine --all-targets --features grafeo-engine/full,grafeo-engine/arrow-export -- -D warnings
 
       - name: Check docs (shipped profile)
-        run: cargo doc --no-deps -p grafeo-core -p grafeo-engine --features grafeo-engine/full,grafeo-engine/compact-store,grafeo-engine/arrow-export
+        run: cargo doc --no-deps -p grafeo-core -p grafeo-engine --features grafeo-engine/full,grafeo-engine/arrow-export
         env:
           RUSTDOCFLAGS: -D warnings
 
       - name: Run tests (shipped profile)
-        run: cargo nextest run -p grafeo-engine --features grafeo-engine/full,grafeo-engine/compact-store,grafeo-engine/arrow-export
+        run: cargo nextest run -p grafeo-engine --features grafeo-engine/full,grafeo-engine/arrow-export
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -485,7 +484,7 @@ jobs:
       - name: Run spill tests with encryption and crash injection (shipped profile)
         run: >
           cargo nextest run -p grafeo-engine
-          --features grafeo-engine/full,grafeo-engine/compact-store,grafeo-engine/arrow-export,grafeo-engine/encryption,grafeo-engine/testing-crash-injection
+          --features grafeo-engine/full,grafeo-engine/arrow-export,grafeo-engine/encryption,grafeo-engine/testing-crash-injection
           --test spilled_embeddings --test legacy_spill --test migration
         env:
           RUSTC_WRAPPER: sccache

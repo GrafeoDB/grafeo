@@ -315,7 +315,6 @@ mod text {
 
 /// A compacted database keeps its data in a compact base under an overlay:
 /// the copy has both, and the indexes over them.
-#[cfg(feature = "compact-store")]
 #[test]
 fn to_memory_copies_a_compacted_database() {
     let mut db = GrafeoDB::new_in_memory();

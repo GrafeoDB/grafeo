@@ -679,7 +679,6 @@ fn writes_and_a_rollback_inside_a_checkpoint_wait_for_its_image() {
 /// As [`writes_and_a_rollback_inside_a_checkpoint_wait_for_its_image`], on a
 /// compacted database: Vincent and Alix are in the compacted base, which the
 /// deletion and the SET (a promotion into the overlay) change.
-#[cfg(feature = "compact-store")]
 #[test]
 fn writes_inside_a_checkpoint_of_a_compacted_database_wait_for_its_image() {
     let dir = tempfile::tempdir().unwrap();

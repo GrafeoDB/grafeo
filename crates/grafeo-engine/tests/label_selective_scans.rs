@@ -737,7 +737,6 @@ fn merge_with_several_labels_finds_the_node_that_has_them_all() {
 /// counted over the compacted base and the changes made since. The nodes with
 /// both labels are made after `compact()` here; `compact_labels.rs` checks
 /// the label choice over compacted nodes with several labels.
-#[cfg(feature = "compact-store")]
 #[test]
 fn a_compacted_database_scans_the_label_with_the_fewest_nodes() {
     let mut db = GrafeoDB::new_in_memory();

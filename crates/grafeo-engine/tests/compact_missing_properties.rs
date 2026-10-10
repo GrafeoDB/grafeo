@@ -3,7 +3,7 @@
 //! matches it, and no filter matches it through the column's empty value
 //! (`''`, `0`, `0.0`, `false`).
 
-#![cfg(feature = "compact-store")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

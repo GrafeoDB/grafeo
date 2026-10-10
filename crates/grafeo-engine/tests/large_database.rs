@@ -22,7 +22,7 @@
 //! release:
 //!
 //! ```bash
-//! cargo test --release -p grafeo-engine --features full,compact-store,arrow-export \
+//! cargo test --release -p grafeo-engine --features full,arrow-export \
 //!     --test large_database -- --ignored --nocapture
 //! ```
 //!

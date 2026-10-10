@@ -9,12 +9,7 @@
 //! cargo test -p grafeo-engine --features full --test checkpoint_sections
 //! ```
 
-#![cfg(all(
-    feature = "compact-store",
-    feature = "lpg",
-    feature = "grafeo-file",
-    feature = "gql"
-))]
+#![cfg(all(feature = "lpg", feature = "grafeo-file", feature = "gql"))]
 
 use std::time::{Duration, Instant};
 

@@ -25,7 +25,6 @@
 //! ```
 
 #![cfg(all(
-    feature = "compact-store",
     feature = "grafeo-file",
     feature = "wal",
     feature = "lpg",

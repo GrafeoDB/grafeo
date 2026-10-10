@@ -24,12 +24,12 @@
 //! a time holds up to twice its length), plus a slack of four chunks (see
 //! [`Scale`]); the open's also by a sixteenth of what it keeps more, for the
 //! maps it builds (see [`MAP_GROWTH_DIVISOR`]). Measured on Windows with all
-//! features and with the shipped set (`full`, `compact-store`,
-//! `arrow-export`), the checkpoint's extra peak grew by 0.20 to 0.40 MiB, at
-//! most 47 bytes for each person added (a node and an edge with four values,
-//! for which the Memory section allows 48), and the open's not at all; a
-//! section held whole made it grow by 2.5 MiB (the vector topology) to 37
-//! MiB (the RDF triples).
+//! features and with the shipped set (`full` and `arrow-export`), the
+//! checkpoint's extra peak grew by 0.20 to 0.40 MiB, at most 47 bytes for
+//! each person added (a node and an edge with four values, for which the
+//! Memory section allows 48), and the open's not at all; a section held
+//! whole made it grow by 2.5 MiB (the vector topology) to 37 MiB (the RDF
+//! triples).
 //!
 //! The tests write with chunk caps of 1,024 rows and 64 KiB ([`SCALE`]), so
 //! each smaller database already spans tens of chunks, and each test runs
@@ -551,7 +551,7 @@ fn checkpoint_and_open_memory_does_not_grow_with_the_lpg_store() {
 /// [`PEOPLE_SCALE`]):
 ///
 /// ```bash
-/// cargo test --release -p grafeo-engine --features full,compact-store,arrow-export \
+/// cargo test --release -p grafeo-engine --features full,arrow-export \
 ///     --test peak_memory -- --ignored --nocapture
 /// ```
 #[test]

@@ -36,22 +36,15 @@ const VINCENT_KNOWS_GUS: &str =
 /// Gus goes, with his edges.
 const DELETE_GUS: &str = "MATCH (g:Person {name: 'Gus'}) DETACH DELETE g";
 
-/// The databases each test runs on: a plain one, and one whose people are
-/// in a compacted base.
+/// The databases each test runs on: a plain one, and one compacted after
+/// its people were written.
 fn databases() -> Vec<(&'static str, GrafeoDB)> {
     let plain = GrafeoDB::new_in_memory();
     plain.execute(PEOPLE).unwrap();
-    let databases = vec![("plain", plain)];
-    #[cfg(feature = "compact-store")]
-    let databases = {
-        let mut compacted = GrafeoDB::new_in_memory();
-        compacted.execute(PEOPLE).unwrap();
-        compacted.compact().unwrap();
-        let mut both = databases;
-        both.push(("compacted", compacted));
-        both
-    };
-    databases
+    let mut compacted = GrafeoDB::new_in_memory();
+    compacted.execute(PEOPLE).unwrap();
+    compacted.compact().unwrap();
+    vec![("plain", plain), ("compacted", compacted)]
 }
 
 /// What the tests compare: the people, who knows whom, and the number of

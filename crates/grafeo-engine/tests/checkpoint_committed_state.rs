@@ -140,7 +140,6 @@ fn committed_state_child() {
         "delete" => vec![DETACH_DELETE],
         "writes" => WRITES.to_vec(),
         "rollback" | "commit" => WRITES.into_iter().chain([DETACH_DELETE]).collect(),
-        #[cfg(feature = "compact-store")]
         "compacted_writes" | "compacted_rollback" => COMPACTED_WRITES.to_vec(),
         other => panic!("unknown scenario {other}"),
     };
@@ -335,7 +334,6 @@ fn a_checkpoint_then_a_commit_replays_the_commit_on_the_image() {
 /// The open transaction changes Vincent, whom the database got after
 /// `compact()`: a value set twice, one added, one removed, a label added and
 /// one removed.
-#[cfg(feature = "compact-store")]
 const COMPACTED_WRITES: [&str; 6] = [
     "MATCH (v:Person {name: 'Vincent'}) SET v.age = 88",
     "MATCH (v:Person {name: 'Vincent'}) SET v.age = 3",
@@ -347,7 +345,6 @@ const COMPACTED_WRITES: [&str; 6] = [
 
 /// A compacted database at `path`: Alix in the compacted base and Vincent,
 /// added after `compact()`, in the overlay; closed, so the file holds both.
-#[cfg(feature = "compact-store")]
 fn compacted(path: &Path) {
     let mut db = open(path);
     db.execute("INSERT (:Person {name: 'Alix', age: 19, city: 'Amsterdam'})")
@@ -360,7 +357,6 @@ fn compacted(path: &Path) {
 
 /// Asserts that the compacted database at `path` holds Alix and Vincent as
 /// committed.
-#[cfg(feature = "compact-store")]
 fn assert_compacted(path: &Path, after: &str) {
     let db = open(path);
     assert_eq!(
@@ -377,7 +373,6 @@ fn assert_compacted(path: &Path, after: &str) {
 /// Guarantee 2 on a compacted database: a checkpoint during open writes to
 /// a node added after `compact()`, then a crash: the overlay in the file
 /// holds the committed values and labels.
-#[cfg(feature = "compact-store")]
 #[test]
 fn after_compact_a_checkpoint_during_open_writes_keeps_the_committed_state() {
     let dir = tempfile::tempdir().unwrap();
@@ -390,7 +385,6 @@ fn after_compact_a_checkpoint_during_open_writes_keeps_the_committed_state() {
 /// Guarantee 4 on a compacted database: a checkpoint during open writes to
 /// a node added after `compact()`, a rollback, then a crash: the file holds
 /// the committed state.
-#[cfg(feature = "compact-store")]
 #[test]
 fn after_compact_a_checkpoint_then_a_rollback_leaves_the_committed_state() {
     let dir = tempfile::tempdir().unwrap();
@@ -479,7 +473,6 @@ fn copies_during_an_open_transaction_hold_the_committed_state() {
 /// Alix -KNOWS-> Gus -KNOWS-> Mia with one label each, compacted into the
 /// base of the compacted tests (a node with several labels is left out of
 /// their label scans after `compact()`, a bug of its own).
-#[cfg(feature = "compact-store")]
 const COMPACTED_TRAVELLERS: [&str; 5] = [
     "INSERT (:Person {name: 'Alix', age: 19, city: 'Amsterdam'})",
     "INSERT (:Person {name: 'Gus', age: 3, city: 'Paris'})",
@@ -494,7 +487,6 @@ const COMPACTED_TRAVELLERS: [&str; 5] = [
 /// Gus (which copies him into the overlay), Vincent and his edge to Gus, and
 /// Mia deleted from the compacted base with her edge. Alix stays in the base
 /// only.
-#[cfg(feature = "compact-store")]
 const AFTER_COMPACT: [&str; 4] = [
     "INSERT (:Person:Employee {name: 'Vincent', age: 19, city: 'Prague'})",
     "MATCH (g:Person {name: 'Gus'}) SET g.age = 88",
@@ -504,7 +496,6 @@ const AFTER_COMPACT: [&str; 4] = [
 ];
 
 /// [`COMPACTED_TRAVELLERS`] in `db`, compacted, then [`AFTER_COMPACT`].
-#[cfg(feature = "compact-store")]
 fn compact_travellers(db: &mut GrafeoDB) {
     for statement in COMPACTED_TRAVELLERS {
         db.execute(statement).unwrap();
@@ -517,7 +508,6 @@ fn compact_travellers(db: &mut GrafeoDB) {
 
 /// Asserts that `db` holds the committed state of [`compact_travellers`]:
 /// the base and the overlay, without Mia and her edge.
-#[cfg(feature = "compact-store")]
 fn assert_compacted_travellers(db: &GrafeoDB, after: &str) {
     assert_eq!(
         people(db, ""),
@@ -540,7 +530,6 @@ fn assert_compacted_travellers(db: &GrafeoDB, after: &str) {
 
 /// N10: `export_snapshot` after `compact()` holds the compacted base and the
 /// overlay, without the base nodes and edges whose delete is committed.
-#[cfg(feature = "compact-store")]
 #[test]
 fn an_export_after_compact_holds_the_base_and_the_overlay() {
     let mut db = GrafeoDB::new_in_memory();
@@ -555,7 +544,6 @@ fn an_export_after_compact_holds_the_base_and_the_overlay() {
 /// Vincent, from the overlay ([`COMPACTED_WRITES`]), changes a value and a
 /// label of Alix, from the compacted base, deletes Gus (copied into the
 /// overlay) with his edge from the base, and creates Jules.
-#[cfg(feature = "compact-store")]
 fn compacted_open_writes() -> Vec<&'static str> {
     COMPACTED_WRITES
         .into_iter()
@@ -570,7 +558,6 @@ fn compacted_open_writes() -> Vec<&'static str> {
 
 /// Guarantee 6 on a compacted database: copies taken while a transaction is
 /// open hold the committed state of the base and the overlay.
-#[cfg(feature = "compact-store")]
 #[test]
 fn after_compact_copies_during_an_open_transaction_hold_the_committed_state() {
     let dir = tempfile::tempdir().unwrap();
@@ -767,11 +754,7 @@ fn assert_committed_search_in_copies(db: &GrafeoDB, saved: &Path) {
 /// changed nodes of the base and of the overlay is open writes the committed
 /// state, and search finds the committed body and embedding of a document
 /// from the base.
-#[cfg(all(
-    feature = "compact-store",
-    feature = "vector-index",
-    feature = "text-index"
-))]
+#[cfg(all(feature = "vector-index", feature = "text-index"))]
 #[test]
 fn after_compact_close_with_an_open_transaction_writes_the_committed_state() {
     let dir = tempfile::tempdir().unwrap();

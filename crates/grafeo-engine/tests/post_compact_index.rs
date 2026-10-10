@@ -7,7 +7,7 @@
 //! cargo test -p grafeo-engine --features full --test post_compact_index
 //! ```
 
-#![cfg(all(feature = "compact-store", feature = "lpg"))]
+#![cfg(feature = "lpg")]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

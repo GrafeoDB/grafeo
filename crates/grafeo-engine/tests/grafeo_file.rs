@@ -1602,7 +1602,7 @@ fn save_to_a_path_with_a_trailing_separator_writes_the_file_it_names() {
 /// Regression test: deletes of nodes written before `compact()` survive a
 /// close and reopen. A compacted store once kept them in memory only, and
 /// the deleted nodes reappeared on reopen.
-#[cfg(all(feature = "compact-store", feature = "lpg"))]
+#[cfg(feature = "lpg")]
 #[test]
 fn deleted_base_nodes_stay_deleted_across_reopen() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -1655,7 +1655,7 @@ fn deleted_base_nodes_stay_deleted_across_reopen() {
 }
 
 /// Companion test for edge deletion after `compact()`.
-#[cfg(all(feature = "compact-store", feature = "lpg"))]
+#[cfg(feature = "lpg")]
 #[test]
 fn deleted_base_edges_stay_deleted_across_reopen() {
     let dir = tempfile::TempDir::new().unwrap();

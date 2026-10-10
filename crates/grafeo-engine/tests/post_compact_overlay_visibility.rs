@@ -7,11 +7,11 @@
 //! `compact()` storing data a different way again.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features "compact-store lpg gql" \
+//! cargo test -p grafeo-engine --features "lpg gql" \
 //!     --test post_compact_overlay_visibility
 //! ```
 
-#![cfg(all(feature = "compact-store", feature = "lpg", feature = "gql"))]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

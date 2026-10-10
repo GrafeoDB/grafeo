@@ -10,7 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test compact_labels
 //! ```
 
-#![cfg(all(feature = "compact-store", feature = "lpg", feature = "gql"))]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

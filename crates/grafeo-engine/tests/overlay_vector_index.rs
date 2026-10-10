@@ -13,12 +13,7 @@
 //! cargo test -p grafeo-engine --all-features --test overlay_vector_index
 //! ```
 
-#![cfg(all(
-    feature = "compact-store",
-    feature = "lpg",
-    feature = "gql",
-    feature = "vector-index"
-))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "vector-index"))]
 
 use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::GrafeoDB;

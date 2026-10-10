@@ -2,10 +2,10 @@
 //! deletes after a compaction reach the edge the id was given to.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features "compact-store lpg gql" --test compact_edge_ids
+//! cargo test -p grafeo-engine --features "lpg gql" --test compact_edge_ids
 //! ```
 
-#![cfg(all(feature = "compact-store", feature = "lpg", feature = "gql"))]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_engine::GrafeoDB;

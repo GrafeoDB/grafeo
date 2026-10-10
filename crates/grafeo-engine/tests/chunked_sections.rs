@@ -572,7 +572,6 @@ fn point_in_time_reads_survive_a_reopen() {
 /// delete after `compact()`. It reopens with all of it, and once more after a
 /// checkpoint with the default caps.
 #[cfg(all(
-    feature = "compact-store",
     feature = "sparql",
     feature = "ring-index",
     feature = "vector-index",

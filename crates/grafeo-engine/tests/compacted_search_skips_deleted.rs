@@ -14,7 +14,6 @@
 //! ```
 
 #![cfg(all(
-    feature = "compact-store",
     feature = "lpg",
     feature = "gql",
     feature = "text-index",

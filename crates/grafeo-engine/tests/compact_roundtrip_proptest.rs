@@ -10,14 +10,14 @@
 //! which ship deterministic tests alongside the fix.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features "compact-store lpg gql" \
+//! cargo test -p grafeo-engine --features "lpg gql" \
 //!     --test compact_roundtrip_proptest
 //!
 //! # bump coverage locally:
 //! PROPTEST_CASES=1024 cargo test -p grafeo-engine ...
 //! ```
 
-#![cfg(all(feature = "compact-store", feature = "lpg", feature = "gql"))]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::GrafeoDB;

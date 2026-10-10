@@ -40,6 +40,27 @@ tests:
   # length(p) function
   # ---------------------------------------------------------------------------
 
+  # PATH_LENGTH(p) (ISO/IEC 39075:2024 20.21 <length expression>) is the number
+  # of edges of p, like length(p), also for ANY SHORTEST paths (it was null,
+  # #570).
+  - name: path_length_counts_the_edges_of_a_path
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(:Person {name: 'Vincent'})"
+    query: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->{1,4}(b:Person) RETURN b.name AS b, path_length(p) AS hops"
+    expect:
+      rows:
+        - [Gus, 1]
+        - [Vincent, 2]
+
+  - name: path_length_of_any_shortest_paths
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(:Person {name: 'Vincent'})"
+    query: "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[:KNOWS]->{1,4}(b:Person) RETURN b.name AS b, path_length(p) AS hops"
+    expect:
+      rows:
+        - [Gus, 1]
+        - [Vincent, 2]
+
   - name: path_length_single_hop
     setup:
       - "INSERT (:Person {name: 'Alix'})"

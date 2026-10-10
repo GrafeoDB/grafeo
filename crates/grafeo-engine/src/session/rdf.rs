@@ -25,9 +25,9 @@ use super::Session;
 use super::SessionConfig;
 
 impl Session {
-    /// Creates a new session with RDF store and adaptive configuration.
+    /// Creates a session that reads and writes `store` and `rdf_store`.
     #[cfg(feature = "lpg")]
-    pub(crate) fn with_rdf_store_and_adaptive(
+    pub(crate) fn with_rdf_store(
         store: Arc<LpgStore>,
         rdf_store: Arc<RdfStore>,
         cfg: SessionConfig,
@@ -48,7 +48,6 @@ impl Session {
             db_read_only: cfg.read_only,
             identity: cfg.identity,
             auto_commit: true,
-            adaptive_config: cfg.adaptive_config,
             plan_options: super::PlanOptions {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,

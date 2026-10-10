@@ -31,7 +31,7 @@ use grafeo_core::graph::rdf::RdfStore;
 use grafeo_core::graph::{GraphStore, GraphStoreMut, GraphStoreSearch};
 
 use crate::catalog::{Catalog, CatalogConstraintValidator};
-use crate::config::{AdaptiveConfig, GraphModel};
+use crate::config::GraphModel;
 use crate::database::QueryResult;
 #[cfg(feature = "lpg")]
 use crate::database::direct;
@@ -170,7 +170,6 @@ pub(crate) struct SessionConfig {
     pub transaction_manager: Arc<TransactionManager>,
     pub query_cache: Arc<QueryCache>,
     pub catalog: Arc<Catalog>,
-    pub adaptive_config: AdaptiveConfig,
     pub factorized_execution: bool,
     pub shuffle_unordered: bool,
     pub graph_model: GraphModel,
@@ -238,9 +237,6 @@ pub struct Session {
     identity: crate::auth::Identity,
     /// Whether the session is in auto-commit mode.
     auto_commit: bool,
-    /// Adaptive execution configuration.
-    #[allow(dead_code)] // Stored for future adaptive re-optimization during execution
-    adaptive_config: AdaptiveConfig,
     /// How the session's queries are planned.
     plan_options: PlanOptions,
     /// The graph data model this session operates on.
@@ -350,10 +346,10 @@ struct SavepointState {
 }
 
 impl Session {
-    /// Creates a new session with adaptive execution configuration.
-    #[cfg(feature = "lpg")]
-    #[allow(dead_code)] // Used when lpg enabled without triple-store
-    pub(crate) fn with_adaptive(store: Arc<LpgStore>, cfg: SessionConfig) -> Self {
+    /// Creates a session that reads and writes `store`. A build with the
+    /// triple store uses `with_rdf_store` instead.
+    #[cfg(all(feature = "lpg", not(feature = "triple-store")))]
+    pub(crate) fn with_store(store: Arc<LpgStore>, cfg: SessionConfig) -> Self {
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
         let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         Self {
@@ -362,8 +358,6 @@ impl Session {
             graph_store,
             graph_store_mut,
             catalog: cfg.catalog,
-            #[cfg(feature = "triple-store")]
-            rdf_store: Arc::new(RdfStore::new()),
             transaction_manager: cfg.transaction_manager,
             query_cache: cfg.query_cache,
             current_transaction: parking_lot::Mutex::new(None),
@@ -371,7 +365,6 @@ impl Session {
             db_read_only: cfg.read_only,
             identity: cfg.identity,
             auto_commit: true,
-            adaptive_config: cfg.adaptive_config,
             plan_options: PlanOptions {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
@@ -511,7 +504,6 @@ impl Session {
             db_read_only: cfg.read_only,
             identity: cfg.identity,
             auto_commit: true,
-            adaptive_config: cfg.adaptive_config,
             plan_options: PlanOptions {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
@@ -612,6 +604,32 @@ impl Session {
             Some(s) => format!("{s}/{type_name}"),
             None => type_name.to_string(),
         }
+    }
+
+    /// A graph that has the graph type with the key `graph_type` as its type,
+    /// which keeps the graph type from being dropped (ISO/IEC 39075:2024 12.7,
+    /// Syntax Rule 6). The binding a dropped graph left behind does not count.
+    #[cfg(all(feature = "lpg", feature = "gql"))]
+    fn graph_typed_by(&self, graph_type: &str) -> Option<String> {
+        let store = self.root_store();
+        self.catalog
+            .all_graph_type_bindings()
+            .into_iter()
+            .filter(|(graph, bound)| bound == graph_type && store.graph(graph).is_some())
+            .map(|(graph, _)| graph)
+            .min()
+    }
+
+    /// The error that refuses to drop `graph_type`, the type of `graph`.
+    #[cfg(all(feature = "lpg", feature = "gql"))]
+    fn graph_type_in_use(graph_type: &str, graph: &str) -> grafeo_common::utils::error::Error {
+        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+        Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            format!(
+                "graph type '{graph_type}' is the type of graph '{graph}': drop the graph first"
+            ),
+        ))
     }
 
     /// Returns the effective storage key for the current graph, accounting for schema.
@@ -1383,7 +1401,7 @@ impl Session {
         &self,
         cmd: grafeo_adapters::query::gql::ast::SchemaStatement,
     ) -> Result<QueryResult> {
-        use crate::catalog::{EdgeTypeDefinition, NodeTypeDefinition, TypedProperty};
+        use crate::catalog::{EdgeTypeDefinition, NodeTypeDefinition};
         use grafeo_adapters::query::gql::ast::SchemaStatement;
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
         #[cfg(feature = "wal")]
@@ -1790,6 +1808,14 @@ impl Session {
                 use grafeo_adapters::query::gql::ast::InlineElementType;
 
                 let effective_name = self.effective_type_key(&stmt.name);
+                // OR REPLACE drops the graph type it replaces first (ISO/IEC
+                // 39075:2024 12.6, General Rule 2), which 12.7 refuses for
+                // the type of a graph: before anything is declared.
+                if stmt.or_replace
+                    && let Some(graph) = self.graph_typed_by(&effective_name)
+                {
+                    return Err(Self::graph_type_in_use(&stmt.name, &graph));
+                }
 
                 // GG04: LIKE clause copies type from existing graph
                 let (mut node_types, mut edge_types, open) =
@@ -1834,24 +1860,16 @@ impl Session {
                         (nt, et, stmt.open)
                     };
 
-                // The properties of every inline element type first, so a
-                // property type the catalog refuses registers none of them.
-                // Inline declarations take no default values.
+                // The properties of every inline element type, with their
+                // default values, first, so a property type the catalog
+                // refuses registers none of them.
                 let inline_properties = stmt
                     .inline_types
                     .iter()
                     .map(|inline| {
                         let (InlineElementType::Node { properties, .. }
                         | InlineElementType::Edge { properties, .. }) = inline;
-                        typed_properties(properties).map(|typed| {
-                            typed
-                                .into_iter()
-                                .map(|typed| TypedProperty {
-                                    default_value: None,
-                                    ..typed
-                                })
-                                .collect::<Vec<_>>()
-                        })
+                        typed_properties(properties)
                     })
                     .collect::<Result<Vec<_>>>()?;
 
@@ -1999,6 +2017,12 @@ impl Session {
             }
             SchemaStatement::DropGraphType { name, if_exists } => {
                 let effective_name = self.effective_type_key(&name);
+                // A graph type that a graph has as its type stays, also with
+                // IF EXISTS, which only spares one that does not exist
+                // (ISO/IEC 39075:2024 12.7, Syntax Rule 6, General Rule 1).
+                if let Some(graph) = self.graph_typed_by(&effective_name) {
+                    return Err(Self::graph_type_in_use(&name, &graph));
+                }
                 match self.catalog.drop_graph_type(&effective_name) {
                     Ok(()) => {
                         wal_log!(
@@ -2483,16 +2507,10 @@ impl Session {
     ) -> Result<()> {
         use grafeo_common::types::{PropertyKey, Value};
         use grafeo_common::utils::error::Error;
-        use grafeo_core::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind};
+        use grafeo_core::index::vector::{HnswConfig, HnswIndex, VectorIndexKind};
 
-        let metric = match metric {
-            Some(m) => DistanceMetric::from_str(m).ok_or_else(|| {
-                Error::Internal(format!(
-                    "Unknown distance metric '{m}'. Use: cosine, euclidean, dot_product, manhattan"
-                ))
-            })?,
-            None => DistanceMetric::Cosine,
-        };
+        let metric = crate::database::vector_index_metric(metric)?;
+        crate::database::check_vector_index_dimensions(dimensions)?;
 
         let prop_key = PropertyKey::new(property);
         let mut found_dims: Option<usize> = dimensions;
@@ -2500,23 +2518,14 @@ impl Session {
 
         for node in store.nodes_with_label(label) {
             if let Some(Value::Vector(v)) = node.properties.get(&prop_key) {
-                if let Some(expected) = found_dims {
-                    if v.len() != expected {
-                        return Err(Error::Internal(format!(
-                            "Vector dimension mismatch: expected {expected}, found {} on node {}",
-                            v.len(),
-                            node.id.0
-                        )));
-                    }
-                } else {
-                    found_dims = Some(v.len());
-                }
+                let expected = *found_dims.get_or_insert(v.len());
+                crate::database::check_vector_for_index(node.id, v, expected)?;
                 vectors.push((node.id, v.to_vec()));
             }
         }
 
         let Some(dims) = found_dims else {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "No vector properties found on :{label}({property}) and no dimensions specified"
             )));
         };
@@ -5289,18 +5298,25 @@ impl Session {
         matches!(self.lpg_backend, LpgBackend::Active)
     }
 
-    /// The checks for writes to `store`: the catalog's schema and
-    /// constraints, and the property size limit.
+    /// The checks for writes to `store`, the active graph's: the catalog's
+    /// schema and constraints (the node and edge types of the session's
+    /// schema), the closed graph type the graph is bound to, and the
+    /// property size limit.
     fn constraint_validator(
         &self,
         store: Arc<dyn GraphStoreSearch>,
         epoch: EpochId,
         transaction_id: Option<TransactionId>,
     ) -> CatalogConstraintValidator {
-        CatalogConstraintValidator::new(Arc::clone(&self.catalog))
+        let validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
             .with_store(store)
             .with_max_property_size(self.max_property_size)
             .with_transaction_context(epoch, transaction_id)
+            .with_schema(self.current_schema().as_deref());
+        match self.active_graph_storage_key() {
+            Some(graph) => validator.with_graph_name(&graph),
+            None => validator,
+        }
     }
 
     /// Writes through a [`GraphWriter`](grafeo_core::execution::operators::GraphWriter)

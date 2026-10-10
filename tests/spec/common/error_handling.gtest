@@ -136,6 +136,9 @@ tests:
   # Invalid function calls
   # ---------------------------------------------------------------------------
 
+  # A call of an unknown function, or with a number of arguments the
+  # function does not take, fails while the query is planned (#570); it
+  # returned null.
   - name: unknown_function
     setup:
       - "INSERT (:N {v: 1})"
@@ -144,12 +147,11 @@ tests:
       error: "Unknown function 'nonexistent_function'"
 
   - name: wrong_argument_count
-    skip: "extra arguments ignored instead of erroring"
     setup:
       - "INSERT (:N {v: 1})"
     query: "MATCH (n:N) RETURN abs(1, 2)"
     expect:
-      error: ""
+      error: "Function 'abs' takes 1 argument, got 2"
 
   # ---------------------------------------------------------------------------
   # Insert/Delete edge cases

@@ -63,13 +63,10 @@ Grafeo supports both **Labeled Property Graph (LPG)** and **Resource Description
 
 ### Performance Features
 
-- **Push-based vectorized execution** with adaptive chunk sizing
-- **Morsel-driven parallelism** with auto-detected thread count
-- **Block-STM conflict partitioning** for parallel transaction re-execution
+- **Push-based vectorized execution** with adaptive chunk sizing; each query runs on one thread (parallel query execution is planned)
 - **Columnar storage** with dictionary, delta and RLE compression
 - **Cost-based optimizer** with DPccp join ordering and histograms
 - **Zone maps** for intelligent data skipping (including vector zone maps)
-- **Adaptive query execution** with runtime re-optimization
 - **Transparent spilling** for out-of-core processing
 - **Streaming execution** for large result sets without buffering
 - **Bloom filters** for efficient membership tests

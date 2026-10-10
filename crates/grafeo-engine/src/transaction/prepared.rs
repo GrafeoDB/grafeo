@@ -32,7 +32,6 @@ use grafeo_common::types::{EpochId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 
 use crate::Session;
-use crate::transaction::EntityId;
 
 /// Summary of pending transaction mutations.
 ///
@@ -44,9 +43,9 @@ pub struct CommitInfo {
     pub txn_id: TransactionId,
     /// Snapshot epoch the transaction read from.
     pub start_epoch: EpochId,
-    /// Number of node entities in the write set.
+    /// Number of nodes the transaction created, changed or deleted.
     pub nodes_written: u64,
-    /// Number of edge entities in the write set.
+    /// Number of edges the transaction created, changed or deleted.
     pub edges_written: u64,
 }
 
@@ -78,17 +77,12 @@ impl<'a> PreparedCommit<'a> {
             .start_epoch(transaction_id)
             .unwrap_or(EpochId::new(0));
 
-        // The entities the transaction created, changed or deleted.
-        let write_set = session
-            .transaction_manager()
-            .get_write_set(transaction_id)?;
-        let (mut nodes_written, mut edges_written) = (0, 0);
-        for written in &write_set {
-            match written.entity {
-                EntityId::Node(_) => nodes_written += 1,
-                EntityId::Edge(_) => edges_written += 1,
-            }
-        }
+        // The entities the transaction created, changed or deleted, from its
+        // change set.
+        let (nodes_written, edges_written) = session
+            .current_changes()
+            .map(|changes| changes.written_entities())
+            .unwrap_or_default();
 
         let info = CommitInfo {
             txn_id: transaction_id,
@@ -172,14 +166,14 @@ mod tests {
         let prepared = session.prepare_commit().unwrap();
         let info = prepared.info();
 
-        // The counts come from the transaction's write set.
+        // The counts come from the transaction's change set.
         assert_eq!((info.nodes_written, info.edges_written), (1, 0));
 
         let epoch = prepared.commit().unwrap();
         assert!(epoch.as_u64() > 0);
 
-        // After commit, finalize_version_epochs() converts PENDING to the
-        // real commit epoch, making the data visible.
+        // The commit stamps the pending versions with its epoch, making the
+        // data visible.
         assert_eq!(db.node_count(), 1, "Node should be visible after commit");
     }
 

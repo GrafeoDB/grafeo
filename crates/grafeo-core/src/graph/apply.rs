@@ -50,13 +50,45 @@ pub enum Writer {
         /// The group's epoch.
         epoch: EpochId,
     },
+    /// A write outside any transaction that commits at once (a direct call
+    /// while no transaction is open): applied and stamped at its epoch as
+    /// [`Writer::Replay`] does, through the same internal function, but
+    /// lenient like a transaction (a write that changes nothing is
+    /// [`Applied::Unchanged`]). With `before_images`, a write that changed
+    /// something returns its before-image ([`Applied::Changed`]), which the
+    /// log and change data capture read; without, it returns
+    /// [`Applied::Committed`]. The caller runs it while nothing else can
+    /// write what it writes, and never stamps or undoes its entries.
+    Immediate {
+        /// The epoch it commits at, which it also reads at.
+        epoch: EpochId,
+        /// Whether to build the before-images.
+        before_images: bool,
+    },
 }
 
 impl Writer {
-    /// Whether this is [`Writer::Replay`]: strict, applied and stamped.
+    /// Whether the write is applied and stamped at once
+    /// ([`Writer::Replay`], [`Writer::Immediate`]), by the system, instead of
+    /// as a transaction's pending version: a target stamps such a write as
+    /// it applies it.
     #[must_use]
-    pub(crate) const fn is_replay(self) -> bool {
-        matches!(self, Self::Replay { .. })
+    pub const fn stamps_at_once(self) -> bool {
+        matches!(self, Self::Replay { .. } | Self::Immediate { .. })
+    }
+
+    /// Whether `apply` builds the before-image: for a transaction and an
+    /// immediate write that asks for them, not for replay.
+    #[must_use]
+    pub(crate) const fn builds_images(self) -> bool {
+        matches!(
+            self,
+            Self::Transaction { .. }
+                | Self::Immediate {
+                    before_images: true,
+                    ..
+                }
+        )
     }
 
     /// What `apply` returns for an op whose entity this writer does not
@@ -79,7 +111,7 @@ impl Writer {
     /// Returns `error` under [`Writer::Replay`].
     pub(crate) fn no_op(self, error: ApplyError) -> Result<Applied, ApplyError> {
         match self {
-            Self::Transaction { .. } => Ok(Applied::Unchanged),
+            Self::Transaction { .. } | Self::Immediate { .. } => Ok(Applied::Unchanged),
             Self::Replay { .. } => Err(error),
         }
     }
@@ -88,10 +120,12 @@ impl Writer {
 /// What [`ChangeTarget::apply`] did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Applied {
-    /// Nothing changed ([`Writer::Transaction`] only): nothing to record.
+    /// Nothing changed ([`Writer::Transaction`], [`Writer::Immediate`]):
+    /// nothing to record.
     Unchanged,
-    /// A pending version holds the change ([`Writer::Transaction`] only):
-    /// the entry to record.
+    /// A pending version holds the change ([`Writer::Transaction`]), or the
+    /// change is committed already ([`Writer::Immediate`]): the entry to
+    /// record.
     Changed {
         /// What the write replaced.
         before: Before,
@@ -99,7 +133,8 @@ pub enum Applied {
         /// wrote or changed one an earlier write of the transaction created.
         version: PendingVersion,
     },
-    /// Applied and stamped ([`Writer::Replay`]); no before-image was built.
+    /// Applied and stamped ([`Writer::Replay`], [`Writer::Immediate`]
+    /// without before-images); no before-image was built.
     Committed,
 }
 
@@ -299,7 +334,7 @@ impl ExternalTarget {
             } => self
                 .store
                 .create_node_versioned(&names, snapshot, transaction),
-            Writer::Replay { .. } => self.store.create_node(&names),
+            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.create_node(&names),
         };
         for (key, value) in &properties {
             match writer {
@@ -309,7 +344,7 @@ impl ExternalTarget {
                     .store
                     .set_node_property_versioned(id, key.as_str(), value.clone(), transaction)
                     .map_err(|error| refused(Entity::Node(id), &error))?,
-                Writer::Replay { .. } => {
+                Writer::Replay { .. } | Writer::Immediate { .. } => {
                     self.store
                         .set_node_property(id, key.as_str(), value.clone());
                 }
@@ -353,7 +388,9 @@ impl ExternalTarget {
                 .store
                 .create_edge_versioned(src, dst, &edge_type, snapshot, transaction)
                 .map_err(|error| refused(Entity::Node(src), &error))?,
-            Writer::Replay { .. } => self.store.create_edge(src, dst, &edge_type),
+            Writer::Replay { .. } | Writer::Immediate { .. } => {
+                self.store.create_edge(src, dst, &edge_type)
+            }
         };
         for (key, value) in &properties {
             match writer {
@@ -367,7 +404,7 @@ impl ExternalTarget {
                         transaction,
                     );
                 }
-                Writer::Replay { .. } => {
+                Writer::Replay { .. } | Writer::Immediate { .. } => {
                     self.store
                         .set_edge_property(id, key.as_str(), value.clone());
                 }
@@ -390,7 +427,7 @@ impl ExternalTarget {
                 id: transaction,
                 snapshot,
             } => self.store.get_node_versioned(id, snapshot, transaction),
-            Writer::Replay { .. } => self.store.get_node(id),
+            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.get_node(id),
         }
     }
 
@@ -401,7 +438,7 @@ impl ExternalTarget {
                 id: transaction,
                 snapshot,
             } => self.store.get_edge_versioned(id, snapshot, transaction),
-            Writer::Replay { .. } => self.store.get_edge(id),
+            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.get_edge(id),
         }
     }
 
@@ -415,12 +452,13 @@ impl ExternalTarget {
 
     /// The applied result of a write that replaced `before`.
     fn done(writer: Writer, before: Before) -> Applied {
-        match writer {
-            Writer::Transaction { .. } => Applied::Changed {
+        if writer.builds_images() {
+            Applied::Changed {
                 before,
                 version: PendingVersion::Created,
-            },
-            Writer::Replay { .. } => Applied::Committed,
+            }
+        } else {
+            Applied::Committed
         }
     }
 
@@ -452,7 +490,7 @@ impl ExternalTarget {
                 .store
                 .delete_node_versioned(id, snapshot, transaction)
                 .map_err(|error| refused(Entity::Node(id), &error))?,
-            Writer::Replay { .. } => self.store.delete_node(id),
+            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.delete_node(id),
         };
         if !deleted {
             return writer.unseen(Entity::Node(id));
@@ -475,7 +513,7 @@ impl ExternalTarget {
                 id: transaction,
                 snapshot,
             } => self.store.delete_edge_versioned(id, snapshot, transaction),
-            Writer::Replay { .. } => self.store.delete_edge(id),
+            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.delete_edge(id),
         };
         if !deleted {
             return writer.unseen(Entity::Edge(id));
@@ -501,9 +539,10 @@ impl ExternalTarget {
                 .store
                 .set_node_property_versioned(id, key.as_str(), value.clone(), transaction)
                 .map_err(|error| refused(Entity::Node(id), &error))?,
-            Writer::Replay { .. } => self
-                .store
-                .set_node_property(id, key.as_str(), value.clone()),
+            Writer::Replay { .. } | Writer::Immediate { .. } => {
+                self.store
+                    .set_node_property(id, key.as_str(), value.clone());
+            }
         }
         Ok(Self::done(writer, Before::Value(old)))
     }
@@ -526,7 +565,9 @@ impl ExternalTarget {
             } => self
                 .store
                 .remove_node_property_versioned(id, key.as_str(), transaction),
-            Writer::Replay { .. } => self.store.remove_node_property(id, key.as_str()),
+            Writer::Replay { .. } | Writer::Immediate { .. } => {
+                self.store.remove_node_property(id, key.as_str())
+            }
         }
         .map_err(|error| refused(Entity::Node(id), &error))?;
         match removed {
@@ -557,7 +598,7 @@ impl ExternalTarget {
                     transaction,
                 );
             }
-            Writer::Replay { .. } => {
+            Writer::Replay { .. } | Writer::Immediate { .. } => {
                 self.store
                     .set_edge_property(id, key.as_str(), value.clone());
             }
@@ -583,7 +624,9 @@ impl ExternalTarget {
             } => self
                 .store
                 .remove_edge_property_versioned(id, key.as_str(), transaction),
-            Writer::Replay { .. } => self.store.remove_edge_property(id, key.as_str()),
+            Writer::Replay { .. } | Writer::Immediate { .. } => {
+                self.store.remove_edge_property(id, key.as_str())
+            }
         }
         .map_err(|error| refused(Entity::Edge(id), &error))?;
         match removed {
@@ -623,8 +666,12 @@ impl ExternalTarget {
                 },
                 false,
             ) => self.store.remove_label_versioned(id, label, transaction),
-            (Writer::Replay { .. }, true) => self.store.add_label(id, label),
-            (Writer::Replay { .. }, false) => self.store.remove_label(id, label),
+            (Writer::Replay { .. } | Writer::Immediate { .. }, true) => {
+                self.store.add_label(id, label)
+            }
+            (Writer::Replay { .. } | Writer::Immediate { .. }, false) => {
+                self.store.remove_label(id, label)
+            }
         };
         if !changed {
             return writer.unseen(Entity::Node(id));

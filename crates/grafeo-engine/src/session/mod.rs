@@ -281,10 +281,15 @@ pub struct Session {
     /// Nested `START TRANSACTION` creates an auto-savepoint; nested `COMMIT`
     /// releases it, nested `ROLLBACK` rolls back to it.
     transaction_nesting_depth: parking_lot::Mutex<u32>,
-    /// Named graphs touched during the current transaction (for cross-graph atomicity).
-    /// `None` represents the default graph. Populated at `BEGIN` time and on each
-    /// `USE GRAPH` / `SESSION SET GRAPH` switch within a transaction.
-    touched_graphs: parking_lot::Mutex<Vec<Option<String>>>,
+    /// What the current transaction changed, in every graph it wrote: its
+    /// writers record into it, and its commit, rollback and savepoints work
+    /// from it.
+    changes: parking_lot::Mutex<Option<Arc<crate::transaction::TransactionChanges>>>,
+    /// The external store a session on one writes through, as the change
+    /// set writes it (`None` on the built-in store, or a read-only external
+    /// store): one handle for the session, so a transaction's writes in it
+    /// are stamped and undone through the store they were applied to.
+    external_target: Option<Arc<grafeo_core::graph::apply::ExternalTarget>>,
     /// Count of active `ResultStream`s pinned to this session. Commit and
     /// rollback block while any streams are outstanding so mid-iteration
     /// snapshots are not invalidated.
@@ -318,23 +323,13 @@ enum LpgBackend {
     Placeholder,
 }
 
-/// Per-graph savepoint snapshot, capturing the store state at the time of the savepoint.
-#[derive(Clone)]
-struct GraphSavepoint {
-    graph_name: Option<String>,
-    /// Length of the transaction's change log in this graph's store.
-    undo_log_position: usize,
-}
-
-/// Savepoint state: name + per-graph snapshots + the graph that was active.
+/// A savepoint: its name, and how far the transaction's changes reached
+/// when it was taken, in every graph at once.
 #[derive(Clone)]
 struct SavepointState {
     name: String,
-    graph_snapshots: Vec<GraphSavepoint>,
-    /// The graph that was active when the savepoint was created.
-    /// Reserved for future use (e.g., restoring graph context on rollback).
-    #[allow(dead_code)]
-    active_graph: Option<String>,
+    /// The position in the transaction's change set.
+    mark: grafeo_common::change::ChangeMark,
     /// CDC event buffer position at savepoint creation.
     /// On rollback-to-savepoint, the buffer is truncated to this position.
     #[cfg(feature = "cdc")]
@@ -391,7 +386,8 @@ impl Session {
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
-            touched_graphs: parking_lot::Mutex::new(Vec::new()),
+            changes: parking_lot::Mutex::new(None),
+            external_target: None,
             active_streams: AtomicUsize::new(0),
             #[cfg(feature = "metrics")]
             metrics: None,
@@ -417,9 +413,11 @@ impl Session {
     /// Sets the WAL for this session (shared with the database).
     ///
     /// The session gets its own [`WalBuffer`](crate::transaction::wal_buffer::WalBuffer),
-    /// and `graph_store` is wrapped in a [`WalGraphStore`] so that mutation
-    /// operators (INSERT, DELETE, SET via queries) record into it. The buffer
-    /// is written to the WAL as one group per transaction.
+    /// written to the WAL as one group per transaction: a commit writes the
+    /// records of its change set (see `transaction::v1_group`) and then
+    /// those the buffer holds (RDF). `graph_store` is wrapped in a
+    /// [`WalGraphStore`] for the writes outside a transaction (auto-commit
+    /// off), which record into the buffer as they happen.
     #[cfg(all(feature = "wal", feature = "lpg"))]
     pub(crate) fn set_wal(&mut self, wal: Arc<grafeo_storage::wal::LpgWal>) {
         let buffer = Arc::new(crate::transaction::wal_buffer::WalBuffer::new(wal));
@@ -449,10 +447,11 @@ impl Session {
 
     /// Sets the CDC log for this session (shared with the database).
     ///
-    /// Wraps the current write store with a `CdcGraphStore` decorator so
-    /// that all session mutations (INSERT, SET, DELETE via query execution)
-    /// buffer CDC events. The buffer is flushed to the `CdcLog` on commit
-    /// and discarded on rollback.
+    /// A commit reports the events of its change set to the `CdcLog` (see
+    /// `cdc::events_for_changes`). The write store is wrapped with a
+    /// `CdcGraphStore` decorator for the writes outside a transaction
+    /// (auto-commit off), which buffer their events; the buffer is flushed
+    /// to the `CdcLog` on the next commit and discarded on rollback.
     #[cfg(feature = "cdc")]
     pub(crate) fn set_cdc_log(&mut self, cdc_log: Arc<crate::cdc::CdcLog>) {
         // Wrap the WRITE store only with CdcGraphStore to intercept mutations.
@@ -487,6 +486,11 @@ impl Session {
         write_store: Option<Arc<dyn GraphStoreMut>>,
         cfg: SessionConfig,
     ) -> Result<Self> {
+        let external_target = write_store.as_ref().map(|store| {
+            Arc::new(grafeo_core::graph::apply::ExternalTarget::new(Arc::clone(
+                store,
+            )))
+        });
         Ok(Self {
             #[cfg(feature = "lpg")]
             store: Arc::new(LpgStore::new()?),
@@ -530,7 +534,8 @@ impl Session {
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
-            touched_graphs: parking_lot::Mutex::new(Vec::new()),
+            changes: parking_lot::Mutex::new(None),
+            external_target,
             active_streams: AtomicUsize::new(0),
             #[cfg(feature = "metrics")]
             metrics: None,
@@ -558,7 +563,6 @@ impl Session {
     /// Sets the current graph for this session (USE GRAPH).
     pub fn use_graph(&self, name: &str) {
         *self.current_graph.lock() = Some(name.to_string());
-        self.track_graph_touch();
     }
 
     /// Returns the current graph name, if any.
@@ -572,7 +576,6 @@ impl Session {
     /// Per ISO/IEC 39075 Section 7.1 GR1, this is independent of the session graph.
     pub fn set_schema(&self, name: &str) {
         *self.current_schema.lock() = Some(name.to_string());
-        self.track_graph_touch();
     }
 
     /// Returns the current schema name, if any.
@@ -767,27 +770,43 @@ impl Session {
         }
     }
 
-    /// Records the current graph as "touched" if a transaction is active.
+    /// Where a writer of the open transaction writes the graph with storage
+    /// key `key` (`None` for the default graph) and records its writes:
+    /// the graph's store and the transaction's changes in it. `None` outside
+    /// a transaction, on a read-only external store, and for a named graph
+    /// that no longer exists.
     ///
-    /// Uses the full storage key (schema/graph) so that commit/rollback
-    /// can resolve the correct store via `resolve_store`. Called from
-    /// every setter that can change the active key (`use_graph`,
-    /// `set_schema`, `reset_*`) so mid-transaction context switches are
-    /// always captured; callers that mutate the active key via those
-    /// setters do not need to invoke this directly.
-    fn track_graph_touch(&self) {
-        if self.current_transaction.lock().is_some() {
-            self.touch_graph(self.active_graph_storage_key());
-        }
-    }
+    /// # Errors
+    ///
+    /// Fails when the transaction wrote the graph through another store: it
+    /// was dropped and created again since.
+    fn recording_for(
+        &self,
+        key: Option<&str>,
+    ) -> Result<Option<grafeo_core::execution::operators::Recording>> {
+        use grafeo_core::execution::operators::WriteTarget;
 
-    /// Records the graph with storage key `key` as touched by the open
-    /// transaction (see [`track_graph_touch`](Self::track_graph_touch)).
-    fn touch_graph(&self, key: Option<String>) {
-        let mut touched = self.touched_graphs.lock();
-        if !touched.contains(&key) {
-            touched.push(key);
-        }
+        let Some(changes) = self.changes.lock().clone() else {
+            return Ok(None);
+        };
+        let target = match &self.external_target {
+            Some(external) => WriteTarget::External(Arc::clone(external)),
+            #[cfg(feature = "lpg")]
+            None if self.searches_own_store() => {
+                let store = match key {
+                    None => self.root_store(),
+                    Some(name) => match self.root_store().graph(name) {
+                        Some(store) => store,
+                        None => return Ok(None),
+                    },
+                };
+                WriteTarget::Store(store as Arc<dyn grafeo_core::graph::apply::ChangeTarget>)
+            }
+            None => return Ok(None),
+        };
+        changes
+            .recording(&self.transaction_manager, key, target)
+            .map(Some)
     }
 
     /// Sets the session time zone.
@@ -819,19 +838,16 @@ impl Session {
         *self.time_zone.lock() = None;
         self.session_params.lock().clear();
         *self.viewing_epoch_override.lock() = None;
-        self.track_graph_touch();
     }
 
     /// Resets only the session schema (Section 7.2 GR1).
     pub fn reset_schema(&self) {
         *self.current_schema.lock() = None;
-        self.track_graph_touch();
     }
 
     /// Resets only the session graph (Section 7.2 GR2).
     pub fn reset_graph(&self) {
         *self.current_graph.lock() = None;
-        self.track_graph_touch();
     }
 
     /// Resets only the session time zone (Section 7.2 GR3).
@@ -3091,7 +3107,7 @@ impl Session {
                     Arc::clone(&active),
                     viewing_epoch,
                     transaction_id,
-                );
+                )?;
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
                 let executor = self
@@ -3137,7 +3153,7 @@ impl Session {
                 viewing_epoch,
                 transaction_id,
                 read_only,
-            );
+            )?;
             let physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan via push-based pipeline when possible
@@ -3323,7 +3339,7 @@ impl Session {
                 viewing_epoch,
                 transaction_id,
                 !has_active_tx,
-            )
+            )?
             .for_streaming();
         let physical_plan = planner.plan(&optimized_plan)?;
         let columns = physical_plan.columns.clone();
@@ -3607,7 +3623,7 @@ impl Session {
                     Arc::clone(&active),
                     viewing_epoch,
                     transaction_id,
-                );
+                )?;
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
                 let executor = self
@@ -3644,7 +3660,7 @@ impl Session {
 
             // Convert to physical plan with transaction context
             let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
+                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
@@ -3725,7 +3741,7 @@ impl Session {
 
             // Convert to physical plan with transaction context
             let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
+                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
@@ -3789,7 +3805,7 @@ impl Session {
         let result = self.with_auto_commit(has_mutations, || {
             let (viewing_epoch, transaction_id) = self.get_transaction_context();
             let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
+                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
@@ -3863,7 +3879,7 @@ impl Session {
         let result = self.with_auto_commit(has_mutations, || {
             let (viewing_epoch, transaction_id) = self.get_transaction_context();
             let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
+                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
@@ -3931,7 +3947,7 @@ impl Session {
         let result = self.with_auto_commit(has_mutations, || {
             let (viewing_epoch, transaction_id) = self.get_transaction_context();
             let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
+                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
@@ -4056,7 +4072,7 @@ impl Session {
         let result = self.with_auto_commit(has_mutations, || {
             let (viewing_epoch, transaction_id) = self.get_transaction_context();
             let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
+                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
@@ -4266,14 +4282,8 @@ impl Session {
             self.transaction_manager.begin()
         };
         *current = Some(transaction_id);
+        *self.changes.lock() = self.transaction_manager.changes(transaction_id);
         *self.read_only_tx.lock() = read_only || self.db_read_only;
-
-        // Record the initial graph as "touched" for cross-graph atomicity.
-        // Uses the full storage key (schema/graph) for schema-scoped resolution.
-        let key = self.active_graph_storage_key();
-        let mut touched = self.touched_graphs.lock();
-        touched.clear();
-        touched.push(key);
 
         #[cfg(feature = "metrics")]
         {
@@ -4337,25 +4347,17 @@ impl Session {
             )
         })?;
 
-        // Validate the transaction first (conflict detection) before committing data.
-        // If this fails, we rollback the data changes instead of making them permanent.
-        //
-        // Take ownership of the touched graphs in one lock acquisition. Since
-        // current_transaction was .take()'d above, no concurrent thread can call
-        // track_graph_touch() for this transaction (it checks current_transaction
-        // first), so this is safe.
-        let touched = std::mem::take(&mut *self.touched_graphs.lock());
+        let changes = self.changes.lock().take();
         // Until `commit.complete()`, the commit holds its writes, readers do
-        // not see its epoch, and no other commit, transaction start or write
-        // outside a transaction can run: the versions, events and WAL records
-        // below are complete before anything that comes after the commit
-        // (#548).
+        // not see its epoch, and no other commit or transaction start can
+        // run: the versions, events and WAL records below are complete
+        // before anything that comes after the commit (#548).
         let commit = match self.transaction_manager.start_commit(transaction_id) {
             Ok(commit) => commit,
             Err(e) => {
                 // Conflict detected: abort the transaction completely so its
                 // entities are released and its versions discarded (#409).
-                let _ = self.abort_transaction(transaction_id, &touched);
+                let _ = self.abort_transaction(transaction_id, changes.as_deref());
                 #[cfg(feature = "metrics")]
                 {
                     crate::metrics::record_metric!(self.metrics, tx_active, dec);
@@ -4383,30 +4385,36 @@ impl Session {
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_epoch();
 
-        // Finalize PENDING epochs: make uncommitted versions visible at the commit epoch.
-        for graph_name in &touched {
-            let store = self.resolve_store(graph_name);
-            store.finalize_version_epochs(transaction_id, commit_epoch);
+        // Stamp the changes with the commit epoch, per graph through the
+        // store each was applied to: the pending versions become visible at
+        // the epoch once it is published, and the stores' counters and
+        // epochs follow. A store that fails leaves the commit half stamped:
+        // dropping the commit guard uncompleted poisons the database.
+        if let Some(changes) = &changes
+            && let Err(error) = changes.stamp(commit_epoch)
+        {
+            return Err(grafeo_common::utils::error::Error::Internal(format!(
+                "the commit of transaction {transaction_id:?} could not stamp its changes: {error}"
+            )));
         }
 
-        // Commit succeeded: discard undo logs (make changes permanent)
         #[cfg(feature = "triple-store")]
         self.commit_rdf_transaction(transaction_id);
-
-        for graph_name in &touched {
-            let store = self.resolve_store(graph_name);
-            store.commit_transaction_properties(transaction_id);
-        }
 
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_stamped();
 
-        // Flush buffered CDC events now that the transaction is committed.
-        // All buffered events have PENDING epoch; assign the real commit_epoch.
-        // Uses record_batch to acquire the write lock once per commit.
+        // Report the changes to CDC at the commit epoch: the events of writes
+        // outside a transaction buffered since the last commit, then those of
+        // the change set, folded into the creates.
         #[cfg(feature = "cdc")]
         if let Some(ref pending) = self.cdc_pending_events {
-            let events = crate::cdc::fold_into_creates(pending.lock().drain(..).collect());
+            let mut events: Vec<crate::cdc::ChangeEvent> = pending.lock().drain(..).collect();
+            if let Some(changes) = &changes {
+                events
+                    .extend(changes.read(|set| crate::cdc::events_for_changes(set, &self.cdc_log)));
+            }
+            let events = crate::cdc::fold_into_creates(events);
             self.cdc_log.record_batch(events.into_iter().map(|mut e| {
                 e.epoch = commit_epoch;
                 e
@@ -4416,16 +4424,25 @@ impl Session {
         // Write the transaction's records to the WAL as one group, closed by
         // the commit marker and the epoch advance, so crash recovery can
         // identify committed transactions and their epoch boundaries (#252)
-        // and no other session's records can land inside the group (#411).
+        // and no other session's records can land inside the group (#411):
+        // the records of its change set, then those the session buffered
+        // (RDF).
         #[cfg(feature = "wal")]
         if let Some(wal) = self.wal() {
             use grafeo_storage::wal::WalRecord;
-            if let Err(e) = wal.flush(&[
-                WalRecord::TransactionCommit { transaction_id },
-                WalRecord::EpochAdvance {
-                    epoch: commit_epoch,
-                },
-            ]) {
+            let records = changes
+                .as_ref()
+                .map(|changes| changes.read(crate::transaction::v1_group::v1_records))
+                .unwrap_or_default();
+            if let Err(e) = wal.flush_with(
+                records,
+                &[
+                    WalRecord::TransactionCommit { transaction_id },
+                    WalRecord::EpochAdvance {
+                        epoch: commit_epoch,
+                    },
+                ],
+            ) {
                 grafeo_common::grafeo_warn!("Failed to write transaction to WAL: {}", e);
             }
         }
@@ -4434,26 +4451,25 @@ impl Session {
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_logged();
 
-        // The touched stores' epochs moved when the versions were stamped
-        // (`finalize_version_epochs`), so a lookup at a store's own epoch
-        // sees the commit from then on; the database's direct reads and
-        // queries read at the published epoch, which moves only once the
-        // commit is complete. The database has one epoch: the root store
-        // follows every commit, also one that only touched named graphs (a
-        // checkpoint saves the root's epoch for all of them).
+        // The stores the transaction wrote moved to the epoch when it was
+        // stamped, so a lookup at a store's own epoch sees the commit from
+        // then on; the database's direct reads and queries read at the
+        // published epoch, which moves only once the commit is complete. The
+        // database has one epoch: the root store follows every commit, also
+        // one that only wrote named graphs (a checkpoint saves the root's
+        // epoch for all of them).
         self.root_store().sync_epoch(commit_epoch);
-        for graph_name in &touched {
-            let store = self.resolve_store(graph_name);
-            store.sync_epoch(commit_epoch);
-        }
 
         // Reset read-only flag and clear savepoints before completing the
         // commit: a transaction this session begins next waits for the commit
-        // and sets its own flag after it. touched_graphs was already emptied
-        // by mem::take above.
+        // and sets its own flag after it.
         *self.read_only_tx.lock() = self.db_read_only;
         self.savepoints.lock().clear();
         commit.complete();
+        let written = changes
+            .as_ref()
+            .map(|changes| changes.written_graphs())
+            .unwrap_or_default();
 
         // Auto-GC: periodically prune old MVCC versions
         if self.gc_interval > 0 {
@@ -4463,7 +4479,7 @@ impl Session {
                 let gc_start = std::time::Instant::now();
 
                 let min_epoch = self.transaction_manager.min_active_epoch();
-                for graph_name in &touched {
+                for graph_name in &written {
                     let store = self.resolve_store(graph_name);
                     store.gc_versions(min_epoch);
                 }
@@ -4551,8 +4567,8 @@ impl Session {
             )
         })?;
 
-        let touched = std::mem::take(&mut *self.touched_graphs.lock());
-        let result = self.abort_transaction(transaction_id, &touched);
+        let changes = self.changes.lock().take();
+        let result = self.abort_transaction(transaction_id, changes.as_deref());
 
         #[cfg(feature = "metrics")]
         if result.is_ok() {
@@ -4569,30 +4585,38 @@ impl Session {
     }
 
     /// Aborts a transaction that has already been taken out of
-    /// `current_transaction`: discards its versions in every touched graph,
-    /// its RDF changes and buffered CDC events, marks it aborted in the
-    /// transaction manager and logs the abort to the WAL.
+    /// `current_transaction`: undoes what it changed (`changes`), in every
+    /// graph it wrote, its RDF changes and buffered CDC events, marks it
+    /// aborted in the transaction manager and drops its buffered WAL
+    /// records.
     ///
     /// Shared by rollback and by a commit that fails validation, so a failed
     /// commit leaves no active transaction holding its entities.
+    ///
+    /// # Errors
+    ///
+    /// When it wrote a graph whose store has no undo (a store the database
+    /// was built on), the error names the graph: everything else is undone
+    /// and the transaction is aborted, but that store keeps its writes. A
+    /// store that fails to undo poisons the database.
     #[cfg(feature = "lpg")]
     fn abort_transaction(
         &self,
         transaction_id: TransactionId,
-        touched: &[Option<String>],
+        changes: Option<&crate::transaction::TransactionChanges>,
     ) -> Result<()> {
         *self.read_only_tx.lock() = self.db_read_only;
 
-        // Discard uncommitted versions in ALL touched LPG stores (cross-graph
-        // atomicity), as a store change in progress: a checkpoint never reads
-        // the store or the change logs halfway through the undo.
-        {
-            let _writing = self.transaction_manager.write_in_progress();
-            for graph_name in touched {
-                let store = self.resolve_store(graph_name);
-                store.discard_uncommitted_versions(transaction_id);
+        // Undo the transaction's changes in every graph it wrote, as a store
+        // change in progress: a checkpoint never reads the store or the
+        // change sets halfway through the undo.
+        let undone = match changes {
+            Some(changes) => {
+                let _writing = self.transaction_manager.write_in_progress();
+                changes.undo_after(changes.start(), false)
             }
-        }
+            None => Ok(None),
+        };
 
         #[cfg(feature = "triple-store")]
         self.rollback_rdf_transaction(transaction_id);
@@ -4603,7 +4627,6 @@ impl Session {
         }
 
         self.savepoints.lock().clear();
-        self.touched_graphs.lock().clear();
 
         let result = self.transaction_manager.abort(transaction_id);
 
@@ -4614,13 +4637,41 @@ impl Session {
             wal.clear();
         }
 
-        result
+        match undone {
+            Ok(None) => result,
+            Ok(Some(graph)) => Err(crate::transaction::kept_by_external_store(&graph)),
+            Err(failure) => Err(self.undo_failed(transaction_id, failure)),
+        }
+    }
+
+    /// The error of an undo that did not restore everything: a store kept
+    /// writes it has no undo for (named), or a store failed to undo, which
+    /// poisons the database.
+    #[cfg(feature = "lpg")]
+    fn undo_failed(
+        &self,
+        transaction_id: TransactionId,
+        failure: crate::transaction::UndoFailure,
+    ) -> grafeo_common::utils::error::Error {
+        match failure {
+            crate::transaction::UndoFailure::External(graph) => {
+                crate::transaction::kept_by_external_store(&graph)
+            }
+            crate::transaction::UndoFailure::Broken(error) => {
+                let message = format!(
+                    "the rollback of transaction {transaction_id:?} could not undo its changes: \
+                     {error}"
+                );
+                self.transaction_manager.poison(&message);
+                grafeo_common::utils::error::Error::Internal(message)
+            }
+        }
     }
 
     /// Creates a named savepoint within the current transaction.
     ///
-    /// The savepoint records how far the transaction's change log reaches in
-    /// every graph it touched, so
+    /// The savepoint records how far the transaction's changes reach, in
+    /// every graph at once, so
     /// [`rollback_to_savepoint`](Self::rollback_to_savepoint) can undo the
     /// changes made after this point.
     ///
@@ -4637,34 +4688,23 @@ impl Session {
             )
         })?;
 
-        self.savepoints
-            .lock()
-            .push(self.capture_savepoint(tx_id, name));
+        let _ = tx_id;
+        self.savepoints.lock().push(self.capture_savepoint(name));
         Ok(())
     }
 
-    /// The state a savepoint named `name` restores: how far the change log
-    /// of transaction `tx_id` reaches in every graph it touched, and the
-    /// lengths of the CDC and WAL buffers.
+    /// The state a savepoint named `name` restores: how far the open
+    /// transaction's changes reach, and the lengths of the CDC and WAL
+    /// buffers.
     #[cfg(feature = "lpg")]
-    fn capture_savepoint(&self, tx_id: TransactionId, name: &str) -> SavepointState {
-        // Capture state for every graph touched so far.
-        let touched = self.touched_graphs.lock().clone();
-        let graph_snapshots: Vec<GraphSavepoint> = touched
-            .iter()
-            .map(|graph_name| {
-                let store = self.resolve_store(graph_name);
-                GraphSavepoint {
-                    graph_name: graph_name.clone(),
-                    undo_log_position: store.property_undo_log_position(tx_id),
-                }
-            })
-            .collect();
-
+    fn capture_savepoint(&self, name: &str) -> SavepointState {
+        let mark = self.changes.lock().as_ref().map_or_else(
+            || grafeo_common::change::ChangeSet::new().mark(),
+            |changes| changes.mark(),
+        );
         SavepointState {
             name: name.to_string(),
-            graph_snapshots,
-            active_graph: self.current_graph.lock().clone(),
+            mark,
             #[cfg(feature = "cdc")]
             cdc_event_position: self
                 .cdc_pending_events
@@ -4708,46 +4748,45 @@ impl Session {
 
         let sp_state = savepoints[pos].clone();
 
+        // Undo first: a rollback that is refused (writes to a store without
+        // undo after the savepoint) changes nothing, the savepoints included.
+        self.restore_savepoint(transaction_id, &sp_state, true)?;
         // Remove this savepoint and all later ones
         savepoints.truncate(pos);
-        drop(savepoints);
-
-        self.restore_savepoint(transaction_id, &sp_state);
         Ok(())
     }
 
     /// Undoes what transaction `transaction_id` did after `sp_state` was
     /// captured: its changes in every graph, its CDC events and its
     /// buffered WAL records.
+    ///
+    /// # Errors
+    ///
+    /// When writes after the savepoint went to a store without undo (a store
+    /// the database was built on), the error names its graph: with
+    /// `refuse_external` nothing is undone (a rollback to a savepoint);
+    /// without, everything else is undone and that store keeps its writes (a
+    /// failed statement). A store that fails to undo poisons the database.
     #[cfg(feature = "lpg")]
-    fn restore_savepoint(&self, transaction_id: TransactionId, sp_state: &SavepointState) {
-        let touched = self.touched_graphs.lock().clone();
+    fn restore_savepoint(
+        &self,
+        transaction_id: TransactionId,
+        sp_state: &SavepointState,
+        refuse_external: bool,
+    ) -> Result<()> {
+        let changes = self.changes.lock().clone();
         // The undo is a store change in progress: a checkpoint never reads
-        // the store or the change logs halfway through it.
-        let writing = self.transaction_manager.write_in_progress();
-
-        // Roll back each graph that was captured in the savepoint.
-        for gs in &sp_state.graph_snapshots {
-            let store = self.resolve_store(&gs.graph_name);
-
-            // Undo the changes recorded after the savepoint, creations included.
-            store.rollback_transaction_properties_to(transaction_id, gs.undo_log_position);
-        }
-
-        // Also roll back any graphs that were touched AFTER the savepoint
-        // but not captured in it. These need full discard since the savepoint
-        // didn't include them.
-        for graph_name in &touched {
-            let already_captured = sp_state
-                .graph_snapshots
-                .iter()
-                .any(|gs| gs.graph_name == *graph_name);
-            if !already_captured {
-                let store = self.resolve_store(graph_name);
-                store.discard_uncommitted_versions(transaction_id);
+        // the store or the change sets halfway through it.
+        let undone = match &changes {
+            Some(changes) => {
+                let _writing = self.transaction_manager.write_in_progress();
+                changes.undo_after(sp_state.mark, refuse_external)
             }
+            None => Ok(None),
+        };
+        if let Err(crate::transaction::UndoFailure::External(graph)) = &undone {
+            return Err(crate::transaction::kept_by_external_store(graph));
         }
-        drop(writing);
 
         // Truncate CDC event buffer to the savepoint position.
         #[cfg(feature = "cdc")]
@@ -4761,13 +4800,10 @@ impl Session {
             wal.truncate(sp_state.wal_position);
         }
 
-        // Restore touched_graphs to only the graphs that were known at savepoint time.
-        let mut touched = self.touched_graphs.lock();
-        touched.clear();
-        for gs in &sp_state.graph_snapshots {
-            if !touched.contains(&gs.graph_name) {
-                touched.push(gs.graph_name.clone());
-            }
+        match undone {
+            Ok(None) => Ok(()),
+            Ok(Some(graph)) => Err(crate::transaction::kept_by_external_store(&graph)),
+            Err(failure) => Err(self.undo_failed(transaction_id, failure)),
         }
     }
 
@@ -4816,6 +4852,11 @@ impl Session {
     #[must_use]
     pub(crate) fn transaction_manager(&self) -> &TransactionManager {
         &self.transaction_manager
+    }
+
+    /// What the open transaction changed so far, if one is open.
+    pub(crate) fn current_changes(&self) -> Option<Arc<crate::transaction::TransactionChanges>> {
+        self.changes.lock().clone()
     }
 
     /// Prepares the current transaction for a two-phase commit.
@@ -4896,10 +4937,7 @@ impl Session {
                     self.commit_inner()?;
                     Ok(result)
                 }
-                Err(e) => {
-                    let _ = self.rollback_inner();
-                    Err(e)
-                }
+                Err(e) => Err(with_kept_writes(e, self.rollback_inner())),
             }
         } else {
             // Inside an open transaction a failed statement undoes its own
@@ -4907,13 +4945,14 @@ impl Session {
             let transaction = *self.current_transaction.lock();
             let start = transaction
                 .filter(|_| has_mutations)
-                .map(|tx| (tx, self.capture_savepoint(tx, "statement")));
-            let result = body();
-            if result.is_err()
-                && let Some((tx, start)) = &start
-            {
-                self.restore_savepoint(*tx, start);
-            }
+                .map(|tx| (tx, self.capture_savepoint("statement")));
+            let result = match (body(), &start) {
+                (Err(error), Some((tx, start))) => Err(with_kept_writes(
+                    error,
+                    self.restore_savepoint(*tx, start, false),
+                )),
+                (result, _) => result,
+            };
             #[cfg(feature = "wal")]
             self.flush_wal_outside_transaction();
             result
@@ -4938,8 +4977,7 @@ impl Session {
             Err(error) => {
                 // The body's error is the one to report, as in
                 // `with_auto_commit`.
-                let _ = self.rollback_inner();
-                Err(error)
+                Err(with_kept_writes(error, self.rollback_inner()))
             }
         }
     }
@@ -5219,17 +5257,24 @@ impl Session {
         store: Arc<dyn GraphStoreSearch>,
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
-    ) -> crate::query::Planner {
+    ) -> Result<crate::query::Planner> {
         self.create_planner_for_store_with_read_only(store, viewing_epoch, transaction_id, false)
     }
 
+    /// A planner with transaction context and constraint validator, whose
+    /// writers record in the open transaction's changes.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the open transaction wrote the active graph through
+    /// another store: the graph was dropped and created again since.
     fn create_planner_for_store_with_read_only(
         &self,
         store: Arc<dyn GraphStoreSearch>,
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
         read_only: bool,
-    ) -> crate::query::Planner {
+    ) -> Result<crate::query::Planner> {
         use crate::query::Planner;
         use grafeo_core::execution::operators::{LazyValue, SessionContext};
 
@@ -5245,6 +5290,8 @@ impl Session {
         };
 
         let write_store = self.active_write_store();
+        #[cfg(feature = "lpg")]
+        let planner_writes = write_store.is_some();
 
         let mut planner = Planner::with_context(
             Arc::clone(&store),
@@ -5261,9 +5308,12 @@ impl Session {
         .with_session_context(session_context)
         .with_read_only(read_only);
 
+        // The graph the writes land in: the active one, or the default graph
+        // when no graph of that name exists.
         #[cfg(feature = "lpg")]
-        {
-            planner = planner.with_write_graph(self.active_lpg_graph_key().as_deref());
+        if transaction_id.is_some() && planner_writes {
+            planner =
+                planner.with_recording(self.recording_for(self.active_lpg_graph_key().as_deref())?);
         }
 
         // Attach the LPG store so CALL grafeo.search.* procedures can reach
@@ -5287,7 +5337,7 @@ impl Session {
             transaction_id,
         )));
 
-        planner
+        Ok(planner)
     }
 
     /// Whether search procedures reach the session's own store: the
@@ -5344,9 +5394,6 @@ impl Session {
         self.check_reads_the_present()?;
         self.with_auto_commit(true, || {
             let key = self.active_graph_storage_key();
-            if self.current_transaction.lock().is_some() {
-                self.touch_graph(key.clone());
-            }
             let store = self.write_store_for_key(key.as_deref()).ok_or(
                 grafeo_common::utils::error::Error::Transaction(
                     grafeo_common::utils::error::TransactionError::ReadOnly,
@@ -5366,12 +5413,9 @@ impl Session {
                 let graph = key
                     .as_deref()
                     .filter(|name| self.root_store().graph(name).is_some());
-                writer = writer.with_write_tracker(Arc::new(
-                    crate::transaction::TransactionWriteTracker::new(Arc::clone(
-                        &self.transaction_manager,
-                    ))
-                    .in_graph(graph),
-                ));
+                if let Some(recording) = self.recording_for(graph)? {
+                    writer = writer.with_recording(recording);
+                }
             }
             write(&writer).map_err(crate::query::executor::convert_operator_error)
         })
@@ -5985,6 +6029,24 @@ impl Session {
         self.require_permission(crate::auth::StatementKind::Read)?;
         let end_epoch = end_epoch.min(self.transaction_manager.current_epoch());
         Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
+    }
+}
+
+/// `error`, the error of a statement whose writes were undone by `undo`,
+/// telling also that a store without undo keeps some of them when the
+/// undo says so. The statement's error is the one to report either way.
+#[cfg(feature = "lpg")]
+fn with_kept_writes(
+    error: grafeo_common::utils::error::Error,
+    undo: Result<()>,
+) -> grafeo_common::utils::error::Error {
+    match undo {
+        Err(kept) if crate::transaction::is_kept_by_external_store(&kept) => {
+            grafeo_common::utils::error::Error::Internal(format!(
+                "{error}; the statement's writes were not all undone: {kept}"
+            ))
+        }
+        _ => error,
     }
 }
 

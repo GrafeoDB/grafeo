@@ -216,10 +216,10 @@ pub struct GrafeoDB {
     /// Whether this database is open in read-only mode.
     /// When true, sessions automatically enforce read-only transactions.
     read_only: bool,
-    /// Buffers of the direct calls made outside a transaction.
+    /// The recorder of the direct calls that commit at once (while no
+    /// transaction is open), made on the first one.
     #[cfg(feature = "lpg")]
-    #[cfg(any(feature = "wal", feature = "cdc"))]
-    implicit_writes: direct::ImplicitWrites,
+    immediate_writes: std::sync::OnceLock<Arc<direct::ImmediateRecorder>>,
     /// Named graph projections (virtual subgraphs), shared with sessions.
     projections:
         Arc<RwLock<std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>>>,
@@ -914,10 +914,9 @@ impl GrafeoDB {
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
             read_only: is_read_only,
-            #[cfg(feature = "lpg")]
-            #[cfg(any(feature = "wal", feature = "cdc"))]
-            implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            #[cfg(feature = "lpg")]
+            immediate_writes: std::sync::OnceLock::new(),
         };
 
         // Register storage sections as memory consumers for pressure tracking
@@ -1072,10 +1071,9 @@ impl GrafeoDB {
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
             read_only: false,
-            #[cfg(feature = "lpg")]
-            #[cfg(any(feature = "wal", feature = "cdc"))]
-            implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            #[cfg(feature = "lpg")]
+            immediate_writes: std::sync::OnceLock::new(),
         })
     }
 
@@ -1170,10 +1168,9 @@ impl GrafeoDB {
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
             read_only: true,
-            #[cfg(feature = "lpg")]
-            #[cfg(any(feature = "wal", feature = "cdc"))]
-            implicit_writes: direct::ImplicitWrites::default(),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            #[cfg(feature = "lpg")]
+            immediate_writes: std::sync::OnceLock::new(),
         })
     }
 

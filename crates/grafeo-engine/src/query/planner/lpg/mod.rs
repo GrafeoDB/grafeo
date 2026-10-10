@@ -265,8 +265,15 @@ pub struct Planner {
     profiling: std::cell::Cell<bool>,
     /// Profile entries collected during planning (post-order).
     profile_entries: std::cell::RefCell<Vec<crate::query::profile::ProfileEntry>>,
-    /// Optional write tracker for recording writes during mutations.
-    write_tracker: Option<grafeo_core::execution::operators::SharedWriteTracker>,
+    /// Where the plan's writers write and record their writes: the active
+    /// graph's store and the transaction's changes in it. `None` outside a
+    /// transaction, where writers write through the write store.
+    recording: Option<grafeo_core::execution::operators::Recording>,
+    /// The claims of a plan in a transaction whose writers write without a
+    /// recording, through the write store's versioned methods (a
+    /// `QueryProcessor` with a transaction context): the default graph's,
+    /// through the transaction manager.
+    claims: Option<Arc<dyn grafeo_core::execution::operators::WriteClaims>>,
     /// Counts the writes of the plan's writers.
     write_counter: Arc<grafeo_core::execution::operators::WriteCounter>,
     /// Session context for introspection functions (info, schema, current_schema, etc.).
@@ -330,7 +337,8 @@ impl Planner {
             after_a_write: std::cell::Cell::new(false),
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
-            write_tracker: None,
+            recording: None,
+            claims: None,
             write_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
@@ -340,20 +348,15 @@ impl Planner {
         }
     }
 
-    /// Records the plan's writes, for conflict detection, as writes to the
-    /// graph with storage key `graph` (`None`: the default graph). Named
-    /// graphs number their entities on their own, so without this node 0 of
-    /// one graph would conflict with node 0 of another.
+    /// Writes the plan's writes through `recording`'s store and records
+    /// them in the transaction's changes, with their claims: what a
+    /// transaction's plan does.
     #[must_use]
-    pub fn with_write_graph(mut self, graph: Option<&str>) -> Self {
-        if self.write_tracker.is_some()
-            && let Some(manager) = &self.transaction_manager
-        {
-            self.write_tracker = Some(Arc::new(
-                crate::transaction::TransactionWriteTracker::new(Arc::clone(manager))
-                    .in_graph(graph),
-            ));
-        }
+    pub(crate) fn with_recording(
+        mut self,
+        recording: Option<grafeo_core::execution::operators::Recording>,
+    ) -> Self {
+        self.recording = recording;
         self
     }
 
@@ -366,18 +369,15 @@ impl Planner {
         transaction_id: Option<TransactionId>,
         viewing_epoch: EpochId,
     ) -> Self {
-        use crate::transaction::TransactionWriteTracker;
-
-        // Create write tracker when there's an active transaction
-        let write_tracker: Option<grafeo_core::execution::operators::SharedWriteTracker> =
-            if transaction_id.is_some() {
-                Some(Arc::new(TransactionWriteTracker::new(Arc::clone(
-                    &transaction_manager,
-                ))))
-            } else {
-                None
-            };
-
+        // A plan in a transaction claims what it writes, in the default
+        // graph, unless the caller gives it a recording.
+        let claims = transaction_id.map(|transaction| {
+            Arc::new(crate::transaction::TransactionClaims::new(
+                Arc::clone(&transaction_manager),
+                transaction,
+                None,
+            )) as Arc<dyn grafeo_core::execution::operators::WriteClaims>
+        });
         Self {
             store,
             write_store,
@@ -404,7 +404,8 @@ impl Planner {
             after_a_write: std::cell::Cell::new(false),
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
-            write_tracker,
+            recording: None,
+            claims,
             write_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
@@ -445,12 +446,15 @@ impl Planner {
     }
 
     /// A writer for this statement's mutations: the writable store with the
-    /// transaction context, the write tracker and the constraint validator.
+    /// transaction context, the transaction's recording and the constraint
+    /// validator.
     fn graph_writer(&self) -> Result<grafeo_core::execution::operators::GraphWriter> {
         let mut writer = grafeo_core::execution::operators::GraphWriter::new(self.write_store()?)
             .with_transaction_context(self.viewing_epoch, self.transaction_id);
-        if let Some(ref tracker) = self.write_tracker {
-            writer = writer.with_write_tracker(Arc::clone(tracker));
+        match (&self.recording, &self.claims) {
+            (Some(recording), _) => writer = writer.with_recording(recording.clone()),
+            (None, Some(claims)) => writer = writer.with_claims(Arc::clone(claims)),
+            (None, None) => {}
         }
         if let Some(ref validator) = self.validator {
             writer = writer.with_validator(Arc::clone(validator));

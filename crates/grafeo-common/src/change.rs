@@ -718,6 +718,14 @@ impl ChangeSet {
         ChangeMark(self.entries.len())
     }
 
+    /// The entries recorded after `mark`, in recorded order: what
+    /// [`split_off`](Self::split_off) would remove, left in place (a
+    /// rollback to a savepoint checks them before it undoes anything).
+    #[must_use]
+    pub fn after(&self, mark: ChangeMark) -> &[Change] {
+        self.entries.get(mark.0..).unwrap_or_default()
+    }
+
     /// Removes the entries recorded after `mark` and returns them in
     /// recorded order, for the caller to undo in reverse. A mark at or past
     /// the end (one taken after entries a rollback already removed) returns
@@ -1432,9 +1440,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(set.len(), 5);
+        assert_eq!(
+            kinds(set.after(statement)),
+            [16, 24, 20],
+            "what a split would take, left in place"
+        );
+        assert_eq!(set.len(), 5);
 
         let tail = set.split_off(inner);
         assert_eq!(kinds(&tail), [20], "only what came after the inner mark");
+        assert!(
+            set.after(inner).is_empty(),
+            "a mark past the end sees nothing"
+        );
         assert_eq!(
             tail[0],
             Change::Data {

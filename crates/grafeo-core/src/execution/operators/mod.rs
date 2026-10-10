@@ -130,10 +130,8 @@ pub use variable_length_expand::{
 pub use vector_join::VectorJoinOperator;
 pub use writer::{GraphWriter, Recording, WriteCounter, WriteCounters, WriteTarget};
 
-use std::sync::Arc;
-
 use grafeo_common::change::{Before, DataOp, PendingVersion};
-use grafeo_common::types::{EdgeId, NodeId, TransactionId};
+use grafeo_common::types::{EdgeId, NodeId};
 use thiserror::Error;
 
 use crate::graph::apply::Writer;
@@ -143,7 +141,7 @@ use super::chunk_state::ChunkState;
 use super::factorized_chunk::FactorizedChunk;
 
 /// A store change of an open transaction in progress (see
-/// [`WriteTracker::write_in_progress`]): a shared hold on the database's
+/// [`WriteClaims::write_in_progress`]): a shared hold on the database's
 /// write freeze, which a checkpoint or a copy of the store holds exclusively
 /// while it reads the store. Released when dropped.
 ///
@@ -151,83 +149,6 @@ use super::factorized_chunk::FactorizedChunk;
 /// checkpoint waiting for the first would block the second request, and the
 /// thread would wait for itself.
 pub type WriteInProgress<'a> = parking_lot::RwLockReadGuard<'a, ()>;
-
-/// Trait for recording write operations during query execution.
-///
-/// This bridges `grafeo-core` mutation operators (which perform writes) with
-/// `grafeo-engine`'s `TransactionManager` (which tracks write sets for conflict
-/// detection, and freezes the store for checkpoints). The trait lives in
-/// `grafeo-core` to avoid circular dependencies.
-pub trait WriteTracker: Send + Sync {
-    /// Marks a store change of the writing transaction as in progress, for
-    /// as long as the returned guard lives: no checkpoint or copy of the
-    /// store starts reading the store meanwhile, and one that is reading it
-    /// is waited for, so none sees part of a change or of the change log
-    /// entry that undoes it.
-    ///
-    /// [`GraphWriter`] takes it once per write method, around its store
-    /// changes, and never twice on one thread (see [`WriteInProgress`]).
-    fn write_in_progress(&self) -> WriteInProgress<'_>;
-
-    /// Records that a node was written (created or modified; a delete is
-    /// recorded with [`record_node_delete`](Self::record_node_delete)).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if a write-write conflict is detected (first-writer-wins).
-    fn record_node_write(
-        &self,
-        transaction_id: TransactionId,
-        node_id: NodeId,
-    ) -> Result<(), OperatorError>;
-
-    /// Records that a node is deleted: a write, as
-    /// [`record_node_write`](Self::record_node_write) records one, that also
-    /// conflicts with another transaction's claim on the node as an endpoint
-    /// of an edge it creates (see
-    /// [`record_edge_endpoints`](Self::record_edge_endpoints)).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if another open transaction wrote the node or claimed it
-    /// (first-writer-wins).
-    fn record_node_delete(
-        &self,
-        transaction_id: TransactionId,
-        node_id: NodeId,
-    ) -> Result<(), OperatorError>;
-
-    /// Claims the endpoints of an edge the transaction is about to create:
-    /// another transaction that deletes one of them conflicts with this one,
-    /// the later of the two failing (first-writer-wins), and so does one that
-    /// deleted one and committed after this transaction began, at this
-    /// transaction's commit. Unlike a write, a claim does not conflict with
-    /// another transaction's writes of the node or claims on it.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if another open transaction deletes either endpoint.
-    fn record_edge_endpoints(
-        &self,
-        transaction_id: TransactionId,
-        src: NodeId,
-        dst: NodeId,
-    ) -> Result<(), OperatorError>;
-
-    /// Records that an edge was written (created, deleted, or modified).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if a write-write conflict is detected (first-writer-wins).
-    fn record_edge_write(
-        &self,
-        transaction_id: TransactionId,
-        edge_id: EdgeId,
-    ) -> Result<(), OperatorError>;
-}
-
-/// Type alias for a shared write tracker.
-pub type SharedWriteTracker = Arc<dyn WriteTracker>;
 
 /// What a transaction claims before it changes the store, for write-conflict
 /// detection: first writer wins between open transactions, and at commit
@@ -246,6 +167,32 @@ pub enum WriteClaim {
     Endpoints(NodeId, NodeId),
 }
 
+/// The claims and the write freeze of a transaction that writes: the
+/// bridge between the writer in this crate and the engine's transaction
+/// manager (first-writer-wins conflict detection, and the freeze a
+/// checkpoint takes).
+pub trait WriteClaims: Send + Sync {
+    /// Claims what the next store change writes, before the store changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperatorError::WriteConflict`] when another open
+    /// transaction holds a claim that conflicts with it (first writer wins).
+    fn claim(&self, claim: WriteClaim) -> Result<(), OperatorError>;
+
+    /// Marks a store change of the transaction as in progress, for as long
+    /// as the returned guard lives: no checkpoint or copy of the store starts
+    /// reading the store meanwhile, and one that is reading it is waited for,
+    /// so none sees a change without its entry in the change set. `None` for
+    /// a writer that holds checkpoints off itself (an immediate write holds
+    /// commits off for its whole run).
+    ///
+    /// [`GraphWriter`] takes it once per write method, around its store
+    /// changes and their records, and never twice on one thread (see
+    /// [`WriteInProgress`]).
+    fn write_in_progress(&self) -> Option<WriteInProgress<'_>>;
+}
+
 /// Where a [`GraphWriter`] records what it changes: one transaction's
 /// changes in one graph (an entry of its change set per write), with the
 /// claims and the write freeze that go with them.
@@ -254,17 +201,9 @@ pub enum WriteClaim {
 /// layer (the change set and the transaction manager's claims), so the
 /// writer records every write it applies the same way, whichever path made
 /// it: a statement, the direct API, a batch.
-pub trait ChangeRecorder: Send + Sync {
+pub trait ChangeRecorder: WriteClaims {
     /// The transaction writing, as the store's change target takes it.
     fn writer(&self) -> Writer;
-
-    /// Claims what the next store change writes, before the store changes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`OperatorError::WriteConflict`] when another open
-    /// transaction holds a claim that conflicts with it (first writer wins).
-    fn claim(&self, claim: WriteClaim) -> Result<(), OperatorError>;
 
     /// Records a write the store applied: `op` with what it replaced
     /// (`before`) and what it did to the transaction's pending version.
@@ -283,10 +222,6 @@ pub trait ChangeRecorder: Send + Sync {
         before: Before,
         version: PendingVersion,
     ) -> Result<(), OperatorError>;
-
-    /// Marks a store change of the transaction as in progress while the
-    /// guard lives (see [`WriteTracker::write_in_progress`]).
-    fn write_in_progress(&self) -> WriteInProgress<'_>;
 }
 
 /// Result of executing an operator.

@@ -181,25 +181,6 @@ impl LpgStore {
         }
         index.finish()
     }
-
-    /// Whether a transaction open in this store has changed it: its undo
-    /// log holds an entry. The store then differs from the committed state
-    /// in what the transaction changed at once: the nodes and edges it
-    /// deleted, the values and labels it changed in place (without
-    /// `temporal`), and the vector and text indexes, which take its values
-    /// as it writes them. A named graph has its own store and log.
-    ///
-    /// The answer holds while the caller holds the transactional writes and
-    /// rollbacks of this store and commits (a checkpoint's or a copy's write
-    /// freeze), as for the committed state a checkpoint reads from the undo
-    /// log.
-    #[must_use]
-    pub fn has_open_changes(&self) -> bool {
-        self.property_undo_log
-            .read()
-            .values()
-            .any(|entries| !entries.is_empty())
-    }
 }
 
 /// Builds an [`OpenChanges`] from undo log entries, in log order.

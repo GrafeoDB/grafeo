@@ -19,7 +19,9 @@
 //!
 //! Replay applies with [`Writer::Replay`]: the same writes at the group's
 //! epoch, by `TransactionId::SYSTEM`, counted and stamped at once, without
-//! before-images.
+//! before-images. An immediate write ([`Writer::Immediate`]) goes the same
+//! way, but lenient and with before-images: what it returns is recorded
+//! for the log and change data capture, and never stamped or undone.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -94,7 +96,7 @@ impl Mode {
                     version: EpochId::PENDING,
                 })
             }
-            Writer::Replay { epoch } => Ok(Self {
+            Writer::Replay { epoch } | Writer::Immediate { epoch, .. } => Ok(Self {
                 writer,
                 by: TransactionId::SYSTEM,
                 at: epoch,
@@ -103,24 +105,37 @@ impl Mode {
         }
     }
 
-    /// Whether this is replay: strict, counted and stamped at once, no
-    /// before-images.
-    fn replay(self) -> bool {
-        self.writer.is_replay()
+    /// Whether the write is stamped at once (replay, an immediate write):
+    /// written by the system at its epoch, which it reads at, and counted
+    /// as it is applied.
+    fn stamped(self) -> bool {
+        self.writer.stamps_at_once()
+    }
+
+    /// Whether the before-image is built (a transaction, an immediate
+    /// write; not replay).
+    fn images(self) -> bool {
+        self.writer.builds_images()
     }
 
     /// What `apply` returns once it applied a write: the entry to record
-    /// for a transaction (`before` is built for one only), `Committed` for
-    /// replay.
+    /// with its before-image (built only then), or `Committed` for replay.
     fn applied(self, before: impl FnOnce() -> Before, version: PendingVersion) -> Applied {
-        if self.replay() {
-            Applied::Committed
-        } else {
+        if self.images() {
             Applied::Changed {
                 before: before(),
                 version,
             }
+        } else {
+            Applied::Committed
         }
+    }
+
+    /// Whether the writer is the transaction that created what it sees, as
+    /// `created_by_writer` tells (asked only for a transaction): a stamped
+    /// write has no pending version of its own.
+    fn owns(self, created_by_writer: impl FnOnce() -> bool) -> bool {
+        !self.stamped() && created_by_writer()
     }
 }
 
@@ -209,8 +224,9 @@ impl ChangeTarget for LpgStore {
             DataOp::RemoveNodeLabel { id, label } => self.apply_label(*id, label, false, mode),
             DataOp::InsertTriple { .. } | DataOp::DeleteTriple { .. } => Err(refuse_triple(op)),
         }?;
-        if mode.replay() {
-            // Replay stamps what it applies: the store's epoch follows.
+        if mode.stamped() {
+            // A stamped write is committed as it is applied: the store's
+            // epoch follows.
             self.sync_epoch(mode.at);
         }
         Ok(applied)
@@ -281,11 +297,21 @@ impl LpgStore {
     ///
     /// Refuses when the version it sees cannot be read (tiered storage).
     fn seen_node(&self, id: NodeId, mode: Mode) -> Result<Option<bool>, ApplyError> {
-        let map = self.node_version_map().read();
+        self.seen_node_in(&self.node_version_map().read(), id, mode)
+    }
+
+    /// [`seen_node`](Self::seen_node) in `map`, the nodes' versions the
+    /// caller holds locked (to look at several nodes under one lock).
+    fn seen_node_in(
+        &self,
+        map: &FxHashMap<NodeId, NodeVersions>,
+        id: NodeId,
+        mode: Mode,
+    ) -> Result<Option<bool>, ApplyError> {
         let Some(versions) = map.get(&id) else {
             return Ok(None);
         };
-        let visible = if mode.replay() {
+        let visible = if mode.stamped() {
             versions.visible_at(mode.at)
         } else {
             versions.visible_to(mode.at, mode.by)
@@ -302,7 +328,7 @@ impl LpgStore {
         };
         Ok(record
             .filter(|record| !record.is_deleted())
-            .map(|_| !mode.replay() && versions.modified_by(mode.by)))
+            .map(|_| mode.owns(|| versions.modified_by(mode.by))))
     }
 
     /// The record of edge `id` the writer sees, and whether its own
@@ -316,7 +342,7 @@ impl LpgStore {
         let Some(versions) = map.get(&id) else {
             return Ok(None);
         };
-        let visible = if mode.replay() {
+        let visible = if mode.stamped() {
             versions.visible_at(mode.at)
         } else {
             versions.visible_to(mode.at, mode.by)
@@ -333,7 +359,7 @@ impl LpgStore {
         };
         Ok(record
             .filter(|record| !record.is_deleted())
-            .map(|record| (record, !mode.replay() && versions.modified_by(mode.by))))
+            .map(|record| (record, mode.owns(|| versions.modified_by(mode.by)))))
     }
 
     /// Whether the writer sees an edge of node `id`. Both ways with backward
@@ -380,6 +406,9 @@ impl LpgStore {
         record: NodeRecord,
         mode: Mode,
     ) -> Result<(), ApplyError> {
+        // A tiered store checks first, so a refused create allocates no
+        // arena record; the check under the write lock below decides.
+        #[cfg(feature = "tiered-storage")]
         if self.node_version_map().read().contains_key(&id) {
             return Err(ApplyError::Exists(Entity::Node(id)));
         }
@@ -416,6 +445,7 @@ impl LpgStore {
         record: EdgeRecord,
         mode: Mode,
     ) -> Result<(), ApplyError> {
+        #[cfg(feature = "tiered-storage")]
         if self.edge_version_map().read().contains_key(&id) {
             return Err(ApplyError::Exists(Entity::Edge(id)));
         }
@@ -662,16 +692,11 @@ impl LpgStore {
                 "a node create names the invalid node id".to_string(),
             ));
         }
-        let label_count = u16::try_from(labels.len()).map_err(|_| {
-            ApplyError::Refused(format!(
-                "node {}: {} labels, more than the {} a node holds",
-                id.as_u64(),
-                labels.len(),
-                u16::MAX
-            ))
-        })?;
+        // The record's count is a hint that stops at its maximum, as the
+        // label writes keep it (`update_label_count`): the node's labels are
+        // in the label map, however many it has.
         let mut record = NodeRecord::new(id, mode.at);
-        record.set_label_count(label_count);
+        record.set_label_count(u16::try_from(labels.len()).unwrap_or(u16::MAX));
         self.insert_node_version(id, record, mode)?;
         self.keep_node_ids_above(id);
 
@@ -683,7 +708,7 @@ impl LpgStore {
         for (key, value) in properties {
             self.put_node_value(id, key, value.clone(), mode.version);
         }
-        if mode.replay() {
+        if mode.stamped() {
             self.live_node_count.fetch_add(1, Ordering::Relaxed);
         }
         Ok(mode.applied(|| Before::Absent, PendingVersion::Created))
@@ -698,9 +723,7 @@ impl LpgStore {
         }
         // The image is read before anything changes: a value that cannot be
         // read refuses the delete, as an undo could not restore it.
-        let image = if mode.replay() {
-            None
-        } else {
+        let image = if mode.images() {
             let mut properties: Properties = self
                 .node_properties
                 .try_get_all(id)
@@ -712,6 +735,8 @@ impl LpgStore {
                 labels: self.label_names_of(id),
                 properties,
             })
+        } else {
+            None
         };
         let marked = self
             .node_version_map()
@@ -732,7 +757,7 @@ impl LpgStore {
         self.node_properties.remove_all(id);
         #[cfg(feature = "temporal")]
         self.node_properties.remove_all(id, mode.version);
-        if mode.replay() {
+        if mode.stamped() {
             self.live_node_count.fetch_sub(1, Ordering::Relaxed);
         }
         Ok(match image {
@@ -758,12 +783,18 @@ impl LpgStore {
                 "an edge create names the invalid edge id".to_string(),
             ));
         }
+        // A tiered store checks the id first, so a refused create allocates
+        // no arena record; the insert checks it under the write lock.
+        #[cfg(feature = "tiered-storage")]
         if self.edge_version_map().read().contains_key(&id) {
             return Err(ApplyError::Exists(Entity::Edge(id)));
         }
-        for end in [src, dst] {
-            if self.seen_node(end, mode)?.is_none() {
-                return Err(ApplyError::Missing(Entity::Node(end)));
+        {
+            let nodes = self.node_version_map().read();
+            for end in [src, dst] {
+                if self.seen_node_in(&nodes, end, mode)?.is_none() {
+                    return Err(ApplyError::Missing(Entity::Node(end)));
+                }
             }
         }
         let type_id = self.get_or_create_edge_type_id(edge_type);
@@ -777,7 +808,7 @@ impl LpgStore {
         for (key, value) in properties {
             self.put_edge_value(id, key, value.clone(), mode.version);
         }
-        if mode.replay() {
+        if mode.stamped() {
             self.live_edge_count.fetch_add(1, Ordering::Relaxed);
             self.increment_edge_type_count(type_id);
         }
@@ -788,7 +819,7 @@ impl LpgStore {
         let Some((record, own)) = self.seen_edge(id, mode)? else {
             return mode.writer.unseen(Entity::Edge(id));
         };
-        let image = if mode.replay() {
+        let image = if !mode.images() {
             None
         } else {
             let edge_type = self
@@ -827,7 +858,7 @@ impl LpgStore {
         self.edge_properties.remove_all(id);
         #[cfg(feature = "temporal")]
         self.edge_properties.remove_all(id, mode.version);
-        if mode.replay() {
+        if mode.stamped() {
             self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
             self.decrement_edge_type_count(record.type_id);
         }
@@ -850,7 +881,7 @@ impl LpgStore {
         if self.seen_node(id, mode)?.is_none() {
             return mode.writer.unseen(Entity::Node(id));
         }
-        let old = if mode.replay() {
+        let old = if !mode.images() {
             None
         } else {
             self.node_properties
@@ -886,7 +917,7 @@ impl LpgStore {
         if self.seen_edge(id, mode)?.is_none() {
             return mode.writer.unseen(Entity::Edge(id));
         }
-        let old = if mode.replay() {
+        let old = if !mode.images() {
             None
         } else {
             self.edge_properties
@@ -932,7 +963,7 @@ impl LpgStore {
                 ApplyError::Missing(Entity::Node(id))
             });
         }
-        let before = if mode.replay() {
+        let before = if !mode.images() {
             None
         } else {
             Some(self.label_names_of(id))

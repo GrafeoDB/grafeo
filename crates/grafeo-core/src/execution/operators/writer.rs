@@ -6,8 +6,8 @@
 //! detection, checks the schema and constraints, and writes with the
 //! transaction's versioning, so the rules for a valid write live in one place.
 //! A transaction's store changes run as a write in progress (see
-//! [`WriteTracker::write_in_progress`](super::WriteTracker::write_in_progress)),
-//! which a checkpoint waits for and which waits for a checkpoint.
+//! [`WriteClaims::write_in_progress`]), which a checkpoint waits for and
+//! which waits for a checkpoint.
 //!
 //! A writer given a [`Recording`] writes through the graph's change target
 //! ([`ChangeTarget::apply`]) instead of the store's versioned methods, and
@@ -30,8 +30,7 @@ use grafeo_common::types::{
 };
 
 use super::{
-    ChangeRecorder, ConstraintValidator, OperatorError, SharedWriteTracker, WriteClaim,
-    WriteInProgress,
+    ChangeRecorder, ConstraintValidator, OperatorError, WriteClaim, WriteClaims, WriteInProgress,
 };
 use crate::graph::apply::{Applied, ApplyError, ChangeTarget, ExternalTarget, Writer};
 use crate::graph::lpg::{Edge, Node};
@@ -158,11 +157,13 @@ pub struct GraphWriter {
     viewing_epoch: Option<EpochId>,
     transaction_id: Option<TransactionId>,
     validator: Option<Arc<dyn ConstraintValidator>>,
-    write_tracker: Option<SharedWriteTracker>,
     counter: Option<Arc<WriteCounter>>,
     /// Where the writes go and are recorded; `None` to write through the
     /// store's versioned methods.
     recording: Option<Recording>,
+    /// The claims of a writer without a recording that writes as a
+    /// transaction through the store's versioned methods.
+    claims: Option<Arc<dyn WriteClaims>>,
 }
 
 impl From<Arc<dyn GraphStoreMut>> for GraphWriter {
@@ -180,29 +181,51 @@ impl GraphWriter {
             viewing_epoch: None,
             transaction_id: None,
             validator: None,
-            write_tracker: None,
             counter: None,
             recording: None,
+            claims: None,
         }
+    }
+
+    /// Claims what each write changes through `claims`, and holds its write
+    /// freeze, for a writer without a recording that writes as a transaction
+    /// through the store's versioned methods (see
+    /// [`with_transaction_context`](Self::with_transaction_context)). A
+    /// recording claims through its own recorder instead.
+    #[must_use]
+    pub fn with_claims(mut self, claims: Arc<dyn WriteClaims>) -> Self {
+        self.claims = Some(claims);
+        self
     }
 
     /// Writes through `recording`'s target and records each write that
     /// changed something in its recorder, which also takes the claims and
-    /// holds the write freeze, as the recorder's transaction: it reads at
-    /// that transaction's snapshot, its own writes included. The store this
-    /// writer was made with stays the one it reads.
+    /// holds the write freeze, as the recorder's writer: a transaction reads
+    /// at its snapshot, its own writes included; an immediate write reads at
+    /// its epoch, as the system. The store this writer was made with stays
+    /// the one it reads.
     #[must_use]
     pub fn with_recording(mut self, recording: Recording) -> Self {
-        if let Writer::Transaction { id, snapshot } = recording.recorder.writer() {
-            self.viewing_epoch = Some(snapshot);
-            self.transaction_id = Some(id);
+        match recording.recorder.writer() {
+            Writer::Transaction { id, snapshot } => {
+                self.viewing_epoch = Some(snapshot);
+                self.transaction_id = Some(id);
+            }
+            Writer::Immediate { epoch, .. } => {
+                self.viewing_epoch = Some(epoch);
+                self.transaction_id = None;
+            }
+            Writer::Replay { .. } => {}
         }
         self.recording = Some(recording);
         self
     }
 
-    /// Writes as `transaction_id` (versioned, undone on rollback), reading at
-    /// `epoch`.
+    /// Writes as `transaction_id` through the store's versioned methods,
+    /// reading at `epoch`, without claims or a record of what it changed:
+    /// the caller stamps or discards the versions itself (a writer of a
+    /// transaction the engine runs gets a [`Recording`] instead, see
+    /// [`with_recording`](Self::with_recording)).
     #[must_use]
     pub fn with_transaction_context(
         mut self,
@@ -218,13 +241,6 @@ impl GraphWriter {
     #[must_use]
     pub fn with_validator(mut self, validator: Arc<dyn ConstraintValidator>) -> Self {
         self.validator = Some(validator);
-        self
-    }
-
-    /// Records every written entity for write-conflict detection.
-    #[must_use]
-    pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
-        self.write_tracker = Some(tracker);
         self
     }
 
@@ -351,47 +367,33 @@ impl GraphWriter {
     }
 
     /// Claims what the next store change writes, for write-conflict
-    /// detection: through the recording's recorder, or the write tracker
-    /// (nothing without a transaction). An edge's endpoints are claimed
+    /// detection, through the recording's recorder or the writer's claims; a
+    /// writer without either claims nothing. An edge's endpoints are claimed
     /// once the edge passed its checks, right before it is written: an edge
     /// refused claims nothing, so it holds off no delete. The delete of a
     /// node also conflicts with an edge another transaction creates to it.
     fn claim(&self, claim: WriteClaim) -> Result<(), OperatorError> {
-        if let Some(recording) = &self.recording {
-            return recording.recorder.claim(claim);
-        }
-        let (Some(tracker), Some(transaction_id)) = (&self.write_tracker, self.transaction_id)
-        else {
-            return Ok(());
-        };
-        match claim {
-            WriteClaim::Node(id) => tracker.record_node_write(transaction_id, id),
-            WriteClaim::NodeDelete(id) => tracker.record_node_delete(transaction_id, id),
-            WriteClaim::Edge(id) => tracker.record_edge_write(transaction_id, id),
-            WriteClaim::Endpoints(src, dst) => {
-                tracker.record_edge_endpoints(transaction_id, src, dst)
-            }
+        match (&self.recording, &self.claims) {
+            (Some(recording), _) => recording.recorder.claim(claim),
+            (None, Some(claims)) => claims.claim(claim),
+            (None, None) => Ok(()),
         }
     }
 
     /// Marks this writer's store changes as in progress while the guard
-    /// lives (see [`WriteTracker::write_in_progress`](super::WriteTracker::write_in_progress)):
-    /// a checkpoint or a copy of the store waits for them, and they wait for
-    /// one. `None` for a writer without a transaction or a write tracker: a
-    /// write outside a transaction holds commits off itself, and with them
-    /// checkpoints.
+    /// lives (see [`WriteClaims::write_in_progress`]): a checkpoint or a
+    /// copy of the store waits for them, and they wait for one. `None` for
+    /// a writer without a recording or claims.
     ///
     /// Each public write method takes it once, right before its first store
     /// change; the methods it calls never take it again (it is not
     /// reentrant), and the expressions a `derive` of
     /// [`create_node_with`](Self::create_node_with) evaluates run without it.
     fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {
-        if let Some(recording) = &self.recording {
-            return Some(recording.recorder.write_in_progress());
-        }
-        match (&self.write_tracker, self.transaction_id) {
-            (Some(tracker), Some(_)) => Some(tracker.write_in_progress()),
-            _ => None,
+        match (&self.recording, &self.claims) {
+            (Some(recording), _) => recording.recorder.write_in_progress(),
+            (None, Some(claims)) => claims.write_in_progress(),
+            (None, None) => None,
         }
     }
 
@@ -1281,11 +1283,9 @@ fn record_applied(
             Ok(true)
         }
         Applied::Unchanged => Ok(false),
-        // A recorder's writer is a transaction's: replay records nothing.
-        Applied::Committed => Err(OperatorError::Execution(format!(
-            "a write of kind {} was committed by the store at once, so it cannot be recorded",
-            op.kind()
-        ))),
+        // Committed at once without a before-image (an immediate write whose
+        // entries nothing reads): nothing to record.
+        Applied::Committed => Ok(true),
     }
 }
 
@@ -1481,15 +1481,12 @@ fn overlay(mut base: Vec<(String, Value)>, changes: &[(String, Value)]) -> Vec<(
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
-    use grafeo_common::types::{EdgeId, NodeId, PropertyKey, TransactionId, Value};
-    use parking_lot::RwLock;
+    use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 
-    use super::{GraphWriter, OperatorError, WriteInProgress, node_labels, property_list};
-    use crate::execution::operators::WriteTracker;
+    use super::{GraphWriter, OperatorError};
     use crate::graph::GraphStoreMut;
     use crate::graph::lpg::LpgStore;
 
@@ -1747,51 +1744,10 @@ mod tests {
         assert_eq!(store.edge_count(), 0, "no edge with the default is written");
     }
 
-    // === Writes in progress ===
+    // === Every write method ===
 
     /// How long a write that should wait gets to finish anyway.
     pub(super) const BRIEFLY: Duration = Duration::from_millis(100);
-
-    /// A write tracker with a write freeze of its own: it counts the writes
-    /// in progress it is asked for, and notes one asked for while the freeze
-    /// is taken already (on one thread, a nested request).
-    #[derive(Default)]
-    struct Freeze {
-        lock: RwLock<()>,
-        requests: AtomicUsize,
-        taken_already: AtomicBool,
-    }
-
-    impl WriteTracker for Freeze {
-        fn write_in_progress(&self) -> WriteInProgress<'_> {
-            self.requests.fetch_add(1, Ordering::SeqCst);
-            if self.lock.is_locked() {
-                self.taken_already.store(true, Ordering::SeqCst);
-            }
-            self.lock.read()
-        }
-
-        fn record_node_write(&self, _: TransactionId, _: NodeId) -> Result<(), OperatorError> {
-            Ok(())
-        }
-
-        fn record_node_delete(&self, _: TransactionId, _: NodeId) -> Result<(), OperatorError> {
-            Ok(())
-        }
-
-        fn record_edge_endpoints(
-            &self,
-            _: TransactionId,
-            _: NodeId,
-            _: NodeId,
-        ) -> Result<(), OperatorError> {
-            Ok(())
-        }
-
-        fn record_edge_write(&self, _: TransactionId, _: EdgeId) -> Result<(), OperatorError> {
-            Ok(())
-        }
-    }
 
     /// The committed graph a transaction writes to: Alix (in Amsterdam), who
     /// knows Gus since 3, and Vincent, who has no edges.
@@ -1819,45 +1775,6 @@ mod tests {
             knows,
         };
         (store, people)
-    }
-
-    /// A store holding [`People`], and a writer of transaction 19 with a
-    /// [`Freeze`] as its write tracker.
-    fn transaction_writer() -> (Arc<LpgStore>, Arc<Freeze>, GraphWriter, People) {
-        let (store, people) = people_store();
-        let freeze = Arc::new(Freeze::default());
-        let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
-        let writer = GraphWriter::new(target)
-            .with_transaction_context(store.current_epoch(), Some(TransactionId::new(19)))
-            .with_write_tracker(Arc::clone(&freeze) as Arc<dyn WriteTracker>);
-        (store, freeze, writer, people)
-    }
-
-    /// What the writer's transaction sees of the store: the next ids, and
-    /// the labels and properties of [`People`]'s nodes and edge.
-    fn seen(store: &LpgStore, writer: &GraphWriter, people: &People) -> String {
-        let sorted = |mut properties: Vec<(String, Value)>| {
-            properties.sort_by(|a, b| a.0.cmp(&b.0));
-            properties
-        };
-        let node = |id| {
-            writer.node(id).map(|node| {
-                let mut labels = node_labels(&node);
-                labels.sort();
-                (labels, sorted(property_list(&node.properties)))
-            })
-        };
-        let knows = writer
-            .edge(people.knows)
-            .map(|edge| sorted(property_list(&edge.properties)));
-        format!(
-            "ids {} {}, alix {:?}, gus {:?}, vincent {:?}, knows {knows:?}",
-            store.next_node_id(),
-            store.next_edge_id(),
-            node(people.alix),
-            node(people.gus),
-            node(people.vincent),
-        )
     }
 
     /// A write method of a transaction, called on [`People`].
@@ -1932,258 +1849,6 @@ mod tests {
                 writer.delete_edge(people.knows).map(drop)
             }),
         ]
-    }
-
-    /// Every write of a transaction waits while the store is frozen (a
-    /// checkpoint holds the freeze), and changes nothing the transaction
-    /// sees until the freeze is released.
-    #[test]
-    fn every_write_of_a_transaction_waits_while_the_store_is_frozen() {
-        for (name, write) in every_write() {
-            let (store, freeze, writer, people) = transaction_writer();
-            let before = seen(&store, &writer, &people);
-            std::thread::scope(|scope| {
-                let frozen = freeze.lock.write();
-                let (done, finished) = std::sync::mpsc::channel();
-                let worker = {
-                    let (writer, people) = (&writer, &people);
-                    scope.spawn(move || {
-                        let result = write(writer, people);
-                        let _ = done.send(());
-                        result
-                    })
-                };
-                assert!(
-                    finished.recv_timeout(BRIEFLY).is_err(),
-                    "{name} finished while the store was frozen"
-                );
-                assert_eq!(
-                    seen(&store, &writer, &people),
-                    before,
-                    "{name} changed the store while it was frozen"
-                );
-                drop(frozen);
-                worker
-                    .join()
-                    .unwrap()
-                    .unwrap_or_else(|error| panic!("{name}: {error}"));
-            });
-            assert_ne!(
-                seen(&store, &writer, &people),
-                before,
-                "{name} changes the store once the freeze is released"
-            );
-        }
-    }
-
-    /// Every write marks itself in progress, and never asks again while it
-    /// is (a checkpoint waiting in between would block the second request
-    /// for good); `derive` evaluates its expressions with no write in
-    /// progress. A writer without a transaction does not ask.
-    #[test]
-    fn every_write_marks_itself_in_progress_once_at_a_time() {
-        for (name, write) in every_write() {
-            let (_store, freeze, writer, people) = transaction_writer();
-            write(&writer, &people).unwrap_or_else(|error| panic!("{name}: {error}"));
-            assert!(
-                freeze.requests.load(Ordering::SeqCst) > 0,
-                "{name} marks its write in progress"
-            );
-            assert!(
-                !freeze.taken_already.load(Ordering::SeqCst),
-                "{name} asked for the freeze while it held it"
-            );
-        }
-
-        let (_store, freeze, writer, _people) = transaction_writer();
-        let frozen_in_derive = AtomicBool::new(true);
-        writer
-            .create_node_with(&labels(&["Person"]), Vec::new(), |_| {
-                frozen_in_derive.store(freeze.lock.is_locked(), Ordering::SeqCst);
-                Ok(Vec::new())
-            })
-            .unwrap();
-        assert!(
-            !frozen_in_derive.load(Ordering::SeqCst),
-            "derive runs with no write in progress"
-        );
-
-        let (store, freeze, _writer, people) = transaction_writer();
-        let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
-        let outside = GraphWriter::new(target)
-            .with_write_tracker(Arc::clone(&freeze) as Arc<dyn WriteTracker>);
-        outside
-            .set_node_properties(people.alix, &pairs("city", &Value::from("Berlin")), false)
-            .unwrap();
-        assert_eq!(
-            freeze.requests.load(Ordering::SeqCst),
-            0,
-            "a write outside a transaction holds commits off instead"
-        );
-    }
-
-    // === Edge endpoints ===
-
-    /// A write tracker that notes what it is asked to record, and refuses
-    /// the claims of an edge's endpoints when told to.
-    #[derive(Default)]
-    struct Claims {
-        freeze: RwLock<()>,
-        recorded: parking_lot::Mutex<Vec<String>>,
-        refuse_endpoints: AtomicBool,
-    }
-
-    impl Claims {
-        fn note(&self, what: String) {
-            self.recorded.lock().push(what);
-        }
-    }
-
-    impl WriteTracker for Claims {
-        fn write_in_progress(&self) -> WriteInProgress<'_> {
-            self.freeze.read()
-        }
-
-        fn record_node_write(&self, _: TransactionId, id: NodeId) -> Result<(), OperatorError> {
-            self.note(format!("write node {}", id.as_u64()));
-            Ok(())
-        }
-
-        fn record_node_delete(&self, _: TransactionId, id: NodeId) -> Result<(), OperatorError> {
-            self.note(format!("delete node {}", id.as_u64()));
-            Ok(())
-        }
-
-        fn record_edge_endpoints(
-            &self,
-            _: TransactionId,
-            src: NodeId,
-            dst: NodeId,
-        ) -> Result<(), OperatorError> {
-            if self.refuse_endpoints.load(Ordering::SeqCst) {
-                return Err(OperatorError::WriteConflict("another delete".to_string()));
-            }
-            self.note(format!("endpoints {} {}", src.as_u64(), dst.as_u64()));
-            Ok(())
-        }
-
-        fn record_edge_write(&self, _: TransactionId, id: EdgeId) -> Result<(), OperatorError> {
-            self.note(format!("write edge {}", id.as_u64()));
-            Ok(())
-        }
-    }
-
-    /// [`transaction_writer`] with a [`Claims`] tracker.
-    fn claiming_writer() -> (Arc<LpgStore>, Arc<Claims>, GraphWriter, People) {
-        let (store, _, _, people) = transaction_writer();
-        let claims = Arc::new(Claims::default());
-        let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
-        let writer = GraphWriter::new(target)
-            .with_transaction_context(store.current_epoch(), Some(TransactionId::new(19)))
-            .with_write_tracker(Arc::clone(&claims) as Arc<dyn WriteTracker>);
-        (store, claims, writer, people)
-    }
-
-    /// A new edge claims its endpoints before it is written, also one MERGE
-    /// creates, and a delete of a node is recorded as a delete: the claims a
-    /// concurrent delete conflicts with.
-    #[test]
-    fn an_edge_claims_its_endpoints_and_a_delete_is_recorded_as_one() {
-        let (_store, claims, writer, people) = claiming_writer();
-        let knows = writer
-            .create_edge(people.vincent, people.gus, "KNOWS", Vec::new())
-            .unwrap();
-        let merged = writer
-            .create_edge_with(people.gus, people.alix, "KNOWS", Vec::new(), |_| {
-                Ok(Vec::new())
-            })
-            .unwrap();
-        writer.delete_node(people.vincent, true).unwrap();
-
-        let (vincent, gus, alix) = (
-            people.vincent.as_u64(),
-            people.gus.as_u64(),
-            people.alix.as_u64(),
-        );
-        assert_eq!(
-            *claims.recorded.lock(),
-            [
-                format!("endpoints {vincent} {gus}"),
-                format!("write edge {}", knows.as_u64()),
-                format!("endpoints {gus} {alix}"),
-                format!("write edge {}", merged.as_u64()),
-                format!("delete node {vincent}"),
-                format!("write edge {}", knows.as_u64()),
-            ]
-        );
-    }
-
-    /// An edge the validator refuses claims no endpoint: a transaction that
-    /// deletes one of them later does not conflict with it.
-    #[test]
-    fn an_edge_the_validator_refuses_claims_no_endpoint() {
-        let (store, claims, writer, people) = claiming_writer();
-        let writer = writer.with_validator(Arc::new(CustomRules));
-        let edges = store.edge_count();
-        let grudge = || pairs("grudge", &Value::from("Paris"));
-
-        let refused = [
-            writer.create_edge(people.alix, people.vincent, "HATES", Vec::new()),
-            writer.create_edge(people.alix, people.vincent, "KNOWS", grudge()),
-            writer.create_edge_with(people.alix, people.vincent, "HATES", Vec::new(), |_| {
-                Ok(Vec::new())
-            }),
-            writer.create_edge_with(people.alix, people.vincent, "KNOWS", grudge(), |_| {
-                Ok(Vec::new())
-            }),
-        ];
-        for (index, result) in refused.iter().enumerate() {
-            assert!(
-                matches!(result, Err(OperatorError::ConstraintViolation(_))),
-                "edge {index}: {result:?}"
-            );
-        }
-        assert_eq!(store.edge_count(), edges, "no edge written");
-        assert!(
-            claims.recorded.lock().is_empty(),
-            "a refused edge claims nothing: {:?}",
-            claims.recorded.lock()
-        );
-
-        let knows = writer
-            .create_edge(people.alix, people.vincent, "KNOWS", Vec::new())
-            .unwrap();
-        let (alix, vincent) = (people.alix.as_u64(), people.vincent.as_u64());
-        assert_eq!(
-            *claims.recorded.lock(),
-            [
-                format!("endpoints {alix} {vincent}"),
-                format!("write edge {}", knows.as_u64()),
-            ],
-            "an edge the validator accepts claims its endpoints"
-        );
-    }
-
-    /// A refused claim, and an endpoint the transaction does not see, write
-    /// no edge.
-    #[test]
-    fn an_edge_whose_endpoints_cannot_be_claimed_is_not_written() {
-        let (store, claims, writer, people) = claiming_writer();
-        let edges = store.edge_count();
-        claims.refuse_endpoints.store(true, Ordering::SeqCst);
-        let refused = writer.create_edge(people.alix, people.vincent, "KNOWS", Vec::new());
-        assert!(
-            matches!(refused, Err(OperatorError::WriteConflict(_))),
-            "got {refused:?}"
-        );
-        claims.refuse_endpoints.store(false, Ordering::SeqCst);
-
-        writer.delete_node(people.vincent, false).unwrap();
-        let deleted = writer.create_edge(people.alix, people.vincent, "KNOWS", Vec::new());
-        assert!(deleted.is_err(), "an endpoint the transaction deleted");
-        let missing = writer.create_edge(people.alix, NodeId::new(388), "KNOWS", Vec::new());
-        assert!(missing.is_err(), "an endpoint that does not exist");
-        assert_eq!(store.edge_count(), edges, "no edge written");
     }
 }
 

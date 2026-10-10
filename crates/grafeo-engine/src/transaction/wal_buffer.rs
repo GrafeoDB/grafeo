@@ -26,7 +26,7 @@ use parking_lot::Mutex;
 
 /// A record waiting for its group, with the named graph it applies to
 /// (`None` = default graph).
-type PendingRecord = (Option<String>, WalRecord);
+pub(crate) type PendingRecord = (Option<String>, WalRecord);
 
 /// Buffers one session's WAL records until they are written as a group.
 pub(crate) struct WalBuffer {
@@ -76,8 +76,29 @@ impl WalBuffer {
     ///
     /// Returns an error if the WAL write fails. The buffered records are
     /// dropped either way.
+    #[cfg(test)]
     pub(crate) fn flush(&self, markers: &[WalRecord]) -> Result<()> {
         self.write_group(&mut self.pending.lock(), markers)
+    }
+
+    /// Writes `first` (a committing transaction's records of its change
+    /// set, each with its graph) and then the buffered records as one group,
+    /// closed by `markers`. The markers are written even when there is no
+    /// record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WAL write fails. The buffered records are
+    /// dropped either way.
+    pub(crate) fn flush_with(
+        &self,
+        first: Vec<PendingRecord>,
+        markers: &[WalRecord],
+    ) -> Result<()> {
+        let mut pending = self.pending.lock();
+        let mut records = first;
+        records.append(&mut pending);
+        self.write_group(&mut records, markers)
     }
 
     /// Writes buffered records from outside a transaction as an implicit
@@ -113,7 +134,7 @@ impl WalBuffer {
 
 /// Builds a group: the records with `SwitchGraph` wherever the graph changes,
 /// a switch back to the default graph if needed, then the markers.
-fn build_group(pending: Vec<PendingRecord>, markers: &[WalRecord]) -> Vec<WalRecord> {
+pub(crate) fn build_group(pending: Vec<PendingRecord>, markers: &[WalRecord]) -> Vec<WalRecord> {
     let mut group = Vec::with_capacity(pending.len() + markers.len() + 2);
     let mut context: Option<String> = None;
     for (graph, record) in pending {

@@ -1,35 +1,170 @@
 //! The direct write API: each call checked through a [`GraphWriter`] and
 //! committed at an epoch of its own.
 //!
-//! While no transaction is open, a call runs without a session or a
-//! transaction-manager transaction. It holds the manager's idle gate, so no
-//! transaction can begin meanwhile and there is nothing it could conflict
-//! with, and it writes as the system, stamped at its new epoch, which it
-//! publishes when done. Every check of a single call runs before it writes,
-//! so the call cannot half-apply; a batch writes as a private transaction
-//! instead, which is undone when a later row fails. A call that fails still
-//! uses up its epoch: the stores take it before the write, to stamp what they
-//! record themselves, and it is not handed out twice. The gap it leaves holds
-//! no data. While a transaction is open, the call runs as an implicit
-//! transaction of a session and is checked for conflicts with the open one.
+//! While no transaction is open, a single call commits at once: it holds the
+//! transaction manager's idle gate, so no transaction can begin meanwhile
+//! and there is nothing it could conflict with, and its writes are applied
+//! and stamped at its new epoch as they happen ([`Writer::Immediate`], the
+//! path replay takes, lenient), which it publishes when done. Every check of
+//! a single call runs before it writes, so the call cannot half-apply; should
+//! it ever fail after a write, what it wrote is committed and logged, so the
+//! WAL matches memory. A call that fails still uses up its epoch.
 //!
-//! This keeps a direct call close to the cost of the store write itself. Once
-//! transactions own their change set (#448), every direct call becomes an
-//! implicit transaction again at about this cost, and this path goes.
+//! While a transaction is open, and for every batch, a call is a private
+//! transaction: one without a session, registered with the transaction
+//! manager like any other (see
+//! [`TransactionManager::begin_private`](crate::transaction::TransactionManager)).
+//! It writes through the graph's store, recording each write in its change
+//! set, and commits when the call succeeds: its changes are stamped with the
+//! commit epoch, logged and reported to change data capture as a
+//! transaction's are. A call that fails or panics is rolled back through its
+//! change set, also a batch whose later row fails: it leaves nothing. Its
+//! claims make it conflict with an open transaction that wrote the same
+//! node or edge first, and an open transaction conflicts with it the same
+//! way; such calls on different nodes and edges run side by side, from any
+//! number of threads, beside open transactions. Like a session's
+//! transaction, a call begins between commits, never in the middle of one.
+//!
+//! Both kinds log the same WAL records and report the same change events,
+//! built from the entries their writes record.
+//!
+//! A database on a read-only or an external store runs each call as an
+//! implicit transaction of a session instead.
+//!
+//! [`Writer::Immediate`]: grafeo_core::graph::apply::Writer::Immediate
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
+use grafeo_common::change::{
+    Before, ChangeSet, DataModel, DataOp, GraphRef, GraphSlot, PendingVersion,
+};
+use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
-use grafeo_core::execution::operators::{GraphWriter, OperatorError};
+use grafeo_core::execution::operators::{
+    ChangeRecorder, GraphWriter, OperatorError, Recording, WriteClaim, WriteClaims,
+    WriteInProgress, WriteTarget,
+};
+use grafeo_core::graph::apply::{ChangeTarget, Writer};
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
 use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
 
 use super::GrafeoDB;
 use crate::catalog::CatalogConstraintValidator;
 use crate::session::graph_storage_key;
+use crate::transaction::{CommitsHeld, TransactionChanges, TransactionManager};
+
+/// The recorder of the direct call that commits at once ([`Writer::Immediate`]):
+/// one per database, used only by the call that holds the transaction
+/// manager's idle gate. It claims nothing (no transaction is open), and keeps
+/// the entries only when the WAL or change data capture reads them.
+pub(crate) struct ImmediateRecorder {
+    manager: Arc<TransactionManager>,
+    /// The running call's epoch.
+    epoch: AtomicU64,
+    /// Whether the running call keeps its entries (and builds their
+    /// before-images).
+    keep: AtomicBool,
+    /// The running call's entries and its graph's slot, while it keeps them.
+    entries: parking_lot::Mutex<(ChangeSet, Option<GraphSlot>)>,
+}
+
+impl ImmediateRecorder {
+    /// A recorder for the direct calls of the database `manager` runs.
+    pub(crate) fn new(manager: Arc<TransactionManager>) -> Self {
+        Self {
+            manager,
+            epoch: AtomicU64::new(0),
+            keep: AtomicBool::new(false),
+            entries: parking_lot::Mutex::new((ChangeSet::new(), None)),
+        }
+    }
+
+    /// Starts a call that commits at `epoch` in the graph with storage key
+    /// `graph`, keeping its entries when `keep`.
+    fn start(&self, epoch: EpochId, graph: Option<&str>, keep: bool) -> Result<()> {
+        self.epoch.store(epoch.as_u64(), Ordering::Release);
+        self.keep.store(keep, Ordering::Release);
+        if keep {
+            let mut entries = self.entries.lock();
+            let mut set = ChangeSet::new();
+            let slot = set.slot(GraphRef {
+                model: DataModel::Lpg,
+                key: graph.map(ArcStr::from),
+            })?;
+            *entries = (set, Some(slot));
+        }
+        Ok(())
+    }
+
+    /// The running call's entries, taken out (none when it kept none).
+    fn finish(&self) -> ChangeSet {
+        if !self.keep.swap(false, Ordering::AcqRel) {
+            return ChangeSet::new();
+        }
+        let mut entries = self.entries.lock();
+        entries.1 = None;
+        std::mem::take(&mut entries.0)
+    }
+}
+
+impl WriteClaims for ImmediateRecorder {
+    /// Nothing to claim: the idle gate keeps every transaction out.
+    fn claim(&self, _claim: WriteClaim) -> std::result::Result<(), OperatorError> {
+        Ok(())
+    }
+
+    /// None: the call holds commits off for its whole run, so no
+    /// checkpoint runs meanwhile.
+    fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {
+        None
+    }
+}
+
+impl ChangeRecorder for ImmediateRecorder {
+    fn writer(&self) -> Writer {
+        Writer::Immediate {
+            epoch: EpochId::new(self.epoch.load(Ordering::Acquire)),
+            before_images: self.keep.load(Ordering::Acquire),
+        }
+    }
+
+    fn record(
+        &self,
+        op: DataOp,
+        before: Before,
+        version: PendingVersion,
+    ) -> std::result::Result<(), OperatorError> {
+        if !self.keep.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut entries = self.entries.lock();
+        let (set, slot) = &mut *entries;
+        let Some(slot) = *slot else {
+            return Ok(());
+        };
+        set.push(slot, op, before, version).map_err(|error| {
+            // Committed already: the log would miss it.
+            self.manager.poison(&format!(
+                "a direct write could not record a change it committed: {error}"
+            ));
+            OperatorError::Execution(error.to_string())
+        })
+    }
+}
+
+/// A direct call that commits at once, between its start and its finish.
+struct ImmediateCall<'a> {
+    /// Holds commits off until the call's epoch is published.
+    commits: CommitsHeld<'a>,
+    /// The database's root store, which follows the call's epoch.
+    root: Arc<LpgStore>,
+    /// The epoch the call commits at.
+    epoch: EpochId,
+    /// The call's writer.
+    writer: GraphWriter,
+}
 
 /// The graph a direct call works in.
 #[derive(Clone, Copy)]
@@ -43,19 +178,6 @@ pub(crate) enum DirectTarget<'a> {
         schema: Option<&'a str>,
         name: &'a str,
     },
-}
-
-/// Buffers the direct calls outside a transaction share. Only the call
-/// holding the transaction manager's idle gate uses them.
-#[cfg(any(feature = "wal", feature = "cdc"))]
-#[derive(Default)]
-pub(crate) struct ImplicitWrites {
-    /// The WAL records of the running call, written as one group.
-    #[cfg(feature = "wal")]
-    wal: std::sync::OnceLock<Arc<crate::transaction::wal_buffer::WalBuffer>>,
-    /// The CDC events of the running call, recorded at its epoch.
-    #[cfg(feature = "cdc")]
-    cdc_events: Arc<parking_lot::Mutex<Vec<crate::cdc::ChangeEvent>>>,
 }
 
 /// An edge to create with [`GrafeoDB::batch_create_edges`]: its endpoints,
@@ -111,9 +233,9 @@ impl GrafeoDB {
         DirectCalls { db: self, target }
     }
 
-    /// Whether direct calls outside a transaction can skip the session: not
-    /// on a read-only database, and not on an external store.
-    fn writes_without_session(&self) -> bool {
+    /// Whether direct calls run as private transactions on the built-in
+    /// store: not on a read-only database, and not on an external store.
+    fn writes_privately(&self) -> bool {
         !self.read_only && self.root_store().is_some() && self.external_read_store.is_none()
     }
 
@@ -170,8 +292,10 @@ impl GrafeoDB {
         })
     }
 
-    /// Runs one direct call on `target`: without a session while no
-    /// transaction is open, otherwise as an implicit transaction of a session.
+    /// Runs one direct call (a batch is one too) on `target`: a single call
+    /// while no transaction is open commits at once; otherwise the call is a
+    /// private transaction; on a read-only or external store, an implicit
+    /// transaction of a session.
     fn write_direct<T>(
         &self,
         target: DirectTarget<'_>,
@@ -179,10 +303,12 @@ impl GrafeoDB {
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
         if let Some((store, graph)) = self.direct_store(target)?
-            && self.writes_without_session()
-            && let Some(_gate) = self.transaction_manager.idle_gate()
+            && self.writes_privately()
         {
-            return self.write_outside_transaction(&store, graph.as_deref(), batch, write);
+            if !batch && let Some(_gate) = self.transaction_manager.idle_gate() {
+                return self.write_immediate(&store, graph.as_deref(), write);
+            }
+            return self.write_private(&store, graph.as_deref(), write);
         }
         let session = match target {
             DirectTarget::Current => self.session(),
@@ -191,85 +317,142 @@ impl GrafeoDB {
         session.write(write)
     }
 
-    /// Writes one direct call to `store` (the graph with storage key `graph`)
-    /// and commits it at a new epoch. The caller holds the idle gate; this
-    /// holds commits off (see
-    /// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager))
+    /// Runs one direct call on `store` (the graph with storage key `graph`)
+    /// that commits at once, at a new epoch, which it publishes when done.
+    /// The caller holds the idle gate; this holds commits off (see
+    /// [`TransactionManager::hold_commits_for_change`](crate::transaction::TransactionManager))
     /// from its epoch until it is published, so no checkpoint holds part of
     /// it (lock order: the idle gate, then the commit lock, as in `begin`).
     /// Fails, like a commit, once the database is closed.
-    fn write_outside_transaction<T>(
+    fn write_immediate<T>(
         &self,
         store: &Arc<LpgStore>,
         graph: Option<&str>,
-        batch: bool,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
+        // Only this shell is generic: one copy per kind of call.
+        let call = self.start_immediate(store, graph)?;
+        // A panic in the call is handled like an error, then raised again:
+        // what it wrote is committed and logged first.
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&call.writer)));
+        self.finish_immediate(call, store);
+        match outcome {
+            Ok(result) => result.map_err(crate::query::executor::convert_operator_error),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Starts a direct call that commits at once (see
+    /// [`write_immediate`](Self::write_immediate)): holds commits off, moves
+    /// the stores to the call's epoch and builds its writer.
+    fn start_immediate<'a>(
+        &'a self,
+        store: &Arc<LpgStore>,
+        graph: Option<&str>,
+    ) -> Result<ImmediateCall<'a>> {
         let commits = self.transaction_manager.hold_commits_for_change()?;
         let root = self.lpg_store();
-        let read_epoch = self.transaction_manager.current_epoch();
-        let epoch = EpochId::new(read_epoch.as_u64() + 1);
-        // A batch versions its writes so it can undo them; a single call
-        // writes as the system at the new epoch, which the stores use for
-        // what they stamp themselves (property and label history, CDC).
-        let transaction = batch.then(|| self.transaction_manager.reserve_transaction_id());
-        let view = if transaction.is_some() {
-            read_epoch
-        } else {
-            root.sync_epoch(epoch);
-            store.sync_epoch(epoch);
-            epoch
-        };
-        // Tests start a checkpoint or `close()` here (a single call's epoch
-        // has moved, nothing is published yet), which must wait.
+        let epoch = EpochId::new(self.transaction_manager.current_epoch().as_u64() + 1);
+        // The stores read at the new epoch from here: the call sees every
+        // commit, and stamps its writes (and the store's history) at it.
+        root.sync_epoch(epoch);
+        store.sync_epoch(epoch);
+        // Tests start a checkpoint or `close()` here (the call's epoch has
+        // moved, nothing is published yet), which must wait.
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_held_change();
 
-        let target: Arc<dyn GraphStoreMut> = Arc::clone(store) as Arc<dyn GraphStoreMut>;
-        #[cfg(feature = "wal")]
-        let wal = self.wal.as_ref().map(|wal| {
-            Arc::clone(self.implicit_writes.wal.get_or_init(|| {
-                Arc::new(crate::transaction::wal_buffer::WalBuffer::new(Arc::clone(
-                    wal,
-                )))
-            }))
-        });
-        // The buffers hold only this call's records and events: clear what a
-        // call that failed without cleaning up may have left.
-        #[cfg(feature = "wal")]
-        if let Some(buffer) = &wal {
-            buffer.clear();
-        }
-        #[cfg(feature = "cdc")]
-        self.implicit_writes.cdc_events.lock().clear();
-        #[cfg(feature = "wal")]
-        let target: Arc<dyn GraphStoreMut> = match &wal {
-            Some(buffer) => {
-                use super::wal_store::WalGraphStore;
-                Arc::new(match graph {
-                    None => WalGraphStore::new(Arc::clone(store), Arc::clone(buffer)),
-                    Some(name) => WalGraphStore::new_for_graph(
-                        Arc::clone(store),
-                        Arc::clone(buffer),
-                        name.to_string(),
-                    ),
-                })
-            }
-            None => target,
+        let keep = {
+            #[cfg(feature = "wal")]
+            let wal = self.wal.is_some();
+            #[cfg(not(feature = "wal"))]
+            let wal = false;
+            #[cfg(feature = "cdc")]
+            let cdc = self.cdc_active();
+            #[cfg(not(feature = "cdc"))]
+            let cdc = false;
+            wal || cdc
         };
-        #[cfg(not(feature = "wal"))]
-        let _ = graph;
-        #[cfg(feature = "cdc")]
-        let target: Arc<dyn GraphStoreMut> = if self.cdc_active() {
-            Arc::new(super::cdc_store::CdcGraphStore::wrap_buffered(
-                target,
-                Arc::clone(&self.cdc_log),
-                Arc::clone(&self.implicit_writes.cdc_events),
-            ))
-        } else {
-            target
-        };
+        let recorder = self.immediate_recorder();
+        recorder.start(epoch, graph, keep)?;
+        let writer = self.direct_writer(
+            store,
+            graph,
+            (epoch, None),
+            Recording {
+                target: WriteTarget::Store(Arc::clone(store) as Arc<dyn ChangeTarget>),
+                recorder: Arc::clone(recorder) as Arc<dyn ChangeRecorder>,
+            },
+        );
+        Ok(ImmediateCall {
+            commits,
+            root,
+            epoch,
+            writer,
+        })
+    }
 
+    /// Finishes a direct call that commits at once: logs what it wrote,
+    /// publishes its epoch, reports its changes to change data capture.
+    fn finish_immediate(&self, call: ImmediateCall<'_>, store: &Arc<LpgStore>) {
+        let ImmediateCall {
+            commits,
+            root,
+            epoch,
+            writer,
+        } = call;
+        drop(writer);
+        let changes = self.immediate_recorder().finish();
+
+        #[cfg(feature = "wal")]
+        if let Some(wal) = &self.wal
+            && !changes.is_empty()
+        {
+            use grafeo_storage::wal::WalRecord;
+            let group = crate::transaction::wal_buffer::build_group(
+                crate::transaction::v1_group::v1_records(&changes),
+                &[
+                    WalRecord::TransactionCommit {
+                        transaction_id: TransactionId::SYSTEM,
+                    },
+                    WalRecord::EpochAdvance { epoch },
+                ],
+            );
+            if let Err(e) = wal.log_batch(&group) {
+                grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
+            }
+        }
+        self.transaction_manager.sync_epoch(epoch);
+        drop(commits);
+        #[cfg(feature = "cdc")]
+        if self.cdc_active() && !changes.is_empty() {
+            let events = crate::cdc::events_for_changes(&changes, &self.cdc_log);
+            self.cdc_log
+                .record_batch(crate::cdc::fold_into_creates(events).into_iter().map(
+                    |mut event| {
+                        event.epoch = epoch;
+                        event
+                    },
+                ));
+        }
+        // A build without the log and change data capture keeps no entries.
+        #[cfg(not(any(feature = "wal", feature = "cdc")))]
+        drop(changes);
+        self.prune_versions(&root, store);
+    }
+
+    /// The writer of a direct call on `store` (the graph with storage key
+    /// `graph`), reading at `context` (an epoch, and the transaction for a
+    /// private one) and writing through `recording`, checked against the
+    /// catalog.
+    fn direct_writer(
+        &self,
+        store: &Arc<LpgStore>,
+        graph: Option<&str>,
+        context: (EpochId, Option<TransactionId>),
+        recording: Recording,
+    ) -> GraphWriter {
         // A graph of a schema has the storage key `schema/graph`: the types of
         // that schema check the call.
         let schema = graph
@@ -278,102 +461,213 @@ impl GrafeoDB {
         let mut validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
             .with_store(Arc::clone(store) as Arc<dyn GraphStoreSearch>)
             .with_max_property_size(self.config.max_property_size)
-            .with_transaction_context(view, transaction)
+            .with_transaction_context(context.0, context.1)
             .with_schema(schema);
         if let Some(graph) = graph {
             validator = validator.with_graph_name(graph);
         }
-        let writer = GraphWriter::new(target)
-            .with_transaction_context(view, transaction)
-            .with_validator(Arc::new(validator));
-        // A panic in the call is handled like an error, then raised again:
-        // left alone, its records and events would stay in the buffers for
-        // the next call to commit.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&writer)));
-        drop(writer);
-        let (result, panic) = match outcome {
-            Ok(result) => (
-                result.map_err(crate::query::executor::convert_operator_error),
-                None,
-            ),
-            Err(panic) => (
-                Err(Error::Internal("the direct call panicked".to_string())),
-                Some(panic),
-            ),
-        };
+        GraphWriter::new(Arc::clone(store) as Arc<dyn GraphStoreMut>)
+            .with_validator(Arc::new(validator))
+            .with_recording(recording)
+    }
 
-        match (&result, transaction) {
-            (Err(_), Some(transaction)) => {
-                store.discard_uncommitted_versions(transaction);
-                #[cfg(feature = "wal")]
-                if let Some(buffer) = &wal {
-                    buffer.clear();
-                }
-                #[cfg(feature = "cdc")]
-                self.implicit_writes.cdc_events.lock().clear();
-                if let Some(panic) = panic {
-                    std::panic::resume_unwind(panic);
-                }
-                return result;
-            }
-            (Ok(_), Some(transaction)) => {
-                store.finalize_version_epochs(transaction, epoch);
-                store.commit_transaction_properties(transaction);
-                root.sync_epoch(epoch);
-                store.sync_epoch(epoch);
-            }
-            // A single call fails before it writes; should it ever fail
-            // later, what it wrote is committed so the WAL matches memory.
-            (_, None) => {}
-        }
+    /// The recorder of the direct calls that commit at once.
+    fn immediate_recorder(&self) -> &Arc<ImmediateRecorder> {
+        self.immediate_writes.get_or_init(|| {
+            Arc::new(ImmediateRecorder::new(Arc::clone(
+                &self.transaction_manager,
+            )))
+        })
+    }
 
-        #[cfg(feature = "wal")]
-        if let Some(buffer) = &wal
-            && buffer.len() > 0
-        {
-            use grafeo_storage::wal::WalRecord;
-            if let Err(e) = buffer.flush(&[
-                WalRecord::TransactionCommit {
-                    transaction_id: transaction
-                        .unwrap_or(grafeo_common::types::TransactionId::SYSTEM),
-                },
-                WalRecord::EpochAdvance { epoch },
-            ]) {
-                grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
-            }
-        }
-        self.transaction_manager.sync_epoch(epoch);
-        drop(commits);
-        #[cfg(feature = "cdc")]
-        {
-            let events = std::mem::take(&mut *self.implicit_writes.cdc_events.lock());
-            if !events.is_empty() {
-                self.cdc_log
-                    .record_batch(crate::cdc::fold_into_creates(events).into_iter().map(
-                        |mut event| {
-                            event.epoch = epoch;
-                            event
-                        },
-                    ));
-            }
-        }
-
-        // Every gc_interval commits, prune versions no reader needs.
+    /// Every `gc_interval` commits, prunes the versions no reader needs, in
+    /// the root store and `store`.
+    fn prune_versions(&self, root: &Arc<LpgStore>, store: &Arc<LpgStore>) {
         if self.config.gc_interval > 0 {
             let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
             if count.is_multiple_of(self.config.gc_interval) {
                 let min_epoch = self.transaction_manager.min_active_epoch();
                 root.gc_versions(min_epoch);
-                if !Arc::ptr_eq(&root, store) {
+                if !Arc::ptr_eq(root, store) {
                     store.gc_versions(min_epoch);
                 }
                 self.transaction_manager.gc();
             }
         }
-        if let Some(panic) = panic {
-            std::panic::resume_unwind(panic);
+    }
+
+    /// Runs one direct call on `store` (the graph with storage key `graph`)
+    /// as a private transaction: commits it when `write` succeeds, rolls it
+    /// back when it fails or panics (and raises the panic again). It begins
+    /// once a commit or checkpoint in progress is done, and fails, like a
+    /// commit, once the database is closed.
+    fn write_private<T>(
+        &self,
+        store: &Arc<LpgStore>,
+        graph: Option<&str>,
+        write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
+    ) -> Result<T> {
+        // Only this shell is generic: one copy per kind of call.
+        let (transaction, changes, writer) = self.start_private(store, graph)?;
+        // A panic in the call is handled like an error, then raised again:
+        // its writes are rolled back first.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&writer)));
+        drop(writer);
+        match outcome {
+            Ok(Ok(value)) => {
+                self.commit_private(transaction, &changes, store)?;
+                Ok(value)
+            }
+            Ok(Err(error)) => Err(self.fail_private(transaction, &changes, error)),
+            Err(panic) => {
+                let _ = self.rollback_private(transaction, &changes);
+                std::panic::resume_unwind(panic)
+            }
         }
-        result
+    }
+
+    /// Begins a direct call as a private transaction (see
+    /// [`write_private`](Self::write_private)) and builds its writer.
+    fn start_private(
+        &self,
+        store: &Arc<LpgStore>,
+        graph: Option<&str>,
+    ) -> Result<(TransactionId, Arc<TransactionChanges>, GraphWriter)> {
+        let (transaction, changes) = self.transaction_manager.begin_private()?;
+        let recording = match changes.recording(
+            &self.transaction_manager,
+            graph,
+            WriteTarget::Store(Arc::clone(store) as Arc<dyn ChangeTarget>),
+        ) {
+            Ok(recording) => recording,
+            Err(error) => {
+                let _ = self.transaction_manager.abort(transaction);
+                return Err(error);
+            }
+        };
+        let writer = self.direct_writer(
+            store,
+            graph,
+            (changes.snapshot(), Some(transaction)),
+            recording,
+        );
+        Ok((transaction, changes, writer))
+    }
+
+    /// Rolls back the private transaction `transaction` whose call failed
+    /// with `error`; the error to return.
+    fn fail_private(
+        &self,
+        transaction: TransactionId,
+        changes: &TransactionChanges,
+        error: OperatorError,
+    ) -> Error {
+        let error = crate::query::executor::convert_operator_error(error);
+        match self.rollback_private(transaction, changes) {
+            Ok(()) => error,
+            Err(undo) => Error::Internal(format!("{error}; {undo}")),
+        }
+    }
+
+    /// Commits the private transaction `transaction`, which wrote
+    /// `changes` in `store`: stamps them with the commit epoch, logs them
+    /// as one WAL group, reports them to change data capture, publishes the
+    /// epoch.
+    fn commit_private(
+        &self,
+        transaction: TransactionId,
+        changes: &TransactionChanges,
+        store: &Arc<LpgStore>,
+    ) -> Result<()> {
+        let commit = match self.transaction_manager.start_commit(transaction) {
+            Ok(commit) => commit,
+            Err(error) => {
+                let _ = self.rollback_private(transaction, changes);
+                return Err(error);
+            }
+        };
+        let epoch = commit.epoch();
+        // Tests start a checkpoint or `close()` here (the commit holds its
+        // epoch, nothing is published yet), which must wait for it.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_held_change();
+
+        // A store that fails to stamp leaves the commit half done: the
+        // guard, dropped uncompleted, poisons the database.
+        changes.stamp(epoch).map_err(|error| {
+            Error::Internal(format!(
+                "the commit of a direct write could not stamp its changes: {error}"
+            ))
+        })?;
+
+        #[cfg(feature = "wal")]
+        if let Some(wal) = &self.wal
+            && !changes.is_empty()
+        {
+            use grafeo_storage::wal::WalRecord;
+            let records = changes.read(crate::transaction::v1_group::v1_records);
+            let group = crate::transaction::wal_buffer::build_group(
+                records,
+                &[
+                    WalRecord::TransactionCommit {
+                        transaction_id: transaction,
+                    },
+                    WalRecord::EpochAdvance { epoch },
+                ],
+            );
+            if let Err(e) = wal.log_batch(&group) {
+                grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
+            }
+        }
+
+        #[cfg(feature = "cdc")]
+        if self.cdc_active() && !changes.is_empty() {
+            let events = changes.read(|set| crate::cdc::events_for_changes(set, &self.cdc_log));
+            self.cdc_log
+                .record_batch(crate::cdc::fold_into_creates(events).into_iter().map(
+                    |mut event| {
+                        event.epoch = epoch;
+                        event
+                    },
+                ));
+        }
+
+        // The database has one epoch: the root store follows every commit
+        // (the stamp moved the written store's).
+        let root = self.lpg_store();
+        root.sync_epoch(epoch);
+        commit.complete();
+
+        self.prune_versions(&root, store);
+        Ok(())
+    }
+
+    /// Rolls the private transaction `transaction` back: undoes `changes`,
+    /// last to first, and aborts it.
+    ///
+    /// # Errors
+    ///
+    /// When a store fails to undo, which poisons the database.
+    fn rollback_private(
+        &self,
+        transaction: TransactionId,
+        changes: &TransactionChanges,
+    ) -> Result<()> {
+        let undone = {
+            let _writing = self.transaction_manager.write_in_progress();
+            changes.undo_after(changes.start(), false)
+        };
+        let _ = self.transaction_manager.abort(transaction);
+        match undone {
+            Ok(_) => Ok(()),
+            Err(failure) => {
+                let message = format!(
+                    "the rollback of a direct write could not undo its changes: {failure:?}"
+                );
+                self.transaction_manager.poison(&message);
+                Err(Error::Internal(message))
+            }
+        }
     }
 }
 
@@ -385,6 +679,8 @@ impl DirectCalls<'_> {
         self.db.write_direct(self.target, false, write)
     }
 
+    /// A batch: one call, all of its rows or none, so always a private
+    /// transaction, which can undo the rows before a failing one.
     fn write_batch<T>(
         &self,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,

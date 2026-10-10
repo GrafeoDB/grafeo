@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, TransactionId, Value};
 use grafeo_core::execution::DataChunk;
-use grafeo_core::execution::operators::{Operator, OperatorError, OperatorResult, WriteCounter};
+use grafeo_core::execution::operators::{
+    Operator, OperatorError, OperatorResult, Recording, WriteCounter,
+};
 use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
 
 use crate::catalog::Catalog;
@@ -32,6 +34,9 @@ pub struct ProcedureContext {
     pub catalog: Option<Arc<Catalog>>,
     /// The calling statement's write counter: the body's writes count there.
     pub write_counter: Arc<WriteCounter>,
+    /// The calling statement's recording: the body's writes are its
+    /// transaction's.
+    pub recording: Option<Recording>,
     /// The database's projections, so a `CALL ... {projection: ...}` in the
     /// body runs as it does at the top level.
     #[cfg(feature = "lpg")]
@@ -69,6 +74,8 @@ pub struct UserProcedureOperator {
     catalog: Option<Arc<Catalog>>,
     /// The calling statement's write counter.
     write_counter: Arc<WriteCounter>,
+    /// The calling statement's recording.
+    recording: Option<Recording>,
     /// The database's projections, for `CALL ... {projection: ...}` in the body.
     #[cfg(feature = "lpg")]
     projections: Option<crate::session::ProjectionRegistry>,
@@ -106,6 +113,7 @@ impl UserProcedureOperator {
             viewing_epoch: ctx.viewing_epoch,
             catalog: ctx.catalog,
             write_counter: ctx.write_counter,
+            recording: ctx.recording,
             #[cfg(feature = "lpg")]
             projections: ctx.projections,
             result_rows: None,
@@ -145,7 +153,7 @@ impl UserProcedureOperator {
             if let Some(ref cat) = self.catalog {
                 p = p.with_catalog(Arc::clone(cat));
             }
-            p
+            p.with_recording(self.recording.clone())
         } else {
             let mut p = Planner::new(Arc::clone(&self.store));
             if let Some(ref cat) = self.catalog {

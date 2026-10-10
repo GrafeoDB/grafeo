@@ -833,6 +833,151 @@ fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>
     h.finish()
 }
 
+/// The change events of a transaction's change set, one per entry in
+/// recorded order (bulk ranges and triples have none: their writers report
+/// their own), at [`EpochId::PENDING`] with timestamps from `log`'s clock
+/// in that order: the events `CdcGraphStore` buffered for the same writes,
+/// built from each entry's op and before-image instead of reads of the
+/// store. A create carries its labels or type and endpoints and the values
+/// it was created with; [`fold_into_creates`] then folds the transaction's
+/// later changes to it in, as it does for buffered events.
+pub(crate) fn events_for_changes(
+    set: &grafeo_common::change::ChangeSet,
+    log: &CdcLog,
+) -> Vec<ChangeEvent> {
+    use grafeo_common::change::{Before, Change, DataOp};
+
+    let values = |properties: &[(grafeo_common::types::PropertyKey, Value)]| {
+        (!properties.is_empty()).then(|| {
+            properties
+                .iter()
+                .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+                .collect::<HashMap<String, Value>>()
+        })
+    };
+    let one = |key: &grafeo_common::types::PropertyKey, value: &Value| {
+        Some(HashMap::from([(key.as_str().to_string(), value.clone())]))
+    };
+    let names = |labels: &grafeo_common::change::Labels| -> Vec<String> {
+        labels.iter().map(ToString::to_string).collect()
+    };
+    let mut events = Vec::with_capacity(set.len());
+    for change in set.entries() {
+        let Change::Data {
+            graph, op, before, ..
+        } = change
+        else {
+            continue;
+        };
+        let (entity_id, kind) = match op {
+            DataOp::CreateNode { id, .. } => (EntityId::Node(*id), ChangeKind::Create),
+            DataOp::CreateEdge { id, .. } => (EntityId::Edge(*id), ChangeKind::Create),
+            DataOp::DeleteNode { id } => (EntityId::Node(*id), ChangeKind::Delete),
+            DataOp::DeleteEdge { id } => (EntityId::Edge(*id), ChangeKind::Delete),
+            DataOp::SetNodeProperty { id, .. }
+            | DataOp::RemoveNodeProperty { id, .. }
+            | DataOp::AddNodeLabel { id, .. }
+            | DataOp::RemoveNodeLabel { id, .. } => (EntityId::Node(*id), ChangeKind::Update),
+            DataOp::SetEdgeProperty { id, .. } | DataOp::RemoveEdgeProperty { id, .. } => {
+                (EntityId::Edge(*id), ChangeKind::Update)
+            }
+            DataOp::InsertTriple { .. } | DataOp::DeleteTriple { .. } => continue,
+        };
+        let mut event = ChangeEvent {
+            entity_id,
+            graph: set
+                .graph(*graph)
+                .and_then(|graph| graph.key.as_ref().map(ToString::to_string)),
+            kind,
+            epoch: EpochId::PENDING,
+            timestamp: log.next_timestamp(),
+            before: None,
+            after: None,
+            labels: None,
+            before_labels: None,
+            edge_type: None,
+            src_id: None,
+            dst_id: None,
+            triple_subject: None,
+            triple_predicate: None,
+            triple_object: None,
+            triple_graph: None,
+        };
+        match (op, before) {
+            (
+                DataOp::CreateNode {
+                    labels, properties, ..
+                },
+                _,
+            ) => {
+                event.labels = Some(names(labels));
+                event.after = values(properties);
+            }
+            (
+                DataOp::CreateEdge {
+                    src,
+                    dst,
+                    edge_type,
+                    properties,
+                    ..
+                },
+                _,
+            ) => {
+                event.edge_type = Some(edge_type.to_string());
+                event.src_id = Some(src.as_u64());
+                event.dst_id = Some(dst.as_u64());
+                event.after = values(properties);
+            }
+            (DataOp::DeleteNode { .. }, Before::Node(image)) => {
+                event.labels = Some(names(&image.labels));
+                event.before = values(&image.properties);
+            }
+            (DataOp::DeleteEdge { .. }, Before::Edge(image)) => {
+                event.edge_type = Some(image.edge_type.to_string());
+                event.src_id = Some(image.src.as_u64());
+                event.dst_id = Some(image.dst.as_u64());
+                event.before = values(&image.properties);
+            }
+            (
+                DataOp::SetNodeProperty { key, value, .. }
+                | DataOp::SetEdgeProperty { key, value, .. },
+                Before::Value(old),
+            ) => {
+                event.before = old.as_ref().and_then(|old| one(key, old));
+                event.after = one(key, value);
+            }
+            (
+                DataOp::RemoveNodeProperty { key, .. } | DataOp::RemoveEdgeProperty { key, .. },
+                Before::Value(old),
+            ) => {
+                event.before = old.as_ref().and_then(|old| one(key, old));
+            }
+            (DataOp::AddNodeLabel { label, .. }, Before::Labels(labels)) => {
+                let before = names(labels);
+                let mut after = before.clone();
+                after.push(label.to_string());
+                event.before_labels = Some(before);
+                event.labels = Some(after);
+            }
+            (DataOp::RemoveNodeLabel { label, .. }, Before::Labels(labels)) => {
+                let before = names(labels);
+                let after = before
+                    .iter()
+                    .filter(|name| name.as_str() != label.as_str())
+                    .cloned()
+                    .collect();
+                event.before_labels = Some(before);
+                event.labels = Some(after);
+            }
+            // The change set checks each entry's before-image against its
+            // op, so no other pair is recorded.
+            _ => {}
+        }
+        events.push(event);
+    }
+    events
+}
+
 /// Folds a transaction's changes to the entities it created into their
 /// create events, so a create event carries the entity as the transaction
 /// left it: its final labels and properties.

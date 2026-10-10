@@ -726,14 +726,6 @@ impl LpgStore {
         }
     }
 
-    /// Discards the undo log entries for a committed transaction.
-    ///
-    /// Called during commit: properties are already written, so just
-    /// clean up the log.
-    pub fn commit_transaction_properties(&self, transaction_id: TransactionId) {
-        self.property_undo_log.write().remove(&transaction_id);
-    }
-
     /// Returns the current number of undo log entries for a transaction.
     ///
     /// Used by savepoints to record the position so that partial rollback

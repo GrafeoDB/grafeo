@@ -14,8 +14,8 @@ use parking_lot::{Mutex, RwLock};
 
 use super::tests::{BRIEFLY, CustomRules, every_write, labels, nested, pairs, people_store};
 use super::{
-    ChangeRecorder, GraphWriter, OperatorError, Recording, WriteClaim, WriteInProgress,
-    WriteTarget, node_labels, property_list,
+    ChangeRecorder, GraphWriter, OperatorError, Recording, WriteClaim, WriteClaims,
+    WriteInProgress, WriteTarget, node_labels, property_list,
 };
 use crate::graph::GraphStoreMut;
 use crate::graph::apply::{Applied, ApplyError, ChangeTarget, ExternalTarget, Writer};
@@ -46,6 +46,9 @@ struct Recorder {
     freeze: RwLock<()>,
     requests: AtomicUsize,
     taken_already: AtomicBool,
+    /// Refuses the claims of an edge's endpoints, as another transaction's
+    /// delete of one would.
+    refuse_endpoints: AtomicBool,
 }
 
 impl Recorder {
@@ -70,6 +73,7 @@ impl Recorder {
             freeze: RwLock::new(()),
             requests: AtomicUsize::new(0),
             taken_already: AtomicBool::new(false),
+            refuse_endpoints: AtomicBool::new(false),
         })
     }
 
@@ -115,16 +119,6 @@ impl ChangeRecorder for Recorder {
         self.writer
     }
 
-    fn claim(&self, claim: WriteClaim) -> Result<(), OperatorError> {
-        let state = match claim {
-            WriteClaim::Node(id) | WriteClaim::NodeDelete(id) => self.node_state(id),
-            WriteClaim::Edge(id) => self.edge_state(id),
-            WriteClaim::Endpoints(..) => String::new(),
-        };
-        self.events.lock().push(Event::Claim(claim, state));
-        Ok(())
-    }
-
     fn record(
         &self,
         op: DataOp,
@@ -142,13 +136,32 @@ impl ChangeRecorder for Recorder {
             .push(self.slot, op, before, version)
             .map_err(|error| OperatorError::Execution(error.to_string()))
     }
+}
 
-    fn write_in_progress(&self) -> WriteInProgress<'_> {
+impl WriteClaims for Recorder {
+    fn claim(&self, claim: WriteClaim) -> Result<(), OperatorError> {
+        if matches!(claim, WriteClaim::Endpoints(..))
+            && self.refuse_endpoints.load(Ordering::SeqCst)
+        {
+            return Err(OperatorError::WriteConflict(
+                "another transaction deletes an endpoint".to_string(),
+            ));
+        }
+        let state = match claim {
+            WriteClaim::Node(id) | WriteClaim::NodeDelete(id) => self.node_state(id),
+            WriteClaim::Edge(id) => self.edge_state(id),
+            WriteClaim::Endpoints(..) => String::new(),
+        };
+        self.events.lock().push(Event::Claim(claim, state));
+        Ok(())
+    }
+
+    fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {
         self.requests.fetch_add(1, Ordering::SeqCst);
         if self.freeze.is_locked() {
             self.taken_already.store(true, Ordering::SeqCst);
         }
-        self.freeze.read()
+        Some(self.freeze.read())
     }
 }
 
@@ -706,4 +719,141 @@ fn every_recorded_write_waits_for_the_freeze_and_asks_once() {
             "{name} asked for the freeze while it held it"
         );
     }
+}
+
+/// The claims a recorder was asked for, in order.
+fn claims(recorder: &Recorder) -> Vec<WriteClaim> {
+    recorder
+        .events
+        .lock()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Claim(claim, _) => Some(*claim),
+            Event::Record(..) => None,
+        })
+        .collect()
+}
+
+/// A new edge claims its endpoints and then itself before it is written,
+/// also one MERGE creates, and a delete of a node is claimed as a delete,
+/// then each edge a detach delete removes: the claims a concurrent delete
+/// conflicts with.
+#[test]
+fn an_edge_claims_its_endpoints_and_a_delete_is_claimed_as_one() {
+    let (store, people) = people_store();
+    let recorder = Recorder::new(&store);
+    let writer = recording_writer(&store, &recorder);
+    let knows = writer
+        .create_edge(people.vincent, people.gus, "KNOWS", Vec::new())
+        .unwrap();
+    let merged = writer
+        .create_edge_with(people.gus, people.alix, "KNOWS", Vec::new(), |_| {
+            Ok(Vec::new())
+        })
+        .unwrap();
+    writer.delete_node(people.vincent, true).unwrap();
+
+    assert_eq!(
+        claims(&recorder),
+        [
+            WriteClaim::Endpoints(people.vincent, people.gus),
+            WriteClaim::Edge(knows),
+            WriteClaim::Endpoints(people.gus, people.alix),
+            WriteClaim::Edge(merged),
+            WriteClaim::NodeDelete(people.vincent),
+            WriteClaim::Edge(knows),
+        ]
+    );
+}
+
+/// An edge the validator refuses claims no endpoint: a transaction that
+/// deletes one of them later does not conflict with it.
+#[test]
+fn an_edge_the_validator_refuses_claims_no_endpoint() {
+    let (store, people) = people_store();
+    let recorder = Recorder::new(&store);
+    let writer = recording_writer(&store, &recorder).with_validator(Arc::new(CustomRules));
+    let grudge = || pairs("grudge", &Value::from("Paris"));
+
+    let refused = [
+        writer.create_edge(people.alix, people.vincent, "HATES", Vec::new()),
+        writer.create_edge(people.alix, people.vincent, "KNOWS", grudge()),
+        writer.create_edge_with(people.alix, people.vincent, "HATES", Vec::new(), |_| {
+            Ok(Vec::new())
+        }),
+        writer.create_edge_with(people.alix, people.vincent, "KNOWS", grudge(), |_| {
+            Ok(Vec::new())
+        }),
+    ];
+    for (index, result) in refused.iter().enumerate() {
+        assert!(
+            matches!(result, Err(OperatorError::ConstraintViolation(_))),
+            "edge {index}: {result:?}"
+        );
+    }
+    assert!(recorder.entries().is_empty(), "no edge written");
+    assert!(
+        claims(&recorder).is_empty(),
+        "a refused edge claims nothing: {:?}",
+        claims(&recorder)
+    );
+
+    let knows = writer
+        .create_edge(people.alix, people.vincent, "KNOWS", Vec::new())
+        .unwrap();
+    assert_eq!(
+        claims(&recorder),
+        [
+            WriteClaim::Endpoints(people.alix, people.vincent),
+            WriteClaim::Edge(knows),
+        ],
+        "an edge the validator accepts claims its endpoints"
+    );
+}
+
+/// A refused claim, and an endpoint the transaction does not see, write
+/// no edge.
+#[test]
+fn an_edge_whose_endpoints_cannot_be_claimed_is_not_written() {
+    let (store, people) = people_store();
+    let recorder = Recorder::new(&store);
+    let writer = recording_writer(&store, &recorder);
+    let before = dump(&store, &writer);
+    recorder.refuse_endpoints.store(true, Ordering::SeqCst);
+    let refused = writer.create_edge(people.alix, people.vincent, "KNOWS", Vec::new());
+    assert!(
+        matches!(refused, Err(OperatorError::WriteConflict(_))),
+        "got {refused:?}"
+    );
+    assert_eq!(recorder.kinds(), Vec::<&str>::new());
+    assert_eq!(dump(&store, &writer), before);
+    recorder.refuse_endpoints.store(false, Ordering::SeqCst);
+
+    writer.delete_node(people.vincent, false).unwrap();
+    let deleted = writer.create_edge(people.alix, people.vincent, "KNOWS", Vec::new());
+    assert!(deleted.is_err(), "an endpoint the transaction deleted");
+    let missing = writer.create_edge(people.alix, NodeId::new(388), "KNOWS", Vec::new());
+    assert!(missing.is_err(), "an endpoint that does not exist");
+    assert_eq!(recorder.kinds(), ["DeleteNode"], "no edge written");
+}
+
+/// The expressions `derive` evaluates run with no write in progress: a
+/// checkpoint waiting meanwhile does not wait for them.
+#[test]
+fn derive_runs_with_no_write_in_progress() {
+    let (store, _) = people_store();
+    let recorder = Recorder::new(&store);
+    let writer = recording_writer(&store, &recorder);
+    let frozen_in_derive = AtomicBool::new(true);
+    writer
+        .create_node_with(&labels(&["Person"]), Vec::new(), |_| {
+            frozen_in_derive.store(recorder.freeze.is_locked(), Ordering::SeqCst);
+            Ok(pairs("name", &Value::from("Butch")))
+        })
+        .unwrap();
+    assert!(
+        !frozen_in_derive.load(Ordering::SeqCst),
+        "derive runs with no write in progress"
+    );
+    assert_eq!(recorder.kinds(), ["CreateNode", "SetNodeProperty"]);
 }

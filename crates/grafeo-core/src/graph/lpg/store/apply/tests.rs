@@ -1269,3 +1269,130 @@ fn by_key(
     history.sort_by(|(a, _), (b, _)| a.cmp(b));
     history
 }
+
+/// An immediate write (a direct call while no transaction is open) is
+/// committed as it is applied, through replay's path: readers see it at
+/// once, the counters move at once, and the store's epoch follows. Unlike
+/// replay it is lenient (a write that changes nothing is `Unchanged`) and
+/// reports what each write replaced, so its entries are what a transaction
+/// would record; replayed at the same epoch they rebuild the same store.
+#[test]
+fn an_immediate_write_is_committed_at_once_with_its_before_image() {
+    let Base {
+        store,
+        alix,
+        gus,
+        mia,
+        gus_mia,
+        ..
+    } = base();
+    let epoch = EpochId::new(2);
+    let mut set = ChangeSet::new();
+    let slot = default_slot(&mut set);
+    let recorder = Recorder {
+        store: &store,
+        slot,
+        writer: Writer::Immediate {
+            epoch,
+            before_images: true,
+        },
+    };
+    recorder.set_node(&mut set, alix, "city", Value::from("Paris"));
+    recorder.remove_node(&mut set, gus, "age");
+    recorder.add_label(&mut set, alix, "Traveller");
+    recorder.remove_label(&mut set, gus, "Employee");
+    recorder.delete_edge(&mut set, gus_mia);
+    recorder.delete_node(&mut set, mia);
+    let vincent = recorder.create_node(&mut set, &["Person"], &[("name", Value::from("Vincent"))]);
+    recorder.create_edge(
+        &mut set,
+        vincent,
+        alix,
+        "KNOWS",
+        &[("since", Value::Int64(88))],
+    );
+    assert_eq!(
+        recorder.write(
+            &mut set,
+            DataOp::RemoveNodeProperty {
+                id: gus,
+                key: PropertyKey::new("age"),
+            }
+        ),
+        Ok(Applied::Unchanged),
+        "lenient: a removal of an absent value changes nothing"
+    );
+
+    let before: Vec<&Before> = set
+        .entries()
+        .iter()
+        .map(|change| match change {
+            Change::Data {
+                before, version, ..
+            } => {
+                assert_eq!(*version, PendingVersion::Created);
+                before
+            }
+            Change::Bulk(_) => panic!("no bulk range"),
+        })
+        .collect();
+    assert_eq!(before.len(), 8);
+    assert_eq!(*before[0], Before::Value(Some(Value::from("Amsterdam"))));
+    assert_eq!(*before[1], Before::Value(Some(Value::Int64(3))));
+    assert!(matches!(before[4], Before::Edge(_)), "{:?}", before[4]);
+    assert!(matches!(before[5], Before::Node(_)), "{:?}", before[5]);
+    assert_eq!(store.current_epoch(), epoch, "the store's epoch follows");
+
+    let committed = image(&store, None);
+    assert_eq!(
+        committed
+            .nodes
+            .get(&alix.as_u64())
+            .map(|(labels, _)| labels.clone()),
+        Some(vec!["Person".to_string(), "Traveller".to_string()]),
+        "a committed reader sees it at once"
+    );
+    assert!(!committed.nodes.contains_key(&mia.as_u64()));
+
+    let replayed = base();
+    for record in set.log_records() {
+        let LogRecordRef::Data { op, .. } = record else {
+            panic!("a change set's records are data records");
+        };
+        assert_eq!(
+            replayed.store.apply(op, Writer::Replay { epoch }),
+            Ok(Applied::Committed)
+        );
+    }
+    assert_eq!(image(&replayed.store, None), committed);
+    assert_eq!(counters(&replayed.store), counters(&store));
+
+    // Without before-images (nothing reads them), a write is committed and
+    // reports so; one that changes nothing is still `Unchanged`.
+    let quiet = Writer::Immediate {
+        epoch: EpochId::new(3),
+        before_images: false,
+    };
+    assert_eq!(
+        store.apply(
+            &DataOp::SetNodeProperty {
+                id: alix,
+                key: PropertyKey::new("city"),
+                value: Value::from("Prague"),
+            },
+            quiet
+        ),
+        Ok(Applied::Committed)
+    );
+    assert_eq!(
+        store.apply(
+            &DataOp::RemoveNodeProperty {
+                id: gus,
+                key: PropertyKey::new("age"),
+            },
+            quiet
+        ),
+        Ok(Applied::Unchanged)
+    );
+    assert_eq!(store.current_epoch(), EpochId::new(3));
+}

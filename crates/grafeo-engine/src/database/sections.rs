@@ -60,12 +60,14 @@ impl CheckpointSources {
     ///
     /// The sections hold the committed state, also while transactions are
     /// open (the hold also holds their writes and rollbacks): the LPG
-    /// section writes it from the stores and the open transactions' undo
-    /// logs, and the vector and text index sections, which mirror what the
-    /// transactions wrote, are left out while one is open in the store
+    /// section writes it from the stores and the open transactions' change
+    /// sets, and the vector and text index sections, which mirror what the
+    /// transactions wrote, are left out while one has changed the store
     /// whose indexes they hold; the load then builds those indexes from the
     /// data.
-    pub fn sections(&self, _commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
+    pub fn sections(&self, commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
+        #[cfg(not(feature = "lpg"))]
+        let _ = commits;
         #[cfg_attr(
             not(any(feature = "lpg", feature = "triple-store")),
             expect(
@@ -84,9 +86,16 @@ impl CheckpointSources {
                 move || transaction_manager.current_epoch().as_u64(),
             )));
 
-            sections.push(Box::new(grafeo_core::graph::lpg::LpgStoreSection::new(
-                Arc::clone(store),
-            )));
+            #[cfg(any(feature = "vector-index", feature = "text-index"))]
+            let indexes_committed = !self
+                .transaction_manager
+                .open_change_sets(commits)
+                .iter()
+                .any(|changes| changes.writes_graph(None));
+            sections.push(Box::new(
+                grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(store))
+                    .with_open_changes(self.open_changes(commits)),
+            ));
 
             // The vector and text indexes take a transaction's values as it
             // writes them, and keep them until it commits or rolls back. The
@@ -96,8 +105,6 @@ impl CheckpointSources {
             // (those of named graphs are always built from the data), the
             // sections are left out, and the load builds the indexes from the
             // committed data (see `restore_indexes`).
-            #[cfg(any(feature = "vector-index", feature = "text-index"))]
-            let indexes_committed = !store.has_open_changes();
 
             // Vector indexes: persist HNSW topology to avoid rebuild on load
             #[cfg(feature = "vector-index")]
@@ -140,20 +147,28 @@ impl CheckpointSources {
     }
 
     /// Whether a transaction still open has changed the LPG store or one of
-    /// its named graphs: the stores then hold what it wrote (see
-    /// [`LpgStore::has_open_changes`]), which a copy must leave out. The
-    /// caller holds commits off (`_commits`), which also holds the writes and
-    /// rollbacks of open transactions, so the answer holds until it lets go.
+    /// its named graphs: the stores then hold what it wrote, which a copy
+    /// must leave out. The caller holds commits off (`commits`), which also
+    /// holds the writes and rollbacks of open transactions, so the answer
+    /// holds until it lets go.
     #[cfg(feature = "lpg")]
-    pub fn has_open_changes(&self, _commits: &CommitsHeld<'_>) -> bool {
-        self.root_store().is_some_and(|store| {
-            store.has_open_changes()
-                || store.graph_names().iter().any(|name| {
-                    store
-                        .graph(name)
-                        .is_some_and(|graph| graph.has_open_changes())
-                })
-        })
+    pub fn has_open_changes(&self, commits: &CommitsHeld<'_>) -> bool {
+        self.transaction_manager
+            .open_change_sets(commits)
+            .iter()
+            .any(|changes| changes.writes_any_graph())
+    }
+
+    /// The committed state of what the open transactions changed, indexed
+    /// from their change sets, for the LPG section and the committed copy.
+    #[cfg(feature = "lpg")]
+    fn open_changes(
+        &self,
+        commits: &CommitsHeld<'_>,
+    ) -> grafeo_core::graph::lpg::OpenChangesByGraph {
+        crate::transaction::TransactionChanges::index(
+            &self.transaction_manager.open_change_sets(commits),
+        )
     }
 
     /// The LPG data as committed, for a copy that reads the stores
@@ -161,7 +176,7 @@ impl CheckpointSources {
     /// they are when no open transaction has changed them, else a store of
     /// its own holding their committed state, as the LPG section writes it
     /// (what open transactions deleted, the values and labels they changed
-    /// as committed, nothing they created; see [`LpgStore::committed_copy`],
+    /// as committed, nothing they created; see [`LpgStore::committed_copy_with`],
     /// which copies it without the section's codec). `None` for a database
     /// without the built-in LPG store.
     ///
@@ -179,7 +194,7 @@ impl CheckpointSources {
         };
         let open = self.has_open_changes(commits);
         let store = if open {
-            Arc::new(store.committed_copy()?)
+            Arc::new(store.committed_copy_with(&self.open_changes(commits))?)
         } else {
             Arc::clone(store)
         };

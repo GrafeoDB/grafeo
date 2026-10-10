@@ -35,7 +35,10 @@ use crate::Session;
 use crate::transaction::EntityId;
 
 /// Summary of pending transaction mutations.
+///
+/// Read, not built, outside this crate: later releases may add fields.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CommitInfo {
     /// Transaction ID.
     pub txn_id: TransactionId,

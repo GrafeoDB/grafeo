@@ -191,8 +191,6 @@
 
 mod manager;
 mod mvcc;
-#[cfg(feature = "parallel")]
-pub mod parallel;
 #[cfg(feature = "lpg")]
 mod prepared;
 
@@ -210,6 +208,3 @@ mod write_tracker;
 
 #[cfg(feature = "wal")]
 pub(crate) mod wal_buffer;
-
-#[cfg(feature = "parallel")]
-pub use parallel::{BatchRequest, BatchResult, ExecutionStatus, ParallelExecutor};

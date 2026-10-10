@@ -100,3 +100,57 @@ tests:
     expect:
       rows:
         - [3000, 4501500]
+
+  # A GQL statement of one INSERT (or CREATE) returned the last node it
+  # created (#580).
+  - name: a_lone_insert_has_no_rows
+    variants:
+      gql: "INSERT (:W {k: 3})-[:R]->(:W {k: 19})"
+      cypher: "CREATE (:W {k: 3})-[:R]->(:W {k: 19})"
+    expect:
+      empty: true
+
+  - name: a_lone_create_has_no_rows
+    variants:
+      gql: "CREATE (:W {k: 3}), (:W {k: 19})"
+    expect:
+      empty: true
+
+  # After NEXT, a lone INSERT reads the rows the statement before returns and
+  # writes for each; it returned the last node of each INSERT and could not
+  # read the rows ("Undefined variable").
+  - name: a_lone_insert_after_next_has_no_rows
+    variants:
+      gql: "INSERT (:W {k: 3}) NEXT INSERT (:W {k: 19})"
+    expect:
+      empty: true
+
+  - name: a_lone_insert_after_next_writes_for_each_row
+    setup:
+      - "INSERT (:W {k: 3}), (:W {k: 19})"
+    statements:
+      - "MATCH (w:W) RETURN w.k AS k NEXT INSERT (:V {k: k})"
+      - "MATCH (v:V) RETURN count(v) AS nodes, sum(v.k) AS total"
+    expect:
+      rows:
+        - [2, 22]
+
+  # After a statement without a result (no RETURN, or FINISH), the statement
+  # after NEXT reads one empty row, as at the start of a statement. A lone
+  # INSERT there wrote nothing; after FINISH nothing ran.
+  - name: next_after_a_write_without_a_result_reads_one_row
+    setup:
+      - "INSERT (:W {k: 3}), (:W {k: 19})"
+    statements:
+      - "MATCH (w:W) SET w.k = 88 NEXT INSERT (:V {k: 3})"
+      - "MATCH (v:V) RETURN count(v) AS nodes"
+    expect:
+      rows:
+        - [1]
+
+  - name: next_after_finish_reads_one_row
+    variants:
+      gql: "FOR i IN [1, 2] INSERT (:W {i: i}) FINISH NEXT RETURN count(*) AS rows"
+    expect:
+      rows:
+        - [1]

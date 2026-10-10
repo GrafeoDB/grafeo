@@ -2501,6 +2501,34 @@ mod tests {
         grafeo_free_database(db);
     }
 
+    /// A GQL statement of one INSERT has no result (#580): no rows and no
+    /// nodes. It returned the node it created, which `grafeo_result_json` and
+    /// `grafeo_result_nodes_json` listed.
+    #[test]
+    fn a_lone_insert_has_no_result() {
+        let text = |ptr: *const c_char| {
+            assert!(!ptr.is_null());
+            // SAFETY: a non-null C string from our API, valid until the
+            // result is freed.
+            unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        let db = grafeo_open_memory();
+        let insert = CString::new("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person)").unwrap();
+        let result = grafeo_execute(db, insert.as_ptr());
+        assert!(!result.is_null());
+        assert_eq!(grafeo_result_row_count(result), 0);
+        assert_eq!(text(grafeo_result_json(result)), "[]");
+        assert_eq!(text(grafeo_result_nodes_json(result)), "[]");
+        assert_eq!(text(grafeo_result_edges_json(result)), "[]");
+        grafeo_free_result(result);
+        assert_eq!((grafeo_node_count(db), grafeo_edge_count(db)), (2, 1));
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
+
     #[test]
     fn test_null_pointer_safety() {
         // All functions should handle null gracefully.

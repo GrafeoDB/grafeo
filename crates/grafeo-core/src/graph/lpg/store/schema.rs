@@ -291,6 +291,33 @@ impl LpgStore {
         self.label_registry.write().insert_at(id, name)
     }
 
+    /// Drops label `name` from the label dictionary when no node has it, as
+    /// the fold of a 0.5.x compacted base does for a joined name it split
+    /// (see `compact::fold`): its id becomes a gap that is never given out
+    /// again, and the next checkpoint writes the dictionary without it.
+    /// Every other name keeps its id for good, also one whose nodes all
+    /// lost it.
+    ///
+    /// Returns whether `name` was dropped: false when it has no id, or when
+    /// the label index holds a node with it (a node of an open transaction
+    /// included).
+    #[cfg(feature = "compact-store")]
+    pub(crate) fn drop_unused_label(&self, name: &str) -> bool {
+        let mut registry = self.label_registry.write();
+        let Some(id) = registry.get_id(name) else {
+            return false;
+        };
+        if self
+            .label_index
+            .read()
+            .get(id as usize)
+            .is_some_and(|nodes| !nodes.is_empty())
+        {
+            return false;
+        }
+        registry.remove(name).is_some()
+    }
+
     /// Restores edge type `name` with the id `id`, as a load does before any
     /// edge has it.
     ///

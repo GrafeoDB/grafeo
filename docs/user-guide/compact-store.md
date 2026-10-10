@@ -52,13 +52,17 @@ migrates every 0.5.x file (see [Persistent Mode](persistence/persistent.md)), so
 migrated file holds one store; a read-only open folds the base in memory and leaves the
 file as it is.
 
+A node with several labels comes back with each of them
+([#595](https://github.com/GrafeoDB/grafeo/issues/595)). Those versions stored its labels
+as one name (`"Actor|Person"`), also on the node when a write after `compact()` found it
+without a label and changed it. The open splits that name into the labels:
+`MATCH (n:Person)` and `MATCH (n:Actor)` both find the node, `labels(n)` lists both, and
+`CALL db.labels()` does not list the joined name. A single label that holds a `|` reads as
+two labels. A write after `compact()` that matched such a node by one of its labels found
+nothing then, so it is not in the file.
+
 What those versions stored differently stays as they stored it:
 
-- **Multi-label nodes**: the labels of a node with several were stored as one name
-  (`"Actor|Person"`). Each label reads such a node (`MATCH (n:Person)` and
-  `MATCH (n:Actor)` both find it), but a single label that holds a `|` reads as two labels.
-  A write after `compact()` that matched such a node by one of its labels found nothing
-  then, so it is not in the file.
 - **Missing properties**: a property that a node or edge lacked was stored as the
   column's empty value (`''`, `0`, `0.0` or `false`)
   ([#542](https://github.com/GrafeoDB/grafeo/issues/542)).

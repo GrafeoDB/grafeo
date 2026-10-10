@@ -234,3 +234,80 @@ fn a_reopened_compacted_file_keeps_each_label() {
     assert_each_label_reads_its_nodes(&db, "after a second reopen");
     db.close().unwrap();
 }
+
+/// The single count `query` returns in GQL, after checking that Cypher
+/// returns the same.
+#[cfg(all(feature = "cypher", feature = "grafeo-file", feature = "wal"))]
+fn count_in_both(db: &GrafeoDB, query: &str) -> Value {
+    let gql = scalar(db, query);
+    let cypher = db
+        .execute_cypher(query)
+        .unwrap_or_else(|error| panic!("Cypher {query}: {error}"))
+        .rows()
+        .to_vec();
+    assert_eq!(
+        cypher,
+        [vec![gql.clone()]],
+        "{query}: GQL and Cypher return the same count"
+    );
+    gql
+}
+
+/// The queries of #595 on Alix (a Graph and a Repository, and `alix`
+/// besides) and Gus (a Graph), in GQL and Cypher: each label, both labels
+/// and a label no node has.
+#[cfg(all(feature = "cypher", feature = "grafeo-file", feature = "wal"))]
+fn assert_the_queries_of_the_issue(db: &GrafeoDB, stage: &str, alix: &[&str]) {
+    for (query, expected) in [
+        ("MATCH (n:Graph) RETURN count(n)", 2),
+        ("MATCH (n:Repository) RETURN count(n)", 1),
+        ("MATCH (n:Graph:Repository) RETURN count(n)", 1),
+        ("MATCH (n:Missing) RETURN count(n)", 0),
+        ("MATCH (n:Graph:Missing) RETURN count(n)", 0),
+    ] {
+        assert_eq!(
+            count_in_both(db, query),
+            Value::Int64(expected),
+            "{stage}: {query}"
+        );
+    }
+    let query = "MATCH (n {name: 'Alix'}) RETURN labels(n) AS labels";
+    let cypher = db.execute_cypher(query).unwrap().rows().to_vec();
+    assert_eq!(
+        cypher,
+        db.execute(query).unwrap().rows(),
+        "{stage}: GQL and Cypher return the same labels"
+    );
+    assert_eq!(labels_of(db, "Alix"), alix, "{stage}: labels(n)");
+}
+
+/// The statements of #595 on a file this build compacts: Alix matches each
+/// of her labels and both, also after a write through one of them, another
+/// `compact()`, and a close and reopen.
+#[cfg(all(feature = "cypher", feature = "grafeo-file", feature = "wal"))]
+#[test]
+fn the_queries_of_the_issue_hold_in_gql_and_cypher() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("issue.grafeo");
+    {
+        let mut db = GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:Graph:Repository {name: 'Alix'})")
+            .unwrap();
+        db.execute("INSERT (:Graph {name: 'Gus'})").unwrap();
+        db.compact().unwrap();
+        assert_the_queries_of_the_issue(&db, "after compact()", &["Graph", "Repository"]);
+
+        db.execute_cypher("MATCH (n:Repository) SET n:Starred")
+            .unwrap();
+        db.compact().unwrap();
+        assert_the_queries_of_the_issue(
+            &db,
+            "after a write and compact()",
+            &["Graph", "Repository", "Starred"],
+        );
+        db.close().unwrap();
+    }
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_the_queries_of_the_issue(&db, "after a reopen", &["Graph", "Repository", "Starred"]);
+    db.close().unwrap();
+}

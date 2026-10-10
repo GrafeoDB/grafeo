@@ -2570,3 +2570,38 @@ mod rollback_lock_order {
         assert_eq!(store.nodes_by_label("Employee"), [gus]);
     }
 }
+
+/// Only a label no node has is dropped from the dictionary: its id becomes a
+/// gap that a new label never gets, and every other label stays listed.
+#[cfg(feature = "compact-store")]
+#[test]
+fn only_a_label_no_node_has_is_dropped() {
+    let store = LpgStore::new().unwrap();
+    let alix = store.create_node(&["Graph|Repository", "Starred"]);
+    assert!(
+        !store.drop_unused_label("Graph|Repository"),
+        "Alix has the label"
+    );
+    assert!(!store.drop_unused_label("Missing"), "an unknown label");
+
+    assert!(store.remove_label(alix, "Graph|Repository"));
+    assert!(store.add_label(alix, "Graph"));
+    let next = store.label_registry.read().next_id();
+    assert!(store.drop_unused_label("Graph|Repository"));
+    assert!(!store.drop_unused_label("Graph|Repository"), "once");
+
+    let mut labels = store.all_labels();
+    labels.sort();
+    assert_eq!(labels, ["Graph", "Starred"]);
+    assert_eq!(store.label_count(), 2);
+    assert_eq!(store.label_id("Graph|Repository"), None);
+    assert_eq!(store.nodes_by_label("Graph|Repository"), []);
+    assert_eq!(store.nodes_by_label("Graph"), [alix]);
+
+    assert!(store.add_label(alix, "Repository"));
+    assert_eq!(
+        store.label_id("Repository"),
+        Some(next),
+        "the next id, not the gap"
+    );
+}

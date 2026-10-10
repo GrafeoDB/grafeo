@@ -6,7 +6,9 @@ the wrong range. `chain` has 5,000 nodes, so sorts, cuts and skips cross row bat
 
 Each case has an id, the query, the languages it runs in, its fixture, and whether its
 rows are ordered (unordered rows compare as a multiset). Queries only read: each fixture
-is built once and shared by its cases. Results are matched by id and
+is built once and shared by its cases. The one exception is the `writes` fixture, an empty
+database of its own on which the writes of section BR run in order, with reads of what
+they wrote. Results are matched by id and
 language, so never change or reuse an id: add new cases at the end of a section, or
 start a new section.
 """
@@ -84,6 +86,11 @@ def chain(grafeo):
 
 
 def empty(grafeo):
+    return grafeo.GrafeoDB()
+
+
+def writes(grafeo):
+    """An empty database for the cases that write (section BR), which no other case reads."""
     return grafeo.GrafeoDB()
 
 
@@ -200,6 +207,7 @@ FIXTURES = {
     "social": social,
     "chain": chain,
     "empty": empty,
+    "writes": writes,
     "labels": labels,
     "labels_indexed": labels_indexed,
     "labels_compacted": labels_compacted,
@@ -1380,5 +1388,27 @@ for case_id, query, languages, is_ordered in [
     ("BQ6", "MATCH (a:Person)-[k:KNOWS]->(b:Person) WITH a.name AS who, b, k RETURN who, count(*) AS n, avg(b.age) AS age, max(k.since) AS last, count(DISTINCT CASE WHEN b.w IS NULL THEN b.name END) AS unweighted", BOTH, False),
 ]:
     case(case_id, query, languages, "social", is_ordered)
+
+# BR: a statement that ends with a write and no RETURN has no result, no columns and no rows
+#     (#580; ISO GQL's omitted result). A GQL statement of one INSERT or CREATE returned the
+#     last node it created (BR1 to BR3), also after NEXT (BR4). A lone INSERT after NEXT
+#     reads the rows the statement before returns (BR5: it created a new node `w`), and
+#     one empty row after a statement without a result (BR7: it wrote nothing). A DELETE
+#     of a variable nothing binds fails (BR9: it deleted every node). These cases write,
+#     in order, on a database of their own (fixture `writes`); BR6, BR8 and BR10 read what
+#     they wrote.
+for case_id, query, languages in [
+    ("BR1", "CREATE (:W {k: 3})", BOTH),
+    ("BR2", "INSERT (:W {k: 19})-[:R]->(:W {k: 88})", GQL),
+    ("BR3", "INSERT (:W {k: 3}), (:W {k: 19})", GQL),
+    ("BR4", "INSERT (:W {k: 88}) NEXT INSERT (:W {k: 3})", GQL),
+    ("BR5", "MATCH (w:W {k: 88}) RETURN w NEXT INSERT (w)-[:R]->(:V {k: 19})", GQL),
+    ("BR6", "MATCH (n) OPTIONAL MATCH (n)-[:R]->(m) RETURN labels(n) AS l, n.k AS k, m.k AS to", BOTH),
+    ("BR7", "MATCH (w:W {k: 3}) SET w.k = 3 NEXT INSERT (:U {k: 88})", GQL),
+    ("BR8", "MATCH (u:U) RETURN count(u) AS n", BOTH),
+    ("BR9", "DETACH DELETE w", GQL),
+    ("BR10", "MATCH (n) RETURN count(n) AS n", BOTH),
+]:
+    case(case_id, query, languages, "writes")
 
 # fmt: on

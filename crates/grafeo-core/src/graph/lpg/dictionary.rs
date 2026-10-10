@@ -4,7 +4,9 @@
 //! A [`NameDictionary`] gives a name a `u32` id the first time it is used and
 //! never reassigns or reuses one: a name nothing uses any more keeps its id,
 //! and an id that names nothing (a gap a file may hold) is never given out,
-//! as [`next_id`](NameDictionary::next_id) only grows. It is not
+//! as [`next_id`](NameDictionary::next_id) only grows. The one exception is
+//! a load that drops a name no node or edge has
+//! ([`remove`](NameDictionary::remove)): its id becomes such a gap. It is not
 //! transactional: a name first used by a transaction that rolls back keeps
 //! its id. The LPG section writes a graph's dictionaries as they are and a
 //! load restores them id for id, so the ids a file's chunks hold are the ids
@@ -78,6 +80,19 @@ impl NameDictionary {
         self.by_name.insert(name.clone(), id);
         self.by_id[at] = Some(name);
         Ok(())
+    }
+
+    /// Forgets `name`: its id becomes a gap, which is never given out again
+    /// (a later use of the name gets a new id). Returns the id it had, `None`
+    /// when it had none. Only a load uses it, for a name no node or edge has
+    /// (see `LpgStore::drop_unused_label`).
+    #[cfg(feature = "compact-store")]
+    pub(crate) fn remove(&mut self, name: &str) -> Option<u32> {
+        let id = self.by_name.remove(name)?;
+        if let Some(slot) = self.by_id.get_mut(id as usize) {
+            *slot = None;
+        }
+        Some(id)
     }
 
     /// The id the next new name gets: one past every id given out or
@@ -196,6 +211,34 @@ mod tests {
         assert_eq!(dictionary.get_or_create("VISITED"), 19);
         dictionary.reserve_below(3);
         assert_eq!(dictionary.next_id(), 20, "reserving never lowers it");
+    }
+
+    /// A removed name leaves a gap: its id names nothing and is never given
+    /// out again, and the name, used again, gets a new id.
+    #[cfg(feature = "compact-store")]
+    #[test]
+    fn a_removed_name_leaves_a_gap_that_is_never_given_out() {
+        let mut dictionary = NameDictionary::new();
+        dictionary.get_or_create("Graph");
+        dictionary.get_or_create("Graph|Repository");
+        dictionary.get_or_create("Repository");
+        assert_eq!(dictionary.remove("Graph|Repository"), Some(1));
+        assert_eq!(dictionary.remove("Graph|Repository"), None, "once");
+        assert_eq!(dictionary.remove("Missing"), None);
+        assert_eq!(dictionary.get_id("Graph|Repository"), None);
+        assert_eq!(dictionary.get_name(1), None, "a gap");
+        assert_eq!(dictionary.len(), 2);
+        assert_eq!(dictionary.next_id(), 3, "the gap stays below the next id");
+        assert_eq!(
+            listed(&dictionary),
+            [(0, "Graph".to_string()), (2, "Repository".to_string())]
+        );
+        assert_eq!(dictionary.get_or_create("Starred"), 3);
+        assert_eq!(
+            dictionary.get_or_create("Graph|Repository"),
+            4,
+            "a new id, not the gap"
+        );
     }
 
     #[test]

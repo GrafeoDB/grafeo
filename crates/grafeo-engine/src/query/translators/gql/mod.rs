@@ -245,6 +245,12 @@ fn sort_key(item: &ast::OrderByItem, expression: LogicalExpression) -> SortKey {
     }
 }
 
+/// Whether a statement's plan ends without a result: in a `RETURN` of no
+/// items (see `no_result`), as a write without `RETURN` and `FINISH` do.
+fn ends_without_a_result(plan: &LogicalOperator) -> bool {
+    matches!(plan, LogicalOperator::Return(ret) if ret.items.is_empty())
+}
+
 /// Whether a query ends with a result: a `RETURN` with items or `RETURN *`.
 /// A `CALL` body without one (no `RETURN`, or `FINISH`) runs for its writes
 /// and passes each row on once, as it came in.
@@ -254,8 +260,8 @@ fn returns_rows(query: &ast::QueryStatement) -> bool {
 }
 
 /// Combines two queries with a set operator, or with `NEXT` (the right one
-/// runs for each row of the left one; a right side that is a query reads the
-/// left one's rows instead, see `translate_composite_query`).
+/// runs for each row of the left one; a right side that is a query or a lone
+/// write reads the left one's rows instead, see `translate_composite_query`).
 fn combine_queries(
     op: ast::CompositeOp,
     left: LogicalOperator,
@@ -357,7 +363,9 @@ impl GqlTranslator {
     fn translate_statement(&self, stmt: &ast::Statement) -> Result<LogicalPlan> {
         match stmt {
             ast::Statement::Query(query) => self.translate_query(query),
-            ast::Statement::DataModification(dm) => self.translate_data_modification(dm),
+            ast::Statement::DataModification(dm) => {
+                self.translate_data_modification(dm, LogicalOperator::Empty)
+            }
             ast::Statement::Schema(_) => Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Schema DDL commands are handled before query planning",
@@ -383,13 +391,36 @@ impl GqlTranslator {
         right: &ast::Statement,
     ) -> Result<LogicalPlan> {
         let left_plan = self.translate_statement(left)?;
-        // NEXT: the query after it reads the rows the one before returns, as
-        // a query reads the rows of a WITH.
-        if op == ast::CompositeOp::Next
-            && let ast::Statement::Query(right_query) = right
-        {
-            let input = return_as_with(left_plan.root);
-            return self.translate_query_from(right_query, input);
+        // NEXT: the statement after it reads the rows the one before returns,
+        // as a query reads the rows of a WITH; a lone INSERT or DELETE writes
+        // for each, and a procedure call runs for each. After one without a
+        // result (no RETURN, or FINISH) it reads one empty row, as at the
+        // start of a statement: the one before runs once, for its writes,
+        // and nothing it binds is a variable after it.
+        if op == ast::CompositeOp::Next {
+            let input = if ends_without_a_result(&left_plan.root) {
+                LogicalOperator::Apply(ApplyOp {
+                    input: Box::new(LogicalOperator::Empty),
+                    subplan: Box::new(left_plan.root),
+                    shared_variables: Vec::new(),
+                    optional: false,
+                    unit: true,
+                })
+            } else {
+                return_as_with(left_plan.root)
+            };
+            return match right {
+                ast::Statement::Query(right_query) => self.translate_query_from(right_query, input),
+                ast::Statement::DataModification(dm) => self.translate_data_modification(dm, input),
+                other => {
+                    let right_plan = self.translate_statement(other)?;
+                    Ok(LogicalPlan::new(combine_queries(
+                        op,
+                        input,
+                        right_plan.root,
+                    )?))
+                }
+            };
         }
         let right_plan = self.translate_statement(right)?;
         Ok(LogicalPlan::new(combine_queries(
@@ -662,12 +693,7 @@ impl GqlTranslator {
                         });
                     }
                     ast::QueryClause::Create(create_clause) => {
-                        // An INSERT that starts the statement has no input rows.
-                        plan = if matches!(plan, LogicalOperator::Empty) {
-                            self.insert_chain(&create_clause.patterns)?.0
-                        } else {
-                            self.translate_create_patterns(&create_clause.patterns, plan)?
-                        };
+                        plan = self.translate_insert(&create_clause.patterns, plan)?;
                     }
                     ast::QueryClause::Delete(delete_clause) => {
                         plan = self.translate_delete_targets(
@@ -905,8 +931,9 @@ impl GqlTranslator {
         }
 
         // FINISH: the statement has no result (ISO GQL's omitted result: no
-        // rows and no columns); the input runs to its end for its writes. The
-        // Limit(0) under it passes no row on to a NEXT after it.
+        // rows and no columns); the input runs to its end for its writes. A
+        // NEXT after it reads one empty row, as after a write without RETURN
+        // (see `translate_composite_query`).
         if query.return_clause.is_finish {
             return Ok(LogicalPlan::new(no_result(wrap_limit(plan, 0))));
         }
@@ -2062,44 +2089,45 @@ impl GqlTranslator {
         }
     }
 
+    /// Translates a data-modifying statement of one clause (a lone `INSERT`
+    /// or `DELETE`) on the rows of `input`: `Empty` for a statement of its
+    /// own, the rows the statement before a `NEXT` passes on. It has no
+    /// `RETURN` or `FINISH`, so it has no result (an omitted result, ISO/IEC
+    /// 39075:2024 13.1; see `no_result`): it returned the last node an INSERT
+    /// created.
     fn translate_data_modification(
         &self,
         dm: &ast::DataModificationStatement,
+        input: LogicalOperator,
     ) -> Result<LogicalPlan> {
-        match dm {
-            ast::DataModificationStatement::Insert(insert) => self.translate_insert(insert),
-            ast::DataModificationStatement::Delete(delete) => self.translate_delete(delete),
-            ast::DataModificationStatement::Set(set) => self.translate_set(set),
-        }
+        let plan = match dm {
+            ast::DataModificationStatement::Insert(insert) => {
+                self.translate_insert(&insert.patterns, input)?
+            }
+            ast::DataModificationStatement::Delete(delete) => {
+                self.translate_delete(delete, input)?
+            }
+            ast::DataModificationStatement::Set(set) => self.translate_set(set, input)?,
+        };
+        Ok(LogicalPlan::new(no_result(plan)))
     }
 
-    fn translate_delete(&self, delete: &ast::DeleteStatement) -> Result<LogicalPlan> {
-        // DELETE requires a preceding MATCH clause to identify what to delete.
-        // For standalone DELETE, we need to scan and delete the specified variables.
-        // This is typically used as: MATCH (n:Label) DELETE n
-
+    /// Translates a lone DELETE on the rows of `input`. Its targets read the
+    /// variables those rows bind: one that starts its statement (`Empty`)
+    /// has none, so the binder refuses `DELETE w` (it scanned the graph for
+    /// `w` and deleted every node).
+    fn translate_delete(
+        &self,
+        delete: &ast::DeleteStatement,
+        input: LogicalOperator,
+    ) -> Result<LogicalOperator> {
         if delete.targets.is_empty() {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "DELETE requires at least one target",
             )));
         }
-
-        // Extract the first variable name for the scan
-        let first_var = match &delete.targets[0] {
-            ast::DeleteTarget::Variable(name) => name.clone(),
-            ast::DeleteTarget::Expression(_) => "__delete_expr_0".to_string(),
-        };
-
-        // Create a scan to find the entities to delete
-        let scan = LogicalOperator::NodeScan(NodeScanOp {
-            variable: first_var.clone(),
-            label: None,
-            input: None,
-        });
-
-        let plan = self.translate_delete_targets(&delete.targets, delete.detach, scan)?;
-        Ok(LogicalPlan::new(plan))
+        self.translate_delete_targets(&delete.targets, delete.detach, input)
     }
 
     /// Translates a list of delete targets into a chain of delete operators.
@@ -2145,10 +2173,14 @@ impl GqlTranslator {
         Ok(plan)
     }
 
-    fn translate_set(&self, set: &ast::SetStatement) -> Result<LogicalPlan> {
-        // SET requires a preceding MATCH clause to identify what to update.
-        // For standalone SET, we error - it should be part of a query.
-
+    /// Translates a lone SET on the rows of `input`, whose variables its
+    /// assignments read (the parser makes none; a SET is a clause of a
+    /// query).
+    fn translate_set(
+        &self,
+        set: &ast::SetStatement,
+        input: LogicalOperator,
+    ) -> Result<LogicalOperator> {
         if set.assignments.is_empty() {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
@@ -2160,13 +2192,6 @@ impl GqlTranslator {
         let first_assignment = &set.assignments[0];
         let var = &first_assignment.variable;
 
-        // Create a scan to find the entity to update
-        let scan = LogicalOperator::NodeScan(NodeScanOp {
-            variable: var.clone(),
-            label: None,
-            input: None,
-        });
-
         // Build property assignments for this variable
         let properties: Vec<(String, LogicalExpression)> = set
             .assignments
@@ -2175,35 +2200,33 @@ impl GqlTranslator {
             .map(|a| Ok((a.property.clone(), self.translate_expression(&a.value)?)))
             .collect::<Result<_>>()?;
 
-        let plan = LogicalOperator::SetProperty(SetPropertyOp {
+        Ok(LogicalOperator::SetProperty(SetPropertyOp {
             variable: var.clone(),
             properties,
             replace: false,
             is_edge: false,
-            input: Box::new(scan),
-        });
-
-        Ok(LogicalPlan::new(plan))
+            input: Box::new(input),
+        }))
     }
 
-    fn translate_insert(&self, insert: &ast::InsertStatement) -> Result<LogicalPlan> {
-        let (plan, last_variable) = self.insert_chain(&insert.patterns)?;
-        let ret = wrap_return(
-            plan,
-            vec![ReturnItem {
-                expression: LogicalExpression::Variable(last_variable),
-                alias: None,
-            }],
-            false,
-        );
-        Ok(LogicalPlan::new(ret))
+    /// Translates the patterns of an INSERT on the rows of `input`: `Empty`
+    /// when the INSERT starts its statement.
+    fn translate_insert(
+        &self,
+        patterns: &[ast::Pattern],
+        input: LogicalOperator,
+    ) -> Result<LogicalOperator> {
+        if matches!(input, LogicalOperator::Empty) {
+            self.insert_chain(patterns)
+        } else {
+            self.translate_create_patterns(patterns, input)
+        }
     }
 
     /// Builds the [`CreateOp`] of an INSERT that starts a statement (no input
-    /// rows). Returns the plan and the last variable created. Used for a
-    /// standalone INSERT and for the first INSERT clause of a query such as
-    /// `INSERT (a) INSERT (b) RETURN a, b`.
-    fn insert_chain(&self, patterns: &[ast::Pattern]) -> Result<(LogicalOperator, String)> {
+    /// rows): a standalone INSERT, or the first INSERT clause of a query such
+    /// as `INSERT (a) INSERT (b) RETURN a, b`.
+    fn insert_chain(&self, patterns: &[ast::Pattern]) -> Result<LogicalOperator> {
         if patterns.is_empty() {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
@@ -2212,7 +2235,6 @@ impl GqlTranslator {
         }
 
         let mut elements = Vec::new();
-        let mut last_variable = String::new();
         // With no input rows, a variable is bound only if this INSERT created
         // it earlier: `INSERT (a:A), (a)-[:T]->(b)` creates `a` once and `b`.
         let mut bound: HashSet<String> = HashSet::new();
@@ -2225,7 +2247,6 @@ impl GqlTranslator {
                     if is_new {
                         elements.push(self.created_node(&variable, node)?);
                     }
-                    last_variable = variable;
                 }
                 ast::Pattern::Path(path) => {
                     let (source_var, is_new) =
@@ -2247,7 +2268,6 @@ impl GqlTranslator {
                             _ => (current_src, target_var.clone()),
                         };
                         elements.push(self.created_edge(edge, from, to)?);
-                        last_variable.clone_from(&target_var);
                         current_src = target_var;
                     }
                 }
@@ -2268,11 +2288,10 @@ impl GqlTranslator {
                 "INSERT must create at least one node",
             )));
         }
-        let plan = LogicalOperator::Create(CreateOp {
+        Ok(LogicalOperator::Create(CreateOp {
             elements,
             input: None,
-        });
-        Ok((plan, last_variable))
+        }))
     }
 
     /// Translates a subquery to a logical operator (without Return).
@@ -2837,8 +2856,13 @@ mod tests {
         let result = translate(query);
         assert!(result.is_ok());
 
+        // A lone DELETE has no result: a RETURN of no items over the write.
         let plan = result.unwrap();
-        if let LogicalOperator::DeleteNode(del) = &plan.root {
+        let LogicalOperator::Return(ret) = &plan.root else {
+            panic!("Expected Return, got {:?}", plan.root);
+        };
+        assert!(ret.items.is_empty(), "no columns: {ret:?}");
+        if let LogicalOperator::DeleteNode(del) = ret.input.as_ref() {
             assert_eq!(del.variable, "n");
         } else {
             panic!("Expected DeleteNode operator");
@@ -2858,11 +2882,19 @@ mod tests {
             span: None,
         };
 
-        let result = translator.translate_set(&set_stmt);
-        assert!(result.is_ok());
+        let plan = translator
+            .translate_data_modification(
+                &ast::DataModificationStatement::Set(set_stmt),
+                LogicalOperator::Empty,
+            )
+            .unwrap();
 
-        let plan = result.unwrap();
-        if let LogicalOperator::SetProperty(set) = &plan.root {
+        // A lone SET has no result: a RETURN of no items over the write.
+        let LogicalOperator::Return(ret) = &plan.root else {
+            panic!("Expected Return, got {:?}", plan.root);
+        };
+        assert!(ret.items.is_empty(), "no columns: {ret:?}");
+        if let LogicalOperator::SetProperty(set) = ret.input.as_ref() {
             assert_eq!(set.variable, "n");
             assert_eq!(set.properties.len(), 1);
             assert_eq!(set.properties[0].0, "name");
@@ -2916,7 +2948,7 @@ mod tests {
             detach: false,
             span: None,
         };
-        let result = translator.translate_delete(&delete);
+        let result = translator.translate_delete(&delete, LogicalOperator::Empty);
         assert!(result.is_err());
     }
 
@@ -2927,7 +2959,7 @@ mod tests {
             assignments: vec![],
             span: None,
         };
-        let result = translator.translate_set(&set);
+        let result = translator.translate_set(&set, LogicalOperator::Empty);
         assert!(result.is_err());
     }
 
@@ -2938,7 +2970,7 @@ mod tests {
             patterns: vec![],
             span: None,
         };
-        let result = translator.translate_insert(&insert);
+        let result = translator.translate_insert(&insert.patterns, LogicalOperator::Empty);
         assert!(result.is_err());
     }
 

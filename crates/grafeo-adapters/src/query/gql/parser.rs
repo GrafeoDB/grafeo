@@ -760,8 +760,8 @@ impl<'a> Parser<'a> {
     }
 
     /// A query made of a single INSERT (or `CREATE (...)`) clause and nothing
-    /// else is kept as a standalone INSERT statement, whose result returns the
-    /// created entity as before; anything longer stays a query.
+    /// else is kept as a standalone INSERT statement; anything longer stays a
+    /// query. Neither has a result without a RETURN.
     fn lone_insert_as_statement(mut query: QueryStatement) -> Statement {
         let lone_insert = matches!(query.ordered_clauses.as_slice(), [QueryClause::Create(_)])
             && query.where_clause.is_none()

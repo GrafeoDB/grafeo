@@ -369,3 +369,17 @@ BQ5|cypher 9588c5d565 Grouping keys named by a WITH beside aggregates over a pro
 BQ5|gql 9588c5d565 Grouping keys named by a WITH beside aggregates over a property, an expression and a CASE come back as their values; they came back as 0 and the four groups merged into one.
 BQ6|cypher 4341952581 A string grouping key named by a WITH beside aggregates over properties and a CASE keeps its groups; the names became 0 and every group merged into one.
 BQ6|gql 4341952581 A string grouping key named by a WITH beside aggregates over properties and a CASE keeps its groups; the names became 0 and every group merged into one.
+BR1|cypher 0197c21812 A statement that ends with a write has no result; Cypher CREATE returned the created node's id in a column _anon_0.
+BR1|gql 0197c21812 A GQL statement of one INSERT or CREATE has no result (#580); it returned the node it created in a column _anon_0.
+BR2|gql 0197c21812 A GQL statement of one INSERT has no result (#580); it returned the last node it created.
+BR3|gql 0197c21812 A GQL statement of one INSERT has no result (#580); it returned the last node it created.
+BR4|gql 0197c21812 A lone INSERT after NEXT has no result (#580); it returned the last node of each INSERT.
+BR5|gql 0197c21812 A lone INSERT after NEXT reads the rows before it and has no result; it returned them with the id of a new node w it created.
+BR6|cypher d17a13422e BR5 links the matched W nodes; it created a new unlabeled node w for each row.
+BR6|gql d17a13422e BR5 links the matched W nodes; it created a new unlabeled node w for each row.
+BR7|gql 0197c21812 A lone INSERT after NEXT has no result, and after a statement without a result it reads one empty row; it returned the id of one new node per matched row.
+BR8|cypher 911b190a6e After a statement without a result, NEXT reads one empty row: BR7 writes one U; it wrote one per matched row.
+BR8|gql 911b190a6e After a statement without a result, NEXT reads one empty row: BR7 writes one U; it wrote one per matched row.
+BR9|gql 1185632940 A DELETE of a variable nothing binds fails with "Undefined variable 'w'"; it deleted every node.
+BR10|cypher 17b3858401 BR9 deletes nothing; every node was gone.
+BR10|gql 17b3858401 BR9 deletes nothing; every node was gone.

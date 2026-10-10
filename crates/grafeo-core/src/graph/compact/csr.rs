@@ -21,57 +21,6 @@ pub struct CsrAdjacency {
 }
 
 impl CsrAdjacency {
-    /// Builds a CSR from pre-sorted `(src, dst)` pairs.
-    ///
-    /// The input **must** be sorted by `src` (ties broken arbitrarily).
-    /// `num_nodes` is the total number of source nodes, nodes beyond the
-    /// highest `src` in `edges` are treated as having zero out-degree.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `edges` is not sorted by source.
-    #[must_use]
-    pub fn from_sorted_edges(num_nodes: usize, edges: &[(u32, u32)]) -> Self {
-        assert!(
-            edges.windows(2).all(|w| w[0].0 <= w[1].0),
-            "edges must be sorted by source"
-        );
-
-        let mut offsets = vec![0u32; num_nodes + 1];
-
-        // Count edges per source.
-        for &(src, _) in edges {
-            offsets[src as usize + 1] += 1;
-        }
-
-        // Prefix sum.
-        for i in 1..offsets.len() {
-            offsets[i] += offsets[i - 1];
-        }
-
-        let targets: Vec<u32> = edges.iter().map(|&(_, dst)| dst).collect();
-
-        Self {
-            offsets,
-            targets,
-            edge_data: None,
-        }
-    }
-
-    /// Sets optional per-edge auxiliary data parallel to `targets`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `data.len()` does not equal `self.targets.len()`.
-    pub fn set_edge_data(&mut self, data: Vec<u32>) {
-        assert_eq!(
-            data.len(),
-            self.targets.len(),
-            "edge_data length must equal targets length"
-        );
-        self.edge_data = Some(data);
-    }
-
     /// Returns `true` if per-edge auxiliary data has been set.
     #[must_use]
     pub fn has_edge_data(&self) -> bool {
@@ -113,15 +62,6 @@ impl CsrAdjacency {
         let start = self.offsets[i] as usize;
         let end = self.offsets[i + 1] as usize;
         &self.targets[start..end]
-    }
-
-    /// Returns the out-degree of the given node.
-    ///
-    /// Returns 0 if `node_offset` is out of range.
-    #[inline]
-    #[must_use]
-    pub fn degree(&self, node_offset: u32) -> usize {
-        self.neighbors(node_offset).len()
     }
 
     /// Finds the source node for a given CSR position via binary search.
@@ -187,12 +127,6 @@ impl CsrAdjacency {
         }
     }
 
-    /// Returns the raw offsets array.
-    #[must_use]
-    pub fn offsets(&self) -> &[u32] {
-        &self.offsets
-    }
-
     /// Returns the raw targets array.
     #[must_use]
     pub fn targets(&self) -> &[u32] {
@@ -203,36 +137,6 @@ impl CsrAdjacency {
     #[must_use]
     pub fn edge_data(&self) -> Option<&[u32]> {
         self.edge_data.as_deref()
-    }
-
-    /// Serializes this CSR to a byte buffer.
-    ///
-    /// # Errors
-    ///
-    /// Fails if an array length does not fit the format's `u32` fields.
-    pub fn write_to(&self, buf: &mut Vec<u8>) -> grafeo_common::utils::error::Result<()> {
-        // offsets
-        write_usize_as_u32(buf, self.offsets.len())?;
-        for &o in &self.offsets {
-            buf.extend_from_slice(&o.to_le_bytes());
-        }
-        // targets
-        write_usize_as_u32(buf, self.targets.len())?;
-        for &t in &self.targets {
-            buf.extend_from_slice(&t.to_le_bytes());
-        }
-        // edge_data
-        match &self.edge_data {
-            Some(ed) => {
-                buf.push(1);
-                write_usize_as_u32(buf, ed.len())?;
-                for &d in ed {
-                    buf.extend_from_slice(&d.to_le_bytes());
-                }
-            }
-            None => buf.push(0),
-        }
-        Ok(())
     }
 
     /// Deserializes a CSR from a byte buffer at the given offset.
@@ -280,23 +184,6 @@ impl CsrAdjacency {
         }
         Ok(Self::from_raw_parts(offsets, targets, edge_data))
     }
-
-    /// Returns the approximate heap memory usage in bytes.
-    #[must_use]
-    pub fn memory_bytes(&self) -> usize {
-        self.offsets.len() * std::mem::size_of::<u32>()
-            + self.targets.len() * std::mem::size_of::<u32>()
-            + self
-                .edge_data
-                .as_ref()
-                .map_or(0, |d| d.len() * std::mem::size_of::<u32>())
-    }
-}
-
-fn write_usize_as_u32(buf: &mut Vec<u8>, v: usize) -> grafeo_common::utils::error::Result<()> {
-    let n = crate::codec::limits::checked_u32(v, "compact store adjacency size")?;
-    buf.extend_from_slice(&n.to_le_bytes());
-    Ok(())
 }
 
 /// Reads a `u32` count and that many `u32` values, refusing a count the
@@ -330,58 +217,6 @@ fn read_u32_le(data: &[u8], pos: &mut usize) -> Result<u32, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_basic_csr() {
-        // 3 nodes, edges: 0->1, 0->2, 1->2
-        let edges = vec![(0u32, 1u32), (0, 2), (1, 2)];
-        let csr = CsrAdjacency::from_sorted_edges(3, &edges);
-
-        assert_eq!(csr.num_nodes(), 3);
-        assert_eq!(csr.num_edges(), 3);
-
-        // Node 0: neighbors [1, 2]
-        assert_eq!(csr.neighbors(0), &[1, 2]);
-        assert_eq!(csr.degree(0), 2);
-
-        // Node 1: neighbors [2]
-        assert_eq!(csr.neighbors(1), &[2]);
-        assert_eq!(csr.degree(1), 1);
-
-        // Node 2: no neighbors
-        assert_eq!(csr.neighbors(2), &[] as &[u32]);
-        assert_eq!(csr.degree(2), 0);
-    }
-
-    #[test]
-    fn test_source_for_position() {
-        // 3 nodes, edges: 0->1, 0->2, 1->2
-        // CSR targets: [1, 2, 2]
-        // offsets:      [0, 2, 3, 3]
-        // position 0 -> source 0 (0->1)
-        // position 1 -> source 0 (0->2)
-        // position 2 -> source 1 (1->2)
-        let edges = vec![(0u32, 1u32), (0, 2), (1, 2)];
-        let csr = CsrAdjacency::from_sorted_edges(3, &edges);
-
-        assert_eq!(csr.source_for_position(0), Some(0));
-        assert_eq!(csr.source_for_position(1), Some(0));
-        assert_eq!(csr.source_for_position(2), Some(1));
-
-        // Out of range.
-        assert_eq!(csr.source_for_position(3), None);
-        assert_eq!(csr.source_for_position(100), None);
-    }
-
-    #[test]
-    fn test_empty_graph() {
-        // 0 nodes, 0 edges.
-        let csr = CsrAdjacency::from_sorted_edges(0, &[]);
-        assert_eq!(csr.num_nodes(), 0);
-        assert_eq!(csr.num_edges(), 0);
-        assert_eq!(csr.source_for_position(0), None);
-        assert_eq!(csr.memory_bytes(), 4); // 1 offset entry (sentinel)
-    }
 
     /// An adjacency as `read_from` reads it: the counts as given, then the
     /// values.

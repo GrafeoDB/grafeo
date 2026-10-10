@@ -567,35 +567,6 @@ impl ChunkedAdjacency {
         self.edge_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Adds edge `edge_id` from `src` to `dst` here and, reversed, to
-    /// `backward`, holding the locks of both until both hold it: a reader
-    /// that finds the edge in one of them finds it in the other when it
-    /// reads that one next (the other's lock holds it back until then).
-    /// This lock is taken before `backward`'s.
-    #[cfg(feature = "compact-store")]
-    pub(crate) fn add_edge_both_ways(
-        &self,
-        backward: Option<&Self>,
-        src: NodeId,
-        dst: NodeId,
-        edge_id: EdgeId,
-    ) {
-        let mut forward_lists = self.lists.write();
-        let backward_lists = backward.map(|backward| (backward, backward.lists.write()));
-        forward_lists
-            .entry(src)
-            .or_insert_with(AdjacencyList::new)
-            .add_edge(dst, edge_id, self.chunk_capacity);
-        self.edge_count.fetch_add(1, Ordering::Relaxed);
-        if let Some((backward, mut lists)) = backward_lists {
-            lists
-                .entry(dst)
-                .or_insert_with(AdjacencyList::new)
-                .add_edge(src, edge_id, backward.chunk_capacity);
-            backward.edge_count.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
     /// Adds multiple edges in a single lock acquisition.
     ///
     /// Each tuple is `(src, dst, edge_id)`. Takes the write lock once and

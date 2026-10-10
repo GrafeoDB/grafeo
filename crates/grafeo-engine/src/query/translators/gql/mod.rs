@@ -9,12 +9,13 @@ mod pattern;
 use std::collections::{HashMap, HashSet};
 
 use super::common::{
-    GeneratedNames, build_left_join_with_predicates, check_branch_columns,
-    collect_expression_variables, combine_with_and, comma_part_join_variables,
-    comma_part_reads_earlier_rows, expand_subquery_return_star, flatten_and_conjuncts,
-    has_all_labels, is_aggregate_function, is_binary_set_function, join_and_conjuncts, no_result,
-    optional_join, push_set_property, references_any, to_aggregate_function, wrap_distinct,
-    wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    CallImports, GeneratedNames, build_left_join_with_predicates, call_imports,
+    check_branch_columns, collect_expression_variables, combine_with_and,
+    comma_part_join_variables, comma_part_reads_earlier_rows, expand_subquery_return_star,
+    flatten_and_conjuncts, has_all_labels, is_aggregate_function, is_binary_set_function,
+    join_and_conjuncts, no_result, optional_join, push_set_property, references_any,
+    to_aggregate_function, with_imports, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
+    wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
@@ -95,6 +96,9 @@ struct GqlTranslator {
     call_scope: std::cell::RefCell<Option<HashSet<String>>>,
     /// The names made up for anonymous elements and helper columns.
     names: GeneratedNames,
+    /// The variables the `CALL` body being translated imports, which a
+    /// `WITH` in it passes on whether it names them or not.
+    call_imports: CallImports,
 }
 
 /// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
@@ -220,6 +224,27 @@ fn keys_before_return(keys: &[SortKey], ret: &ReturnOp) -> Option<Vec<SortKey>> 
         .collect()
 }
 
+/// The sort key of an `ORDER BY` item that sorts on `expression`.
+///
+/// Without `NULLS FIRST` or `NULLS LAST`, GQL puts nulls last in both
+/// directions. ISO/IEC 39075 leaves this default to the implementation, as SQL
+/// does; nulls last both ways is what Microsoft Fabric's GQL documents. Cypher
+/// keeps openCypher's order, where null is the largest value (see
+/// `physical_null_order`).
+fn sort_key(item: &ast::OrderByItem, expression: LogicalExpression) -> SortKey {
+    SortKey {
+        expression,
+        order: match item.order {
+            ast::SortOrder::Asc => SortOrder::Ascending,
+            ast::SortOrder::Desc => SortOrder::Descending,
+        },
+        nulls: Some(match item.nulls {
+            Some(ast::NullsOrdering::First) => NullsOrdering::First,
+            Some(ast::NullsOrdering::Last) | None => NullsOrdering::Last,
+        }),
+    }
+}
+
 /// Whether a query ends with a result: a `RETURN` with items or `RETURN *`.
 /// A `CALL` body without one (no `RETURN`, or `FINISH`) runs for its writes
 /// and passes each row on once, as it came in.
@@ -296,6 +321,7 @@ impl GqlTranslator {
             group_list_variables: std::cell::RefCell::new(HashMap::new()),
             call_scope: std::cell::RefCell::new(None),
             names: GeneratedNames::new(query),
+            call_imports: CallImports::default(),
         }
     }
 
@@ -479,17 +505,7 @@ impl GqlTranslator {
                                     expression = LogicalExpression::Variable(col_name);
                                 }
                             }
-                            Ok(SortKey {
-                                expression,
-                                order: match item.order {
-                                    ast::SortOrder::Asc => SortOrder::Ascending,
-                                    ast::SortOrder::Desc => SortOrder::Descending,
-                                },
-                                nulls: item.nulls.map(|n| match n {
-                                    ast::NullsOrdering::First => NullsOrdering::First,
-                                    ast::NullsOrdering::Last => NullsOrdering::Last,
-                                }),
-                            })
+                            Ok(sort_key(item, expression))
                         })
                         .collect::<Result<Vec<_>>>()?;
 
@@ -539,17 +555,7 @@ impl GqlTranslator {
                         .items
                         .iter()
                         .map(|item| {
-                            Ok(SortKey {
-                                expression: self.translate_expression(&item.expression)?,
-                                order: match item.order {
-                                    ast::SortOrder::Asc => SortOrder::Ascending,
-                                    ast::SortOrder::Desc => SortOrder::Descending,
-                                },
-                                nulls: item.nulls.map(|n| match n {
-                                    ast::NullsOrdering::First => NullsOrdering::First,
-                                    ast::NullsOrdering::Last => NullsOrdering::Last,
-                                }),
-                            })
+                            Ok(sort_key(item, self.translate_expression(&item.expression)?))
                         })
                         .collect::<Result<Vec<_>>>()?;
 
@@ -1053,17 +1059,7 @@ impl GqlTranslator {
                                 expression = LogicalExpression::Variable(col_name);
                             }
                         }
-                        Ok(SortKey {
-                            expression,
-                            order: match item.order {
-                                ast::SortOrder::Asc => SortOrder::Ascending,
-                                ast::SortOrder::Desc => SortOrder::Descending,
-                            },
-                            nulls: item.nulls.map(|n| match n {
-                                ast::NullsOrdering::First => NullsOrdering::First,
-                                ast::NullsOrdering::Last => NullsOrdering::Last,
-                            }),
-                        })
+                        Ok(sort_key(item, expression))
                     })
                     .collect::<Result<Vec<_>>>()?;
 
@@ -1100,19 +1096,7 @@ impl GqlTranslator {
                 let keys = order_by
                     .items
                     .iter()
-                    .map(|item| {
-                        Ok(SortKey {
-                            expression: self.translate_expression(&item.expression)?,
-                            order: match item.order {
-                                ast::SortOrder::Asc => SortOrder::Ascending,
-                                ast::SortOrder::Desc => SortOrder::Descending,
-                            },
-                            nulls: item.nulls.map(|n| match n {
-                                ast::NullsOrdering::First => NullsOrdering::First,
-                                ast::NullsOrdering::Last => NullsOrdering::Last,
-                            }),
-                        })
-                    })
+                    .map(|item| Ok(sort_key(item, self.translate_expression(&item.expression)?)))
                     .collect::<Result<Vec<_>>>()?;
 
                 plan = wrap_sort(plan, keys);
@@ -1541,6 +1525,21 @@ impl GqlTranslator {
             } = self.take_horizontal_aggregates(&with_clause.items, None, None, plan)?;
             plan = horizontal_plan;
 
+            // In a CALL body, the imports this WITH leaves out pass on too.
+            let projected: Vec<(String, bool)> = with_clause
+                .items
+                .iter()
+                .filter_map(|item| match (&item.alias, &item.expression) {
+                    (Some(alias), ast::Expression::Variable(name)) => {
+                        Some((alias.clone(), alias == name))
+                    }
+                    (Some(alias), _) => Some((alias.clone(), false)),
+                    (None, ast::Expression::Variable(name)) => Some((name.clone(), true)),
+                    (None, _) => None,
+                })
+                .collect();
+            let missing = self.call_imports.left_out(&projected);
+
             // Check if WITH contains aggregate functions (e.g. WITH count(n) AS cnt)
             has_aggregates = items
                 .iter()
@@ -1553,23 +1552,27 @@ impl GqlTranslator {
                 // Split the WHERE into HAVING (aggregate-referencing
                 // conjuncts) and a post-aggregate filter (the rest).
                 // This handles mixed predicates like
-                // `WHERE a.name = 'Alix' AND cnt > 2` correctly.
+                // `WHERE a.name = 'Alix' AND cnt > 2` correctly. A conjunct
+                // that reads an import the aggregation leaves out filters
+                // after the import is back.
                 let aggregate_aliases: Vec<String> =
                     aggregates.iter().filter_map(|a| a.alias.clone()).collect();
-                let (having, post_agg_filter) =
-                    if let Some(where_clause) = &with_clause.where_clause {
-                        let pred = self.translate_expression(&where_clause.expression)?;
-                        let conjuncts = flatten_and_conjuncts(&pred);
-                        let (having_parts, filter_parts): (Vec<_>, Vec<_>) = conjuncts
-                            .into_iter()
-                            .partition(|c| references_any(c, &aggregate_aliases));
-                        (
-                            join_and_conjuncts(having_parts.into_iter().cloned().collect()),
-                            join_and_conjuncts(filter_parts.into_iter().cloned().collect()),
-                        )
-                    } else {
-                        (None, None)
-                    };
+                let (having, post_agg_filter) = if let Some(where_clause) =
+                    &with_clause.where_clause
+                {
+                    let pred = self.translate_expression(&where_clause.expression)?;
+                    let conjuncts = flatten_and_conjuncts(&pred);
+                    let (having_parts, filter_parts): (Vec<_>, Vec<_>) =
+                        conjuncts.into_iter().partition(|c| {
+                            references_any(c, &aggregate_aliases) && !references_any(c, &missing)
+                        });
+                    (
+                        join_and_conjuncts(having_parts.into_iter().cloned().collect()),
+                        join_and_conjuncts(filter_parts.into_iter().cloned().collect()),
+                    )
+                } else {
+                    (None, None)
+                };
 
                 plan = LogicalOperator::Aggregate(AggregateOp {
                     group_by: auto_group_by,
@@ -1594,6 +1597,7 @@ impl GqlTranslator {
                         pass_through_input: false,
                     });
                 }
+                plan = with_imports(plan, missing, true);
 
                 // Apply non-aggregate WHERE conjuncts as a post-aggregate filter.
                 if let Some(filter_pred) = post_agg_filter {
@@ -1610,11 +1614,15 @@ impl GqlTranslator {
                     })
                     .collect::<Result<_>>()?;
 
-                plan = LogicalOperator::Project(ProjectOp {
-                    projections,
-                    input: Box::new(plan),
-                    pass_through_input: false,
-                });
+                plan = with_imports(
+                    LogicalOperator::Project(ProjectOp {
+                        projections,
+                        input: Box::new(plan),
+                        pass_through_input: false,
+                    }),
+                    missing,
+                    false,
+                );
             }
         }
         // WITH * skips projection: all variables pass through unchanged
@@ -1699,7 +1707,8 @@ impl GqlTranslator {
     /// variables: all of them, or the ones its variable scope clause names
     /// (`CALL (a, b) { ... }`; none for `CALL () { ... }`). It starts from a
     /// `ParameterScan` of them, which the planner fills for each row through
-    /// `ParameterState`, so a `WITH` in it is an ordinary `WITH`.
+    /// `ParameterState`. They stay in scope for the whole body: a `WITH` in
+    /// it passes them on whether it names them or not (see [`CallImports`]).
     fn translate_inline_call(
         &self,
         subquery: &ast::QueryStatement,
@@ -1727,9 +1736,16 @@ impl GqlTranslator {
         // out, and the scope of a CALL nested in it.
         let outer_names = outer.bound_variables(self.call_scope.borrow().as_ref());
         let enclosing = self.call_scope.replace(outer_names.clone());
-        // Each query combined in the body starts from the same outer row.
+        let imports = call_imports(&shared_variables, outer_names.as_ref());
+        // Each query combined in the body starts from the same outer row,
+        // with the same imports.
         let translate_part = |part: &ast::QueryStatement| -> Result<LogicalOperator> {
-            let mut plan = self.translate_query_from(part, input.clone())?.root;
+            let mut plan = self
+                .call_imports
+                .within(imports.clone(), || {
+                    self.translate_query_from(part, input.clone())
+                })?
+                .root;
             expand_subquery_return_star(&mut plan, outer_names.as_ref())?;
             Ok(plan)
         };

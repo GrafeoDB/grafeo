@@ -4,12 +4,12 @@
 //! that can be optimized and executed.
 
 use super::common::{
-    EdgeOccurrence, GeneratedNames, build_left_join_with_predicates, check_branch_columns,
-    collect_expression_variables, combine_with_and, comma_part_join_variables,
-    comma_part_reads_earlier_rows, different_edges, edges_to_compare, expand_subquery_return_star,
-    has_all_labels, is_aggregate_function, is_binary_set_function, no_result, optional_join,
-    push_set_property, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
-    wrap_skip, wrap_sort,
+    CallImports, EdgeOccurrence, GeneratedNames, build_left_join_with_predicates, call_imports,
+    check_branch_columns, collect_expression_variables, combine_with_and,
+    comma_part_join_variables, comma_part_reads_earlier_rows, different_edges, edges_to_compare,
+    expand_subquery_return_star, has_all_labels, is_aggregate_function, is_binary_set_function,
+    no_result, optional_join, push_set_property, to_aggregate_function, with_imports,
+    wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
@@ -91,6 +91,9 @@ struct CypherTranslator {
     /// What the clause just translated projects, when it is a WITH or a
     /// RETURN: what an ORDER BY right after it may read.
     sort_scope: RefCell<Option<SortScope>>,
+    /// The variables the `CALL` body being translated imports, which a
+    /// `WITH` in it passes on whether it names them or not.
+    call_imports: CallImports,
 }
 
 /// What a WITH or RETURN projects, for the ORDER BY that follows it
@@ -130,6 +133,7 @@ impl CypherTranslator {
             return_aliases: RefCell::new(HashMap::new()),
             call_scope: RefCell::new(None),
             sort_scope: RefCell::new(None),
+            call_imports: CallImports::default(),
         }
     }
 
@@ -348,7 +352,9 @@ impl CypherTranslator {
     /// `ParameterScan` of them, and they are recorded in
     /// `ApplyOp.shared_variables` so the planner can wire them through
     /// `ParameterState`. Parts joined by `UNION` each import their own; the
-    /// Apply imports all of them, and each part's scan names its own.
+    /// Apply imports all of them, and each part's scan names its own. The
+    /// imports stay in scope for the whole part: a later `WITH` passes them
+    /// on whether it names them or not (see [`CallImports`]).
     fn translate_call_subquery(
         &self,
         inner: &ast::Query,
@@ -445,12 +451,18 @@ impl CypherTranslator {
         });
 
         // Translate the remaining inner subquery clauses, which see the outer
-        // row's variables through `WITH *`
+        // row's variables through `WITH *`, and keep the imports in scope
+        // after a `WITH` that leaves them out
         let enclosing = self.call_scope.replace(outer_names.cloned());
-        let mut translated = Ok(inner_plan);
-        for clause in clauses_iter {
-            translated = translated.and_then(|plan| self.translate_clause(clause, plan).map(Some));
-        }
+        let imports = call_imports(&shared_variables, outer_names);
+        let translated = self.call_imports.within(imports, || {
+            let mut translated = Ok(inner_plan);
+            for clause in clauses_iter {
+                translated =
+                    translated.and_then(|plan| self.translate_clause(clause, plan).map(Some));
+            }
+            translated
+        });
         self.call_scope.replace(enclosing);
         let mut inner_plan = translated?.ok_or_else(|| {
             Error::Query(QueryError::new(
@@ -1334,6 +1346,21 @@ impl CypherTranslator {
             return Err(super::common::unaliased_with_expression());
         }
 
+        // In a CALL body, the imports this WITH leaves out pass on too.
+        let projected: Vec<(String, bool)> = with_clause
+            .items
+            .iter()
+            .filter_map(|item| match (&item.alias, &item.expression) {
+                (Some(alias), ast::Expression::Variable(name)) => {
+                    Some((alias.clone(), alias == name))
+                }
+                (Some(alias), _) => Some((alias.clone(), false)),
+                (None, ast::Expression::Variable(name)) => Some((name.clone(), true)),
+                (None, _) => None,
+            })
+            .collect();
+        let missing = self.call_imports.left_out(&projected);
+
         // Check if WITH contains aggregate functions (e.g. WITH collect(n) AS people)
         let has_aggregates = with_clause
             .items
@@ -1455,6 +1482,7 @@ impl CypherTranslator {
                 pass_through_input: false,
             })
         };
+        plan = with_imports(plan, missing, has_aggregates);
 
         if let Some(where_clause) = &with_clause.where_clause {
             let predicate = self.translate_expression(&where_clause.predicate)?;

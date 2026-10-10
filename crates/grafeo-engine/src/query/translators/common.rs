@@ -3,14 +3,15 @@
 //! Functions here are used by multiple translator modules (GQL, Cypher, etc.)
 //! to avoid duplication of identical logic.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 #[cfg(any(feature = "graphql", feature = "gremlin", test))]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::query::plan::{
-    AggregateFunction, BinaryOp, CountExpr, DistinctOp, FilterOp, LeftJoinOp, LimitOp,
-    LogicalExpression, LogicalOperator, ReturnItem, ReturnOp, SetPropertyOp, SkipOp, SortKey,
-    SortOp,
+    AggregateFunction, BinaryOp, CountExpr, DistinctOp, FilterOp, JoinOp, JoinType, LeftJoinOp,
+    LimitOp, LogicalExpression, LogicalOperator, ParameterScanOp, Projection, ReturnItem, ReturnOp,
+    SetPropertyOp, SkipOp, SortKey, SortOp,
 };
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
@@ -64,6 +65,97 @@ fn final_return_mut(plan: &mut LogicalOperator) -> Option<&mut ReturnOp> {
         LogicalOperator::Skip(op) => final_return_mut(&mut op.input),
         LogicalOperator::Distinct(op) => final_return_mut(&mut op.input),
         _ => None,
+    }
+}
+
+/// The variables a `CALL` subquery imports (see [`call_imports`]) while its
+/// body is translated: none outside one. They stay in scope for the whole
+/// body: a `WITH` in it that leaves one out passes it on all the same
+/// (openCypher: "a subsequent WITH within the subquery cannot descope an
+/// imported variable"; in GQL they are fields of the body's incoming working
+/// record, which a statement of the body does not drop). A `WITH` that binds
+/// an import's name to anything but the import itself (`WITH 3 AS a`) makes
+/// the name a variable of the body, and no longer an import.
+#[derive(Debug, Default)]
+pub(crate) struct CallImports(RefCell<Vec<String>>);
+
+impl CallImports {
+    /// Runs `translate` with `imports` as the imports of the body it
+    /// translates, and puts back the imports of the enclosing body
+    /// afterwards.
+    pub(crate) fn within<T>(&self, imports: Vec<String>, translate: impl FnOnce() -> T) -> T {
+        let enclosing = self.0.replace(imports);
+        let translated = translate();
+        self.0.replace(enclosing);
+        translated
+    }
+
+    /// The imports a `WITH` that passes on `projected` leaves out, which it
+    /// passes on as well. Each projected item is its name and whether it is
+    /// the variable of that name itself (`WITH a`, `WITH a AS a`). An import
+    /// the `WITH` binds to something else stops being one.
+    pub(crate) fn left_out(&self, projected: &[(String, bool)]) -> Vec<String> {
+        let mut imports = self.0.borrow_mut();
+        imports.retain(|import| {
+            projected
+                .iter()
+                .all(|(name, itself)| name != import || *itself)
+        });
+        imports
+            .iter()
+            .filter(|import| projected.iter().all(|(name, _)| name != *import))
+            .cloned()
+            .collect()
+    }
+}
+
+/// The variables of a `CALL` subquery's outer row that it imports:
+/// `shared_variables` (the `ApplyOp`'s), with `*` replaced by the variables of
+/// the outer row, `outer`, in name order (none when they are not known here).
+pub(crate) fn call_imports(
+    shared_variables: &[String],
+    outer: Option<&HashSet<String>>,
+) -> Vec<String> {
+    if shared_variables.iter().any(|name| name == "*") {
+        let mut names: Vec<String> = outer.into_iter().flatten().cloned().collect();
+        names.sort();
+        return names;
+    }
+    shared_variables.to_vec()
+}
+
+/// The rows of a `WITH` in a `CALL` body (`plan`, its projection, or its
+/// aggregation when `aggregates`), with the imports it leaves out, `missing`
+/// (see [`CallImports`]), beside its own columns. A projection passes them on
+/// as items. An aggregation cannot group by them, since a count over no rows
+/// would then be no row instead of one: its rows are joined with a scan of
+/// the imported values (one row, the outer row's).
+pub(crate) fn with_imports(
+    plan: LogicalOperator,
+    missing: Vec<String>,
+    aggregates: bool,
+) -> LogicalOperator {
+    if missing.is_empty() {
+        return plan;
+    }
+    match plan {
+        LogicalOperator::Project(mut project) if !aggregates && !project.pass_through_input => {
+            project
+                .projections
+                .extend(missing.into_iter().map(|name| Projection {
+                    expression: LogicalExpression::Variable(name),
+                    alias: None,
+                }));
+            LogicalOperator::Project(project)
+        }
+        plan => LogicalOperator::Join(JoinOp {
+            left: Box::new(plan),
+            right: Box::new(LogicalOperator::ParameterScan(ParameterScanOp {
+                columns: missing,
+            })),
+            join_type: JoinType::Cross,
+            conditions: Vec::new(),
+        }),
     }
 }
 

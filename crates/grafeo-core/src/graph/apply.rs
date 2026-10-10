@@ -21,9 +21,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use grafeo_common::change::{
-    Before, Change, DataOp, EdgeImage, Entity, NodeImage, PendingVersion, Properties,
+    Before, Change, DataOp, EdgeImage, Entity, Labels, NodeImage, PendingVersion, Properties,
 };
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 
 use super::Direction;
 use super::lpg::{Edge, Node};
@@ -255,7 +255,10 @@ pub trait ChangeTarget: Send + Sync {
 /// engine never calls [`undo`](ChangeTarget::undo).
 ///
 /// A [`GraphStoreMut`] gives the ids of what it creates and cannot create at
-/// an id given to it, so this target reserves no ids and refuses creates.
+/// an id given to it, so this target reserves no ids and `apply` refuses
+/// creates: a writer creates through [`create_node`](Self::create_node) and
+/// [`create_edge`](Self::create_edge), which use the store's own ids and
+/// return the op with the id it gave.
 pub struct ExternalTarget {
     store: Arc<dyn GraphStoreMut>,
 }
@@ -271,6 +274,113 @@ impl ExternalTarget {
     #[must_use]
     pub fn store(&self) -> &Arc<dyn GraphStoreMut> {
         &self.store
+    }
+
+    /// Creates a node with `labels` and `properties` as `writer`, at the id
+    /// the store gives: returns the op with that id, and what to record (a
+    /// create replaced nothing).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplyError::Refused`] when the store refuses a value. The
+    /// store then holds the node with the values set before it: an external
+    /// store keeps what it applied.
+    pub fn create_node(
+        &self,
+        labels: Labels,
+        properties: Properties,
+        writer: Writer,
+    ) -> Result<(DataOp, Applied), ApplyError> {
+        let names: Vec<&str> = labels.iter().map(ArcStr::as_str).collect();
+        let id = match writer {
+            Writer::Transaction {
+                id: transaction,
+                snapshot,
+            } => self
+                .store
+                .create_node_versioned(&names, snapshot, transaction),
+            Writer::Replay { .. } => self.store.create_node(&names),
+        };
+        for (key, value) in &properties {
+            match writer {
+                Writer::Transaction {
+                    id: transaction, ..
+                } => self
+                    .store
+                    .set_node_property_versioned(id, key.as_str(), value.clone(), transaction)
+                    .map_err(|error| refused(Entity::Node(id), &error))?,
+                Writer::Replay { .. } => {
+                    self.store
+                        .set_node_property(id, key.as_str(), value.clone());
+                }
+            }
+        }
+        let op = DataOp::CreateNode {
+            id,
+            labels,
+            properties,
+        };
+        Ok((op, Self::done(writer, Before::Absent)))
+    }
+
+    /// Creates an edge from `src` to `dst` with `properties` as `writer`, at
+    /// the id the store gives, as [`create_node`](Self::create_node) does a
+    /// node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplyError::Missing`], creating nothing, when the writer
+    /// does not see an endpoint, and [`ApplyError::Refused`] when the store
+    /// refuses the edge or a value (the values set before it stay).
+    pub fn create_edge(
+        &self,
+        src: NodeId,
+        dst: NodeId,
+        edge_type: ArcStr,
+        properties: Properties,
+        writer: Writer,
+    ) -> Result<(DataOp, Applied), ApplyError> {
+        for end in [src, dst] {
+            if self.node(end, writer).is_none() {
+                return Err(ApplyError::Missing(Entity::Node(end)));
+            }
+        }
+        let id = match writer {
+            Writer::Transaction {
+                id: transaction,
+                snapshot,
+            } => self
+                .store
+                .create_edge_versioned(src, dst, &edge_type, snapshot, transaction)
+                .map_err(|error| refused(Entity::Node(src), &error))?,
+            Writer::Replay { .. } => self.store.create_edge(src, dst, &edge_type),
+        };
+        for (key, value) in &properties {
+            match writer {
+                Writer::Transaction {
+                    id: transaction, ..
+                } => {
+                    self.store.set_edge_property_versioned(
+                        id,
+                        key.as_str(),
+                        value.clone(),
+                        transaction,
+                    );
+                }
+                Writer::Replay { .. } => {
+                    self.store
+                        .set_edge_property(id, key.as_str(), value.clone());
+                }
+            }
+        }
+        let op = DataOp::CreateEdge {
+            id,
+            src,
+            dst,
+            edge_type,
+            properties,
+        };
+        Ok((op, Self::done(writer, Before::Absent)))
     }
 
     /// Node `id` as `writer` sees it.

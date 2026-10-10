@@ -128,12 +128,15 @@ pub use variable_length_expand::{
     DEFAULT_PATH_SEARCH_BUDGET, PathMode as ExecutionPathMode, VariableLengthExpandOperator,
 };
 pub use vector_join::VectorJoinOperator;
-pub use writer::{GraphWriter, WriteCounter, WriteCounters};
+pub use writer::{GraphWriter, Recording, WriteCounter, WriteCounters, WriteTarget};
 
 use std::sync::Arc;
 
+use grafeo_common::change::{Before, DataOp, PendingVersion};
 use grafeo_common::types::{EdgeId, NodeId, TransactionId};
 use thiserror::Error;
+
+use crate::graph::apply::Writer;
 
 use super::DataChunk;
 use super::chunk_state::ChunkState;
@@ -225,6 +228,66 @@ pub trait WriteTracker: Send + Sync {
 
 /// Type alias for a shared write tracker.
 pub type SharedWriteTracker = Arc<dyn WriteTracker>;
+
+/// What a transaction claims before it changes the store, for write-conflict
+/// detection: first writer wins between open transactions, and at commit
+/// against the transactions that committed after it began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteClaim {
+    /// A write of a node: its properties or labels.
+    Node(NodeId),
+    /// The delete of a node: a write, which also conflicts with another
+    /// transaction's claim on the node as an endpoint of an edge it creates.
+    NodeDelete(NodeId),
+    /// A write of an edge: its create, delete or properties.
+    Edge(EdgeId),
+    /// The endpoints of an edge the transaction creates: they conflict only
+    /// with another transaction's delete of either node.
+    Endpoints(NodeId, NodeId),
+}
+
+/// Where a [`GraphWriter`] records what it changes: one transaction's
+/// changes in one graph (an entry of its change set per write), with the
+/// claims and the write freeze that go with them.
+///
+/// The bridge between the writer in this crate and the engine's transaction
+/// layer (the change set and the transaction manager's claims), so the
+/// writer records every write it applies the same way, whichever path made
+/// it: a statement, the direct API, a batch.
+pub trait ChangeRecorder: Send + Sync {
+    /// The transaction writing, as the store's change target takes it.
+    fn writer(&self) -> Writer;
+
+    /// Claims what the next store change writes, before the store changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperatorError::WriteConflict`] when another open
+    /// transaction holds a claim that conflicts with it (first writer wins).
+    fn claim(&self, claim: WriteClaim) -> Result<(), OperatorError>;
+
+    /// Records a write the store applied: `op` with what it replaced
+    /// (`before`) and what it did to the transaction's pending version.
+    /// Called while the write's freeze guard is held, right after the store
+    /// changed, once per change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the change set refuses the entry: a broken
+    /// invariant (the store reported a before-image the op does not have),
+    /// after which the store holds a change no undo knows of; the recorder
+    /// makes sure no commit follows.
+    fn record(
+        &self,
+        op: DataOp,
+        before: Before,
+        version: PendingVersion,
+    ) -> Result<(), OperatorError>;
+
+    /// Marks a store change of the transaction as in progress while the
+    /// guard lives (see [`WriteTracker::write_in_progress`]).
+    fn write_in_progress(&self) -> WriteInProgress<'_>;
+}
 
 /// Result of executing an operator.
 pub type OperatorResult = Result<Option<DataChunk>, OperatorError>;

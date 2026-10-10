@@ -1322,6 +1322,54 @@ describe('text search', () => {
     expect(results.length).toBeGreaterThanOrEqual(2)
     db.close()
   })
+
+  // Notes in Chinese and Russian, with a city and a rank.
+  function notes() {
+    const db = GrafeoDB.create()
+    for (const [owner, city, rank, body] of [
+      ['Alix', 'Berlin', 3, '阿利克斯住在柏林'],
+      ['Gus', 'Amsterdam', 19, '古斯住在阿姆斯特丹'],
+      ['Vincent', 'Berlin', 88, 'Винсент живёт в Берлине'],
+      ['Mia', 'Prague', 19, 'Мия и Жюль в Праге'],
+    ]) {
+      db.createNode(['Note'], { owner, city, rank, body })
+    }
+    return db
+  }
+
+  const noteOwners = (db, results) =>
+    results.map(([id]) => db.getNode(id).get('owner')).sort()
+
+  it('should take BM25, tokenizer and stop word options', async () => {
+    const db = notes()
+    await db.createTextIndex('Note', 'body', {
+      k1: 0.3,
+      b: 0.19,
+      tokenizer: 'cjk_bigram',
+      stopWords: ['住在', 'и'],
+    })
+    expect(noteOwners(db, await db.textSearch('Note', 'body', '柏林', 10))).toEqual(['Alix'])
+    expect(await db.textSearch('Note', 'body', '住在', 10)).toEqual([])
+    expect(noteOwners(db, await db.textSearch('Note', 'body', 'БЕРЛИНЕ', 10))).toEqual(['Vincent'])
+    await expect(db.createTextIndex('Note', 'body', { k1: -0.3 })).rejects.toThrow('GRAFEO-V001')
+    await expect(db.createTextIndex('Note', 'body', { tokenizer: 'jieba' })).rejects.toThrow(
+      "Unknown tokenizer 'jieba'"
+    )
+    db.close()
+  })
+
+  it('should search only the nodes its filters match', async () => {
+    const db = notes()
+    await db.createTextIndex('Note', 'body', { tokenizer: 'cjk_bigram' })
+    expect(noteOwners(db, await db.textSearch('Note', 'body', '住在', 10))).toEqual(['Alix', 'Gus'])
+    expect(
+      noteOwners(db, await db.textSearch('Note', 'body', '住在', 10, { city: 'Berlin' }))
+    ).toEqual(['Alix'])
+    expect(
+      noteOwners(db, await db.textSearch('Note', 'body', '住在', 1, { rank: { $gt: 3 } }))
+    ).toEqual(['Gus'])
+    db.close()
+  })
 })
 
 // ── Hybrid search ────────────────────────────────────────────────────
@@ -1370,6 +1418,63 @@ describe('hybrid search', () => {
       'Doc', 'content', 'emb', 'Rust', 4
     )
     expect(results.length).toBeGreaterThan(0)
+    db.close()
+  })
+
+  // For "canals" the text index ranks Alix, Vincent, Jules; for [1, 0] the
+  // vector index ranks Gus, Mia, Vincent, Jules. Alix (a text match only) and
+  // Gus (a vector match only) live in Amsterdam.
+  async function cityNotes() {
+    const db = GrafeoDB.create()
+    const notes = [
+      ['Alix', 'Amsterdam', 3, 'Alix rides along canals, canals and canals', [0, 1]],
+      ['Gus', 'Amsterdam', 19, 'Gus buys museum tickets', [1, 0]],
+      ['Vincent', 'Berlin', 88, 'Vincent paints canals', [0.8, 0.6]],
+      ['Mia', 'Berlin', 3, 'Mia dances in Berlin clubs', [0.95, 0.31]],
+      ['Jules', 'Berlin', 19, 'Jules swims past the old canals of Berlin at dawn', [0.6, 0.8]],
+    ]
+    // batchCreateNodes stores the embeddings as vectors.
+    const ids = await db.batchCreateNodes('Doc', 'emb', notes.map((note) => note[4]))
+    notes.forEach(([owner, city, rank, text], i) => {
+      db.setNodeProperty(ids[i], 'owner', owner)
+      db.setNodeProperty(ids[i], 'city', city)
+      db.setNodeProperty(ids[i], 'rank', rank)
+      db.setNodeProperty(ids[i], 'text', text)
+    })
+    await db.createTextIndex('Doc', 'text')
+    await db.createVectorIndex('Doc', 'emb', 2, 'cosine')
+    return db
+  }
+
+  const owners = (db, results) => results.map(([id]) => db.getNode(id).get('owner'))
+
+  it('should narrow the text and the vector search with filters', async () => {
+    const db = await cityNotes()
+    const unfiltered = owners(db, await db.hybridSearch('Doc', 'text', 'emb', 'canals', 10, [1, 0]))
+    expect(unfiltered).toContain('Alix')
+    expect(unfiltered).toContain('Gus')
+
+    const berlin = await db.hybridSearch(
+      'Doc', 'text', 'emb', 'canals', 10, [1, 0], null, null, { city: 'Berlin' }
+    )
+    expect(owners(db, berlin).sort()).toEqual(['Jules', 'Mia', 'Vincent'])
+    db.close()
+  })
+
+  it('should return k matching nodes with filters', async () => {
+    const db = await cityNotes()
+    const topTwo = await db.hybridSearch('Doc', 'text', 'emb', 'canals', 2, [1, 0])
+    expect(owners(db, topTwo)).toEqual(['Vincent', 'Jules'])
+
+    const amsterdam = await db.hybridSearch(
+      'Doc', 'text', 'emb', 'canals', 2, [1, 0], null, null, { city: 'Amsterdam' }
+    )
+    expect(owners(db, amsterdam)).toEqual(['Alix', 'Gus'])
+
+    const ranked = await db.hybridSearch(
+      'Doc', 'text', 'emb', 'canals', 10, [1, 0], 'weighted', null, { rank: { $gt: 3 } }
+    )
+    expect(owners(db, ranked)).toEqual(['Vincent', 'Gus', 'Jules'])
     db.close()
   })
 })

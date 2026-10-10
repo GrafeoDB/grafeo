@@ -22,12 +22,14 @@ use grafeo_common::storage::catalog_record::{
     CatalogRecord, ConstraintRecord, DistanceMetricRecord, EdgeTypeRecord, EndpointPair,
     GraphTypeRecord, IndexKindRecord, IndexNameKindRecord, IndexNameRecord, IndexRecord,
     MAX_CATALOG_RECORD_PAYLOAD, NamedConstraintKindRecord, NodeTypeRecord, ProcedureRecord,
-    PropertyRecord, PropertyTypeRecord, QuantizationRecord, TypeConstraintRecord,
+    PropertyRecord, PropertyTypeRecord, QuantizationRecord, TextTokenizerRecord,
+    TypeConstraintRecord,
 };
 use grafeo_common::utils::error::{Error, Result};
+use grafeo_core::index::text::{TextIndexOptions, TokenizerKind};
 use grafeo_core::index::vector::{DistanceMetric, QuantizationType};
 
-use super::catalog_section::{GraphIndexes, IndexName, VectorIndexDefinition};
+use super::catalog_section::{GraphIndexes, IndexName, TextIndexDefinition, VectorIndexDefinition};
 use crate::catalog::{
     ConstraintDefinition, ConstraintType, EdgeTypeDefinition, GraphTypeDefinition, IndexType,
     NodeTypeDefinition, ProcedureDefinition, PropertyDataType, TypeConstraint, TypedProperty,
@@ -496,11 +498,8 @@ pub(crate) fn index_records(graphs: &[GraphIndexes]) -> Result<Vec<IndexRecord>>
         for def in &graph.vector {
             records.push(record(vector_index_record(def)?));
         }
-        for (label, property) in &graph.text {
-            records.push(record(IndexKindRecord::Text {
-                label: label.clone(),
-                property: property.clone(),
-            }));
+        for def in &graph.text {
+            records.push(record(text_index_record(def)?));
         }
     }
     Ok(records)
@@ -554,6 +553,73 @@ fn vector_index_record(def: &VectorIndexDefinition) -> Result<IndexKindRecord> {
         m: size("m", def.m)?,
         ef_construction: size("ef_construction", def.ef_construction)?,
         quantization,
+    })
+}
+
+/// The index kind record of a text index: what it indexes and its options.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] naming the index when it tokenizes in a
+/// way this release cannot store.
+pub(crate) fn text_index_record(def: &TextIndexDefinition) -> Result<IndexKindRecord> {
+    let options = &def.options;
+    let tokenizer = match options.tokenizer() {
+        TokenizerKind::Simple => TextTokenizerRecord::Simple,
+        TokenizerKind::Standard => TextTokenizerRecord::Standard,
+        TokenizerKind::CjkBigram => TextTokenizerRecord::CjkBigram,
+        other => {
+            return Err(Error::Serialization(format!(
+                "the text index on :{}({}) tokenizes as {other}, which this release cannot                  store",
+                def.label, def.property
+            )));
+        }
+    };
+    Ok(IndexKindRecord::Text {
+        label: def.label.clone(),
+        property: def.property.clone(),
+        k1: options.k1(),
+        b: options.b(),
+        tokenizer,
+        stop_words: options.stop_words().map(<[String]>::to_vec),
+    })
+}
+
+/// The definition of the text index a record describes.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] naming the index when its BM25
+/// parameters or stop words are none a text index takes (see
+/// [`TextIndexOptions::check`]).
+fn text_index_definition(
+    label: String,
+    property: String,
+    k1: f64,
+    b: f64,
+    tokenizer: TextTokenizerRecord,
+    stop_words: Option<Vec<String>>,
+) -> Result<TextIndexDefinition> {
+    let mut options = TextIndexOptions::new()
+        .with_k1(k1)
+        .with_b(b)
+        .with_tokenizer(match tokenizer {
+            TextTokenizerRecord::Simple => TokenizerKind::Simple,
+            TextTokenizerRecord::Standard => TokenizerKind::Standard,
+            TextTokenizerRecord::CjkBigram => TokenizerKind::CjkBigram,
+        });
+    if let Some(words) = stop_words {
+        options = options.with_stop_words(words);
+    }
+    options.check().map_err(|error| {
+        Error::Serialization(format!(
+            "the text index on :{label}({property}) has options no text index takes: {error}"
+        ))
+    })?;
+    Ok(TextIndexDefinition {
+        label,
+        property,
+        options,
     })
 }
 
@@ -627,7 +693,16 @@ pub(crate) fn graph_indexes(records: Vec<IndexRecord>) -> Result<Vec<GraphIndexe
                 };
                 graph.vector.push(definition);
             }
-            IndexKindRecord::Text { label, property } => graph.text.push((label, property)),
+            IndexKindRecord::Text {
+                label,
+                property,
+                k1,
+                b,
+                tokenizer,
+                stop_words,
+            } => graph.text.push(text_index_definition(
+                label, property, k1, b, tokenizer, stop_words,
+            )?),
         }
     }
     if let Some(at) = graphs.iter().position(|graph| graph.graph.is_none()) {
@@ -664,9 +739,9 @@ pub(crate) fn record_name(record: &CatalogRecord) -> String {
                 IndexKindRecord::Vector {
                     label, property, ..
                 } => format!("the vector index on :{label}({property}) of {graph}"),
-                IndexKindRecord::Text { label, property } => {
-                    format!("the text index on :{label}({property}) of {graph}")
-                }
+                IndexKindRecord::Text {
+                    label, property, ..
+                } => format!("the text index on :{label}({property}) of {graph}"),
             }
         }
         CatalogRecord::IndexName(record) => format!(
@@ -1056,8 +1131,17 @@ mod tests {
         }
     }
 
+    fn text(label: &str, options: TextIndexOptions) -> TextIndexDefinition {
+        TextIndexDefinition {
+            label: label.to_string(),
+            property: "notes".to_string(),
+            options,
+        }
+    }
+
     /// The indexes of every graph become index records, the default graph's
-    /// first, and are grouped by graph again.
+    /// first, and are grouped by graph again, every option of a text index
+    /// with it.
     #[test]
     fn index_definitions_round_trip_through_records() {
         let graphs = vec![
@@ -1068,7 +1152,14 @@ mod tests {
                     vector("Doc", None),
                     vector("Note", Some(QuantizationType::Scalar)),
                 ],
-                text: vec![("Doc".to_string(), "body".to_string())],
+                text: vec![text(
+                    "Doc",
+                    TextIndexOptions::new()
+                        .with_k1(1.9)
+                        .with_b(0.3)
+                        .with_tokenizer(TokenizerKind::CjkBigram)
+                        .with_stop_words(["住在", "und"]),
+                )],
             },
             GraphIndexes {
                 graph: Some("model".to_string()),
@@ -1086,7 +1177,7 @@ mod tests {
                 graph: Some("trips".to_string()),
                 property: names(&["km"]),
                 vector: Vec::new(),
-                text: vec![("Stop".to_string(), "notes".to_string())],
+                text: vec![text("Stop", TextIndexOptions::new())],
             },
         ];
         let records = index_records(&graphs).unwrap();
@@ -1115,8 +1206,48 @@ mod tests {
             "{:?}",
             records[6]
         );
+        assert_eq!(
+            records[4].index,
+            IndexKindRecord::Text {
+                label: "Doc".to_string(),
+                property: "notes".to_string(),
+                k1: 1.9,
+                b: 0.3,
+                tokenizer: TextTokenizerRecord::CjkBigram,
+                stop_words: Some(names(&["und", "住在"])),
+            }
+        );
         assert_eq!(graph_indexes(records).unwrap(), graphs);
         assert_eq!(graph_indexes(Vec::new()).unwrap(), Vec::new());
+    }
+
+    /// A text index record whose options no text index takes does not
+    /// load: a damaged catalog, not a silent change of the scores.
+    #[test]
+    fn a_text_index_record_with_options_out_of_range_is_refused() {
+        for (k1, b) in [
+            (-0.3, 0.75),
+            (f64::NAN, 0.75),
+            (1.2, 1.88),
+            (1.2, f64::INFINITY),
+        ] {
+            let record = IndexRecord {
+                graph: None,
+                index: IndexKindRecord::Text {
+                    label: "Doc".to_string(),
+                    property: "body".to_string(),
+                    k1,
+                    b,
+                    tokenizer: TextTokenizerRecord::Simple,
+                    stop_words: None,
+                },
+            };
+            let error = graph_indexes(vec![record]).unwrap_err();
+            assert!(
+                matches!(&error, Error::Serialization(message) if message.contains(":Doc(body)")),
+                "k1 {k1}, b {b}: {error}"
+            );
+        }
     }
 
     /// The default graph's indexes come first, whatever the order of the

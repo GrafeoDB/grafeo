@@ -136,7 +136,7 @@ fn every_search_call_refuses_a_query_vector_the_index_cannot_measure() {
         );
         #[cfg(feature = "hybrid-search")]
         assert_refused(
-            db.hybrid_search("Doc", "text", "emb", "graph", Some(&query), 2, None),
+            db.hybrid_search("Doc", "text", "emb", "graph", Some(&query), 2, None, None),
             message,
             "hybrid_search",
         );

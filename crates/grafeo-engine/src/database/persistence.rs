@@ -2144,7 +2144,7 @@ mod tests {
 
         // Text search should work on the restored database
         let results = db2
-            .text_search("Article", "body", "graph database", 10)
+            .text_search("Article", "body", "graph database", 10, None)
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, n1);

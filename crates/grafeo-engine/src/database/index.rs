@@ -188,18 +188,19 @@ pub(crate) fn vector_index_from_data(
 }
 
 /// A text index of `property` on the nodes of `graph` that have `label`,
-/// built from their text values, for `create_text_index` and `CREATE INDEX
-/// ... USING TEXT`.
+/// with `options`, built from their text values, for `create_text_index`
+/// and `CREATE INDEX ... USING TEXT`.
 #[cfg(feature = "text-index")]
 pub(crate) fn text_index_from_data(
     graph: &dyn GraphStoreSearch,
     label: &str,
     property: &str,
+    options: &grafeo_core::index::text::TextIndexOptions,
 ) -> grafeo_core::index::text::InvertedIndex {
     use grafeo_common::types::{PropertyKey, Value};
-    use grafeo_core::index::text::{BM25Config, InvertedIndex};
+    use grafeo_core::index::text::InvertedIndex;
 
-    let mut index = InvertedIndex::new(BM25Config::default());
+    let mut index = InvertedIndex::with_options(options.clone());
     let key = PropertyKey::new(property);
     for node_id in graph.nodes_by_label(label) {
         if let Some(Value::String(text)) = graph.get_node_property(node_id, &key) {
@@ -243,6 +244,26 @@ pub(crate) fn vector_index_record(
         .into_iter()
         .next()
         .ok_or_else(|| Error::Internal("a vector index made no catalog record".to_string()))
+}
+
+/// The catalog record of a text index of `property` on the nodes with
+/// `label`, with `options`.
+///
+/// # Errors
+///
+/// Options a catalog record cannot hold (see
+/// [`text_index_record`](super::catalog_records::text_index_record)).
+#[cfg(feature = "text-index")]
+pub(crate) fn text_index_kind(
+    label: &str,
+    property: &str,
+    options: &grafeo_core::index::text::TextIndexOptions,
+) -> Result<IndexKindRecord> {
+    super::catalog_records::text_index_record(&super::catalog_section::TextIndexDefinition {
+        label: label.to_string(),
+        property: property.to_string(),
+        options: options.clone(),
+    })
 }
 
 /// The put of the index of `kind` in the graph with storage key `graph`.
@@ -709,7 +730,10 @@ impl super::GrafeoDB {
     // TEXT INDEX API
     // =========================================================================
 
-    /// Creates a BM25 text index on a node property for full-text search.
+    /// Creates a BM25 text index on a node property for full-text search,
+    /// with the default options: BM25 with k1 1.2 and b 0.75, the `simple`
+    /// tokenizer and its English stop words (see
+    /// [`create_text_index_with`](Self::create_text_index_with)).
     ///
     /// Indexes all existing nodes with the given label and property.
     /// The index stays in sync automatically as nodes are created, updated,
@@ -727,22 +751,72 @@ impl super::GrafeoDB {
     /// complete.
     #[cfg(feature = "text-index")]
     pub fn create_text_index(&self, label: &str, property: &str) -> Result<()> {
+        self.create_text_index_with(
+            label,
+            property,
+            grafeo_core::index::text::TextIndexOptions::new(),
+        )
+    }
+
+    /// Creates a BM25 text index on a node property with `options`: its
+    /// BM25 parameters (k1, b), its tokenizer and its stop words, as
+    /// [`create_text_index`](Self::create_text_index) does otherwise. The
+    /// database keeps the options with the index: a reopen, a crash
+    /// recovery and [`rebuild_text_index`](Self::rebuild_text_index) build
+    /// it with them.
+    ///
+    /// ```no_run
+    /// # use grafeo_engine::GrafeoDB;
+    /// use grafeo_engine::{TextIndexOptions, TokenizerKind};
+    ///
+    /// # let db = GrafeoDB::new_in_memory();
+    /// db.create_text_index_with(
+    ///     "Article",
+    ///     "body",
+    ///     TextIndexOptions::new()
+    ///         .with_k1(1.5)
+    ///         .with_b(0.3)
+    ///         .with_tokenizer(TokenizerKind::CjkBigram),
+    /// )?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An invalid-value error (`GRAFEO-V001`) when k1 is not a finite number
+    /// of at least 0, b not a number from 0 to 1, or the stop words hold more
+    /// than [`MAX_STOP_WORD_BYTES`](grafeo_core::index::text::MAX_STOP_WORD_BYTES);
+    /// and the errors of [`create_text_index`](Self::create_text_index).
+    #[cfg(feature = "text-index")]
+    pub fn create_text_index_with(
+        &self,
+        label: &str,
+        property: &str,
+        options: grafeo_core::index::text::TextIndexOptions,
+    ) -> Result<()> {
+        options.check()?;
         self.check_index_change()?;
         let (graph, _) = self.index_target(None)?;
-        let index = text_index_from_data(&*graph, label, property);
+        let index = text_index_from_data(&*graph, label, property, &options);
+        let kind = text_index_kind(label, property, &options)?;
         let held = self.hold_for_standalone(false)?;
         let mut change = StandaloneChange::new();
-        change.push_built(
-            put_index(
-                None,
-                IndexKindRecord::Text {
-                    label: label.to_string(),
-                    property: property.to_string(),
-                },
-            ),
-            BuiltIndex::Text(index),
-        );
+        change.push_built(put_index(None, kind), BuiltIndex::Text(index));
         self.commit_standalone(change, &held)
+    }
+
+    /// The options of the text index on `label` and `property` of the
+    /// default graph, or `None` when there is no such index.
+    #[cfg(feature = "text-index")]
+    #[must_use]
+    pub fn text_index_options(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<grafeo_core::index::text::TextIndexOptions> {
+        self.lpg_store()
+            .get_text_index(label, property)
+            .map(|index| index.read().options().clone())
     }
 
     /// Builds the text index a load found defined (see
@@ -760,10 +834,11 @@ impl super::GrafeoDB {
         graph: Option<&str>,
         label: &str,
         property: &str,
+        options: &grafeo_core::index::text::TextIndexOptions,
     ) -> Result<()> {
         self.check_index_change()?;
         let (read, _) = self.index_target(graph)?;
-        let index = text_index_from_data(&*read, label, property);
+        let index = text_index_from_data(&*read, label, property, options);
         let _held = self.hold_for_standalone(false)?;
         self.install_target(graph)?.add_text_index(
             label,
@@ -801,7 +876,8 @@ impl super::GrafeoDB {
     }
 
     /// Rebuilds a text index by re-scanning all matching nodes: the new index
-    /// replaces the old one once it is built.
+    /// replaces the old one once it is built, with the options of the old
+    /// one (the default options when there is none).
     ///
     /// Use after bulk property updates to keep the index current.
     ///
@@ -810,6 +886,7 @@ impl super::GrafeoDB {
     /// The errors of [`create_text_index`](Self::create_text_index).
     #[cfg(feature = "text-index")]
     pub fn rebuild_text_index(&self, label: &str, property: &str) -> Result<()> {
-        self.create_text_index(label, property)
+        let options = self.text_index_options(label, property).unwrap_or_default();
+        self.create_text_index_with(label, property, options)
     }
 }

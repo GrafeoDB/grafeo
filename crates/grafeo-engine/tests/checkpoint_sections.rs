@@ -236,7 +236,7 @@ fn assert_every_kind_of_section(db: &GrafeoDB, what: &str) {
         "{what}: vector search"
     );
     let matches = db
-        .text_search("Person", "bio", "jazz", 3)
+        .text_search("Person", "bio", "jazz", 3, None)
         .unwrap_or_else(|error| panic!("{what}: text search: {error}"));
     assert_eq!(
         ids(matches.into_iter().map(|(node, _)| node).collect()),

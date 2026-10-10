@@ -159,7 +159,7 @@ fn assert_indexed(db: &GrafeoDB) {
         "the vector index keeps its configuration"
     );
     let matches = db
-        .text_search("Document", "content", "canals", 3)
+        .text_search("Document", "content", "canals", 3, None)
         .unwrap_or_else(|error| panic!("the text index of the documents: {error}"));
     assert_eq!(
         matches

@@ -75,7 +75,7 @@ fn a_vector_search_call_without_a_vector_index_is_invalid_input() {
 fn a_text_search_without_a_text_index_is_invalid_input() {
     let db = papers();
     let error = db
-        .text_search("Paper", "title", "Amsterdam", 3)
+        .text_search("Paper", "title", "Amsterdam", 3, None)
         .expect_err("text_search");
     assert_user_mistake(
         &error,

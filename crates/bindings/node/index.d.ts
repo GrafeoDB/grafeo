@@ -181,9 +181,12 @@ export declare class GrafeoDB {
    *
    * The index is automatically kept in sync as nodes are created,
    * updated, or deleted. You do not need to call rebuildTextIndex()
-   * after normal write operations.
+   * after normal write operations. `options` sets the BM25 parameters,
+   * the tokenizer and the stop words (see `TextIndexOptions`); the
+   * database keeps them with the index. Throws for an unknown tokenizer
+   * and for k1 or b out of range.
    */
-  createTextIndex(label: string, property: string): Promise<void>
+  createTextIndex(label: string, property: string, options?: TextIndexOptions | undefined | null): Promise<void>
   /** Drop a text index for the given label and property. */
   dropTextIndex(label: string, property: string): Promise<boolean>
   /**
@@ -199,8 +202,12 @@ export declare class GrafeoDB {
    * Returns an array of [nodeId, score] pairs sorted by descending
    * relevance (higher score = more relevant). BM25 scores are
    * unbounded positive floats.
+   *
+   * `filters` takes property filters as vectorSearch does (equality, or
+   * operators such as `{rank: {$gt: 19}}`): only matching nodes are
+   * searched, so up to k of them come back, scored as without filters.
    */
-  textSearch(label: string, property: string, query: string, k: number): Promise<Array<Array<number>>>
+  textSearch(label: string, property: string, query: string, k: number, filters?: Record<string, any> | undefined | null): Promise<Array<Array<number>>>
   /**
    * Perform hybrid search combining text (BM25) and vector similarity.
    *
@@ -211,8 +218,13 @@ export declare class GrafeoDB {
    * Returns an array of [nodeId, score] pairs sorted by fused score
    * descending (higher = more relevant). These are fusion scores,
    * NOT distances.
+   *
+   * `filters` takes property filters as vectorSearch does (equality, or
+   * operators such as `{rank: {$gt: 19}}`): both the text and the vector
+   * search keep only matching nodes before fusion, so up to k matching
+   * nodes come back.
    */
-  hybridSearch(label: string, textProperty: string, vectorProperty: string, queryText: string, k: number, queryVector?: Array<number> | undefined | null, fusion?: string | undefined | null, weights?: Array<number> | undefined | null): Promise<Array<Array<number>>>
+  hybridSearch(label: string, textProperty: string, vectorProperty: string, queryText: string, k: number, queryVector?: Array<number> | undefined | null, fusion?: string | undefined | null, weights?: Array<number> | undefined | null, filters?: Record<string, any> | undefined | null): Promise<Array<Array<number>>>
   /**
    * Compacts the database: writes a checkpoint of a persistent database
    * and drops the old versions no open transaction can see any more.
@@ -492,6 +504,26 @@ export interface JsonlImportOptions {
 
 /** Returns the active SIMD instruction set for vector operations. */
 export declare function simdSupport(): string
+
+/** Options for `createTextIndex`: each the default when absent. */
+export interface TextIndexOptions {
+  /** BM25 term frequency saturation, a number of at least 0 (default 1.2). */
+  k1?: number
+  /** BM25 length normalization, from 0 to 1 (default 0.75). */
+  b?: number
+  /**
+   * `"simple"` (default: terms of at least 2 bytes without common English
+   * words), `"standard"` (every word, for languages that separate words)
+   * or `"cjk_bigram"` (also pairs of Chinese, Japanese and Korean
+   * characters).
+   */
+  tokenizer?: string
+  /**
+   * Words to leave out of documents and queries, in place of the
+   * tokenizer's own (an empty list leaves none out).
+   */
+  stopWords?: Array<string>
+}
 
 /** Options for `upsertEdges`. */
 export interface UpsertEdgesOptions {

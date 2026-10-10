@@ -698,10 +698,19 @@ for node_id, distance in results:
 BM25 full-text search. Requires the `text-index` feature and a text index created with `create_text_index()`.
 
 ```python
-def text_search(self, label: str, property: str, query: str, k: int) -> List[Tuple[int, float]]
+def text_search(
+    self,
+    label: str,
+    property: str,
+    query: str,
+    k: int,
+    filters: Optional[Dict[str, Any]] = None
+) -> List[Tuple[int, float]]
 ```
 
 Returns a list of `(node_id, score)` tuples sorted by descending relevance (higher score = more relevant). BM25 scores are unbounded positive floats; compare them only within a single query's results.
+
+`filters` takes the property filters of `vector_search()`: equality (`{"city": "Berlin"}`) and operators (`{"rank": {"$gt": 19}}`). Only matching nodes are searched, so up to `k` of them come back, scored as without the filters.
 
 ```python
 db.create_text_index("Article", "title")
@@ -725,11 +734,14 @@ def hybrid_search(
     query_vector: Optional[List[float]] = None,
     fusion: Optional[str] = None,          # "rrf" (default) or "weighted"
     weights: Optional[List[float]] = None, # [text_weight, vector_weight]
-    rrf_k: Optional[int] = None
+    rrf_k: Optional[int] = None,
+    filters: Optional[Dict[str, Any]] = None
 ) -> List[Tuple[int, float]]
 ```
 
 Returns a list of `(node_id, score)` tuples sorted by fused score **descending** (higher = more relevant). These are fusion scores, **not** distances. With RRF (default), scores are `sum(1/(k+rank))` across sources. With weighted fusion, scores are normalized to `[0, 1]` and combined with explicit weights.
+
+`filters` takes the property filters of `vector_search()`: equality (`{"city": "Berlin"}`) and operators (`{"rank": {"$gt": 19}}`). Both the text and the vector search keep only the matching nodes before fusion, so up to `k` matching nodes come back; text scores stay those of the whole index.
 
 !!! warning "Score convention differs from vector_search"
     `hybrid_search()` returns fusion scores where higher = better.
@@ -741,6 +753,14 @@ results = db.hybrid_search(
     "Article", "title", "embedding",
     "graph databases", k=10,
     query_vector=[1.0, 0.0, 0.0]
+)
+
+# Only articles from Berlin, from both searches
+results = db.hybrid_search(
+    "Article", "title", "embedding",
+    "graph databases", k=10,
+    query_vector=[1.0, 0.0, 0.0],
+    filters={"city": "Berlin"}
 )
 ```
 
@@ -829,7 +849,21 @@ Requires the `text-index` feature.
 Create a BM25 text index on a node property. The index is automatically kept in sync as nodes are created, updated, or deleted. You do not need to call `rebuild_text_index()` after normal write operations.
 
 ```python
-def create_text_index(self, label: str, property: str) -> None
+def create_text_index(
+    self,
+    label: str,
+    property: str,
+    k1: Optional[float] = None,             # BM25 term frequency saturation, >= 0 (default 1.2)
+    b: Optional[float] = None,              # BM25 length normalization, 0 to 1 (default 0.75)
+    tokenizer: Optional[str] = None,        # "simple" (default), "standard" or "cjk_bigram"
+    stop_words: Optional[List[str]] = None  # in place of the tokenizer's own
+) -> None
+```
+
+The database keeps the options with the index: reopening it, recovering after a crash and `rebuild_text_index()` use them again. `simple` keeps words of at least 2 bytes without common English words, `standard` keeps every word (for Russian, Greek and other languages that separate words), and `cjk_bigram` also splits Chinese, Japanese and Korean text into overlapping pairs of characters. An unknown tokenizer, or `k1` or `b` out of range, raises `grafeo.GrafeoError` (`GRAFEO-V001`).
+
+```python
+db.create_text_index("Note", "body", tokenizer="cjk_bigram", k1=1.5, b=0.3)
 ```
 
 ### drop_text_index()

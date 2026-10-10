@@ -440,7 +440,9 @@ mod text {
     fn test_text_search_basic() {
         let db = setup_text_db();
 
-        let results = db.text_search("Article", "title", "Rust", 10).unwrap();
+        let results = db
+            .text_search("Article", "title", "Rust", 10, None)
+            .unwrap();
 
         // Should match articles with "Rust"
         assert!(results.len() >= 2, "expected at least 2 Rust articles");
@@ -454,7 +456,7 @@ mod text {
             .unwrap();
 
         // No text index: should error
-        let result = db.text_search("Article", "title", "test", 10);
+        let result = db.text_search("Article", "title", "test", 10, None);
         assert!(result.is_err(), "text search without index should error");
     }
 
@@ -463,7 +465,7 @@ mod text {
         let db = setup_text_db();
 
         let results = db
-            .text_search("Article", "title", "nonexistentxyz", 10)
+            .text_search("Article", "title", "nonexistentxyz", 10, None)
             .unwrap();
 
         assert!(results.is_empty(), "no matches expected for nonsense query");
@@ -478,7 +480,9 @@ mod text {
         db.set_node_property(n, "title", Value::String("Rust web framework".into()))
             .unwrap();
 
-        let results = db.text_search("Article", "title", "Rust", 10).unwrap();
+        let results = db
+            .text_search("Article", "title", "Rust", 10, None)
+            .unwrap();
 
         // Should now include the new article
         assert!(
@@ -492,21 +496,25 @@ mod text {
         let db = setup_text_db();
 
         // Search works
-        let r1 = db.text_search("Article", "title", "Rust", 10).unwrap();
+        let r1 = db
+            .text_search("Article", "title", "Rust", 10, None)
+            .unwrap();
         assert!(!r1.is_empty(), "r1 is empty");
 
         // Drop index
         assert!(db.drop_text_index("Article", "title").unwrap());
 
         // Search should fail
-        let err = db.text_search("Article", "title", "Rust", 10);
+        let err = db.text_search("Article", "title", "Rust", 10, None);
         assert!(err.is_err());
 
         // Rebuild index
         db.rebuild_text_index("Article", "title").unwrap();
 
         // Search works again
-        let r2 = db.text_search("Article", "title", "Rust", 10).unwrap();
+        let r2 = db
+            .text_search("Article", "title", "Rust", 10, None)
+            .unwrap();
         assert!(!r2.is_empty(), "r2 is empty");
     }
 }
@@ -589,6 +597,7 @@ mod hybrid {
                 Some(&[1.0, 0.0, 0.0]),
                 4,
                 None,
+                None,
             )
             .expect("hybrid search");
 
@@ -616,7 +625,7 @@ mod hybrid {
 
         // No vector query: only text search contributes
         let results = db
-            .hybrid_search("Doc", "content", "emb", "Rust", None, 4, None)
+            .hybrid_search("Doc", "content", "emb", "Rust", None, 4, None, None)
             .expect("text-only hybrid");
 
         assert!(
@@ -638,6 +647,7 @@ mod hybrid {
                 Some(&[0.0, 0.0, 0.0]),
                 4,
                 None,
+                None,
             )
             .expect("hybrid no matches");
 
@@ -658,6 +668,7 @@ mod hybrid {
                 "Rust graph",
                 Some(&[1.0, 0.0, 0.0]),
                 4,
+                None,
                 None,
             )
             .expect("hybrid search");
@@ -716,6 +727,7 @@ mod hybrid {
                 Some(&[1.0, 0.0, 0.0]),
                 4,
                 None,
+                None,
             )
             .expect("hybrid without text index should not error");
 
@@ -749,6 +761,7 @@ mod hybrid {
                 Some(&[1.0, 0.0, 0.0]),
                 4,
                 None,
+                None,
             )
             .expect("hybrid without vector index should not error");
 
@@ -778,6 +791,7 @@ mod hybrid {
                 Some(&[1.0, 0.0, 0.0]),
                 4,
                 None,
+                None,
             )
             .expect("hybrid without any index should not error");
 
@@ -806,6 +820,7 @@ mod hybrid {
                 Some(&[1.0, 0.0, 0.0]),
                 4,
                 Some(fusion),
+                None,
             )
             .expect("weighted hybrid search");
 
@@ -918,7 +933,7 @@ mod concurrent_text {
 
         let reader = std::thread::spawn(move || {
             for _ in 0..10 {
-                let results = db_read.text_search("Doc", "content", "database", 5);
+                let results = db_read.text_search("Doc", "content", "database", 5, None);
                 assert!(results.is_ok(), "concurrent text read should not error");
             }
         });

@@ -6,7 +6,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 File format release: every database is now a single file in a new format, and 0.5.x databases migrate to it on their first read-write open. Encryption at rest now encrypts, writes after `close()` fail instead of being lost, and read-only opens recover the last commits after a crash. Plus graph algorithms on projections and named graphs, algorithm results in a fixed order, corrected k-core and Louvain, and faster GQL statements and multi-label patterns.
 
-> **Breaking: new file format.** The first read-write open migrates a 0.5.x database (a `.grafeo` file or a WAL directory) and keeps the old files, unchanged, under `.pre-0.6` names. 0.5.x cannot open the migrated database, so stop every 0.5.x process that uses it before 0.6 opens it, and see [Upgrading from 0.5](https://grafeo.dev/user-guide/persistence/persistent/#upgrading-from-05). Also breaking: a new database is always a single file, `save()` fails on an existing path, opening a directory that is not a 0.5.x database fails, the minimum Rust version is 1.99.0, property values nest at most 128 levels deep, several Rust calls return `Result`, Python `kcore()` returns a dict, Go `DropVectorIndex` an error, Rust option and result types, `Config` among them, cannot be built as struct literals, and the Block-STM metrics are gone (see Changed).
+> **Breaking: new file format.** The first read-write open migrates a 0.5.x database (a `.grafeo` file or a WAL directory) and keeps the old files, unchanged, under `.pre-0.6` names. 0.5.x cannot open the migrated database, so stop every 0.5.x process that uses it before 0.6 opens it, and see [Upgrading from 0.5](https://grafeo.dev/user-guide/persistence/persistent/#upgrading-from-05). Also breaking: a new database is always a single file, `save()` fails on an existing path, opening a directory that is not a 0.5.x database fails, the minimum Rust version is 1.99.0, property values nest at most 128 levels deep, several Rust calls return `Result`, Python `kcore()` returns a dict, Go `DropVectorIndex` an error, Rust `hybrid_search` and `text_search` take a `filters` argument, the Arrow export keeps lists, maps and durations typed, the backup manifest is JSON, Rust option and result types, `Config` among them, cannot be built as struct literals, and the Block-STM metrics are gone (see Changed).
 
 ### Added
 
@@ -25,6 +25,8 @@ File format release: every database is now a single file in a new format, and 0.
 - **The `grafeo` crate exports what `Config` takes**: `StorageFormat`, `CdcRetentionConfig` (with `cdc`), and, with the new `encryption` feature, `EncryptionConfig`, `KeyChain` and `PasswordKeyProvider`, which derives the master key from a passphrase.
 - **Python 3.15**: the Python package is tested on Python 3.15 and lists it as supported; the existing wheels (one per platform, for Python 3.12 and newer) install on it unchanged.
 - **GQL `GROUP BY` on an alias of the `RETURN` list, and `RETURN` items computed from the grouping keys**: `RETURN c.id AS cityId, c.name, count(*) AS population GROUP BY cityId, c.name` (Microsoft Fabric's form) works, also after `CALL ... YIELD`, and a `RETURN` item may be a key, an expression over the keys (`RETURN c.name AS city, upper(c.name), count(*) * 100 + c.id GROUP BY c`) or a constant. These failed with "Undefined variable".
+- **Filters for hybrid and text search** ([#397](https://github.com/GrafeoDB/grafeo/issues/397)): `hybrid_search` and `text_search` take the property filters of `vector_search` (equality, and operators such as `$gt` and `$in`) in Rust, Python (`filters=`), Node.js (`filters`) and WASM (`{ filters }`). The text and the vector search keep only the matching nodes before a hybrid search fuses them, so a scoped search (per tenant, per user) returns up to `k` results, where filtering afterwards returned fewer; text scores stay those of the whole index.
+- **Text index options: BM25 parameters, tokenizers and stop words** ([#351](https://github.com/GrafeoDB/grafeo/issues/351)): a text index takes `k1` and `b`, a tokenizer (`simple`, the default as before; `standard`, every word, for languages such as Russian or Greek; `cjk_bigram`, pairs of characters for Chinese, Japanese and Korean) and stop words in place of the tokenizer's own. Use Python `create_text_index(..., tokenizer=, k1=, b=, stop_words=)`, a Node.js or WASM options object, Rust `create_text_index_with` and `TextIndexOptions`, or GQL `CREATE INDEX ... USING TEXT {k1: 1.5, tokenizer: 'cjk_bigram'}`. The database keeps the options with the index, through reopens, crashes, `save()` and `rebuild_text_index`.
 
 ### Changed
 
@@ -76,6 +78,7 @@ File format release: every database is now a single file in a new format, and 0.
 - **Rust: `QueryResult::gql_status` is `00001` (omitted result) for a statement without a result**: a write without `RETURN`, `FINISH`, and schema and transaction commands. It is `00000` for a statement with a result, also an empty one.
 - **GQL `GROUP BY` errors say why**: grouping by an aggregate alias, by an alias inside an expression, or by a name that is both an incoming variable and the alias of another item fails with a reason, as does a `RETURN` item that reads a variable that is not a grouping key; these failed with "Undefined variable".
 - **SQL/PGQ: an aggregate in `COLUMNS` is an error**: it returned null on every row.
+- **Breaking (Rust): `hybrid_search` and `text_search` take a `filters` argument** ([#397](https://github.com/GrafeoDB/grafeo/issues/397)): pass `None` to search as before. Python, Node.js and WASM take it as an optional argument.
 
 ### Fixed
 
@@ -257,6 +260,7 @@ File format release: every database is now a single file in a new format, and 0.
 - **C, Go and Dart: `grafeo_open_single_file`, `OpenSingleFile` and `GrafeoDB.openSingleFile`**, removed in 0.7.0: they do the same as `grafeo_open`, `Open` and `GrafeoDB.open`, and compilers and analyzers warn on their use.
 - **Rust: `Config::adaptive`, `Config::with_adaptive`, `Config::without_adaptive` and `AdaptiveConfig`**, removed in 0.7.0: adaptive execution was never wired in, and these settings have no effect.
 - **The `compact-store` feature** (the Rust crates and the bindings), removed in 0.7.0: it enables nothing, as every build that opens files reads a database compacted by 0.5.x, the `grafeo` crate and the command line tool included. The bindings' default profiles no longer list it, and neither does Python's `grafeo.features()`.
+- **Rust (`grafeo-core`): `InvertedIndex::with_tokenizer`**, removed in 0.7.0: a database cannot keep a custom tokenizer. Use `InvertedIndex::with_options` with a `TokenizerKind`.
 
 ### Internal
 

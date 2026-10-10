@@ -401,8 +401,19 @@ async mmrSearch(
 Create a BM25 text index on a node property for full-text search. The index is automatically kept in sync as nodes are created, updated, or deleted. You do not need to call `rebuildTextIndex()` after normal write operations.
 
 ```typescript
-async createTextIndex(label: string, property: string): Promise<void>
+async createTextIndex(
+  label: string,
+  property: string,
+  options?: {
+    k1?: number,          // BM25 term frequency saturation, >= 0 (default 1.2)
+    b?: number,           // BM25 length normalization, 0 to 1 (default 0.75)
+    tokenizer?: string,   // 'simple' (default), 'standard' or 'cjk_bigram'
+    stopWords?: string[]  // in place of the tokenizer's own
+  }
+): Promise<void>
 ```
+
+The database keeps the options with the index: reopening it, recovering after a crash and `rebuildTextIndex()` use them again. An unknown tokenizer, or `k1` or `b` out of range, rejects with `GRAFEO-V001`.
 
 ### dropTextIndex()
 
@@ -429,9 +440,12 @@ async textSearch(
   label: string,
   property: string,
   query: string,
-  k: number
+  k: number,
+  filters?: Record<string, any> // as vectorSearch(): {city: 'Berlin'}, {rank: {$gt: 19}}
 ): Promise<number[][]>
 ```
+
+With `filters`, only matching nodes are searched, so up to `k` of them come back, scored as without the filters.
 
 ### hybridSearch()
 
@@ -453,9 +467,12 @@ async hybridSearch(
   k: number,
   queryVector?: number[],
   fusion?: string,         // 'weighted' for weighted fusion
-  weights?: number[]       // [textWeight, vectorWeight], default [0.5, 0.5]
+  weights?: number[],      // [textWeight, vectorWeight], default [0.5, 0.5]
+  filters?: Record<string, any> // as vectorSearch(): {city: 'Berlin'}, {rank: {$gt: 19}}
 ): Promise<number[][]>
 ```
+
+With `filters`, both the text and the vector search keep only the matching nodes before fusion, so up to `k` matching nodes come back.
 
 ## Embedding (opt-in)
 

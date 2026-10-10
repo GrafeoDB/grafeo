@@ -474,7 +474,7 @@ fn prague_mottos(matches: Vec<(NodeId, f64)>) -> Vec<(NodeId, u64)> {
 #[cfg(feature = "text-index")]
 fn text_index_matches(db: &GrafeoDB) -> Vec<(NodeId, u64)> {
     prague_mottos(
-        db.text_search("Person", "motto", "Prague", 100_000)
+        db.text_search("Person", "motto", "Prague", 100_000, None)
             .unwrap(),
     )
 }

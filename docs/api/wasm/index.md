@@ -66,7 +66,14 @@ Create BM25 text indexes and run full-text queries:
 ```javascript
 db.createTextIndex("Document", "content");
 const results = db.textSearch("Document", "content", "graph database", 10);
-// [{nodeId, score}, ...]
+// [{id, score}, ...]
+
+// Options: BM25 k1 (>= 0, default 1.2) and b (0 to 1, default 0.75), the
+// tokenizer ("simple", the default, "standard" or "cjk_bigram") and stop words
+db.createTextIndex("Note", "body", { tokenizer: "cjk_bigram", k1: 1.5, stopWords: ["住在"] });
+
+// Only the nodes the filters match, as in vectorSearch()
+const berlin = db.textSearch("Document", "content", "graph", 10, { filters: { city: "Berlin" } });
 
 db.rebuildTextIndex("Document", "content");
 db.dropTextIndex("Document", "content");
@@ -83,11 +90,15 @@ db.execute("CREATE VECTOR INDEX ON Document(embedding) OPTIONS {dimensions: 384}
 
 const results = db.hybridSearch(
     "Document",
-    "content", "graph database",     // text field + query
-    "embedding", queryVector,         // vector field + query
-    10                                // top-k
+    "content",                        // text field
+    "embedding",                      // vector field
+    "graph database",                 // text query
+    10,                               // top-k
+    { filters: { city: "Berlin" } }   // optional: property filters, as in vectorSearch()
 );
 ```
+
+With `filters`, the search keeps only the matching nodes before fusion, so up to `k` matching nodes come back.
 
 !!! tip "Vector Index Creation"
     Both `createVectorIndex()` and GQL `CREATE VECTOR INDEX` queries via `db.execute()` are supported in WASM.

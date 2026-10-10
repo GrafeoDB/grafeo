@@ -214,7 +214,7 @@ fn text_index_after_compact() {
         .expect("create text index after compact");
 
     let results = db
-        .text_search("Article", "body", "fox", 10)
+        .text_search("Article", "body", "fox", 10, None)
         .expect("text search");
     assert_eq!(
         results.len(),

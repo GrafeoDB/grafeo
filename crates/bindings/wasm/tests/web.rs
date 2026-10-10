@@ -678,3 +678,111 @@ fn test_lists_maps_and_paths_hold_nodes_and_edges() {
     assert_eq!(text(field(&field(&field(&row, "m"), "k"), "name")), "Gus");
     assert_eq!(text(field(&field(&row, "s"), "name")), "Alix");
 }
+
+/// `hybridSearch` keeps only the nodes its `filters` option matches, and
+/// still returns up to `k` of them (#397). Without options it searches as
+/// before.
+#[cfg(feature = "hybrid-search")]
+#[wasm_bindgen_test]
+fn hybrid_search_keeps_the_nodes_its_filters_match() {
+    let db = Database::new().expect("create db");
+    db.execute(
+        "INSERT (:Doc {owner: 'Alix', city: 'Amsterdam', text: 'Alix rides along canals, canals and canals'}), \
+         (:Doc {owner: 'Vincent', city: 'Berlin', text: 'Vincent paints canals'}), \
+         (:Doc {owner: 'Jules', city: 'Berlin', text: 'Jules swims past the old canals of Berlin at dawn'}), \
+         (:Doc {owner: 'Mia', city: 'Berlin', text: 'Mia dances in Berlin clubs'})",
+    )
+    .expect("insert");
+    db.create_text_index("Doc", "text", None)
+        .expect("text index");
+
+    let ids = |results: &wasm_bindgen::JsValue| -> Vec<f64> {
+        js_sys::Array::from(results)
+            .iter()
+            .map(|row| field(&row, "id").as_f64().expect("a numeric id"))
+            .collect()
+    };
+    let id_of = |owner: &str| -> f64 {
+        let rows = db
+            .execute(&format!(
+                "MATCH (d:Doc {{owner: '{owner}'}}) RETURN id(d) AS id"
+            ))
+            .expect("query");
+        ids(&rows)[0]
+    };
+
+    let unfiltered = db
+        .hybrid_search("Doc", "text", "emb", "canals", 1, None)
+        .expect("hybrid search without options");
+    assert_eq!(ids(&unfiltered), [id_of("Alix")], "Alix says canals most");
+
+    let options = js_sys::JSON::parse(r#"{"filters": {"city": "Berlin"}}"#).expect("options");
+    let berlin = db
+        .hybrid_search("Doc", "text", "emb", "canals", 1, Some(options))
+        .expect("hybrid search with filters");
+    assert_eq!(ids(&berlin), [id_of("Vincent")], "the best match of Berlin");
+
+    let invalid = js_sys::JSON::parse(r#"{"filters": 3}"#).expect("options");
+    assert!(
+        db.hybrid_search("Doc", "text", "emb", "canals", 1, Some(invalid))
+            .is_err(),
+        "filters that are not an object are refused"
+    );
+}
+
+/// `createTextIndex` takes the BM25 parameters, the tokenizer and the stop
+/// words, and `textSearch` property filters (#351, #397).
+#[cfg(feature = "text-index")]
+#[wasm_bindgen_test]
+fn text_index_options_and_text_search_filters() {
+    let db = Database::new().expect("create db");
+    db.execute(
+        "INSERT (:Note {owner: 'Alix', city: 'Berlin', body: '阿利克斯住在柏林'}), \
+         (:Note {owner: 'Gus', city: 'Amsterdam', body: '古斯住在阿姆斯特丹'})",
+    )
+    .expect("insert");
+    let ids = |results: &wasm_bindgen::JsValue| -> Vec<f64> {
+        js_sys::Array::from(results)
+            .iter()
+            .map(|row| field(&row, "id").as_f64().expect("a numeric id"))
+            .collect()
+    };
+    let id_of = |owner: &str| -> f64 {
+        let rows = db
+            .execute(&format!(
+                "MATCH (n:Note {{owner: '{owner}'}}) RETURN id(n) AS id"
+            ))
+            .expect("query");
+        ids(&rows)[0]
+    };
+    let options = js_sys::JSON::parse(r#"{"tokenizer": "cjk_bigram", "stopWords": ["阿姆"]}"#)
+        .expect("options");
+    db.create_text_index("Note", "body", Some(options))
+        .expect("text index with options");
+
+    let berlin = db
+        .text_search("Note", "body", "柏林", 10, None)
+        .expect("text search");
+    assert_eq!(ids(&berlin), [id_of("Alix")], "a word inside a sentence");
+    assert_eq!(
+        ids(&db.text_search("Note", "body", "阿姆", 10, None).unwrap()),
+        Vec::<f64>::new(),
+        "a stop word"
+    );
+    let filters = js_sys::JSON::parse(r#"{"filters": {"city": "Amsterdam"}}"#).expect("filters");
+    assert_eq!(
+        ids(&db
+            .text_search("Note", "body", "住在", 10, Some(filters))
+            .unwrap()),
+        [id_of("Gus")],
+        "only the notes of Amsterdam"
+    );
+
+    for invalid in [r#"{"k1": -3}"#, r#"{"b": 19}"#, r#"{"tokenizer": "jieba"}"#] {
+        let options = js_sys::JSON::parse(invalid).expect("options");
+        assert!(
+            db.create_text_index("Note", "body", Some(options)).is_err(),
+            "{invalid} is refused"
+        );
+    }
+}

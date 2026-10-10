@@ -312,39 +312,39 @@ impl FeatureData {
     /// looked at), or `on :Document(embedding), ...` for the indexes of this
     /// kind that `indexes`, the image's catalog, defines.
     fn held(&self, image: &dyn ImageSource, indexes: &[GraphIndexes]) -> Option<String> {
-        let (kind, found): (&str, Vec<String>) = match self.held_in {
-            HeldIn::Sections(section_types) => (
-                "sections",
-                section_types
-                    .iter()
-                    .filter(|section_type| image.section_source(**section_type).is_some())
-                    .map(|section_type| format!("{section_type:?}"))
-                    .collect(),
-            ),
-            HeldIn::VectorIndexDefinitions => (
-                "on",
-                indexes
-                    .iter()
-                    .flat_map(|graph| {
-                        graph
-                            .vector
-                            .iter()
-                            .map(|def| index_on(graph.graph.as_deref(), &def.label, &def.property))
-                    })
-                    .collect(),
-            ),
-            HeldIn::TextIndexDefinitions => (
-                "on",
-                indexes
-                    .iter()
-                    .flat_map(|graph| {
-                        graph.text.iter().map(|(label, property)| {
-                            index_on(graph.graph.as_deref(), label, property)
+        let (kind, found): (&str, Vec<String>) =
+            match self.held_in {
+                HeldIn::Sections(section_types) => (
+                    "sections",
+                    section_types
+                        .iter()
+                        .filter(|section_type| image.section_source(**section_type).is_some())
+                        .map(|section_type| format!("{section_type:?}"))
+                        .collect(),
+                ),
+                HeldIn::VectorIndexDefinitions => (
+                    "on",
+                    indexes
+                        .iter()
+                        .flat_map(|graph| {
+                            graph.vector.iter().map(|def| {
+                                index_on(graph.graph.as_deref(), &def.label, &def.property)
+                            })
                         })
-                    })
-                    .collect(),
-            ),
-        };
+                        .collect(),
+                ),
+                HeldIn::TextIndexDefinitions => (
+                    "on",
+                    indexes
+                        .iter()
+                        .flat_map(|graph| {
+                            graph.text.iter().map(|def| {
+                                index_on(graph.graph.as_deref(), &def.label, &def.property)
+                            })
+                        })
+                        .collect(),
+                ),
+            };
         (!found.is_empty()).then(|| format!("{kind} {}", found.join(", ")))
     }
 }
@@ -669,11 +669,15 @@ fn restore_from_sections(
 
     #[cfg(feature = "text-index")]
     if !indexes.text.is_empty() {
-        use grafeo_core::index::text::{BM25Config, InvertedIndex, TextIndexSection};
+        use grafeo_core::index::text::{InvertedIndex, TextIndexSection};
 
-        for (label, property) in &indexes.text {
-            let shell = InvertedIndex::new(BM25Config::default());
-            store.add_text_index(label, property, Arc::new(parking_lot::RwLock::new(shell)));
+        for def in &indexes.text {
+            let shell = InvertedIndex::with_options(def.options.clone());
+            store.add_text_index(
+                &def.label,
+                &def.property,
+                Arc::new(parking_lot::RwLock::new(shell)),
+            );
         }
         if let Some(source) = image.section_source(SectionType::TextIndex)
             && let Some(err) = read_mirror(
@@ -682,17 +686,22 @@ fn restore_from_sections(
             )?
         {
             grafeo_common::grafeo_warn!("rebuilding text indexes from the data: {err}");
-            for (label, property) in &indexes.text {
-                store.remove_text_index(label, property);
+            for def in &indexes.text {
+                store.remove_text_index(&def.label, &def.property);
             }
         }
-        for (label, property) in indexes.text {
+        for def in indexes.text {
+            // The catalog's options win: a stream whose BM25 parameters are
+            // not the catalog's is left for the build from the data.
             let restored = store
-                .get_text_index(&label, &property)
-                .is_some_and(|index| !index.read().is_empty());
+                .get_text_index(&def.label, &def.property)
+                .is_some_and(|index| {
+                    let index = index.read();
+                    !index.is_empty() && *index.options() == def.options
+                });
             if !restored {
-                store.remove_text_index(&label, &property);
-                missing.text.push((label, property));
+                store.remove_text_index(&def.label, &def.property);
+                missing.text.push(def);
             }
         }
     }
@@ -821,10 +830,18 @@ impl super::GrafeoDB {
             }
         }
         #[cfg(feature = "text-index")]
-        for (label, property) in indexes.text {
-            if let Err(err) = self.create_text_index_in(indexes.graph.as_deref(), &label, &property)
-            {
-                grafeo_common::grafeo_warn!("text index :{label}({property}) not rebuilt: {err}");
+        for def in indexes.text {
+            if let Err(err) = self.create_text_index_in(
+                indexes.graph.as_deref(),
+                &def.label,
+                &def.property,
+                &def.options,
+            ) {
+                grafeo_common::grafeo_warn!(
+                    "text index :{}({}) not rebuilt: {err}",
+                    def.label,
+                    def.property
+                );
             }
         }
     }
@@ -840,6 +857,13 @@ mod tests {
     use super::*;
     use crate::GrafeoDB;
     use grafeo_common::storage::{ChunkKind, MemoryImage, SectionSink, ServedOnce, legacy_bytes};
+
+    /// The label and property of each text index of `defs`.
+    fn text_keys(defs: &[super::super::catalog_section::TextIndexDefinition]) -> Vec<(&str, &str)> {
+        defs.iter()
+            .map(|def| (def.label.as_str(), def.property.as_str()))
+            .collect()
+    }
 
     /// The default graph's HNSW and text indexes come back from their
     /// sections, not from the data; quantized indexes and those of named
@@ -988,21 +1012,17 @@ mod tests {
         assert_eq!(written(&db), [], "a transaction open in the default graph");
         let store = Arc::new(LpgStore::new().unwrap());
         let loaded = load(&image, &store).unwrap();
-        let unbuilt: Vec<(Option<&str>, Vec<&str>, &[(String, String)])> = loaded
+        let unbuilt: Vec<(Option<&str>, Vec<&str>, Vec<(&str, &str)>)> = loaded
             .unbuilt
             .iter()
             .map(|graph| {
                 let vector = graph.vector.iter().map(|def| def.label.as_str()).collect();
-                (graph.graph.as_deref(), vector, &graph.text[..])
+                (graph.graph.as_deref(), vector, text_keys(&graph.text))
             })
             .collect();
         assert_eq!(
             unbuilt,
-            [(
-                None,
-                vec!["Doc"],
-                &[("Doc".to_string(), "body".to_string())][..]
-            )],
+            [(None, vec!["Doc"], vec![("Doc", "body")])],
             "the load leaves both indexes to build from the data"
         );
         assert_eq!(
@@ -1094,6 +1114,66 @@ mod tests {
     /// The image of a checkpoint of `db`.
     fn image_of(db: &GrafeoDB) -> MemoryImage {
         image_with(db, |_| None)
+    }
+
+    /// The catalog's text index options win over the index section: a
+    /// stream whose BM25 parameters are not those of the catalog record (an
+    /// image whose text section another index wrote) is not restored; the
+    /// index is left to build from the data, with the catalog's options.
+    #[test]
+    fn a_text_stream_with_other_bm25_parameters_than_the_catalog_is_not_restored() {
+        use grafeo_core::index::text::{TextIndexOptions, TokenizerKind};
+
+        let notes = |options: TextIndexOptions| {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:Doc {body: 'Alix Amsterdam'}), (:Doc {body: 'Gus Berlin'})")
+                .unwrap();
+            db.create_text_index_with("Doc", "body", options).unwrap();
+            db
+        };
+        let options = TextIndexOptions::new()
+            .with_k1(0.3)
+            .with_tokenizer(TokenizerKind::Standard);
+        let catalog_of = notes(options.clone());
+        let section_of = notes(TextIndexOptions::new().with_tokenizer(TokenizerKind::Standard));
+
+        let commits = catalog_of.transaction_manager.hold_commits().unwrap();
+        let other = section_of.transaction_manager.hold_commits().unwrap();
+        let mut image = MemoryImage::new();
+        for section in catalog_of.checkpoint_sources().sections(&commits) {
+            image
+                .begin_section(section.section_type(), section.version())
+                .unwrap();
+            if section.section_type() == SectionType::TextIndex {
+                let text = section_of
+                    .checkpoint_sources()
+                    .sections(&other)
+                    .into_iter()
+                    .find(|section| section.section_type() == SectionType::TextIndex)
+                    .expect("the other database has a text section");
+                text.write_to(&mut image).unwrap();
+            } else {
+                section.write_to(&mut image).unwrap();
+            }
+        }
+        drop((commits, other));
+
+        let store = Arc::new(LpgStore::new().unwrap());
+        let loaded = load(&image, &store).unwrap();
+        assert!(
+            store.get_text_index("Doc", "body").is_none(),
+            "the stream of k1 1.2 is not restored into an index of k1 0.3"
+        );
+        let unbuilt: Vec<&TextIndexOptions> = loaded
+            .unbuilt
+            .iter()
+            .flat_map(|graph| graph.text.iter().map(|def| &def.options))
+            .collect();
+        assert_eq!(
+            unbuilt,
+            [&options],
+            "left to build from the data, with the catalog's options"
+        );
     }
 
     fn load(image: &dyn ImageSource, store: &Arc<LpgStore>) -> Result<LoadedSections> {
@@ -1760,12 +1840,8 @@ mod tests {
         let mut labels: Vec<&str> = graph.vector.iter().map(|def| def.label.as_str()).collect();
         labels.sort_unstable();
         assert_eq!(
-            (graph.graph.as_deref(), labels, &graph.text[..]),
-            (
-                None,
-                vec!["Doc", "Note"],
-                &[("Doc".to_string(), "body".to_string())][..]
-            ),
+            (graph.graph.as_deref(), labels, text_keys(&graph.text)),
+            (None, vec!["Doc", "Note"], vec![("Doc", "body")]),
             "every index is left to build from the data"
         );
     }
@@ -1899,14 +1975,11 @@ mod tests {
             );
         }
         assert_eq!(loaded.unbuilt.len(), 1, "one graph: the default one");
-        let mut text = loaded.unbuilt[0].text.clone();
+        let mut text = text_keys(&loaded.unbuilt[0].text);
         text.sort_unstable();
         assert_eq!(
             text,
-            [
-                ("Doc".to_string(), "body".to_string()),
-                ("Note".to_string(), "text".to_string())
-            ],
+            [("Doc", "body"), ("Note", "text")],
             "both text indexes are left to build from the data"
         );
     }
@@ -1960,7 +2033,7 @@ mod tests {
             );
             let graph = &loaded.unbuilt[0];
             let vector: Vec<&str> = graph.vector.iter().map(|def| def.label.as_str()).collect();
-            let text: Vec<&str> = graph.text.iter().map(|(label, _)| label.as_str()).collect();
+            let text: Vec<&str> = graph.text.iter().map(|def| def.label.as_str()).collect();
             match section_type {
                 SectionType::VectorStore => {
                     assert_eq!(

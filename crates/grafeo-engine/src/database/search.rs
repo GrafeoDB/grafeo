@@ -6,7 +6,7 @@
     feature = "hybrid-search"
 ))]
 use grafeo_common::types::NodeId;
-#[cfg(feature = "vector-index")]
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
 use grafeo_common::types::Value;
 #[cfg(any(feature = "text-index", feature = "hybrid-search"))]
 use grafeo_common::utils::error::Error;
@@ -42,7 +42,7 @@ impl super::GrafeoDB {
     ///
     /// Returns `None` if filters is `None` or empty (meaning no filtering),
     /// or `Some(set)` with the intersection (possibly empty).
-    #[cfg(feature = "vector-index")]
+    #[cfg(any(feature = "vector-index", feature = "text-index"))]
     fn compute_filter_allowlist(
         &self,
         label: &str,
@@ -50,7 +50,7 @@ impl super::GrafeoDB {
     ) -> Option<std::collections::HashSet<NodeId>> {
         let filters = filters.filter(|f| !f.is_empty())?;
 
-        let graph = self.graph_store_ref();
+        let graph = self.graph_store();
 
         // Start with all nodes for this label
         let label_nodes: std::collections::HashSet<NodeId> =
@@ -294,6 +294,12 @@ impl super::GrafeoDB {
     /// are unbounded positive floats whose magnitude depends on corpus
     /// statistics, so compare them only within a single query's results.
     ///
+    /// `filters` takes property filters as
+    /// [`vector_search`](Self::vector_search) does: equality filters and
+    /// operator filters (`$gt`, `$in`, ...). Only the nodes of `label` that
+    /// match all of them are searched, so up to `k` matching nodes come
+    /// back; their scores are those of the whole index.
+    ///
     /// # Errors
     ///
     /// Returns an error if no text index exists for this label+property.
@@ -304,6 +310,7 @@ impl super::GrafeoDB {
         property: &str,
         query: &str,
         k: usize,
+        filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<(NodeId, f64)>> {
         let store = self.lpg_store();
         let index = store.get_text_index(label, property).ok_or_else(|| {
@@ -312,7 +319,11 @@ impl super::GrafeoDB {
             ))
         })?;
 
-        Ok(index.read().search(query, k))
+        let index = index.read();
+        Ok(match self.compute_filter_allowlist(label, filters) {
+            Some(allowed) => index.search_with_filter(query, k, &allowed),
+            None => index.search(query, k),
+        })
     }
 
     /// Performs hybrid search combining text (BM25) and vector similarity.
@@ -331,6 +342,12 @@ impl super::GrafeoDB {
     /// * `query_vector` - Vector query for similarity search (optional)
     /// * `k` - Number of results to return
     /// * `fusion` - Score fusion method (default: RRF with k=60)
+    /// * `filters` - Optional property filters, as for
+    ///   [`vector_search`](Self::vector_search): equality filters and
+    ///   operator filters (`$gt`, `$in`, ...). Both the text and the vector
+    ///   search keep only the nodes of `label` that match all of them before
+    ///   the results are fused, so up to `k` matching nodes come back.
+    ///   Text scores stay those of the whole index.
     ///
     /// # Returns
     ///
@@ -362,6 +379,7 @@ impl super::GrafeoDB {
         query_vector: Option<&[f32]>,
         k: usize,
         fusion: Option<grafeo_core::index::text::FusionMethod>,
+        filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<(NodeId, f64)>> {
         use grafeo_core::index::text::fuse_results;
 
@@ -374,9 +392,20 @@ impl super::GrafeoDB {
             check_query_vector(query_vec, index.config().dimensions, label, vector_property)?;
         }
 
+        // Both searches keep only the nodes that match the filters, before
+        // fusion: filtering the fused results would return fewer than k.
+        let allowlist = self.compute_filter_allowlist(label, filters);
+        if allowlist.as_ref().is_some_and(|allowed| allowed.is_empty()) {
+            return Ok(Vec::new());
+        }
+
         // Text search
         if let Some(text_index) = store.get_text_index(label, text_property) {
-            let text_results = text_index.read().search(query_text, fetch);
+            let text_index = text_index.read();
+            let text_results = match &allowlist {
+                Some(allowed) => text_index.search_with_filter(query_text, fetch, allowed),
+                None => text_index.search(query_text, fetch),
+            };
             if !text_results.is_empty() {
                 sources.push(text_results);
             }
@@ -387,7 +416,14 @@ impl super::GrafeoDB {
             && let Some(vector_index) = vector_index
         {
             let accessor = self.make_vector_accessor(vector_property);
-            let vector_results = vector_index.search(query_vec, fetch, &accessor);
+            let vector_results = search_vector_index(
+                &vector_index,
+                query_vec,
+                fetch,
+                None,
+                allowlist.as_ref(),
+                &accessor,
+            );
             if !vector_results.is_empty() {
                 // Negate distances so that "closer = higher score", matching
                 // the text source convention (higher = better). This is

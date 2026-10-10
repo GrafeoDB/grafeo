@@ -721,7 +721,7 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
             "{what}: vector search"
         );
         let matches = db
-            .text_search("Person", "bio", "cycling", 3)
+            .text_search("Person", "bio", "cycling", 3, None)
             .unwrap_or_else(|error| panic!("{what}: text search: {error}"));
         assert_eq!(matches.len(), 1, "{what}: text search: {matches:?}");
         assert_eq!(

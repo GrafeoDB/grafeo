@@ -856,7 +856,7 @@ fn check_indexes(fixture: Fixture, db: &GrafeoDB) {
         "{name}: indexes"
     );
     let vector = db.vector_search("Document", "embedding", &[1.0, 0.0, 0.0], 1, None, None);
-    let text = db.text_search("Document", "content", "canals", 3);
+    let text = db.text_search("Document", "content", "canals", 3, None);
     if !fixture.has_search_indexes() {
         assert!(vector.is_err(), "{name}: a vector index");
         assert!(text.is_err(), "{name}: a text index");

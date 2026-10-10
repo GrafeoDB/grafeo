@@ -316,7 +316,7 @@ fn a_rollback_leaves_the_text_index_as_committed() {
     db.execute("INSERT (:Note {body: 'bridges of Prague'})")
         .unwrap();
     db.create_text_index("Doc", "body").unwrap();
-    let found = |word: &str| db.text_search("Doc", "body", word, 3).unwrap().len();
+    let found = |word: &str| db.text_search("Doc", "body", word, 3, None).unwrap().len();
     assert_eq!((found("canals"), found("bridges")), (1, 0));
 
     let mut session = db.session();

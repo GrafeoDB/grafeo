@@ -1740,19 +1740,50 @@ impl PyGrafeoDB {
     /// Indexes all existing nodes with the given label and text property.
     /// The index is automatically kept in sync as nodes are created,
     /// updated, or deleted. You do NOT need to call rebuild_text_index()
-    /// after normal write operations.
+    /// after normal write operations. The database keeps the options with
+    /// the index: reopening and rebuilding it keep them.
     ///
     /// Args:
     ///     label: Node label to index
     ///     property: Text property to index
+    ///     k1: BM25 term frequency saturation, a number of at least 0
+    ///         (default: 1.2)
+    ///     b: BM25 length normalization, from 0 to 1 (default: 0.75)
+    ///     tokenizer: "simple" (default: terms of at least 2 bytes without
+    ///         common English words), "standard" (every word, for languages
+    ///         that separate words) or "cjk_bigram" (also pairs of Chinese,
+    ///         Japanese and Korean characters)
+    ///     stop_words: Words to leave out of documents and queries, in place
+    ///         of the tokenizer's own (an empty list leaves none out)
+    ///
+    /// Raises:
+    ///     grafeo.GrafeoError: For an unknown tokenizer, or k1 or b out of
+    ///         range.
     ///
     /// Example:
     ///     db.create_node(['Article'], {'title': 'Graph Databases'})
     ///     db.create_text_index("Article", "title")
+    ///     db.create_text_index("Note", "body", tokenizer="cjk_bigram", k1=1.5)
     #[cfg(feature = "text-index")]
-    fn create_text_index(&self, label: &str, property: &str) -> PyResult<()> {
+    #[pyo3(signature = (label, property, k1=None, b=None, tokenizer=None, stop_words=None))]
+    fn create_text_index(
+        &self,
+        label: &str,
+        property: &str,
+        k1: Option<f64>,
+        b: Option<f64>,
+        tokenizer: Option<&str>,
+        stop_words: Option<Vec<String>>,
+    ) -> PyResult<()> {
+        let options = grafeo_core::index::text::TextIndexOptions::from_parts(
+            k1,
+            b,
+            tokenizer,
+            stop_words.as_deref(),
+        )
+        .map_err(PyGrafeoError::from)?;
         let db = self.inner.read();
-        db.create_text_index(label, property)
+        db.create_text_index_with(label, property, options)
             .map_err(|e| PyGrafeoError::from(e).into())
     }
 
@@ -1799,6 +1830,10 @@ impl PyGrafeoDB {
     ///     property: Property that was indexed
     ///     query: Text query string
     ///     k: Number of results to return
+    ///     filters: Property filters, as for vector_search(): equality
+    ///         ({"city": "Berlin"}) and operators ({"rank": {"$gt": 19}}).
+    ///         Only matching nodes are searched, so up to k of them come
+    ///         back, scored as without the filters.
     ///
     /// Returns:
     ///     List of (node_id, score) tuples sorted by score descending.
@@ -1808,16 +1843,19 @@ impl PyGrafeoDB {
     ///     for node_id, score in results:
     ///         print(f"Node {node_id}: score={score:.4f}")
     #[cfg(feature = "text-index")]
+    #[pyo3(signature = (label, property, query, k, filters=None))]
     fn text_search(
         &self,
         label: &str,
         property: &str,
         query: &str,
         k: usize,
+        filters: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Vec<(u64, f64)>> {
+        let filter_map = Self::convert_filters(filters)?;
         let db = self.inner.read();
         let results = db
-            .text_search(label, property, query, k)
+            .text_search(label, property, query, k, filter_map.as_ref())
             .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
@@ -1841,6 +1879,11 @@ impl PyGrafeoDB {
     ///     query_vector: Vector query for similarity search (optional)
     ///     fusion: Fusion method - "rrf" (default) or "weighted"
     ///     weights: Weights for weighted fusion [text_weight, vector_weight]
+    ///     rrf_k: Smoothing constant for RRF (default: 60)
+    ///     filters: Property filters, as for vector_search(): equality
+    ///         ({"city": "Berlin"}) and operators ({"rank": {"$gt": 19}}).
+    ///         Both the text and the vector search keep only matching
+    ///         nodes before fusion, so up to k matching nodes come back.
     ///
     /// Returns:
     ///     List of (node_id, score) tuples sorted by fused score
@@ -1851,9 +1894,10 @@ impl PyGrafeoDB {
     /// Example:
     ///     results = db.hybrid_search("Article", "title", "embedding",
     ///                                "graph databases", k=10,
-    ///                                query_vector=[1.0, 0.0, 0.0])
+    ///                                query_vector=[1.0, 0.0, 0.0],
+    ///                                filters={"city": "Berlin"})
     #[cfg(feature = "hybrid-search")]
-    #[pyo3(signature = (label, text_property, vector_property, query_text, k, query_vector=None, fusion=None, weights=None, rrf_k=None))]
+    #[pyo3(signature = (label, text_property, vector_property, query_text, k, query_vector=None, fusion=None, weights=None, rrf_k=None, filters=None))]
     #[allow(clippy::too_many_arguments)]
     fn hybrid_search(
         &self,
@@ -1866,7 +1910,9 @@ impl PyGrafeoDB {
         fusion: Option<&str>,
         weights: Option<Vec<f64>>,
         rrf_k: Option<usize>,
+        filters: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Vec<(u64, f64)>> {
+        let filter_map = Self::convert_filters(filters)?;
         let fusion_method = match fusion {
             Some("weighted") => {
                 let w = weights.unwrap_or_else(|| vec![0.5, 0.5]);
@@ -1888,6 +1934,7 @@ impl PyGrafeoDB {
                 query_vector.as_deref(),
                 k,
                 fusion_method,
+                filter_map.as_ref(),
             )
             .map_err(PyGrafeoError::from)?;
         Ok(results

@@ -51,6 +51,7 @@ use grafeo_common::storage::section::{
 };
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::index::text::TextIndexOptions;
 use grafeo_core::index::vector::{DistanceMetric, QuantizationType};
 
 use super::catalog_records::{
@@ -141,8 +142,8 @@ pub(crate) struct GraphIndexes {
     pub property: Vec<String>,
     /// Vector indexes.
     pub vector: Vec<VectorIndexDefinition>,
-    /// Text indexes, as `(label, property)`.
-    pub text: Vec<(String, String)>,
+    /// Text indexes.
+    pub text: Vec<TextIndexDefinition>,
 }
 
 impl GraphIndexes {
@@ -174,17 +175,21 @@ impl GraphIndexes {
         vector.sort_by(|a, b| (&a.label, &a.property).cmp(&(&b.label, &b.property)));
 
         #[cfg(feature = "text-index")]
-        let mut text: Vec<(String, String)> = store
+        let mut text: Vec<TextIndexDefinition> = store
             .text_index_entries()
             .into_iter()
-            .filter_map(|(key, _)| {
+            .filter_map(|(key, index)| {
                 let (label, property) = key.split_once(':')?;
-                Some((label.to_string(), property.to_string()))
+                Some(TextIndexDefinition {
+                    label: label.to_string(),
+                    property: property.to_string(),
+                    options: index.read().options().clone(),
+                })
             })
             .collect();
         #[cfg(not(feature = "text-index"))]
-        let mut text: Vec<(String, String)> = Vec::new();
-        text.sort();
+        let mut text: Vec<TextIndexDefinition> = Vec::new();
+        text.sort_by(|a, b| (&a.label, &a.property).cmp(&(&b.label, &b.property)));
 
         Self {
             graph,
@@ -211,6 +216,20 @@ pub(crate) struct VectorIndexDefinition {
     pub ef_construction: usize,
     /// `None` for a plain HNSW index.
     pub quantization: Option<QuantizationType>,
+}
+
+/// A text index's definition: what it indexes, and its options.
+///
+/// It serializes as the `(label, property)` pair it replaced, so the indexes
+/// that 0.5.44 appended to a version 1 catalog ([`IndexExtension`]) still
+/// decode; the options are left out of that layout, and read back as the
+/// defaults, which every 0.5.x text index had.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct TextIndexDefinition {
+    pub label: String,
+    pub property: String,
+    #[serde(skip)]
+    pub options: TextIndexOptions,
 }
 
 /// The name `CREATE INDEX` gave an index, for `SHOW INDEXES` and
@@ -263,9 +282,9 @@ impl SnapshotIndexes {
             text_indexes: indexes
                 .text
                 .iter()
-                .map(|(label, property)| SnapshotTextIndex {
-                    label: label.clone(),
-                    property: property.clone(),
+                .map(|def| SnapshotTextIndex {
+                    label: def.label.clone(),
+                    property: def.property.clone(),
                 })
                 .collect(),
         }
@@ -293,7 +312,11 @@ impl SnapshotIndexes {
             text: self
                 .text_indexes
                 .into_iter()
-                .map(|def| (def.label, def.property))
+                .map(|def| TextIndexDefinition {
+                    label: def.label,
+                    property: def.property,
+                    options: TextIndexOptions::default(),
+                })
                 .collect(),
         }
     }
@@ -675,7 +698,9 @@ fn index_key(record: &IndexRecord) -> IndexKey {
         IndexKindRecord::Vector {
             label, property, ..
         } => (graph, 1, label.clone(), property.clone()),
-        IndexKindRecord::Text { label, property } => (graph, 2, label.clone(), property.clone()),
+        IndexKindRecord::Text {
+            label, property, ..
+        } => (graph, 2, label.clone(), property.clone()),
     }
 }
 
@@ -1187,6 +1212,31 @@ mod tests {
         let mut section = make_section();
         let result = section.deserialize(&[0xFF, 0xFE, 0xFD, 0x00]);
         assert!(result.is_err(), "corrupt data should fail deserialization");
+    }
+
+    /// The indexes 0.5.44 appended to a version 1 catalog hold a text index
+    /// as a `(label, property)` pair: a text index definition still encodes
+    /// and decodes as one, and reads back with the default options, which
+    /// every 0.5.x text index had.
+    #[test]
+    fn a_text_index_definition_has_the_version_1_layout_of_a_pair() {
+        let config = bincode::config::standard();
+        let def = TextIndexDefinition {
+            label: "Doc".to_string(),
+            property: "body".to_string(),
+            options: TextIndexOptions::new().with_k1(0.3),
+        };
+        let bytes = bincode::serde::encode_to_vec(&def, config).unwrap();
+        assert_eq!(
+            bytes,
+            bincode::serde::encode_to_vec(("Doc".to_string(), "body".to_string()), config).unwrap()
+        );
+        let (back, _): (TextIndexDefinition, _) =
+            bincode::serde::decode_from_slice(&bytes, config).unwrap();
+        assert_eq!(
+            (back.label.as_str(), back.property.as_str(), back.options),
+            ("Doc", "body", TextIndexOptions::default())
+        );
     }
 
     /// The indexes of every graph and the index names round trip: loading

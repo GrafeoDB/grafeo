@@ -112,7 +112,7 @@ fn names_of(db: &GrafeoDB, hits: impl IntoIterator<Item = NodeId>) -> Vec<String
 /// The people the text index finds for `word` in their bio.
 fn bios_with(db: &GrafeoDB, word: &str, stage: &str) -> Vec<String> {
     let hits = db
-        .text_search("Person", "bio", word, 19)
+        .text_search("Person", "bio", word, 19, None)
         .unwrap_or_else(|error| panic!("{stage}: {error}"));
     names_of(db, hits.into_iter().map(|(id, _)| id))
 }

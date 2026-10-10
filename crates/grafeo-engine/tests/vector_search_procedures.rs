@@ -211,7 +211,7 @@ mod text {
     fn test_call_search_text_matches_direct_api() {
         let db = setup_text_graph();
         let direct = db
-            .text_search("Doc", "body", "graph", 5)
+            .text_search("Doc", "body", "graph", 5, None)
             .expect("direct text_search");
 
         let session = db.session();

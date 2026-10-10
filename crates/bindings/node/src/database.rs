@@ -835,13 +835,32 @@ impl JsGrafeoDB {
     ///
     /// The index is automatically kept in sync as nodes are created,
     /// updated, or deleted. You do not need to call rebuildTextIndex()
-    /// after normal write operations.
+    /// after normal write operations. `options` sets the BM25 parameters,
+    /// the tokenizer and the stop words (see `TextIndexOptions`); the
+    /// database keeps them with the index. Throws for an unknown tokenizer
+    /// and for k1 or b out of range.
     #[napi(js_name = "createTextIndex")]
-    pub async fn create_text_index(&self, label: String, property: String) -> Result<()> {
+    pub async fn create_text_index(
+        &self,
+        label: String,
+        property: String,
+        options: Option<TextIndexOptions>,
+    ) -> Result<()> {
+        let options = match options {
+            Some(options) => grafeo_core::index::text::TextIndexOptions::from_parts(
+                options.k1,
+                options.b,
+                options.tokenizer.as_deref(),
+                options.stop_words.as_deref(),
+            ),
+            None => Ok(grafeo_core::index::text::TextIndexOptions::new()),
+        }
+        .map_err(NodeGrafeoError::from)
+        .map_err(napi::Error::from)?;
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let db = db.read();
-            db.create_text_index(&label, &property)
+            db.create_text_index_with(&label, &property, options)
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)
         })
@@ -885,6 +904,10 @@ impl JsGrafeoDB {
     /// Returns an array of [nodeId, score] pairs sorted by descending
     /// relevance (higher score = more relevant). BM25 scores are
     /// unbounded positive floats.
+    ///
+    /// `filters` takes property filters as vectorSearch does (equality, or
+    /// operators such as `{rank: {$gt: 19}}`): only matching nodes are
+    /// searched, so up to k of them come back, scored as without filters.
     #[napi(js_name = "textSearch")]
     pub async fn text_search(
         &self,
@@ -892,12 +915,14 @@ impl JsGrafeoDB {
         property: String,
         query: String,
         k: u32,
+        filters: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<Vec<Vec<f64>>> {
+        let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let db = db.read();
             let results = db
-                .text_search(&label, &property, &query, k as usize)
+                .text_search(&label, &property, &query, k as usize, filter_map.as_ref())
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)?;
             Ok(results
@@ -923,6 +948,11 @@ impl JsGrafeoDB {
     /// Returns an array of [nodeId, score] pairs sorted by fused score
     /// descending (higher = more relevant). These are fusion scores,
     /// NOT distances.
+    ///
+    /// `filters` takes property filters as vectorSearch does (equality, or
+    /// operators such as `{rank: {$gt: 19}}`): both the text and the vector
+    /// search keep only matching nodes before fusion, so up to k matching
+    /// nodes come back.
     #[napi(js_name = "hybridSearch")]
     #[allow(clippy::too_many_arguments)]
     // reason: f64->f32 is intentional: HNSW index uses f32 vectors
@@ -937,7 +967,9 @@ impl JsGrafeoDB {
         query_vector: Option<Vec<f64>>,
         fusion: Option<String>,
         weights: Option<Vec<f64>>,
+        filters: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<Vec<Vec<f64>>> {
+        let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let fusion_method = match fusion.as_deref() {
@@ -961,6 +993,7 @@ impl JsGrafeoDB {
                     query_vec_f32.as_deref(),
                     k as usize,
                     fusion_method,
+                    filter_map.as_ref(),
                 )
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)?;
@@ -1423,6 +1456,23 @@ impl JsGrafeoDB {
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
     }
+}
+
+/// Options for `createTextIndex`: each the default when absent.
+#[napi(object)]
+pub struct TextIndexOptions {
+    /// BM25 term frequency saturation, a number of at least 0 (default 1.2).
+    pub k1: Option<f64>,
+    /// BM25 length normalization, from 0 to 1 (default 0.75).
+    pub b: Option<f64>,
+    /// `"simple"` (default: terms of at least 2 bytes without common English
+    /// words), `"standard"` (every word, for languages that separate words)
+    /// or `"cjk_bigram"` (also pairs of Chinese, Japanese and Korean
+    /// characters).
+    pub tokenizer: Option<String>,
+    /// Words to leave out of documents and queries, in place of the
+    /// tokenizer's own (an empty list leaves none out).
+    pub stop_words: Option<Vec<String>>,
 }
 
 /// Options for CSV import.

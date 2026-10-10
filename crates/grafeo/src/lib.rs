@@ -84,6 +84,10 @@ pub use grafeo_engine::cdc::CdcRetentionConfig;
 pub use grafeo_engine::config::EncryptionConfig;
 pub use grafeo_engine::config::StorageFormat;
 
+// Re-export what `GrafeoDB::create_text_index_with` takes
+#[cfg(feature = "text-index")]
+pub use grafeo_engine::{TextIndexOptions, TokenizerKind};
+
 // Re-export submodules for qualified access (e.g. grafeo::auth::Identity)
 pub use grafeo_engine::admin;
 pub use grafeo_engine::auth;

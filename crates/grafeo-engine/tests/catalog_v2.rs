@@ -255,7 +255,9 @@ fn the_schema_survives_a_reopen_after_a_checkpoint_in_small_chunks() {
         [id("Canals")],
         "the vector index"
     );
-    let matches = db.text_search("Document", "content", "bridges", 3).unwrap();
+    let matches = db
+        .text_search("Document", "content", "bridges", 3, None)
+        .unwrap();
     assert_eq!(
         matches.iter().map(|(node, _)| *node).collect::<Vec<_>>(),
         [id("Bridges")],

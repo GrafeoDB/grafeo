@@ -593,8 +593,19 @@ pub enum QuantizationRecord {
     },
 }
 
+/// How a text index splits text into terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextTokenizerRecord {
+    /// Terms of at least 2 bytes without common English words.
+    Simple,
+    /// Every term.
+    Standard,
+    /// Every term, runs of Chinese, Japanese and Korean characters as pairs.
+    CjkBigram,
+}
+
 /// What an index indexes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum IndexKindRecord {
     /// A property index on a node property key.
     Property {
@@ -624,12 +635,21 @@ pub enum IndexKindRecord {
         label: String,
         /// The indexed property.
         property: String,
+        /// The BM25 term frequency saturation, finite and at least 0.
+        k1: f64,
+        /// The BM25 length normalization, from 0 to 1.
+        b: f64,
+        /// How it splits text into terms.
+        tokenizer: TextTokenizerRecord,
+        /// The stop words in place of the tokenizer's own, lowercased and in
+        /// increasing order; `None` for the tokenizer's own.
+        stop_words: Option<Vec<String>>,
     },
 }
 
 /// An index of one graph. It holds the definition only: a load builds the
 /// index from the data, or restores it from its own section.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexRecord {
     /// The graph's storage key; `None` for the default graph.
     pub graph: Option<String>,
@@ -828,7 +848,9 @@ impl CatalogRecord {
                         label: label.clone(),
                         property: property.clone(),
                     },
-                    IndexKindRecord::Text { label, property } => IndexKeyRecord::Text {
+                    IndexKindRecord::Text {
+                        label, property, ..
+                    } => IndexKeyRecord::Text {
                         label: label.clone(),
                         property: property.clone(),
                     },
@@ -1508,6 +1530,10 @@ mod tests {
                 index: IndexKindRecord::Text {
                     label: "Doc".into(),
                     property: "body".into(),
+                    k1: 1.9,
+                    b: 0.3,
+                    tokenizer: TextTokenizerRecord::CjkBigram,
+                    stop_words: Some(names(&["und", "в"])),
                 },
             }),
             CatalogRecord::IndexName(IndexNameRecord {
@@ -1869,10 +1895,14 @@ mod tests {
                 3, 8, // product quantization, 8 subvectors
             ],
             &[
-                7, 1, 11, 0, 0, 0, // kind 7 (Index), required, 11 bytes
+                7, 1, 37, 0, 0, 0, // kind 7 (Index), required, 37 bytes
                 0, // the default graph
                 2, // a text index
                 3, 68, 111, 99, 4, 98, 111, 100, 121, // on "Doc"."body"
+                102, 102, 102, 102, 102, 102, 254, 63, // k1 1.9, f64 little endian
+                51, 51, 51, 51, 51, 51, 211, 63, // b 0.3
+                2, // the CJK bigram tokenizer
+                1, 2, 3, 117, 110, 100, 2, 208, 178, // stop words ["und", "в"]
             ],
             &[
                 8, 1, 25, 0, 0, 0, // kind 8 (IndexName), required, 25 bytes
@@ -1971,11 +2001,44 @@ mod tests {
                 IndexKindRecord::Text {
                     label: String::new(),
                     property: String::new(),
+                    k1: 1.2,
+                    b: 0.75,
+                    tokenizer: TextTokenizerRecord::Simple,
+                    stop_words: None,
                 },
             ]
             .map(|variant| first(bincode_of(&variant))),
             [0, 1, 2]
         );
+        assert_eq!(
+            [
+                TextTokenizerRecord::Simple,
+                TextTokenizerRecord::Standard,
+                TextTokenizerRecord::CjkBigram,
+            ]
+            .map(|variant| bincode_of(&variant)),
+            [[0], [1], [2]]
+        );
+        // A text index: the variant, label and property (empty), k1 and b
+        // as 8-byte little-endian floats, the tokenizer, and the stop words:
+        // none, or a list (its length, then each word's length and bytes).
+        let text = |stop_words| IndexKindRecord::Text {
+            label: String::new(),
+            property: String::new(),
+            k1: 1.2,
+            b: 0.75,
+            tokenizer: TextTokenizerRecord::Standard,
+            stop_words,
+        };
+        let mut expected = vec![2, 0, 0];
+        expected.extend(1.2f64.to_le_bytes());
+        expected.extend(0.75f64.to_le_bytes());
+        expected.extend([1, 0]);
+        assert_eq!(bincode_of(&text(None)), expected);
+        expected.pop();
+        expected.extend([1, 1, 2]);
+        expected.extend("в".as_bytes());
+        assert_eq!(bincode_of(&text(Some(vec!["в".to_string()]))), expected);
         assert_eq!(
             [
                 IndexNameKindRecord::Hash,

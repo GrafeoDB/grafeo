@@ -170,7 +170,7 @@ fn assert_searches_skip_the_deleted(db: &GrafeoDB, stage: &str) {
 
     // Text: Gus ranks first for canals, so the top 1 needs a second look.
     let text =
-        |query: &str, k: usize| names(db, db.text_search("Person", "bio", query, k).unwrap());
+        |query: &str, k: usize| names(db, db.text_search("Person", "bio", query, k, None).unwrap());
     checks.names("text_search", text("canals", 19), &["Alix"]);
     checks.names("text_search for the top 1", text("canals", 1), &["Alix"]);
     checks.names(
@@ -184,8 +184,17 @@ fn assert_searches_skip_the_deleted(db: &GrafeoDB, stage: &str) {
     let hybrid = |vector: Option<&[f32]>, k: usize| {
         sorted_names(
             db,
-            db.hybrid_search("Person", "bio", "embedding", "canals", vector, k, None)
-                .unwrap(),
+            db.hybrid_search(
+                "Person",
+                "bio",
+                "embedding",
+                "canals",
+                vector,
+                k,
+                None,
+                None,
+            )
+            .unwrap(),
         )
     };
     checks.names("hybrid_search, text only", hybrid(None, 1), &["Alix"]);
@@ -198,8 +207,17 @@ fn assert_searches_skip_the_deleted(db: &GrafeoDB, stage: &str) {
         "hybrid_search, the quantized vector index only",
         names(
             db,
-            db.hybrid_search("Note", "name", "embedding", "", Some(&[0.0, 0.0]), 1, None)
-                .unwrap(),
+            db.hybrid_search(
+                "Note",
+                "name",
+                "embedding",
+                "",
+                Some(&[0.0, 0.0]),
+                1,
+                None,
+                None,
+            )
+            .unwrap(),
         ),
         &["Prague"],
     );
@@ -389,8 +407,12 @@ fn searches_of_indexes_made_after_compact_skip_deleted_compacted_nodes() {
 #[ignore = "#412: the plain store's indexes drop a node at an uncommitted delete"]
 fn an_open_delete_hides_nothing_until_it_commits() {
     let db = indexed_then_compacted();
-    let canals =
-        |db: &GrafeoDB| sorted_names(db, db.text_search("Person", "bio", "canals", 19).unwrap());
+    let canals = |db: &GrafeoDB| {
+        sorted_names(
+            db,
+            db.text_search("Person", "bio", "canals", 19, None).unwrap(),
+        )
+    };
     let nearest_note = |db: &GrafeoDB| {
         names(
             db,

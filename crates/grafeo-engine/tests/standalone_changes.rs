@@ -585,7 +585,7 @@ mod replay {
             "a vector index dropped"
         );
 
-        let found = db.text_search("Doc", "body", "Prague", 3).unwrap();
+        let found = db.text_search("Doc", "body", "Prague", 3, None).unwrap();
         assert_eq!(
             found.len(),
             1,

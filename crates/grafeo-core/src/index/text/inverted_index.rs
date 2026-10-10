@@ -1,9 +1,10 @@
 //! BM25-scored inverted index for full-text search.
 
-use super::tokenizer::{SimpleTokenizer, Tokenizer};
+use super::options::{BM25Config, TextIndexOptions};
+use super::tokenizer::{OptionsTokenizer, Tokenizer};
 use grafeo_common::types::NodeId;
 use grafeo_common::utils::error::{Error, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Receives an [`InvertedIndex`] one posting list at a time, from
 /// [`InvertedIndex::visit`].
@@ -79,25 +80,6 @@ fn count_terms<'t>(
     Ok((length, frequencies))
 }
 
-/// Configuration for BM25 scoring.
-#[derive(Debug, Clone)]
-pub struct BM25Config {
-    /// Term frequency saturation parameter (default 1.2).
-    ///
-    /// Higher values give more weight to term frequency.
-    pub k1: f64,
-    /// Length normalization parameter (default 0.75).
-    ///
-    /// 0.0 = no length normalization, 1.0 = full normalization.
-    pub b: f64,
-}
-
-impl Default for BM25Config {
-    fn default() -> Self {
-        Self { k1: 1.2, b: 0.75 }
-    }
-}
-
 /// A posting entry: document ID and term frequency.
 #[derive(Debug, Clone)]
 struct Posting {
@@ -139,34 +121,60 @@ pub struct InvertedIndex {
     doc_lengths: HashMap<NodeId, u32>,
     /// Sum of all document lengths (for average calculation).
     total_length: u64,
-    /// Tokenizer used for indexing and querying.
+    /// Tokenizer used for indexing and querying: the one `options` names.
     tokenizer: Box<dyn Tokenizer>,
-    /// BM25 configuration.
-    config: BM25Config,
+    /// The options the index was made with; their BM25 parameters are the
+    /// ones it scores with.
+    options: TextIndexOptions,
 }
 
 impl InvertedIndex {
-    /// Creates a new inverted index with the given BM25 configuration.
+    /// Creates a new inverted index with the given BM25 configuration, the
+    /// [`simple`](super::TokenizerKind::Simple) tokenizer and its stop words.
     #[must_use]
     pub fn new(config: BM25Config) -> Self {
+        Self::with_options(TextIndexOptions::new().with_bm25(config))
+    }
+
+    /// Creates a new inverted index with `options`: its BM25 parameters, its
+    /// tokenizer and its stop words, which [`options`](Self::options) gives
+    /// back. The options are not checked (see [`TextIndexOptions::check`]).
+    #[must_use]
+    pub fn with_options(options: TextIndexOptions) -> Self {
         Self {
             postings: HashMap::new(),
             doc_lengths: HashMap::new(),
             total_length: 0,
-            tokenizer: Box::new(SimpleTokenizer::new()),
-            config,
+            tokenizer: Box::new(OptionsTokenizer::new(&options)),
+            options,
         }
     }
 
     /// Creates a new inverted index with a custom tokenizer.
+    ///
+    /// A database keeps a text index by its [`options`](Self::options), and
+    /// a custom tokenizer is none of them: the options of such an index name
+    /// the `simple` tokenizer, which a database opened again would use.
+    #[deprecated(
+        since = "0.6.0",
+        note = "use `InvertedIndex::with_options` and a `TokenizerKind`: a database cannot \
+                keep a custom tokenizer"
+    )]
     pub fn with_tokenizer(config: BM25Config, tokenizer: Box<dyn Tokenizer>) -> Self {
         Self {
             postings: HashMap::new(),
             doc_lengths: HashMap::new(),
             total_length: 0,
             tokenizer,
-            config,
+            options: TextIndexOptions::new().with_bm25(config),
         }
+    }
+
+    /// The options of the index: its BM25 parameters (also after a restore,
+    /// which sets them), its tokenizer and its stop words.
+    #[must_use]
+    pub fn options(&self) -> &TextIndexOptions {
+        &self.options
     }
 
     /// Indexes a document (node text) into the inverted index.
@@ -259,41 +267,74 @@ impl InvertedIndex {
     #[inline]
     fn bm25_term_score(&self, df: f64, tf: f64, dl: f64, n: f64, avg_dl: f64) -> f64 {
         let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-        let tf_component = (tf * (self.config.k1 + 1.0))
-            / (tf + self.config.k1 * (1.0 - self.config.b + self.config.b * dl / avg_dl));
+        let BM25Config { k1, b } = *self.options.bm25();
+        let tf_component = (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * dl / avg_dl));
         idf * tf_component
     }
 
-    /// Searches the index using BM25 scoring.
-    ///
-    /// Returns up to `k` results sorted by descending BM25 score.
-    pub fn search(&self, query: &str, k: usize) -> Vec<(NodeId, f64)> {
+    /// The BM25 score of every document of a node `keep` accepts that holds a
+    /// term of `query`. The corpus statistics count every document.
+    fn scores(&self, query: &str, keep: impl Fn(NodeId) -> bool) -> HashMap<NodeId, f64> {
         let query_tokens = self.tokenizer.tokenize(query);
+        let mut scores: HashMap<NodeId, f64> = HashMap::new();
         if query_tokens.is_empty() || self.doc_lengths.is_empty() {
-            return Vec::new();
+            return scores;
         }
 
         let n = self.doc_lengths.len() as f64;
         let avg_dl = self.total_length as f64 / n;
-        let mut scores: HashMap<NodeId, f64> = HashMap::new();
-
         for token in &query_tokens {
             let Some(posting_list) = self.postings.get(token.as_str()) else {
                 continue;
             };
             let df = posting_list.postings.len() as f64;
             for posting in &posting_list.postings {
+                if !keep(posting.node_id) {
+                    continue;
+                }
                 let tf = f64::from(posting.term_freq);
                 let dl = f64::from(self.doc_lengths.get(&posting.node_id).copied().unwrap_or(0));
                 *scores.entry(posting.node_id).or_insert(0.0) +=
                     self.bm25_term_score(df, tf, dl, n, avg_dl);
             }
         }
+        scores
+    }
 
+    /// The `k` best of `scores`, by descending score.
+    fn top(scores: HashMap<NodeId, f64>, k: usize) -> Vec<(NodeId, f64)> {
         let mut results: Vec<(NodeId, f64)> = scores.into_iter().collect();
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(k);
         results
+    }
+
+    /// Searches the index using BM25 scoring.
+    ///
+    /// Returns up to `k` results sorted by descending BM25 score.
+    pub fn search(&self, query: &str, k: usize) -> Vec<(NodeId, f64)> {
+        Self::top(self.scores(query, |_| true), k)
+    }
+
+    /// Searches the index as [`Self::search`] does, among the nodes of
+    /// `allowlist` only: up to `k` of them, sorted by descending BM25 score.
+    ///
+    /// The scores are the ones [`Self::search`] gives the same nodes: the
+    /// corpus statistics (the number of documents, their average length and
+    /// each term's document frequency) count every document of the index,
+    /// not only the allowed ones, so a filter narrows the results without
+    /// changing how a document scores.
+    #[must_use]
+    pub fn search_with_filter(
+        &self,
+        query: &str,
+        k: usize,
+        allowlist: &HashSet<NodeId>,
+    ) -> Vec<(NodeId, f64)> {
+        if allowlist.is_empty() {
+            return Vec::new();
+        }
+        Self::top(self.scores(query, |node| allowlist.contains(&node)), k)
     }
 
     /// Scores a single document against a query using BM25.
@@ -344,31 +385,10 @@ impl InvertedIndex {
     /// text search with WHERE predicates.
     #[must_use]
     pub fn search_with_threshold(&self, query: &str, threshold: f64) -> Vec<(NodeId, f64)> {
-        let query_tokens = self.tokenizer.tokenize(query);
-        if query_tokens.is_empty() || self.doc_lengths.is_empty() {
-            return Vec::new();
-        }
-        let n = self.doc_lengths.len() as f64;
-        let avg_dl = self.total_length as f64 / n;
-        let mut scores: HashMap<NodeId, f64> = HashMap::new();
-        for token in &query_tokens {
-            let Some(posting_list) = self.postings.get(token.as_str()) else {
-                continue;
-            };
-            let df = posting_list.postings.len() as f64;
-            for posting in &posting_list.postings {
-                let tf = f64::from(posting.term_freq);
-                let dl = f64::from(self.doc_lengths.get(&posting.node_id).copied().unwrap_or(0));
-                *scores.entry(posting.node_id).or_insert(0.0) +=
-                    self.bm25_term_score(df, tf, dl, n, avg_dl);
-            }
-        }
-        let mut results: Vec<(NodeId, f64)> = scores
-            .into_iter()
-            .filter(|(_, score)| *score >= threshold)
-            .collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        results
+        let mut scores = self.scores(query, |_| true);
+        scores.retain(|_, score| *score >= threshold);
+        let count = scores.len();
+        Self::top(scores, count)
     }
 
     /// Returns true if the given node is indexed.
@@ -398,7 +418,7 @@ impl InvertedIndex {
     /// Returns the BM25 configuration.
     #[must_use]
     pub fn config(&self) -> &BM25Config {
-        &self.config
+        self.options.bm25()
     }
 
     /// Snapshot the index for serialization.
@@ -433,7 +453,7 @@ impl InvertedIndex {
 
     /// Override the BM25 configuration parameters.
     pub fn set_config(&mut self, config: BM25Config) {
-        self.config = config;
+        self.options.set_bm25(config);
     }
 
     /// Restore the index from a snapshot. Replaces all current data and
@@ -444,7 +464,7 @@ impl InvertedIndex {
         doc_lengths: Vec<(NodeId, u32)>,
         total_length: u64,
     ) {
-        self.begin_restore(self.config.clone(), total_length);
+        self.begin_restore(self.options.bm25().clone(), total_length);
         for (term, entries) in postings {
             self.restore_posting_list(term, entries);
         }
@@ -475,7 +495,7 @@ impl InvertedIndex {
     /// Returns the first error of `visitor`, which ends the visit.
     pub fn visit(&self, visitor: &mut dyn PostingsVisitor) -> Result<()> {
         visitor.header(
-            &self.config,
+            self.options.bm25(),
             self.total_length,
             self.postings.len(),
             self.doc_lengths.len(),
@@ -520,7 +540,7 @@ impl InvertedIndex {
         self.postings = HashMap::new();
         self.doc_lengths = HashMap::new();
         self.total_length = total_length;
-        self.config = config;
+        self.options.set_bm25(config);
     }
 
     /// Sets the posting list of `term`: pairs of a node and the term's
@@ -831,6 +851,202 @@ mod tests {
         assert!(
             empty_query_results.is_empty(),
             "empty query should return no results"
+        );
+    }
+
+    /// Three notes in the standard tokenizer: Alix in Amsterdam (3 terms),
+    /// Gus in Berlin (2), Alix three times in Berlin (4).
+    fn berlin_notes(options: TextIndexOptions) -> InvertedIndex {
+        let mut index = InvertedIndex::with_options(
+            options.with_tokenizer(super::super::TokenizerKind::Standard),
+        );
+        index.insert(NodeId::new(3), "Alix Amsterdam Amsterdam");
+        index.insert(NodeId::new(19), "Gus Berlin");
+        index.insert(NodeId::new(88), "Alix Berlin Berlin Berlin");
+        index
+    }
+
+    /// BM25 of the term "berlin" in [`berlin_notes`]: 3 documents of 3
+    /// terms on average, 2 with the term, so its inverse document frequency
+    /// is ln(1 + 1.5 / 2.5) = 0.470003629245736 for both. Gus's note has it
+    /// once in 2 terms, the other three times in 4:
+    /// idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * length / 3)).
+    #[test]
+    fn scores_follow_k1_and_b_as_bm25_says() {
+        for (k1, b, gus, alix) in [
+            (1.2, 0.75, 0.544_214_728_600_325_5, 0.689_338_656_227_079),
+            (0.0, 0.75, 0.470_003_629_245_735_6, 0.470_003_629_245_735_6),
+            (2.0, 0.0, 0.470_003_629_245_735_6, 0.846_006_532_642_324_1),
+            (1.2, 1.0, 0.574_448_880_189_232_6, 0.674_353_033_265_620_8),
+            (0.3, 0.19, 0.476_974_799_390_676_2, 0.552_279_046_115_808_7),
+        ] {
+            let index = berlin_notes(TextIndexOptions::new().with_k1(k1).with_b(b));
+            let mut found = index.search("Berlin", 10);
+            found.sort_by_key(|(node, _)| *node);
+            assert_eq!(found.len(), 2, "k1 {k1}, b {b}: {found:?}");
+            for ((node, score), expected) in found.iter().zip([gus, alix]) {
+                assert!(
+                    (score - expected).abs() < 1e-12,
+                    "k1 {k1}, b {b}: node {node:?} scores {score}, BM25 says {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_index_scores_as_bm25_1_2_and_0_75() {
+        let default = berlin_notes(TextIndexOptions::new());
+        let explicit = berlin_notes(TextIndexOptions::new().with_k1(1.2).with_b(0.75));
+        assert_eq!(default.search("berlin", 10).len(), 2);
+        let mut found = default.search("berlin", 10);
+        let mut expected = explicit.search("berlin", 10);
+        found.sort_by_key(|(node, _)| *node);
+        expected.sort_by_key(|(node, _)| *node);
+        assert_eq!(found, expected);
+        assert_eq!(
+            InvertedIndex::new(BM25Config::default()).options(),
+            &TextIndexOptions::new(),
+            "new() makes an index with the default options"
+        );
+    }
+
+    #[test]
+    fn documents_and_queries_are_tokenized_by_the_options_tokenizer() {
+        use super::super::TokenizerKind;
+
+        let mut chinese = InvertedIndex::with_options(
+            TextIndexOptions::new().with_tokenizer(TokenizerKind::CjkBigram),
+        );
+        chinese.insert(NodeId::new(3), "阿利克斯住在柏林");
+        chinese.insert(NodeId::new(19), "古斯住在阿姆斯特丹");
+        let found: Vec<u64> = chinese
+            .search("柏林", 10)
+            .into_iter()
+            .map(|(node, _)| node.0)
+            .collect();
+        assert_eq!(found, [3], "Berlin in Chinese is found inside the sentence");
+
+        let mut simple = InvertedIndex::new(BM25Config::default());
+        simple.insert(NodeId::new(3), "阿利克斯住在柏林");
+        assert_eq!(
+            simple.search("柏林", 10),
+            [],
+            "the simple tokenizer keeps the sentence as one term"
+        );
+
+        let mut russian = InvertedIndex::with_options(
+            TextIndexOptions::new()
+                .with_tokenizer(TokenizerKind::Standard)
+                .with_stop_words(["и", "в"]),
+        );
+        russian.insert(NodeId::new(3), "Аликс и Гас едут в Берлин");
+        assert_eq!(
+            russian.search("и в", 10),
+            [],
+            "a query of stop words finds nothing"
+        );
+        assert_eq!(
+            russian.search("БЕРЛИН", 10).len(),
+            1,
+            "queries are lowercased"
+        );
+        assert_eq!(russian.len(), 1);
+        assert_eq!(russian.term_count(), 4, "аликс, гас, едут, берлин");
+    }
+
+    #[test]
+    fn a_restore_sets_the_bm25_parameters_and_keeps_the_tokenizer_and_stop_words() {
+        use super::super::TokenizerKind;
+
+        let options = TextIndexOptions::new()
+            .with_tokenizer(TokenizerKind::CjkBigram)
+            .with_stop_words(["住在"]);
+        let mut index = InvertedIndex::with_options(options.clone());
+        index.begin_restore(BM25Config { k1: 0.3, b: 0.19 }, 0);
+        assert_eq!(
+            index.options(),
+            &options.with_k1(0.3).with_b(0.19),
+            "the restored parameters, the same tokenizer and stop words"
+        );
+    }
+
+    /// Five notes, three about canals: Gus's three times, Alix's in a shorter
+    /// note than Mia's.
+    fn canal_notes() -> InvertedIndex {
+        let mut index = InvertedIndex::new(BM25Config::default());
+        index.insert(NodeId::new(3), "Alix walks the canals of Amsterdam");
+        index.insert(
+            NodeId::new(19),
+            "Gus cycles along canals, canals and more canals",
+        );
+        index.insert(NodeId::new(88), "Vincent visits Berlin");
+        index.insert(NodeId::new(4), "Mia sees the old canals of Berlin at night");
+        index.insert(NodeId::new(5), "Jules naps");
+        index
+    }
+
+    /// The nodes with these ids, as an allowlist.
+    fn nodes(ids: &[u64]) -> HashSet<NodeId> {
+        ids.iter().copied().map(NodeId::new).collect()
+    }
+
+    #[test]
+    fn a_filtered_search_keeps_the_allowed_nodes_with_the_scores_of_the_whole_index() {
+        let index = canal_notes();
+        let allowlist = nodes(&[3, 4, 5, 88]);
+        let everything = index.search("canals Berlin", 10);
+        let expected: Vec<(NodeId, f64)> = everything
+            .iter()
+            .copied()
+            .filter(|(node, _)| allowlist.contains(node))
+            .collect();
+        assert_eq!(
+            expected.iter().map(|(node, _)| node.0).collect::<Vec<_>>(),
+            vec![4, 88, 3],
+            "Mia has both terms; Berlin, the rarer one, outscores the canals of Alix: \
+             {everything:?}"
+        );
+        assert_eq!(
+            index.search_with_filter("canals Berlin", 10, &allowlist),
+            expected,
+            "the order and the scores of the unfiltered search, Gus left out"
+        );
+        assert_eq!(
+            index.search_with_filter("canals Berlin", 2, &allowlist),
+            expected[..2],
+            "k counts the allowed nodes"
+        );
+    }
+
+    #[test]
+    fn a_filtered_search_fills_k_from_the_allowed_nodes() {
+        let index = canal_notes();
+        let top_two: Vec<u64> = index
+            .search("canals", 2)
+            .into_iter()
+            .map(|(node, _)| node.0)
+            .collect();
+        assert_eq!(top_two, vec![19, 3], "Gus and Alix outscore Mia");
+        let found = index.search_with_filter("canals", 1, &nodes(&[4, 88]));
+        assert_eq!(
+            found.iter().map(|(node, _)| node.0).collect::<Vec<_>>(),
+            vec![4],
+            "the best allowed match, not a top-k filtered afterwards: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_filtered_search_without_allowed_nodes_finds_nothing() {
+        let index = canal_notes();
+        assert_eq!(
+            index.search_with_filter("canals", 10, &HashSet::new()),
+            [],
+            "no node is allowed"
+        );
+        assert_eq!(
+            index.search_with_filter("canals", 10, &nodes(&[5, 88])),
+            [],
+            "Jules and Vincent never mention canals"
         );
     }
 

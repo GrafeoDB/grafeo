@@ -5302,6 +5302,89 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parses the options of a text index, `{k1: 1.2, b: 0.75, tokenizer:
+    /// 'standard', stop_words: ['and', 'or']}` (each optional, names in any
+    /// case), into `options`.
+    fn parse_text_index_options(&mut self, options: &mut IndexOptions) -> Result<()> {
+        self.expect(TokenKind::LBrace)?;
+        while self.current.kind != TokenKind::RBrace {
+            if !self.is_identifier() {
+                return Err(self.error("Expected option name"));
+            }
+            let opt_name = self.get_identifier_name();
+            self.advance();
+            self.expect(TokenKind::Colon)?;
+            match opt_name.to_uppercase().as_str() {
+                "K1" => options.k1 = Some(self.parse_index_option_number("k1")?),
+                "B" => options.b = Some(self.parse_index_option_number("b")?),
+                "TOKENIZER" => {
+                    if self.current.kind != TokenKind::String {
+                        return Err(self.error("Expected string for tokenizer"));
+                    }
+                    options.tokenizer = Some(self.index_option_string());
+                    self.advance();
+                }
+                "STOP_WORDS" => {
+                    self.expect(TokenKind::LBracket)?;
+                    let mut words = Vec::new();
+                    while self.current.kind != TokenKind::RBracket {
+                        if self.current.kind != TokenKind::String {
+                            return Err(self.error("Expected string in stop_words"));
+                        }
+                        words.push(self.index_option_string());
+                        self.advance();
+                        if self.current.kind == TokenKind::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::RBracket)?;
+                    options.stop_words = Some(words);
+                }
+                _ => {
+                    return Err(self.error(&format!(
+                        "Unknown text index option '{opt_name}'. Use: k1, b, tokenizer, stop_words"
+                    )));
+                }
+            }
+            if self.current.kind == TokenKind::Comma {
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(())
+    }
+
+    /// Parses the number of the index option `name`: an integer or a float,
+    /// with an optional leading minus (which the engine then refuses as out
+    /// of range, naming the option).
+    fn parse_index_option_number(&mut self, name: &str) -> Result<f64> {
+        let negative = self.current.kind == TokenKind::Minus;
+        if negative {
+            self.advance();
+        }
+        if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Float) {
+            return Err(self.error(&format!("Expected a number for {name}")));
+        }
+        let value: f64 = self
+            .current
+            .text
+            .parse()
+            .map_err(|_| self.error(&format!("Invalid number for {name}")))?;
+        self.advance();
+        Ok(if negative { -value } else { value })
+    }
+
+    /// The text of the current string literal, without its quotes.
+    fn index_option_string(&self) -> String {
+        self.current
+            .text
+            .trim_matches('\'')
+            .trim_matches('"')
+            .to_string()
+    }
+
     /// Parses the body of CREATE INDEX after name: `FOR (n:Label) ON (n.prop) [USING kind] [options]`.
     fn parse_create_index_body(
         &mut self,
@@ -5376,7 +5459,13 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             match kind_text.to_uppercase().as_str() {
-                "TEXT" => index_kind = IndexKind::Text,
+                "TEXT" => {
+                    index_kind = IndexKind::Text;
+                    // Parse optional {k1: 1.2, b: 0.75, tokenizer: 'name', stop_words: [...]}
+                    if self.current.kind == TokenKind::LBrace {
+                        self.parse_text_index_options(&mut options)?;
+                    }
+                }
                 "VECTOR" => {
                     index_kind = IndexKind::Vector;
                     // Parse optional {dimensions: N, metric: 'name'}
@@ -12121,6 +12210,75 @@ mod tests {
             "CREATE INDEX ... FOR must parse: {:?}",
             result.err()
         );
+    }
+
+    /// The options of `CREATE INDEX ... USING TEXT {...}` reach the statement.
+    #[test]
+    fn create_text_index_takes_bm25_tokenizer_and_stop_word_options() {
+        let parsed = Parser::new(
+            "CREATE INDEX notes FOR (n:Note) ON (n.body) USING TEXT \
+             {K1: 1.5, b: 0, tokenizer: 'cjk_bigram', stop_words: ['и', \"в\"]}",
+        )
+        .parse()
+        .expect("text index options parse");
+        let Statement::Schema(SchemaStatement::CreateIndex(stmt)) = parsed else {
+            panic!("a CREATE INDEX statement: {parsed:?}");
+        };
+        assert_eq!(stmt.index_kind, IndexKind::Text);
+        assert_eq!(stmt.options.k1, Some(1.5));
+        assert_eq!(stmt.options.b, Some(0.0), "an integer is a number too");
+        assert_eq!(stmt.options.tokenizer.as_deref(), Some("cjk_bigram"));
+        assert_eq!(
+            stmt.options.stop_words,
+            Some(vec!["и".to_string(), "в".to_string()])
+        );
+
+        let negative = Parser::new(
+            "CREATE INDEX notes FOR (n:Note) ON (n.body) USING TEXT {k1: -3, stop_words: []}",
+        )
+        .parse()
+        .expect("a negative k1 parses; the engine refuses it");
+        let Statement::Schema(SchemaStatement::CreateIndex(stmt)) = negative else {
+            panic!("a CREATE INDEX statement: {negative:?}");
+        };
+        assert_eq!(stmt.options.k1, Some(-3.0));
+        assert_eq!(stmt.options.stop_words, Some(Vec::new()));
+
+        let plain = Parser::new("CREATE INDEX notes FOR (n:Note) ON (n.body) USING TEXT")
+            .parse()
+            .expect("no options");
+        let Statement::Schema(SchemaStatement::CreateIndex(stmt)) = plain else {
+            panic!("a CREATE INDEX statement: {plain:?}");
+        };
+        assert_eq!(
+            (
+                stmt.options.k1,
+                stmt.options.b,
+                stmt.options.tokenizer,
+                stmt.options.stop_words
+            ),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn unknown_or_mistyped_text_index_options_are_errors() {
+        for (options, says) in [
+            (
+                "{analyzer: 'standard'}",
+                "Unknown text index option 'analyzer'",
+            ),
+            ("{k1: 'high'}", "Expected a number for k1"),
+            ("{tokenizer: standard}", "Expected string for tokenizer"),
+            ("{stop_words: ['and', 3]}", "Expected string in stop_words"),
+        ] {
+            let error = Parser::new(&format!(
+                "CREATE INDEX notes FOR (n:Note) ON (n.body) USING TEXT {options}"
+            ))
+            .parse()
+            .expect_err(options);
+            assert!(error.to_string().contains(says), "{options}: {error}");
+        }
     }
 
     #[test]

@@ -655,7 +655,9 @@ fn checkpoint_and_open_memory_does_not_grow_with_a_text_index() {
         },
         &|db, documents| {
             assert_eq!(db.node_count(), documents, "every document came back");
-            let found = db.text_search("Doc", "body", "amsterdam88", 3).unwrap();
+            let found = db
+                .text_search("Doc", "body", "amsterdam88", 3, None)
+                .unwrap();
             assert_eq!(found.len(), 3, "the text index came back: {found:?}");
         },
     );

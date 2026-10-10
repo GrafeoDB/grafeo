@@ -297,6 +297,14 @@ pub struct IndexOptions {
     pub dimensions: Option<usize>,
     /// Distance metric (for vector indexes).
     pub metric: Option<String>,
+    /// BM25 term frequency saturation (for text indexes).
+    pub k1: Option<f64>,
+    /// BM25 length normalization (for text indexes).
+    pub b: Option<f64>,
+    /// Tokenizer name (for text indexes).
+    pub tokenizer: Option<String>,
+    /// Stop words in place of the tokenizer's own (for text indexes).
+    pub stop_words: Option<Vec<String>>,
 }
 
 /// A CREATE CONSTRAINT statement.

@@ -634,7 +634,7 @@ fn assert_committed_docs(db: &GrafeoDB, after: &str) {
             .and_then(|node| node.get_property("title").cloned())
     };
     let text = |query: &str| -> Vec<Option<Value>> {
-        db.text_search("Doc", "body", query, 3)
+        db.text_search("Doc", "body", query, 3, None)
             .unwrap()
             .into_iter()
             .map(|(id, _)| title(id))

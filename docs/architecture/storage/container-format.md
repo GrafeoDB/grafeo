@@ -557,6 +557,10 @@ increase among the document lengths and within each list, terms (UTF-8)
 strictly increase, every length, count and term frequency is at least 1, every
 posting's node has a document length, the document lengths add up to
 `total_length`, and each document's term frequencies add up to its length.
+The index's options (k1, b, tokenizer, stop words) are those of its catalog
+record: an open restores a stream into an index with the record's tokenizer
+and stop words, and builds the index from the data instead when the stream's
+k1 or b are not the record's.
 
 **`RDF_RING` (version 3).** The metadata holds the number of triples. Streams
 0 to 5 hold the six parts of the ring, each in its packed format: the term
@@ -596,7 +600,7 @@ framed, little-endian:
 | 4 | Graph type | Name, node types, edge types, whether it is open |
 | 5 | Graph type binding | Graph, graph type |
 | 6 | Named constraint | Name, label, properties, kind (`0` unique, `1` node key, `2` not null, `3` exists) |
-| 7 | Index definition | Graph (none for the default graph), then the index: `0` a property index and its key; `1` a vector index and its label, property, dimensions, metric (`0` cosine, `1` Euclidean, `2` dot product, `3` Manhattan), `m`, `ef_construction` and quantization (`0` none, `1` scalar, `2` binary, `3` product and its number of subvectors); or `2` a text index and its label and property |
+| 7 | Index definition | Graph (none for the default graph), then the index: `0` a property index and its key; `1` a vector index and its label, property, dimensions, metric (`0` cosine, `1` Euclidean, `2` dot product, `3` Manhattan), `m`, `ef_construction` and quantization (`0` none, `1` scalar, `2` binary, `3` product and its number of subvectors); or `2` a text index and its label, property, BM25 `k1` and `b` (`f64` each, little-endian), tokenizer (`0` simple, `1` standard, `2` CJK bigram) and stop words (none, or a list of lowercased strings in increasing order, in place of the tokenizer's own) |
 | 8 | Index name | Name, label, property, kind (`0` hash, `1` B-tree, `2` full text) |
 | 9 | Procedure | Name, parameters and result columns (each a list of name and type), body |
 

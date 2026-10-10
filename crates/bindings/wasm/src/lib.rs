@@ -437,19 +437,44 @@ impl Database {
     /// Creates a text index on a label+property pair for full-text (BM25) search.
     ///
     /// Indexes all existing nodes with matching label and string property values.
+    /// `options` sets the BM25 parameters `k1` (at least 0, default 1.2) and
+    /// `b` (0 to 1, default 0.75), the `tokenizer` (`"simple"`, the default,
+    /// `"standard"` or `"cjk_bigram"`) and the `stopWords` in place of the
+    /// tokenizer's own.
     ///
     /// ```js
     /// db.createTextIndex("Article", "content");
+    /// db.createTextIndex("Note", "body", { tokenizer: "cjk_bigram", k1: 1.5 });
     /// ```
     ///
     /// # Errors
     ///
-    /// Returns `JsError` if the text index cannot be created (e.g., invalid label or property).
+    /// Returns `JsError` if `options` cannot be deserialised, names an unknown
+    /// tokenizer or k1 or b out of range, or the text index cannot be created.
     #[cfg(feature = "text-index")]
     #[wasm_bindgen(js_name = "createTextIndex")]
-    pub fn create_text_index(&self, label: &str, property: &str) -> Result<(), JsError> {
+    pub fn create_text_index(
+        &self,
+        label: &str,
+        property: &str,
+        options: Option<JsValue>,
+    ) -> Result<(), JsError> {
+        let opts: TextIndexOptionsJs = match options {
+            Some(options) if !options.is_undefined() && !options.is_null() => {
+                serde_wasm_bindgen::from_value(options)
+                    .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
+            }
+            _ => TextIndexOptionsJs::default(),
+        };
+        let options = grafeo_engine::TextIndexOptions::from_parts(
+            opts.k1,
+            opts.b,
+            opts.tokenizer.as_deref(),
+            opts.stop_words.as_deref(),
+        )
+        .map_err(|e| JsError::new(&e.to_string()))?;
         self.inner
-            .create_text_index(label, property)
+            .create_text_index_with(label, property, options)
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -486,16 +511,22 @@ impl Database {
     /// Performs full-text search using BM25 ranking.
     ///
     /// Returns an array of `{id, score}` objects, ordered by relevance.
+    /// `options.filters` takes property filters as `vectorSearch()` does
+    /// (equality, or operators such as `{rank: {$gt: 19}}`): only matching
+    /// nodes are searched, so up to `k` of them come back.
     ///
     /// ```js
     /// db.createTextIndex("Article", "content");
     /// const results = db.textSearch("Article", "content", "graph database", 10);
     /// // [{id: 42, score: 2.5}, {id: 17, score: 1.8}]
+    /// const berlin = db.textSearch("Article", "content", "graph", 10,
+    ///   { filters: { city: "Berlin" } });
     /// ```
     ///
     /// # Errors
     ///
-    /// Returns `JsError` if no text index exists for the label/property pair, or if the search fails.
+    /// Returns `JsError` if `options` cannot be deserialised, no text index exists for the
+    /// label/property pair, or the search fails.
     #[cfg(feature = "text-index")]
     #[wasm_bindgen(js_name = "textSearch")]
     pub fn text_search(
@@ -504,10 +535,23 @@ impl Database {
         property: &str,
         query: &str,
         k: usize,
+        options: Option<JsValue>,
     ) -> Result<JsValue, JsError> {
+        let opts: SearchFilterOptions = match options {
+            Some(options) if !options.is_undefined() && !options.is_null() => {
+                serde_wasm_bindgen::from_value(options)
+                    .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
+            }
+            _ => SearchFilterOptions::default(),
+        };
+        let filters = opts.filters.as_ref().map(|f| {
+            f.iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect::<HashMap<String, Value>>()
+        });
         let results = self
             .inner
-            .text_search(label, property, query, k)
+            .text_search(label, property, query, k, filters.as_ref())
             .map_err(|e| JsError::new(&e.to_string()))?;
 
         let arr = Array::new_with_length(results.len() as u32);
@@ -533,13 +577,19 @@ impl Database {
     /// Uses Reciprocal Rank Fusion to combine results from both indexes.
     /// Returns an array of `{id, score}` objects.
     ///
+    /// `options.filters` takes property filters as `vectorSearch()` does
+    /// (equality, or operators such as `{rank: {$gt: 19}}`): the search keeps
+    /// only matching nodes before fusion, so up to `k` matching nodes come
+    /// back.
+    ///
     /// ```js
-    /// const results = db.hybridSearch("Article", "content", "embedding", "graph databases", 10);
+    /// const results = db.hybridSearch("Article", "content", "embedding", "graph databases", 10,
+    ///   { filters: { city: "Berlin" } });
     /// ```
     ///
     /// # Errors
     ///
-    /// Returns `JsError` if the required text or vector indexes are missing, or if the search fails.
+    /// Returns `JsError` if `options` cannot be deserialised, or if the search fails.
     #[cfg(feature = "hybrid-search")]
     #[wasm_bindgen(js_name = "hybridSearch")]
     pub fn hybrid_search(
@@ -549,7 +599,21 @@ impl Database {
         vector_property: &str,
         query_text: &str,
         k: usize,
+        options: Option<JsValue>,
     ) -> Result<JsValue, JsError> {
+        let opts: SearchFilterOptions = match options {
+            Some(options) if !options.is_undefined() && !options.is_null() => {
+                serde_wasm_bindgen::from_value(options)
+                    .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
+            }
+            _ => SearchFilterOptions::default(),
+        };
+        let filters = opts.filters.as_ref().map(|f| {
+            f.iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect::<HashMap<String, Value>>()
+        });
+
         let results = self
             .inner
             .hybrid_search(
@@ -560,6 +624,7 @@ impl Database {
                 None,
                 k,
                 None,
+                filters.as_ref(),
             )
             .map_err(|e| JsError::new(&e.to_string()))?;
 
@@ -1492,6 +1557,25 @@ struct MmrSearchOptions {
     lambda: Option<f32>,
     ef: Option<usize>,
     filters: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// Options for `textSearch()` and `hybridSearch()`.
+#[cfg(any(feature = "text-index", feature = "hybrid-search"))]
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchFilterOptions {
+    filters: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// Options for `createTextIndex()`.
+#[cfg(feature = "text-index")]
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TextIndexOptionsJs {
+    k1: Option<f64>,
+    b: Option<f64>,
+    tokenizer: Option<String>,
+    stop_words: Option<Vec<String>>,
 }
 
 /// Converts a `Vec<(NodeId, f32)>` to a JS array of `{id, distance}` objects.

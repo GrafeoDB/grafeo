@@ -412,7 +412,10 @@ fn install(target: &LpgStore, kind: &IndexKindRecord, index: BuiltIndex) -> Resu
         }
         #[cfg(feature = "text-index")]
         BuiltIndex::Text(index) => {
-            let IndexKindRecord::Text { label, property } = kind else {
+            let IndexKindRecord::Text {
+                label, property, ..
+            } = kind
+            else {
                 return Err(Error::Internal(format!("a text index built for {kind:?}")));
             };
             target.add_text_index(label, property, Arc::new(parking_lot::RwLock::new(index)));
@@ -431,7 +434,9 @@ fn index_key(kind: &IndexKindRecord) -> IndexKeyRecord {
             label: label.clone(),
             property: property.clone(),
         },
-        IndexKindRecord::Text { label, property } => IndexKeyRecord::Text {
+        IndexKindRecord::Text {
+            label, property, ..
+        } => IndexKeyRecord::Text {
             label: label.clone(),
             property: property.clone(),
         },
@@ -465,7 +470,7 @@ fn forget_unbuilt(unbuilt: &mut Vec<GraphIndexes>, graph: Option<&str>, key: &In
                 .retain(|def| (&def.label, &def.property) != (label, property)),
             IndexKeyRecord::Text { label, property } => indexes
                 .text
-                .retain(|(indexed, text)| (indexed, text) != (label, property)),
+                .retain(|def| (&def.label, &def.property) != (label, property)),
         }
     }
     unbuilt.retain(|indexes| !indexes.is_empty());

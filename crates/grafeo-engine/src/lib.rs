@@ -55,6 +55,9 @@ pub use database::GrafeoDB;
 #[cfg(feature = "lpg")]
 pub use database::GraphHandle;
 pub use grafeo_core::graph::{GraphStore, GraphStoreMut, ProjectionSpec};
+/// The options `GrafeoDB::create_text_index_with` takes.
+#[cfg(feature = "text-index")]
+pub use grafeo_core::index::text::{TextIndexOptions, TokenizerKind};
 pub use memory_usage::MemoryUsage;
 #[cfg(feature = "metrics")]
 pub use metrics::{MetricsRegistry, MetricsSnapshot};

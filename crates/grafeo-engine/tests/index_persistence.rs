@@ -251,7 +251,9 @@ mod text {
     const SEARCH: &str = "MATCH (a:Article) WHERE text_score(a.body, 'graph') > 0.0 RETURN a.id";
 
     fn assert_text_index(db: &GrafeoDB) {
-        let found = db.text_search("Article", "body", "graph", 10).unwrap();
+        let found = db
+            .text_search("Article", "body", "graph", 10, None)
+            .unwrap();
         assert_eq!(found.len(), 1);
         let result = db.execute(&format!("PROFILE {SEARCH}")).unwrap();
         assert!(plan(&result).contains("TextScan"), "{}", plan(&result));
@@ -267,13 +269,13 @@ mod text {
         copy.execute("INSERT (:Article {id: 3, body: 'graph theory'})")
             .unwrap();
         assert_eq!(
-            copy.text_search("Article", "body", "graph", 10)
+            copy.text_search("Article", "body", "graph", 10, None)
                 .unwrap()
                 .len(),
             2
         );
         assert_eq!(
-            db.text_search("Article", "body", "graph", 10)
+            db.text_search("Article", "body", "graph", 10, None)
                 .unwrap()
                 .len(),
             1

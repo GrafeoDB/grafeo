@@ -1576,7 +1576,9 @@ impl Session {
                                 IndexKindRecord::Property { key: prop.clone() },
                             ));
                         }
-                        IndexKind::Text => self.text_index_change(change, &stmt.label, prop)?,
+                        IndexKind::Text => {
+                            self.text_index_change(change, &stmt.label, prop, &stmt.options)?;
+                        }
                         IndexKind::Vector => self.vector_index_change(
                             change,
                             &stmt.label,
@@ -2192,30 +2194,37 @@ impl Session {
     }
 
     /// Adds to `change` the put of a text index of `property` on the nodes
-    /// with `label` in the active graph, built from their text values.
+    /// with `label` in the active graph, with the text index options of
+    /// `options`, built from their text values.
     ///
     /// # Errors
     ///
-    /// An error in a build without the `text-index` feature.
+    /// An invalid-value error for options no text index takes, and an error
+    /// in a build without the `text-index` feature.
     #[cfg(all(feature = "lpg", feature = "gql"))]
     fn text_index_change(
         &self,
         change: &mut crate::transaction::StandaloneChange,
         label: &str,
         property: &str,
+        options: &grafeo_adapters::query::gql::ast::IndexOptions,
     ) -> Result<()> {
         #[cfg(feature = "text-index")]
         {
+            let options = grafeo_core::index::text::TextIndexOptions::from_parts(
+                options.k1,
+                options.b,
+                options.tokenizer.as_deref(),
+                options.stop_words.as_deref(),
+            )?;
             let graph = self.active_lpg_graph_key();
             let store = self.active_lpg_store();
-            let index = crate::database::index::text_index_from_data(&*store, label, property);
+            let index =
+                crate::database::index::text_index_from_data(&*store, label, property, &options);
             change.push_built(
                 crate::database::index::put_index(
                     graph.as_deref(),
-                    grafeo_common::storage::catalog_record::IndexKindRecord::Text {
-                        label: label.to_string(),
-                        property: property.to_string(),
-                    },
+                    crate::database::index::text_index_kind(label, property, &options)?,
                 ),
                 crate::transaction::BuiltIndex::Text(index),
             );
@@ -2223,7 +2232,7 @@ impl Session {
         }
         #[cfg(not(feature = "text-index"))]
         {
-            let _ = (change, label, property);
+            let _ = (change, label, property, options);
             Err(grafeo_common::utils::error::Error::Query(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no text indexes (the `text-index` feature)",

@@ -65,7 +65,7 @@ All labeled property graph query languages plus persistence. The default choice 
 rdf = ["triple-store", "grafeo-engine/lpg", "gql", "sparql", "graphql", "storage", "regex", "shacl"]
 ```
 
-RDF triple store with SPARQL, GraphQL, SHACL validation and persistence, for knowledge engineers working with ontologies and linked data. Persistence needs the LPG store for now, so the profile includes it ([#544](https://github.com/GrafeoDB/grafeo/issues/544)): without it a database lost its triples on reopen. Add the `ring-index` atom for compact RDF indexing (it pulls in `succinct-indexes`).
+RDF triple store with SPARQL, GraphQL, SHACL validation and persistence, for knowledge engineers working with ontologies and linked data. The triple store comes with the LPG store, which sessions, persistence and recovery need: the engine's `triple-store` feature enables `lpg`, so every database build with the triple store has it ([#544](https://github.com/GrafeoDB/grafeo/issues/544); such a build lost its triples on reopen). Add the `ring-index` atom for compact RDF indexing (it pulls in `succinct-indexes`).
 
 > **Note:** in the lower-level crates (`grafeo-core`, `grafeo-adapters`, `grafeo-engine`), `rdf` is a deprecated alias for the `triple-store` atom only. The profile above applies to the facade and binding crates.
 
@@ -218,7 +218,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
-| `triple-store` | RDF | RDF triple store with 6-way indexing | Implemented |
+| `triple-store` | RDF | RDF triple store with 6-way indexing; enables `lpg` | Implemented |
 | `shacl` | RDF | SHACL validation (core and SPARQL-based constraints) | Implemented |
 | `ring-index` | (standalone) | Space-efficient RDF index (pulls in succinct-indexes) | Implemented |
 | `succinct-indexes` | (pulled in by ring-index) | Rank/select bitvectors, Elias-Fano, wavelet trees | Implemented |
@@ -254,10 +254,8 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
-| `parallel` | (standalone); in `embedded` | Parallel execution (rayon) | Implemented |
+| `parallel` | (standalone); in `embedded` | Multi-core batch vector search and graph algorithms (rayon); a query runs on one thread | Implemented |
 | `tiered-storage` | (standalone) | Hot/cold version storage with epochs | Implemented |
-
-> **Note:** Block-STM parallel transaction execution is compiled unconditionally. It is not gated behind a feature flag.
 
 ### Operations
 

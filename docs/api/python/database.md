@@ -338,8 +338,8 @@ def remove_edge_property(self, edge_id: int, key: str) -> bool
 Create or update nodes and edges by a key property, many rows in one statement. The rows are checked like
 a query (constraints, schema), and a call writes all of its rows or none. Rows apply in order: a key
 repeated within one call creates one node or edge, which the later rows update. Both return a dict with
-`created`, `updated`, `skipped` and `skipped_rows` (the indices of the skipped rows, at most 1,000). Graph
-handles (`db.graph(name)`) have the same methods.
+`created`, `updated`, `skipped` and `skipped_rows` (the indices of the skipped rows, at most 1,000); the dict
+gains keys only, as the admin dicts do. Graph handles (`db.graph(name)`) have the same methods.
 
 ### upsert_nodes()
 
@@ -962,6 +962,8 @@ else:
 ```
 
 ## Admin Methods
+
+The dicts these methods return gain keys only: a patch release can add a key, never remove or rename one, so read the keys you need rather than comparing whole dicts.
 
 ### info()
 

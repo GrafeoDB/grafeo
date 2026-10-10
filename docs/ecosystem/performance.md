@@ -183,17 +183,6 @@ Approximate memory for graph operations:
 | Medium (hot spots) | 100K tx/s | 5-10% |
 | High (same nodes) | 20K tx/s | 30-50% |
 
-### Block-STM (Batch Mode)
-
-When processing batches of similar transactions:
-
-| Conflict Rate | Speedup (4 cores) |
-|---------------|-------------------|
-| 0% | 3.8x |
-| 5% | 3.2x |
-| 10% | 2.5x |
-| 20% | 1.8x |
-
 ---
 
 ## Compression Effectiveness

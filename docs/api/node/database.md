@@ -549,6 +549,8 @@ Each `ChangeEvent` is a JSON object:
 
 ## Admin Methods
 
+The objects these methods return gain keys only: a patch release can add a key, never remove or rename one, so read the keys you need rather than comparing whole objects.
+
 ### info()
 
 Returns high-level database information as a JSON object.

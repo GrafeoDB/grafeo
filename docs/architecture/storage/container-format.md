@@ -176,8 +176,8 @@ block.
 | 1 | `CATALOG` | 2 | Schema definitions, index definitions and index names, as [records](#catalog-records) |
 | 2 | `LPG_STORE` | 3 | Nodes, edges, properties, named graphs |
 | 3 | `RDF_STORE` | 3 | RDF triples, named graphs |
-| 4 | `COMPACT_STORE` | 5 | Columnar base of a database compacted by 0.5.x (read only: an open folds it into the LPG store) |
-| 5 | `OVERLAY_DELETIONS` | 2 | Base entities deleted since that `compact()` (read only, as `COMPACT_STORE`) |
+| 4 | `COMPACT_STORE` | - | Reserved, never written: the columnar base that `compact()` of 0.5.40 to 0.5.44 wrote to a 0.5.x file, which an open folds into the LPG store |
+| 5 | `OVERLAY_DELETIONS` | - | Reserved, never written: the base nodes and edges deleted after that `compact()` (0.5.42 to 0.5.44), as `COMPACT_STORE` |
 | 10 | `VECTOR_STORE` | 3 | HNSW topology of each vector index (the embeddings are node properties) |
 | 11 | `TEXT_INDEX` | 2 | BM25 document lengths and posting lists |
 | 12 | `RDF_RING` | 3 | Term dictionary, wavelet trees and permutations of the RDF ring |
@@ -191,10 +191,23 @@ block.
 
 **Versions.** The version is the one 0.6.0 writes, in the `section_version`
 byte of every directory entry of the section. A reader accepts its section's
-version and refuses any other, naming the section and both versions. The one
+version and refuses any other, naming the section and both versions (for a
+derived section that means building it from the data, see below). The one
 exception is a section stored as one raw chunk (see [Chunks](#chunks)), which
 holds 0.5.x bytes and is read by the 0.5.x reader of its section, whatever its
 version byte.
+
+**Derived sections** (`VECTOR_STORE`, `TEXT_INDEX` and `RDF_RING`) only
+mirror the data. A reader that cannot decode one, because it has another
+section version or a stream that does not decode, builds its indexes from the
+data instead, with a warning, and the database opens; a derived section whose
+chunks cannot be read (a checksum, I/O or decryption failure) fails the open,
+as any section's does. So a later 0.6 release can change a derived layout
+without making its files unreadable to this one: it writes the new layout
+under a new section version, or as a new section type with the optional bit
+set, which this release skips (see [unknown entries](#directory-entry-48-bytes))
+and builds from the data. Derived data a later 0.6 release adds, such as
+persisted statistics, comes as such optional sections as well.
 
 **`PROPERTY_INDEX` is reserved:** no checkpoint writes it. Property indexes are
 built from the data when a database opens, from their definitions in the
@@ -267,14 +280,12 @@ and lengths inside a chunk count only within that chunk. So a database, a
 section, a graph and a table can pass 4 GiB and 2^32 rows, and a node can
 have any number of labels. What stays limited is a single value (lengths and
 counts of at most 2^32 - 1, nesting of at most 128 levels, see
-[Value Encoding](#value-encoding)), and the encodings inside two stream
-sections: the compacted base in `COMPACT_STORE` keeps its 32-bit counts and
-lengths (see [Stream Sections](#stream-sections)), and the RDF ring index
-holds at most 2^32 - 1 terms and triples. Each schema entry is one catalog
-record of at most 2 MiB, whose property types nest at most 32,768 `LIST<...>`
-levels in all (see [Catalog Records](#catalog-records)). A
-checkpoint that meets a value or an entry past these limits fails, names it
-and keeps the WAL.
+[Value Encoding](#value-encoding)), and the RDF ring index, which holds at
+most 2^32 - 1 terms and triples (see [Stream Sections](#stream-sections)).
+Each schema entry is one catalog record of at most 2 MiB, whose property
+types nest at most 32,768 `LIST<...>` levels in all (see
+[Catalog Records](#catalog-records)). A checkpoint that meets a value or an
+entry past these limits fails, names it and keeps the WAL.
 
 ### Column Chunks
 
@@ -295,7 +306,7 @@ Layout, little-endian:
 | `row_count` | `u32` | Equal to the directory entry's, at most 65,536 |
 | `value_count` | `u32` | At least 1, at most `row_count` |
 | presence bitmap | `ceil(row_count / 64)` `u64` words | Only when `value_count` is below `row_count`: bit `r` is set when row `r` has a value; bits past the rows are 0 |
-| zone map | two values | The minimum and the maximum of the values, in the [value encoding](#value-encoding) |
+| zone map | see below | Bounds of the values, for the codecs that have them |
 | epochs | a `BitPacked` body | One epoch per value, only when one of them is not 0 |
 | body | | The values, in the codec's body |
 
@@ -313,13 +324,26 @@ A writer picks a typed codec (1 to 6) only when every value of the chunk has
 its kind, and `Values` otherwise, so every value reads back exactly as it was
 written: an `Int64` next to a `Float64` stays an `Int64`.
 
-**Zone maps.** A chunk of the codecs `BitPacked`, `RawI64`, `Float64`,
-`Bitmap` and `Dict` carries the minimum and the maximum of its values: NaN is
-left out (a chunk of NaN only has no zone map), strings compare by their
-bytes, and a `Dict` chunk has a zone map only when both strings are at most 64
-bytes. `Float32Vector` and `Values` chunks have none. A reader refuses a zone
-map other than the one the values give, so it can be trusted. See
-[Zone Maps](zone-maps.md).
+**Zone maps.** A chunk of the codecs `BitPacked`, `RawI64`, `Float64` and
+`Bitmap` carries the minimum and the maximum of its values, two values in the
+[value encoding](#value-encoding); NaN is left out (a chunk of NaN only has no
+zone map). Every `Dict` chunk carries a string zone map, by the strings' UTF-8
+bytes:
+
+| Field | Encoding | Meaning |
+|-------|----------|---------|
+| minimum | a length `u8`, then that many bytes | The smallest string, cut to at most 16 bytes |
+| maximum | a length `u8`, then that many bytes | The largest string; when longer than 16 bytes, its first 16 with the last raised by one |
+| flags | `u8` | Bit 0: the minimum was not cut; bit 1: the maximum was not cut. A reader refuses other bits |
+| shortest, longest | `u32` each | The lengths in bytes of the shortest and the longest string |
+
+A cut maximum is raised so it stays an upper bound: every string that starts
+with its first 16 bytes is below it (UTF-8 holds no `0xFF` byte, so the 16th
+byte can always be raised; the result need not be UTF-8). So no string of the
+chunk is below the minimum or above the maximum (or at or above it when it was
+cut), and each is from the shortest to the longest length. `Float32Vector` and
+`Values` chunks have none. A reader refuses a zone map other than the one the
+values give, so it can be trusted. See [Zone Maps](zone-maps.md).
 
 **Epochs.** In a build with the `temporal` feature, each property value
 carries the epoch it was set at, in its `Column` chunk's epochs. A chunk whose
@@ -375,10 +399,9 @@ bytes.
 #### `LPG_STORE` (version 3)
 
 Per graph in id order, the section holds its node table and then its edge
-table, and it ends with its metadata chunk. Graph 0 is the default graph, then
-come the named graphs in name order: a graph's id is its position in the
-metadata, so the ids are this checkpoint's. A row is a node or edge id. The
-columns:
+table, and it ends with its metadata chunk. Graph 0 is the default graph; a
+named graph gets the next graph id when it is created. A row is a node or edge
+id. The columns:
 
 | Namespace | Column | Values |
 |-----------|--------|--------|
@@ -386,10 +409,18 @@ columns:
 | Edge structure | 1 | The source node id, as an `Int64` |
 | Edge structure | 2 | The target node id, as an `Int64` |
 | Edge structure | 3 | The edge type id, as an `Int64` |
-| Node properties or edge properties | 16 and up | A property column of that table, as the metadata lists it |
+| Node properties or edge properties | The property key's id | A property column of that table |
 
-Ids 4 to 15 are reserved for fixed columns. A label's or an edge type's id is
-its position in the metadata's list of names. Within a row group, a column's
+**Ids are permanent.** A graph's id, and each graph's label, edge type and
+property key ids, are given once and never reassigned or reused, so one
+checkpoint and the next name the same things by the same ids. Each graph has
+three dictionaries: its labels and edge types (an id given when a name is
+first used), and its property keys (an id given when a checkpoint first writes
+the key's column), one dictionary of keys for the node and the edge table, the
+namespace telling their columns apart. A name nothing uses any more keeps its
+id; an id that names nothing is a gap. A dropped graph's id is never given
+again: a graph created later under its name gets a new one. A load restores
+every id as written. Within a row group, a column's
 `Column` chunks, and its `History` chunks, each come in row order without
 overlapping; a property column has chunks only where it has values; and the
 edge columns 1, 2 and 3 come as three chunks of one range in a row. Only the
@@ -412,36 +443,38 @@ The metadata chunk, little-endian:
 | layout | `u8`, `1` |
 | `max_rows`, `max_bytes` | `u32` each: the caps |
 | epoch | `u64`: the store's epoch with `temporal`, 0 without |
-| labels, edge types | Each a count `u32`, then per name its length `u32` and UTF-8 |
-| graphs | A count `u32`, then per graph its name (as above, empty for graph 0), next node id `u64`, next edge id `u64`, and its unused label ids and unused edge type ids (each a count `u32`, then `u32` ids, ascending) |
-| columns | A count `u32`, then per column its id `u32`, its table `u8` (0 node, 1 edge) and its property key (as above) |
+| next graph id | `u32`: above every graph id given out |
+| graphs | A count `u32`, then per graph (the default graph first, then the named graphs by id, ascending) its id `u32`, its name (a length `u32` and UTF-8, empty for the default graph), next node id `u64`, next edge id `u64`, and its labels, edge types and property keys |
+| a dictionary | Its next id `u32` (above every id given out), a count `u32`, then per name its id `u32` and the name (as above), ids ascending |
 
 The layout has no size limit of its own: a reader checks every count and
 length against the bytes left, so the chunk holds as many names as the store
-has. It comes last because it lists every name the chunks use: commits wait
-while a checkpoint writes, but a transaction still open can create a label, an
-edge type or a property key meanwhile, and the write meets it. The names are
-those the store held when the write began, sorted (labels and edge types by
-name, property columns by table and key), followed by the names met during the
-write, in the order met. A graph's next node and edge ids are at least one
-past its last row, so no id is given out twice across a reopen. Each graph
-also lists the labels and edge types it has registered that none of its nodes
-or edges use (those of deleted nodes and edges, or of a transaction that
-rolled back), and the reader registers them in that graph, so every graph's
-names come back as they were. A reader fetches the metadata chunk first, then
+has. It comes last because it lists every name the chunks use, read after the
+rows: commits wait while a checkpoint writes, but a transaction still open can
+create a label, an edge type or a property key meanwhile, and as the
+dictionaries only grow, the ones read after the rows hold every id the rows
+name. A graph's next node and edge ids are at least one past its last row, so
+no id is given out twice across a reopen; the next graph id and each
+dictionary's next id do the same for graphs and names. A reader fetches the
+metadata chunk first, restores every graph and its dictionaries, then reads
 the other chunks in order.
 
 A reader refuses, naming the graph, the column and the rows: a last chunk that
 is not the section's only metadata chunk; a chunk of another kind than
 `Column` or `History` (`History` only for property columns), of an unknown
-graph or column, holding no rows or more than `max_rows`, crossing its row
-group or reaching past its table's next id; groups out of order (by graph,
-then table, then row group), or overlapping chunks of one column; edge columns
-that do not come as three chunks of one range; a property value of a row
-whose node or edge is not in its group; labels that are not ascending ids
-below the number of labels, negative endpoints, and edge type ids past the
-number of edge types; epochs on a fixed column or a `History` chunk; a null
-property value; and history epochs that go back.
+graph, outside the node and edge namespaces, of a fixed column its namespace
+does not have or a property key its graph does not have, holding no rows or
+more than `max_rows`, crossing its row group or reaching past its table's next
+id; groups out of order (by graph, then table, then row group), or overlapping
+chunks of one column; edge columns that do not come as three chunks of one
+range; a property value of a row whose node or edge is not in its group;
+labels that are not ascending ids of the graph's labels, negative endpoints,
+and edge type ids the graph does not have; epochs on a fixed column or a
+`History` chunk; a null property value; history epochs that go back; and in
+the metadata, a first graph other than the default graph, graph ids that do
+not ascend or reach the next graph id, two named graphs of one name, and per
+dictionary ids that do not ascend or reach its next id, or a name listed
+twice.
 
 #### `RDF_STORE` (version 3)
 
@@ -477,10 +510,9 @@ its number of triples.
 
 ### Stream Sections
 
-The index sections (`VECTOR_STORE`, `TEXT_INDEX`, `RDF_RING`), `COMPACT_STORE`,
-`OVERLAY_DELETIONS` and `CATALOG` hold their data as byte streams. Such a
-section is its metadata chunk, then the pieces of its streams, stream after
-stream:
+The index sections (`VECTOR_STORE`, `TEXT_INDEX`, `RDF_RING`) and `CATALOG`
+hold their data as byte streams. Such a section is its metadata chunk, then
+the pieces of its streams, stream after stream:
 
 - The metadata chunk (`chunk_kind` 1, every other field 0) is the bincode
   encoding (bincode 2, standard configuration: variable-length little-endian
@@ -531,18 +563,6 @@ posting's node has a document length, the document lengths add up to
 dictionary, the wavelet trees of the subjects, predicates and objects, and the
 permutations from SPO to POS and to OSP order. A store without a ring writes no
 `RDF_RING` section.
-
-**`COMPACT_STORE` (version 5).** Stream 0 holds the compact store's own
-encoding (version 4, magic `GCST`): a header, the node tables, the relationship
-tables, the id maps, and a CRC-32 of all of it. Its counts and lengths are
-32-bit and its names have 16-bit lengths, so a compacted base with a column or
-table past those limits (4 GiB, 2^32 rows, or a name over 64 KiB) fails the
-checkpoint with an error that names it.
-
-**`OVERLAY_DELETIONS` (version 2).** The metadata holds the number of deleted
-base nodes and edges. Stream 0 holds the node ids and stream 1 the edge ids,
-each a `u64`, strictly increasing; a stream that holds another number of ids
-than the metadata counts is refused.
 
 **`CATALOG` (version 2).** The metadata holds the byte cap. Stream 0 holds the
 [catalog records](#catalog-records). A catalog without entries is its metadata
@@ -672,7 +692,6 @@ These sections hold more, in proportion to their data:
 | `VECTOR_STORE` | A reference to every node of an in-memory topology, sorted by id (16 bytes per node) | |
 | `TEXT_INDEX` | References to the terms (16 bytes per term), a copy of the document lengths (16 bytes per document) and, for a posting list not held in node order, a sorted copy of it (16 bytes per posting) | Each document's length and the part of it the term frequencies read so far leave uncovered (16 bytes per document) |
 | `RDF_RING` | The packed term dictionary, built whole before it is written | Each of the six streams in one buffer, which becomes that part of the ring |
-| `COMPACT_STORE` | Each column and each adjacency, encoded whole before it is written | The stream in one buffer, which becomes the store's column storage |
 
 **Locks.** A checkpoint holds a vector or text index's read lock while it
 writes that index's stream. Changes to that index (a node's vector or text

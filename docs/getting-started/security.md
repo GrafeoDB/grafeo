@@ -94,21 +94,18 @@ DROP GRAPH old_data;
 
 ## Encryption at Rest
 
-Grafeo can encrypt a persistent database (a single file, as every database is since 0.6) and its WAL with AES-256-GCM. Enable the `encryption` feature of `grafeo-engine` and pass a key chain built from a 32-byte master key to `Config::with_encryption`:
+Grafeo can encrypt a persistent database (a single file, as every database is since 0.6) and its WAL with AES-256-GCM. Enable the `encryption` feature of `grafeo` and pass a key chain built from a 32-byte master key to `Config::with_encryption`:
 
 ```rust
 use std::sync::Arc;
 
-use grafeo_common::encryption::KeyChain;
-use grafeo_engine::config::EncryptionConfig;
-use grafeo_engine::{Config, GrafeoDB};
+use grafeo::{Config, EncryptionConfig, GrafeoDB, KeyChain};
 
 // 32 bytes from your key management (a KMS, a secrets manager, an HSM).
 let master_key: [u8; 32] = load_master_key();
 
-let config = Config::persistent("social.grafeo").with_encryption(EncryptionConfig {
-    key_chain: Arc::new(KeyChain::new(master_key)),
-});
+let config = Config::persistent("social.grafeo")
+    .with_encryption(EncryptionConfig::new(Arc::new(KeyChain::new(master_key))));
 let db = GrafeoDB::with_config(config)?;
 ```
 
@@ -149,13 +146,9 @@ The key chain derives the keys with HKDF-SHA256, one per database and component:
 use std::path::Path;
 use std::sync::Arc;
 
-use grafeo_common::encryption::KeyChain;
-use grafeo_engine::config::EncryptionConfig;
-use grafeo_engine::GrafeoDB;
+use grafeo::{EncryptionConfig, GrafeoDB, KeyChain};
 
-let encryption = EncryptionConfig {
-    key_chain: Arc::new(KeyChain::new(master_key)),
-};
+let encryption = EncryptionConfig::new(Arc::new(KeyChain::new(master_key)));
 let output = Path::new("restored.grafeo");
 GrafeoDB::restore_to_epoch_with(backup_dir, target_epoch, output, &encryption)?;
 ```

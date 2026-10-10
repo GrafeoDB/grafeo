@@ -50,9 +50,10 @@ Chunk 3: min=18, max=35  -> SKIP (max < 50)
 ## In the Database File
 
 Since 0.6.0, the column chunks of the database file store zone maps: a chunk
-whose values are all `Int64`, all `Float64` (NaN left out), all `Bool` or all
-`String` stores their minimum and maximum (for strings, only when both are at
-most 64 bytes). A chunk covers at most 65,536 rows and 1 MiB, so a property
+whose values are all `Int64`, all `Float64` (NaN left out) or all `Bool`
+stores their minimum and maximum, and a chunk of strings stores their minimum
+and maximum cut to 16 bytes (a cut maximum raised so it stays an upper bound)
+with the shortest and longest length. A chunk covers at most 65,536 rows and 1 MiB, so a property
 column gets one zone map per range of node or edge ids. A reader refuses a zone map
 that differs from the chunk's values, so it can be trusted. The file stores no
 null count, as the chunk's presence bitmap and value count give the rows

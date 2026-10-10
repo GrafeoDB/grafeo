@@ -50,7 +50,8 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),
-        _ => None,
+        // Zoned datetimes, also against a timestamp: by their instant.
+        _ => a.compare_instants(b),
     }
 }
 

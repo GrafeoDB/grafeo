@@ -83,7 +83,7 @@ pub use filter::{
     ListPredicateKind, Predicate, SessionContext, UnaryFilterOp,
 };
 pub use functions::{
-    FunctionSupport, REGEX_SUPPORT, function_names, function_support, regex_pattern_error,
+    Arity, FunctionSupport, REGEX_SUPPORT, function_names, function_support, regex_pattern_error,
 };
 pub use horizontal_aggregate::{EntityKind, HorizontalAggregateOperator};
 pub use join::{
@@ -353,6 +353,11 @@ pub enum OperatorError {
     /// Schema constraint violation during a write operation.
     #[error("constraint violation: {0}")]
     ConstraintViolation(String),
+    /// A value the statement gave cannot be used (a user mistake, such as a
+    /// query vector of another size than the index's), reported as an
+    /// invalid value rather than an execution failure.
+    #[error("invalid value: {0}")]
+    InvalidValue(String),
     /// Write-write conflict detected (first-writer-wins).
     #[error("write conflict: {0}")]
     WriteConflict(String),

@@ -169,6 +169,58 @@ pub trait ConstraintValidator: Send + Sync {
     fn inject_edge_defaults(&self, edge_type: &str, properties: &mut Vec<(String, Value)>) {
         let _ = (edge_type, properties);
     }
+
+    /// The value a node with `labels` stores for property `key` when the
+    /// type the schema declares for it takes `value` by an implicit
+    /// conversion, such as an integer written to a `FLOAT64` property.
+    /// `None` when `value` is stored as it is (also when it does not conform:
+    /// [`validate_node_property`](Self::validate_node_property) refuses it).
+    /// A writer converts before it validates.
+    fn convert_node_property(&self, labels: &[String], key: &str, value: &Value) -> Option<Value> {
+        let _ = (labels, key, value);
+        None
+    }
+
+    /// The value an edge of `edge_type` stores for property `key`, like
+    /// [`convert_node_property`](Self::convert_node_property).
+    fn convert_edge_property(&self, edge_type: &str, key: &str, value: &Value) -> Option<Value> {
+        let _ = (edge_type, key, value);
+        None
+    }
+
+    /// Checks that a node with `labels` (all of its labels) may have each
+    /// property `properties` gives a value (a null removes one): in a graph
+    /// of a closed graph type, one that a node type of its labels declares.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` naming the first property no node type of the node
+    /// declares.
+    fn validate_node_properties_declared(
+        &self,
+        labels: &[String],
+        properties: &[(String, Value)],
+    ) -> Result<(), OperatorError> {
+        let _ = (labels, properties);
+        Ok(())
+    }
+
+    /// Checks that an edge of `edge_type` may have each property
+    /// `properties` gives a value, like
+    /// [`validate_node_properties_declared`](Self::validate_node_properties_declared).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` naming the first property the edge type does not
+    /// declare.
+    fn validate_edge_properties_declared(
+        &self,
+        edge_type: &str,
+        properties: &[(String, Value)],
+    ) -> Result<(), OperatorError> {
+        let _ = (edge_type, properties);
+        Ok(())
+    }
 }
 
 /// Operator that creates new nodes.

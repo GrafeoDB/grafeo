@@ -9,6 +9,7 @@
 //! [`WriteTracker::write_in_progress`](super::WriteTracker::write_in_progress)),
 //! which a checkpoint waits for and which waits for a checkpoint.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -34,7 +35,10 @@ enum Entity {
 
 /// What the writes of one statement changed, as counts: the summary a query
 /// result reports.
+///
+/// Read, not built, outside this crate: later releases may add counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WriteCounters {
     /// Nodes created, by `INSERT`, `CREATE` or `MERGE`.
     pub nodes_created: u64,
@@ -338,6 +342,7 @@ impl GraphWriter {
     ) -> Result<NodeId, OperatorError> {
         let properties = self.new_node_properties(labels, properties)?;
         if let Some(validator) = &self.validator {
+            validator.validate_node_properties_declared(labels, &properties)?;
             self.check_node_values(validator.as_ref(), labels, &properties, None)?;
             validator.validate_node_complete(labels, &properties)?;
             validator.check_unique_node(labels, &properties, None)?;
@@ -365,6 +370,7 @@ impl GraphWriter {
     ) -> Result<NodeId, OperatorError> {
         let properties = self.new_node_properties(labels, properties)?;
         if let Some(validator) = &self.validator {
+            validator.validate_node_properties_declared(labels, &properties)?;
             self.check_node_values(validator.as_ref(), labels, &properties, None)?;
         }
         let id = {
@@ -375,9 +381,13 @@ impl GraphWriter {
         };
 
         // Evaluates expressions: no write is in progress meanwhile.
-        let derived = derive(id)?;
+        let mut derived = derive(id)?;
         refuse_too_deep(plain_values(&derived))?;
         if let Some(validator) = &self.validator {
+            convert_values(&mut derived, |key, value| {
+                validator.convert_node_property(labels, key, value)
+            });
+            validator.validate_node_properties_declared(labels, &derived)?;
             self.check_node_values(validator.as_ref(), labels, &derived, Some(id))?;
             let all = overlay(properties, &derived);
             validator.validate_node_complete(labels, &all)?;
@@ -408,20 +418,27 @@ impl GraphWriter {
         refuse_too_deep(assigned_values(assignments))?;
         self.require_node(id)?;
         self.record(Entity::Node(id))?;
+        let mut assignments = Cow::Borrowed(assignments);
         if let Some(validator) = &self.validator {
             let needs_node = replace
-                || assigned_values(assignments)
+                || assigned_values(&assignments)
                     .any(|(key, value)| validator.constrains_node_property(key, value));
             if !needs_node {
-                for (key, value) in assigned_values(assignments) {
+                for (key, value) in assigned_values(&assignments) {
                     validator.validate_node_property(&[], key, value)?;
                 }
             } else if let Some(node) = self.node(id) {
-                self.check_node_set(validator.as_ref(), &node, assignments, replace)?;
+                let labels = node_labels(&node);
+                if let Some(converted) = convert_assignments(&assignments, |key, value| {
+                    validator.convert_node_property(&labels, key, value)
+                }) {
+                    assignments = Cow::Owned(converted);
+                }
+                self.check_node_set(validator.as_ref(), &node, &assignments, replace)?;
             }
         }
         let _writing = self.write_in_progress();
-        self.apply_set(Entity::Node(id), assignments, replace)?;
+        self.apply_set(Entity::Node(id), &assignments, replace)?;
         Ok(())
     }
 
@@ -603,11 +620,15 @@ impl GraphWriter {
         edge_type: &str,
         properties: Vec<(String, Value)>,
     ) -> Result<EdgeId, OperatorError> {
-        let properties = self.new_edge_properties(edge_type, properties)?;
+        let mut properties = self.new_edge_properties(edge_type, properties)?;
         self.require_node(src)?;
         self.require_node(dst)?;
         if let Some(validator) = &self.validator {
             self.check_new_edge(validator.as_ref(), src, dst, edge_type)?;
+            convert_values(&mut properties, |key, value| {
+                validator.convert_edge_property(edge_type, key, value)
+            });
+            validator.validate_edge_properties_declared(edge_type, &properties)?;
             for (name, value) in &properties {
                 validator.validate_edge_property(edge_type, name, value)?;
             }
@@ -637,11 +658,15 @@ impl GraphWriter {
         properties: Vec<(String, Value)>,
         derive: impl FnOnce(EdgeId) -> Result<Vec<(String, Value)>, OperatorError>,
     ) -> Result<EdgeId, OperatorError> {
-        let properties = self.new_edge_properties(edge_type, properties)?;
+        let mut properties = self.new_edge_properties(edge_type, properties)?;
         self.require_node(src)?;
         self.require_node(dst)?;
         if let Some(validator) = &self.validator {
             self.check_new_edge(validator.as_ref(), src, dst, edge_type)?;
+            convert_values(&mut properties, |key, value| {
+                validator.convert_edge_property(edge_type, key, value)
+            });
+            validator.validate_edge_properties_declared(edge_type, &properties)?;
             for (name, value) in &properties {
                 validator.validate_edge_property(edge_type, name, value)?;
             }
@@ -655,9 +680,13 @@ impl GraphWriter {
         };
 
         // Evaluates expressions: no write is in progress meanwhile.
-        let derived = derive(id)?;
+        let mut derived = derive(id)?;
         refuse_too_deep(plain_values(&derived))?;
         if let Some(validator) = &self.validator {
+            convert_values(&mut derived, |key, value| {
+                validator.convert_edge_property(edge_type, key, value)
+            });
+            validator.validate_edge_properties_declared(edge_type, &derived)?;
             for (name, value) in &derived {
                 validator.validate_edge_property(edge_type, name, value)?;
             }
@@ -684,16 +713,25 @@ impl GraphWriter {
         refuse_too_deep(assigned_values(assignments))?;
         self.require_edge(id)?;
         self.record(Entity::Edge(id))?;
+        let mut assignments = Cow::Borrowed(assignments);
         if let Some(validator) = &self.validator
             && let Some(edge) = self.edge(id)
         {
+            let edge_type = edge.edge_type.as_str();
+            if let Some(converted) = convert_assignments(&assignments, |key, value| {
+                validator.convert_edge_property(edge_type, key, value)
+            }) {
+                assignments = Cow::Owned(converted);
+            }
             let existing = property_list(&edge.properties);
-            for (name, value) in expand_assignments(&existing, assignments, replace) {
-                validator.validate_edge_property(edge.edge_type.as_str(), &name, &value)?;
+            let changes = expand_assignments(&existing, &assignments, replace);
+            validator.validate_edge_properties_declared(edge_type, &changes)?;
+            for (name, value) in changes {
+                validator.validate_edge_property(edge_type, &name, &value)?;
             }
         }
         let _writing = self.write_in_progress();
-        self.apply_set(Entity::Edge(id), assignments, replace)?;
+        self.apply_set(Entity::Edge(id), &assignments, replace)?;
         Ok(())
     }
 
@@ -745,9 +783,10 @@ impl GraphWriter {
     // === Checks ===
 
     /// The properties a new node with `labels` gets: `properties` with the
-    /// validator's type defaults added, once the labels are allowed. No
-    /// value may nest too deep, a default included: a custom validator's
-    /// default is written like any other value.
+    /// validator's type defaults added and each value converted to the type
+    /// the schema declares for it, once the labels are allowed. No value may
+    /// nest too deep, a default included: a custom validator's default is
+    /// written like any other value.
     fn new_node_properties(
         &self,
         labels: &[String],
@@ -756,6 +795,9 @@ impl GraphWriter {
         if let Some(validator) = &self.validator {
             validator.validate_node_labels_allowed(labels)?;
             validator.inject_defaults(labels, &mut properties);
+            convert_values(&mut properties, |key, value| {
+                validator.convert_node_property(labels, key, value)
+            });
         }
         refuse_too_deep(plain_values(&properties))?;
         Ok(properties)
@@ -813,6 +855,7 @@ impl GraphWriter {
         let labels = node_labels(node);
         let existing = property_list(&node.properties);
         let changes = expand_assignments(&existing, assignments, replace);
+        validator.validate_node_properties_declared(&labels, &changes)?;
         self.check_node_values(validator, &labels, &changes, Some(node.id))?;
         validator.check_unique_node(&labels, &overlay(existing, &changes), Some(node.id))
     }
@@ -1022,6 +1065,63 @@ fn refuse_too_deep<'v>(
 /// The `(key, value)` pairs of a property list, as written.
 fn plain_values(properties: &[(String, Value)]) -> impl Iterator<Item = (&str, &Value)> {
     properties.iter().map(|(key, value)| (key.as_str(), value))
+}
+
+/// Replaces each value of a property list that `convert` converts to the
+/// type the schema declares for its key (see
+/// [`ConstraintValidator::convert_node_property`]).
+fn convert_values(
+    properties: &mut [(String, Value)],
+    convert: impl Fn(&str, &Value) -> Option<Value>,
+) {
+    for (key, value) in properties {
+        if let Some(converted) = convert(key, value) {
+            *value = converted;
+        }
+    }
+}
+
+/// The assignments of a SET with each value that `convert` converts
+/// replaced, also the entries of a map assignment. `None` when no value
+/// converts.
+fn convert_assignments(
+    assignments: &[(String, Value)],
+    convert: impl Fn(&str, &Value) -> Option<Value>,
+) -> Option<Vec<(String, Value)>> {
+    let convert_one = |name: &str, value: &Value| -> Option<Value> {
+        match value {
+            Value::Map(map) if name == MAP_ASSIGNMENT => {
+                let mut converted_any = false;
+                let entries = map
+                    .iter()
+                    .map(|(key, entry)| {
+                        let converted = convert(key.as_str(), entry);
+                        converted_any |= converted.is_some();
+                        (key.clone(), converted.unwrap_or_else(|| entry.clone()))
+                    })
+                    .collect();
+                converted_any.then(|| Value::Map(Arc::new(entries)))
+            }
+            _ if name == MAP_ASSIGNMENT => None,
+            _ => convert(name, value),
+        }
+    };
+    let converted: Vec<Option<Value>> = assignments
+        .iter()
+        .map(|(name, value)| convert_one(name, value))
+        .collect();
+    if converted.iter().all(Option::is_none) {
+        return None;
+    }
+    Some(
+        assignments
+            .iter()
+            .zip(converted)
+            .map(|((name, value), converted)| {
+                (name.clone(), converted.unwrap_or_else(|| value.clone()))
+            })
+            .collect(),
+    )
 }
 
 /// The `(key, value)` pairs a SET writes: the entries of a map assignment,

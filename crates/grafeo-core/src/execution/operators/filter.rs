@@ -3325,6 +3325,19 @@ impl ExpressionPredicate {
                     })
                 }
             }
+            "path_length" => {
+                // PATH_LENGTH(path) (ISO/IEC 39075 20.21): the number of edges
+                // of a path value. A path variable reads its length column
+                // instead (see the translators).
+                if args.len() != 1 {
+                    return None;
+                }
+                match self.eval_expr(&args[0], chunk, row)? {
+                    Value::Path { edges, .. } => i64::try_from(edges.len()).ok().map(Value::Int64),
+                    Value::Null => Some(Value::Null),
+                    _ => None,
+                }
+            }
             "nodes" => {
                 // nodes(path) - extracts nodes from a path value
                 if args.len() != 1 {
@@ -3803,6 +3816,12 @@ impl ExpressionPredicate {
                         .zip(e2.iter())
                         .all(|(a, b)| Self::values_equal(a, b))
             }
+            // A timestamp and a zoned datetime: the same instant, as `<` and
+            // `>` compare them.
+            (Value::Timestamp(_), Value::ZonedDatetime(_))
+            | (Value::ZonedDatetime(_), Value::Timestamp(_)) => left
+                .compare_instants(right)
+                .is_some_and(|order| order.is_eq()),
             // Temporal values, bytes, vectors and the rest: the same variant
             // with the same value (zoned datetimes compare by instant). This
             // used to be `false`, so `date('2024-01-01') = date('2024-01-01')`
@@ -3909,7 +3928,8 @@ impl ExpressionPredicate {
             (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b) as i32),
             (Value::Date(a), Value::Date(b)) => Some(a.cmp(b) as i32),
             (Value::Time(a), Value::Time(b)) => Some(a.cmp(b) as i32),
-            _ => None,
+            // Zoned datetimes, also against a timestamp: by their instant.
+            _ => left.compare_instants(right).map(|o| o as i32),
         }
     }
 }

@@ -73,6 +73,7 @@ WHERE a.name = 'Alix' AND b.name = 'Dave'
 
 -- Number of edges in the path
 RETURN length(path)       -- e.g., 3
+RETURN path_length(path)  -- the same, ISO GQL's PATH_LENGTH
 
 -- List of nodes in the path
 RETURN nodes(path)        -- [Alix, Gus, Harm, Dave]

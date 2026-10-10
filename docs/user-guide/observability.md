@@ -25,7 +25,7 @@ grafeo = { version = "0.5", features = ["metrics"] }
 
 ### Retrieving a Snapshot
 
-Call `db.metrics()` to get a serializable point-in-time snapshot of all tracked metrics:
+Call `db.metrics()` to get a serializable point-in-time snapshot of all tracked metrics. A patch release can add a metric to the snapshot, never remove or rename one:
 
 ```rust
 use grafeo::GrafeoDB;

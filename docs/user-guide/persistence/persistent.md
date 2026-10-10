@@ -62,13 +62,18 @@ The sync mode decides when the WAL is flushed to disk (`fsync`). Every mode hand
 
 `Batch` checks its limits when a commit is written. The last commit before an idle period is therefore synced by the next write or by `close()`, not when the delay passes.
 
-The sync mode is set through the Rust `Config` builder; the Python constructor uses the default.
+The sync mode is set through the Rust `Config` builder; the Python constructor uses the default. Build the modes with settings with `DurabilityMode::batch(max_delay, max_records)` and `DurabilityMode::adaptive(interval)`, in whole milliseconds.
 
 ```rust
+use std::time::Duration;
+
 use grafeo::{Config, DurabilityMode, GrafeoDB};
 
 let config = Config::persistent("my_graph.db").with_wal_durability(DurabilityMode::Sync);
 let db = GrafeoDB::with_config(config)?;
+
+let batched = Config::persistent("my_other_graph.db")
+    .with_wal_durability(DurabilityMode::batch(Duration::from_millis(19), 88));
 ```
 
 ## Single-File Format (`.grafeo`)

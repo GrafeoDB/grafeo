@@ -41,6 +41,8 @@ CREATE GRAPH TYPE social_network (
 CREATE GRAPH my_social TYPED social_network
 ```
 
+A graph type with a body is closed: a graph bound to it takes only nodes whose labels are its node types, edges of its edge types, and the properties those types declare. Writing anything else to the graph, with a query in it (`USE GRAPH my_social`) or through a graph handle, fails with an error naming the label, edge type or property and the graph type. A graph type declared with `{node_types: [...], edge_types: [...], open: true}` is open and checks only the property types.
+
 ### Dropping Graphs
 
 ```sql
@@ -92,7 +94,7 @@ CREATE OR REPLACE NODE TYPE Person (
 
 ### Property Types
 
-Each property of a node or edge type has one of these types. A value written to the property (when a node or edge of the type is created, or with `SET`) must have the type, or the write fails; `NULL` is accepted unless the property is `NOT NULL`. Types match strictly: an integer is not a `FLOAT64`, and a zoned datetime is not a `LOCAL DATETIME`.
+Each property of a node or edge type has one of these types. A value written to the property (when a node or edge of the type is created, or with `SET`) must have the type, or the write fails; `NULL` is accepted unless the property is `NOT NULL`. Types match strictly, with two conversions that lose nothing: an integer written to a `FLOAT64` property is stored as a float (an integer beyond 2^53 that has no exact float fails), and a zoned datetime written to a `TIMESTAMP` property is stored as its instant in UTC. A float is not an `INT64`, and a zoned datetime is not a `LOCAL DATETIME`.
 
 | Type | Also written | Values |
 |------|--------------|--------|

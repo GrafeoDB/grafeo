@@ -90,10 +90,10 @@ ORDER BY p.age ASC NULLS FIRST
 
 MATCH (p:Person)
 RETURN p.name, p.age
-ORDER BY p.age DESC NULLS LAST
+ORDER BY p.age DESC NULLS FIRST
 ```
 
-Nulls sort last in ascending order and first in descending order, unless `NULLS FIRST` or `NULLS LAST` says otherwise, which holds in either direction.
+Nulls sort last in both directions, unless `NULLS FIRST` or `NULLS LAST` says otherwise. ISO GQL leaves this default to the implementation; Cypher queries keep openCypher's order, where nulls come last in ascending order and first in descending order.
 
 Values of different types in one sort key, such as a property that holds a number on some nodes and a string on others, follow one fixed order, the one openCypher defines: maps, lists, paths, temporal values (zoned datetimes, datetimes, dates, zoned times, times, durations), strings, booleans, numbers, then null. Integers and floats compare as numbers, with NaN after infinity. Lists compare element by element with a prefix first, and maps by size, then keys, then values. Grafeo's own types fit in as follows: vectors after paths, bytes before strings and counters before numbers.
 
@@ -293,7 +293,9 @@ RETURN p.name, friend_count
 ```
 
 A variable scope clause limits what the subquery sees: `CALL (p) { ... }` sees only `p`, and `CALL () { ... }`
-sees no outer variable. A subquery returns new names only: returning an outer variable is an error, so rename it
+sees no outer variable. What it sees stays visible in the whole body, also after a `WITH` that leaves it out:
+`CALL (p) { MATCH (p)-[:KNOWS]->(f) WITH count(f) AS n RETURN p.name AS name, n }` gives one row per person,
+`0` for one who knows nobody. A subquery returns new names only: returning an outer variable is an error, so rename it
 (`RETURN p AS person`). A subquery without a result (no `RETURN`, or `FINISH`) runs for its writes and passes
 each row on once, as it came in: nothing it binds is visible after it. The body can order and cut its rows, for the top rows per input row, and combine queries
 with `UNION`, `EXCEPT`, `INTERSECT` or `OTHERWISE`:

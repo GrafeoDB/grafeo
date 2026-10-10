@@ -109,7 +109,15 @@ let config = Config::persistent("social.grafeo")
 let db = GrafeoDB::with_config(config)?;
 ```
 
-Grafeo stores no key material: keep the master key safe, as the database cannot be opened without it. To derive the master key from a passphrase, `PasswordKeyProvider::derive_with_salt` (Argon2id) gives the same key for the same passphrase and salt; store the salt with the database.
+Grafeo stores no key material: keep the master key safe, as the database cannot be opened without it. To derive the master key from a passphrase, `grafeo::PasswordKeyProvider::derive_with_salt` (Argon2id) gives the same key for the same passphrase and salt; store the salt with the database:
+
+```rust
+use grafeo::{KeyChain, PasswordKeyProvider};
+
+// The salt is not secret: 16 random bytes, stored next to the database.
+let master_key = PasswordKeyProvider::new(passphrase).derive_with_salt(&salt)?;
+let keys = KeyChain::new(*master_key);
+```
 
 ### What Is Encrypted
 

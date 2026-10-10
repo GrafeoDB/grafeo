@@ -9,8 +9,11 @@
 
 #![cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
 
-use grafeo_common::types::EpochId;
+use std::path::{Path, PathBuf};
+
+use grafeo_common::types::{EpochId, Value};
 use grafeo_engine::GrafeoDB;
+use grafeo_engine::database::backup::BackupKind;
 
 // ── Full backup roundtrip ─────────────────────────────────────────
 
@@ -513,4 +516,221 @@ fn backups_during_writes_lose_nothing() {
     assert_eq!(count, grafeo_common::types::Value::Int64(NODES + 2));
     restored.close().expect("close restored");
     db.close().expect("close");
+}
+
+// ── Backups taken by 0.5.x ────────────────────────────────────────
+
+/// A copy of the backup chain that 0.5.44 wrote (`fixtures/backups/0.5.44`,
+/// see its README): a full backup at epoch 3 and incremental backups of
+/// epoch 4 and of epochs 5 to 7, under a bincode manifest. The copy keeps the
+/// committed files as the release wrote them; the manifest is committed as
+/// `backup_manifest.bincode` (text hooks would append a newline to a `.json`)
+/// and copied back under its real name.
+fn backups_of_0_5_44(dir: &Path) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/backups/0.5.44");
+    let backups = dir.join("backups");
+    std::fs::create_dir_all(&backups).expect("create backup directory");
+    for entry in std::fs::read_dir(&source).expect("read fixture") {
+        let entry = entry.expect("fixture entry");
+        let name = if entry.file_name() == "backup_manifest.bincode" {
+            "backup_manifest.json".into()
+        } else {
+            entry.file_name()
+        };
+        std::fs::copy(entry.path(), backups.join(name)).expect("copy fixture");
+    }
+    backups
+}
+
+/// The people (name and city, by name) and the `KNOWS` edges (from, to and
+/// since, by since) of the database at `path`.
+fn people_and_friendships(path: &Path) -> (Vec<Vec<Value>>, Vec<Vec<Value>>) {
+    let db = GrafeoDB::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+    let rows = |query: &str| {
+        db.execute(query)
+            .unwrap_or_else(|e| panic!("{query}: {e}"))
+            .rows()
+            .to_vec()
+    };
+    let people = rows("MATCH (p:Person) RETURN p.name, p.city ORDER BY p.name");
+    let friendships = rows(
+        "MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN a.name, b.name, k.since ORDER BY k.since",
+    );
+    db.close().expect("close");
+    (people, friendships)
+}
+
+fn person(name: &str, city: &str) -> Vec<Value> {
+    vec![Value::from(name), Value::from(city)]
+}
+
+fn knows(from: &str, to: &str, since: i64) -> Vec<Value> {
+    vec![Value::from(from), Value::from(to), Value::Int64(since)]
+}
+
+/// The kind, file name and epochs of every segment in the manifest.
+fn segments(backups: &Path) -> Vec<(BackupKind, String, u64, u64)> {
+    GrafeoDB::read_backup_manifest(backups)
+        .expect("read manifest")
+        .expect("a manifest")
+        .segments
+        .iter()
+        .map(|s| {
+            (
+                s.kind,
+                s.filename.clone(),
+                s.start_epoch.as_u64(),
+                s.end_epoch.as_u64(),
+            )
+        })
+        .collect()
+}
+
+/// The segments of the 0.5.44 chain, as its manifest lists them.
+fn segments_of_0_5_44() -> Vec<(BackupKind, String, u64, u64)> {
+    vec![
+        (
+            BackupKind::Full,
+            "backup_full_0000.grafeo".to_string(),
+            0,
+            3,
+        ),
+        (
+            BackupKind::Incremental,
+            "backup_incr_0001.wal".to_string(),
+            4,
+            4,
+        ),
+        (
+            BackupKind::Incremental,
+            "backup_incr_0002.wal".to_string(),
+            5,
+            7,
+        ),
+    ]
+}
+
+/// A backup chain taken by 0.5.44, under its bincode manifest, restores to
+/// each epoch it covers: the full backup alone, and with its incremental
+/// segments replayed up to the epoch.
+#[test]
+fn a_backup_chain_taken_by_0_5_44_still_restores() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let backups = backups_of_0_5_44(dir.path());
+    assert_eq!(segments(&backups), segments_of_0_5_44());
+
+    let restore = |epoch: u64| {
+        let path = dir.path().join(format!("restored_at_{epoch}.grafeo"));
+        GrafeoDB::restore_to_epoch(&backups, EpochId::new(epoch), &path)
+            .unwrap_or_else(|e| panic!("restore to epoch {epoch}: {e}"));
+        people_and_friendships(&path)
+    };
+
+    assert_eq!(
+        restore(3),
+        (
+            vec![person("Alix", "Amsterdam"), person("Gus", "Berlin")],
+            vec![knows("Alix", "Gus", 2019)]
+        ),
+        "the full backup alone"
+    );
+    assert_eq!(
+        restore(4),
+        (
+            vec![
+                person("Alix", "Amsterdam"),
+                person("Gus", "Berlin"),
+                person("Vincent", "Paris")
+            ],
+            vec![knows("Alix", "Gus", 2019)]
+        ),
+        "with the first incremental backup"
+    );
+    assert_eq!(
+        restore(7),
+        (
+            vec![
+                person("Alix", "Amsterdam"),
+                person("Gus", "Barcelona"),
+                person("Mia", "Prague"),
+                person("Vincent", "Paris")
+            ],
+            vec![knows("Mia", "Alix", 1988), knows("Alix", "Gus", 2019)]
+        ),
+        "with both incremental backups"
+    );
+}
+
+/// After an upgrade, the database restored from a 0.5.44 chain goes on
+/// backing up into the same directory: the manifest is rewritten as JSON with
+/// the 0.5.44 segments kept, and both the old and the new segments restore.
+#[test]
+fn a_backup_directory_of_0_5_44_takes_new_backups() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let backups = backups_of_0_5_44(dir.path());
+    let db_path = dir.path().join("upgraded.grafeo");
+    GrafeoDB::restore_to_epoch(&backups, EpochId::new(7), &db_path).expect("restore to epoch 7");
+
+    let db = GrafeoDB::open(&db_path).expect("open the restored 0.5.x database");
+    db.execute("INSERT (:Person {name: 'Jules', city: 'Amsterdam'})")
+        .expect("insert Jules");
+    let full = db.backup_full(&backups).expect("full backup");
+    db.execute("INSERT (:Person {name: 'Butch', city: 'Berlin'})")
+        .expect("insert Butch");
+    let incremental = db.backup_incremental(&backups).expect("incremental backup");
+    db.close().expect("close");
+
+    let manifest = std::fs::read(backups.join("backup_manifest.json")).expect("read manifest");
+    let json: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("the rewritten manifest is JSON");
+    assert_eq!(json["version"], 2, "{json}");
+
+    let mut expected = segments_of_0_5_44();
+    expected.push((
+        BackupKind::Full,
+        "backup_full_0003.grafeo".to_string(),
+        0,
+        full.end_epoch.as_u64(),
+    ));
+    expected.push((
+        BackupKind::Incremental,
+        "backup_incr_0004.wal".to_string(),
+        incremental.start_epoch.as_u64(),
+        incremental.end_epoch.as_u64(),
+    ));
+    assert_eq!(
+        segments(&backups),
+        expected,
+        "the 0.5.44 segments are kept, the new ones appended"
+    );
+
+    let restore = |epoch: EpochId| {
+        let path = dir
+            .path()
+            .join(format!("restored_at_{}.grafeo", epoch.as_u64()));
+        GrafeoDB::restore_to_epoch(&backups, epoch, &path)
+            .unwrap_or_else(|e| panic!("restore to epoch {epoch:?}: {e}"));
+        people_and_friendships(&path).0
+    };
+    assert_eq!(
+        restore(EpochId::new(4)),
+        vec![
+            person("Alix", "Amsterdam"),
+            person("Gus", "Berlin"),
+            person("Vincent", "Paris")
+        ],
+        "a 0.5.44 segment still restores from the rewritten manifest"
+    );
+    assert_eq!(
+        restore(incremental.end_epoch),
+        vec![
+            person("Alix", "Amsterdam"),
+            person("Butch", "Berlin"),
+            person("Gus", "Barcelona"),
+            person("Jules", "Amsterdam"),
+            person("Mia", "Prague"),
+            person("Vincent", "Paris")
+        ],
+        "the new segments restore"
+    );
 }

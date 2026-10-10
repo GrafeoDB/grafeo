@@ -75,6 +75,9 @@ pub use grafeo_engine::{
 // crate
 #[cfg(feature = "encryption")]
 pub use grafeo_common::encryption::KeyChain;
+// Derives the master key a `KeyChain` takes from a passphrase
+#[cfg(feature = "encryption")]
+pub use grafeo_common::encryption::PasswordKeyProvider;
 #[cfg(feature = "cdc")]
 pub use grafeo_engine::cdc::CdcRetentionConfig;
 #[cfg(feature = "encryption")]

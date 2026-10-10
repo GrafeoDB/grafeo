@@ -97,3 +97,50 @@ fn an_encrypted_database_is_configured_through_the_facade() {
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A master key derived from a passphrase through the facade's
+/// `PasswordKeyProvider` opens the database: the same passphrase and salt
+/// give the same key, another passphrase does not open it.
+#[cfg(all(feature = "encryption", feature = "grafeo-file"))]
+#[test]
+fn a_passphrase_key_is_derived_through_the_facade() {
+    use std::sync::Arc;
+
+    use grafeo::{EncryptionConfig, GrafeoDB, KeyChain, PasswordKeyProvider};
+
+    let dir = std::env::temp_dir().join(format!("grafeo-facade-passphrase-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("barcelona.grafeo");
+    // Stored with the database: the salt is not secret.
+    let salt = *b"barcelona-salt-3";
+    let key = |passphrase: &str| {
+        let master = PasswordKeyProvider::new(passphrase)
+            .derive_with_salt(&salt)
+            .unwrap();
+        EncryptionConfig::new(Arc::new(KeyChain::new(*master)))
+    };
+
+    let db = GrafeoDB::with_config(
+        Config::persistent(&path).with_encryption(key("Mia and Vincent dance")),
+    )
+    .unwrap();
+    db.create_node(&["Person"]).unwrap();
+    db.close().unwrap();
+    drop(db);
+
+    let error =
+        GrafeoDB::with_config(Config::persistent(&path).with_encryption(key("Jules and Vincent")))
+            .err()
+            .expect("another passphrase does not open the database");
+    assert!(error.to_string().contains("wrong key"), "{error}");
+
+    let db = GrafeoDB::with_config(
+        Config::persistent(&path).with_encryption(key("Mia and Vincent dance")),
+    )
+    .unwrap();
+    assert_eq!(db.node_count(), 1, "the passphrase opens the database");
+    db.close().unwrap();
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
+}

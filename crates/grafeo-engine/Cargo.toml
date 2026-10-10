@@ -29,6 +29,7 @@ parking_lot.workspace = true
 # Serialization
 serde.workspace = true
 bincode.workspace = true
+serde_json = { version = "1", optional = true }  # The backup manifest and cursor (feature `wal`)
 
 # Regex for SPARQL FILTER (use regex-lite for smaller WASM builds)
 regex = { workspace = true, optional = true }
@@ -86,7 +87,7 @@ shacl = ["grafeo-core/shacl", "sparql"]  # SHACL validation (core constraints + 
 rdf = ["triple-store"]  # Deprecated: use triple-store
 parallel = ["grafeo-core/parallel", "grafeo-adapters/parallel"]  # rayon in core and adapters: batch vector search, graph algorithms
 algos = ["grafeo-adapters/algos"]  # Graph algorithm plugin (SSSP, PageRank, etc.)
-wal = ["dep:grafeo-storage", "grafeo-storage/wal", "grafeo-file"]  # Write-ahead log storage (the sidecar WAL of a `.grafeo` file)
+wal = ["dep:grafeo-storage", "grafeo-storage/wal", "grafeo-file", "dep:serde_json"]  # Write-ahead log storage (the sidecar WAL of a `.grafeo` file); serde_json writes the backup manifest and cursor
 async-storage = ["dep:grafeo-storage", "grafeo-storage/async-storage", "dep:tokio"]  # Async WAL and storage backend
 grafeo-file = ["dep:grafeo-storage", "grafeo-storage/grafeo-file", "dep:crc32fast"]  # Single-file .grafeo format
 encryption = ["dep:grafeo-storage", "grafeo-common/encryption", "grafeo-storage/encryption"]  # AES-256-GCM encryption at rest

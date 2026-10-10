@@ -37,9 +37,24 @@ pub enum BackupKind {
 /// Metadata for a single backup segment (full or incremental).
 ///
 /// Read, not built, outside this crate: later releases may add fields. It is
-/// stored with bincode, which has no field names, so a field added later
-/// needs a reader for the layout without it (`#[serde(default)]` alone does
-/// not read an older file).
+/// stored as JSON in the backup manifest: a release ignores the fields it
+/// does not know, and a field added later needs `#[serde(default)]`, so the
+/// manifests written before it still read.
+///
+/// ```compile_fail,E0639
+/// use grafeo_common::types::EpochId;
+/// use grafeo_engine::database::backup::{BackupKind, BackupSegment};
+///
+/// let segment = BackupSegment {
+///     kind: BackupKind::Full,
+///     filename: "backup_full_0000.grafeo".to_string(),
+///     start_epoch: EpochId::new(0),
+///     end_epoch: EpochId::new(19),
+///     checksum: 88,
+///     size_bytes: 4096,
+///     created_at_ms: 0,
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct BackupSegment {
@@ -62,13 +77,17 @@ pub struct BackupSegment {
 /// Tracks the full backup chain for a database.
 ///
 /// Read, not built, outside this crate: later releases may add fields. It is
-/// stored with bincode, which has no field names, so a field added later
-/// needs a reader for the layout without it (`#[serde(default)]` alone does
-/// not read an older file).
+/// stored as JSON in `backup_manifest.json`: a release ignores the fields it
+/// does not know, and a field added later needs `#[serde(default)]`, so the
+/// manifests written before it still read. Up to 0.5.x the file held
+/// bincode; [`read_manifest`] still reads it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct BackupManifest {
-    /// Manifest format version.
+    /// Manifest format version: 2, the JSON manifest. A 0.5.x manifest
+    /// (version 1, bincode) reads as version 2, the format it is written in
+    /// next. The version changes only for a change that older releases
+    /// cannot read, and [`read_manifest`] refuses a newer one.
     pub version: u32,
     /// Ordered list of backup segments (full first, then incrementals).
     pub segments: Vec<BackupSegment>,
@@ -79,7 +98,7 @@ impl BackupManifest {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            version: 1,
+            version: MANIFEST_VERSION,
             segments: Vec::new(),
         }
     }
@@ -121,9 +140,10 @@ impl Default for BackupManifest {
 /// Persisted as `backup_cursor.meta` in the WAL directory.
 ///
 /// Read, not built, outside this crate: later releases may add fields. It is
-/// stored with bincode, which has no field names, so a field added later
-/// needs a reader for the layout without it (`#[serde(default)]` alone does
-/// not read an older file).
+/// stored as JSON: a release ignores the fields it does not know, and a field
+/// added later needs `#[serde(default)]`, so the cursors written before it
+/// still read. Up to 0.5.x the file held bincode; [`read_backup_cursor`]
+/// still reads it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct BackupCursor {
@@ -140,13 +160,19 @@ pub struct BackupCursor {
 const MANIFEST_FILENAME: &str = "backup_manifest.json";
 const BACKUP_CURSOR_FILENAME: &str = "backup_cursor.meta";
 
+/// The format version of the JSON manifest (0.5.x wrote version 1, in
+/// bincode).
+const MANIFEST_VERSION: u32 = 2;
+
 /// Reads the backup manifest from a backup directory.
 ///
-/// Returns `None` if no manifest exists.
+/// Returns `None` if no manifest exists. Reads the JSON manifest and the
+/// bincode manifest of 0.5.x.
 ///
 /// # Errors
 ///
-/// Returns an error if the manifest file exists but cannot be read, and
+/// Returns an error if the manifest file exists but cannot be read, or if a
+/// newer release wrote it in a format version this one cannot read, and
 /// [`Error::Corruption`] naming it if it does not parse.
 pub fn read_manifest(backup_dir: &Path) -> Result<Option<BackupManifest>> {
     let path = backup_dir.join(MANIFEST_FILENAME);
@@ -155,14 +181,50 @@ pub fn read_manifest(backup_dir: &Path) -> Result<Option<BackupManifest>> {
     }
     let data = std::fs::read(&path)
         .map_err(|e| Error::Internal(format!("failed to read backup manifest: {e}")))?;
-    let (manifest, _): (BackupManifest, _) =
-        bincode::serde::decode_from_slice(&data, bincode::config::standard()).map_err(|e| {
-            Error::corruption(format!("the backup manifest does not parse: {e}")).in_file(&path)
-        })?;
+    let manifest = decode_manifest(&data).map_err(|e| match e {
+        ManifestDecodeError::Newer(reason) => Error::Internal(format!(
+            "cannot read backup manifest {}: {reason}",
+            path.display()
+        )),
+        ManifestDecodeError::Invalid(reason) => {
+            Error::corruption(format!("the backup manifest does not parse: {reason}"))
+                .in_file(&path)
+        }
+    })?;
     Ok(Some(manifest))
 }
 
-/// Writes the backup manifest to a backup directory.
+/// Why a manifest did not decode: a newer release wrote it (not damage), or it
+/// is neither JSON nor a 0.5.x bincode manifest.
+#[derive(Debug)]
+enum ManifestDecodeError {
+    /// A newer release wrote it in a format version this one cannot read.
+    Newer(String),
+    /// It does not parse.
+    Invalid(String),
+}
+
+/// Decodes a manifest: JSON, or else the bincode of 0.5.x.
+fn decode_manifest(data: &[u8]) -> std::result::Result<BackupManifest, ManifestDecodeError> {
+    let json_error = match serde_json::from_slice::<BackupManifest>(data) {
+        Ok(manifest) if manifest.version > MANIFEST_VERSION => {
+            return Err(ManifestDecodeError::Newer(format!(
+                "format version {} was written by a newer release; this one reads up to \
+                 version {MANIFEST_VERSION}",
+                manifest.version
+            )));
+        }
+        Ok(manifest) => return Ok(manifest),
+        Err(e) => e,
+    };
+    bincode_0_5::manifest(data).map_err(|bincode_error| {
+        ManifestDecodeError::Invalid(format!(
+            "neither JSON ({json_error}) nor a 0.5.x bincode manifest ({bincode_error})"
+        ))
+    })
+}
+
+/// Writes the backup manifest to a backup directory, as JSON.
 ///
 /// Uses write-to-temp-then-rename for atomicity.
 ///
@@ -176,7 +238,7 @@ pub fn write_manifest(backup_dir: &Path, manifest: &BackupManifest) -> Result<()
     let path = backup_dir.join(MANIFEST_FILENAME);
     let temp_path = backup_dir.join(format!("{MANIFEST_FILENAME}.tmp"));
 
-    let data = bincode::serde::encode_to_vec(manifest, bincode::config::standard())
+    let data = serde_json::to_vec_pretty(manifest)
         .map_err(|e| Error::Internal(format!("failed to serialize backup manifest: {e}")))?;
 
     std::fs::write(&temp_path, data)
@@ -191,7 +253,8 @@ pub fn write_manifest(backup_dir: &Path, manifest: &BackupManifest) -> Result<()
 
 /// Reads the backup cursor from a WAL directory.
 ///
-/// Returns `None` if no cursor exists (no backup has been taken).
+/// Returns `None` if no cursor exists (no backup has been taken). Reads the
+/// JSON cursor and the bincode cursor of 0.5.x.
 ///
 /// # Errors
 ///
@@ -204,16 +267,23 @@ pub fn read_backup_cursor(wal_dir: &Path) -> Result<Option<BackupCursor>> {
     }
     let data = std::fs::read(&path)
         .map_err(|e| Error::Internal(format!("failed to read backup cursor: {e}")))?;
-    let cursor: BackupCursor =
-        bincode::serde::decode_from_slice(&data, bincode::config::standard())
-            .map(|(c, _)| c)
-            .map_err(|e| {
-                Error::corruption(format!("the backup cursor does not parse: {e}")).in_file(&path)
-            })?;
+    let cursor = decode_cursor(&data).map_err(|reason| {
+        Error::corruption(format!("the backup cursor does not parse: {reason}")).in_file(&path)
+    })?;
     Ok(Some(cursor))
 }
 
-/// Writes the backup cursor to a WAL directory.
+/// Decodes a cursor: JSON, or else the bincode of 0.5.x. The order matters:
+/// a bincode cursor can start with `{` (epoch 123), but it is never JSON.
+fn decode_cursor(data: &[u8]) -> std::result::Result<BackupCursor, String> {
+    serde_json::from_slice::<BackupCursor>(data).or_else(|json_error| {
+        bincode_0_5::cursor(data).map_err(|bincode_error| {
+            format!("neither JSON ({json_error}) nor a 0.5.x bincode cursor ({bincode_error})")
+        })
+    })
+}
+
+/// Writes the backup cursor to a WAL directory, as JSON.
 ///
 /// Uses write-to-temp-then-rename for atomicity.
 ///
@@ -224,7 +294,7 @@ pub fn write_backup_cursor(wal_dir: &Path, cursor: &BackupCursor) -> Result<()> 
     let path = wal_dir.join(BACKUP_CURSOR_FILENAME);
     let temp_path = wal_dir.join(format!("{BACKUP_CURSOR_FILENAME}.tmp"));
 
-    let data = bincode::serde::encode_to_vec(cursor, bincode::config::standard())
+    let data = serde_json::to_vec_pretty(cursor)
         .map_err(|e| Error::Internal(format!("failed to serialize backup cursor: {e}")))?;
 
     std::fs::write(&temp_path, &data)
@@ -233,6 +303,111 @@ pub fn write_backup_cursor(wal_dir: &Path, cursor: &BackupCursor) -> Result<()> 
         .map_err(|e| Error::Internal(format!("failed to finalize backup cursor: {e}")))?;
 
     Ok(())
+}
+
+/// The manifest and cursor as 0.5.x wrote them: bincode 2 with the standard
+/// configuration, which has no field names, so these frozen copies of the
+/// 0.5.x layout read them whatever fields the current types gain. Removed in
+/// 0.7.0 with the other 0.5.x readers.
+mod bincode_0_5 {
+    use serde::Deserialize;
+
+    use super::{BackupCursor, BackupKind, BackupManifest, BackupSegment, MANIFEST_VERSION};
+    use grafeo_common::types::EpochId;
+
+    /// The only version 0.5.x wrote.
+    const VERSION: u32 = 1;
+
+    /// A cap on what a decode claims, so a damaged file fails to decode
+    /// instead of asking for a huge allocation (a 0.5.x manifest of 64 MiB
+    /// would hold about a million segments).
+    const LIMIT: usize = 64 << 20;
+
+    #[derive(Deserialize)]
+    enum Kind {
+        Full,
+        Incremental,
+    }
+
+    #[derive(Deserialize)]
+    struct Segment {
+        kind: Kind,
+        filename: String,
+        start_epoch: u64,
+        end_epoch: u64,
+        checksum: u32,
+        size_bytes: u64,
+        created_at_ms: u64,
+    }
+
+    #[derive(Deserialize)]
+    struct Manifest {
+        version: u32,
+        segments: Vec<Segment>,
+    }
+
+    #[derive(Deserialize)]
+    struct Cursor {
+        backed_up_epoch: u64,
+        log_sequence: u64,
+        timestamp_ms: u64,
+    }
+
+    /// Decodes `data` as a whole: a 0.5.x file is exactly one value, so
+    /// bytes left over mean it is something else.
+    fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, String> {
+        let config = bincode::config::standard().with_limit::<LIMIT>();
+        let (value, read) =
+            bincode::serde::decode_from_slice(data, config).map_err(|e| e.to_string())?;
+        if read != data.len() {
+            return Err(format!(
+                "{} bytes left over after the first {read}",
+                data.len() - read
+            ));
+        }
+        Ok(value)
+    }
+
+    /// A 0.5.x manifest, as the current manifest (format version 2, the
+    /// format it is written in next).
+    pub(super) fn manifest(data: &[u8]) -> Result<BackupManifest, String> {
+        let manifest: Manifest = decode(data)?;
+        if manifest.version != VERSION {
+            return Err(format!(
+                "version {} (0.5.x wrote version {VERSION})",
+                manifest.version
+            ));
+        }
+        Ok(BackupManifest {
+            version: MANIFEST_VERSION,
+            segments: manifest
+                .segments
+                .into_iter()
+                .map(|segment| BackupSegment {
+                    kind: match segment.kind {
+                        Kind::Full => BackupKind::Full,
+                        Kind::Incremental => BackupKind::Incremental,
+                    },
+                    filename: segment.filename,
+                    start_epoch: EpochId::new(segment.start_epoch),
+                    end_epoch: EpochId::new(segment.end_epoch),
+                    checksum: segment.checksum,
+                    size_bytes: segment.size_bytes,
+                    created_at_ms: segment.created_at_ms,
+                })
+                .collect(),
+        })
+    }
+
+    /// A 0.5.x backup cursor.
+    pub(super) fn cursor(data: &[u8]) -> Result<BackupCursor, String> {
+        let cursor: Cursor = decode(data)?;
+        Ok(BackupCursor {
+            backed_up_epoch: EpochId::new(cursor.backed_up_epoch),
+            log_sequence: cursor.log_sequence,
+            timestamp_ms: cursor.timestamp_ms,
+        })
+    }
 }
 
 // ── Incremental backup file format ─────────────────────────────────
@@ -815,7 +990,7 @@ mod tests {
     #[test]
     fn test_manifest_new() {
         let manifest = BackupManifest::new();
-        assert_eq!(manifest.version, 1);
+        assert_eq!(manifest.version, 2, "a new manifest is a JSON manifest");
         assert!(manifest.segments.is_empty());
         assert!(manifest.latest_full().is_none());
         assert!(manifest.epoch_range().is_none());
@@ -855,24 +1030,143 @@ mod tests {
         assert_eq!(end, EpochId::new(200));
     }
 
-    #[test]
-    fn test_manifest_round_trip() {
-        let dir = TempDir::new().unwrap();
+    /// A chain of a full segment of epochs 0 to 19 and an incremental one of
+    /// 20 to 88.
+    fn chain() -> BackupManifest {
         let mut manifest = BackupManifest::new();
         manifest.segments.push(BackupSegment {
             kind: BackupKind::Full,
-            filename: "test.grafeo".to_string(),
+            filename: "backup_full_0000.grafeo".to_string(),
             start_epoch: EpochId::new(0),
-            end_epoch: EpochId::new(50),
-            checksum: 0,
-            size_bytes: 512,
-            created_at_ms: 0,
+            end_epoch: EpochId::new(19),
+            checksum: 88,
+            size_bytes: 4096,
+            created_at_ms: 1_791_331_200_000,
         });
+        manifest.segments.push(BackupSegment {
+            kind: BackupKind::Incremental,
+            filename: "backup_incr_0001.wal".to_string(),
+            start_epoch: EpochId::new(20),
+            end_epoch: EpochId::new(88),
+            checksum: 3,
+            size_bytes: 319,
+            created_at_ms: 1_791_331_288_000,
+        });
+        manifest
+    }
 
-        write_manifest(dir.path(), &manifest).unwrap();
+    /// Every field of every segment.
+    fn fields(manifest: &BackupManifest) -> Vec<(BackupKind, String, u64, u64, u32, u64, u64)> {
+        manifest
+            .segments
+            .iter()
+            .map(|segment| {
+                (
+                    segment.kind,
+                    segment.filename.clone(),
+                    segment.start_epoch.as_u64(),
+                    segment.end_epoch.as_u64(),
+                    segment.checksum,
+                    segment.size_bytes,
+                    segment.created_at_ms,
+                )
+            })
+            .collect()
+    }
+
+    /// `chain()` as `write_manifest` writes it.
+    const MANIFEST_JSON: &str = r#"{
+  "version": 2,
+  "segments": [
+    {
+      "kind": "Full",
+      "filename": "backup_full_0000.grafeo",
+      "start_epoch": 0,
+      "end_epoch": 19,
+      "checksum": 88,
+      "size_bytes": 4096,
+      "created_at_ms": 1791331200000
+    },
+    {
+      "kind": "Incremental",
+      "filename": "backup_incr_0001.wal",
+      "start_epoch": 20,
+      "end_epoch": 88,
+      "checksum": 3,
+      "size_bytes": 319,
+      "created_at_ms": 1791331288000
+    }
+  ]
+}"#;
+
+    /// A cursor at epoch 88 and log sequence 3, as `write_backup_cursor`
+    /// writes it.
+    const CURSOR_JSON: &str = r#"{
+  "backed_up_epoch": 88,
+  "log_sequence": 3,
+  "timestamp_ms": 1791331288000
+}"#;
+
+    fn cursor_fields(cursor: &BackupCursor) -> (u64, u64, u64) {
+        (
+            cursor.backed_up_epoch.as_u64(),
+            cursor.log_sequence,
+            cursor.timestamp_ms,
+        )
+    }
+
+    /// The manifest is written as JSON, the file its name promises, and
+    /// reads back with every field.
+    #[test]
+    fn a_manifest_is_written_as_json_and_reads_back() {
+        let dir = TempDir::new().unwrap();
+        write_manifest(dir.path(), &chain()).unwrap();
+        let written = std::fs::read_to_string(dir.path().join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(written, MANIFEST_JSON);
+
         let loaded = read_manifest(dir.path()).unwrap().unwrap();
-        assert_eq!(loaded.segments.len(), 1);
-        assert_eq!(loaded.segments[0].filename, "test.grafeo");
+        assert_eq!(loaded.version, 2);
+        assert_eq!(fields(&loaded), fields(&chain()));
+    }
+
+    /// A manifest from a later 0.6 release, with fields this one does not
+    /// know at the top and in a segment, reads: the unknown fields are
+    /// ignored.
+    #[test]
+    fn a_json_manifest_with_fields_this_release_does_not_know_reads() {
+        let dir = TempDir::new().unwrap();
+        let later = MANIFEST_JSON
+            .replacen(
+                r#""version": 2,"#,
+                r#""version": 2, "compression": "zstd", "database": {"name": "prague"},"#,
+                1,
+            )
+            .replacen(
+                r#""created_at_ms": 1791331200000"#,
+                r#""created_at_ms": 1791331200000, "database_id": 19, "parent": null"#,
+                1,
+            );
+        assert_ne!(later, MANIFEST_JSON, "the extra fields are in");
+        std::fs::write(dir.path().join(MANIFEST_FILENAME), later).unwrap();
+
+        let loaded = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.version, 2);
+        assert_eq!(fields(&loaded), fields(&chain()));
+    }
+
+    /// A manifest of a format version above 2 is refused, not read as far as
+    /// its fields happen to match.
+    #[test]
+    fn a_manifest_of_a_newer_format_version_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let newer = MANIFEST_JSON.replacen(r#""version": 2"#, r#""version": 3"#, 1);
+        std::fs::write(dir.path().join(MANIFEST_FILENAME), newer).unwrap();
+
+        let error = read_manifest(dir.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("format version 3") && error.contains("newer release"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -881,68 +1175,69 @@ mod tests {
         assert!(read_manifest(dir.path()).unwrap().is_none());
     }
 
+    /// The cursor is written as JSON and reads back with every field.
     #[test]
-    fn test_backup_cursor_round_trip() {
+    fn a_cursor_is_written_as_json_and_reads_back() {
         let dir = TempDir::new().unwrap();
         let cursor = BackupCursor {
-            backed_up_epoch: EpochId::new(42),
-            log_sequence: 7,
-            timestamp_ms: 12345,
+            backed_up_epoch: EpochId::new(88),
+            log_sequence: 3,
+            timestamp_ms: 1_791_331_288_000,
         };
-
         write_backup_cursor(dir.path(), &cursor).unwrap();
+        let written = std::fs::read_to_string(dir.path().join(BACKUP_CURSOR_FILENAME)).unwrap();
+        assert_eq!(written, CURSOR_JSON);
+
         let loaded = read_backup_cursor(dir.path()).unwrap().unwrap();
-        assert_eq!(loaded.backed_up_epoch, EpochId::new(42));
-        assert_eq!(loaded.log_sequence, 7);
-        assert_eq!(loaded.timestamp_ms, 12345);
+        assert_eq!(cursor_fields(&loaded), (88, 3, 1_791_331_288_000));
     }
 
-    /// A backup manifest as 0.6.0 writes it (bincode, standard config): a
+    /// A cursor with a field this release does not know reads.
+    #[test]
+    fn a_json_cursor_with_fields_this_release_does_not_know_reads() {
+        let dir = TempDir::new().unwrap();
+        let later = CURSOR_JSON.replacen(
+            r#""log_sequence": 3,"#,
+            r#""log_sequence": 3, "wal_format": 2, "segments": [19, 88],"#,
+            1,
+        );
+        assert_ne!(later, CURSOR_JSON, "the extra fields are in");
+        std::fs::write(dir.path().join(BACKUP_CURSOR_FILENAME), later).unwrap();
+
+        let loaded = read_backup_cursor(dir.path()).unwrap().unwrap();
+        assert_eq!(cursor_fields(&loaded), (88, 3, 1_791_331_288_000));
+    }
+
+    /// A backup manifest as 0.5.x wrote it (bincode, standard config): a
     /// full segment of epochs 3 to 19 and an incremental one of 20 to 88.
-    const MANIFEST_0_6_0: [u8; 79] = [
+    const MANIFEST_BINCODE_0_5: [u8; 79] = [
         1, 2, 0, 23, 98, 97, 99, 107, 117, 112, 95, 102, 117, 108, 108, 95, 48, 48, 48, 51, 46,
         103, 114, 97, 102, 101, 111, 3, 19, 88, 251, 0, 16, 253, 0, 236, 168, 19, 161, 1, 0, 0, 1,
         20, 98, 97, 99, 107, 117, 112, 95, 105, 110, 99, 114, 95, 48, 48, 50, 48, 46, 119, 97, 108,
         20, 88, 3, 251, 63, 1, 253, 192, 67, 170, 19, 161, 1, 0, 0,
     ];
 
-    /// A backup cursor as 0.6.0 writes it: epoch 88, log sequence 3.
-    const CURSOR_0_6_0: [u8; 11] = [88, 3, 253, 192, 67, 170, 19, 161, 1, 0, 0];
+    /// A backup cursor as 0.5.x wrote it: epoch 88, log sequence 3.
+    const CURSOR_BINCODE_0_5: [u8; 11] = [88, 3, 253, 192, 67, 170, 19, 161, 1, 0, 0];
 
-    /// The manifest and cursor that 0.6.0 writes still read. They are
-    /// bincode, which has no field names: a field added to `BackupManifest`,
-    /// `BackupSegment` or `BackupCursor` makes these bytes unreadable, even
-    /// with `#[serde(default)]`, so such a change needs a reader for the old
-    /// layout.
+    /// The bincode manifest and cursor that 0.5.x wrote (under the same file
+    /// names) still read, the manifest as format version 2, which it is
+    /// written in next. `tests/backup_restore.rs` restores a whole chain
+    /// that 0.5.44 wrote.
     #[test]
-    fn a_manifest_and_cursor_written_by_0_6_0_still_read() {
+    fn a_bincode_manifest_and_cursor_as_0_5_x_wrote_them_still_read() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(MANIFEST_FILENAME), MANIFEST_0_6_0).unwrap();
-        std::fs::write(dir.path().join(BACKUP_CURSOR_FILENAME), CURSOR_0_6_0).unwrap();
+        std::fs::write(dir.path().join(MANIFEST_FILENAME), MANIFEST_BINCODE_0_5).unwrap();
+        std::fs::write(dir.path().join(BACKUP_CURSOR_FILENAME), CURSOR_BINCODE_0_5).unwrap();
 
         let manifest = read_manifest(dir.path()).unwrap().unwrap();
-        assert_eq!(manifest.version, 1);
-        let segments: Vec<_> = manifest
-            .segments
-            .iter()
-            .map(|segment| {
-                (
-                    segment.kind,
-                    segment.filename.as_str(),
-                    segment.start_epoch.as_u64(),
-                    segment.end_epoch.as_u64(),
-                    segment.checksum,
-                    segment.size_bytes,
-                    segment.created_at_ms,
-                )
-            })
-            .collect();
+        assert_eq!(manifest.version, 2, "read as the format it is written in");
         assert_eq!(
-            segments,
+            fields(&manifest),
             [
                 (
                     BackupKind::Full,
-                    "backup_full_0003.grafeo",
+                    "backup_full_0003.grafeo".to_string(),
                     3,
                     19,
                     88,
@@ -951,7 +1246,7 @@ mod tests {
                 ),
                 (
                     BackupKind::Incremental,
-                    "backup_incr_0020.wal",
+                    "backup_incr_0020.wal".to_string(),
                     20,
                     88,
                     3,
@@ -962,13 +1257,59 @@ mod tests {
         );
 
         let cursor = read_backup_cursor(dir.path()).unwrap().unwrap();
-        assert_eq!(
-            (
-                cursor.backed_up_epoch.as_u64(),
-                cursor.log_sequence,
-                cursor.timestamp_ms
-            ),
-            (88, 3, 1_791_331_288_000)
+        assert_eq!(cursor_fields(&cursor), (88, 3, 1_791_331_288_000));
+    }
+
+    /// A bincode cursor of epoch 123 starts with `{`, as JSON does: it is
+    /// still read as bincode.
+    #[test]
+    fn a_bincode_cursor_that_starts_like_json_still_reads() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(BACKUP_CURSOR_FILENAME), [b'{', 3, 19]).unwrap();
+
+        let cursor = read_backup_cursor(dir.path()).unwrap().unwrap();
+        assert_eq!(cursor_fields(&cursor), (123, 3, 19));
+    }
+
+    /// A damaged manifest or cursor is refused: a torn JSON file, and bincode
+    /// that is not exactly one 0.5.x value.
+    #[test]
+    fn a_manifest_or_cursor_that_is_neither_json_nor_0_5_x_bincode_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let manifest = |bytes: &[u8]| {
+            std::fs::write(dir.path().join(MANIFEST_FILENAME), bytes).unwrap();
+            read_manifest(dir.path())
+                .map(|_| ())
+                .unwrap_err()
+                .to_string()
+        };
+
+        let torn = manifest(&MANIFEST_JSON.as_bytes()[..88]);
+        assert!(
+            torn.contains("neither JSON") && torn.contains("0.5.x bincode manifest"),
+            "{torn}"
+        );
+        let mut trailing = MANIFEST_BINCODE_0_5.to_vec();
+        trailing.push(19);
+        let trailing = manifest(&trailing);
+        assert!(trailing.contains("1 bytes left over"), "{trailing}");
+        let mut version_2 = MANIFEST_BINCODE_0_5;
+        version_2[0] = 2;
+        let version_2 = manifest(&version_2);
+        assert!(version_2.contains("0.5.x wrote version 1"), "{version_2}");
+
+        std::fs::write(
+            dir.path().join(BACKUP_CURSOR_FILENAME),
+            &CURSOR_JSON.as_bytes()[..19],
+        )
+        .unwrap();
+        let cursor = read_backup_cursor(dir.path())
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            cursor.contains("neither JSON") && cursor.contains("0.5.x bincode cursor"),
+            "{cursor}"
         );
     }
 
@@ -1005,13 +1346,16 @@ mod tests {
         assert!(read_backup_header(&data).is_err());
     }
 
+    /// The kinds are stored by name: a manifest names them as written here.
     #[test]
-    fn test_backup_kind_serialization() {
-        let config = bincode::config::standard();
-        let encoded = bincode::serde::encode_to_vec(BackupKind::Full, config).unwrap();
-        let (parsed, _): (BackupKind, _) =
-            bincode::serde::decode_from_slice(&encoded, config).unwrap();
-        assert_eq!(parsed, BackupKind::Full);
+    fn backup_kinds_are_stored_by_name() {
+        for (kind, name) in [
+            (BackupKind::Full, r#""Full""#),
+            (BackupKind::Incremental, r#""Incremental""#),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), name);
+            assert_eq!(serde_json::from_str::<BackupKind>(name).unwrap(), kind);
+        }
     }
 
     /// A full backup records the epoch of the image it copied. After a

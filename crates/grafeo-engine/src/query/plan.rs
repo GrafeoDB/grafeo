@@ -195,6 +195,9 @@ pub enum LogicalOperator {
     /// Scan RDF triples matching a pattern.
     TripleScan(TripleScanOp),
 
+    /// Unbounded RDF endpoint reachability through a finite property path.
+    PropertyPath(PropertyPathOp),
+
     /// Union of multiple result sets.
     Union(UnionOp),
 
@@ -380,9 +383,11 @@ impl LogicalOperator {
             Self::ShortestPath(op) => op.input.has_mutations(),
 
             // Leaf operators (read-only)
-            Self::Empty | Self::ParameterScan(_) | Self::CallProcedure(_) | Self::LoadData(_) => {
-                false
-            }
+            Self::PropertyPath(_)
+            | Self::Empty
+            | Self::ParameterScan(_)
+            | Self::CallProcedure(_)
+            | Self::LoadData(_) => false,
             Self::Construct(op) => op.input.has_mutations(),
         }
     }
@@ -448,6 +453,7 @@ impl LogicalOperator {
 
             // Leaf operators
             Self::Empty
+            | Self::PropertyPath(_)
             | Self::ParameterScan(_)
             | Self::CallProcedure(_)
             | Self::ClearGraph(_)
@@ -660,6 +666,7 @@ impl LogicalOperator {
 
             // Leaf operators
             leaf @ (Self::Empty
+            | Self::PropertyPath(_)
             | Self::ParameterScan(_)
             | Self::CallProcedure(_)
             | Self::ClearGraph(_)
@@ -679,6 +686,13 @@ impl LogicalOperator {
     #[must_use]
     pub fn display_label(&self) -> String {
         match self {
+            Self::PropertyPath(op) => format!(
+                "{} {:?}{} {}",
+                fmt_triple_component(&op.subject),
+                op.path,
+                if op.zero_length { "*" } else { "+" },
+                fmt_triple_component(&op.object),
+            ),
             Self::NodeScan(op) => {
                 let label = op.label.as_deref().unwrap_or("*");
                 format!("{}:{}", op.variable, label)
@@ -1009,7 +1023,8 @@ impl LogicalOperator {
                 }
             }
             // RDF and graph management plans have no node patterns to close.
-            Self::TripleScan(_)
+            Self::PropertyPath(_)
+            | Self::TripleScan(_)
             | Self::Construct(_)
             | Self::InsertTriple(_)
             | Self::DeleteTriple(_)
@@ -1453,6 +1468,9 @@ impl LogicalOperator {
                     path = op.path,
                     var = op.variable,
                 );
+            }
+            Self::PropertyPath(_) => {
+                let _ = writeln!(out, "{indent}PropertyPath ({})", self.display_label());
             }
             Self::TripleScan(op) => {
                 let _ = writeln!(
@@ -2197,6 +2215,23 @@ pub struct DatasetRestriction {
     /// FROM NAMED IRIs: only these named graphs are available to GRAPH patterns.
     /// Empty means no FROM NAMED clause was specified (all named graphs visible).
     pub named_graphs: Vec<String>,
+}
+
+/// Endpoint reachability for an outer SPARQL `+` or `*` property path.
+#[derive(Debug, Clone)]
+pub struct PropertyPathOp {
+    /// Starting term or variable.
+    pub subject: TripleComponent,
+    /// Ending term or variable.
+    pub object: TripleComponent,
+    /// Finite path repeated by the outer quantifier.
+    pub path: grafeo_core::execution::operators::PathStep,
+    /// Whether the zero-length path is included (`*`).
+    pub zero_length: bool,
+    /// Active named graph or graph variable; absent for the default graph.
+    pub graph: Option<TripleComponent>,
+    /// Dataset restriction from FROM / FROM NAMED.
+    pub dataset: Option<DatasetRestriction>,
 }
 
 /// Scan RDF triples matching a pattern.

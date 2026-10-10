@@ -24,7 +24,9 @@ use grafeo_common::change::{Change, ChangeSet, DataOp, RdfGraphOp};
 use grafeo_common::storage::log_record::RdfGraphTarget;
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
-use grafeo_core::execution::operators::OperatorError;
+use grafeo_core::execution::operators::{
+    OperatorError, RdfPathPendingGraph, RdfPathReadControl, RdfPathReadOverlay,
+};
 use grafeo_core::graph::rdf::{RdfStore, Triple, TriplePattern};
 
 use super::{CommitsHeld, TransactionChanges, TransactionManager};
@@ -32,6 +34,94 @@ use super::{CommitsHeld, TransactionChanges, TransactionManager};
 /// The triples of one graph a transaction wrote: whether each is there once
 /// the transaction commits.
 type GraphTriples = FxHashMap<Arc<Triple>, bool>;
+
+/// One graph's existing transaction-owned net, borrowed only while its
+/// change-set lock is held. Reading it makes no copy of pending triples.
+struct PathPendingGraph<'a> {
+    triples: Option<&'a GraphTriples>,
+}
+
+impl RdfPathPendingGraph for PathPendingGraph<'_> {
+    fn state(&self, triple: &Triple) -> Option<bool> {
+        self.triples?.get(triple).copied()
+    }
+
+    fn visit_present(
+        &self,
+        pattern: &TriplePattern,
+        control: &mut RdfPathReadControl<'_>,
+        visit: &mut dyn FnMut(
+            &Triple,
+            &mut RdfPathReadControl<'_>,
+        ) -> std::result::Result<(), OperatorError>,
+    ) -> std::result::Result<(), OperatorError> {
+        if let Some(triples) = self.triples {
+            for (triple, &present) in triples {
+                control.poll()?;
+                if present && pattern.matches(triple) {
+                    visit(triple, control)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Query-owned adapter; the pending map stays owned by the transaction.
+struct PathReadOverlay {
+    changes: Arc<TransactionChanges>,
+}
+
+impl RdfPathReadOverlay for PathReadOverlay {
+    fn with_graph(
+        &self,
+        graph: Option<&str>,
+        control: &mut RdfPathReadControl<'_>,
+        read: &mut dyn FnMut(
+            &dyn RdfPathPendingGraph,
+            &mut RdfPathReadControl<'_>,
+        ) -> std::result::Result<(), OperatorError>,
+    ) -> std::result::Result<(), OperatorError> {
+        self.changes
+            .with_path_pending(control, |pending, _, control| {
+                read(&pending.path_graph(graph), control)
+            })
+    }
+
+    fn visit_graph_names(
+        &self,
+        control: &mut RdfPathReadControl<'_>,
+        visit: &mut dyn FnMut(
+            &str,
+            &mut RdfPathReadControl<'_>,
+        ) -> std::result::Result<(), OperatorError>,
+    ) -> std::result::Result<(), OperatorError> {
+        self.changes.with_path_pending(control, |_, set, control| {
+            // An insert creates its graph even if a later delete leaves the
+            // graph empty. Borrow the surviving records, so rollback removes
+            // that existence too; delete-only references create no graph.
+            for change in set.entries() {
+                control.poll()?;
+                let Change::Data {
+                    graph,
+                    op: DataOp::InsertTriple { .. },
+                    ..
+                } = change
+                else {
+                    continue;
+                };
+                if let Some(name) = set.graph(*graph).and_then(|graph| graph.key.as_deref()) {
+                    visit(name, control)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(2 * std::mem::size_of::<usize>())
+    }
+}
 
 /// The net effect of a transaction's RDF entries, per graph: for each triple
 /// it inserted or deleted, whether the triple is there once it commits (its
@@ -45,6 +135,16 @@ pub(crate) struct PendingTriples {
 }
 
 impl PendingTriples {
+    /// Borrows one graph's net for a native path lookup.
+    fn path_graph(&self, graph: Option<&str>) -> PathPendingGraph<'_> {
+        PathPendingGraph {
+            triples: match graph {
+                None => Some(&self.default),
+                Some(name) => self.named.get(name),
+            },
+        }
+    }
+
     /// The net effect of the RDF entries of `set`.
     pub(crate) fn of(set: &ChangeSet) -> Self {
         let mut pending = Self::default();
@@ -151,6 +251,14 @@ pub(crate) struct RdfWriter {
 }
 
 impl RdfWriter {
+    /// Borrowed, bounded pending reader for the native path operator. The
+    /// adapter retains no store or manager and allocates no pending snapshot.
+    pub(crate) fn path_overlay(&self) -> Arc<dyn RdfPathReadOverlay> {
+        Arc::new(PathReadOverlay {
+            changes: Arc::clone(&self.changes),
+        })
+    }
+
     /// The writer of the transaction whose changes are `changes`.
     pub(crate) fn new(
         store: Arc<RdfStore>,

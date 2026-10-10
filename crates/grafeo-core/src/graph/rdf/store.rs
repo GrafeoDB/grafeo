@@ -14,6 +14,141 @@ use hashbrown::HashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+#[cfg(test)]
+mod path_lookup_tests {
+    use super::super::path_budget::PathBudget;
+    use super::*;
+    use crate::execution::operators::OperatorError;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn path_lookup_polls_rejected_index_candidates() {
+        let store = RdfStore::new();
+        for n in 0..64 {
+            store.insert(Triple::new(
+                Term::iri("s"),
+                Term::iri("p"),
+                Term::literal(n.to_string()),
+            ));
+        }
+        let pattern = TriplePattern {
+            subject: Some(Term::iri("s")),
+            predicate: Some(Term::iri("p")),
+            object: Some(Term::literal("missing")),
+        };
+        let mut budget = PathBudget::new(4096, None);
+        budget.expire_after_polls(8);
+        let mut visits = 0;
+        let result = store.visit_matches_with_pending(&pattern, None, &mut budget, &mut |_, _| {
+            visits += 1;
+            Ok(())
+        });
+        assert!(matches!(result, Err(OperatorError::Timeout)));
+        assert_eq!(visits, 0);
+    }
+
+    #[test]
+    #[expect(
+        deprecated,
+        reason = "tests the legacy per-transaction buffer supported until 0.7.0"
+    )]
+    fn path_lookup_polls_rejected_pending_operations() {
+        let store = RdfStore::new();
+        let tx = TransactionId::new(1);
+        for n in 0..64 {
+            store.insert_in_transaction(
+                tx,
+                Triple::new(
+                    Term::iri("s"),
+                    Term::iri("other"),
+                    Term::literal(n.to_string()),
+                ),
+            );
+        }
+        let mut budget = PathBudget::new(4096, None);
+        budget.expire_after_polls(8);
+        let result = store.visit_matches_with_pending(
+            &TriplePattern::with_predicate(Term::iri("p")),
+            Some(tx),
+            &mut budget,
+            &mut |_, _| Ok(()),
+        );
+        assert!(matches!(result, Err(OperatorError::Timeout)));
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn path_lookup_deadline_bounds_index_lock_wait() {
+        let store = RdfStore::new();
+        std::thread::scope(|scope| {
+            let (held_tx, held_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let store_ref = &store;
+            scope.spawn(move || {
+                let _guard = store_ref.sp_index.write();
+                held_tx.send(()).unwrap();
+                // Bound the fixture too, so a regressed lock wait fails
+                // instead of preventing the test suite from finishing.
+                let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            });
+            held_rx.recv().unwrap();
+            let deadline = Instant::now() + Duration::from_millis(2);
+            let mut budget = PathBudget::new(4096, Some(deadline));
+            let pattern = TriplePattern {
+                subject: Some(Term::iri("s")),
+                predicate: Some(Term::iri("p")),
+                object: None,
+            };
+            let result =
+                store.visit_matches_with_pending(&pattern, None, &mut budget, &mut |_, _| Ok(()));
+            assert!(store.sp_index.try_read().is_none());
+            release_tx.send(()).unwrap();
+            assert!(matches!(result, Err(OperatorError::Timeout)));
+            assert!(Instant::now() >= deadline);
+        });
+    }
+
+    #[test]
+    #[expect(
+        deprecated,
+        reason = "tests the legacy per-transaction buffer supported until 0.7.0"
+    )]
+    fn path_lookup_pending_net_is_bounded_and_last_operation_wins() {
+        let store = RdfStore::new();
+        let tx = TransactionId::new(1);
+        let triple = Triple::new(Term::iri("s"), Term::iri("p"), Term::iri("o"));
+        store.insert(triple.clone());
+        store.remove_in_transaction(tx, triple.clone());
+        store.insert_in_transaction(tx, triple);
+        let mut empty_budget = PathBudget::new(0, None);
+        assert!(matches!(
+            store.visit_matches_with_pending(
+                &TriplePattern::any(),
+                Some(tx),
+                &mut empty_budget,
+                &mut |_, _| Ok(())
+            ),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        assert_eq!(empty_budget.used(), 0);
+        let mut budget = PathBudget::new(4096, None);
+        let mut visits = 0;
+        store
+            .visit_matches_with_pending(
+                &TriplePattern::any(),
+                Some(tx),
+                &mut budget,
+                &mut |_, _| {
+                    visits += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(visits, 1);
+        assert_eq!(budget.used(), 0);
+    }
+}
+
 /// A pending operation in a transaction buffer.
 #[derive(Debug, Clone)]
 enum PendingOp {
@@ -665,6 +800,196 @@ impl RdfStore {
                 .cloned()
                 .collect(),
         }
+    }
+
+    /// Bounded, query-local visitor for native paths. The callback must not
+    /// re-enter the store: it runs under a pending-buffer read lock and one
+    /// index read lock, and may only update the query's charged collections.
+    pub(crate) fn visit_matches_with_pending(
+        &self,
+        pattern: &TriplePattern,
+        transaction_id: Option<TransactionId>,
+        budget: &mut super::path_budget::PathBudget,
+        visit: &mut dyn FnMut(
+            &Triple,
+            &mut super::path_budget::PathBudget,
+        ) -> Result<(), crate::execution::operators::OperatorError>,
+    ) -> Result<(), crate::execution::operators::OperatorError> {
+        use grafeo_common::utils::hash::FxHashMap;
+        let buffer = match transaction_id {
+            Some(_) => Some(budget.read(&self.tx_buffer)?),
+            None => None,
+        };
+        // Borrow terms already owned by the buffer. No Arc/Triple clone or
+        // eager result vector is needed to compute the last operation.
+        let mut net: FxHashMap<&Triple, bool> = FxHashMap::default();
+        let result = (|| {
+            if let (Some(tx), Some(buffer)) = (transaction_id, buffer.as_ref())
+                && let Some(ops) = buffer.buffers.get(&tx)
+            {
+                for op in ops {
+                    budget.check()?;
+                    let (triple, present) = match op {
+                        PendingOp::Insert(triple) => (triple, true),
+                        PendingOp::Delete(triple) => (triple, false),
+                    };
+                    if pattern.matches(triple) {
+                        if !net.contains_key(triple) {
+                            budget.reserve_map(&mut net, 1)?;
+                        }
+                        net.insert(triple, present);
+                    }
+                }
+            }
+            self.visit_path_base(pattern, budget, &mut |triple, budget| {
+                if let Some(present) = net.get_mut(triple) {
+                    if !*present {
+                        return Ok(());
+                    }
+                    // A pending insertion already present in committed state
+                    // is visited here, never again in the pending-only pass.
+                    *present = false;
+                }
+                visit(triple, budget)
+            })?;
+            for (triple, present) in &net {
+                budget.check()?;
+                if *present {
+                    visit(triple, budget)?;
+                }
+            }
+            Ok(())
+        })();
+        let allocation = net.allocation_size();
+        drop(net);
+        budget.release(allocation);
+        result
+    }
+
+    pub(crate) fn visit_path_base(
+        &self,
+        pattern: &TriplePattern,
+        budget: &mut super::path_budget::PathBudget,
+        visit: &mut dyn FnMut(
+            &Triple,
+            &mut super::path_budget::PathBudget,
+        ) -> Result<(), crate::execution::operators::OperatorError>,
+    ) -> Result<(), crate::execution::operators::OperatorError> {
+        match (&pattern.subject, &pattern.predicate, &pattern.object) {
+            (Some(s), Some(p), _) => {
+                let index = budget.read(&self.sp_index)?;
+                Self::visit_path_candidates(
+                    index.get(&(s.clone(), p.clone())).into_iter().flatten(),
+                    pattern,
+                    budget,
+                    visit,
+                )
+            }
+            (Some(s), None, Some(o)) => {
+                let index = budget.read(&self.os_index)?;
+                Self::visit_path_candidates(
+                    index.get(&(o.clone(), s.clone())).into_iter().flatten(),
+                    pattern,
+                    budget,
+                    visit,
+                )
+            }
+            (None, Some(p), Some(o)) => {
+                let index = budget.read(&self.po_index)?;
+                Self::visit_path_candidates(
+                    index.get(&(p.clone(), o.clone())).into_iter().flatten(),
+                    pattern,
+                    budget,
+                    visit,
+                )
+            }
+            (Some(s), None, None) => {
+                let index = budget.read(&self.subject_index)?;
+                Self::visit_path_candidates(
+                    index.get(s).into_iter().flatten(),
+                    pattern,
+                    budget,
+                    visit,
+                )
+            }
+            (None, Some(p), None) => {
+                let index = budget.read(&self.predicate_index)?;
+                Self::visit_path_candidates(
+                    index.get(p).into_iter().flatten(),
+                    pattern,
+                    budget,
+                    visit,
+                )
+            }
+            (None, None, Some(o)) if self.config.index_objects => {
+                let index = budget.read(&self.object_index)?;
+                if let Some(index) = index.as_ref() {
+                    return Self::visit_path_candidates(
+                        index.get(o).into_iter().flatten(),
+                        pattern,
+                        budget,
+                        visit,
+                    );
+                }
+                drop(index);
+                let triples = budget.read(&self.triples)?;
+                Self::visit_path_candidates(triples.iter(), pattern, budget, visit)
+            }
+            _ => {
+                let triples = budget.read(&self.triples)?;
+                Self::visit_path_candidates(triples.iter(), pattern, budget, visit)
+            }
+        }
+    }
+
+    fn visit_path_candidates<'a>(
+        candidates: impl IntoIterator<Item = &'a Arc<Triple>>,
+        pattern: &TriplePattern,
+        budget: &mut super::path_budget::PathBudget,
+        visit: &mut dyn FnMut(
+            &Triple,
+            &mut super::path_budget::PathBudget,
+        ) -> Result<(), crate::execution::operators::OperatorError>,
+    ) -> Result<(), crate::execution::operators::OperatorError> {
+        for triple in candidates {
+            budget.check()?; // Rejected candidates must still obey the deadline.
+            if pattern.matches(triple) {
+                visit(triple, budget)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Visits named partitions without copying an unbounded graph-name list.
+    /// The callback is query-local and must not re-enter this store.
+    pub(crate) fn visit_path_graphs(
+        &self,
+        names: Option<&[String]>,
+        budget: &mut super::path_budget::PathBudget,
+        visit: &mut dyn FnMut(
+            &str,
+            &Arc<RdfStore>,
+            &mut super::path_budget::PathBudget,
+        ) -> Result<(), crate::execution::operators::OperatorError>,
+    ) -> Result<(), crate::execution::operators::OperatorError> {
+        let graphs = budget.read(&self.named_graphs)?;
+        match names {
+            Some(names) => {
+                for name in names {
+                    budget.check()?;
+                    if let Some(store) = graphs.get(name) {
+                        visit(name, store, budget)?;
+                    }
+                }
+            }
+            None => {
+                for (name, store) in graphs.iter() {
+                    budget.check()?;
+                    visit(name, store, budget)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Returns triples with the given subject.

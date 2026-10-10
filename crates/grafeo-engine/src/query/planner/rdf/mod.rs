@@ -12,7 +12,7 @@ use std::sync::Arc;
 use grafeo_common::change::RdfGraphOp;
 use grafeo_common::storage::log_record::RdfGraphTarget;
 use grafeo_common::types::{LogicalType, Value};
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
     BinaryFilterOp, FilterExpression, FilterOperator, HashAggregateOperator, Operator,
@@ -112,6 +112,10 @@ pub struct RdfPlanner {
     encoded_columns: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Whether a plan without `ORDER BY` returns its rows in random order.
     shuffle_unordered: bool,
+    /// One traversal's maximum resident memory, narrowed by the caller's budget.
+    path_search_budget: usize,
+    /// The same execution deadline used by the caller's executor.
+    deadline: Option<std::time::Instant>,
 }
 
 impl RdfPlanner {
@@ -128,6 +132,8 @@ impl RdfPlanner {
             dictionary: None,
             encoded_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             shuffle_unordered: false,
+            path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
+            deadline: None,
         }
     }
 
@@ -143,6 +149,20 @@ impl RdfPlanner {
     #[must_use]
     pub fn with_shuffle_unordered(mut self, shuffle: bool) -> Self {
         self.shuffle_unordered = shuffle;
+        self
+    }
+
+    /// Sets the memory one native property-path traversal may retain.
+    #[must_use]
+    pub fn with_path_search_budget(mut self, bytes: usize) -> Self {
+        self.path_search_budget = bytes;
+        self
+    }
+
+    /// Sets the deadline checked inside native property-path lookups.
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: Option<std::time::Instant>) -> Self {
+        self.deadline = deadline;
         self
     }
 
@@ -259,6 +279,7 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         let result = match op {
             LogicalOperator::TripleScan(scan) => self.plan_triple_scan(scan),
+            LogicalOperator::PropertyPath(path) => self.plan_property_path(path),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
             LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
@@ -293,6 +314,68 @@ impl RdfPlanner {
             ))),
         };
         self.maybe_profile(result, op)
+    }
+
+    fn plan_property_path(
+        &self,
+        path: &crate::query::plan::PropertyPathOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        use grafeo_core::execution::operators::{RdfPathConfig, RdfPathGraph, RdfPathOperator};
+        let graph = match path.graph.as_ref() {
+            Some(TripleComponent::Variable(_)) => {
+                RdfPathGraph::NamedGraphs(path.dataset.as_ref().map(|ds| ds.named_graphs.clone()))
+            }
+            Some(component) => {
+                let iri = match component {
+                    TripleComponent::Iri(iri) => iri.clone(),
+                    TripleComponent::Literal(Value::String(iri)) => iri.to_string(),
+                    _ => {
+                        return Err(Error::Query(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            "A path graph must be an IRI or variable",
+                        )));
+                    }
+                };
+                if path
+                    .dataset
+                    .as_ref()
+                    .is_some_and(|ds| !ds.named_graphs.contains(&iri))
+                {
+                    RdfPathGraph::NamedGraphs(Some(Vec::new()))
+                } else {
+                    RdfPathGraph::Named(iri)
+                }
+            }
+            None => path.dataset.as_ref().map_or(RdfPathGraph::Default, |ds| {
+                RdfPathGraph::Union(ds.default_graphs.clone())
+            }),
+        };
+        let operator = RdfPathOperator::new(
+            Arc::clone(&self.store),
+            RdfPathConfig {
+                subject: component_to_term(&path.subject),
+                object: component_to_term(&path.object),
+                subject_var: path.subject.as_variable().map(str::to_string),
+                object_var: path.object.as_variable().map(str::to_string),
+                graph_var: path
+                    .graph
+                    .as_ref()
+                    .and_then(TripleComponent::as_variable)
+                    .map(str::to_string),
+                min_hops: !path.zero_length,
+                path: path.path.clone(),
+                graph,
+                companions: self.needs_companion_columns.get(),
+                transaction_id: None,
+                chunk_capacity: self.chunk_size,
+            },
+        )
+        .with_memory_budget(self.path_search_budget)
+        .with_deadline(self.deadline)
+        .with_read_overlay(self.writer.as_ref().map(RdfWriter::path_overlay));
+        let columns = operator.columns();
+        let types = vec![LogicalType::String; columns.len()];
+        Ok((Box::new(operator), columns, types))
     }
 
     /// Plans a triple scan operator.

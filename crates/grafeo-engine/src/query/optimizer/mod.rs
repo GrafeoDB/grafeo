@@ -1724,6 +1724,17 @@ impl Optimizer {
                 Self::collect_output_variables_recursive(&distinct.input, vars);
             }
             #[cfg(feature = "triple-store")]
+            LogicalOperator::PropertyPath(path) => {
+                for component in [Some(&path.subject), Some(&path.object), path.graph.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(v) = component.as_variable() {
+                        vars.insert(v.to_string());
+                    }
+                }
+            }
+            #[cfg(feature = "triple-store")]
             LogicalOperator::TripleScan(scan) => {
                 if let Some(v) = scan.subject.as_variable() {
                     vars.insert(v.to_string());

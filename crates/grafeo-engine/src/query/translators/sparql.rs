@@ -1094,12 +1094,12 @@ impl SparqlTranslator {
             return Ok(LogicalOperator::Union(UnionOp { inputs: branches }));
         }
 
-        // Handle OneOrMore (path+): bounded expansion
+        // Handle OneOrMore (path+): native endpoint reachability
         if let ast::PropertyPath::OneOrMore(inner) = &triple.predicate {
             return self.translate_one_or_more_path(triple, inner);
         }
 
-        // Handle ZeroOrMore (path*): bounded expansion
+        // Handle ZeroOrMore (path*): native endpoint reachability
         if let ast::PropertyPath::ZeroOrMore(inner) = &triple.predicate {
             return self.translate_zero_or_more_path(triple, inner);
         }
@@ -1711,6 +1711,18 @@ impl SparqlTranslator {
 
     fn collect_variables_recursive(op: &LogicalOperator, vars: &mut Vec<String>) {
         match op {
+            LogicalOperator::PropertyPath(path) => {
+                for component in [Some(&path.subject), Some(&path.object), path.graph.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(v) = component.as_variable()
+                        && !vars.iter().any(|name| name == v)
+                    {
+                        vars.push(v.to_string());
+                    }
+                }
+            }
             LogicalOperator::TripleScan(scan) => {
                 if let TripleComponent::Variable(v) = &scan.subject
                     && !vars.contains(v)
@@ -1994,74 +2006,69 @@ impl SparqlTranslator {
         }
     }
 
-    /// Translates a `OneOrMore` property path (`path+`) using bounded expansion.
-    ///
-    /// Expands to a `Union` of fixed-depth sequences from depth 1 to
-    /// `MAX_DEPTH`, each projected to its endpoint columns so every branch
-    /// shares a schema, wrapped in `Distinct` to deduplicate the transitive
-    /// closure across depths. Unlike `ZeroOrMore`, no reflexive 0-hop branch is
-    /// added: `path+` excludes the zero-length path (SPARQL 1.1 sec 9.1).
+    /// Plans one native endpoint traversal instead of a bounded union of walks.
     fn translate_one_or_more_path(
         &mut self,
         triple: &ast::TriplePattern,
         inner_path: &ast::PropertyPath,
     ) -> Result<LogicalOperator> {
-        const MAX_DEPTH: usize = 50;
-
-        let subject = self.translate_triple_term(&triple.subject)?;
-        let object = self.translate_triple_term(&triple.object)?;
-        let graph = self.graph_context_stack.last().cloned();
-
-        let mut branches = Vec::new();
-
-        for depth in 1..=MAX_DEPTH {
-            let branch =
-                self.translate_fixed_depth_path(inner_path, &subject, &object, &graph, depth)?;
-            // Project every depth branch to its endpoint columns before the
-            // Union, exactly as `ZeroOrMore` and `ZeroOrOne` do. Depth-N
-            // branches carry intermediate-hop columns of differing widths;
-            // without this projection the heterogeneous branches reach `Union`
-            // and `Distinct` unnormalized and the visible object column ends up
-            // holding the first intermediate hop instead of the true endpoint.
-            branches.push(self.project_path_endpoints(&subject, &object, branch));
-        }
-
-        let union = LogicalOperator::Union(UnionOp { inputs: branches });
-
-        // Wrap in Distinct to deduplicate across depths
-        Ok(wrap_distinct(union))
+        self.translate_repeated_path(triple, inner_path, false)
     }
 
-    /// Translates a `ZeroOrMore` property path (`path*`) using bounded expansion.
-    ///
-    /// Includes reflexive (0-hop) matches for every node that participates as
-    /// subject or object of the predicate, plus the same 1..`MAX_DEPTH` expansion
-    /// used by `OneOrMore`.
     fn translate_zero_or_more_path(
         &mut self,
         triple: &ast::TriplePattern,
         inner_path: &ast::PropertyPath,
     ) -> Result<LogicalOperator> {
-        const MAX_DEPTH: usize = 50;
+        self.translate_repeated_path(triple, inner_path, true)
+    }
 
-        let subject = self.translate_triple_term(&triple.subject)?;
-        let object = self.translate_triple_term(&triple.object)?;
-        let graph = self.graph_context_stack.last().cloned();
+    fn translate_repeated_path(
+        &mut self,
+        triple: &ast::TriplePattern,
+        inner_path: &ast::PropertyPath,
+        zero_length: bool,
+    ) -> Result<LogicalOperator> {
+        Ok(LogicalOperator::PropertyPath(
+            crate::query::plan::PropertyPathOp {
+                subject: self.translate_triple_term(&triple.subject)?,
+                object: self.translate_triple_term(&triple.object)?,
+                path: self.translate_path_step(inner_path)?,
+                zero_length,
+                graph: self.graph_context_stack.last().cloned(),
+                dataset: self.dataset.clone(),
+            },
+        ))
+    }
 
-        let mut branches = Vec::new();
-
-        // 0-hop reflexive branches
-        self.add_reflexive_branches(&subject, &object, inner_path, &graph, &mut branches)?;
-
-        // 1+ hops: same as OneOrMore (wrapped in projection to match reflexive column count)
-        for depth in 1..=MAX_DEPTH {
-            let branch =
-                self.translate_fixed_depth_path(inner_path, &subject, &object, &graph, depth)?;
-            branches.push(self.project_path_endpoints(&subject, &object, branch));
+    fn translate_path_step(
+        &self,
+        path: &ast::PropertyPath,
+    ) -> Result<grafeo_core::execution::operators::PathStep> {
+        use grafeo_core::execution::operators::PathStep;
+        match path {
+            ast::PropertyPath::Predicate(iri) => Ok(PathStep::Predicate(self.resolve_iri(iri))),
+            ast::PropertyPath::RdfType => Ok(PathStep::Predicate(
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type".to_string(),
+            )),
+            ast::PropertyPath::Inverse(inner) => Ok(PathStep::Inverse(Box::new(
+                self.translate_path_step(inner)?,
+            ))),
+            ast::PropertyPath::Sequence(paths) => paths
+                .iter()
+                .map(|p| self.translate_path_step(p))
+                .collect::<Result<Vec<_>>>()
+                .map(PathStep::Sequence),
+            ast::PropertyPath::Alternative(paths) => paths
+                .iter()
+                .map(|p| self.translate_path_step(p))
+                .collect::<Result<Vec<_>>>()
+                .map(PathStep::Alternative),
+            _ => Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "Repeated property paths support IRIs, inverse, sequence and alternative; nested quantifiers and negated sets are not supported",
+            ))),
         }
-
-        let union = LogicalOperator::Union(UnionOp { inputs: branches });
-        Ok(wrap_distinct(union))
     }
 
     /// Translates a `ZeroOrOne` property path (`path?`).
@@ -2866,89 +2873,36 @@ mod tests {
 
     #[test]
     fn test_translate_one_or_more_property_path() {
-        let query = "SELECT ?s ?o WHERE { ?s <http://ex.org/p>+ ?o }";
-        let result = translate(query);
-        assert!(
-            result.is_ok(),
-            "OneOrMore path translation failed: {:?}",
-            result.err()
-        );
-        let plan = result.unwrap();
-
-        // OneOrMore produces Distinct(Union(...))
-        fn find_distinct(op: &LogicalOperator) -> bool {
-            match op {
-                LogicalOperator::Distinct(_) => true,
-                LogicalOperator::Project(p) => find_distinct(&p.input),
-                _ => false,
+        let plan = translate("SELECT ?s ?o WHERE { ?s <http://ex.org/p>+ ?o }").unwrap();
+        fn find_path(op: &LogicalOperator) -> Option<&crate::query::plan::PropertyPathOp> {
+            if let LogicalOperator::PropertyPath(path) = op {
+                return Some(path);
             }
+            op.children().into_iter().find_map(find_path)
         }
-        assert!(
-            find_distinct(&plan.root),
-            "Expected Distinct wrapping the bounded expansion"
-        );
-
-        fn find_union_inside_distinct(op: &LogicalOperator) -> bool {
-            match op {
-                LogicalOperator::Distinct(d) => matches!(*d.input, LogicalOperator::Union(_)),
-                LogicalOperator::Project(p) => find_union_inside_distinct(&p.input),
-                _ => false,
-            }
-        }
-        assert!(
-            find_union_inside_distinct(&plan.root),
-            "Expected Union inside Distinct for OneOrMore path"
-        );
+        let path = find_path(&plan.root).expect("native repeated property path");
+        assert!(!path.zero_length);
+        assert!(matches!(&path.subject, TripleComponent::Variable(v) if v == "s"));
+        assert!(matches!(&path.object, TripleComponent::Variable(v) if v == "o"));
+        assert!(!plan.root.explain_tree().contains("Union"));
     }
 
     // === ZeroOrMore Property Path Tests ===
 
     #[test]
     fn test_translate_zero_or_more_property_path() {
-        let query = "SELECT ?s ?o WHERE { ?s <http://ex.org/p>* ?o }";
-        let result = translate(query);
-        assert!(
-            result.is_ok(),
-            "ZeroOrMore path translation failed: {:?}",
-            result.err()
-        );
-        let plan = result.unwrap();
-
-        // ZeroOrMore produces Distinct(Union(...)) with reflexive branches
-        fn find_distinct(op: &LogicalOperator) -> bool {
-            match op {
-                LogicalOperator::Distinct(_) => true,
-                LogicalOperator::Project(p) => find_distinct(&p.input),
-                _ => false,
+        let plan = translate("SELECT ?s ?o WHERE { ?s <http://ex.org/p>* ?o }").unwrap();
+        fn find_path(op: &LogicalOperator) -> Option<&crate::query::plan::PropertyPathOp> {
+            if let LogicalOperator::PropertyPath(path) = op {
+                return Some(path);
             }
+            op.children().into_iter().find_map(find_path)
         }
-        assert!(
-            find_distinct(&plan.root),
-            "Expected Distinct wrapping the bounded expansion"
-        );
-
-        // The Union should have more branches than OneOrMore (reflexive + depth branches)
-        fn count_union_branches(op: &LogicalOperator) -> Option<usize> {
-            match op {
-                LogicalOperator::Distinct(d) => {
-                    if let LogicalOperator::Union(u) = d.input.as_ref() {
-                        Some(u.inputs.len())
-                    } else {
-                        None
-                    }
-                }
-                LogicalOperator::Project(p) => count_union_branches(&p.input),
-                _ => None,
-            }
-        }
-        let branch_count = count_union_branches(&plan.root)
-            .expect("Expected Union inside Distinct for ZeroOrMore path");
-        // ZeroOrMore has 2 reflexive branches + MAX_DEPTH (50) depth branches = 52
-        assert!(
-            branch_count > 10,
-            "ZeroOrMore should have reflexive branches plus depth branches, got {}",
-            branch_count
-        );
+        let path = find_path(&plan.root).expect("native repeated property path");
+        assert!(path.zero_length);
+        assert!(matches!(&path.subject, TripleComponent::Variable(v) if v == "s"));
+        assert!(matches!(&path.object, TripleComponent::Variable(v) if v == "o"));
+        assert!(!plan.root.explain_tree().contains("Union"));
     }
 
     // === Sequence Property Path Tests ===
@@ -3246,7 +3200,7 @@ mod tests {
 
     #[test]
     fn test_property_path_plus_translates_beyond_10() {
-        // With MAX_DEPTH=50, a + path should expand to more than 10 levels
+        // Native reachability has no translation-time depth cap.
         let result = translate("SELECT ?x ?y WHERE { ?x <http://example.org/knows>+ ?y }");
         assert!(
             result.is_ok(),

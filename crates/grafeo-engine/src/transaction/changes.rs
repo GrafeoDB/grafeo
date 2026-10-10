@@ -372,6 +372,28 @@ impl TransactionChanges {
         self.state.lock().triples.state(graph, triple)
     }
 
+    /// Borrows the existing RDF net and entries under a deadline-aware lock. The reader
+    /// may acquire a store index afterwards, matching `apply_triples`' lock
+    /// order, but its callbacks must not reenter storage or transaction state.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn with_path_pending(
+        &self,
+        control: &mut grafeo_core::execution::operators::RdfPathReadControl<'_>,
+        read: impl FnOnce(
+            &super::rdf::PendingTriples,
+            &ChangeSet,
+            &mut grafeo_core::execution::operators::RdfPathReadControl<'_>,
+        ) -> std::result::Result<(), OperatorError>,
+    ) -> std::result::Result<(), OperatorError> {
+        loop {
+            let wait = control.lock_wait()?;
+            if let Some(state) = self.state.try_lock_for(wait) {
+                control.poll()?;
+                return read(&state.triples, &state.set, control);
+            }
+        }
+    }
+
     /// The triples the transaction wrote that match `pattern` in the graphs
     /// `graphs` names, each with its graph and whether it is there once the
     /// transaction commits (see `PendingTriples::matching`).
@@ -1098,4 +1120,207 @@ pub(crate) enum BuiltIndex {
     /// A text index.
     #[cfg(feature = "text-index")]
     Text(grafeo_core::index::text::InvertedIndex),
+}
+
+#[cfg(all(test, feature = "triple-store"))]
+mod path_overlay_tests {
+    use super::super::rdf::RdfWriter;
+    use super::{TransactionChanges, TransactionManager};
+    use grafeo_common::types::{EpochId, TransactionId};
+    use grafeo_core::execution::operators::{
+        Operator, OperatorError, PathStep, RdfPathConfig, RdfPathGraph, RdfPathOperator,
+        RdfPathPendingGraph, RdfPathReadControl, RdfPathReadOverlay,
+    };
+    use grafeo_core::graph::rdf::{RdfStore, Term, Triple, TriplePattern};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    enum Probe {
+        Lock,
+        ExpiredLock,
+        Pending,
+    }
+
+    /// Reaches the real adapter after native traversal starts. Expiration is
+    /// placed at the indicated stage, so initial State admission cannot pass
+    /// one of these controls merely by returning an early timeout.
+    struct ProbeOverlay {
+        inner: Arc<dyn RdfPathReadOverlay>,
+        entered: Arc<AtomicBool>,
+        deadline: Instant,
+        probe: Probe,
+    }
+
+    impl ProbeOverlay {
+        fn expire(&self, control: &mut RdfPathReadControl<'_>) {
+            control.poll().unwrap();
+            self.entered.store(true, Ordering::SeqCst);
+            std::thread::sleep(
+                self.deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+            );
+        }
+    }
+
+    impl RdfPathReadOverlay for ProbeOverlay {
+        fn with_graph(
+            &self,
+            graph: Option<&str>,
+            control: &mut RdfPathReadControl<'_>,
+            read: &mut dyn FnMut(
+                &dyn RdfPathPendingGraph,
+                &mut RdfPathReadControl<'_>,
+            ) -> Result<(), OperatorError>,
+        ) -> Result<(), OperatorError> {
+            match self.probe {
+                Probe::Lock => {
+                    control.poll()?;
+                    self.entered.store(true, Ordering::SeqCst);
+                    self.inner.with_graph(graph, control, read)
+                }
+                Probe::ExpiredLock => {
+                    self.expire(control);
+                    self.inner.with_graph(graph, control, read)
+                }
+                Probe::Pending => self
+                    .inner
+                    .with_graph(graph, control, &mut |pending, control| {
+                        self.expire(control);
+                        let mut visits = 0;
+                        let result = pending.visit_present(
+                            &TriplePattern::with_predicate(Term::iri("p")),
+                            control,
+                            &mut |_, _| {
+                                visits += 1;
+                                Ok(())
+                            },
+                        );
+                        assert_eq!(visits, 0);
+                        assert!(matches!(result, Err(OperatorError::Timeout)));
+                        result
+                    }),
+            }
+        }
+
+        fn visit_graph_names(
+            &self,
+            control: &mut RdfPathReadControl<'_>,
+            visit: &mut dyn FnMut(&str, &mut RdfPathReadControl<'_>) -> Result<(), OperatorError>,
+        ) -> Result<(), OperatorError> {
+            self.inner.visit_graph_names(control, visit)
+        }
+
+        fn retained_bytes(&self) -> usize {
+            self.inner.retained_bytes() + std::mem::size_of::<Self>()
+        }
+    }
+
+    fn path(changes: &Arc<TransactionChanges>, probe: Probe) -> (RdfPathOperator, Arc<AtomicBool>) {
+        let store = Arc::new(RdfStore::new());
+        let writer = RdfWriter::new(
+            Arc::clone(&store),
+            Arc::clone(changes),
+            Arc::new(TransactionManager::new()),
+            #[cfg(feature = "wal")]
+            None,
+        );
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let entered = Arc::new(AtomicBool::new(false));
+        let overlay = Arc::new(ProbeOverlay {
+            inner: writer.path_overlay(),
+            entered: Arc::clone(&entered),
+            deadline,
+            probe,
+        });
+        let config = RdfPathConfig {
+            subject: Some(Term::iri("s")),
+            object: None,
+            subject_var: None,
+            object_var: None,
+            graph_var: None,
+            min_hops: false,
+            path: PathStep::Predicate("p".into()),
+            graph: RdfPathGraph::Default,
+            companions: false,
+            transaction_id: None,
+            chunk_capacity: 16,
+        };
+        (
+            RdfPathOperator::new(store, config)
+                .with_read_overlay(Some(overlay))
+                .with_deadline(Some(deadline)),
+            entered,
+        )
+    }
+
+    #[test]
+    fn path_overlay_deadline_bounds_changes_lock_wait() {
+        let changes = Arc::new(TransactionChanges::new(
+            TransactionId::new(2),
+            EpochId::new(0),
+        ));
+        std::thread::scope(|scope| {
+            let (held_tx, held_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let changes_ref = &changes;
+            scope.spawn(move || {
+                let _guard = changes_ref.state.lock();
+                held_tx.send(()).unwrap();
+                // Release even if the path regresses to an unbounded lock wait,
+                // so this control fails instead of hanging the test suite.
+                let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            });
+            held_rx.recv().unwrap();
+            let (mut path, entered) = path(&changes, Probe::Lock);
+            let result = path.next();
+            assert!(changes.state.try_lock().is_none());
+            release_tx.send(()).unwrap();
+            assert!(entered.load(Ordering::SeqCst));
+            assert!(matches!(result, Err(OperatorError::Timeout)));
+            assert!(path.next().unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn path_overlay_refuses_expired_changes_lock_read() {
+        let changes = Arc::new(TransactionChanges::new(
+            TransactionId::new(2),
+            EpochId::new(0),
+        ));
+        let (mut path, entered) = path(&changes, Probe::ExpiredLock);
+        assert!(matches!(path.next(), Err(OperatorError::Timeout)));
+        assert!(entered.load(Ordering::SeqCst));
+        assert!(path.next().unwrap().is_none());
+        assert!(changes.state.try_lock().is_some());
+    }
+
+    #[test]
+    fn path_overlay_polls_deleted_and_rejected_pending_entries() {
+        for present in [false, true] {
+            let changes = Arc::new(TransactionChanges::new(
+                TransactionId::new(2),
+                EpochId::new(0),
+            ));
+            for n in 0..64 {
+                changes
+                    .record_triple(
+                        None,
+                        Triple::new(
+                            Term::iri("s"),
+                            Term::iri("other"),
+                            Term::literal(n.to_string()),
+                        ),
+                        present,
+                    )
+                    .unwrap();
+            }
+            let (mut path, entered) = path(&changes, Probe::Pending);
+            assert!(matches!(path.next(), Err(OperatorError::Timeout)));
+            assert!(entered.load(Ordering::SeqCst));
+            // The reflexive, zero-column row was buffered before traversal;
+            // an error discards it and releases the borrowed changes lock.
+            assert!(path.next().unwrap().is_none());
+            assert!(changes.state.try_lock().is_some());
+        }
+    }
 }

@@ -746,17 +746,29 @@ impl WalManager {
     pub fn rotate(&self) -> Result<()> {
         let mut active = self.active_log.lock();
         self.check_available()?;
-        self.rotate_under_lock(&mut active)
-            .map_err(|error| self.make_unavailable(error.to_string()))
+        // A failed flush or sync can leave the old writer unsafe to reuse.
+        // Failure to open its replacement leaves that writer intact.
+        Self::flush_before_rotation(&mut active)
+            .map_err(|error| self.make_unavailable(error.to_string()))?;
+        self.open_next_log_under_lock(&mut active)
     }
 
     /// The caller holds active_log until a rotation failure is classified.
     fn rotate_under_lock(&self, active: &mut Option<LogFile>) -> Result<()> {
         self.check_available()?;
+        Self::flush_before_rotation(active)?;
+        self.open_next_log_under_lock(active)
+    }
+
+    fn flush_before_rotation(active: &mut Option<LogFile>) -> Result<()> {
         if let Some(old_log) = active.as_mut() {
             old_log.writer.flush()?;
             old_log.writer.get_ref().sync_all()?;
         }
+        Ok(())
+    }
+
+    fn open_next_log_under_lock(&self, active: &mut Option<LogFile>) -> Result<()> {
         let new_sequence = self.current_sequence.load(Ordering::SeqCst) + 1;
         let new_path = self.log_path(new_sequence);
         let file = OpenOptions::new()
@@ -1439,6 +1451,58 @@ mod legacy_commit_tests {
         assert_eq!(fs::read(wal.path()).unwrap(), before);
         drop(wal);
         assert_eq!(recovered_ids(dir.path()), vec![1, 2]);
+    }
+
+    #[test]
+    fn legacy_checkpoint_rotation_open_failure_remains_retryable() {
+        let dir = tempdir().unwrap();
+        let wal = open_sync(dir.path());
+        wal.log_batch(&records(1, false)).unwrap();
+        let sequence = wal.manager().current_sequence();
+        let before = fs::read(wal.path()).unwrap();
+        let blocker = wal.manager().log_path(sequence + 1);
+        fs::create_dir(&blocker).unwrap();
+
+        assert!(wal.manager().rotate().is_err());
+        assert_eq!(wal.manager().current_sequence(), sequence);
+        assert_eq!(fs::read(wal.path()).unwrap(), before);
+        wal.log_batch(&records(2, false)).unwrap();
+
+        fs::remove_dir(blocker).unwrap();
+        wal.manager().rotate().unwrap();
+        assert_eq!(wal.manager().current_sequence(), sequence + 1);
+        wal.log_batch(&records(3, false)).unwrap();
+        drop(wal);
+        assert_eq!(recovered_ids(dir.path()), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn legacy_checkpoint_rotation_flush_failure_fences_writer() {
+        let dir = tempdir().unwrap();
+        let wal = open_sync(dir.path());
+        wal.log_batch(&records(1, false)).unwrap();
+        let before = fs::read(wal.path()).unwrap();
+        {
+            let mut active = wal.manager().active_log.lock();
+            let log = active.as_mut().unwrap();
+            // A real read-only file makes the buffered write fail at flush.
+            log.writer = BufWriter::new(File::open(&log.path).unwrap());
+            log.writer.write_all(b"pending bytes").unwrap();
+            assert_eq!(log.writer.buffer(), b"pending bytes");
+        }
+
+        let error = wal.manager().rotate().unwrap_err();
+        assert!(matches!(
+            disposition(&error),
+            GroupError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            disposition(&wal.log_batch(&records(2, false)).unwrap_err()),
+            GroupError::Unavailable { .. }
+        ));
+        assert_eq!(fs::read(wal.path()).unwrap(), before);
+        drop(wal);
+        assert_eq!(recovered_ids(dir.path()), vec![1]);
     }
 
     #[test]

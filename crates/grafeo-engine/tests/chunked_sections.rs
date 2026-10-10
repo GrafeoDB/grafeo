@@ -1345,9 +1345,7 @@ mod moved_chunks {
     use super::TINY;
 
     fn with_key(config: Config, chain: &Arc<KeyChain>) -> Config {
-        config.with_encryption(EncryptionConfig {
-            key_chain: Arc::clone(chain),
-        })
+        config.with_encryption(EncryptionConfig::new(Arc::clone(chain)))
     }
 
     /// Writes 30 Persons whose names have one length ("Alix 00" to "Alix

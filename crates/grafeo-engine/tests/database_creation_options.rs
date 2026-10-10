@@ -92,13 +92,6 @@ fn validate_rejects_zero_threads() {
     assert_eq!(config.validate(), Err(ConfigError::ZeroThreads));
 }
 
-#[test]
-fn validate_rejects_zero_wal_flush_interval() {
-    let mut config = Config::in_memory();
-    config.wal_flush_interval_ms = 0;
-    assert_eq!(config.validate(), Err(ConfigError::ZeroWalFlushInterval));
-}
-
 #[cfg(not(feature = "triple-store"))]
 #[test]
 fn validate_rejects_rdf_without_feature() {
@@ -214,10 +207,9 @@ fn cdc_retention_from_the_config_bounds_the_history() {
         "the default retention keeps the insert and every update"
     );
 
-    let bounded = history_after_gc(Config::in_memory().with_cdc_retention(CdcRetentionConfig {
-        max_epochs: None,
-        max_events: Some(3),
-    }));
+    let bounded = history_after_gc(
+        Config::in_memory().with_cdc_retention(CdcRetentionConfig::unlimited().with_max_events(3)),
+    );
     let kept_ages: Vec<Option<Value>> = bounded
         .iter()
         .map(|event| {

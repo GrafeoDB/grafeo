@@ -43,9 +43,7 @@ fn key_chain(seed: u8) -> Arc<KeyChain> {
 }
 
 fn with_key(config: Config, chain: &Arc<KeyChain>) -> Config {
-    config.with_encryption(EncryptionConfig {
-        key_chain: Arc::clone(chain),
-    })
+    config.with_encryption(EncryptionConfig::new(Arc::clone(chain)))
 }
 
 /// A read-write configuration of the database at `path` with `chain`.
@@ -985,9 +983,7 @@ fn the_keyless_restore_refuses_the_segments_of_an_encrypted_backup() {
 }
 
 fn encryption(chain: &Arc<KeyChain>) -> EncryptionConfig {
-    EncryptionConfig {
-        key_chain: Arc::clone(chain),
-    }
+    EncryptionConfig::new(Arc::clone(chain))
 }
 
 /// The keyed restore replays the encrypted segments, and what it writes (the

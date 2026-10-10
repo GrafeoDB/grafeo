@@ -8,14 +8,6 @@
 // The feature-gated modules are linked only where they are built: rustdoc
 // fails on a link to a module that is not there.
 #![cfg_attr(
-    feature = "compact-store",
-    doc = "| [`compact`] | Read-heavy / embedded (feature-gated: `compact-store`) | WASM, edge workers, static snapshots |"
-)]
-#![cfg_attr(
-    not(feature = "compact-store"),
-    doc = "| `compact` | Read-heavy / embedded (feature-gated: `compact-store`) | WASM, edge workers, static snapshots |"
-)]
-#![cfg_attr(
     feature = "triple-store",
     doc = "| [`rdf`] | Knowledge graphs | Ontologies, linked data (feature-gated: `triple-store`) |"
 )]
@@ -26,12 +18,15 @@
 //!
 //! These are separate implementations with no abstraction overhead - you get
 //! the full performance of whichever model you choose.
+//!
+//! `compact` (with `lpg`) is not a model: it reads the compacted base of a
+//! 0.5.x database file, so that opening the file folds it into the LPG store.
 
 pub mod lpg;
 pub mod projection;
 pub mod traits;
 
-#[cfg(feature = "compact-store")]
+#[cfg(feature = "lpg")]
 pub mod compact;
 
 #[cfg(feature = "triple-store")]

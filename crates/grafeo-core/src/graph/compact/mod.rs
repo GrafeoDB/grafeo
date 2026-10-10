@@ -14,10 +14,8 @@ mod column;
 /// Compressed Sparse Row (CSR) adjacency.
 mod csr;
 /// The `OverlayDeletions` section.
-#[cfg(feature = "lpg")]
 mod deletions_section;
 /// Folds the base into the LPG store.
-#[cfg(feature = "lpg")]
 pub mod fold;
 /// Node and edge id encoding.
 mod id;

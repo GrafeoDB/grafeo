@@ -78,10 +78,11 @@ fn simd_support() -> &'static str {
 /// Names are the Cargo feature names: the query languages (`gql`, `cypher`,
 /// `sparql`, `gremlin`, `graphql`, `sql-pgq`) and the optional capabilities
 /// (`algos`, `vector-index`, `text-index`, `hybrid-search`, `cdc`,
-/// `triple-store`, `shacl`, `temporal`, `compact-store`, `embed`,
-/// `arrow-export`, `jsonl-import`, `parquet-import`, `metrics`). Groups and
-/// profiles such as `full` or `ai` are not listed, only the features they
-/// enable. Persistence (WAL and `.grafeo` files) is part of every build.
+/// `triple-store`, `shacl`, `temporal`, `embed`, `arrow-export`,
+/// `jsonl-import`, `parquet-import`, `metrics`). Groups and profiles such as
+/// `full` or `ai` are not listed, only the features they enable. Persistence
+/// (WAL and `.grafeo` files) is part of every build, and so is reading a
+/// database file compacted by 0.5.x.
 ///
 /// Example:
 ///     import grafeo
@@ -104,7 +105,6 @@ fn features() -> Vec<&'static str> {
         ("triple-store", cfg!(feature = "triple-store")),
         ("shacl", cfg!(feature = "shacl")),
         ("temporal", cfg!(feature = "temporal")),
-        ("compact-store", cfg!(feature = "compact-store")),
         ("embed", cfg!(feature = "embed")),
         ("arrow-export", cfg!(feature = "arrow-export")),
         ("jsonl-import", cfg!(feature = "jsonl-import")),

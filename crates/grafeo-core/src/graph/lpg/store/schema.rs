@@ -301,7 +301,6 @@ impl LpgStore {
     /// Returns whether `name` was dropped: false when it has no id, or when
     /// the label index holds a node with it (a node of an open transaction
     /// included).
-    #[cfg(feature = "compact-store")]
     pub(crate) fn drop_unused_label(&self, name: &str) -> bool {
         let mut registry = self.label_registry.write();
         let Some(id) = registry.get_id(name) else {

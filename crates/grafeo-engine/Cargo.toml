@@ -56,7 +56,7 @@ tokenizers = { version = "0.23", optional = true, default-features = false, feat
 hf-hub = { version = "1.0", optional = true, features = ["blocking"] }
 crc32fast = { workspace = true, optional = true }
 
-# Memory-mapped files (optional, for compact-store mmap spill)
+# Memory-mapped files (optional, for file-backed vector storage)
 memmap2 = { workspace = true, optional = true }
 
 # Refcounted byte slices for mmap-backed column storage (Phase 3c)
@@ -91,9 +91,9 @@ async-storage = ["dep:grafeo-storage", "grafeo-storage/async-storage", "dep:toki
 grafeo-file = ["dep:grafeo-storage", "grafeo-storage/grafeo-file", "dep:crc32fast"]  # Single-file .grafeo format
 encryption = ["dep:grafeo-storage", "grafeo-common/encryption", "grafeo-storage/encryption"]  # AES-256-GCM encryption at rest
 spill = ["grafeo-core/spill"]  # Disk spilling for out-of-core execution
-mmap = ["grafeo-core/mmap", "dep:memmap2"]  # File-backed vector storage and compact-store spill
+mmap = ["grafeo-core/mmap", "dep:memmap2"]  # File-backed vector storage
 temporal = ["grafeo-core/temporal"]  # Append-only versioned properties
-compact-store = ["grafeo-core/compact-store"]  # CompactStore — columnar graph for read-only workloads
+compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 # Convenience groups
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]  # All query language parsers
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]  # All AI/RAG features

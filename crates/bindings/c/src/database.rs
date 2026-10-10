@@ -2297,7 +2297,6 @@ mod tests {
     /// `grafeo_compact` keeps a database opened with `grafeo_open_read_only`
     /// read-only: the compaction succeeds, a write after it still fails, and
     /// the data stays as it was.
-    #[cfg(feature = "compact-store")]
     #[test]
     fn compact_keeps_a_read_only_database_read_only() {
         let dir =

@@ -2573,7 +2573,6 @@ mod rollback_lock_order {
 
 /// Only a label no node has is dropped from the dictionary: its id becomes a
 /// gap that a new label never gets, and every other label stays listed.
-#[cfg(feature = "compact-store")]
 #[test]
 fn only_a_label_no_node_has_is_dropped() {
     let store = LpgStore::new().unwrap();

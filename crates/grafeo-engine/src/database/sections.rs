@@ -241,19 +241,6 @@ enum HeldIn {
     TextIndexDefinitions,
 }
 
-/// A compacted database (written after `compact()` by 0.5.x and 0.6
-/// development builds): its base and the deletes of base nodes and edges
-/// since, which a load folds into the store (see `fold_compacted_base`).
-/// Without them the database is the overlay alone, without every node and
-/// edge only the base holds.
-#[cfg(feature = "lpg")]
-const COMPACTED: FeatureData = FeatureData {
-    what: "a compacted database",
-    feature: "compact-store",
-    in_build: cfg!(all(feature = "compact-store", feature = "grafeo-file")),
-    held_in: HeldIn::Sections(&[SectionType::CompactStore, SectionType::OverlayDeletions]),
-};
-
 /// RDF triples, and the Ring index over them. A WAL holds them as records
 /// and a 0.5.x container v1 file in its snapshot.
 #[cfg(feature = "lpg")]
@@ -285,7 +272,7 @@ pub(super) const TEXT_INDEXES: FeatureData = FeatureData {
 
 /// Every kind of data a build reads only with a feature.
 #[cfg(feature = "lpg")]
-const FEATURE_DATA: [&FeatureData; 4] = [&COMPACTED, &RDF_TRIPLES, &VECTOR_INDEXES, &TEXT_INDEXES];
+const FEATURE_DATA: [&FeatureData; 3] = [&RDF_TRIPLES, &VECTOR_INDEXES, &TEXT_INDEXES];
 
 #[cfg(feature = "lpg")]
 impl FeatureData {
@@ -435,9 +422,9 @@ fn refuse_unreadable(
 /// The indexes exist before WAL recovery, which keeps them current. What is
 /// left (see [`LoadedSections`]) is finished by `GrafeoDB::finish_load`.
 ///
-/// A build leaves out what it cannot read (a compacted base without the
-/// `compact-store` feature, the triples without `triple-store`, the vector
-/// and text index definitions without `vector-index` and `text-index`). So
+/// A build leaves out what it cannot read (the triples without
+/// `triple-store`, the vector and text index definitions without
+/// `vector-index` and `text-index`). So
 /// the image of a database file is refused when it holds any of that (see
 /// [`FeatureData`]), right after the catalog, which holds the index
 /// definitions, and before any other section is read: a refused open has
@@ -499,7 +486,7 @@ pub(super) fn load_sections(
 
     // Before the indexes: they are built from all the data. Only a database
     // file holds a compacted base: a copy (`to_memory`) never does.
-    #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
+    #[cfg(feature = "grafeo-file")]
     fold_compacted_base(image, store)?;
 
     loaded.unbuilt = restore_indexes(image, store, indexes)?;
@@ -517,7 +504,7 @@ pub(super) fn load_sections(
 ///
 /// Returns an error if a section cannot be read or is not the 0.5.x layout,
 /// or if the base cannot be folded.
-#[cfg(all(feature = "lpg", feature = "compact-store", feature = "grafeo-file"))]
+#[cfg(all(feature = "lpg", feature = "grafeo-file"))]
 fn fold_compacted_base(image: &dyn ImageSource, store: &LpgStore) -> Result<()> {
     let Some(base) = image.section_source(SectionType::CompactStore) else {
         return Ok(());
@@ -1516,7 +1503,7 @@ mod tests {
     /// two documents, with Alix knowing Gus and living in Amsterdam; the
     /// overlay copies of Alix (age 31, no score) and Amsterdam, and Mia, the
     /// Rijksmuseum (in Amsterdam) and a third document; the log Vincent.
-    #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
+    #[cfg(feature = "grafeo-file")]
     fn compacted_image() -> MemoryImage {
         use grafeo_common::storage::ChunkMeta;
 
@@ -1549,7 +1536,7 @@ mod tests {
     /// reading the base and the deletion log once: the base's nodes and edges
     /// come back under their ids, the overlay's copy of a changed one wins,
     /// and the deleted ones stay deleted.
-    #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
+    #[cfg(feature = "grafeo-file")]
     #[test]
     fn a_compacted_base_folds_into_the_store() {
         use grafeo_common::types::{PropertyKey, Value};
@@ -1616,7 +1603,7 @@ mod tests {
     /// A database loaded from a compacted image is one plain store: its
     /// checkpoint writes the folded data in the LPG section and no compacted
     /// sections, and that image loads back to the same data.
-    #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
+    #[cfg(feature = "grafeo-file")]
     #[test]
     fn a_folded_database_checkpoints_as_a_plain_one() {
         let db = GrafeoDB::new_in_memory();

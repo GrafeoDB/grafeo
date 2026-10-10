@@ -86,7 +86,6 @@ impl NameDictionary {
     /// (a later use of the name gets a new id). Returns the id it had, `None`
     /// when it had none. Only a load uses it, for a name no node or edge has
     /// (see `LpgStore::drop_unused_label`).
-    #[cfg(feature = "compact-store")]
     pub(crate) fn remove(&mut self, name: &str) -> Option<u32> {
         let id = self.by_name.remove(name)?;
         if let Some(slot) = self.by_id.get_mut(id as usize) {
@@ -215,7 +214,6 @@ mod tests {
 
     /// A removed name leaves a gap: its id names nothing and is never given
     /// out again, and the name, used again, gets a new id.
-    #[cfg(feature = "compact-store")]
     #[test]
     fn a_removed_name_leaves_a_gap_that_is_never_given_out() {
         let mut dictionary = NameDictionary::new();

@@ -362,10 +362,9 @@ impl GrafeoDB {
     /// Returns an error if the database doesn't exist or can't be read, and,
     /// in a build without the `wal` feature, if its sidecar WAL holds commits
     /// to replay (a non-empty log file; for a 0.5.x file, any file); also
-    /// if the database holds data this build cannot read (by 0.5.x too): a
-    /// compacted base without the `compact-store` feature, RDF triples
-    /// without `triple-store`, vector or text indexes without `vector-index`
-    /// or `text-index`.
+    /// if the database holds data this build cannot read (by 0.5.x too): RDF
+    /// triples without `triple-store`, vector or text indexes without
+    /// `vector-index` or `text-index`.
     ///
     /// # Examples
     ///
@@ -407,10 +406,9 @@ impl GrafeoDB {
     /// database file holds commits only a build with `wal` can replay (a
     /// non-empty log file; for a 0.5.x file, any file); and if the database
     /// holds data this build cannot read, which it would open without and
-    /// its next checkpoint drop (by 0.5.x too): a compacted base (written
-    /// after `compact()`) without the `compact-store` feature, RDF triples
-    /// (in the file or its WAL) without `triple-store`, vector or text
-    /// indexes without `vector-index` or `text-index`.
+    /// its next checkpoint drop (by 0.5.x too): RDF triples (in the file or
+    /// its WAL) without `triple-store`, vector or text indexes without
+    /// `vector-index` or `text-index`.
     ///
     /// # Examples
     ///

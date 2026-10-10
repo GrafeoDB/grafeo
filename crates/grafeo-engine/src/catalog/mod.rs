@@ -1084,7 +1084,10 @@ pub enum IndexType {
 }
 
 /// Index definition.
+///
+/// Read, not built, outside this crate: later releases may add fields.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct IndexDefinition {
     /// The index ID.
     pub id: IndexId,
@@ -1368,6 +1371,80 @@ impl PropertyDataType {
             _ => false,
         }
     }
+
+    /// The value a property of this type stores for `value` when `value` is
+    /// not of the type but converts to it on assignment without losing
+    /// anything, as ISO/IEC 39075 converts between numeric types and SQL's
+    /// store assignment does:
+    ///
+    /// - an `INT64` to `FLOAT64`, when the float is exactly the integer (every
+    ///   integer up to 2^53 in magnitude, and the larger ones a float holds);
+    /// - a zoned datetime to its instant, for `TIMESTAMP` (`DATETIME`), which
+    ///   compares with zoned values as an instant in UTC;
+    /// - the items of a `LIST<...>`, each by these rules.
+    ///
+    /// A `LOCAL DATETIME` and a `ZONED DATETIME` take no other datetime: a
+    /// local datetime has no offset to be an instant by.
+    ///
+    /// `None` when `value` is of the type already, or does not convert.
+    #[must_use]
+    pub fn convert(&self, value: &Value) -> Option<Value> {
+        match (self, value) {
+            (Self::Float64, Value::Int64(int)) => exact_float(*int).map(Value::Float64),
+            (Self::Timestamp, Value::ZonedDatetime(zoned)) => {
+                Some(Value::Timestamp(zoned.as_timestamp()))
+            }
+            (Self::ListTyped(item_type), Value::List(items)) if !self.matches(value) => items
+                .iter()
+                .map(|item| {
+                    if item_type.matches(item) {
+                        Some(item.clone())
+                    } else {
+                        item_type.convert(item)
+                    }
+                })
+                .collect::<Option<Vec<Value>>>()
+                .map(|items| Value::List(items.into())),
+            _ => None,
+        }
+    }
+}
+
+/// `int` as a float, when the float is exactly `int`.
+fn exact_float(int: i64) -> Option<f64> {
+    // 2^63: the one float an i64 rounds to that is out of the i64 range
+    // (i64::MAX rounds up to it).
+    const BEYOND_I64: f64 = 9_223_372_036_854_775_808.0;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the cast back below checks that the float is exact"
+    )]
+    let float = int as f64;
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "`float` came from an i64 and is below 2^63, checked first, and a whole \
+                  number (a float from an integer is), so the cast back is exact"
+    )]
+    let exact = float < BEYOND_I64 && float as i64 == int;
+    exact.then_some(float)
+}
+
+/// The error for a property value that is not of the property's type.
+fn type_mismatch(
+    key: &str,
+    owner: &str,
+    data_type: &PropertyDataType,
+    value: &Value,
+) -> OperatorError {
+    let detail = match (data_type, value) {
+        (PropertyDataType::Float64, Value::Int64(int)) if exact_float(*int).is_none() => {
+            ", which has no exact Float64 value (an integer beyond 2^53)"
+        }
+        _ => "",
+    };
+    OperatorError::ConstraintViolation(format!(
+        "property '{key}' on :{owner} expects {data_type:?}, got {value:?}{detail}"
+    ))
 }
 
 impl std::fmt::Display for PropertyDataType {
@@ -1624,6 +1701,16 @@ pub struct ProcedureDefinition {
 
 // === Schema Catalog ===
 
+/// The name the parent type `parent` of the node type `child` is registered
+/// under: a type created in a schema is named `schema/Type`, and names its
+/// parents (`EXTENDS Base`) in that schema.
+fn parent_type_key(child: &str, parent: &str) -> String {
+    match child.rsplit_once('/') {
+        Some((schema, _)) if !parent.contains('/') => format!("{schema}/{parent}"),
+        _ => parent.to_string(),
+    }
+}
+
 /// Schema constraints and type definitions.
 pub struct SchemaCatalog {
     /// Properties that must be unique for a given label.
@@ -1787,8 +1874,9 @@ impl SchemaCatalog {
         let Some(def) = types.get(name) else { return };
         // Walk parents first (depth-first) so child properties override
         for parent in &def.parent_types {
+            let parent = parent_type_key(name, parent);
             if visited.insert(parent.clone()) {
-                Self::collect_inherited(types, parent, visited, properties, constraints);
+                Self::collect_inherited(types, &parent, visited, properties, constraints);
             }
         }
         // Add own properties, overriding parent ones with same name
@@ -2424,8 +2512,8 @@ use grafeo_core::execution::operators::OperatorError;
 /// against registered node/edge type definitions.
 pub struct CatalogConstraintValidator {
     catalog: Arc<Catalog>,
-    /// Optional graph name for graph-type-bound validation.
-    graph_name: Option<String>,
+    /// The closed graph type of the graph written to, if it has one.
+    closed_type: Option<ClosedGraphType>,
     /// Optional graph store for UNIQUE constraint enforcement via index lookup
     /// and the dimensions of vector indexes.
     store: Option<Arc<dyn grafeo_core::graph::GraphStoreSearch>>,
@@ -2436,6 +2524,9 @@ pub struct CatalogConstraintValidator {
         grafeo_common::types::EpochId,
         grafeo_common::types::TransactionId,
     )>,
+    /// The schema written in, whose node and edge types check the writes
+    /// (`None`: no schema).
+    schema: Option<String>,
 }
 
 impl CatalogConstraintValidator {
@@ -2443,10 +2534,45 @@ impl CatalogConstraintValidator {
     pub fn new(catalog: Arc<Catalog>) -> Self {
         Self {
             catalog,
-            graph_name: None,
+            closed_type: None,
             store: None,
             max_property_size: None,
             transaction: None,
+            schema: None,
+        }
+    }
+
+    /// Checks the writes with the node and edge types of `schema`, the schema
+    /// of the graph written to (`None`: no schema). A type created while a
+    /// session works in a schema is registered under `schema/Type` and
+    /// checks the nodes with the label `Type` (or the edges of that type) in
+    /// that schema only, as `SHOW NODE TYPES` lists the types of the current
+    /// schema only.
+    #[must_use]
+    pub fn with_schema(mut self, schema: Option<&str>) -> Self {
+        self.schema = schema.map(ToString::to_string);
+        self
+    }
+
+    /// The node type, with what it inherits, that checks nodes with `label`
+    /// in the schema written in.
+    fn node_type(&self, label: &str) -> Option<NodeTypeDefinition> {
+        match &self.schema {
+            Some(schema) => self
+                .catalog
+                .resolved_node_type(&format!("{schema}/{label}")),
+            None => self.catalog.resolved_node_type(label),
+        }
+    }
+
+    /// The edge type that checks edges of `edge_type` in the schema written
+    /// in.
+    fn edge_type(&self, edge_type: &str) -> Option<EdgeTypeDefinition> {
+        match &self.schema {
+            Some(schema) => self
+                .catalog
+                .get_edge_type_def(&format!("{schema}/{edge_type}")),
+            None => self.catalog.get_edge_type_def(edge_type),
         }
     }
 
@@ -2497,9 +2623,12 @@ impl CatalogConstraintValidator {
             .collect()
     }
 
-    /// Sets the graph name for graph-type-bound validation.
-    pub fn with_graph_name(mut self, name: String) -> Self {
-        self.graph_name = Some(name);
+    /// Checks writes to the graph with storage key `name` (`schema/graph` in
+    /// a schema) against the closed graph type it is bound to, if any: the
+    /// labels, edge types and properties it declares.
+    #[must_use]
+    pub fn with_graph_name(mut self, name: &str) -> Self {
+        self.closed_type = ClosedGraphType::of_graph(&self.catalog, name);
         self
     }
 
@@ -2524,17 +2653,27 @@ impl ConstraintValidator for CatalogConstraintValidator {
         key: &str,
         value: &Value,
     ) -> Result<(), OperatorError> {
-        // A vector index on the property fixes the vector's size.
+        // A vector index on the property fixes the vector's size, and takes
+        // only values it can measure a distance to (#593).
         #[cfg(feature = "vector-index")]
         if let (Value::Vector(vector), Some(store)) = (value, &self.store) {
             for label in labels {
-                if let Some(config) = store.vector_index_config(label, key)
-                    && vector.len() != config.dimensions
-                {
+                let Some(config) = store.vector_index_config(label, key) else {
+                    continue;
+                };
+                if vector.len() != config.dimensions {
                     return Err(OperatorError::ConstraintViolation(format!(
                         "property '{key}' on :{label} has a vector index of {} dimensions, got a vector of {}",
                         config.dimensions,
                         vector.len()
+                    )));
+                }
+                if let Some((position, value)) =
+                    grafeo_core::index::vector::first_non_finite(vector)
+                {
+                    return Err(OperatorError::ConstraintViolation(format!(
+                        "property '{key}' on :{label} has a vector index, which cannot measure \
+                         {value} (at position {position})"
                     )));
                 }
             }
@@ -2546,7 +2685,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             }
         }
         for label in labels {
-            let Some(type_def) = self.catalog.resolved_node_type(label) else {
+            let Some(type_def) = self.node_type(label) else {
                 continue;
             };
             if let Some(typed_prop) = type_def.properties.iter().find(|p| p.name == key) {
@@ -2558,10 +2697,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 }
                 // Check type compatibility
                 if *value != Value::Null && !typed_prop.data_type.matches(value) {
-                    return Err(OperatorError::ConstraintViolation(format!(
-                        "property '{key}' on :{label} expects {:?}, got {:?}",
-                        typed_prop.data_type, value
-                    )));
+                    return Err(type_mismatch(key, label, &typed_prop.data_type, value));
                 }
             }
             // A null removes the property (`SET n.p = NULL`, `REMOVE n.p`),
@@ -2593,7 +2729,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             properties.iter().map(|(n, _)| n.as_str()).collect();
 
         for label in labels {
-            if let Some(type_def) = self.catalog.resolved_node_type(label) {
+            if let Some(type_def) = self.node_type(label) {
                 // Check that all NOT NULL properties are present
                 for typed_prop in &type_def.properties {
                     if !typed_prop.nullable
@@ -2661,7 +2797,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             return Ok(());
         }
         for label in labels {
-            if let Some(type_def) = self.catalog.resolved_node_type(label) {
+            if let Some(type_def) = self.node_type(label) {
                 for constraint in &type_def.constraints {
                     // A constraint on several properties holds for the
                     // combination of values: see `check_unique_node`.
@@ -2705,7 +2841,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 .filter(|value| !value.is_null())
         };
         for label in labels {
-            let Some(type_def) = self.catalog.resolved_node_type(label) else {
+            let Some(type_def) = self.node_type(label) else {
                 continue;
             };
             for constraint in &type_def.constraints {
@@ -2761,7 +2897,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 return Err(property_size_error(key, size, limit));
             }
         }
-        if let Some(type_def) = self.catalog.get_edge_type_def(edge_type)
+        if let Some(type_def) = self.edge_type(edge_type)
             && let Some(typed_prop) = type_def.properties.iter().find(|p| p.name == key)
         {
             // Check NOT NULL
@@ -2772,10 +2908,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             }
             // Check type compatibility
             if *value != Value::Null && !typed_prop.data_type.matches(value) {
-                return Err(OperatorError::ConstraintViolation(format!(
-                    "property '{key}' on :{edge_type} expects {:?}, got {:?}",
-                    typed_prop.data_type, value
-                )));
+                return Err(type_mismatch(key, edge_type, &typed_prop.data_type, value));
             }
         }
         Ok(())
@@ -2786,7 +2919,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         edge_type: &str,
         properties: &[(String, Value)],
     ) -> Result<(), OperatorError> {
-        if let Some(type_def) = self.catalog.get_edge_type_def(edge_type) {
+        if let Some(type_def) = self.edge_type(edge_type) {
             let prop_names: std::collections::HashSet<&str> =
                 properties.iter().map(|(n, _)| n.as_str()).collect();
 
@@ -2826,57 +2959,113 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn validate_node_labels_allowed(&self, labels: &[String]) -> Result<(), OperatorError> {
-        let Some(ref graph_name) = self.graph_name else {
+        let Some(closed) = &self.closed_type else {
             return Ok(());
         };
-        let Some(type_name) = self.catalog.get_graph_type_binding(graph_name) else {
+        let Some(node_types) = &closed.node_types else {
             return Ok(());
         };
-        let Some(gt) = self
-            .catalog
-            .schema()
-            .and_then(|s| s.get_graph_type(&type_name))
-        else {
-            return Ok(());
-        };
-        if !gt.open && !gt.allowed_node_types.is_empty() {
-            let allowed = labels
-                .iter()
-                .any(|l| gt.allowed_node_types.iter().any(|a| a == l));
-            if !allowed {
-                return Err(OperatorError::ConstraintViolation(format!(
-                    "node labels {labels:?} are not allowed by graph type '{}'",
-                    gt.name
-                )));
-            }
+        if labels.is_empty() {
+            return Err(OperatorError::ConstraintViolation(format!(
+                "a node without a label is not allowed by closed graph type '{}': \
+                 give it the label of one of its node types",
+                closed.name
+            )));
         }
-        Ok(())
+        match labels.iter().find(|label| !node_types.contains_key(*label)) {
+            Some(label) => Err(OperatorError::ConstraintViolation(format!(
+                "label '{label}' is not a node type of closed graph type '{}'",
+                closed.name
+            ))),
+            None => Ok(()),
+        }
     }
 
     fn validate_edge_type_allowed(&self, edge_type: &str) -> Result<(), OperatorError> {
-        let Some(ref graph_name) = self.graph_name else {
+        let Some(closed) = &self.closed_type else {
             return Ok(());
         };
-        let Some(type_name) = self.catalog.get_graph_type_binding(graph_name) else {
+        match &closed.edge_types {
+            Some(edge_types) if !edge_types.contains_key(edge_type) => {
+                Err(OperatorError::ConstraintViolation(format!(
+                    "edge type '{edge_type}' is not an edge type of closed graph type '{}'",
+                    closed.name
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_node_properties_declared(
+        &self,
+        labels: &[String],
+        properties: &[(String, Value)],
+    ) -> Result<(), OperatorError> {
+        let Some(closed) = &self.closed_type else {
             return Ok(());
         };
-        let Some(gt) = self
-            .catalog
-            .schema()
-            .and_then(|s| s.get_graph_type(&type_name))
+        let Some(node_types) = &closed.node_types else {
+            return Ok(());
+        };
+        // The properties the node's node types declare; `None` when one of
+        // them has no definition to check against.
+        let mut declared: Vec<&HashSet<String>> = Vec::new();
+        for label in labels {
+            match node_types.get(label) {
+                Some(Some(properties)) => declared.push(properties),
+                Some(None) => return Ok(()),
+                // A label the graph type does not declare is refused by
+                // `validate_node_labels_allowed`.
+                None => {}
+            }
+        }
+        if declared.is_empty() {
+            return Ok(());
+        }
+        let undeclared = properties
+            .iter()
+            .find(|(key, value)| !value.is_null() && !declared.iter().any(|d| d.contains(key)));
+        match undeclared {
+            Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+                "property '{key}' is not declared by node type {} of closed graph type '{}'",
+                labels
+                    .iter()
+                    .filter(|label| node_types.contains_key(*label))
+                    .map(|label| format!("'{label}'"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                closed.name
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn validate_edge_properties_declared(
+        &self,
+        edge_type: &str,
+        properties: &[(String, Value)],
+    ) -> Result<(), OperatorError> {
+        let Some(closed) = &self.closed_type else {
+            return Ok(());
+        };
+        let Some(Some(Some(declared))) = closed
+            .edge_types
+            .as_ref()
+            .map(|edge_types| edge_types.get(edge_type))
         else {
             return Ok(());
         };
-        if !gt.open && !gt.allowed_edge_types.is_empty() {
-            let allowed = gt.allowed_edge_types.iter().any(|a| a == edge_type);
-            if !allowed {
-                return Err(OperatorError::ConstraintViolation(format!(
-                    "edge type '{edge_type}' is not allowed by graph type '{}'",
-                    gt.name
-                )));
-            }
+        let undeclared = properties
+            .iter()
+            .find(|(key, value)| !value.is_null() && !declared.contains(key));
+        match undeclared {
+            Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+                "property '{key}' is not declared by edge type '{edge_type}' of closed graph \
+                 type '{}'",
+                closed.name
+            ))),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn validate_edge_endpoints(
@@ -2885,7 +3074,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         source_labels: &[String],
         target_labels: &[String],
     ) -> Result<(), OperatorError> {
-        let Some(type_def) = self.catalog.get_edge_type_def(edge_type) else {
+        let Some(type_def) = self.edge_type(edge_type) else {
             return Ok(());
         };
         if !type_def.source_node_types.is_empty() {
@@ -2916,22 +3105,45 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn constrains_edge_endpoints(&self, edge_type: &str) -> bool {
-        self.catalog
-            .get_edge_type_def(edge_type)
-            .is_some_and(|def| {
-                !def.source_node_types.is_empty() || !def.target_node_types.is_empty()
-            })
+        self.edge_type(edge_type).is_some_and(|def| {
+            !def.source_node_types.is_empty() || !def.target_node_types.is_empty()
+        })
     }
 
     fn constrains_node_property(&self, _key: &str, value: &Value) -> bool {
         // A vector index on (label, key) fixes a vector's size; the node
-        // types hold every other constraint.
-        matches!(value, Value::Vector(_)) || self.catalog.has_node_types()
+        // types and a closed graph type hold every other constraint.
+        matches!(value, Value::Vector(_))
+            || self.catalog.has_node_types()
+            || self
+                .closed_type
+                .as_ref()
+                .is_some_and(|closed| closed.node_types.is_some())
+    }
+
+    fn convert_node_property(&self, labels: &[String], key: &str, value: &Value) -> Option<Value> {
+        if value.is_null() || !self.catalog.has_node_types() {
+            return None;
+        }
+        labels.iter().find_map(|label| {
+            let type_def = self.node_type(label)?;
+            let typed = type_def.properties.iter().find(|p| p.name == key)?;
+            typed.data_type.convert(value)
+        })
+    }
+
+    fn convert_edge_property(&self, edge_type: &str, key: &str, value: &Value) -> Option<Value> {
+        if value.is_null() {
+            return None;
+        }
+        let type_def = self.edge_type(edge_type)?;
+        let typed = type_def.properties.iter().find(|p| p.name == key)?;
+        typed.data_type.convert(value)
     }
 
     fn inject_defaults(&self, labels: &[String], properties: &mut Vec<(String, Value)>) {
         for label in labels {
-            if let Some(type_def) = self.catalog.resolved_node_type(label) {
+            if let Some(type_def) = self.node_type(label) {
                 for typed_prop in &type_def.properties {
                     if let Some(ref default) = typed_prop.default_value {
                         let already_set = properties.iter().any(|(n, _)| n == &typed_prop.name);
@@ -2945,7 +3157,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn inject_edge_defaults(&self, edge_type: &str, properties: &mut Vec<(String, Value)>) {
-        let Some(type_def) = self.catalog.get_edge_type_def(edge_type) else {
+        let Some(type_def) = self.edge_type(edge_type) else {
             return;
         };
         for typed_prop in &type_def.properties {
@@ -2956,6 +3168,77 @@ impl ConstraintValidator for CatalogConstraintValidator {
             }
         }
     }
+}
+
+/// What a closed graph type lets a graph hold (ISO/IEC 39075:2024 4.13): the
+/// labels of its node types, its edge types, and the properties each of them
+/// declares.
+struct ClosedGraphType {
+    /// The graph type's name, for messages.
+    name: String,
+    /// The labels a node may have, each with the properties its node type
+    /// declares (`None` when the node type has no definition to check
+    /// against). `None` when the graph type lists no node types: it does not
+    /// restrict them.
+    node_types: Option<HashMap<String, Option<HashSet<String>>>>,
+    /// The edge types an edge may have, with their properties like
+    /// `node_types`.
+    edge_types: Option<HashMap<String, Option<HashSet<String>>>>,
+}
+
+impl ClosedGraphType {
+    /// The closed graph type the graph with storage key `graph` is bound to;
+    /// `None` for a graph without one, or bound to an open graph type.
+    fn of_graph(catalog: &Catalog, graph: &str) -> Option<Self> {
+        let type_name = catalog.get_graph_type_binding(graph)?;
+        let def = catalog.schema()?.get_graph_type(&type_name)?;
+        if def.open {
+            return None;
+        }
+        let declared = |properties: &[TypedProperty]| -> HashSet<String> {
+            properties.iter().map(|p| p.name.clone()).collect()
+        };
+        let node_types = (!def.allowed_node_types.is_empty()).then(|| {
+            let mut labels = HashMap::new();
+            for name in &def.allowed_node_types {
+                // A node type of a graph type in a schema is named
+                // `schema/Type`; its nodes carry the label `Type`.
+                let resolved = catalog.resolved_node_type(name);
+                let properties = resolved.as_ref().map(|t| declared(&t.properties));
+                if let Some(node_type) = &resolved {
+                    for key_label in &node_type.key_labels {
+                        labels
+                            .entry(key_label.clone())
+                            .or_insert_with(|| properties.clone());
+                    }
+                }
+                labels.insert(unqualified(name).to_string(), properties);
+            }
+            labels
+        });
+        let edge_types = (!def.allowed_edge_types.is_empty()).then(|| {
+            def.allowed_edge_types
+                .iter()
+                .map(|name| {
+                    let properties = catalog
+                        .get_edge_type_def(name)
+                        .map(|t| declared(&t.properties));
+                    (unqualified(name).to_string(), properties)
+                })
+                .collect()
+        });
+        Some(Self {
+            name: def.name,
+            node_types,
+            edge_types,
+        })
+    }
+}
+
+/// A type name without the schema a graph type in a schema prefixes it with
+/// (`schema/Type`).
+fn unqualified(name: &str) -> &str {
+    name.rsplit_once('/').map_or(name, |(_, name)| name)
 }
 
 /// The error for a property value over the size limit.

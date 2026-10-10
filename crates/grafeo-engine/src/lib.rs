@@ -44,9 +44,9 @@ pub mod transaction;
 pub mod validation;
 
 pub use admin::{
-    AdminService, CompactReport, DatabaseInfo, DatabaseMode, DatabaseStats, DumpFormat,
-    DumpMetadata, IndexInfo, LpgSchemaInfo, RdfSchemaInfo, SchemaInfo, ValidationError,
-    ValidationResult, ValidationWarning, WalStatus,
+    AdminService, CompactReport, DatabaseInfo, DatabaseMode, DatabaseStats, DumpFormat, IndexInfo,
+    LpgSchemaInfo, RdfSchemaInfo, SchemaInfo, ValidationError, ValidationResult, ValidationWarning,
+    WalStatus,
 };
 pub use auth::{Grant, Identity, Role, StatementKind};
 pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};

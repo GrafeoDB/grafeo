@@ -92,7 +92,14 @@ impl ProcedureCallOperator {
         let result = self
             .procedure
             .execute(&ctx, &self.params)
-            .map_err(|e| OperatorError::Execution(format!("Procedure execution failed: {e}")))?;
+            .map_err(|e| match e {
+                // A mistake in the arguments stays one (a query vector the index
+                // cannot measure, #593), with the procedure's own message.
+                grafeo_common::utils::error::Error::InvalidValue(message) => {
+                    OperatorError::InvalidValue(message)
+                }
+                other => OperatorError::Execution(format!("Procedure execution failed: {other}")),
+            })?;
 
         // Use canonical column names if available (same length as result columns),
         // otherwise fall back to the algorithm's own column names.

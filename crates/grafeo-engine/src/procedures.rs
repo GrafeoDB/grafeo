@@ -279,22 +279,6 @@ fn coerce_params_to_vector(params: &Parameters, key: &str) -> Result<Vec<f32>> {
     )))
 }
 
-/// Checks that a query vector has the dimensions of the index it searches:
-/// the index refuses (panics on) any other length.
-#[cfg(all(feature = "lpg", feature = "vector-index"))]
-fn check_query_dimensions(procedure: &str, query: &[f32], dimensions: usize) -> Result<()> {
-    if query.len() == dimensions {
-        return Ok(());
-    }
-    Err(Error::Query(QueryError::new(
-        QueryErrorKind::Semantic,
-        format!(
-            "Argument 'query' of {procedure} has {} dimensions, the index has {dimensions}",
-            query.len()
-        ),
-    )))
-}
-
 /// Converts a `k` parameter (signed, user-supplied) to an unsigned limit.
 /// Negative values clamp to 0 so they can't silently flip via cast.
 #[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
@@ -396,14 +380,18 @@ impl Procedure for SearchVectorProcedure {
                 "No vector index found for :{label}({property}). Call CREATE VECTOR INDEX first."
             ))
         })?;
-        check_query_dimensions("grafeo.search.vector", &query, index.config().dimensions)?;
+        grafeo_core::index::vector::check_query_vector(
+            &query,
+            index.config().dimensions,
+            label,
+            property,
+        )?;
 
         let accessor = VectorAccessorKind::Property(PropertyVectorAccessor::new(
             ctx.store as &dyn grafeo_core::graph::GraphStore,
             property,
         ));
-        // The index may hold nodes that are gone: see `live_index_hits`.
-        let results = lpg.live_index_hits(k, |fetch| index.search(&query, fetch, &accessor));
+        let results = index.search(&query, k, &accessor);
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "distance".into()]);
         for (node_id, distance) in results {
@@ -528,14 +516,18 @@ impl Procedure for SearchMmrProcedure {
                 "No vector index found for :{label}({property}). Call CREATE VECTOR INDEX first."
             ))
         })?;
-        check_query_dimensions("grafeo.search.mmr", &query, index.config().dimensions)?;
+        grafeo_core::index::vector::check_query_vector(
+            &query,
+            index.config().dimensions,
+            label,
+            property,
+        )?;
 
         let accessor = VectorAccessorKind::Property(PropertyVectorAccessor::new(
             ctx.store as &dyn grafeo_core::graph::GraphStore,
             property,
         ));
-        // The index may hold nodes that are gone: see `live_index_hits`.
-        let initial = lpg.live_index_hits(fetch_k, |fetch| index.search(&query, fetch, &accessor));
+        let initial = index.search(&query, fetch_k, &accessor);
         if initial.is_empty() {
             return Ok(AlgorithmResult::new(vec![
                 "node_id".into(),
@@ -659,8 +651,7 @@ impl Procedure for SearchTextProcedure {
             ))
         })?;
 
-        // The index may hold nodes that are gone: see `live_index_hits`.
-        let results = lpg.live_index_hits(k, |fetch| index.read().search(query, fetch));
+        let results = index.read().search(query, k);
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "score".into()]);
         for (node_id, score) in results {
@@ -1543,6 +1534,85 @@ mod tests {
             err.to_string().contains("Expected numeric list"),
             "error must describe expected type: {err}"
         );
+    }
+
+    /// #593: `grafeo.search.vector` and `grafeo.search.mmr` refuse a query
+    /// vector with a NaN or an infinite value (a query literal cannot hold
+    /// one, so the procedures are called directly), naming the value, as an
+    /// invalid value.
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    #[test]
+    fn search_procedures_refuse_nan_and_infinite_query_values() {
+        use grafeo_common::utils::error::ErrorCode;
+        use grafeo_core::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind};
+
+        let store = LpgStore::new().expect("store");
+        for vector in [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+            let node = store.create_node(&["Doc"]);
+            store.set_node_property(node, "emb", Value::Vector(vector.to_vec().into()));
+        }
+        let index = HnswIndex::with_seed(HnswConfig::new(3, DistanceMetric::Cosine), 3);
+        store.add_vector_index(
+            "Doc",
+            "emb",
+            std::sync::Arc::new(VectorIndexKind::Hnsw(index)),
+        );
+        // The index takes the vectors the store already holds when they are
+        // set again.
+        for node in store.nodes_by_label("Doc") {
+            let vector = store
+                .get_node_property(node, &grafeo_common::types::PropertyKey::new("emb"))
+                .expect("vector");
+            store.set_node_property(node, "emb", vector);
+        }
+        let ctx = ProcedureContext::with_lpg_store(&store, &store);
+        let procedures: [Box<dyn Procedure>; 2] = [
+            Box::new(SearchVectorProcedure::new()),
+            Box::new(SearchMmrProcedure::new()),
+        ];
+        for procedure in &procedures {
+            for (query, message) in [
+                (
+                    [0.9, f64::NAN, 0.0],
+                    "the query vector has NaN at position 1",
+                ),
+                (
+                    [0.9, 0.0, f64::INFINITY],
+                    "the query vector has inf at position 2",
+                ),
+            ] {
+                let mut params = Parameters::new();
+                params.set_string("label", "Doc");
+                params.set_string("property", "emb");
+                params.set_list("query", query.iter().map(|v| Value::Float64(*v)).collect());
+                params.set_int("k", 2);
+                let Err(err) = procedure.execute(&ctx, &params) else {
+                    panic!("{}: {message} was not refused", procedure.name());
+                };
+                assert_eq!(err.error_code(), ErrorCode::InvalidInput, "{err}");
+                assert!(
+                    err.to_string().contains(message),
+                    "{}: {err}",
+                    procedure.name()
+                );
+            }
+            let mut params = Parameters::new();
+            params.set_string("label", "Doc");
+            params.set_string("property", "emb");
+            params.set_list(
+                "query",
+                vec![
+                    Value::Float64(1.0),
+                    Value::Float64(0.0),
+                    Value::Float64(0.0),
+                ],
+            );
+            params.set_int("k", 1);
+            let result = procedure
+                .execute(&ctx, &params)
+                .expect("a query it can measure");
+            assert_eq!(result.rows.len(), 1, "{}", procedure.name());
+        }
     }
 
     #[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]

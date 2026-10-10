@@ -4,8 +4,9 @@
 //! A call is to a scalar function of the expression evaluator (see
 //! [`function_support`]) or to an aggregate, which groups rows. The LPG
 //! planner checks every call and every `=~` and LIKE it plans, so a query
-//! that calls a function that does not exist (a misspelled `upperr`), a
-//! function this build lacks a feature for, or that matches a pattern this
+//! that calls a function that does not exist (a misspelled `upperr`), passes
+//! a function a number of arguments it does not take (`toUpper('a', 'b')`),
+//! calls a function this build lacks a feature for, or matches a pattern this
 //! build cannot, fails before any row is read. The evaluator would answer
 //! each of these with a null for every row, and a WHERE would keep no rows.
 
@@ -70,20 +71,25 @@ fn semantic(message: String) -> Error {
     Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
 }
 
-/// Checks a call to the function `name`: an aggregate, or a scalar function
-/// the evaluator computes in this build.
+/// Checks a call to the function `name` with `arguments` arguments: an
+/// aggregate, or a scalar function the evaluator computes in this build with
+/// that many arguments.
 ///
 /// # Errors
 ///
 /// `Unknown function '<name>'`, with the closest function name as a hint when
-/// one is close, or, for a function that needs a feature this build does not
-/// have, an error that names the feature.
-pub(crate) fn check_function_call(name: &str) -> Result<()> {
+/// one is close; `Function '<name>' takes <numbers>, got <arguments>` for a
+/// number of arguments the function does not take; or, for a function that
+/// needs a feature this build does not have, an error that names the feature.
+pub(crate) fn check_function_call(name: &str, arguments: usize) -> Result<()> {
     if is_aggregate_function(name) {
         return Ok(());
     }
     match function_support(name) {
-        FunctionSupport::Available => Ok(()),
+        FunctionSupport::Available(arity) if arity.accepts(arguments) => Ok(()),
+        FunctionSupport::Available(arity) => Err(semantic(format!(
+            "Function '{name}' takes {arity}, got {arguments}"
+        ))),
         FunctionSupport::NeedsFeature(feature) => Err(semantic(format!(
             "Function '{name}' is not available in this build: it needs the '{feature}' feature"
         ))),
@@ -155,22 +161,61 @@ mod tests {
             "toUpper",
             "ELEMENTID",
         ] {
-            assert!(check_function_call(name).is_ok(), "{name}");
+            assert!(check_function_call(name, 1).is_ok(), "{name}");
         }
     }
 
     #[test]
     fn an_unknown_function_names_the_closest_known_one() {
-        let error = message(check_function_call("upperr"));
+        let error = message(check_function_call("upperr", 1));
         assert!(error.contains("Unknown function 'upperr'"), "{error}");
         assert!(error.contains("Did you mean 'upper'?"), "{error}");
-        let error = message(check_function_call("coutn"));
+        let error = message(check_function_call("coutn", 1));
         assert!(error.contains("Did you mean 'count'?"), "{error}");
-        let error = message(check_function_call("regexp_matches"));
+        let error = message(check_function_call("regexp_matches", 2));
         assert!(
             error.contains("Unknown function 'regexp_matches'") && !error.contains("Did you mean"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_wrong_number_of_arguments_names_the_numbers_the_function_takes() {
+        let cases = [
+            ("toUpper", 2, "Function 'toUpper' takes 1 argument, got 2"),
+            (
+                "substring",
+                1,
+                "Function 'substring' takes 2 or 3 arguments, got 1",
+            ),
+            ("TRIM", 2, "Function 'TRIM' takes 1 or 3 arguments, got 2"),
+            (
+                "coalesce",
+                0,
+                "Function 'coalesce' takes at least 1 argument, got 0",
+            ),
+            ("pi", 1, "Function 'pi' takes 0 arguments, got 1"),
+        ];
+        for (name, arguments, expected) in cases {
+            assert_eq!(
+                message(check_function_call(name, arguments)),
+                format!("semantic error: {expected}"),
+                "{name} with {arguments}"
+            );
+        }
+        for (name, arguments) in [
+            ("substring", 2),
+            ("substring", 3),
+            ("trim", 3),
+            ("coalesce", 19),
+        ] {
+            assert!(
+                check_function_call(name, arguments).is_ok(),
+                "{name} with {arguments}"
+            );
+        }
+        // The numbers of arguments of an aggregate are not checked here.
+        assert!(check_function_call("count", 0).is_ok());
     }
 
     #[test]

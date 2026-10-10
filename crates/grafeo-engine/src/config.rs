@@ -13,13 +13,50 @@ use std::time::Duration;
 /// own. See [`Config::encryption`].
 ///
 /// Wrapped in `Arc` internally so `Config` can remain `Clone` without
-/// duplicating key material.
+/// duplicating key material. Build it with [`EncryptionConfig::new()`]:
+/// later releases may add settings, so outside this crate it cannot be built
+/// with a struct literal.
 #[cfg(feature = "encryption")]
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct EncryptionConfig {
     /// The key chain that derives per-component encryption keys.
     /// Shared via Arc so Config can be cloned.
     pub key_chain: std::sync::Arc<grafeo_common::encryption::KeyChain>,
+}
+
+#[cfg(feature = "encryption")]
+impl EncryptionConfig {
+    /// Encrypts with the keys `key_chain` derives from its master key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use grafeo_common::encryption::KeyChain;
+    /// use grafeo_engine::config::EncryptionConfig;
+    ///
+    /// // 32 bytes from your key management (a KMS, a secrets manager, an HSM).
+    /// let encryption = EncryptionConfig::new(Arc::new(KeyChain::new([19; 32])));
+    /// ```
+    ///
+    /// A struct literal does not compile, as a later setting would break it:
+    ///
+    /// ```compile_fail,E0639
+    /// use std::sync::Arc;
+    ///
+    /// use grafeo_common::encryption::KeyChain;
+    /// use grafeo_engine::config::EncryptionConfig;
+    ///
+    /// let encryption = EncryptionConfig {
+    ///     key_chain: Arc::new(KeyChain::new([19; 32])),
+    /// };
+    /// ```
+    #[must_use]
+    pub fn new(key_chain: std::sync::Arc<grafeo_common::encryption::KeyChain>) -> Self {
+        Self { key_chain }
+    }
 }
 
 #[cfg(feature = "encryption")]
@@ -146,25 +183,88 @@ impl fmt::Display for StorageFormat {
 /// This enum lives in config so that `Config` can always carry the desired
 /// durability regardless of whether the `wal` feature is compiled in. When
 /// WAL is enabled, the engine maps this to the adapter-level durability mode.
+///
+/// Build the variants with settings with [`DurabilityMode::batch()`] and
+/// [`DurabilityMode::adaptive()`]: later releases may add settings to them,
+/// so outside this crate they cannot be built with a struct expression, and
+/// a pattern names their fields with `..`.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use grafeo_engine::{Config, DurabilityMode};
+///
+/// let config = Config::persistent("amsterdam.grafeo")
+///     .with_wal_durability(DurabilityMode::batch(Duration::from_millis(19), 88));
+/// assert!(matches!(
+///     config.wal_durability,
+///     DurabilityMode::Batch { max_records: 88, .. }
+/// ));
+/// ```
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::DurabilityMode;
+///
+/// let mode = DurabilityMode::Adaptive {
+///     target_interval_ms: 19,
+/// };
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DurabilityMode {
     /// Fsync after every commit. Slowest but safest.
     Sync,
     /// Batch fsync periodically. Good balance of performance and durability.
+    /// Built with [`DurabilityMode::batch()`].
+    #[non_exhaustive]
     Batch {
         /// Maximum time between syncs in milliseconds.
         max_delay_ms: u64,
         /// Maximum records between syncs.
         max_records: u64,
     },
-    /// Adaptive sync via a background flusher thread.
+    /// Adaptive sync via a background flusher thread. Built with
+    /// [`DurabilityMode::adaptive()`].
+    #[non_exhaustive]
     Adaptive {
         /// Target interval between flushes in milliseconds.
         target_interval_ms: u64,
     },
     /// No sync - rely on OS buffer flushing. Fastest but may lose recent data.
     NoSync,
+}
+
+impl DurabilityMode {
+    /// Syncs at a commit once `max_delay` has passed since the last sync or
+    /// `max_records` records were written since, whichever comes first.
+    ///
+    /// The delay counts in whole milliseconds: a part of a millisecond is
+    /// dropped.
+    #[must_use]
+    pub fn batch(max_delay: Duration, max_records: u64) -> Self {
+        Self::Batch {
+            max_delay_ms: whole_millis(max_delay),
+            max_records,
+        }
+    }
+
+    /// Syncs from a background thread every `target_interval`.
+    ///
+    /// The interval counts in whole milliseconds: a part of a millisecond is
+    /// dropped, and [`Config::validate()`] refuses an interval of zero.
+    #[must_use]
+    pub fn adaptive(target_interval: Duration) -> Self {
+        Self::Adaptive {
+            target_interval_ms: whole_millis(target_interval),
+        }
+    }
+}
+
+/// `duration` in whole milliseconds, `u64::MAX` when it has more.
+fn whole_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl Default for DurabilityMode {
@@ -184,8 +284,6 @@ pub enum ConfigError {
     ZeroMemoryLimit,
     /// Thread count must be greater than zero.
     ZeroThreads,
-    /// WAL flush interval must be greater than zero.
-    ZeroWalFlushInterval,
     /// `DurabilityMode::Adaptive` needs an interval greater than zero.
     ZeroAdaptiveFlushInterval,
     /// RDF graph model requires the `rdf` feature flag.
@@ -208,9 +306,6 @@ impl fmt::Display for ConfigError {
         match self {
             Self::ZeroMemoryLimit => write!(f, "memory_limit must be greater than zero"),
             Self::ZeroThreads => write!(f, "threads must be greater than zero"),
-            Self::ZeroWalFlushInterval => {
-                write!(f, "wal_flush_interval_ms must be greater than zero")
-            }
             Self::ZeroAdaptiveFlushInterval => write!(
                 f,
                 "the target_interval_ms of DurabilityMode::Adaptive must be greater than zero"
@@ -309,16 +404,22 @@ pub struct Config {
     /// [`Config::read_only()`]; [`Config::without_wal()`] turns it off.
     pub wal_enabled: bool,
 
-    /// WAL flush interval in milliseconds.
-    pub wal_flush_interval_ms: u64,
-
     /// Whether to maintain backward edges.
     pub backward_edges: bool,
 
     /// Whether to enable query logging.
     pub query_logging: bool,
 
-    /// Adaptive execution configuration.
+    /// Adaptive execution configuration. It has no effect: no query reads
+    /// it.
+    #[deprecated(
+        since = "0.6.0",
+        note = "adaptive execution was never wired in and has no effect; removed in 0.7.0"
+    )]
+    #[expect(
+        deprecated,
+        reason = "the deprecated adaptive configuration names itself until 0.7.0 removes it"
+    )]
     pub adaptive: AdaptiveConfig,
 
     /// Whether to use factorized execution for multi-hop queries.
@@ -405,10 +506,10 @@ pub struct Config {
     /// CDC event retention policy.
     ///
     /// Controls how many events the CDC log retains in memory. By default,
-    /// retains up to 1,000 epochs and 100,000 events. Set to unlimited
-    /// (`max_epochs: None, max_events: None`) to disable pruning, but
-    /// beware of unbounded memory growth on long-running instances. Set it
-    /// with [`Config::with_cdc_retention()`].
+    /// retains up to 1,000 epochs and 100,000 events.
+    /// [`CdcRetentionConfig::unlimited()`](crate::cdc::CdcRetentionConfig::unlimited)
+    /// disables pruning, but beware of unbounded memory growth on
+    /// long-running instances. Set it with [`Config::with_cdc_retention()`].
     #[cfg(feature = "cdc")]
     pub cdc_retention: crate::cdc::CdcRetentionConfig,
 
@@ -460,9 +561,14 @@ pub struct Config {
 
 /// Configuration for adaptive query execution.
 ///
-/// Adaptive execution monitors actual row counts during query processing and
-/// can trigger re-optimization when estimates are significantly wrong.
+/// Adaptive execution was meant to monitor actual row counts during query
+/// processing and re-optimize when estimates are significantly wrong. It was
+/// never wired in: no setting here changes how a query runs.
 #[derive(Debug, Clone)]
+#[deprecated(
+    since = "0.6.0",
+    note = "adaptive execution was never wired in and has no effect; removed in 0.7.0"
+)]
 pub struct AdaptiveConfig {
     /// Whether adaptive execution is enabled.
     pub enabled: bool,
@@ -482,6 +588,10 @@ pub struct AdaptiveConfig {
     pub max_reoptimizations: usize,
 }
 
+#[expect(
+    deprecated,
+    reason = "the deprecated adaptive configuration names itself until 0.7.0 removes it"
+)]
 impl Default for AdaptiveConfig {
     fn default() -> Self {
         Self {
@@ -493,9 +603,17 @@ impl Default for AdaptiveConfig {
     }
 }
 
+#[expect(
+    deprecated,
+    reason = "the deprecated adaptive configuration names itself until 0.7.0 removes it"
+)]
 impl AdaptiveConfig {
     /// Creates a disabled adaptive config.
     #[must_use]
+    #[deprecated(
+        since = "0.6.0",
+        note = "adaptive execution was never wired in and has no effect; removed in 0.7.0"
+    )]
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -505,6 +623,10 @@ impl AdaptiveConfig {
 
     /// Sets the deviation threshold.
     #[must_use]
+    #[deprecated(
+        since = "0.6.0",
+        note = "adaptive execution was never wired in and has no effect; removed in 0.7.0"
+    )]
     pub fn with_threshold(mut self, threshold: f64) -> Self {
         self.threshold = threshold;
         self
@@ -512,6 +634,10 @@ impl AdaptiveConfig {
 
     /// Sets the minimum rows before re-optimization.
     #[must_use]
+    #[deprecated(
+        since = "0.6.0",
+        note = "adaptive execution was never wired in and has no effect; removed in 0.7.0"
+    )]
     pub fn with_min_rows(mut self, min_rows: u64) -> Self {
         self.min_rows = min_rows;
         self
@@ -519,6 +645,10 @@ impl AdaptiveConfig {
 
     /// Sets the maximum number of re-optimizations.
     #[must_use]
+    #[deprecated(
+        since = "0.6.0",
+        note = "adaptive execution was never wired in and has no effect; removed in 0.7.0"
+    )]
     pub fn with_max_reoptimizations(mut self, max: usize) -> Self {
         self.max_reoptimizations = max;
         self
@@ -534,9 +664,12 @@ impl Default for Config {
             spill_path: None,
             threads: num_cpus::get(),
             wal_enabled: true,
-            wal_flush_interval_ms: 100,
             backward_edges: true,
             query_logging: false,
+            #[expect(
+                deprecated,
+                reason = "the deprecated adaptive configuration names itself until 0.7.0 removes it"
+            )]
             adaptive: AdaptiveConfig::default(),
             factorized_execution: true,
             shuffle_unordered: false,
@@ -649,15 +782,33 @@ impl Config {
         self
     }
 
-    /// Sets the adaptive execution configuration.
+    /// Sets the adaptive execution configuration, which has no effect (see
+    /// [`AdaptiveConfig`]).
     #[must_use]
+    #[deprecated(
+        since = "0.6.0",
+        note = "adaptive execution was never wired in and has no effect; removed in 0.7.0"
+    )]
+    #[expect(
+        deprecated,
+        reason = "the deprecated adaptive configuration names itself until 0.7.0 removes it"
+    )]
     pub fn with_adaptive(mut self, adaptive: AdaptiveConfig) -> Self {
         self.adaptive = adaptive;
         self
     }
 
-    /// Disables adaptive execution.
+    /// Disables adaptive execution, which has no effect (see
+    /// [`AdaptiveConfig`]).
     #[must_use]
+    #[deprecated(
+        since = "0.6.0",
+        note = "adaptive execution was never wired in and has no effect; removed in 0.7.0"
+    )]
+    #[expect(
+        deprecated,
+        reason = "the deprecated adaptive configuration names itself until 0.7.0 removes it"
+    )]
     pub fn without_adaptive(mut self) -> Self {
         self.adaptive.enabled = false;
         self
@@ -794,10 +945,7 @@ impl Config {
     ///
     /// let config = Config::in_memory()
     ///     .with_cdc()
-    ///     .with_cdc_retention(CdcRetentionConfig {
-    ///         max_epochs: None,
-    ///         max_events: Some(88_000),
-    ///     });
+    ///     .with_cdc_retention(CdcRetentionConfig::unlimited().with_max_events(88_000));
     /// assert_eq!(config.cdc_retention.max_events, Some(88_000));
     /// ```
     #[cfg(feature = "cdc")]
@@ -900,9 +1048,8 @@ impl Config {
     ///
     /// // 32 bytes from your key management (a KMS, a secrets manager, an HSM).
     /// let master_key = [19; 32];
-    /// let config = Config::persistent("berlin.grafeo").with_encryption(EncryptionConfig {
-    ///     key_chain: Arc::new(KeyChain::new(master_key)),
-    /// });
+    /// let config = Config::persistent("berlin.grafeo")
+    ///     .with_encryption(EncryptionConfig::new(Arc::new(KeyChain::new(master_key))));
     /// assert!(config.validate().is_ok());
     /// ```
     #[cfg(feature = "encryption")]
@@ -928,10 +1075,6 @@ impl Config {
 
         if self.threads == 0 {
             return Err(ConfigError::ZeroThreads);
-        }
-
-        if self.wal_flush_interval_ms == 0 {
-            return Err(ConfigError::ZeroWalFlushInterval);
         }
 
         if self.wal_durability
@@ -1000,7 +1143,6 @@ mod tests {
         assert!(config.spill_path.is_none());
         assert!(config.threads > 0);
         assert!(config.wal_enabled);
-        assert_eq!(config.wal_flush_interval_ms, 100);
         assert!(config.backward_edges);
         assert!(!config.query_logging);
         assert!(config.factorized_execution);
@@ -1069,19 +1211,6 @@ mod tests {
     }
 
     #[test]
-    fn test_config_with_adaptive() {
-        let adaptive = AdaptiveConfig::default().with_threshold(5.0);
-        let config = Config::in_memory().with_adaptive(adaptive);
-        assert!((config.adaptive.threshold - 5.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_config_without_adaptive() {
-        let config = Config::in_memory().without_adaptive();
-        assert!(!config.adaptive.enabled);
-    }
-
-    #[test]
     fn test_config_without_factorized_execution() {
         let config = Config::in_memory().without_factorized_execution();
         assert!(!config.factorized_execution);
@@ -1102,50 +1231,6 @@ mod tests {
         assert!(config.query_logging);
         assert!(!config.backward_edges);
         assert!(config.spill_path.is_some());
-    }
-
-    #[test]
-    fn test_adaptive_config_default() {
-        let config = AdaptiveConfig::default();
-        assert!(config.enabled);
-        assert!((config.threshold - 3.0).abs() < f64::EPSILON);
-        assert_eq!(config.min_rows, 1000);
-        assert_eq!(config.max_reoptimizations, 3);
-    }
-
-    #[test]
-    fn test_adaptive_config_disabled() {
-        let config = AdaptiveConfig::disabled();
-        assert!(!config.enabled);
-    }
-
-    #[test]
-    fn test_adaptive_config_with_threshold() {
-        let config = AdaptiveConfig::default().with_threshold(10.0);
-        assert!((config.threshold - 10.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_adaptive_config_with_min_rows() {
-        let config = AdaptiveConfig::default().with_min_rows(500);
-        assert_eq!(config.min_rows, 500);
-    }
-
-    #[test]
-    fn test_adaptive_config_with_max_reoptimizations() {
-        let config = AdaptiveConfig::default().with_max_reoptimizations(5);
-        assert_eq!(config.max_reoptimizations, 5);
-    }
-
-    #[test]
-    fn test_adaptive_config_builder_chaining() {
-        let config = AdaptiveConfig::default()
-            .with_threshold(2.0)
-            .with_min_rows(100)
-            .with_max_reoptimizations(10);
-        assert!((config.threshold - 2.0).abs() < f64::EPSILON);
-        assert_eq!(config.min_rows, 100);
-        assert_eq!(config.max_reoptimizations, 10);
     }
 
     // --- GraphModel tests ---
@@ -1304,11 +1389,54 @@ mod tests {
         );
     }
 
+    /// The constructors build the variants with their limits in whole
+    /// milliseconds; the default is a batch of 100 ms and 1,000 records.
     #[test]
-    fn test_validate_rejects_zero_wal_flush_interval() {
-        let mut config = Config::in_memory();
-        config.wal_flush_interval_ms = 0;
-        assert_eq!(config.validate(), Err(ConfigError::ZeroWalFlushInterval));
+    fn durability_constructors_build_the_variants() {
+        assert_eq!(
+            DurabilityMode::batch(Duration::from_millis(100), 1000),
+            DurabilityMode::default()
+        );
+        assert_eq!(
+            DurabilityMode::batch(Duration::from_millis(19), 88),
+            DurabilityMode::Batch {
+                max_delay_ms: 19,
+                max_records: 88
+            }
+        );
+        assert_eq!(
+            DurabilityMode::adaptive(Duration::from_millis(3)),
+            DurabilityMode::Adaptive {
+                target_interval_ms: 3
+            }
+        );
+        assert_eq!(
+            DurabilityMode::adaptive(Duration::from_micros(88_999)),
+            DurabilityMode::Adaptive {
+                target_interval_ms: 88
+            },
+            "a part of a millisecond is dropped"
+        );
+        assert_eq!(
+            DurabilityMode::batch(Duration::MAX, u64::MAX),
+            DurabilityMode::Batch {
+                max_delay_ms: u64::MAX,
+                max_records: u64::MAX
+            },
+            "a delay beyond u64 milliseconds saturates"
+        );
+    }
+
+    /// An interval under a millisecond is zero milliseconds, which would sync
+    /// in a busy loop: `validate` refuses it.
+    #[test]
+    fn an_adaptive_interval_under_a_millisecond_is_invalid() {
+        let config = Config::persistent("paris.grafeo")
+            .with_wal_durability(DurabilityMode::adaptive(Duration::from_micros(880)));
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::ZeroAdaptiveFlushInterval)
+        );
     }
 
     #[cfg(not(feature = "triple-store"))]
@@ -1329,10 +1457,6 @@ mod tests {
             "threads must be greater than zero"
         );
         assert_eq!(
-            ConfigError::ZeroWalFlushInterval.to_string(),
-            "wal_flush_interval_ms must be greater than zero"
-        );
-        assert_eq!(
             ConfigError::RdfFeatureRequired.to_string(),
             "RDF graph model requires the `rdf` feature flag to be enabled"
         );
@@ -1344,9 +1468,9 @@ mod tests {
     #[cfg(all(feature = "encryption", not(miri)))]
     #[test]
     fn encryption_without_a_persistent_path_is_invalid() {
-        let encryption = EncryptionConfig {
-            key_chain: std::sync::Arc::new(grafeo_common::encryption::KeyChain::new([3; 32])),
-        };
+        let encryption = EncryptionConfig::new(std::sync::Arc::new(
+            grafeo_common::encryption::KeyChain::new([3; 32]),
+        ));
         let mut in_memory = Config::in_memory();
         in_memory.encryption = Some(encryption.clone());
         assert_eq!(
@@ -1373,9 +1497,9 @@ mod tests {
     fn encryption_with_a_spill_path_is_invalid() {
         let mut config = Config::persistent("berlin.grafeo").with_spill_path("berlin.spill");
         assert_eq!(config.validate(), Ok(()), "a spill path alone is fine");
-        config.encryption = Some(EncryptionConfig {
-            key_chain: std::sync::Arc::new(grafeo_common::encryption::KeyChain::new([19; 32])),
-        });
+        config.encryption = Some(EncryptionConfig::new(std::sync::Arc::new(
+            grafeo_common::encryption::KeyChain::new([19; 32]),
+        )));
         assert_eq!(config.validate(), Err(ConfigError::EncryptionWithSpillPath));
         assert!(
             ConfigError::EncryptionWithSpillPath
@@ -1392,9 +1516,9 @@ mod tests {
     fn encryption_with_a_section_forced_to_disk_is_invalid() {
         use grafeo_common::storage::{SectionType, TierOverride};
 
-        let encryption = EncryptionConfig {
-            key_chain: std::sync::Arc::new(grafeo_common::encryption::KeyChain::new([88; 32])),
-        };
+        let encryption = EncryptionConfig::new(std::sync::Arc::new(
+            grafeo_common::encryption::KeyChain::new([88; 32]),
+        ));
         let mut config = Config::persistent("prague.grafeo")
             .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
             .with_section_tier(SectionType::TextIndex, TierOverride::Auto);
@@ -1469,10 +1593,9 @@ mod tests {
             .without_wal()
             .without_backward_edges()
             .with_query_logging()
-            .with_adaptive(AdaptiveConfig::default().with_threshold(19.0))
             .without_factorized_execution()
             .with_shuffle_unordered(true)
-            .with_wal_durability(DurabilityMode::Sync)
+            .with_wal_durability(DurabilityMode::batch(Duration::from_millis(19), 88))
             .with_storage_format(StorageFormat::Auto)
             .with_schema_constraints()
             .with_query_timeout(Duration::from_secs(19))
@@ -1483,15 +1606,20 @@ mod tests {
             .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
             .with_checkpoint_interval(Duration::from_secs(88));
         #[cfg(feature = "cdc")]
-        let config = config.with_cdc_retention(crate::cdc::CdcRetentionConfig {
-            max_epochs: Some(19),
-            max_events: Some(88),
-        });
+        let config = config.with_cdc_retention(
+            crate::cdc::CdcRetentionConfig::unlimited()
+                .with_max_epochs(19)
+                .with_max_events(88),
+        );
         #[cfg(feature = "encryption")]
-        let config = config.with_encryption(EncryptionConfig {
-            key_chain: std::sync::Arc::new(grafeo_common::encryption::KeyChain::new([3; 32])),
-        });
+        let config = config.with_encryption(EncryptionConfig::new(std::sync::Arc::new(
+            grafeo_common::encryption::KeyChain::new([3; 32]),
+        )));
 
+        #[expect(
+            deprecated,
+            reason = "the pattern names every field, the deprecated adaptive one too, until 0.7.0 removes it"
+        )]
         let Config {
             graph_model,
             path,
@@ -1499,11 +1627,10 @@ mod tests {
             spill_path,
             threads,
             wal_enabled,
-            // No method: nothing reads this setting.
-            wal_flush_interval_ms: _,
             backward_edges,
             query_logging,
-            adaptive,
+            // Deprecated: adaptive execution never changed a query.
+            adaptive: _,
             factorized_execution,
             shuffle_unordered,
             wal_durability,
@@ -1536,10 +1663,15 @@ mod tests {
         assert!(!wal_enabled, "without_wal turns the WAL off");
         assert!(!backward_edges);
         assert!(query_logging);
-        assert!((adaptive.threshold - 19.0).abs() < f64::EPSILON);
         assert!(!factorized_execution);
         assert!(shuffle_unordered);
-        assert_eq!(wal_durability, DurabilityMode::Sync);
+        assert_eq!(
+            wal_durability,
+            DurabilityMode::Batch {
+                max_delay_ms: 19,
+                max_records: 88
+            }
+        );
         // The only storage format that is not deprecated is the default.
         assert_eq!(storage_format, StorageFormat::Auto);
         assert!(schema_constraints);

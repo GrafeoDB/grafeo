@@ -194,6 +194,10 @@ impl BindingContext {
 pub struct Binder {
     /// The current binding context.
     context: BindingContext,
+    /// The outer variables the `CALL` subquery being bound imports, with what
+    /// they are in the outer query: a parameter scan after a `WITH` in its
+    /// body that leaves one out brings it back as that.
+    imports: BindingContext,
 }
 
 impl Binder {
@@ -202,6 +206,7 @@ impl Binder {
     pub fn new() -> Self {
         Self {
             context: BindingContext::new(),
+            imports: BindingContext::new(),
         }
     }
 
@@ -777,10 +782,7 @@ impl Binder {
                     // Apply imports all of them): the ones its scan starts from.
                     Some(parts) if !imports_all => parts.iter().try_for_each(|part| {
                         let part_context = self.imported(&leading_imports(part));
-                        let outer_context = std::mem::replace(&mut self.context, part_context);
-                        let bound = self.bind_operator(part);
-                        self.context = outer_context;
-                        bound
+                        self.bind_subquery_part(part, part_context)
                     }),
                     _ => {
                         let subplan_context = if imports_all {
@@ -788,10 +790,7 @@ impl Binder {
                         } else {
                             self.imported(&apply.shared_variables)
                         };
-                        let outer_context = std::mem::replace(&mut self.context, subplan_context);
-                        let bound = self.bind_operator(&apply.subplan);
-                        self.context = outer_context;
-                        bound
+                        self.bind_subquery_part(&apply.subplan, subplan_context)
                     }
                 };
                 bound?;
@@ -830,20 +829,20 @@ impl Binder {
             LogicalOperator::ParameterScan(param_scan) => {
                 // Register parameter columns as variables (injected by outer
                 // Apply). A variable of the outer query keeps what it is, so a
-                // CALL subquery can match an imported edge as an edge.
+                // CALL subquery can match an imported edge as an edge, also
+                // where a scan brings an import back after a `WITH` that left
+                // it out.
                 for col in &param_scan.columns {
                     if self.context.contains(col) {
                         continue;
                     }
-                    self.context.add_variable(
-                        col.clone(),
-                        VariableInfo {
-                            name: col.clone(),
-                            data_type: LogicalType::Any,
-                            is_node: true,
-                            is_edge: false,
-                        },
-                    );
+                    let info = self.imports.get(col).cloned().unwrap_or(VariableInfo {
+                        name: col.clone(),
+                        data_type: LogicalType::Any,
+                        is_node: true,
+                        is_edge: false,
+                    });
+                    self.context.add_variable(col.clone(), info);
                 }
                 Ok(())
             }
@@ -1582,6 +1581,23 @@ impl Binder {
         }
 
         Ok(())
+    }
+
+    /// Binds `part`, a `CALL` subquery's body or one part of a `UNION` in it,
+    /// in a context of its own that starts as `imported`, the outer
+    /// variables it imports. Neither its own variables nor a `WITH` in it
+    /// change the outer scope.
+    fn bind_subquery_part(
+        &mut self,
+        part: &LogicalOperator,
+        imported: BindingContext,
+    ) -> Result<()> {
+        let enclosing_imports = std::mem::replace(&mut self.imports, imported.clone());
+        let outer_context = std::mem::replace(&mut self.context, imported);
+        let bound = self.bind_operator(part);
+        self.context = outer_context;
+        self.imports = enclosing_imports;
+        bound
     }
 
     /// The outer variables named in `names`, with what they are in the

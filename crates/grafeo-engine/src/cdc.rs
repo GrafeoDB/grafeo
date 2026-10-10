@@ -192,7 +192,11 @@ impl EntityId {
 
 /// A recorded change event with before/after property snapshots, or an RDF
 /// triple insert/delete.
+///
+/// Later releases may add fields, so outside this crate an event is read,
+/// not built: a pattern names its fields with `..`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct ChangeEvent {
     /// The entity that was changed.
     pub entity_id: EntityId,
@@ -250,7 +254,35 @@ pub struct ChangeEvent {
 ///
 /// Controls how many events the CDC log keeps in memory. When limits are
 /// exceeded, the oldest events (by epoch) are pruned automatically.
+///
+/// Start from [`CdcRetentionConfig::default()`] (1,000 epochs and 100,000
+/// events) or [`CdcRetentionConfig::unlimited()`] and set a limit with
+/// [`with_max_epochs`](Self::with_max_epochs) and
+/// [`with_max_events`](Self::with_max_events). Later releases may add
+/// settings, so outside this crate it cannot be built with a struct literal.
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_engine::Config;
+/// use grafeo_engine::cdc::CdcRetentionConfig;
+///
+/// let config = Config::in_memory()
+///     .with_cdc()
+///     .with_cdc_retention(CdcRetentionConfig::unlimited().with_max_events(88_000));
+/// assert_eq!(config.cdc_retention.max_epochs, None);
+/// ```
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::cdc::CdcRetentionConfig;
+///
+/// let retention = CdcRetentionConfig {
+///     max_epochs: None,
+///     max_events: Some(88_000),
+/// };
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CdcRetentionConfig {
     /// Maximum number of epochs to retain. Events older than
     /// `current_epoch - max_epochs` are pruned during GC.
@@ -268,6 +300,34 @@ impl Default for CdcRetentionConfig {
             max_epochs: Some(1000),
             max_events: Some(100_000),
         }
+    }
+}
+
+impl CdcRetentionConfig {
+    /// Keeps every event: no limit on epochs or events. Beware of unbounded
+    /// memory growth on long-running instances.
+    #[must_use]
+    pub fn unlimited() -> Self {
+        Self {
+            max_epochs: None,
+            max_events: None,
+        }
+    }
+
+    /// Prunes the events more than `max_epochs` epochs older than the
+    /// current one (see [`max_epochs`](Self::max_epochs)).
+    #[must_use]
+    pub fn with_max_epochs(mut self, max_epochs: u64) -> Self {
+        self.max_epochs = Some(max_epochs);
+        self
+    }
+
+    /// Prunes the oldest events beyond `max_events` in total (see
+    /// [`max_events`](Self::max_events)).
+    #[must_use]
+    pub fn with_max_events(mut self, max_events: usize) -> Self {
+        self.max_events = Some(max_events);
+        self
     }
 }
 
@@ -1028,6 +1088,45 @@ mod tests {
         let config = CdcRetentionConfig::default();
         assert_eq!(config.max_epochs, Some(1000));
         assert_eq!(config.max_events, Some(100_000));
+    }
+
+    /// `unlimited()` keeps every event, where the default drops those more
+    /// than 1,000 epochs old; `with_max_epochs` and `with_max_events` each
+    /// bound the history on their own.
+    #[test]
+    fn retention_constructors_set_the_limits() {
+        let kept = |retention: CdcRetentionConfig| {
+            let log = CdcLog::with_retention(retention);
+            for epoch in 1..=1_003 {
+                log.record_create_node(NodeId::new(epoch), EpochId(epoch), None, None);
+            }
+            log.apply_retention(EpochId(1_003));
+            log.event_count()
+        };
+        assert_eq!(
+            kept(CdcRetentionConfig::default()),
+            1_001,
+            "the default keeps epochs 3 to 1003"
+        );
+        assert_eq!(
+            kept(CdcRetentionConfig::unlimited()),
+            1_003,
+            "unlimited keeps every event"
+        );
+        assert_eq!(
+            kept(CdcRetentionConfig::unlimited().with_max_epochs(3)),
+            4,
+            "3 epochs back from 1003 keeps epochs 1000 to 1003"
+        );
+        assert_eq!(
+            kept(CdcRetentionConfig::unlimited().with_max_events(19)),
+            19,
+            "19 events keeps the 19 newest"
+        );
+        let both = CdcRetentionConfig::unlimited()
+            .with_max_epochs(88)
+            .with_max_events(19);
+        assert_eq!((both.max_epochs, both.max_events), (Some(88), Some(19)));
     }
 
     #[test]

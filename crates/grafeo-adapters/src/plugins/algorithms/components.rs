@@ -12,7 +12,7 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, Parameters};
-use super::traits::{ComponentResultBuilder, GraphAlgorithm, impl_algorithm};
+use super::traits::{ComponentResultBuilder, GraphAlgorithm, impl_algorithm, visible_edges_from};
 
 // ============================================================================
 // Union-Find Data Structure
@@ -115,14 +115,14 @@ pub fn connected_components(store: &dyn GraphStore) -> FxHashMap<NodeId, u64> {
         let idx = node_to_idx[&node];
 
         // Outgoing edges
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&neighbor_idx) = node_to_idx.get(&neighbor) {
                 uf.union(idx, neighbor_idx);
             }
         }
 
         // Incoming edges (for weakly connected)
-        for (neighbor, _) in store.edges_from(node, Direction::Incoming) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Incoming) {
             if let Some(&neighbor_idx) = node_to_idx.get(&neighbor) {
                 uf.union(idx, neighbor_idx);
             }
@@ -210,8 +210,7 @@ pub fn strongly_connected_components(store: &dyn GraphStore) -> FxHashMap<NodeId
         index += 1;
         stack.push(start);
 
-        let neighbors: Vec<NodeId> = store
-            .edges_from(start, Direction::Outgoing)
+        let neighbors: Vec<NodeId> = visible_edges_from(store, start, Direction::Outgoing)
             .into_iter()
             .map(|(n, _)| n)
             .collect();
@@ -281,11 +280,11 @@ pub fn strongly_connected_components(store: &dyn GraphStore) -> FxHashMap<NodeId
                 index += 1;
                 stack.push(neighbor);
 
-                let neighbor_neighbors: Vec<NodeId> = store
-                    .edges_from(neighbor, Direction::Outgoing)
-                    .into_iter()
-                    .map(|(n, _)| n)
-                    .collect();
+                let neighbor_neighbors: Vec<NodeId> =
+                    visible_edges_from(store, neighbor, Direction::Outgoing)
+                        .into_iter()
+                        .map(|(n, _)| n)
+                        .collect();
                 dfs_stack.push((neighbor, neighbor_neighbors, 0, true));
             }
         }
@@ -324,7 +323,7 @@ pub fn topological_sort(store: &dyn GraphStore) -> Option<Vec<NodeId>> {
     }
 
     for &node in &node_ids {
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             *in_degree.entry(neighbor).or_default() += 1;
         }
     }
@@ -341,7 +340,7 @@ pub fn topological_sort(store: &dyn GraphStore) -> Option<Vec<NodeId>> {
     while let Some(node) = queue.pop() {
         result.push(node);
 
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(deg) = in_degree.get_mut(&neighbor) {
                 *deg -= 1;
                 if *deg == 0 {

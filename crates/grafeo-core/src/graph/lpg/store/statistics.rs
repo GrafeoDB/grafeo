@@ -46,8 +46,10 @@ impl LpgStore {
         let registry = self.label_registry.read();
         let label_index = self.label_index.read();
 
-        for (label_id, label_name) in registry.names().iter().enumerate() {
-            let node_count = label_index.get(label_id).map_or(0, |set| set.len() as u64);
+        for (label_id, label_name) in registry.iter() {
+            let node_count = label_index
+                .get(label_id as usize)
+                .map_or(0, |set| set.len() as u64);
 
             if node_count > 0 {
                 let avg_out_degree = if stats.total_nodes > 0 {
@@ -64,13 +66,17 @@ impl LpgStore {
         }
 
         // Compute per-edge-type statistics from incremental counts
-        let id_to_edge_type = self.id_to_edge_type.read();
+        let edge_types = self.edge_types.read();
         let edge_type_counts = self.edge_type_live_counts.read();
 
-        for (type_id, type_name) in id_to_edge_type.iter().enumerate() {
+        for (type_id, type_name) in edge_types.iter() {
             // reason: clamped to >= 0 by max(0), safe to cast to u64
             #[allow(clippy::cast_sign_loss)]
-            let count = edge_type_counts.get(type_id).copied().unwrap_or(0).max(0) as u64;
+            let count = edge_type_counts
+                .get(type_id as usize)
+                .copied()
+                .unwrap_or(0)
+                .max(0) as u64;
 
             if count > 0 {
                 let avg_degree = if stats.total_nodes > 0 {

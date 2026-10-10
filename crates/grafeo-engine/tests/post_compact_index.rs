@@ -1,14 +1,13 @@
 //! Tests for index operations after compact().
 //!
-//! Validates that vector and text indexes work correctly when the database
-//! is in layered mode (after compact()), including the full cycle of
-//! insert → compact → create index → search.
+//! Validates that vector and text indexes work correctly after compact(),
+//! including the full cycle of insert → compact → create index → search.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --features full --test post_compact_index
 //! ```
 
-#![cfg(all(feature = "compact-store", feature = "lpg"))]
+#![cfg(feature = "lpg")]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
@@ -215,7 +214,7 @@ fn text_index_after_compact() {
         .expect("create text index after compact");
 
     let results = db
-        .text_search("Article", "body", "fox", 10)
+        .text_search("Article", "body", "fox", 10, None)
         .expect("text search");
     assert_eq!(
         results.len(),
@@ -266,11 +265,11 @@ fn snapshot_compact_vector_index_round_trip() {
     assert_eq!(results.len(), 3, "should find all nodes from snapshot");
 }
 
-// ── LayeredStore trait method forwarding ────────────────────────────
+// ── Index lookups of the graph store ───────────────────────────────
 
 #[test]
 #[cfg(feature = "vector-index")]
-fn layered_store_has_vector_index_forwards_to_overlay() {
+fn graph_store_has_a_vector_index_created_after_compact() {
     let mut db = GrafeoDB::new_in_memory();
 
     let n = db.create_node(&["Doc"]).unwrap();
@@ -279,11 +278,11 @@ fn layered_store_has_vector_index_forwards_to_overlay() {
 
     db.compact().expect("compact");
 
-    // No index yet — graph_store (LayeredStore) should report false
+    // No index yet: the graph store reports none
     let gs = db.graph_store();
     assert!(!gs.has_vector_index("Doc", "embedding"));
 
-    // Create index on the overlay via the imperative API
+    // Create the index via the imperative API
     db.create_vector_index(
         "Doc",
         "embedding",
@@ -295,7 +294,7 @@ fn layered_store_has_vector_index_forwards_to_overlay() {
     )
     .expect("create");
 
-    // Now LayeredStore should forward to overlay and report true
+    // Now the graph store reports it
     let gs = db.graph_store();
     assert!(gs.has_vector_index("Doc", "embedding"));
     assert!(gs.vector_index_config("Doc", "embedding").is_some());
@@ -303,7 +302,7 @@ fn layered_store_has_vector_index_forwards_to_overlay() {
 
 #[test]
 #[cfg(feature = "text-index")]
-fn layered_store_has_text_index_forwards_to_overlay() {
+fn graph_store_has_a_text_index_created_after_compact() {
     let mut db = GrafeoDB::new_in_memory();
 
     let n = db.create_node(&["Article"]).unwrap();
@@ -342,7 +341,7 @@ fn vector_index_after_recompact() {
     db.set_node_property(n3, "embedding", vec3(0.0, 0.0, 1.0))
         .unwrap();
 
-    db.recompact().expect("recompact");
+    db.compact().expect("recompact");
 
     db.create_vector_index(
         "Doc",

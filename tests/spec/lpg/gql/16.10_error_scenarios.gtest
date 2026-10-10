@@ -237,3 +237,37 @@ tests:
     expect:
       rows:
         - [0]
+
+  # ---------------------------------------------------------------------------
+  # Calls of functions that do not exist (#570): an error naming the function,
+  # not a null value
+  # ---------------------------------------------------------------------------
+
+  - name: unknown_function_is_an_error
+    query: "RETURN nope(1) AS v"
+    expect:
+      error: "Unknown function 'nope'"
+
+  - name: unknown_function_in_a_filter_is_an_error
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    query: "MATCH (n:Person) WHERE nope(n.name) RETURN n.name"
+    expect:
+      error: "Unknown function 'nope'"
+
+  - name: unknown_function_suggests_a_close_name
+    query: "RETURN toUpperr('a') AS v"
+    expect:
+      error: "Did you mean 'toUpper'?"
+
+  - name: wrong_number_of_arguments_is_an_error
+    query: "RETURN toUpper('a', 'b') AS v"
+    expect:
+      error: "Function 'toUpper' takes 1 argument, got 2"
+
+  - name: wrong_number_of_arguments_in_set_is_an_error
+    setup:
+      - "INSERT (:Doc {name: 'Alix'})"
+    query: "MATCH (d:Doc) SET d.embedding = vector([3.0, 19.0], 88)"
+    expect:
+      error: "Function 'vector' takes 1 argument, got 2"

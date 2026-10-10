@@ -176,7 +176,7 @@ println!("{names:?}");
 
 ### Dropping
 
-Remove a named graph with `DROP GRAPH`. All data in the graph is deleted. If the session is currently using that graph, the session resets to the default graph automatically.
+Remove a named graph with `DROP GRAPH`. All data in the graph is deleted. If the session is currently using that graph, the session resets to the default graph automatically. While an open transaction has changes in the graph, `DROP GRAPH` fails with a write conflict (`GRAFEO-T001`): drop the graph once that transaction commits or rolls back.
 
 ```sql
 DROP GRAPH friends

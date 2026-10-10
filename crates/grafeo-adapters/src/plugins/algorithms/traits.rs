@@ -5,11 +5,33 @@
 
 use grafeo_common::types::{EdgeId, NodeId, Value};
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::graph::GraphStore;
+use grafeo_core::graph::{Direction, GraphStore};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use super::super::{AlgorithmResult, ParameterDef, Parameters};
+
+/// The edges from `node` in `direction` that an algorithm reads, each with the
+/// node at its other end: those visible at the store's current epoch whose
+/// other end is visible too, so the graph an algorithm walks has the nodes of
+/// [`GraphStore::node_ids`] and only edges between them.
+///
+/// A store's adjacency holds more: the edges of a node a store-level
+/// `delete_node` removed without detaching it, and the edges a transaction
+/// created and has not committed (to a node only it sees, or between two
+/// visible nodes). Every algorithm reads adjacency through this function.
+pub(crate) fn visible_edges_from(
+    store: &dyn GraphStore,
+    node: NodeId,
+    direction: Direction,
+) -> Vec<(NodeId, EdgeId)> {
+    let epoch = store.current_epoch();
+    let mut edges = store.edges_from(node, direction);
+    edges.retain(|&(other, edge)| {
+        store.is_edge_visible_at_epoch(edge, epoch) && store.is_node_visible_at_epoch(other, epoch)
+    });
+    edges
+}
 
 /// Safely converts a user-supplied `i64` parameter into a [`NodeId`].
 ///

@@ -488,7 +488,14 @@ mod tests {
     }
 
     /// Restoring reads the backup and changes nothing in it: a backup written
-    /// by 0.5.x is read in place, never migrated.
+    /// by 0.5.x is read in place, never migrated. The released backup holds
+    /// RDF triples and vector and text indexes, which only a build with these
+    /// features reads.
+    #[cfg(all(
+        feature = "triple-store",
+        feature = "vector-index",
+        feature = "text-index"
+    ))]
     #[test]
     fn restore_leaves_a_0_5_backup_unchanged() {
         let dir = tempfile::tempdir().unwrap();
@@ -518,6 +525,42 @@ mod tests {
             after == before,
             "the backup is unchanged, and was not migrated: {:?}",
             after.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        );
+    }
+
+    /// A build without the features a backup's data needs refuses to restore
+    /// it, names a missing feature, and changes nothing: the released 0.5.44
+    /// backup holds RDF triples and vector and text indexes.
+    #[cfg(not(all(
+        feature = "triple-store",
+        feature = "vector-index",
+        feature = "text-index"
+    )))]
+    #[test]
+    fn restore_refuses_a_backup_this_build_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join("backup.grafeo");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../grafeo-engine/tests/fixtures/released/0.5.44/closed.grafeo");
+        std::fs::copy(&fixture, &backup).unwrap();
+        let before = files_under(dir.path());
+
+        let restored = dir.path().join("restored.grafeo");
+        let error = format!(
+            "{:#}",
+            restore(&backup, &restored, false).expect_err("the restore is refused")
+        );
+        assert!(
+            ["triple-store", "vector-index", "text-index"]
+                .iter()
+                .any(|feature| error.contains(feature)),
+            "the error names a feature the backup needs: {error}"
+        );
+        assert!(!restored.exists(), "nothing is restored");
+        assert_eq!(
+            files_under(dir.path()),
+            before,
+            "the backup is unchanged and nothing is left behind"
         );
     }
 

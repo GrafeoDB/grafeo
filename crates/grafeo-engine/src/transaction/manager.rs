@@ -1,13 +1,15 @@
 //! Transaction manager.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
-use grafeo_common::utils::hash::FxHashMap;
-use parking_lot::{Mutex, MutexGuard, RwLock};
+use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
+use grafeo_core::execution::operators::WriteInProgress;
+use parking_lot::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
+
+use super::changes::TransactionChanges;
 
 /// State of a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,22 +153,83 @@ pub struct TransactionInfo {
     /// Start epoch (snapshot epoch for reads).
     pub start_epoch: EpochId,
     /// Set of entities written by this transaction.
-    pub write_set: HashSet<GraphEntity>,
+    pub write_set: FxHashSet<GraphEntity>,
     /// Set of entities read by this transaction (for serializable isolation).
-    pub read_set: HashSet<GraphEntity>,
+    pub read_set: FxHashSet<GraphEntity>,
+    /// The nodes this transaction deleted (in `write_set` too): another
+    /// transaction's edge to one of them conflicts with the delete.
+    pub delete_set: FxHashSet<GraphEntity>,
+    /// The nodes the edges this transaction created end at, claimed against
+    /// a delete by another transaction (see
+    /// [`TransactionManager::record_endpoints`]).
+    pub endpoint_set: FxHashSet<GraphEntity>,
+    /// What the transaction changed, while it is open or committing: a
+    /// checkpoint reads the committed state of what open transactions
+    /// changed from it (see [`TransactionManager::open_change_sets`]).
+    /// Dropped once the transaction is committed or aborted.
+    pub(crate) changes: Option<Arc<TransactionChanges>>,
+    /// Whether this is a private transaction (a direct call, see
+    /// [`TransactionManager::begin_private`]): nobody asks for its state, so
+    /// it leaves the manager as soon as no other transaction can conflict
+    /// with it.
+    private: bool,
 }
 
 impl TransactionInfo {
     /// Creates a new transaction info with the given isolation level.
-    fn new(start_epoch: EpochId, isolation_level: IsolationLevel) -> Self {
+    fn new(
+        start_epoch: EpochId,
+        isolation_level: IsolationLevel,
+        changes: Arc<TransactionChanges>,
+        private: bool,
+    ) -> Self {
         Self {
             state: TransactionState::Active,
             isolation_level,
             start_epoch,
-            write_set: HashSet::new(),
-            read_set: HashSet::new(),
+            write_set: FxHashSet::default(),
+            read_set: FxHashSet::default(),
+            delete_set: FxHashSet::default(),
+            endpoint_set: FxHashSet::default(),
+            changes: Some(changes),
+            private,
         }
     }
+
+    /// Whether `claim` of `entity` by another transaction conflicts with
+    /// this transaction's writes and claims, and why.
+    fn conflict_with(&self, claim: Claim, entity: &GraphEntity) -> Option<String> {
+        let written = || self.write_set.contains(entity);
+        match claim {
+            Claim::Write if written() => Some(format!("Write-write conflict on entity {entity}")),
+            Claim::Delete if written() => Some(format!("Write-write conflict on entity {entity}")),
+            Claim::Delete if self.endpoint_set.contains(entity) => Some(format!(
+                "Write conflict on entity {entity}: another transaction creates an edge to the \
+                 node this transaction deletes"
+            )),
+            Claim::Endpoint if self.delete_set.contains(entity) => Some(format!(
+                "Write conflict on entity {entity}: another transaction deletes the node this \
+                 transaction creates an edge to"
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// How a transaction claims an entity for conflict detection
+/// (first-writer-wins between open transactions, and at commit against the
+/// transactions that committed after it began).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// A write: conflicts with another transaction's writes (deletes
+    /// included).
+    Write,
+    /// The delete of a node: a write, which also conflicts with another
+    /// transaction's claim on the node as an edge's endpoint.
+    Delete,
+    /// The endpoint of an edge the transaction creates: conflicts only with
+    /// another transaction's delete of the node.
+    Endpoint,
 }
 
 /// Manages transactions and MVCC versioning.
@@ -202,27 +265,49 @@ pub struct TransactionManager {
     /// Committed transaction epochs (for conflict detection).
     /// Maps TransactionId -> commit epoch.
     committed_epochs: RwLock<FxHashMap<TransactionId, EpochId>>,
-    /// Held by a write outside any transaction (see [`idle_gate`](Self::idle_gate))
-    /// and briefly by every [`begin`](Self::begin), so no transaction starts
-    /// while such a write runs.
+    /// Held by a direct call that commits at once while no transaction is
+    /// open (see [`idle_gate`](Self::idle_gate)), and briefly by every
+    /// [`begin`](Self::begin) and [`begin_private`](Self::begin_private), so
+    /// no transaction starts while such a call runs.
     ///
-    /// Lock order: the idle gate before the commit lock (`begin` and a write
-    /// outside a transaction take both, in that order).
+    /// Lock order: the idle gate before the commit lock (`begin` and such a
+    /// call take both, in that order).
     idle_gate: Mutex<()>,
     /// Held by a commit from its epoch until it is complete (see
-    /// [`CommitGuard`]), by a write outside a transaction from its epoch
-    /// until it is published, by a checkpoint or a copy of the store while it
-    /// builds its image (see [`hold_commits`](Self::hold_commits)), and
-    /// briefly by every [`begin`](Self::begin) and by
+    /// [`CommitGuard`]), by a change outside a commit (a schema statement, a
+    /// graph command, a direct call that commits at once) while it runs, by
+    /// a checkpoint or a copy of the store
+    /// while it builds its image (see [`hold_commits`](Self::hold_commits)),
+    /// and briefly by every [`begin`](Self::begin) and
+    /// [`begin_private`](Self::begin_private) and by
     /// [`close_for_writes`](Self::close_for_writes): commits complete one at a
     /// time, in epoch order, no transaction starts in the middle of one, and
     /// no image holds part of one.
     ///
     /// Lock order: a checkpoint takes the file's checkpoint guard before this
-    /// lock, and the idle gate comes before it too. Nothing that holds it
-    /// waits for the checkpoint timer thread (`close()` and `compact()` stop
-    /// the timer before they take it).
+    /// lock, and the idle gate comes before it too; the write freeze comes
+    /// after it. Nothing that holds it waits for
+    /// the checkpoint timer thread (`close()` stops the timer before it takes
+    /// it).
     commit_lock: Mutex<()>,
+    /// The write freeze: held shared by every store change of an open
+    /// transaction while it runs (a write, see
+    /// [`write_in_progress`](Self::write_in_progress), and the undo of a
+    /// rollback or a rollback to a savepoint), and exclusively by a
+    /// checkpoint or a copy of the store while it builds its image (see
+    /// [`hold_commits`](Self::hold_commits)): they read a store and change
+    /// logs that do not move. Changes outside
+    /// any commit ([`hold_commits_for_change`](Self::hold_commits_for_change))
+    /// do not take it: they hold the commit lock, which already keeps every
+    /// checkpoint out.
+    ///
+    /// Lock order: the commit lock before this one, so a checkpoint that
+    /// holds the commit lock waits here only for store changes in progress,
+    /// which never wait for the commit lock, the checkpoint guard or anything
+    /// else a checkpoint holds. It is not reentrant (a fair lock): no thread
+    /// asks for it while it holds it, in either mode, because a checkpoint
+    /// waiting in between would block the second request.
+    write_freeze: RwLock<()>,
     /// Set when a commit did not complete (its [`CommitGuard`] was dropped
     /// without `complete`): no commit can run afterwards.
     poisoned: AtomicBool,
@@ -234,20 +319,24 @@ pub struct TransactionManager {
 
 /// Commits held off (see [`TransactionManager::hold_commits`]): while this
 /// lives, no commit is between its epoch and its completion, and no commit,
-/// transaction start or write outside a transaction can begin.
+/// transaction start or write outside a transaction can begin. Held for a
+/// checkpoint or a copy of the store, it also freezes the store: no store
+/// change of an open transaction is in progress or can begin.
 #[must_use = "commits are held off only while the guard lives"]
 pub(crate) struct CommitsHeld<'a> {
+    // Fields drop in order: the freeze is released before the commit lock,
+    // the reverse of the order they are taken in.
+    _writes: Option<RwLockWriteGuard<'a, ()>>,
     _commit: MutexGuard<'a, ()>,
 }
 
 /// A commit in progress, from [`TransactionManager::start_commit`] until
 /// [`complete`](Self::complete). Until then the transaction is
-/// [`TransactionState::Committing`]: it still counts as open, so no write
-/// outside a transaction can start (see [`TransactionManager::idle_gate`]),
-/// its writes still conflict with other transactions' writes, readers do not
-/// see its epoch yet, and no other commit and no
-/// [`begin`](TransactionManager::begin) can run. Complete it once the
-/// commit's versions, events and WAL records are written.
+/// [`TransactionState::Committing`]: it still counts as open, its writes
+/// still conflict with other transactions' writes, readers do not see its
+/// epoch yet, and no other commit and no [`begin`](TransactionManager::begin)
+/// can run. Complete it once the commit's versions, events and WAL records
+/// are written.
 ///
 /// A guard dropped without `complete` (only when the commit code panics) does
 /// not report the transaction as committed and does not publish its epoch: it
@@ -293,23 +382,29 @@ impl Drop for CommitGuard<'_> {
             );
             return;
         }
-        if let Some(info) = self
-            .manager
-            .transactions
-            .write()
-            .get_mut(&self.transaction_id)
-        {
+        let mut transactions = self.manager.transactions.write();
+        if let Some(info) = transactions.get_mut(&self.transaction_id) {
             info.state = TransactionState::Committed;
+            // Stamped: what it changed is committed state now.
+            info.changes = None;
+            // A private transaction no open one began before: only a
+            // transaction that began before this commit can conflict with it
+            // (and none begins during it, see `commit_lock`), so its claims
+            // are of no further use.
+            if info.private && self.manager.active_count.load(Ordering::Acquire) == 1 {
+                transactions.remove(&self.transaction_id);
+                self.manager
+                    .committed_epochs
+                    .write()
+                    .remove(&self.transaction_id);
+            }
         }
+        drop(transactions);
         // Commits complete one at a time and in epoch order (the commit
-        // lock), so the published epoch only moves forward. It is published
-        // before the count drops, so a write outside a transaction that finds
-        // no transaction open also finds this commit published.
+        // lock), so the published epoch only moves forward.
         self.manager
             .published_epoch
             .fetch_max(self.epoch.as_u64(), Ordering::Release);
-        // Release pairs with the acquire in `idle_gate`: a write outside a
-        // transaction sees everything the commit wrote.
         self.manager.active_count.fetch_sub(1, Ordering::Release);
         // The commit lock is released after this, with `_commit`.
     }
@@ -330,6 +425,7 @@ impl TransactionManager {
             committed_epochs: RwLock::new(FxHashMap::default()),
             idle_gate: Mutex::new(()),
             commit_lock: Mutex::new(()),
+            write_freeze: RwLock::new(()),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
         }
@@ -342,35 +438,97 @@ impl TransactionManager {
 
     /// Begins a new transaction with the specified isolation level.
     pub fn begin_with_isolation(&self, isolation_level: IsolationLevel) -> TransactionId {
-        // Wait for a write outside any transaction to finish, and for a
-        // commit in progress: the snapshot holds every commit up to its
-        // epoch, complete.
+        // Wait for a direct call that commits at once, and for a commit in
+        // progress: the snapshot holds every commit up to its epoch,
+        // complete.
         let _gate = self.idle_gate.lock();
         let _commit = self.commit_lock.lock();
-        let transaction_id =
-            TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
-        let epoch = self.current_epoch();
-
-        let info = TransactionInfo::new(epoch, isolation_level);
-        self.transactions.write().insert(transaction_id, info);
-        self.active_count.fetch_add(1, Ordering::Relaxed);
-        transaction_id
+        self.register(isolation_level, false).0
     }
 
-    /// Exclusive access for a write outside any transaction: `Some` while no
-    /// transaction is open. No transaction can begin until the guard is
-    /// dropped, so such a write cannot conflict with one and needs no
-    /// conflict tracking.
+    /// Exclusive access for a direct call that commits at once: `Some` while
+    /// no transaction is open. No transaction can begin until the guard is
+    /// dropped, so such a call cannot conflict with one and needs no
+    /// claims; nor with another such call, which waits for the guard.
     pub(crate) fn idle_gate(&self) -> Option<MutexGuard<'_, ()>> {
         let gate = self.idle_gate.lock();
+        // Acquire pairs with the release of a commit's completion: the call
+        // sees everything the last commit wrote.
         (self.active_count.load(Ordering::Acquire) == 0).then_some(gate)
     }
 
-    /// A transaction id that no transaction uses, for a write outside any
-    /// transaction that versions its changes so it can undo them (a batch
-    /// holding [`idle_gate`](Self::idle_gate)).
-    pub(crate) fn reserve_transaction_id(&self) -> TransactionId {
-        TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed))
+    /// Begins a private transaction: one without a session, for a direct
+    /// call of the database or a graph handle while a transaction is open
+    /// (or a batch), committed or rolled back by the call itself. Like
+    /// [`begin`](Self::begin) it waits for a commit in progress (and for a
+    /// checkpoint holding commits off, and a direct call holding the idle
+    /// gate), so it never starts in the middle of one: a direct call made
+    /// while a transaction commits lands after it. It does not wait for open transactions: its
+    /// writes are claimed like any transaction's, so it conflicts with an
+    /// open transaction that wrote the same entity first, and the other way
+    /// round.
+    ///
+    /// # Errors
+    ///
+    /// Fails once the database is closed for writes (see
+    /// [`check_open`](Self::check_open)): the call's commit would fail.
+    pub(crate) fn begin_private(&self) -> Result<(TransactionId, Arc<TransactionChanges>)> {
+        let _gate = self.idle_gate.lock();
+        let _commit = self.commit_lock.lock();
+        self.check_open()?;
+        Ok(self.register(IsolationLevel::default(), true))
+    }
+
+    /// Registers a new active transaction reading at the published epoch,
+    /// with its (empty) change set.
+    fn register(
+        &self,
+        isolation_level: IsolationLevel,
+        private: bool,
+    ) -> (TransactionId, Arc<TransactionChanges>) {
+        let transaction_id =
+            TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
+        let epoch = self.current_epoch();
+        let changes = Arc::new(TransactionChanges::new(transaction_id, epoch));
+        let info = TransactionInfo::new(epoch, isolation_level, Arc::clone(&changes), private);
+        self.transactions.write().insert(transaction_id, info);
+        self.active_count.fetch_add(1, Ordering::Relaxed);
+        (transaction_id, changes)
+    }
+
+    /// What transaction `transaction_id` changed so far, while it is open.
+    pub(crate) fn changes(&self, transaction_id: TransactionId) -> Option<Arc<TransactionChanges>> {
+        self.transactions
+            .read()
+            .get(&transaction_id)
+            .and_then(|info| info.changes.clone())
+    }
+
+    /// The change sets of the open transactions, for a checkpoint or a copy
+    /// of the store that holds commits off (`_commits`): no commit is in
+    /// progress, and no write or rollback of an open transaction, so the sets
+    /// and the stores hold the same changes until the hold is released.
+    pub(crate) fn open_change_sets(
+        &self,
+        _commits: &CommitsHeld<'_>,
+    ) -> Vec<Arc<TransactionChanges>> {
+        self.transactions
+            .read()
+            .values()
+            .filter(|info| info.state == TransactionState::Active)
+            .filter_map(|info| info.changes.clone())
+            .collect()
+    }
+
+    /// Poisons the manager after a broken invariant that leaves the store
+    /// in a state no commit may build on (a change applied but not
+    /// recorded, an undo that failed): from now on every commit and
+    /// checkpoint fails, as after a commit that did not complete.
+    pub(crate) fn poison(&self, reason: &str) {
+        self.poisoned.store(true, Ordering::Release);
+        grafeo_common::grafeo_error!(
+            "{reason}; no transaction can commit until the database is reopened"
+        );
     }
 
     /// Returns the isolation level of a transaction.
@@ -396,7 +554,56 @@ impl TransactionManager {
         transaction_id: TransactionId,
         entity: impl Into<GraphEntity>,
     ) -> Result<()> {
-        let entity = entity.into();
+        self.record_claims(transaction_id, Claim::Write, [entity.into()])
+    }
+
+    /// Records the delete of a node: a write, as
+    /// [`record_write`](Self::record_write) records one, that also conflicts
+    /// with an open transaction that creates an edge to the node (see
+    /// [`record_endpoints`](Self::record_endpoints)), first writer wins; at
+    /// commit, with one that did and committed after this one began.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction is not active, or if another open
+    /// transaction wrote the node or claimed it as an edge's endpoint.
+    pub fn record_delete(
+        &self,
+        transaction_id: TransactionId,
+        entity: impl Into<GraphEntity>,
+    ) -> Result<()> {
+        self.record_claims(transaction_id, Claim::Delete, [entity.into()])
+    }
+
+    /// Claims the endpoints of an edge the transaction is about to create,
+    /// so no committed edge ends at a deleted node: an open transaction that
+    /// deletes one of them conflicts with this one, first writer wins, and at
+    /// commit so does one that deleted one and committed after this one
+    /// began. A claim does not conflict with other writes of the node or
+    /// with other claims on it: transactions that create edges to one node,
+    /// or set its properties, go on side by side.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction is not active, or if another open
+    /// transaction deletes one of the endpoints; nothing is claimed then.
+    pub fn record_endpoints(
+        &self,
+        transaction_id: TransactionId,
+        endpoints: [GraphEntity; 2],
+    ) -> Result<()> {
+        self.record_claims(transaction_id, Claim::Endpoint, endpoints)
+    }
+
+    /// Records `claim` of each of `entities` for `transaction_id`, after
+    /// checking it against the writes and claims of the other open
+    /// transactions (first-writer-wins): all of them, or none on a conflict.
+    fn record_claims<const N: usize>(
+        &self,
+        transaction_id: TransactionId,
+        claim: Claim,
+        entities: [GraphEntity; N],
+    ) -> Result<()> {
         let mut txns = self.transactions.write();
 
         // First-writer-wins conflict detection. Skip the scan when only one
@@ -404,15 +611,20 @@ impl TransactionManager {
         // progress still holds its writes.
         if self.active_count.load(Ordering::Relaxed) > 1 {
             for (other_tx, other_info) in txns.iter() {
-                if *other_tx != transaction_id
-                    && matches!(
+                if *other_tx == transaction_id
+                    || !matches!(
                         other_info.state,
                         TransactionState::Active | TransactionState::Committing
                     )
-                    && other_info.write_set.contains(&entity)
+                {
+                    continue;
+                }
+                if let Some(conflict) = entities
+                    .iter()
+                    .find_map(|entity| other_info.conflict_with(claim, entity))
                 {
                     return Err(Error::Transaction(TransactionError::WriteConflict(
-                        format!("Write-write conflict on entity {entity}"),
+                        conflict,
                     )));
                 }
             }
@@ -431,7 +643,20 @@ impl TransactionManager {
             )));
         }
 
-        info.write_set.insert(entity);
+        for entity in entities {
+            match claim {
+                Claim::Write => {
+                    info.write_set.insert(entity);
+                }
+                Claim::Delete => {
+                    info.write_set.insert(entity.clone());
+                    info.delete_set.insert(entity);
+                }
+                Claim::Endpoint => {
+                    info.endpoint_set.insert(entity);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -482,9 +707,28 @@ impl TransactionManager {
     /// - An earlier commit did not complete (see [`TransactionManager`]): no
     ///   transaction commits until the database is reopened
     /// - The database is closed: `close()` of a persistent database started
+    /// - A store fails to stamp the transaction's changes: the commit does
+    ///   not complete, which poisons the manager
+    ///
+    /// The changes the transaction recorded (the writes of a
+    /// [`QueryProcessor`](crate::query::QueryProcessor) with its transaction
+    /// context) are stamped with the commit epoch, so they are visible once
+    /// it is published. They are not logged: a session's commit logs its
+    /// transaction.
     pub fn commit(&self, transaction_id: TransactionId) -> Result<EpochId> {
+        let changes = self.changes(transaction_id);
         let commit = self.start_commit(transaction_id)?;
         let epoch = commit.epoch();
+        if let Some(changes) = changes {
+            // A store that fails leaves the commit half stamped: the guard,
+            // dropped uncompleted, poisons the manager.
+            changes.stamp(epoch).map_err(|error| {
+                Error::Internal(format!(
+                    "the commit of transaction {transaction_id:?} could not stamp its changes: \
+                     {error}"
+                ))
+            })?;
+        }
         commit.complete();
         Ok(epoch)
     }
@@ -551,6 +795,34 @@ impl TransactionManager {
             }
         }
 
+        // The same for the endpoints of our new edges and the nodes we
+        // deleted: a transaction that committed after our snapshot deleted
+        // a node we link to, or linked to a node we delete (neither saw the
+        // other's change, so its commit would leave a dangling edge).
+        if others_committed && !(ours.endpoint_set.is_empty() && ours.delete_set.is_empty()) {
+            for (other_tx, commit_epoch) in committed.iter() {
+                if *other_tx != transaction_id
+                    && commit_epoch.as_u64() > our_start_epoch.as_u64()
+                    && let Some(other_info) = txns.get(other_tx)
+                {
+                    let conflict = ours
+                        .endpoint_set
+                        .iter()
+                        .find_map(|entity| other_info.conflict_with(Claim::Endpoint, entity))
+                        .or_else(|| {
+                            ours.delete_set
+                                .iter()
+                                .find_map(|entity| other_info.conflict_with(Claim::Delete, entity))
+                        });
+                    if let Some(conflict) = conflict {
+                        return Err(Error::Transaction(TransactionError::WriteConflict(
+                            conflict,
+                        )));
+                    }
+                }
+            }
+        }
+
         // SSI validation for Serializable isolation level.
         // Check for read-write conflicts: if we read an entity that another
         // transaction (that committed after we started) wrote, we have a
@@ -607,17 +879,30 @@ impl TransactionManager {
     /// Holds commits off for a checkpoint or a copy of the store: while the
     /// returned guard lives, no commit is between its epoch and its
     /// completion, and no commit, transaction start or write outside a
-    /// transaction can begin. Waits for a commit in progress to complete.
+    /// transaction can begin. It also freezes the store (see `write_freeze`):
+    /// no store change of an open transaction, a write or the undo of a
+    /// rollback, is in progress or can begin, so the image is read from a
+    /// store and change logs that do not move. Waits for a commit in
+    /// progress to complete, then for the store changes in progress.
+    ///
+    /// Lock order: the commit lock, then the write freeze. The calling
+    /// thread must not have a write in progress (see
+    /// [`write_in_progress`](Self::write_in_progress)): it would wait for
+    /// itself.
     ///
     /// # Errors
     ///
-    /// Fails, once the lock is held, when a commit did not complete (see
-    /// [`check_no_incomplete_commit`](Self::check_no_incomplete_commit)):
+    /// Fails, once the commit lock is held, when a commit did not complete
+    /// (see [`check_no_incomplete_commit`](Self::check_no_incomplete_commit)):
     /// the store holds its stamped versions, which no image may contain.
     pub(crate) fn hold_commits(&self) -> Result<CommitsHeld<'_>> {
         let commit = self.commit_lock.lock();
         self.check_no_incomplete_commit()?;
-        Ok(CommitsHeld { _commit: commit })
+        let writes = self.write_freeze.write();
+        Ok(CommitsHeld {
+            _writes: Some(writes),
+            _commit: commit,
+        })
     }
 
     /// Holds commits off for a change that takes effect at once and logs its
@@ -628,30 +913,36 @@ impl TransactionManager {
     /// the database is closed (see [`check_open`](Self::check_open)) or after
     /// a commit that did not complete.
     ///
+    /// It does not freeze the store (see `write_freeze`): the writes of open
+    /// transactions go on meanwhile.
+    ///
     /// # Errors
     ///
     /// [`TransactionError::IncompleteCommit`] or
     /// [`TransactionError::DatabaseClosed`].
     pub(crate) fn hold_commits_for_change(&self) -> Result<CommitsHeld<'_>> {
-        let held = self.hold_commits()?;
+        let commit = self.commit_lock.lock();
+        self.check_no_incomplete_commit()?;
         self.check_open()?;
-        Ok(held)
+        Ok(CommitsHeld {
+            _writes: None,
+            _commit: commit,
+        })
     }
 
-    /// [`hold_commits`](Self::hold_commits) without waiting: `None` while a
-    /// commit (or anything else holding commits off) is in progress, also
-    /// one on the calling thread.
+    /// Marks a store change of an open transaction as in progress, for as
+    /// long as the returned guard lives: a write and its record in the
+    /// transaction's change set (through the transaction's change recorder),
+    /// or the undo of a rollback or a rollback to a savepoint. It waits while a
+    /// checkpoint or a copy of the store holds commits off (see
+    /// [`hold_commits`](Self::hold_commits)), and they wait for it.
     ///
-    /// # Errors
-    ///
-    /// As [`hold_commits`](Self::hold_commits), when the lock is free.
-    #[cfg(all(feature = "compact-store", feature = "lpg"))]
-    pub(crate) fn try_hold_commits(&self) -> Result<Option<CommitsHeld<'_>>> {
-        let Some(commit) = self.commit_lock.try_lock() else {
-            return Ok(None);
-        };
-        self.check_no_incomplete_commit()?;
-        Ok(Some(CommitsHeld { _commit: commit }))
+    /// Not reentrant: the calling thread must not hold one already, nor
+    /// hold commits off for a checkpoint or a copy (see `write_freeze`). It
+    /// may hold the commit lock (taken before this), but nothing else a
+    /// checkpoint waits for while it holds commits off.
+    pub(crate) fn write_in_progress(&self) -> WriteInProgress<'_> {
+        self.write_freeze.read()
     }
 
     /// Closes the database for writes: from now on every commit and every
@@ -705,12 +996,44 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Aborts a transaction.
+    /// Aborts a transaction, undoing the changes it recorded that nobody
+    /// undid yet (the writes of a
+    /// [`QueryProcessor`](crate::query::QueryProcessor) with its transaction
+    /// context; a session and a direct call undo their own first).
     ///
     /// # Errors
     ///
-    /// Returns an error if the transaction is not active.
+    /// Returns an error if the transaction is not active, or when a store
+    /// fails to undo a change, which poisons the manager (the transaction is
+    /// aborted either way).
     pub fn abort(&self, transaction_id: TransactionId) -> Result<()> {
+        let undone = match self.changes(transaction_id) {
+            Some(changes) => {
+                // A store change in progress: a checkpoint never reads the
+                // store or the change set halfway through the undo.
+                let _writing = self.write_in_progress();
+                changes.undo_after(changes.start(), false)
+            }
+            None => Ok(None),
+        };
+        let undo_error = match undone {
+            Err(super::UndoFailure::Broken(error)) => {
+                let message = format!(
+                    "the abort of transaction {transaction_id:?} could not undo its changes: \
+                     {error}"
+                );
+                self.poison(&message);
+                Some(Error::Internal(message))
+            }
+            // A store without undo keeps its writes: the caller chose it.
+            Ok(_) | Err(super::UndoFailure::External(_)) => None,
+        };
+        self.abort_registered(transaction_id)?;
+        undo_error.map_or(Ok(()), Err)
+    }
+
+    /// Marks transaction `transaction_id` aborted.
+    fn abort_registered(&self, transaction_id: TransactionId) -> Result<()> {
         let mut txns = self.transactions.write();
 
         let info = txns.get_mut(&transaction_id).ok_or_else(|| {
@@ -726,6 +1049,12 @@ impl TransactionManager {
         }
 
         info.state = TransactionState::Aborted;
+        info.changes = None;
+        // An aborted transaction conflicts with nobody: a private one, whose
+        // state nobody asks for, leaves at once (others at the next `gc`).
+        if info.private {
+            txns.remove(&transaction_id);
+        }
         self.active_count.fetch_sub(1, Ordering::Relaxed);
         Ok(())
     }
@@ -738,7 +1067,7 @@ impl TransactionManager {
     /// # Errors
     ///
     /// Returns a `TransactionError::InvalidState` if the transaction is not found.
-    pub fn get_write_set(&self, transaction_id: TransactionId) -> Result<HashSet<GraphEntity>> {
+    pub fn get_write_set(&self, transaction_id: TransactionId) -> Result<FxHashSet<GraphEntity>> {
         let txns = self.transactions.read();
         let info = txns.get(&transaction_id).ok_or_else(|| {
             Error::Transaction(TransactionError::InvalidState(
@@ -756,7 +1085,7 @@ impl TransactionManager {
     pub fn reset_write_set(
         &self,
         transaction_id: TransactionId,
-        write_set: HashSet<GraphEntity>,
+        write_set: FxHashSet<GraphEntity>,
     ) -> Result<()> {
         let mut txns = self.transactions.write();
         let info = txns.get_mut(&transaction_id).ok_or_else(|| {
@@ -776,6 +1105,7 @@ impl TransactionManager {
         for info in txns.values_mut() {
             if info.state == TransactionState::Active {
                 info.state = TransactionState::Aborted;
+                info.changes = None;
                 self.active_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
@@ -1586,9 +1916,9 @@ mod tests {
         );
     }
 
-    /// Until a commit is complete, a write outside any transaction cannot
+    /// Until a commit is complete, a direct call that commits at once cannot
     /// start and another transaction cannot write what the committing one
-    /// wrote; dropping the guard allows both again.
+    /// wrote; completing the commit allows both again.
     #[test]
     fn a_commit_holds_its_writes_until_it_is_complete() {
         let mgr = TransactionManager::new();
@@ -1607,14 +1937,50 @@ mod tests {
         mgr.abort(other).unwrap();
         assert!(
             mgr.idle_gate().is_none(),
-            "a write outside a transaction waits for the commit"
+            "a direct call that commits at once waits for the commit"
         );
 
         commit.complete();
         assert_eq!(mgr.state(tx), Some(TransactionState::Committed));
+        assert!(mgr.changes(tx).is_none(), "a commit drops its change set");
         assert!(mgr.idle_gate().is_some());
         let next = mgr.begin();
         mgr.record_write(next, NodeId::new(1)).unwrap();
+    }
+
+    /// A private transaction (a direct call) begins between commits too: it
+    /// waits for the commit in progress and starts at its epoch, registered
+    /// with its change set. It does not wait for an open transaction, and
+    /// conflicts with one that wrote an entity first.
+    #[test]
+    fn a_private_transaction_waits_for_a_commit_in_progress_only() {
+        let mgr = TransactionManager::new();
+        let open = mgr.begin();
+        mgr.record_write(open, NodeId::new(3)).unwrap();
+        let tx = mgr.begin();
+        let commit = mgr.start_commit(tx).unwrap();
+        let epoch = commit.epoch();
+
+        let manager = &mgr;
+        std::thread::scope(|scope| {
+            let (finished, late) =
+                spawn_and_wait(scope, BRIEFLY, move || manager.begin_private().unwrap());
+            assert!(!finished, "begin_private returned during the commit");
+            commit.complete();
+            let (direct, changes) = late.join().unwrap();
+            assert_eq!(mgr.start_epoch(direct), Some(epoch));
+            assert_eq!((changes.id(), changes.snapshot()), (direct, epoch));
+            assert!(mgr.changes(direct).is_some(), "registered with its set");
+            assert!(
+                matches!(
+                    mgr.record_write(direct, NodeId::new(3)),
+                    Err(Error::Transaction(TransactionError::WriteConflict(_)))
+                ),
+                "the open transaction wrote the node first"
+            );
+            mgr.abort(direct).unwrap();
+            assert!(mgr.changes(direct).is_none(), "an abort drops its set");
+        });
     }
 
     /// A transaction begins between commits, never during one: it waits for
@@ -1762,5 +2128,233 @@ mod tests {
         assert!(mgr.idle_gate().is_some());
         let next = mgr.begin();
         mgr.record_write(next, NodeId::new(1)).unwrap();
+    }
+
+    /// How long work that should wait gets to finish anyway.
+    const BRIEFLY: std::time::Duration = std::time::Duration::from_millis(100);
+
+    /// How long work that should not wait gets to finish: long, so a loaded
+    /// machine does not fail the test, and finite, so a wait fails it
+    /// instead of hanging.
+    const PATIENTLY: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Runs `work` on a scoped thread; returns whether it finished within
+    /// `wait`, and its handle.
+    fn spawn_and_wait<'scope, T: Send + 'scope>(
+        scope: &'scope std::thread::Scope<'scope, '_>,
+        wait: std::time::Duration,
+        work: impl FnOnce() -> T + Send + 'scope,
+    ) -> (bool, std::thread::ScopedJoinHandle<'scope, T>) {
+        let (done, finished) = std::sync::mpsc::channel();
+        let handle = scope.spawn(move || {
+            let result = work();
+            let _ = done.send(());
+            result
+        });
+        (finished.recv_timeout(wait).is_ok(), handle)
+    }
+
+    /// A checkpoint's hold waits for a store change of an open transaction
+    /// in progress, and once it holds commits off, a store change waits for
+    /// it: the image is read from a store that does not move.
+    #[test]
+    fn a_checkpoint_hold_and_a_write_in_progress_wait_for_each_other() {
+        let mgr = TransactionManager::new();
+        let manager = &mgr;
+        std::thread::scope(|scope| {
+            let writing = mgr.write_in_progress();
+            let (finished, checkpoint) = spawn_and_wait(scope, BRIEFLY, move || {
+                drop(manager.hold_commits().unwrap());
+            });
+            assert!(!finished, "the hold waits for the write in progress");
+            drop(writing);
+            checkpoint.join().unwrap();
+
+            let held = mgr.hold_commits().unwrap();
+            let (finished, write) = spawn_and_wait(scope, BRIEFLY, move || {
+                drop(manager.write_in_progress());
+            });
+            assert!(!finished, "a write waits for the checkpoint's hold");
+            drop(held);
+            write.join().unwrap();
+        });
+    }
+
+    /// Writes in progress do not wait for each other, and a change outside
+    /// any commit (a schema statement, a graph command) holds commits off
+    /// without freezing the store: writes of open
+    /// transactions go on, and it does not wait for them.
+    #[test]
+    fn a_change_outside_a_commit_does_not_freeze_the_store() {
+        let mgr = TransactionManager::new();
+        let manager = &mgr;
+        std::thread::scope(|scope| {
+            let writing = mgr.write_in_progress();
+            let (finished, other) = spawn_and_wait(scope, PATIENTLY, move || {
+                drop(manager.write_in_progress());
+            });
+            assert!(finished, "another write runs alongside");
+            other.join().unwrap();
+
+            let (finished, change) = spawn_and_wait(scope, PATIENTLY, move || {
+                drop(manager.hold_commits_for_change().unwrap());
+            });
+            assert!(finished, "the change does not wait for the write");
+            change.join().unwrap();
+            drop(writing);
+
+            let held = mgr.hold_commits_for_change().unwrap();
+            let (finished, write) = spawn_and_wait(scope, PATIENTLY, move || {
+                drop(manager.write_in_progress());
+            });
+            assert!(finished, "a write does not wait for the change");
+            write.join().unwrap();
+            drop(held);
+        });
+    }
+
+    // === Edge endpoints claimed against deletes ===
+
+    /// Alix, Gus and Vincent as entities of the default graph.
+    fn people() -> (GraphEntity, GraphEntity, GraphEntity) {
+        (
+            GraphEntity::from(NodeId::new(3)),
+            GraphEntity::from(NodeId::new(19)),
+            GraphEntity::from(NodeId::new(88)),
+        )
+    }
+
+    /// Whether `result` is a write conflict.
+    fn is_conflict(result: &Result<impl std::fmt::Debug>) -> bool {
+        matches!(
+            result,
+            Err(Error::Transaction(TransactionError::WriteConflict(_)))
+        )
+    }
+
+    /// A delete of a node that an open transaction claimed as an edge's
+    /// endpoint is a conflict; a delete of another node is not.
+    #[test]
+    fn a_delete_conflicts_with_an_open_claim_on_the_node() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, vincent) = people();
+        let linker = mgr.begin();
+        let deleter = mgr.begin();
+        mgr.record_endpoints(linker, [alix, gus.clone()]).unwrap();
+
+        let deleted = mgr.record_delete(deleter, gus);
+        assert!(is_conflict(&deleted), "got {deleted:?}");
+        mgr.record_delete(deleter, vincent).unwrap();
+        mgr.commit(linker).unwrap();
+        mgr.commit(deleter).unwrap();
+    }
+
+    /// A claim on a node an open transaction deletes is a conflict, and
+    /// claims neither endpoint: once the delete is rolled back, another
+    /// transaction deletes the other endpoint without a conflict.
+    #[test]
+    fn a_claim_conflicts_with_an_open_delete_and_claims_nothing() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, _) = people();
+        let deleter = mgr.begin();
+        let linker = mgr.begin();
+        mgr.record_delete(deleter, gus.clone()).unwrap();
+
+        let claimed = mgr.record_endpoints(linker, [alix.clone(), gus]);
+        assert!(is_conflict(&claimed), "got {claimed:?}");
+        mgr.abort(deleter).unwrap();
+        let other = mgr.begin();
+        mgr.record_delete(other, alix)
+            .expect("the failed claim left Alix unclaimed");
+    }
+
+    /// Claims conflict with deletes only: transactions that create edges to
+    /// one node, and one that writes the node, all commit.
+    #[test]
+    fn claims_do_not_conflict_with_claims_or_writes() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, vincent) = people();
+        let alix_links = mgr.begin();
+        let vincent_links = mgr.begin();
+        let writer = mgr.begin();
+        mgr.record_endpoints(alix_links, [alix, gus.clone()])
+            .unwrap();
+        mgr.record_endpoints(vincent_links, [vincent, gus.clone()])
+            .unwrap();
+        mgr.record_write(writer, gus).unwrap();
+        mgr.commit(alix_links).unwrap();
+        mgr.commit(vincent_links).unwrap();
+        mgr.commit(writer).unwrap();
+    }
+
+    /// A transaction whose new edge ends at a node another transaction
+    /// deleted and committed after it began fails its commit.
+    #[test]
+    fn a_claim_fails_the_commit_after_a_later_committed_delete() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, _) = people();
+        let linker = mgr.begin();
+        let deleter = mgr.begin();
+        mgr.record_delete(deleter, gus.clone()).unwrap();
+        mgr.commit(deleter).unwrap();
+
+        mgr.record_endpoints(linker, [alix, gus])
+            .expect("the delete is committed: no open transaction holds it");
+        let committed = mgr.commit(linker);
+        assert!(is_conflict(&committed), "got {committed:?}");
+    }
+
+    /// The other way around: a delete fails its commit when another
+    /// transaction committed an edge to the node after the delete's
+    /// transaction began.
+    #[test]
+    fn a_delete_fails_the_commit_after_a_later_committed_claim() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, _) = people();
+        let deleter = mgr.begin();
+        let linker = mgr.begin();
+        mgr.record_endpoints(linker, [alix, gus.clone()]).unwrap();
+        mgr.commit(linker).unwrap();
+
+        mgr.record_delete(deleter, gus).unwrap();
+        let committed = mgr.commit(deleter);
+        assert!(is_conflict(&committed), "got {committed:?}");
+    }
+
+    /// A claim committed before a transaction began is part of its snapshot
+    /// (it sees the edge, and deletes it with the node): no conflict.
+    #[test]
+    fn a_claim_committed_before_the_transaction_began_does_not_conflict() {
+        let mgr = TransactionManager::new();
+        let (alix, gus, _) = people();
+        let linker = mgr.begin();
+        mgr.record_endpoints(linker, [alix, gus.clone()]).unwrap();
+        mgr.commit(linker).unwrap();
+
+        let deleter = mgr.begin();
+        mgr.record_delete(deleter, gus).unwrap();
+        mgr.commit(deleter).unwrap();
+    }
+
+    /// Claims of one node id in two graphs are claims of two nodes: a delete
+    /// in one graph does not conflict with an edge in the other.
+    #[test]
+    fn claims_in_different_graphs_do_not_conflict() {
+        let mgr = TransactionManager::new();
+        let gus = NodeId::new(19);
+        let linker = mgr.begin();
+        let deleter = mgr.begin();
+        mgr.record_endpoints(
+            linker,
+            [
+                GraphEntity::new(Some(Arc::from("Paris")), gus),
+                GraphEntity::new(Some(Arc::from("Paris")), gus),
+            ],
+        )
+        .unwrap();
+        mgr.record_delete(deleter, GraphEntity::new(Some(Arc::from("Prague")), gus))
+            .unwrap();
+        mgr.commit(linker).unwrap();
+        mgr.commit(deleter).unwrap();
     }
 }

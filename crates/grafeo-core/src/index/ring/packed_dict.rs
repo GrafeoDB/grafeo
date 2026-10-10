@@ -34,6 +34,8 @@
 //! time. Instead, we keep IDs stable and store an auxiliary `sorted_ids`
 //! array so query-time `get_id` lookups remain O(log n).
 
+use std::io::Write;
+
 use bytes::Bytes;
 
 use crate::graph::rdf::Term;
@@ -135,14 +137,15 @@ impl PackedTermDictionary {
         std::str::from_utf8(bytes).ok()
     }
 
-    /// Returns the parsed [`Term`] for the given id.
+    /// Returns the parsed [`Term`] for the given id, or `None` if the id is
+    /// out of range or its string is not an N-Triples term.
     ///
     /// Combines [`get_term_str`](Self::get_term_str) with N-Triples
     /// parsing. Allocates one `Term`.
     #[must_use]
     pub fn get_term(&self, id: u32) -> Option<Term> {
         let s = self.get_term_str(id)?;
-        Term::from_ntriples(s)
+        Term::from_ntriples(s).ok()
     }
 
     /// Returns the id of the term whose N-Triples encoding equals `s`,
@@ -241,25 +244,40 @@ impl PackedTermDictionary {
     }
 
     /// Serializes this dictionary to a flat byte buffer per the layout
-    /// documented at the module top.
+    /// documented at the module top (see [`write_to`](Self::write_to)).
+    ///
+    /// # Panics
+    ///
+    /// Does not panic: writing into a `Vec` does not fail.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let total =
             HEADER_SIZE + 8 + self.string_table.len() + self.offsets.len() + self.sorted_ids.len();
         let mut buf = Vec::with_capacity(total);
-        // Header.
-        buf.extend_from_slice(MAGIC);
-        buf.push(VERSION);
-        buf.extend_from_slice(&[0u8; 3]); // reserved
-        buf.extend_from_slice(&(self.count as u64).to_le_bytes());
-        // String table size + table.
-        buf.extend_from_slice(&(self.string_table.len() as u64).to_le_bytes());
-        buf.extend_from_slice(&self.string_table);
-        // Offsets (count + 1 u64 LE).
-        buf.extend_from_slice(&self.offsets);
-        // Sorted ids (count u32 LE).
-        buf.extend_from_slice(&self.sorted_ids);
+        self.write_to(&mut buf)
+            .expect("writing into a Vec does not fail");
         buf
+    }
+
+    /// Writes this dictionary to `out` per the layout documented at the
+    /// module top: the header, then its three regions as they are stored,
+    /// without a copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error of `out`.
+    pub fn write_to(&self, out: &mut dyn Write) -> std::io::Result<()> {
+        // Header.
+        out.write_all(MAGIC)?;
+        out.write_all(&[VERSION, 0, 0, 0])?; // version, then 3 reserved bytes
+        out.write_all(&(self.count as u64).to_le_bytes())?;
+        // String table size + table.
+        out.write_all(&(self.string_table.len() as u64).to_le_bytes())?;
+        out.write_all(&self.string_table)?;
+        // Offsets (count + 1 u64 LE).
+        out.write_all(&self.offsets)?;
+        // Sorted ids (count u32 LE).
+        out.write_all(&self.sorted_ids)
     }
 
     fn read_count_from_header(data: &[u8]) -> Result<usize, PackedDictError> {
@@ -277,8 +295,9 @@ impl PackedTermDictionary {
     ///
     /// # Errors
     ///
-    /// Returns a [`PackedDictError`] on truncation, magic/version
-    /// mismatch, inconsistent sizes, or invalid offsets/sorted-ids.
+    /// Returns a [`PackedDictError`] on truncation, bytes after the sorted
+    /// ids, magic/version mismatch, inconsistent sizes (sizes that overflow
+    /// included), or invalid offsets/sorted-ids.
     ///
     /// # Panics
     ///
@@ -329,7 +348,13 @@ impl PackedTermDictionary {
         cursor = st_end;
 
         // Offsets region: (count + 1) * 8 bytes.
-        let offsets_size = (count + 1) * 8;
+        let offsets_size = count
+            .checked_add(1)
+            .and_then(|entries| entries.checked_mul(8))
+            .ok_or(PackedDictError::InconsistentSizes {
+                expected_total: usize::MAX,
+                actual_total: data.len(),
+            })?;
         let offsets_end =
             cursor
                 .checked_add(offsets_size)
@@ -347,7 +372,12 @@ impl PackedTermDictionary {
         cursor = offsets_end;
 
         // Sorted ids region: count * 4 bytes.
-        let sorted_size = count * 4;
+        let sorted_size = count
+            .checked_mul(4)
+            .ok_or(PackedDictError::InconsistentSizes {
+                expected_total: usize::MAX,
+                actual_total: data.len(),
+            })?;
         let sorted_end =
             cursor
                 .checked_add(sorted_size)
@@ -355,7 +385,10 @@ impl PackedTermDictionary {
                     expected_total: 0,
                     actual_total: data.len(),
                 })?;
-        if sorted_end > data.len() {
+        // The sorted ids end the encoding: a part holds exactly its
+        // encoding (parts are laid out without padding, in the envelope as
+        // in the streams).
+        if sorted_end != data.len() {
             return Err(PackedDictError::InconsistentSizes {
                 expected_total: sorted_end,
                 actual_total: data.len(),
@@ -582,5 +615,45 @@ mod tests {
             offset < (HEADER_SIZE + 8 + restored.string_table.len() + 256),
             "string_table should be inside source allocation; offset={offset}"
         );
+    }
+    /// A packed dictionary is exactly its encoding: bytes after the sorted
+    /// ids are refused.
+    #[test]
+    fn bytes_after_the_sorted_ids_are_refused() {
+        let dict = build_dict_with(&[Term::iri("http://example.org/alix"), Term::literal("Gus")]);
+        for packed in [
+            PackedTermDictionary::from_term_dict(&dict),
+            PackedTermDictionary::from_term_dict(&TermDictionary::new()),
+        ] {
+            let mut bytes = packed.to_bytes();
+            let expected = bytes.len();
+            bytes.extend_from_slice(b"Jules");
+            assert_eq!(
+                PackedTermDictionary::from_bytes(Bytes::from(bytes)).unwrap_err(),
+                PackedDictError::InconsistentSizes {
+                    expected_total: expected,
+                    actual_total: expected + 5
+                }
+            );
+        }
+    }
+
+    /// A term count whose regions would not fit any buffer is refused
+    /// without overflowing.
+    #[test]
+    fn a_count_that_overflows_is_refused() {
+        let dict = build_dict_with(&[Term::iri("http://example.org/vincent")]);
+        let bytes = PackedTermDictionary::from_term_dict(&dict).to_bytes();
+        for count in [1u64 << 61, (1u64 << 62) + 3, u64::MAX] {
+            let mut crafted = bytes.clone();
+            crafted[8..16].copy_from_slice(&count.to_le_bytes());
+            assert!(
+                matches!(
+                    PackedTermDictionary::from_bytes(Bytes::from(crafted)),
+                    Err(PackedDictError::InconsistentSizes { .. })
+                ),
+                "count {count:#x}"
+            );
+        }
     }
 }

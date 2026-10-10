@@ -36,7 +36,6 @@ parquet = { version = "60", optional = true, default-features = false }
 
 # Concurrency
 parking_lot.workspace = true
-arc-swap = { workspace = true, optional = true }
 crossbeam = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 
@@ -68,7 +67,7 @@ rdf = ["triple-store"]  # Deprecated: use triple-store
 tiered-storage = ["grafeo-common/tiered-storage"]  # Enable tiered hot/cold storage
 temporal = ["grafeo-common/temporal"]  # Enable append-only versioned properties
 succinct-indexes = []  # Enable succinct data structures (rank/select bitvectors, Elias-Fano, wavelet trees)
-compact-store = ["dep:arc-swap"]  # CompactStore — columnar graph for read-only workloads
+compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 ring-index = ["succinct-indexes", "triple-store"]  # Ring Index for RDF (3x space reduction, requires succinct-indexes and triple-store)
 shacl = ["triple-store"]  # SHACL shapes constraint language (W3C validation)
 vector-index = ["ordered-float", "rand"]  # HNSW vector index for approximate nearest neighbor search
@@ -96,3 +95,8 @@ required-features = ["vector-index"]
 [[bench]]
 name = "top_k"
 harness = false
+
+[[bench]]
+name = "morsel_pipeline"
+harness = false
+required-features = ["parallel"]

@@ -7,7 +7,7 @@
 //! constraints, logged to the WAL and reported to CDC like the same write in a
 //! query, and it either applies completely or fails with an error (see
 //! [`direct`](super::direct) for how). Reads see the current graph as queries
-//! do (after `compact()` and on an external store too), and nothing when the
+//! do (on an external store too), and nothing when the
 //! selected graph no longer exists. Like queries, they read at the last epoch
 //! whose commit is complete, so they never see part of a commit.
 
@@ -30,7 +30,7 @@ impl super::GrafeoDB {
             self.current_graph.read().as_deref(),
         )
         .and_then(|key| self.lpg_store().graph(&key))
-        .unwrap_or_else(|| Arc::clone(self.lpg_store()))
+        .unwrap_or_else(|| self.lpg_store())
     }
 
     /// The epoch the direct reads see: the last one whose commit is

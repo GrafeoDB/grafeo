@@ -150,15 +150,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arc-swap"
-version = "1.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1612,7 +1603,6 @@ dependencies = [
 name = "grafeo-core"
 version = "0.5.44"
 dependencies = [
- "arc-swap",
  "arcstr",
  "bincode",
  "byteorder",
@@ -1652,7 +1642,6 @@ dependencies = [
  "bytes",
  "codspeed-criterion-compat",
  "crc32fast",
- "crossbeam",
  "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",
@@ -1665,7 +1654,6 @@ dependencies = [
  "ort",
  "parking_lot",
  "proptest",
- "rayon",
  "regex",
  "regex-lite",
  "serde",

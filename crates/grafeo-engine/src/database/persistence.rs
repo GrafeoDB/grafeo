@@ -241,34 +241,128 @@ fn validate_snapshot_data(nodes: &[SnapshotNode], edges: &[SnapshotEdge]) -> Res
     let mut node_ids = HashSet::with_capacity(nodes.len());
     for node in nodes {
         if !node_ids.insert(node.id) {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "snapshot contains duplicate node ID {}",
                 node.id
             )));
         }
+        refuse_too_deep("node", node.id.as_u64(), &node.properties)?;
     }
     let mut edge_ids = HashSet::with_capacity(edges.len());
     for edge in edges {
         if !edge_ids.insert(edge.id) {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "snapshot contains duplicate edge ID {}",
                 edge.id
             )));
         }
+        refuse_too_deep("edge", edge.id.as_u64(), &edge.properties)?;
         if !node_ids.contains(&edge.src) {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "snapshot edge {} references non-existent source node {}",
                 edge.id, edge.src
             )));
         }
         if !node_ids.contains(&edge.dst) {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "snapshot edge {} references non-existent destination node {}",
                 edge.id, edge.dst
             )));
         }
     }
     Ok(())
+}
+
+/// Refuses a property version of snapshot `entity` `id` nested deeper than a
+/// database can store (see [`nests_too_deep`]), naming the entity and the
+/// property, as a write of the value would be refused.
+fn refuse_too_deep(
+    entity: &str,
+    id: u64,
+    properties: &[(String, Vec<(EpochId, Value)>)],
+) -> Result<()> {
+    use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
+
+    for (key, versions) in properties {
+        if versions.iter().any(|(_, value)| nests_too_deep(value)) {
+            return Err(Error::InvalidValue(format!(
+                "snapshot {entity} {id}, property {key:?}: the value nests lists, maps and \
+                 paths more than {MAX_PROPERTY_VALUE_DEPTH} levels deep, deeper than a database \
+                 can store"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Refuses `snapshot` when it holds data this build cannot read (see
+/// [`FeatureData`](super::sections::FeatureData)): RDF triples or graphs
+/// without the `triple-store` feature, vector or text index definitions
+/// without `vector-index` or `text-index`. Such a build would `action`
+/// (`import`, `restore`) the snapshot without that data.
+///
+/// # Errors
+///
+/// Returns an error that says what the snapshot holds (`1 in the default
+/// graph, 3 in graph trips`, `on :Document(embedding)`) and the features, in
+/// that case.
+fn refuse_unreadable_snapshot(snapshot: &Snapshot, action: &str) -> Result<()> {
+    use super::sections::{FeatureData, RDF_TRIPLES, TEXT_INDEXES, VECTOR_INDEXES, refusal_of};
+
+    // Plain loops that append to one string per kind of data: this runs in
+    // the WebAssembly packages, whose size is gated.
+    let mut found: Vec<(&FeatureData, String)> = Vec::new();
+    if !RDF_TRIPLES.in_build() {
+        let mut held = String::new();
+        if !snapshot.rdf_triples.is_empty() {
+            held.push_str(&snapshot.rdf_triples.len().to_string());
+            held.push_str(" in the default graph");
+        }
+        for graph in &snapshot.rdf_named_graphs {
+            if !held.is_empty() {
+                held.push_str(", ");
+            }
+            held.push_str(&graph.triples.len().to_string());
+            held.push_str(" in graph ");
+            held.push_str(&graph.name);
+        }
+        if !held.is_empty() {
+            found.push((&RDF_TRIPLES, held));
+        }
+    }
+    if !VECTOR_INDEXES.in_build() {
+        let mut held = String::new();
+        for def in &snapshot.indexes.vector_indexes {
+            push_index_on(&mut held, &def.label, &def.property);
+        }
+        if !held.is_empty() {
+            found.push((&VECTOR_INDEXES, held));
+        }
+    }
+    if !TEXT_INDEXES.in_build() {
+        let mut held = String::new();
+        for def in &snapshot.indexes.text_indexes {
+            push_index_on(&mut held, &def.label, &def.property);
+        }
+        if !held.is_empty() {
+            found.push((&TEXT_INDEXES, held));
+        }
+    }
+    if found.is_empty() {
+        Ok(())
+    } else {
+        Err(refusal_of("the snapshot", action, &found))
+    }
+}
+
+/// Appends the index on `property` of the nodes with `label` to `held`, the
+/// list a refusal names: `on :Document(embedding), :Document(title)`.
+fn push_index_on(held: &mut String, label: &str, property: &str) {
+    held.push_str(if held.is_empty() { "on :" } else { ", :" });
+    held.push_str(label);
+    held.push('(');
+    held.push_str(property);
+    held.push(')');
 }
 
 /// Collects all triples from an RDF store into snapshot format.
@@ -285,18 +379,83 @@ fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<Snapsho
         .collect()
 }
 
-/// Populates an RDF store from snapshot triples.
+/// The RDF graphs of a snapshot with their terms read: the default graph's
+/// triples, then each named graph's name and triples.
 #[cfg(feature = "triple-store")]
-fn populate_rdf_store(store: &grafeo_core::graph::rdf::RdfStore, triples: &[SnapshotTriple]) {
+struct RdfSnapshotGraphs {
+    default: Vec<grafeo_core::graph::rdf::Triple>,
+    named: Vec<(String, Vec<grafeo_core::graph::rdf::Triple>)>,
+}
+
+/// Reads the terms of every RDF triple of a snapshot, before anything is
+/// changed, so a snapshot that holds a term that does not parse changes
+/// nothing.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] naming the graph, the triple and the term
+/// when a term is not an N-Triples term: a snapshot never loses a triple.
+#[cfg(feature = "triple-store")]
+fn read_rdf_snapshot(
+    triples: &[SnapshotTriple],
+    named: &[RdfNamedGraphSnapshot],
+) -> Result<RdfSnapshotGraphs> {
+    Ok(RdfSnapshotGraphs {
+        default: read_rdf_triples(None, triples)?,
+        named: named
+            .iter()
+            .map(|graph| {
+                Ok((
+                    graph.name.clone(),
+                    read_rdf_triples(Some(&graph.name), &graph.triples)?,
+                ))
+            })
+            .collect::<Result<_>>()?,
+    })
+}
+
+/// The triples of one graph of a snapshot (`None`: the default graph), their
+/// terms read from their N-Triples strings.
+#[cfg(feature = "triple-store")]
+fn read_rdf_triples(
+    graph: Option<&str>,
+    triples: &[SnapshotTriple],
+) -> Result<Vec<grafeo_core::graph::rdf::Triple>> {
     use grafeo_core::graph::rdf::{Term, Triple};
-    for triple in triples {
-        if let (Some(s), Some(p), Some(o)) = (
-            Term::from_ntriples(&triple.subject),
-            Term::from_ntriples(&triple.predicate),
-            Term::from_ntriples(&triple.object),
-        ) {
-            store.insert(Triple::new(s, p, o));
-        }
+
+    triples
+        .iter()
+        .enumerate()
+        .map(|(index, triple)| {
+            let term = |text: &str, role: &str| {
+                Term::from_ntriples(text).map_err(|error| {
+                    let graph = graph.map_or_else(
+                        || "the default graph".to_string(),
+                        |name| format!("graph {name:?}"),
+                    );
+                    Error::Serialization(format!(
+                        "snapshot RDF triple {index} of {graph}, {role}: {error}"
+                    ))
+                })
+            };
+            // Unchecked: the store holds what it was given, as it was
+            // exported.
+            Ok(Triple::new_unchecked(
+                term(&triple.subject, "subject")?,
+                term(&triple.predicate, "predicate")?,
+                term(&triple.object, "object")?,
+            ))
+        })
+        .collect()
+}
+
+/// Populates an RDF store from the graphs of a snapshot, creating its named
+/// graphs.
+#[cfg(feature = "triple-store")]
+fn populate_rdf_store(store: &grafeo_core::graph::rdf::RdfStore, graphs: RdfSnapshotGraphs) {
+    store.batch_insert(graphs.default);
+    for (name, triples) in graphs.named {
+        store.graph_or_create(&name).batch_insert(triples);
     }
 }
 
@@ -304,9 +463,25 @@ fn populate_rdf_store(store: &grafeo_core::graph::rdf::RdfStore, triples: &[Snap
 // Snapshot deserialization helpers (used by single-file format)
 // =========================================================================
 
-/// Decodes snapshot bytes and populates a store and catalog.
+/// Decodes snapshot bytes, the snapshot of the 0.5.x container v1 file
+/// `path`, and populates a store and catalog.
+///
+/// # Errors
+///
+/// Returns an error if the snapshot does not decode or a term of its triples
+/// does not parse; in a build without the `triple-store` feature, if it holds
+/// RDF triples or graphs, which the database would be loaded (and migrated)
+/// without.
 #[cfg(feature = "grafeo-file")]
+#[cfg_attr(
+    feature = "triple-store",
+    expect(
+        unused_variables,
+        reason = "only a build without `triple-store` refuses the snapshot, naming the file"
+    )
+)]
 pub(super) fn load_snapshot_into_store(
+    path: &Path,
     store: &std::sync::Arc<grafeo_core::graph::lpg::LpgStore>,
     catalog: &std::sync::Arc<crate::catalog::Catalog>,
     #[cfg(feature = "triple-store")] rdf_store: &std::sync::Arc<grafeo_core::graph::rdf::RdfStore>,
@@ -317,8 +492,20 @@ pub(super) fn load_snapshot_into_store(
     let config = bincode::config::standard();
     let (snapshot, _) =
         bincode::serde::decode_from_slice::<Snapshot, _>(data, config).map_err(|e| {
-            Error::Serialization(format!("failed to decode snapshot from .grafeo file: {e}"))
+            Error::corruption(format!("failed to decode snapshot from .grafeo file: {e}"))
         })?;
+    #[cfg(feature = "triple-store")]
+    let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;
+    #[cfg(not(feature = "triple-store"))]
+    if !snapshot.rdf_triples.is_empty() || !snapshot.rdf_named_graphs.is_empty() {
+        return Err(super::sections::refusal(
+            path,
+            &[(
+                &super::sections::RDF_TRIPLES,
+                "the snapshot of a 0.5.x file".to_string(),
+            )],
+        ));
+    }
 
     populate_store_from_snapshot_ref(store, &snapshot.nodes, &snapshot.edges)?;
 
@@ -342,13 +529,7 @@ pub(super) fn load_snapshot_into_store(
     // Restore RDF triples
     #[cfg(feature = "triple-store")]
     {
-        populate_rdf_store(rdf_store, &snapshot.rdf_triples);
-        for rdf_graph in &snapshot.rdf_named_graphs {
-            rdf_store.create_graph(&rdf_graph.name);
-            if let Some(graph_store) = rdf_store.graph(&rdf_graph.name) {
-                populate_rdf_store(&graph_store, &rdf_graph.triples);
-            }
-        }
+        populate_rdf_store(rdf_store, rdf_graphs);
     }
 
     Ok(())
@@ -500,7 +681,9 @@ fn collect_schema(catalog: &std::sync::Arc<crate::catalog::Catalog>) -> Snapshot
 /// Restores indexes from snapshot metadata by rebuilding them from existing data.
 ///
 /// Must be called after all nodes/edges have been populated, since index
-/// creation scans existing data.
+/// creation scans existing data. A build without `vector-index` or
+/// `text-index` has refused a snapshot with such definitions before (see
+/// [`refuse_unreadable_snapshot`]).
 fn restore_indexes_from_snapshot(db: &super::GrafeoDB, indexes: &SnapshotIndexes) {
     for name in &indexes.property_indexes {
         db.lpg_store().create_property_index(name);
@@ -592,7 +775,8 @@ impl super::GrafeoDB {
     /// its extension (`.grafeo`, `.db` or none): a database of its own, with
     /// every graph, the schema and the indexes, and no sidecar WAL. Works the
     /// same for an in-memory and a persistent database; the original stays
-    /// as it is.
+    /// as it is. Like a checkpoint, the copy holds the committed state: a
+    /// transaction still open is left out of it (see [`close`](Self::close)).
     ///
     /// The copy of an encrypted database (`Config::encryption`) is encrypted
     /// with the same key chain: it has a new database id and so its own
@@ -692,7 +876,11 @@ impl super::GrafeoDB {
     /// constraints, and the property, vector and text indexes. It is built
     /// from the checkpoint sections and loaded as a `.grafeo` file is, except
     /// that nodes and edges are copied from store to store, which is much
-    /// faster than encoding them.
+    /// faster than encoding them (while no transaction is open).
+    ///
+    /// Like a checkpoint, the copy holds the committed state: what a
+    /// transaction still open deleted is in it, with the values and labels
+    /// it changed as they were committed, and nothing it created is.
     ///
     /// Useful for:
     /// - Testing modifications without affecting the original
@@ -708,12 +896,13 @@ impl super::GrafeoDB {
     /// Returns an error if the copy operation fails, or after a commit that
     /// did not complete.
     pub fn to_memory(&self) -> Result<Self> {
-        let mut target = Self::with_config(Config::in_memory())?;
+        let target = Self::with_config(Config::in_memory())?;
         // Each section is served once and freed as soon as it is loaded.
         let image = grafeo_common::storage::ServedOnce::new(self.copy_into(&target)?);
         let loaded = super::sections::load_sections(
             &image,
-            target.lpg_store(),
+            None,
+            &target.lpg_store(),
             &target.catalog,
             #[cfg(feature = "triple-store")]
             &target.rdf_store,
@@ -722,7 +911,7 @@ impl super::GrafeoDB {
         target
             .transaction_manager
             .sync_epoch(target.lpg_store().current_epoch());
-        target.finish_load(loaded)?;
+        target.finish_load(loaded);
         Ok(target)
     }
 
@@ -731,10 +920,12 @@ impl super::GrafeoDB {
     /// [`to_memory`](Self::to_memory) to load.
     ///
     /// Both are taken under one commit hold, so they hold the same commits:
-    /// every commit whole, and none that did not complete. The LPG section
-    /// (the overlay's, after `compact()`) is left out of the image: its nodes
-    /// and edges are copied from store to store instead, which is much
-    /// faster than encoding them.
+    /// every commit whole, none that did not complete, and nothing of a
+    /// transaction still open (the hold also holds its writes). The LPG
+    /// section is left out of the image: its nodes and edges are copied from store to store instead, which is
+    /// much faster than encoding them. While a transaction is open the stores
+    /// hold what it wrote, so the image holds the LPG section, which writes
+    /// the committed state, and the copy loads it as a reopen does.
     ///
     /// # Errors
     ///
@@ -745,9 +936,11 @@ impl super::GrafeoDB {
 
         let mut image = MemoryImage::new();
         let commits = self.transaction_manager.hold_commits()?;
-        for section in self.checkpoint_sources().sections(&commits) {
-            if section.section_type() == SectionType::LpgStore {
-                copy_graph_data(self.lpg_store(), target.lpg_store())?;
+        let sources = self.checkpoint_sources();
+        let open = sources.has_open_changes(&commits);
+        for section in sources.sections(&commits) {
+            if section.section_type() == SectionType::LpgStore && !open {
+                copy_graph_data(&self.lpg_store(), &target.lpg_store())?;
             } else {
                 image.begin_section(section.section_type(), section.version())?;
                 section.write_to(&mut image)?;
@@ -829,21 +1022,38 @@ impl super::GrafeoDB {
     /// enabled, the full history is captured. Otherwise, each property is
     /// wrapped as a single-entry list at epoch 0.
     ///
+    /// The snapshot holds the committed state: what a transaction still open
+    /// deleted is in it, with the values and labels it changed as they were
+    /// committed, and nothing it created is (while one is open, the data is
+    /// read from a committed copy, which takes as much memory again).
+    ///
     /// # Errors
     ///
     /// Returns an error if serialization fails, or after a commit that did
     /// not complete.
     pub fn export_snapshot(&self) -> Result<Vec<u8>> {
-        // The snapshot holds every commit whole, and none that did not
-        // complete (whose stamped part the store holds).
-        let _commits = self.transaction_manager.hold_commits()?;
-        let nodes = collect_snapshot_nodes(self.lpg_store())?;
-        let edges = collect_snapshot_edges(self.lpg_store());
+        // The snapshot holds every commit whole, none that did not complete
+        // (whose stamped part the store holds), and nothing of a transaction
+        // still open (the hold also holds its writes).
+        let commits = self.transaction_manager.hold_commits()?;
+        let committed = self
+            .checkpoint_sources()
+            .committed(&commits)?
+            .ok_or_else(|| {
+                Error::Query(grafeo_common::utils::error::QueryError::unsupported(
+                    "a snapshot export needs the built-in LPG store",
+                ))
+            })?;
+        let store = &committed.store;
+        let (nodes, edges) = (
+            collect_snapshot_nodes(store)?,
+            collect_snapshot_edges(store),
+        );
 
         // Collect named graphs
         let mut named_graphs: Vec<NamedGraphSnapshot> = Vec::new();
-        for name in self.lpg_store().graph_names() {
-            if let Some(graph_store) = self.lpg_store().graph(&name) {
+        for name in store.graph_names() {
+            if let Some(graph_store) = store.graph(&name) {
                 named_graphs.push(NamedGraphSnapshot {
                     name,
                     nodes: collect_snapshot_nodes(&graph_store)?,
@@ -876,7 +1086,7 @@ impl super::GrafeoDB {
         let rdf_named_graphs = Vec::new();
 
         let schema = collect_schema(&self.catalog);
-        let indexes = collect_index_metadata(self.lpg_store());
+        let indexes = collect_index_metadata(&self.lpg_store());
 
         let snapshot = Snapshot {
             version: SNAPSHOT_VERSION,
@@ -908,25 +1118,34 @@ impl super::GrafeoDB {
     /// snapshot, and duplicate node/edge IDs are rejected. If validation
     /// fails, no database is created.
     ///
+    /// A build without the `triple-store`, `vector-index` or `text-index`
+    /// feature refuses a snapshot that holds RDF triples, or vector or text
+    /// index definitions: it would create the database without them.
+    ///
     /// # Errors
     ///
     /// Returns an error if the snapshot is invalid, contains dangling edge
-    /// references, has duplicate IDs, or deserialization fails.
+    /// references, has duplicate IDs, holds an RDF term that is not an
+    /// N-Triples term, or deserialization fails; and, naming the data and the
+    /// feature, if it holds data this build cannot read.
     pub fn import_snapshot(data: &[u8]) -> Result<Self> {
         if data.is_empty() {
-            return Err(Error::Internal("empty snapshot data".to_string()));
+            return Err(Error::InvalidValue("empty snapshot data".to_string()));
         }
 
         let version = data[0];
         if version != 4 {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "unsupported snapshot version: {version} (expected 4)"
             )));
         }
 
         let config = bincode::config::standard();
         let (snapshot, _): (Snapshot, _) = bincode::serde::decode_from_slice(data, config)
-            .map_err(|e| Error::Internal(format!("snapshot import failed: {e}")))?;
+            .map_err(|e| Error::Serialization(format!("snapshot import failed: {e}")))?;
+        // Before the database is created: this build would import the
+        // snapshot without the data it cannot read.
+        refuse_unreadable_snapshot(&snapshot, "import")?;
 
         // Validate default graph data
         validate_snapshot_data(&snapshot.nodes, &snapshot.edges)?;
@@ -935,9 +1154,11 @@ impl super::GrafeoDB {
         for ng in &snapshot.named_graphs {
             validate_snapshot_data(&ng.nodes, &ng.edges)?;
         }
+        #[cfg(feature = "triple-store")]
+        let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;
 
         let db = Self::new_in_memory();
-        populate_store_from_snapshot(db.lpg_store(), snapshot.nodes, snapshot.edges)?;
+        populate_store_from_snapshot(&db.lpg_store(), snapshot.nodes, snapshot.edges)?;
 
         // Restore epoch from snapshot
         #[cfg(feature = "temporal")]
@@ -968,15 +1189,11 @@ impl super::GrafeoDB {
         // Restore RDF triples
         #[cfg(feature = "triple-store")]
         {
-            populate_rdf_store(&db.rdf_store, &snapshot.rdf_triples);
-            for rng in &snapshot.rdf_named_graphs {
-                let graph = db.rdf_store.graph_or_create(&rng.name);
-                populate_rdf_store(&graph, &rng.triples);
-            }
+            populate_rdf_store(&db.rdf_store, rdf_graphs);
         }
 
         // Restore schema
-        restore_schema_from_snapshot(db.lpg_store(), &db.catalog, &snapshot.schema);
+        restore_schema_from_snapshot(&db.lpg_store(), &db.catalog, &snapshot.schema);
 
         // Restore indexes (must come after data population)
         restore_indexes_from_snapshot(&db, &snapshot.indexes);
@@ -990,18 +1207,26 @@ impl super::GrafeoDB {
     /// [`export_snapshot()`](Self::export_snapshot), so it is plaintext
     /// (snapshots are never encrypted).
     ///
-    /// All validation (duplicate IDs, dangling edge references) is performed
-    /// before any data is modified. If validation fails, the current database
+    /// All validation (duplicate IDs, dangling edge references, RDF terms,
+    /// data this build cannot read) is performed before any data is
+    /// modified. If validation fails, the current database
     /// is left unchanged. If validation passes, the store is cleared and
     /// rebuilt from the snapshot atomically (from the perspective of
     /// subsequent queries).
     ///
+    /// A build without the `triple-store`, `vector-index` or `text-index`
+    /// feature refuses a snapshot that holds RDF triples, or vector or text
+    /// index definitions, and leaves the database as it was: it would restore
+    /// the database without them.
+    ///
     /// # Errors
     ///
     /// Returns an error if the snapshot is invalid, contains dangling edge
-    /// references, has duplicate IDs, or deserialization fails, after a
-    /// commit that did not complete (the restored database could never be
-    /// checkpointed, see [`TransactionManager`](crate::transaction::TransactionManager)),
+    /// references, has duplicate IDs, holds an RDF term that is not an
+    /// N-Triples term or data this build cannot read (naming the data and the
+    /// feature), or deserialization fails, after a commit that did not
+    /// complete (the restored database could never be checkpointed, see
+    /// [`TransactionManager`](crate::transaction::TransactionManager)),
     /// on a read-only database, and the database-closed error after `close()`
     /// of a persistent database (read-only or not).
     pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
@@ -1017,25 +1242,29 @@ impl super::GrafeoDB {
         self.transaction_manager.check_no_incomplete_commit()?;
         self.transaction_manager.check_open()?;
         if data.is_empty() {
-            return Err(Error::Internal("empty snapshot data".to_string()));
+            return Err(Error::InvalidValue("empty snapshot data".to_string()));
         }
 
         let version = data[0];
         if version != 4 {
-            return Err(Error::Internal(format!(
+            return Err(Error::InvalidValue(format!(
                 "unsupported snapshot version: {version} (expected 4)"
             )));
         }
 
         let config = bincode::config::standard();
         let (snapshot, _): (Snapshot, _) = bincode::serde::decode_from_slice(data, config)
-            .map_err(|e| Error::Internal(format!("snapshot restore failed: {e}")))?;
+            .map_err(|e| Error::Serialization(format!("snapshot restore failed: {e}")))?;
 
-        // Validate all data before making any changes
+        // Validate all data before making any changes, and refuse data this
+        // build cannot read, which it would restore the database without.
+        refuse_unreadable_snapshot(&snapshot, "restore")?;
         validate_snapshot_data(&snapshot.nodes, &snapshot.edges)?;
         for ng in &snapshot.named_graphs {
             validate_snapshot_data(&ng.nodes, &ng.edges)?;
         }
+        #[cfg(feature = "triple-store")]
+        let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;
 
         // Drop all existing named graphs, then clear default store
         for name in self.lpg_store().graph_names() {
@@ -1043,7 +1272,7 @@ impl super::GrafeoDB {
         }
         self.lpg_store().clear();
 
-        populate_store_from_snapshot(self.lpg_store(), snapshot.nodes, snapshot.edges)?;
+        populate_store_from_snapshot(&self.lpg_store(), snapshot.nodes, snapshot.edges)?;
 
         // Restore epoch from temporal snapshot
         #[cfg(feature = "temporal")]
@@ -1074,15 +1303,11 @@ impl super::GrafeoDB {
             for name in self.rdf_store.graph_names() {
                 self.rdf_store.drop_graph(&name);
             }
-            populate_rdf_store(&self.rdf_store, &snapshot.rdf_triples);
-            for rng in &snapshot.rdf_named_graphs {
-                let graph = self.rdf_store.graph_or_create(&rng.name);
-                populate_rdf_store(&graph, &rng.triples);
-            }
+            populate_rdf_store(&self.rdf_store, rdf_graphs);
         }
 
         // Restore schema
-        restore_schema_from_snapshot(self.lpg_store(), &self.catalog, &snapshot.schema);
+        restore_schema_from_snapshot(&self.lpg_store(), &self.catalog, &snapshot.schema);
 
         // Restore indexes (must come after data population)
         restore_indexes_from_snapshot(self, &snapshot.indexes);
@@ -1396,6 +1621,55 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
     }
 
+    /// With `temporal`, copies taken while a transaction is open hold none of
+    /// its versions: no property version of the copy is pending (it would
+    /// never be finalized there), and no label it added is there (#412).
+    #[cfg(feature = "temporal")]
+    #[test]
+    fn a_temporal_copy_holds_no_version_of_an_open_transaction() {
+        use grafeo_common::types::EpochId;
+
+        let db = GrafeoDB::new_in_memory();
+        db.execute("INSERT (:Person {name: 'Alix', age: 19})")
+            .unwrap();
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session
+            .execute(
+                "MATCH (p:Person {name: 'Alix'}) SET p.age = 88, p.city = 'Berlin', p:Traveller",
+            )
+            .unwrap();
+
+        let copy = db.to_memory().unwrap();
+        let imported = GrafeoDB::import_snapshot(&db.export_snapshot().unwrap()).unwrap();
+        for (what, copy) in [("to_memory", &copy), ("export_snapshot", &imported)] {
+            let store = copy.lpg_store();
+            let ids = store.all_node_ids();
+            assert_eq!(ids.len(), 1, "{what}: Alix");
+            let mut history = store.node_property_history(ids[0]);
+            history.sort_by(|(a, _), (b, _)| a.cmp(b));
+            let keys: Vec<&str> = history.iter().map(|(key, _)| key.as_str()).collect();
+            assert_eq!(keys, ["age", "name"], "{what}: the committed keys only");
+            assert!(
+                history.iter().all(|(_, versions)| versions
+                    .iter()
+                    .all(|(epoch, _)| *epoch != EpochId::PENDING)),
+                "{what}: no pending version: {history:?}"
+            );
+            let labels = copy
+                .execute("MATCH (p:Person) RETURN labels(p)")
+                .unwrap()
+                .rows()[0][0]
+                .clone();
+            assert_eq!(
+                labels,
+                Value::List(vec![Value::from("Person")].into()),
+                "{what}: the committed labels"
+            );
+        }
+        session.rollback().unwrap();
+    }
+
     // --- to_memory() ---
 
     #[test]
@@ -1546,6 +1820,117 @@ mod tests {
 
         // DB unchanged
         assert_eq!(db.lpg_store().node_count(), 1);
+    }
+
+    /// A snapshot holding a value nested deeper than a database can store is
+    /// refused before anything is imported, naming the node or edge and the
+    /// property, as a write of the value is.
+    #[test]
+    fn a_snapshot_with_a_value_nested_too_deep_is_refused() {
+        use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+        use grafeo_common::types::EpochId;
+
+        let mut deep = Value::from("Berlin");
+        for _ in 0..=MAX_PROPERTY_VALUE_DEPTH {
+            deep = Value::List(vec![deep].into());
+        }
+        let node = |id: u64, value: &Value| SnapshotNode {
+            id: NodeId::new(id),
+            labels: vec!["City".into()],
+            properties: vec![(
+                "trips".into(),
+                vec![
+                    (EpochId::new(3), value.clone()),
+                    (EpochId::new(19), Value::Int64(88)),
+                ],
+            )],
+        };
+        let deep_node = make_snapshot(
+            SNAPSHOT_VERSION,
+            vec![node(0, &Value::Null), node(3, &deep)],
+            vec![],
+        );
+        let deep_edge = make_snapshot(
+            SNAPSHOT_VERSION,
+            vec![node(0, &Value::Null)],
+            vec![SnapshotEdge {
+                id: EdgeId::new(19),
+                src: NodeId::new(0),
+                dst: NodeId::new(0),
+                edge_type: "ROUTE".into(),
+                properties: vec![("stops".into(), vec![(EpochId::new(3), deep.clone())])],
+            }],
+        );
+        for (bytes, words) in [
+            (&deep_node, "node 3, property \"trips\""),
+            (&deep_edge, "edge 19, property \"stops\""),
+        ] {
+            let error = GrafeoDB::import_snapshot(bytes).err().expect(words);
+            assert!(
+                matches!(error, grafeo_common::utils::error::Error::InvalidValue(_)),
+                "an invalid value: {error:?}"
+            );
+            let error = error.to_string();
+            assert!(error.contains(words), "{words}: {error}");
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:City {name: 'Amsterdam'})").unwrap();
+            let error = db.restore_snapshot(bytes).unwrap_err().to_string();
+            assert!(error.contains(words), "{words}: {error}");
+            assert_eq!(
+                db.lpg_store().node_count(),
+                1,
+                "a refused restore changes nothing"
+            );
+        }
+    }
+
+    /// The direct API and statements (through a parameter, the way a value
+    /// deeper than any literal reaches them) refuse a value nested deeper
+    /// than a database can store, and write nothing; the deepest one passes.
+    #[test]
+    fn writes_refuse_a_value_nested_too_deep() {
+        use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+
+        let nested = |depth: usize| {
+            let mut value = Value::from("Paris");
+            for _ in 0..depth {
+                value = Value::List(vec![value].into());
+            }
+            value
+        };
+        // A limit on input: an invalid value, never an internal error.
+        let invalid = |error: grafeo_common::utils::error::Error, what: &str| {
+            assert!(
+                matches!(error, grafeo_common::utils::error::Error::InvalidValue(_)),
+                "{what}: {error:?}"
+            );
+            let message = error.to_string();
+            assert!(message.contains("\"trips\""), "{what}: {message}");
+            assert!(message.contains("GRAFEO-V"), "{what}: {message}");
+        };
+        let db = GrafeoDB::new_in_memory();
+        let alix = db.create_node(&["Person"]).unwrap();
+        let too_deep = nested(MAX_PROPERTY_VALUE_DEPTH + 1);
+        invalid(
+            db.set_node_property(alix, "trips", too_deep.clone())
+                .unwrap_err(),
+            "set_node_property",
+        );
+        invalid(
+            db.create_node_with_props(&["Person"], [("trips", too_deep.clone())])
+                .unwrap_err(),
+            "create_node_with_props",
+        );
+        let params = [("trips".to_string(), too_deep)].into_iter().collect();
+        invalid(
+            db.execute_with_params("INSERT (:Person {trips: $trips})", params)
+                .unwrap_err(),
+            "an INSERT parameter",
+        );
+        assert_eq!(db.node_count(), 1, "nothing was written");
+
+        db.set_node_property(alix, "trips", nested(MAX_PROPERTY_VALUE_DEPTH))
+            .unwrap();
     }
 
     #[test]
@@ -1759,7 +2144,7 @@ mod tests {
 
         // Text search should work on the restored database
         let results = db2
-            .text_search("Article", "body", "graph database", 10)
+            .text_search("Article", "body", "graph database", 10, None)
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, n1);

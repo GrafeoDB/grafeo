@@ -7,6 +7,8 @@
 //! outer nodes and edges and its expressions read the outer values, and an
 //! aggregate counts its rows (for `EXISTS`, up to one). The count becomes a
 //! column of the row that the expression reads in place of the subquery.
+//! Below a write, every subquery runs so, after the whole input is read: it
+//! then sees what all the rows wrote, also those after its own.
 
 use std::collections::HashSet;
 
@@ -27,16 +29,19 @@ impl super::Planner {
     /// check cannot answer (outside a list comprehension, list predicate or
     /// `reduce`, whose subqueries read the item variable). With the row's
     /// `columns`, also one that shares no variable with the row (see
-    /// [`Self::edge_check_answers`]).
+    /// [`Self::edge_check_answers`]). Below a write (`input_writes`), any
+    /// subquery: the edge check runs as each row arrives, before the rows
+    /// after it have written.
     pub(super) fn has_subquery_to_lift(
         &self,
         expression: &LogicalExpression,
         columns: Option<&[String]>,
+        input_writes: bool,
     ) -> bool {
         let mut expression = expression.clone();
         let mut found = false;
         let _ = visit_subqueries(&mut expression, &mut |subquery| {
-            found |= !self.edge_check_answers(subquery, columns);
+            found |= input_writes || !self.edge_check_answers(subquery, columns);
             Ok(())
         });
         found
@@ -47,7 +52,8 @@ impl super::Planner {
     /// column with its count. Returns the expression with each such subquery
     /// replaced by a read of that column (`> 0` for `EXISTS`), and the input
     /// and columns with the new ones. `input_writes`: whether the input's
-    /// plan writes (see [`Self::plan_counted_subquery`]).
+    /// plan writes, which lifts every subquery (see
+    /// [`Self::has_subquery_to_lift`] and [`Self::plan_counted_subquery`]).
     pub(super) fn lift_subqueries(
         &self,
         expression: &LogicalExpression,
@@ -57,7 +63,7 @@ impl super::Planner {
     ) -> Result<(LogicalExpression, Box<dyn Operator>, Vec<String>)> {
         let mut expression = expression.clone();
         visit_subqueries(&mut expression, &mut |subquery| {
-            if self.edge_check_answers(subquery, Some(&columns)) {
+            if !input_writes && self.edge_check_answers(subquery, Some(&columns)) {
                 return Ok(());
             }
             let column = self.next_subquery_column(&columns);
@@ -119,7 +125,7 @@ impl super::Planner {
     ) -> Result<(Option<Vec<ReturnItem>>, Box<dyn Operator>, Vec<String>)> {
         if !items
             .iter()
-            .any(|item| self.has_subquery_to_lift(&item.expression, Some(&columns)))
+            .any(|item| self.has_subquery_to_lift(&item.expression, Some(&columns), input_writes))
         {
             return Ok((None, input, columns));
         }
@@ -145,10 +151,9 @@ impl super::Planner {
         mut columns: Vec<String>,
         input_writes: bool,
     ) -> Result<(Option<Vec<Projection>>, Box<dyn Operator>, Vec<String>)> {
-        if !projections
-            .iter()
-            .any(|projection| self.has_subquery_to_lift(&projection.expression, Some(&columns)))
-        {
+        if !projections.iter().any(|projection| {
+            self.has_subquery_to_lift(&projection.expression, Some(&columns), input_writes)
+        }) {
             return Ok((None, input, columns));
         }
         let mut lifted = Vec::with_capacity(projections.len());
@@ -215,8 +220,8 @@ impl super::Planner {
     /// Plans `subplan` once per row of `outer`, counting its rows (up to one
     /// when `exists`), as a correlated `Apply` that adds the count as `column`.
     /// A subquery that shares nothing with the row is counted once and joined
-    /// to every row; below a write (`input_writes`) after all the rows are read,
-    /// so the count sees what they wrote.
+    /// to every row. Below a write (`input_writes`) it is counted after all
+    /// the rows are read, so the count sees what they wrote.
     fn plan_counted_subquery(
         &self,
         outer: Box<dyn Operator>,
@@ -296,8 +301,9 @@ impl super::Planner {
 
     /// Joins `inner`, which gives the `added` column and at most one row, to
     /// each row of `outer`, with the `shared` columns of the row as its
-    /// parameters. With nothing shared it runs once; below a write
-    /// (`input_writes`) after all the rows are read, so it sees what they wrote.
+    /// parameters (with nothing shared it runs once). Below a write
+    /// (`input_writes`) it runs after all the rows are read, so it sees what
+    /// they wrote.
     fn join_per_row(
         &self,
         outer: Box<dyn Operator>,
@@ -307,8 +313,9 @@ impl super::Planner {
         added: &AddedColumn<'_>,
         input_writes: bool,
     ) -> Result<Box<dyn Operator>> {
+        // After a write the subquery reads the store as the write left it.
         if shared.is_empty() {
-            let (inner, _) = self.plan_operator(inner)?;
+            let (inner, _) = self.plan_after_a_write(input_writes, inner)?;
             self.scalar_columns
                 .borrow_mut()
                 .insert(added.name.to_string());
@@ -336,18 +343,20 @@ impl super::Planner {
         let previous = self
             .correlated_param_state
             .replace(Some(Arc::clone(&state)));
-        let planned = self.plan_operator(inner);
+        let planned = self.plan_after_a_write(input_writes, inner);
         *self.correlated_param_state.borrow_mut() = previous;
         let (inner, _) = planned?;
         self.scalar_columns
             .borrow_mut()
             .insert(added.name.to_string());
-        let apply = ApplyOperator::new_correlated(outer, inner, state, indices);
-        Ok(Box::new(if added.optional {
-            apply.with_optional(1)
-        } else {
-            apply
-        }))
+        let mut apply = ApplyOperator::new_correlated(outer, inner, state, indices);
+        if added.optional {
+            apply = apply.with_optional(1);
+        }
+        if input_writes {
+            apply = apply.with_outer_first();
+        }
+        Ok(Box::new(apply))
     }
 }
 

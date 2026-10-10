@@ -169,7 +169,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("not registered"),
+            err.contains("no embedding model is registered as 'nonexistent'"),
             "Error should mention model not registered: {err}"
         );
     }

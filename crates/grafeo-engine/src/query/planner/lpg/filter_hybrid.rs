@@ -44,10 +44,15 @@ impl super::Planner {
         &self,
         filter: &super::FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        // Only push down when input is a full label scan (no nested input)
+        // Only push down when input is a full label scan (no nested input):
+        // the search finds the nodes alone, so a scan per input row (a later
+        // MATCH, an UNWIND) checks the predicate per row instead.
         let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
             return Ok(None);
         };
+        if scan.input.is_some() {
+            return Ok(None);
+        }
         let Some(ref label) = scan.label else {
             return Ok(None);
         };
@@ -229,9 +234,14 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // A full label scan only: a scan per input row checks the predicate
+        // per row (see `try_plan_filter_with_text_index`).
         let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
             return Ok(None);
         };
+        if scan.input.is_some() {
+            return Ok(None);
+        }
         let Some(ref label) = scan.label else {
             return Ok(None);
         };

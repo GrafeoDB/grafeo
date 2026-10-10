@@ -521,7 +521,6 @@ fn a_commit_failing_after_its_wal_records_is_replayed_whole_on_reopen() {
 /// Under memory pressure a compacted database merges its overlay into the
 /// base, which has no versions: after a failed commit the merge would make
 /// the commit's stamped part visible, so it does not run.
-#[cfg(feature = "compact-store")]
 #[test]
 fn a_memory_pressure_merge_never_folds_a_failed_commit_into_the_base() {
     let mut db = GrafeoDB::new_in_memory();
@@ -659,10 +658,9 @@ fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
     assert_refused(&db, "to_memory", db.to_memory().map(drop));
     assert_refused(&db, "export_snapshot", db.export_snapshot().map(drop));
     assert_refused(&db, "backup_full", db.backup_full(&backups).map(drop));
-    #[cfg(feature = "compact-store")]
     let db = {
         let mut db = db;
-        let outcome = db.compact();
+        let outcome = db.compact().map(drop);
         assert_refused(&db, "compact", outcome);
         db
     };

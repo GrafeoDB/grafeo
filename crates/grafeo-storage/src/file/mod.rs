@@ -20,6 +20,28 @@
 //! points at the first directory block of its image; the valid header with
 //! the higher iteration is the active one.
 //!
+//! ## Sections and chunks
+//!
+//! Each section of an image is a sequence of chunks: a checkpoint hands the
+//! container's writer to [`Section::write_to`], which writes the section's
+//! chunks one at a time, and a read serves them back to
+//! [`Section::read_from`] through an
+//! [`ImageSource`](grafeo_common::storage::ImageSource). Every chunk is stored
+//! on pages of its own, and its directory entry names its section type and
+//! version, its [`ChunkKind`], graph, column, rows and codec, and holds the
+//! CRC-32 of its stored bytes. The container treats the bytes as opaque: it
+//! refuses two chunks of one section with one identity (kind, graph, column,
+//! first row), and skips a chunk of an unknown section type or chunk kind only
+//! when its entry marks it optional.
+//!
+//! A section of a checkpoint writes a metadata chunk and its column chunks or
+//! stream pieces. A raw chunk holds a section whole: a 0.5.x file holds
+//! each section as one, and the catalog section is still written so.
+//!
+//! [`Section::write_to`]: grafeo_common::storage::Section::write_to
+//! [`Section::read_from`]: grafeo_common::storage::Section::read_from
+//! [`ChunkKind`]: grafeo_common::storage::ChunkKind
+//!
 //! ## Crash safety
 //!
 //! Checkpoints are copy-on-write ([`GrafeoFileManager::write_checkpoint`]):

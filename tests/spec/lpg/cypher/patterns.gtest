@@ -97,6 +97,32 @@ tests:
         - [Gus]
         - [Vincent]
 
+  # openCypher 9 RelationshipTypes also writes alternatives as :A|:B
+  - name: alternative_relationship_types_with_a_colon_each
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
+      - "MATCH (a:Person {name: 'Alix'}) CREATE (a)-[:FOLLOWS]->(:Person {name: 'Vincent'})"
+    query: "MATCH (a:Person {name: 'Alix'})-[:KNOWS|:FOLLOWS*1..2]->(b) RETURN b.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  # A relationship has one type: a second colon is an error, not the
+  # alternatives KNOWS or FOLLOWS
+  - name: a_second_relationship_type_is_an_error
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
+    query: "MATCH (a:Person {name: 'Alix'})-[:KNOWS:FOLLOWS]->(b) RETURN b.name"
+    expect:
+      error: "write :`KNOWS:FOLLOWS` for the type named KNOWS:FOLLOWS, or :KNOWS|FOLLOWS to match either type"
+
+  # A created relationship gets one type, not alternatives
+  - name: a_created_relationship_with_alternative_types_is_an_error
+    query: "CREATE (:Person {name: 'Alix'})-[:KNOWS|FOLLOWS]->(:Person {name: 'Gus'})"
+    expect:
+      error: "CREATE gives a relationship one type: :KNOWS|FOLLOWS names alternatives"
+
   - name: relationship_properties
     setup:
       - "CREATE (:Person {name: 'Alix'})-[:KNOWS {since: 2020}]->(:Person {name: 'Gus'})"
@@ -234,3 +260,267 @@ tests:
     expect:
       rows:
         - [Alix]
+
+  # ---------------------------------------------------------------------------
+  # Pattern comprehensions read the row (openCypher 9 TCK Pattern2): the
+  # variables of the row a comprehension names, at either end of its pattern
+  # or in its WHERE and projection, are the row's; the others are its own.
+  # A comprehension used to import only its first node, so one that starts
+  # from a new node failed, and a bound node later in its pattern matched any
+  # node.
+  # ---------------------------------------------------------------------------
+
+  - name: pattern_comprehension_without_a_match
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: "RETURN [(a:Person {name: 'Alix'})-[:KNOWS]->(b) | b.name] AS names, size([(a:Person)-[:KNOWS]->(b) | b]) AS links"
+    expect:
+      rows:
+        - ["[Gus]", 2]
+
+  - name: pattern_comprehension_without_a_row_anchor
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: "UNWIND [3, 19] AS i RETURN i, size([(w:Person) | w]) AS people ORDER BY i"
+    expect:
+      ordered: true
+      rows:
+        - [3, 4]
+        - [19, 4]
+
+  - name: pattern_comprehension_reads_a_value_of_the_row
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: |
+      UNWIND ['Gus', 'Jules'] AS wanted
+      RETURN wanted, [(a:Person)-[:KNOWS]->(b:Person {name: wanted}) | a.name] AS who
+      ORDER BY wanted
+    expect:
+      ordered: true
+      rows:
+        - [Gus, "[Alix]"]
+        - [Jules, "[Mia]"]
+
+  - name: pattern_comprehension_from_a_bound_node_reads_a_value_of_the_row
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus', k: 3}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules', k: 88})"
+    query: |
+      UNWIND [3, 88] AS k
+      MATCH (a:Person {name: 'Alix'})
+      RETURN k, [(a)-[:KNOWS]->(b) WHERE b.k = k | b.name + '/' + toString(k)] AS hits
+      ORDER BY k
+    expect:
+      ordered: true
+      rows:
+        - [3, "[Gus/3]"]
+        - [88, "[]"]
+
+  - name: pattern_comprehension_between_two_bound_nodes
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: |
+      MATCH (a:Person), (b:Person)
+      WHERE a.name IN ['Alix', 'Mia'] AND b.name IN ['Gus', 'Jules']
+      RETURN a.name, b.name, size([(a)-[:KNOWS]->(b) | 1]) AS links
+      ORDER BY a.name, b.name
+    expect:
+      ordered: true
+      rows:
+        - [Alix, Gus, 1]
+        - [Alix, Jules, 0]
+        - [Mia, Gus, 0]
+        - [Mia, Jules, 1]
+
+  - name: pattern_comprehension_to_a_bound_node
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: "MATCH (b:Person {name: 'Gus'}) RETURN [(x)-[:KNOWS]->(b) | x.name] AS who"
+    expect:
+      rows:
+        - ["[Alix]"]
+
+  # The label of a bound first node still holds: Mia is no :Admin.
+  - name: pattern_comprehension_checks_the_label_of_a_bound_node
+    setup:
+      - "CREATE (:Person:Admin {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: |
+      MATCH (n:Person) WHERE n.name IN ['Alix', 'Mia']
+      RETURN n.name, [(n:Admin)-[:KNOWS]->(b) | b.name] AS names
+      ORDER BY n.name
+    expect:
+      ordered: true
+      rows:
+        - [Alix, "[Gus]"]
+        - [Mia, "[]"]
+
+  # ---------------------------------------------------------------------------
+  # Variables named like the ones the translator makes up for anonymous
+  # nodes, relationships and MERGE elements are the user's own: they used to
+  # alias the first anonymous element, so `(_anon_0)-->()` matched only
+  # self-loops and a MERGE rebound the user's `_merge_0`.
+  # ---------------------------------------------------------------------------
+
+  - name: user_variable_spelled_like_an_anonymous_node
+    setup:
+      - "CREATE (:N {id: 3})-[:T]->(:N {id: 19}), (:N {id: 88})-[:T]->(:N {id: 1})"
+    query: "MATCH (_anon_0)-->() RETURN _anon_0.id AS id ORDER BY id"
+    expect:
+      ordered: true
+      rows:
+        - [3]
+        - [88]
+
+  - name: user_variables_spelled_like_two_anonymous_nodes
+    setup:
+      - "CREATE (:N {id: 3})-[:T]->(:N {id: 19})-[:T]->(:N {id: 88})"
+    query: "MATCH ()-->(_anon_1)-->(_anon_0) RETURN _anon_1.id AS mid, _anon_0.id AS last"
+    expect:
+      rows:
+        - [19, 88]
+
+  - name: user_variable_spelled_like_a_merged_node
+    setup:
+      - "CREATE (:N {id: 3})"
+    query: "MATCH (_merge_0:N) MERGE (:M {id: 19}) RETURN _merge_0.id AS id"
+    expect:
+      rows:
+        - [3]
+
+  # The key used to share its column with the aggregate under `> 0`, so
+  # every row showed the first key.
+  - name: grouping_key_spelled_like_an_aggregate_column
+    query: "UNWIND [3, 19] AS _agg_0 RETURN _agg_0, count(*) > 0 AS any ORDER BY _agg_0"
+    expect:
+      ordered: true
+      rows:
+        - [3, true]
+        - [19, true]
+
+  - name: user_variable_spelled_like_a_merged_relationship
+    setup:
+      - "CREATE (:N {id: 3}), (:N {id: 19})"
+    query: "MATCH (_merge_rel_0:N {id: 3}), (b:N {id: 19}) MERGE (_merge_rel_0)-[:T]->(b) RETURN _merge_rel_0.id AS id"
+    expect:
+      rows:
+        - [3]
+
+  # ---------------------------------------------------------------------------
+  # Relationship uniqueness (openCypher 9): a MATCH binds a relationship at
+  # most once, across all its patterns and the hops of its variable-length
+  # ones, so one relationship never serves two hops. Grafeo's Cypher used to
+  # match relationships homomorphically, as GQL does by default. The graph:
+  # KNOWS Alix->Gus (w 1), Gus->Vincent (2), Vincent->Alix (3) and a second
+  # Alix->Gus (4).
+  # ---------------------------------------------------------------------------
+
+  - name: one_relationship_never_serves_two_hops
+    setup:
+      - "CREATE (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus)"
+    query: "MATCH (a)-[r1:KNOWS]->(b)<-[r2:KNOWS]-(c) RETURN r1.w AS r1, r2.w AS r2"
+    expect:
+      rows:
+        - [1, 4]
+        - [4, 1]
+
+  # Each middle node with d KNOWS relationships gives d * (d - 1) pairs:
+  # Alix 6, Gus 6, Vincent 2 (22 walks went back over the same one).
+  - name: an_undirected_two_hop_pattern_never_goes_back_over_its_relationship
+    setup:
+      - "CREATE (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus)"
+    query: "MATCH (a)-[:KNOWS]-(b)-[:KNOWS]-(c) RETURN count(*) AS n"
+    expect:
+      rows:
+        - [14]
+
+  # openCypher TCK Match3 [29] raises RelationshipUniquenessViolation here;
+  # Grafeo returns no rows, as the pattern cannot match.
+  - name: a_relationship_variable_twice_in_a_pattern_matches_nothing
+    setup:
+      - "CREATE (mia:Person {name: 'Mia'}), (mia)-[:LIKES]->(mia)"
+    query: "MATCH (a)-[r]->(b)-[r]->(c) RETURN a.name"
+    expect:
+      empty: true
+
+  # The trails from Gus: to Vincent, on to Alix, and back to Gus over either
+  # of Alix's relationships; from there only relationship 2 leads on, taken
+  # already. The unbounded pattern ends on its own.
+  - name: a_variable_length_relationship_repeats_no_relationship
+    setup:
+      - "CREATE (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus)"
+    query: "MATCH p = (g:Person {name: 'Gus'})-[:KNOWS*]->(c) RETURN c.name AS c, length(p) AS len"
+    expect:
+      rows:
+        - [Vincent, 1]
+        - [Alix, 2]
+        - [Gus, 3]
+        - [Gus, 3]
+
+  # A variable-length relationship takes no relationship another pattern of
+  # the MATCH binds.
+  - name: a_variable_length_relationship_takes_no_relationship_of_another_pattern
+    setup:
+      - "CREATE (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus)"
+    query: "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b)-[rs:KNOWS*1..3]->(c) RETURN r.w AS r, [x IN rs | x.w] AS rs"
+    expect:
+      rows:
+        - [1, "[2]"]
+        - [1, "[2, 3]"]
+        - [1, "[2, 3, 4]"]
+        - [4, "[2]"]
+        - [4, "[2, 3]"]
+        - [4, "[2, 3, 1]"]
+
+  # An unbounded pattern used to stop after 101 hops.
+  - name: an_unbounded_pattern_reaches_past_a_hundred_hops
+    setup:
+      - "UNWIND range(0, 104) AS i CREATE (:Step {i: i})"
+      - "MATCH (a:Step), (b:Step) WHERE b.i = a.i + 1 CREATE (a)-[:NEXT]->(b)"
+    query: "MATCH (a:Step {i: 0})-[:NEXT*]->(b:Step {i: 104}) RETURN count(*) AS n"
+    expect:
+      rows:
+        - [1]
+
+  # openCypher TCK Match4 [7]
+  - name: tck_match4_7_a_bound_relationship_between_variable_length_patterns
+    setup:
+      - "CREATE (n0:Node), (n1:Node), (n2:Node), (n3:Node), (n0)-[:EDGE]->(n1), (n1)-[:EDGE]->(n2), (n2)-[:EDGE]->(n3)"
+    query: "MATCH ()-[r:EDGE]-() MATCH p = (n)-[*0..1]-()-[r]-()-[*0..1]-(m) RETURN count(p) AS c"
+    expect:
+      rows:
+        - [32]
+
+  # openCypher TCK Match3 [17] and [18]: relationships of different types are
+  # never one relationship.
+  - name: tck_match3_17_handling_cyclic_patterns
+    setup:
+      - "CREATE (a {name: 'a'}), (b {name: 'b'}), (c {name: 'c'}), (a)-[:A]->(b), (b)-[:B]->(a), (b)-[:B]->(c)"
+    query: "MATCH (a)-[:A]->()-[:B]->(a) RETURN a.name"
+    expect:
+      rows:
+        - [a]
+
+  - name: tck_match3_18_handling_cyclic_patterns_in_two_parts
+    setup:
+      - "CREATE (a {name: 'a'}), (b {name: 'b'}), (c {name: 'c'}), (a)-[:A]->(b), (b)-[:B]->(a), (b)-[:B]->(c)"
+    query: "MATCH (a)-[:A]->(b), (b)-[:B]->(a) RETURN a.name"
+    expect:
+      rows:
+        - [a]
+
+  # The rule holds per MATCH: a later MATCH may bind the relationship again.
+  - name: separate_matches_may_bind_one_relationship
+    setup:
+      - "CREATE (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (alix)-[:KNOWS {w: 1}]->(gus)"
+    query: "MATCH (a)-[r1:KNOWS]->(b) MATCH (c)-[r2:KNOWS]->(b) RETURN r1.w AS r1, r2.w AS r2"
+    expect:
+      rows:
+        - [1, 1]
+
+  # A pattern comprehension binds each relationship once as well.
+  - name: a_pattern_comprehension_binds_each_relationship_once
+    setup:
+      - "CREATE (mia:Person {name: 'Mia'}), (mia)-[:LIKES]->(mia)"
+    query: "MATCH (m:Person) RETURN [(m)-->(x)-->(y) | y.name] AS names"
+    expect:
+      rows:
+        - ["[]"]

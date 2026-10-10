@@ -1,5 +1,8 @@
 //! Filter operator for applying predicates.
 
+use super::project::{
+    field_type, holds_entities, item_type_at, list_type, reversed_type, slice_type, struct_type,
+};
 use super::{Operator, OperatorResult};
 use crate::execution::{ChunkZoneHints, DataChunk, SelectionVector, ValueVector};
 use crate::graph::Direction;
@@ -918,6 +921,49 @@ impl ExpressionPredicate {
         }
     }
 
+    /// The node `expr` yields at `row`: the node of a node variable, or a
+    /// node taken from a list, a map or a function (`head(ns)`, `x.msg`,
+    /// `startNode(r)`, see [`shape`](Self::shape)).
+    fn node_of(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<Node> {
+        let id = match expr {
+            FilterExpression::Variable(var) => chunk
+                .column(*self.variable_columns.get(var)?)?
+                .get_node_id(row)?,
+            _ => NodeId::new(self.entity_id(expr, &LogicalType::Node, chunk, row)?),
+        };
+        self.resolve_node(id)
+    }
+
+    /// The edge `expr` yields at `row`, as [`node_of`](Self::node_of) finds
+    /// a node.
+    fn edge_of(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<Edge> {
+        let id = match expr {
+            FilterExpression::Variable(var) => chunk
+                .column(*self.variable_columns.get(var)?)?
+                .get_edge_id(row)?,
+            _ => EdgeId::new(self.entity_id(expr, &LogicalType::Edge, chunk, row)?),
+        };
+        self.resolve_edge(id)
+    }
+
+    /// The ID `expr` yields at `row` when it yields a `kind` (a node or an
+    /// edge) by its [`shape`](Self::shape).
+    fn entity_id(
+        &self,
+        expr: &FilterExpression,
+        kind: &LogicalType,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<u64> {
+        if self.shape(expr, chunk, row) != *kind {
+            return None;
+        }
+        match self.eval_expr(expr, chunk, row)? {
+            Value::Int64(id) => u64::try_from(id).ok(),
+            _ => None,
+        }
+    }
+
     /// Evaluates the expression for a specific row in a chunk, returning the result value.
     /// This is useful for evaluating expressions in contexts like RETURN clauses.
     pub fn eval_at(&self, chunk: &DataChunk, row: usize) -> Option<Value> {
@@ -951,12 +997,12 @@ impl ExpressionPredicate {
                 {
                     return edge.get_property(property).cloned();
                 }
-                // Try as map value (e.g. from UNWIND with map elements)
-                if let Some(Value::Map(map)) = col.get_value(row) {
-                    let key = grafeo_common::types::PropertyKey::new(property);
-                    return map.get(&key).cloned();
+                match col.get_value(row)? {
+                    // A key of a map value (e.g. from UNWIND with map elements)
+                    Value::Map(map) => map.get(&PropertyKey::new(property)).cloned(),
+                    // A component of a temporal value (`d.month`)
+                    value => value.temporal_component(property),
                 }
-                None
             }
             FilterExpression::Binary { left, op, right } => {
                 // For IN operator, right side is a list that we evaluate specially
@@ -986,25 +1032,27 @@ impl ExpressionPredicate {
             FilterExpression::FunctionCall { name, args } => {
                 self.eval_function(name, args, chunk, row)
             }
+            // A list literal has one item per expression and a map literal one
+            // entry per key: an expression without a value (a property of a
+            // null entity, a property the entity does not have) is a null.
             FilterExpression::List(items) => {
                 let values: Vec<Value> = items
                     .iter()
-                    .filter_map(|item| self.eval_expr(item, chunk, row))
+                    .map(|item| self.eval_expr(item, chunk, row).unwrap_or(Value::Null))
                     .collect();
                 Some(Value::List(values.into()))
             }
             FilterExpression::Map(pairs) => {
                 let mut map = BTreeMap::new();
                 for (k, v) in pairs {
-                    if let Some(val) = self.eval_expr(v, chunk, row) {
-                        if k == "*" {
-                            // AllProperties marker: flatten the inner map into the result
-                            if let Value::Map(inner) = val {
-                                map.extend(inner.iter().map(|(pk, pv)| (pk.clone(), pv.clone())));
-                            }
-                        } else {
-                            map.insert(PropertyKey::new(k.as_str()), val);
+                    let val = self.eval_expr(v, chunk, row);
+                    if k == "*" {
+                        // AllProperties marker: flatten the inner map into the result
+                        if let Some(Value::Map(inner)) = val {
+                            map.extend(inner.iter().map(|(pk, pv)| (pk.clone(), pv.clone())));
                         }
+                    } else {
+                        map.insert(PropertyKey::new(k.as_str()), val.unwrap_or(Value::Null));
                     }
                 }
                 Some(Value::Map(Arc::new(map)))
@@ -1037,7 +1085,8 @@ impl ExpressionPredicate {
                             clippy::cast_sign_loss
                         )]
                         let idx = if *i < 0 {
-                            let len = s.len() as i64;
+                            // From the end, in characters as the index counts
+                            let len = s.chars().count() as i64;
                             (len + i) as usize
                         } else {
                             *i as usize
@@ -1050,6 +1099,15 @@ impl ExpressionPredicate {
                         let prop_key = PropertyKey::new(key.as_str());
                         m.get(&prop_key).cloned()
                     }
+                    // A component of a temporal property (`n.born.month`).
+                    (
+                        Value::Date(_)
+                        | Value::Time(_)
+                        | Value::Timestamp(_)
+                        | Value::ZonedDatetime(_)
+                        | Value::Duration(_),
+                        Value::String(key),
+                    ) => base_val.temporal_component(key),
                     (_, Value::String(key)) => {
                         // Node/edge bracket access: n['name'] looks up a property
                         // via the store when the base variable refers to a node or edge.
@@ -1068,19 +1126,20 @@ impl ExpressionPredicate {
                                 return edge.get_property(key.as_str()).cloned();
                             }
                         }
-                        // One item of a node or edge list (`rs[0].w`,
-                        // `head(rs).w`) is the ID of a node or edge.
+                        // A node or edge taken from a list, a map or a
+                        // function (`rs[0].w`, `head(rs).w`, `x.msg.id`,
+                        // `startNode(r).name`) is its ID.
                         if let Value::Int64(id) = &base_val
                             && let Ok(id) = u64::try_from(*id)
                         {
-                            return match self.element_kind(base, chunk) {
-                                ItemKind::Node => self
+                            return match self.shape(base, chunk, row) {
+                                LogicalType::Node => self
                                     .resolve_node(NodeId::new(id))
                                     .and_then(|node| node.get_property(key.as_str()).cloned()),
-                                ItemKind::Edge => self
+                                LogicalType::Edge => self
                                     .resolve_edge(EdgeId::new(id))
                                     .and_then(|edge| edge.get_property(key.as_str()).cloned()),
-                                ItemKind::Value => None,
+                                _ => None,
                             };
                         }
                         None
@@ -1214,12 +1273,12 @@ impl ExpressionPredicate {
                 filter_expr,
                 map_expr,
             } => {
-                let kind = self.item_kind(list_expr, chunk);
+                let shape = self.shape(list_expr, chunk, row);
                 let items = Self::list_items(self.eval_expr(list_expr, chunk, row)?)?;
                 let mut scope = ItemScope::new(self, &[variable], chunk, row);
                 let mut result = Vec::with_capacity(items.len());
-                for item in &items {
-                    scope.bind(0, item, kind);
+                for (position, item) in items.iter().enumerate() {
+                    scope.bind(0, item, &item_shape(&shape, position));
                     let passes = filter_expr
                         .as_ref()
                         .is_none_or(|filter| matches!(scope.eval(filter), Some(Value::Bool(true))));
@@ -1235,12 +1294,12 @@ impl ExpressionPredicate {
                 list_expr,
                 predicate,
             } => {
-                let item_kind = self.item_kind(list_expr, chunk);
+                let shape = self.shape(list_expr, chunk, row);
                 let items = Self::list_items(self.eval_expr(list_expr, chunk, row)?)?;
                 let mut scope = ItemScope::new(self, &[variable], chunk, row);
                 let mut match_count = 0usize;
-                for item in &items {
-                    scope.bind(0, item, item_kind);
+                for (position, item) in items.iter().enumerate() {
+                    scope.bind(0, item, &item_shape(&shape, position));
                     if matches!(scope.eval(predicate), Some(Value::Bool(true))) {
                         match_count += 1;
                     }
@@ -1307,13 +1366,13 @@ impl ExpressionPredicate {
                 list,
                 expression,
             } => {
-                let kind = self.item_kind(list, chunk);
+                let shape = self.shape(list, chunk, row);
                 let mut acc = self.eval_expr(initial, chunk, row)?;
                 let items = Self::list_items(self.eval_expr(list, chunk, row)?)?;
                 let mut scope = ItemScope::new(self, &[accumulator, variable], chunk, row);
-                for item in &items {
-                    scope.bind(0, &acc, ItemKind::Value);
-                    scope.bind(1, item, kind);
+                for (position, item) in items.iter().enumerate() {
+                    scope.bind(0, &acc, &LogicalType::Any);
+                    scope.bind(1, item, &item_shape(&shape, position));
                     acc = scope.eval(expression)?;
                 }
                 Some(acc)
@@ -1358,47 +1417,81 @@ impl ExpressionPredicate {
         }
     }
 
-    /// What one item taken from a list refers to: `list[i]`, `head(list)`
-    /// and `last(list)` are nodes or edges when the items of `list` are.
-    fn element_kind(&self, expr: &FilterExpression, chunk: &DataChunk) -> ItemKind {
-        match expr {
-            FilterExpression::IndexAccess { base, .. } => self.item_kind(base, chunk),
-            FilterExpression::FunctionCall { name, args, .. }
-                if name.eq_ignore_ascii_case("head") || name.eq_ignore_ascii_case("last") =>
-            {
-                args.first()
-                    .map_or(ItemKind::Value, |list| self.item_kind(list, chunk))
-            }
-            _ => ItemKind::Value,
-        }
-    }
-
-    /// What the items of `list_expr` refer to: edges for `edges(p)`,
-    /// `relationships(p)` and the variable of a variable-length edge pattern,
-    /// nodes for `nodes(p)`, also after `reverse`, `tail` or a slice.
-    fn item_kind(&self, list_expr: &FilterExpression, chunk: &DataChunk) -> ItemKind {
-        match list_expr {
-            FilterExpression::FunctionCall { name, args, .. } => {
-                match name.to_lowercase().as_str() {
-                    "edges" | "relationships" => ItemKind::Edge,
-                    "nodes" => ItemKind::Node,
-                    "reverse" | "tail" => args
-                        .first()
-                        .map_or(ItemKind::Value, |list| self.item_kind(list, chunk)),
-                    _ => ItemKind::Value,
-                }
-            }
-            FilterExpression::SliceAccess { base, .. } => self.item_kind(base, chunk),
-            FilterExpression::Variable(name) => self
-                .variable_columns
+    /// Where what `expr` yields at `row` holds nodes or edges, as ids, as
+    /// the type that says it (see [`EntityValue`](super::EntityValue)):
+    /// `Node` or `Edge` for one, a list of them, a map that holds them
+    /// (`Struct`), a list literal of mixed kinds (`Tuple`) or a path. A
+    /// column gives its type (the planner types a column by what it holds);
+    /// `nodes(p)`, `relationships(p)`, `startNode(r)` and `endNode(r)` give
+    /// theirs; list and map literals, keys, items, slices, `head`, `last`,
+    /// `tail` and `reverse` follow what they are made of or read from. A
+    /// plain value, and anything else, is `Any`.
+    fn shape(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> LogicalType {
+        let column = |name: &str| {
+            self.variable_columns
                 .get(name)
                 .and_then(|&index| chunk.column(index))
-                .map_or(ItemKind::Value, |column| match column.data_type() {
-                    LogicalType::List(item) if **item == LogicalType::Edge => ItemKind::Edge,
-                    LogicalType::List(item) if **item == LogicalType::Node => ItemKind::Node,
-                    _ => ItemKind::Value,
+        };
+        match expr {
+            FilterExpression::Variable(name) => {
+                column(name).map_or(LogicalType::Any, |column| column.data_type().clone())
+            }
+            FilterExpression::Property { variable, property } => column(variable)
+                .map_or(LogicalType::Any, |column| {
+                    field_type(column.data_type(), property)
                 }),
-            _ => ItemKind::Value,
+            FilterExpression::IndexAccess { base, index } => {
+                let base = self.shape(base, chunk, row);
+                if !holds_entities(&base) {
+                    return LogicalType::Any;
+                }
+                match self.eval_expr(index, chunk, row) {
+                    Some(Value::String(key)) => field_type(&base, &key),
+                    Some(Value::Int64(position)) => item_type_at(&base, position),
+                    _ => LogicalType::Any,
+                }
+            }
+            FilterExpression::SliceAccess { base, start, end } => {
+                let base = self.shape(base, chunk, row);
+                let bound = |bound: &Option<Box<FilterExpression>>| match bound
+                    .as_deref()
+                    .and_then(|bound| self.eval_expr(bound, chunk, row))
+                {
+                    Some(Value::Int64(i)) => usize::try_from(i).ok(),
+                    _ => None,
+                };
+                slice_type(base, bound(start).unwrap_or(0), bound(end))
+            }
+            FilterExpression::FunctionCall { name, args } => {
+                let argument = || {
+                    args.first()
+                        .map_or(LogicalType::Any, |list| self.shape(list, chunk, row))
+                };
+                match name.to_lowercase().as_str() {
+                    "nodes" => LogicalType::List(Box::new(LogicalType::Node)),
+                    "edges" | "relationships" => LogicalType::List(Box::new(LogicalType::Edge)),
+                    "startnode" | "start_node" | "endnode" | "end_node" => LogicalType::Node,
+                    "head" => item_type_at(&argument(), 0),
+                    "last" => item_type_at(&argument(), -1),
+                    "tail" => slice_type(argument(), 1, None),
+                    "reverse" => reversed_type(argument()),
+                    _ => LogicalType::Any,
+                }
+            }
+            FilterExpression::List(items) => list_type(
+                items
+                    .iter()
+                    .map(|item| self.shape(item, chunk, row))
+                    .collect(),
+            ),
+            FilterExpression::Map(pairs) => struct_type(
+                pairs
+                    .iter()
+                    .filter(|(key, _)| key != "*")
+                    .map(|(key, value)| (key.clone(), self.shape(value, chunk, row)))
+                    .collect(),
+            ),
+            _ => LogicalType::Any,
         }
     }
 
@@ -1801,65 +1894,38 @@ impl ExpressionPredicate {
                 if args.len() != 1 {
                     return None;
                 }
-                if let FilterExpression::Variable(var) = &args[0] {
-                    let col_idx = *self.variable_columns.get(var)?;
-                    let col = chunk.column(col_idx)?;
-                    let node_id = col.get_node_id(row)?;
-                    let node = self.resolve_node(node_id)?;
-                    let mut sorted: Vec<&arcstr::ArcStr> = node.labels.iter().collect();
-                    sorted.sort();
-                    let labels: Vec<Value> = sorted
-                        .into_iter()
-                        .map(|l| Value::String(l.clone()))
-                        .collect();
-                    return Some(Value::List(labels.into()));
-                }
-                None
+                let node = self.node_of(&args[0], chunk, row)?;
+                let mut sorted: Vec<&arcstr::ArcStr> = node.labels.iter().collect();
+                sorted.sort();
+                let labels: Vec<Value> = sorted
+                    .into_iter()
+                    .map(|l| Value::String(l.clone()))
+                    .collect();
+                Some(Value::List(labels.into()))
             }
             "type" => {
                 if args.len() != 1 {
                     return None;
                 }
-                if let FilterExpression::Variable(var) = &args[0] {
-                    let col_idx = *self.variable_columns.get(var)?;
-                    let col = chunk.column(col_idx)?;
-                    let edge_id = col.get_edge_id(row)?;
-                    let edge = self.resolve_edge(edge_id)?;
-                    return Some(Value::String(edge.edge_type.clone()));
-                }
-                None
+                let edge = self.edge_of(&args[0], chunk, row)?;
+                Some(Value::String(edge.edge_type.clone()))
             }
+            // startNode(edge) and endNode(edge): the edge's source and
+            // destination node, as the node's ID in a node column (RETURN
+            // gives the node, and a property read reads the node's).
             "startnode" | "start_node" => {
-                // startNode(edge) - returns the source node ID
                 if args.len() != 1 {
                     return None;
                 }
-                if let FilterExpression::Variable(var) = &args[0] {
-                    let col_idx = *self.variable_columns.get(var)?;
-                    let col = chunk.column(col_idx)?;
-                    let edge_id = col.get_edge_id(row)?;
-                    let edge = self.resolve_edge(edge_id)?;
-                    // reason: entity IDs stored as i64, standard encoding
-                    #[allow(clippy::cast_possible_wrap)]
-                    return Some(Value::Int64(edge.src.0 as i64));
-                }
-                None
+                let edge = self.edge_of(&args[0], chunk, row)?;
+                i64::try_from(edge.src.as_u64()).ok().map(Value::Int64)
             }
             "endnode" | "end_node" => {
-                // endNode(edge) - returns the destination node ID
                 if args.len() != 1 {
                     return None;
                 }
-                if let FilterExpression::Variable(var) = &args[0] {
-                    let col_idx = *self.variable_columns.get(var)?;
-                    let col = chunk.column(col_idx)?;
-                    let edge_id = col.get_edge_id(row)?;
-                    let edge = self.resolve_edge(edge_id)?;
-                    // reason: entity IDs stored as i64, standard encoding
-                    #[allow(clippy::cast_possible_wrap)]
-                    return Some(Value::Int64(edge.dst.0 as i64));
-                }
-                None
+                let edge = self.edge_of(&args[0], chunk, row)?;
+                i64::try_from(edge.dst.as_u64()).ok().map(Value::Int64)
             }
             "property_exists" => {
                 // property_exists(entity, key) - checks if a property key exists on an entity
@@ -2139,9 +2205,12 @@ impl ExpressionPredicate {
                     // reason: collection lengths fit i64 for practical sizes
                     #[allow(clippy::cast_possible_wrap)]
                     Value::List(items) => Some(Value::Int64(items.len() as i64)),
+                    // A string's size is its number of characters, as
+                    // `char_length` counts them (openCypher `size()`), not
+                    // its UTF-8 bytes (`octet_length`).
                     // reason: string lengths fit i64 for practical sizes
                     #[allow(clippy::cast_possible_wrap)]
-                    Value::String(s) => Some(Value::Int64(s.len() as i64)),
+                    Value::String(s) => Some(Value::Int64(s.chars().count() as i64)),
                     // reason: path lengths fit i64 for practical sizes
                     #[allow(clippy::cast_possible_wrap)]
                     Value::Path { edges, .. } => Some(Value::Int64(edges.len() as i64)),
@@ -3067,6 +3136,23 @@ impl ExpressionPredicate {
                         None
                     }
                     Value::Timestamp(_) => Some(val),
+                    // `{epochMillis: n}` and `{epochSeconds: n, nanosecond: m}`:
+                    // the instant that long after 1970-01-01T00:00:00Z.
+                    Value::Map(m) if m.contains_key(&PropertyKey::from("epochMillis")) => {
+                        let micros = map_int(&m, "epochMillis")?.checked_mul(1_000)?;
+                        Some(Value::Timestamp(
+                            grafeo_common::types::Timestamp::from_micros(micros),
+                        ))
+                    }
+                    Value::Map(m) if m.contains_key(&PropertyKey::from("epochSeconds")) => {
+                        let nanosecond = map_int_or(&m, "nanosecond", 0)?;
+                        let micros = map_int(&m, "epochSeconds")?
+                            .checked_mul(1_000_000)?
+                            .checked_add(nanosecond.div_euclid(1_000))?;
+                        Some(Value::Timestamp(
+                            grafeo_common::types::Timestamp::from_micros(micros),
+                        ))
+                    }
                     Value::Map(m) => {
                         let year = i32::try_from(map_int(&m, "year")?).ok()?;
                         let month = u32::try_from(map_int_or(&m, "month", 1)?).ok()?;
@@ -3166,72 +3252,11 @@ impl ExpressionPredicate {
             "timestamp" => Some(Value::Int64(
                 grafeo_common::types::Timestamp::now().as_millis(),
             )),
-            "year" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Date(d) => Some(Value::Int64(i64::from(d.year()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_date().year()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_date().year())))
-                    }
-                    _ => None,
-                }
-            }
-            "month" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Date(d) => Some(Value::Int64(i64::from(d.month()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_date().month()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_date().month())))
-                    }
-                    _ => None,
-                }
-            }
-            "day" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Date(d) => Some(Value::Int64(i64::from(d.day()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_date().day()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_date().day())))
-                    }
-                    _ => None,
-                }
-            }
-            "hour" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Time(t) => Some(Value::Int64(i64::from(t.hour()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_time().hour()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_time().hour())))
-                    }
-                    _ => None,
-                }
-            }
-            "minute" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Time(t) => Some(Value::Int64(i64::from(t.minute()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_time().minute()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_time().minute())))
-                    }
-                    _ => None,
-                }
-            }
-            "second" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Time(t) => Some(Value::Int64(i64::from(t.second()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_time().second()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_time().second())))
-                    }
-                    _ => None,
-                }
-            }
+            // The component functions read what the property form (`d.year`)
+            // reads.
+            "year" | "month" | "day" | "hour" | "minute" | "second" => self
+                .eval_expr(args.first()?, chunk, row)?
+                .temporal_component(name),
             "date_trunc" | "truncate" => {
                 if args.len() < 2 {
                     return None;
@@ -3298,6 +3323,19 @@ impl ExpressionPredicate {
                         nodes: nodes.into(),
                         edges: edges.into(),
                     })
+                }
+            }
+            "path_length" => {
+                // PATH_LENGTH(path) (ISO/IEC 39075 20.21): the number of edges
+                // of a path value. A path variable reads its length column
+                // instead (see the translators).
+                if args.len() != 1 {
+                    return None;
+                }
+                match self.eval_expr(&args[0], chunk, row)? {
+                    Value::Path { edges, .. } => i64::try_from(edges.len()).ok().map(Value::Int64),
+                    Value::Null => Some(Value::Null),
+                    _ => None,
                 }
             }
             "nodes" => {
@@ -3778,6 +3816,12 @@ impl ExpressionPredicate {
                         .zip(e2.iter())
                         .all(|(a, b)| Self::values_equal(a, b))
             }
+            // A timestamp and a zoned datetime: the same instant, as `<` and
+            // `>` compare them.
+            (Value::Timestamp(_), Value::ZonedDatetime(_))
+            | (Value::ZonedDatetime(_), Value::Timestamp(_)) => left
+                .compare_instants(right)
+                .is_some_and(|order| order.is_eq()),
             // Temporal values, bytes, vectors and the rest: the same variant
             // with the same value (zoned datetimes compare by instant). This
             // used to be `false`, so `date('2024-01-01') = date('2024-01-01')`
@@ -3884,7 +3928,8 @@ impl ExpressionPredicate {
             (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b) as i32),
             (Value::Date(a), Value::Date(b)) => Some(a.cmp(b) as i32),
             (Value::Time(a), Value::Time(b)) => Some(a.cmp(b) as i32),
-            _ => None,
+            // Zoned datetimes, also against a timestamp: by their instant.
+            _ => left.compare_instants(right).map(|o| o as i32),
         }
     }
 }
@@ -3946,15 +3991,13 @@ fn edge_id_list(column: &ValueVector, row: usize) -> Option<Vec<EdgeId>> {
         .collect()
 }
 
-/// What the items of a list a comprehension, list predicate or `reduce`
-/// iterates over refer to. `edges(p)`, `relationships(p)` and `nodes(p)`
-/// hold entity ids; an item bound as an edge or a node is read like an edge
-/// or node variable of the row.
-#[derive(Clone, Copy)]
-enum ItemKind {
-    Value,
-    Edge,
-    Node,
+/// What item `position` of a list of type `list` holds (see
+/// `ExpressionPredicate::shape`), for the variable a comprehension, list
+/// predicate or `reduce` binds to it: `edges(p)`, `relationships(p)` and
+/// `nodes(p)` hold entity ids, and an item bound as an edge or a node is
+/// read like an edge or node variable of the row.
+fn item_shape(list: &LogicalType, position: usize) -> LogicalType {
+    i64::try_from(position).map_or(LogicalType::Any, |position| item_type_at(list, position))
 }
 
 /// The row a list comprehension, list predicate or `reduce` is evaluated for,
@@ -4009,8 +4052,10 @@ impl ItemScope {
         }
     }
 
-    /// Binds the `index`-th variable given to [`new`](Self::new) to `value`.
-    fn bind(&mut self, index: usize, value: &Value, kind: ItemKind) {
+    /// Binds the `index`-th variable given to [`new`](Self::new) to `value`,
+    /// which holds what `shape` says (a node, an edge, a map with nodes in
+    /// it, ...; `Any` for a plain value).
+    fn bind(&mut self, index: usize, value: &Value, shape: &LogicalType) {
         let entity = match value {
             Value::Int64(id) => u64::try_from(*id).ok(),
             Value::Map(map) => match map.get(&PropertyKey::new("_id")) {
@@ -4019,15 +4064,22 @@ impl ItemScope {
             },
             _ => None,
         };
-        let column = match (kind, entity) {
-            (ItemKind::Edge, Some(id)) => {
+        let column = match (shape, entity) {
+            (LogicalType::Edge, Some(id)) => {
                 let mut column = ValueVector::with_capacity(LogicalType::Edge, 1);
                 column.push_edge_id(EdgeId::new(id));
                 column
             }
-            (ItemKind::Node, Some(id)) => {
+            (LogicalType::Node, Some(id)) => {
                 let mut column = ValueVector::with_capacity(LogicalType::Node, 1);
                 column.push_node_id(NodeId::new(id));
+                column
+            }
+            // A value with nodes or edges inside keeps its type, so a key or
+            // item read from it is one (`[x IN xs | x.msg.name]`).
+            (shape, _) if holds_entities(shape) && !shape.is_graph_element() => {
+                let mut column = ValueVector::with_capacity(shape.clone(), 1);
+                column.push_value(value.clone());
                 column
             }
             _ => {

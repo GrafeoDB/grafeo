@@ -26,9 +26,8 @@ env:
 #    bindings each pull in "full" through their crate dependencies.
 #    Used by: python-test, node-test, go-test.
 #
-# 4. Shipped profile (grafeo-engine's "full" plus "compact-store" and
-#    "arrow-export", which the packages' default "embedded" adds; it leaves out
-#    "temporal"): the Rust side of what the Python and Node.js packages build. Profile 1
+# 4. Shipped profile (grafeo-engine's "full" plus "arrow-export", which the
+#    packages' default "embedded" adds; it leaves out "temporal"): the Rust side of what the Python and Node.js packages build. Profile 1
 #    turns "temporal" on, which compiles every cfg(not(feature = "temporal"))
 #    path out, so clippy and rustdoc for grafeo-core and grafeo-engine, and the
 #    grafeo-engine tests, run once more with exactly these features (the
@@ -353,10 +352,17 @@ jobs:
   # Tests that need a minimal feature set, so they are covered outside
   # --all-features too: encryption at rest with only the features it needs,
   # the migration of 0.5.x files in a build without `wal` (the default
-  # `embedded` profile of the Node.js, C, Go, C# and Dart bindings), and the
-  # refusal of 0.5.x files in a build without `lpg` (the `rdf` profile). A job of
-  # its own: the rust-test runners are near their disk limit, and these are
-  # extra engine builds.
+  # `embedded` profile of the Node.js, C, Go, C# and Dart bindings), the
+  # refusal of 0.5.x files in a build without `lpg`, the migration of files
+  # compacted by 0.5.x in a build without the old `compact-store` feature (the
+  # `grafeo` crate, the CLI), the refusal of files with data a build cannot
+  # read: triples without `triple-store` (in the file, its WAL or a 0.5.x WAL directory, so also with
+  # `wal`) and vector and text indexes without `vector-index` and `text-index`
+  # (the engine's default build, the CLI), and of snapshots with such triples
+  # or indexes (import and restore), and RDF triples that survive a reopen and
+  # a crash in the feature matrix's `rdf` engine build (#544). A job of its
+  # own: the rust-test runners are near their disk limit, and these are extra
+  # engine builds.
   minimal-features:
     name: Minimal Features
     needs: [rust-check]
@@ -383,15 +389,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
 
-      - name: Test encryption at rest
-        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,wal,grafeo-file,encryption --test encryption_at_rest
+      - name: Test encryption at rest, triples in a WAL without triple-store
+        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,wal,grafeo-file,encryption --test encryption_at_rest --test rdf_file_without_triple_store
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
-      - name: Test migration and close without the wal feature
-        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close
+      - name: Test migration and close without the wal feature, files and snapshots with data this build cannot read, functions without their features
+        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close --test compacted_file_in_every_build --test rdf_file_without_triple_store --test search_indexes_without_their_features --test snapshot_without_its_features --test functions_without_their_features
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -399,6 +405,15 @@ jobs:
 
       - name: Test 0.5.x files without the lpg feature
         run: cargo nextest run -p grafeo-engine --no-default-features --features gql,grafeo-file,wal --test legacy_without_lpg
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+      # The engine features of the feature matrix's `rdf` profile, which name
+      # no `lpg`: `triple-store` brings it (#544).
+      - name: Test RDF persistence with the rdf engine features
+        run: cargo nextest run -p grafeo-engine --no-default-features --features gql,sparql,graphql,triple-store,shacl,wal,grafeo-file,spill,mmap,regex,testing-crash-injection --test rdf_persistence
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -449,15 +464,15 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Run clippy (shipped profile)
-        run: cargo clippy -p grafeo-core -p grafeo-engine --all-targets --features grafeo-engine/full,grafeo-engine/compact-store,grafeo-engine/arrow-export -- -D warnings
+        run: cargo clippy -p grafeo-core -p grafeo-engine --all-targets --features grafeo-engine/full,grafeo-engine/arrow-export -- -D warnings
 
       - name: Check docs (shipped profile)
-        run: cargo doc --no-deps -p grafeo-core -p grafeo-engine --features grafeo-engine/full,grafeo-engine/compact-store,grafeo-engine/arrow-export
+        run: cargo doc --no-deps -p grafeo-core -p grafeo-engine --features grafeo-engine/full,grafeo-engine/arrow-export
         env:
           RUSTDOCFLAGS: -D warnings
 
       - name: Run tests (shipped profile)
-        run: cargo nextest run -p grafeo-engine --features grafeo-engine/full,grafeo-engine/compact-store,grafeo-engine/arrow-export
+        run: cargo nextest run -p grafeo-engine --features grafeo-engine/full,grafeo-engine/arrow-export
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -469,7 +484,7 @@ jobs:
       - name: Run spill tests with encryption and crash injection (shipped profile)
         run: >
           cargo nextest run -p grafeo-engine
-          --features grafeo-engine/full,grafeo-engine/compact-store,grafeo-engine/arrow-export,grafeo-engine/encryption,grafeo-engine/testing-crash-injection
+          --features grafeo-engine/full,grafeo-engine/arrow-export,grafeo-engine/encryption,grafeo-engine/testing-crash-injection
           --test spilled_embeddings --test legacy_spill --test migration
         env:
           RUSTC_WRAPPER: sccache
@@ -665,9 +680,9 @@ jobs:
     name: Code Coverage
     runs-on: ubuntu-latest
     steps:
-      # Instrumented test binaries with full debug info fill the runner's
-      # disk, and the linker then dies with a bus error: remove preinstalled
-      # SDKs that this job does not use, as rust-test does.
+      # Instrumented test binaries fill the runner's disk, and the linker
+      # then dies with a bus error: remove preinstalled SDKs that this job
+      # does not use, as rust-test does (see also the debug info below).
       - name: Free disk space
         run: |
           df -h /
@@ -687,10 +702,16 @@ jobs:
       # Full profile: --all-features ensures coverage includes all language
       # parsers, AI features, and optional modules. Binding crates, build
       # scripts, test helpers, and benchmarks are excluded from the report.
+      # Line tables only, as in rust-test: the report comes from the coverage
+      # mapping the instrumentation embeds, not from debug info, and full
+      # debug info in every instrumented test binary ran the runner out of
+      # disk space.
       - name: Generate coverage report
         run: |
           cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info \
             --ignore-filename-regex '(crates/bindings/|build\.rs|tests/|benches/)'
+        env:
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
@@ -711,7 +732,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ['3.12', '3.13', '3.14']
+        python: ['3.12', '3.13', '3.14', '3.15']
     steps:
       - uses: actions/checkout@v7
 
@@ -719,6 +740,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
+          # Takes the newest release candidate until the setup-python manifest lists a final release.
+          allow-prereleases: true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7

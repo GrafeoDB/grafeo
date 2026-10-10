@@ -42,11 +42,8 @@ fn key_chain(seed: u8) -> Arc<KeyChain> {
     Arc::new(KeyChain::new([seed; 32]))
 }
 
-fn with_key(mut config: Config, chain: &Arc<KeyChain>) -> Config {
-    config.encryption = Some(EncryptionConfig {
-        key_chain: Arc::clone(chain),
-    });
-    config
+fn with_key(config: Config, chain: &Arc<KeyChain>) -> Config {
+    config.with_encryption(EncryptionConfig::new(Arc::clone(chain)))
 }
 
 /// A read-write configuration of the database at `path` with `chain`.
@@ -712,10 +709,16 @@ fn an_encrypted_database_has_no_spill_path() {
     );
 }
 
-/// Under memory pressure an unencrypted database moves its compacted base to
-/// a spill file next to it; an encrypted one keeps it in memory and writes
-/// nothing next to its file but the file and its sidecar WAL.
-#[cfg(all(feature = "compact-store", feature = "spill", feature = "mmap"))]
+/// Under memory pressure an unencrypted database moves the vectors of its
+/// vector index to a spill file next to it; an encrypted one keeps them in
+/// memory and writes nothing next to its file but the file and its sidecar
+/// WAL. (The vectors spill only without `temporal`.)
+#[cfg(all(
+    feature = "vector-index",
+    feature = "spill",
+    feature = "mmap",
+    not(feature = "temporal")
+))]
 #[test]
 fn an_encrypted_database_spills_nothing_to_disk() {
     let dir = tempfile::tempdir().unwrap();
@@ -725,14 +728,19 @@ fn an_encrypted_database_spills_nothing_to_disk() {
             Some(seed) => encrypted(&path, &key_chain(seed)),
             None => Config::persistent(&path),
         };
-        let mut db = GrafeoDB::with_config(config).unwrap();
-        for name in ["Alix", "Gus", "Vincent", "Mia", "Jules"] {
+        let db = GrafeoDB::with_config(config).unwrap();
+        for (seed, name) in ["Alix", "Gus", "Vincent", "Mia", "Jules"]
+            .into_iter()
+            .enumerate()
+        {
             db.execute(&format!(
-                "INSERT (:Person {{name: '{name}', note: '{MARKER}'}})"
+                "INSERT (:Person {{name: '{name}', note: '{MARKER}', \
+                 embedding: vector([{seed}.0, 19.0, 88.0])}})"
             ))
             .unwrap();
         }
-        db.compact().unwrap();
+        db.create_vector_index("Person", "embedding", None, None, None, None, None)
+            .unwrap();
         db.buffer_manager().spill_all();
         let found: Vec<PathBuf> = files_under(root)
             .into_iter()
@@ -975,9 +983,7 @@ fn the_keyless_restore_refuses_the_segments_of_an_encrypted_backup() {
 }
 
 fn encryption(chain: &Arc<KeyChain>) -> EncryptionConfig {
-    EncryptionConfig {
-        key_chain: Arc::clone(chain),
-    }
+    EncryptionConfig::new(Arc::clone(chain))
 }
 
 /// The keyed restore replays the encrypted segments, and what it writes (the
@@ -1085,6 +1091,12 @@ fn the_keyed_restore_refuses_another_key_and_an_unencrypted_backup() {
 }
 
 // --- Databases written by 0.5.x ------------------------------------------------
+//
+// The released fixtures hold RDF triples (the file and the WAL directory) and
+// vector and text indexes (the file), which a build without `triple-store`,
+// `vector-index` and `text-index` refuses (see `rdf_file_without_triple_store`
+// and `search_indexes_without_their_features`): their migrations run in
+// builds with these features.
 
 /// The 0.5.44 database whose second session is only in its sidecar WAL.
 fn fixture() -> PathBuf {
@@ -1098,6 +1110,7 @@ fn copy_fixture(to: &Path) {
 }
 
 /// The people and the sorted named graphs of `db`, as queries see them.
+#[cfg(feature = "triple-store")]
 fn summary(db: &GrafeoDB) -> (Vec<Vec<Value>>, Vec<String>) {
     let mut graphs = db.list_graphs();
     graphs.sort();
@@ -1110,6 +1123,11 @@ fn summary(db: &GrafeoDB) -> (Vec<Vec<Value>>, Vec<String>) {
     )
 }
 
+#[cfg(all(
+    feature = "triple-store",
+    feature = "vector-index",
+    feature = "text-index"
+))]
 #[test]
 fn a_05x_database_opened_with_a_key_is_migrated_into_an_encrypted_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -1224,6 +1242,7 @@ fn directory_fixture() -> PathBuf {
 /// `<path>.pre-0.6/` byte for byte (it is the user's 0.5.x data, never
 /// encrypted), and no other file next to the database holds its values in
 /// plaintext.
+#[cfg(feature = "triple-store")]
 #[test]
 fn a_05x_wal_directory_opened_with_a_key_is_migrated_into_an_encrypted_file() {
     let dir = tempfile::tempdir().unwrap();

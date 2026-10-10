@@ -5,11 +5,8 @@
 #[allow(clippy::wildcard_imports)]
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
+use crate::query::limits::{Chain, Nesting, nesting_error_message};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
-
-/// Maximum nesting depth for recursive parsing constructs (parenthesized
-/// expressions, EXISTS subqueries, function calls).
-const MAX_NESTING_DEPTH: u32 = 128;
 
 /// SPARQL Parser.
 pub struct Parser<'a> {
@@ -21,8 +18,9 @@ pub struct Parser<'a> {
     collection_counter: u32,
     /// Counter for generating unique anonymous blank node labels.
     anon_blank_counter: u32,
-    /// Current nesting depth for recursive parsing constructs.
-    nesting_depth: u32,
+    /// How deep the query parsed so far nests (see
+    /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)).
+    nesting: Nesting,
 }
 
 impl<'a> Parser<'a> {
@@ -36,7 +34,7 @@ impl<'a> Parser<'a> {
             source,
             collection_counter: 0,
             anon_blank_counter: 0,
-            nesting_depth: 0,
+            nesting: Nesting::default(),
         }
     }
 
@@ -687,6 +685,7 @@ impl<'a> Parser<'a> {
 
         let mut patterns = Vec::new();
 
+        self.enter_group()?;
         while self.current.kind != TokenKind::RightBrace {
             if self.current.kind == TokenKind::Eof {
                 return Err(self.error("unexpected end of input in graph pattern"));
@@ -694,6 +693,7 @@ impl<'a> Parser<'a> {
 
             patterns.push(self.parse_graph_pattern_element()?);
         }
+        self.exit_group();
 
         self.expect(TokenKind::RightBrace)?;
 
@@ -763,8 +763,10 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Values => self.parse_inline_data(),
             TokenKind::LeftBrace => {
-                // Nested group or subquery
+                // Nested group or subquery, which nests as a group does
+                self.enter_group()?;
                 let pattern = self.parse_group_or_subquery()?;
+                self.exit_group();
                 // Check for UNION
                 self.parse_union_continuation(pattern)
             }
@@ -1305,7 +1307,9 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LeftParen => {
                 self.advance();
+                self.enter_nesting()?;
                 let path = self.parse_property_path()?;
+                self.exit_nesting();
                 self.expect(TokenKind::RightParen)?;
                 Ok(path)
             }
@@ -1508,41 +1512,63 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_conditional_or_expression(&mut self) -> Result<Expression> {
-        let mut expr = self.parse_conditional_and_expression()?;
-
-        while self.current.kind == TokenKind::OrOp {
-            self.advance();
-            let right = self.parse_conditional_and_expression()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator: BinaryOperator::Or,
-                right: Box::new(right),
-            };
-        }
-
-        Ok(expr)
+        self.parse_balanced_chain(
+            TokenKind::OrOp,
+            BinaryOperator::Or,
+            Self::parse_conditional_and_expression,
+        )
     }
 
     fn parse_conditional_and_expression(&mut self) -> Result<Expression> {
-        let mut expr = self.parse_value_logical()?;
+        self.parse_balanced_chain(
+            TokenKind::AndOp,
+            BinaryOperator::And,
+            Self::parse_value_logical,
+        )
+    }
 
-        while self.current.kind == TokenKind::AndOp {
-            self.advance();
-            let right = self.parse_value_logical()?;
-            expr = Expression::Binary {
-                left: Box::new(expr),
-                operator: BinaryOperator::And,
-                right: Box::new(right),
-            };
+    /// Parses `operand` joined by `token`, an associative operator, into a
+    /// balanced tree of `operator` (see [`Nesting::join_balanced`]): a chain
+    /// of any length stays shallow.
+    fn parse_balanced_chain(
+        &mut self,
+        token: TokenKind,
+        operator: BinaryOperator,
+        operand: fn(&mut Self) -> Result<Expression>,
+    ) -> Result<Expression> {
+        let chain = self.begin_chain();
+        let first = operand(self)?;
+        if self.current.kind != token {
+            self.end_chain(chain);
+            return Ok(first);
         }
-
-        Ok(expr)
+        let mut operands = vec![(first, self.nesting.take_operand())];
+        while self.current.kind == token {
+            self.advance();
+            let next = operand(self)?;
+            operands.push((next, self.nesting.take_operand()));
+        }
+        let tree = self
+            .nesting
+            .join_balanced(operands, |left, right| Expression::Binary {
+                left: Box::new(left),
+                operator,
+                right: Box::new(right),
+            })
+            .ok_or_else(|| self.error(&nesting_error_message()));
+        self.end_chain(chain);
+        tree
     }
 
     fn parse_value_logical(&mut self) -> Result<Expression> {
-        self.parse_relational_expression()
+        let chain = self.begin_chain();
+        let expression = self.parse_relational_expression()?;
+        self.end_chain(chain);
+        Ok(expression)
     }
 
+    /// A comparison nests one level above its operands (see
+    /// [`Self::parse_value_logical`]).
     fn parse_relational_expression(&mut self) -> Result<Expression> {
         let mut expr = self.parse_numeric_expression()?;
 
@@ -1556,6 +1582,7 @@ impl<'a> Parser<'a> {
             TokenKind::In => {
                 self.advance();
                 let list = self.parse_expression_list()?;
+                self.link_chain()?;
                 return Ok(Expression::In {
                     expression: Box::new(expr),
                     list,
@@ -1565,6 +1592,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(TokenKind::In)?;
                 let list = self.parse_expression_list()?;
+                self.link_chain()?;
                 return Ok(Expression::NotIn {
                     expression: Box::new(expr),
                     list,
@@ -1576,6 +1604,7 @@ impl<'a> Parser<'a> {
         if let Some(op) = operator {
             self.advance();
             let right = self.parse_numeric_expression()?;
+            self.link_chain()?;
             expr = Expression::Binary {
                 left: Box::new(expr),
                 operator: op,
@@ -1591,6 +1620,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_additive_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut expr = self.parse_multiplicative_expression()?;
 
         loop {
@@ -1601,17 +1631,20 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let right = self.parse_multiplicative_expression()?;
+            self.link_chain()?;
             expr = Expression::Binary {
                 left: Box::new(expr),
                 operator,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
 
         Ok(expr)
     }
 
     fn parse_multiplicative_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut expr = self.parse_unary_expression()?;
 
         loop {
@@ -1622,44 +1655,35 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let right = self.parse_unary_expression()?;
+            self.link_chain()?;
             expr = Expression::Binary {
                 left: Box::new(expr),
                 operator,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
 
         Ok(expr)
     }
 
+    /// A unary operator nests one level above its operand.
     fn parse_unary_expression(&mut self) -> Result<Expression> {
-        match self.current.kind {
-            TokenKind::Bang => {
-                self.advance();
-                let operand = self.parse_primary_expression()?;
-                Ok(Expression::Unary {
-                    operator: UnaryOperator::Not,
-                    operand: Box::new(operand),
-                })
-            }
-            TokenKind::Plus => {
-                self.advance();
-                let operand = self.parse_primary_expression()?;
-                Ok(Expression::Unary {
-                    operator: UnaryOperator::Plus,
-                    operand: Box::new(operand),
-                })
-            }
-            TokenKind::MinusOp => {
-                self.advance();
-                let operand = self.parse_primary_expression()?;
-                Ok(Expression::Unary {
-                    operator: UnaryOperator::Minus,
-                    operand: Box::new(operand),
-                })
-            }
-            _ => self.parse_primary_expression(),
-        }
+        let operator = match self.current.kind {
+            TokenKind::Bang => UnaryOperator::Not,
+            TokenKind::Plus => UnaryOperator::Plus,
+            TokenKind::MinusOp => UnaryOperator::Minus,
+            _ => return self.parse_primary_expression(),
+        };
+        self.advance();
+        let chain = self.begin_chain();
+        let operand = self.parse_primary_expression()?;
+        self.link_chain()?;
+        self.end_chain(chain);
+        Ok(Expression::Unary {
+            operator,
+            operand: Box::new(operand),
+        })
     }
 
     fn parse_primary_expression(&mut self) -> Result<Expression> {
@@ -2286,20 +2310,50 @@ impl<'a> Parser<'a> {
             .map_err(|_| self.error(&format!("invalid integer: {}", text)))
     }
 
-    /// Increments the nesting depth and returns an error if the limit is exceeded.
+    /// Enters one level of nesting, or fails past the nesting limit.
     fn enter_nesting(&mut self) -> Result<()> {
-        self.nesting_depth += 1;
-        if self.nesting_depth > MAX_NESTING_DEPTH {
-            return Err(self.error(&format!(
-                "Maximum nesting depth of {MAX_NESTING_DEPTH} exceeded"
-            )));
+        if self.nesting.enter() {
+            Ok(())
+        } else {
+            Err(self.error(&nesting_error_message()))
         }
-        Ok(())
     }
 
-    /// Decrements the nesting depth.
+    /// Leaves the level [`Self::enter_nesting`] entered.
     fn exit_nesting(&mut self) {
-        self.nesting_depth = self.nesting_depth.saturating_sub(1);
+        self.nesting.exit();
+    }
+
+    /// Enters a group graph pattern, which nests two levels: translating
+    /// and planning one takes more stack than an expression in parentheses.
+    fn enter_group(&mut self) -> Result<()> {
+        self.enter_nesting()?;
+        self.enter_nesting()
+    }
+
+    /// Leaves the levels [`Self::enter_group`] entered.
+    fn exit_group(&mut self) {
+        self.exit_nesting();
+        self.exit_nesting();
+    }
+
+    /// Begins a chain of binary operators (see [`Nesting::begin_chain`]).
+    fn begin_chain(&mut self) -> Chain {
+        self.nesting.begin_chain()
+    }
+
+    /// Counts one operator of a chain, or fails past the nesting limit.
+    fn link_chain(&mut self) -> Result<()> {
+        if self.nesting.link() {
+            Ok(())
+        } else {
+            Err(self.error(&nesting_error_message()))
+        }
+    }
+
+    /// Ends a chain of binary operators.
+    fn end_chain(&mut self, chain: Chain) {
+        self.nesting.end_chain(chain);
     }
 
     fn error(&self, message: &str) -> Error {

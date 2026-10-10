@@ -49,6 +49,14 @@ RETURN b.name, length(path) AS distance
 ORDER BY distance
 ```
 
+A path variable holds the whole path of its pattern: over several edges, `path` runs from the first node through every edge and node to the last.
+
+```sql
+-- Three nodes and two edges per path
+MATCH path = (a:Person)-[:KNOWS]->(b:Person)-[:WORKS_AT]->(c:Company)
+RETURN [n IN nodes(path) | n.name] AS names, length(path) AS hops
+```
+
 ## Shortest Path
 
 ```sql
@@ -106,7 +114,7 @@ RETURN a.name, b.name
 
 ## Path Modes
 
-Path modes restrict which traversals are valid. Place the mode keyword before the pattern.
+Path modes restrict which traversals are valid. Place the mode keyword after the path variable, as below, or after `MATCH` for every pattern of the clause.
 
 ```sql
 -- WALK (default): repeated nodes and edges allowed
@@ -162,7 +170,7 @@ RETURN a.name, b.name
 
 ## Path Search Prefixes
 
-Search prefixes control how many matching paths are returned. See [Pattern Matching](patterns.md#path-search-prefixes) for the complete list.
+Search prefixes control how many matching paths are returned, for each pair of endpoints: the paths of a pattern are grouped by their first and last node (for each row the pattern starts from), and each group keeps its own selection. See [Pattern Matching](patterns.md#path-search-prefixes) for the complete list.
 
 ```sql
 -- ANY SHORTEST: any one shortest path
@@ -179,9 +187,33 @@ RETURN path, length(path)
 MATCH path = SHORTEST 3 (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix' AND b.name = 'Dave'
 RETURN path, length(path)
+
+-- SHORTEST 2 GROUPS: every path of the 2 shortest lengths
+MATCH path = SHORTEST 2 GROUPS (a:Person)-[:KNOWS*]->(b:Person)
+WHERE a.name = 'Alix' AND b.name = 'Dave'
+RETURN path, length(path)
+
+-- ANY: one path to each person Alix reaches
+MATCH path = ANY (a:Person {name: 'Alix'})-[:KNOWS*]->(b:Person)
+RETURN b.name, length(path)
+
+-- ANY SHORTEST TRAIL: the shortest path that takes no edge twice
+MATCH path = ANY SHORTEST TRAIL (a:Person)-[:KNOWS]-{3,}(b:Person)
+WHERE a.name = 'Alix' AND b.name = 'Dave'
+RETURN path
 ```
 
+The path mode of a search prefix restricts the paths it selects among: with a minimum of edges, the shortest walk may go back over an edge, which the shortest trail does not.
+
 Shortest-path searches (these prefixes and `shortestPath`) only return paths that fit the edge's quantifier: `->+` or `-[:KNOWS*]->` is one or more hops, `->{1,3}` at most three, `->*` also pairs a node with itself (length 0), and an edge without a quantifier is a single hop. A pair of nodes without such a path has no row; use `OPTIONAL MATCH` to keep it with a null path.
+
+The path variable holds the path found, with `nodes(path)` and `edges(path)`, and the variable of a quantified edge is the list of the path's edges. A property map or `WHERE` on the edge holds for every edge of the path: the search only takes such edges, so the shortest path is picked among the paths that meet it. A `WHERE` or `FILTER` after the pattern is checked on the path found instead. A search runs over one edge pattern between two node patterns.
+
+```sql
+-- The shortest route that takes roads only
+MATCH path = ANY SHORTEST (a:City {name: 'Amsterdam'})-[r:ROUTE WHERE r.kind = 'road']->+(b:City {name: 'Prague'})
+RETURN [n IN nodes(path) | n.name] AS stops, [x IN r | x.km] AS legs
+```
 
 ## Path Predicate Functions
 

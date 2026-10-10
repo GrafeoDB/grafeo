@@ -194,13 +194,24 @@ grafeo import jsonl events.jsonl --path ./mydb --label Event
 ### Data Export
 
 ```bash
-# Native dump/load
-grafeo data dump ./mydb -o ./export/
-grafeo data load ./export/ ./newdb
+# Native dump and load (JSON Lines, the default graph)
+grafeo data dump ./mydb -o graph.jsonl
+grafeo data load graph.jsonl ./newdb
 
 # Graph interchange formats
 grafeo data dump ./mydb -o graph.gexf --export-format gexf
 grafeo data dump ./mydb -o graph.graphml --export-format graphml
+```
+
+`data load` adds the graph of a JSON Lines file to a database, in one transaction: if a line
+fails, the error names it and the database is left as it was. Each line is a node or an edge.
+Edges name their nodes by the node's `id` in the file (nodes may come in any order, and each gets
+a new ID), and property values are plain JSON or tagged with their type, as `data dump` writes them:
+
+```json
+{"type":"node","id":3,"labels":["Person"],"properties":{"name":"Alix","born":{"Date":6652}}}
+{"type":"node","id":19,"labels":["Person"],"properties":{"name":"Gus"}}
+{"type":"edge","source":3,"target":19,"edge_type":"KNOWS","properties":{"since":2019}}
 ```
 
 ### WAL Management

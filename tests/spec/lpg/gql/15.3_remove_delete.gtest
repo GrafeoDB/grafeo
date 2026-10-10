@@ -160,3 +160,19 @@ tests:
     expect:
       rows:
         - [Alix]
+
+  # A DELETE of a variable that nothing binds is an error; it scanned the
+  # graph for the variable and deleted every node.
+  - name: delete_of_an_unbound_variable_is_an_error
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+    query: "DETACH DELETE n"
+    expect:
+      error: "Undefined variable 'n'"
+
+  - name: delete_of_an_unbound_variable_after_next_is_an_error
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+    query: "MATCH (p:Person {name: 'Alix'}) RETURN p NEXT DETACH DELETE n"
+    expect:
+      error: "Undefined variable 'n'"

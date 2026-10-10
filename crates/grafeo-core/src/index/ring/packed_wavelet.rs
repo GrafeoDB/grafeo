@@ -31,6 +31,8 @@
 //!     word_count * 8 bytes of LE u64 BitVector data
 //! ```
 
+use std::io::Write;
+
 use bytes::Bytes;
 
 use crate::codec::BitVector;
@@ -56,6 +58,20 @@ pub enum PackedWaveletError {
     },
     /// A field overflows the platform-native usize.
     SizeOverflow,
+    /// The header claims more levels than a tree over `u64` symbols has
+    /// (64), refused before anything is allocated for them.
+    TooHigh {
+        /// The height the header claims.
+        height: u32,
+    },
+    /// Bytes follow the last level: a packed tree is exactly its
+    /// encoding.
+    TrailingBytes {
+        /// The length the header and the levels declare.
+        expected: usize,
+        /// The length of the buffer.
+        actual: usize,
+    },
     /// Per-level bit count doesn't match the declared `len` field.
     BitCountMismatch {
         /// Level index where the mismatch was observed.
@@ -79,6 +95,13 @@ impl std::fmt::Display for PackedWaveletError {
             Self::UnsupportedVersion(v) => write!(f, "packed wavelet unsupported version {v}"),
             Self::Truncated { region } => write!(f, "packed wavelet truncated in {region}"),
             Self::SizeOverflow => write!(f, "packed wavelet size field overflows usize"),
+            Self::TooHigh { height } => {
+                write!(f, "packed wavelet height {height} exceeds 64 levels")
+            }
+            Self::TrailingBytes { expected, actual } => write!(
+                f,
+                "packed wavelet holds {actual} bytes, its encoding {expected}"
+            ),
             Self::BitCountMismatch {
                 level,
                 expected,
@@ -95,50 +118,73 @@ impl std::fmt::Display for PackedWaveletError {
 impl std::error::Error for PackedWaveletError {}
 
 /// Serializes a [`WaveletTree`] to the v2 packed format.
+///
+/// # Panics
+///
+/// Panics when the tree is higher than `u32::MAX` levels, which a tree over
+/// `u64` symbols never is (see [`write_wavelet_tree`]).
 #[must_use]
 pub fn serialize_wavelet_tree(tree: &WaveletTree) -> Vec<u8> {
-    let symbols = tree.symbols_slice();
-    let height = tree.height();
-    let levels = tree.levels_slice();
-    let sigma = tree.sigma();
-    let len = tree.len() as u64;
+    let mut buf = Vec::with_capacity(packed_len(tree));
+    write_wavelet_tree(tree, &mut buf).expect("writing into a Vec fails only for a tree too high");
+    buf
+}
 
-    // Estimate total size to pre-allocate.
-    let symbols_bytes = symbols.len() * 8;
-    let level_bytes: usize = levels
+/// The length of the packed format of `tree`.
+fn packed_len(tree: &WaveletTree) -> usize {
+    let symbols_bytes = tree.symbols_slice().len() * 8;
+    let level_bytes: usize = tree
+        .levels_slice()
         .iter()
         .map(|sbv| 16 /* bit_count + word_count */ + sbv.inner().data_bytes().len())
         .sum();
-    let total = HEADER_SIZE + symbols_bytes + level_bytes;
+    HEADER_SIZE + symbols_bytes + level_bytes
+}
 
-    let mut buf = Vec::with_capacity(total);
-    // Header (40 bytes total — see module-top layout doc):
-    buf.extend_from_slice(MAGIC); // 0..4
-    buf.push(VERSION); // 4
-    buf.extend_from_slice(&[0u8; 3]); // 5..8 reserved
-    buf.extend_from_slice(&u32::try_from(height).unwrap_or(u32::MAX).to_le_bytes()); // 8..12
-    buf.extend_from_slice(&[0u8; 4]); // 12..16 padding to align sigma
-    buf.extend_from_slice(&sigma.to_le_bytes()); // 16..24
-    buf.extend_from_slice(&len.to_le_bytes()); // 24..32
-    buf.extend_from_slice(&(symbols.len() as u64).to_le_bytes()); // 32..40 symbol_count
+/// Writes `tree` to `out` in the v2 packed format, piece by piece: the
+/// header, the symbols, then each level's bits as they are stored. No copy
+/// of the tree is made.
+///
+/// # Errors
+///
+/// Returns the first error of `out`, or [`std::io::ErrorKind::InvalidInput`]
+/// when the tree is higher than `u32::MAX` levels, which the header cannot
+/// record.
+pub fn write_wavelet_tree(tree: &WaveletTree, out: &mut dyn Write) -> std::io::Result<()> {
+    let symbols = tree.symbols_slice();
+    let height = u32::try_from(tree.height()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "a packed wavelet tree records at most u32::MAX levels, this one has {}",
+                tree.height()
+            ),
+        )
+    })?;
+
+    // Header (40 bytes total, see the module-top layout doc):
+    out.write_all(MAGIC)?; // 0..4
+    out.write_all(&[VERSION, 0, 0, 0])?; // 4, then 5..8 reserved
+    out.write_all(&height.to_le_bytes())?; // 8..12
+    out.write_all(&[0u8; 4])?; // 12..16 padding to align sigma
+    out.write_all(&tree.sigma().to_le_bytes())?; // 16..24
+    out.write_all(&(tree.len() as u64).to_le_bytes())?; // 24..32
+    out.write_all(&(symbols.len() as u64).to_le_bytes())?; // 32..40 symbol_count
 
     // Symbols.
     for &sym in symbols {
-        buf.extend_from_slice(&sym.to_le_bytes());
+        out.write_all(&sym.to_le_bytes())?;
     }
 
     // Levels.
-    for sbv in levels {
+    for sbv in tree.levels_slice() {
         let bv = sbv.inner();
-        let bit_count = bv.len() as u64;
         let word_data = bv.data_bytes();
-        let word_count = (word_data.len() / 8) as u64;
-        buf.extend_from_slice(&bit_count.to_le_bytes());
-        buf.extend_from_slice(&word_count.to_le_bytes());
-        buf.extend_from_slice(word_data);
+        out.write_all(&(bv.len() as u64).to_le_bytes())?; // bit_count
+        out.write_all(&((word_data.len() / 8) as u64).to_le_bytes())?; // word_count
+        out.write_all(word_data)?;
     }
-
-    buf
+    Ok(())
 }
 
 /// Parses a [`WaveletTree`] from the v2 packed format. Rebuilds rank/select
@@ -151,7 +197,9 @@ pub fn serialize_wavelet_tree(tree: &WaveletTree) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns a [`PackedWaveletError`] on truncation, magic/version
-/// mismatch, or per-level bit-count inconsistency.
+/// mismatch, a height above 64 levels, bytes after the last level, a
+/// per-level bit-count inconsistency, or parts that break an invariant of
+/// the tree (see [`WaveletTree::from_packed_parts`]).
 ///
 /// # Panics
 ///
@@ -176,6 +224,11 @@ pub fn deserialize_wavelet_tree(data: Bytes) -> Result<WaveletTree, PackedWavele
     let len_raw = u64::from_le_bytes(data[24..32].try_into().expect("8-byte slice"));
     let symbol_count_raw = u64::from_le_bytes(data[32..40].try_into().expect("8-byte slice"));
 
+    // A tree over u64 symbols has at most 64 levels. Refused before the
+    // levels are allocated: a crafted height must not size an allocation.
+    if height_raw > 64 {
+        return Err(PackedWaveletError::TooHigh { height: height_raw });
+    }
     let height = usize::try_from(height_raw).map_err(|_| PackedWaveletError::SizeOverflow)?;
     let len_usize = usize::try_from(len_raw).map_err(|_| PackedWaveletError::SizeOverflow)?;
     let symbol_count =
@@ -257,6 +310,14 @@ pub fn deserialize_wavelet_tree(data: Bytes) -> Result<WaveletTree, PackedWavele
             }
         })?;
         levels.push(SuccinctBitVector::from_bitvec(bv));
+    }
+    // A part holds exactly its encoding (parts are laid out without
+    // padding, in the envelope as in the streams).
+    if cursor != data.len() {
+        return Err(PackedWaveletError::TrailingBytes {
+            expected: cursor,
+            actual: data.len(),
+        });
     }
 
     WaveletTree::from_packed_parts(levels, height, sigma, len_usize, symbols)
@@ -392,6 +453,126 @@ mod tests {
                 offset < source_len,
                 "level {idx}: inner BitVector should be inside source allocation; offset={offset}"
             );
+        }
+    }
+    use crate::codec::succinct::WaveletInvariantError;
+
+    /// A packed tree with `height` levels of `len` zero bits each over
+    /// `symbols`, whose header claims `sigma`.
+    fn crafted_tree(height: u32, sigma: u64, len: u64, symbols: &[u64]) -> Bytes {
+        let mut out = Vec::new();
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&[VERSION, 0, 0, 0]);
+        out.extend_from_slice(&height.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&sigma.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(symbols.len() as u64).to_le_bytes());
+        for symbol in symbols {
+            out.extend_from_slice(&symbol.to_le_bytes());
+        }
+        let words = len.div_ceil(64);
+        for _ in 0..height {
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&words.to_le_bytes());
+            out.extend(std::iter::repeat_n(
+                0u8,
+                usize::try_from(words * 8).unwrap(),
+            ));
+        }
+        Bytes::from(out)
+    }
+
+    /// A header claiming more levels than a tree over `u64` symbols has is
+    /// refused before anything is allocated for its levels (a claim of
+    /// `u32::MAX` levels once aborted the process).
+    #[test]
+    fn a_height_above_64_levels_is_refused() {
+        for height in [65, 70, u32::MAX] {
+            let mut bytes = serialize_wavelet_tree(&build_tree(&[3, 19]));
+            bytes[8..12].copy_from_slice(&height.to_le_bytes());
+            assert_eq!(
+                deserialize_wavelet_tree(Bytes::from(bytes)).unwrap_err(),
+                PackedWaveletError::TooHigh { height },
+                "height {height}"
+            );
+        }
+        assert_eq!(
+            deserialize_wavelet_tree(crafted_tree(70, 2, 3, &[3, 19])).unwrap_err(),
+            PackedWaveletError::TooHigh { height: 70 },
+            "70 levels, all present"
+        );
+    }
+
+    /// A packed tree is exactly its encoding: bytes after the last level
+    /// are refused.
+    #[test]
+    fn bytes_after_the_last_level_are_refused() {
+        for sequence in [&[][..], &[3, 19, 88, 3][..]] {
+            let mut bytes = serialize_wavelet_tree(&build_tree(sequence));
+            let expected = bytes.len();
+            bytes.extend_from_slice(b"Mia");
+            assert_eq!(
+                deserialize_wavelet_tree(Bytes::from(bytes)).unwrap_err(),
+                PackedWaveletError::TrailingBytes {
+                    expected,
+                    actual: expected + 3
+                },
+                "{sequence:?}"
+            );
+        }
+    }
+
+    /// A tree whose alphabet, symbols and height disagree is refused: the
+    /// alphabet size is the number of symbols, a sequence has symbols when
+    /// it is not empty, and the height is the bits the codes take.
+    #[test]
+    fn an_inconsistent_tree_is_refused() {
+        let invariant = |bytes: Bytes| match deserialize_wavelet_tree(bytes) {
+            Err(PackedWaveletError::InvariantViolation(error)) => error,
+            other => panic!("expected an invariant violation, got {other:?}"),
+        };
+        assert_eq!(
+            invariant(crafted_tree(1, 3, 3, &[3, 19])),
+            WaveletInvariantError::SigmaMismatch {
+                symbols_len: 2,
+                sigma: 3
+            }
+        );
+        assert_eq!(
+            invariant(crafted_tree(1, 0, 3, &[])),
+            WaveletInvariantError::AlphabetMismatch {
+                len: 3,
+                symbols_len: 0
+            }
+        );
+        assert_eq!(
+            invariant(crafted_tree(0, 1, 0, &[88])),
+            WaveletInvariantError::AlphabetMismatch {
+                len: 0,
+                symbols_len: 1
+            }
+        );
+        for (height, symbols, expected) in [
+            (2, &[3, 19][..], 1),
+            (64, &[3, 19][..], 1),
+            (1, &[3, 19, 88][..], 2),
+            (2, &[88][..], 1),
+        ] {
+            assert_eq!(
+                invariant(crafted_tree(height, symbols.len() as u64, 3, symbols)),
+                WaveletInvariantError::HeightMismatch {
+                    height: height as usize,
+                    expected
+                },
+                "{height} levels for {symbols:?}"
+            );
+        }
+        for sequence in [&[][..], &[88][..], &[3, 19][..], &[3, 19, 88][..]] {
+            let tree = build_tree(sequence);
+            let restored = deserialize_wavelet_tree(Bytes::from(serialize_wavelet_tree(&tree)))
+                .expect("a consistent tree");
+            assert_trees_equal(&tree, &restored);
         }
     }
 }

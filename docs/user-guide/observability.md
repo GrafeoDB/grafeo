@@ -25,7 +25,7 @@ grafeo = { version = "0.5", features = ["metrics"] }
 
 ### Retrieving a Snapshot
 
-Call `db.metrics()` to get a serializable point-in-time snapshot of all tracked metrics:
+Call `db.metrics()` to get a serializable point-in-time snapshot of all tracked metrics. A patch release can add a metric to the snapshot, never remove or rename one:
 
 ```rust
 use grafeo::GrafeoDB;
@@ -246,18 +246,23 @@ print(result[0][0])
 Example output:
 
 ```text
-Projection [n.name]
-  Filter (n.age > 20)
-    NodeScan (n:Person) [label-first]
+Return (n.name)
+  Filter (n.age Gt 20) [range: age]
+    NodeScan (n:Person)
 ```
 
 Pushdown hints in square brackets indicate optimizer decisions:
 
 | Hint | Meaning |
 |------|---------|
+| `[hash join: t.k = f.k]` | A later `MATCH` joined to the rows before it by equal values, in a statement that only reads: its nodes are scanned once, not once per row |
+| `[range: prop]` | A range of constants read by a range scan, with or without an index |
 | `[label-first]` | Label filter applied at scan level |
 | `[index: prop]` | Property index used for filtering |
 | `[inline-filter]` | Filter merged into scan operator |
+| `[reachability]` | Variable-length expand that finds each node a row reaches once, for `DISTINCT`, `count(DISTINCT ...)`, `min` or `max`, instead of once per walk |
+| `[reachability: once]` | The same, and each node once over all rows, when nothing but the reached node is read (`RETURN DISTINCT m.id`) |
+| `[after the write]` | A clause after a write in the same statement (`RETURN`, `WITH`, `WHERE`, `ORDER BY`, an aggregate, `UNWIND`, `LIMIT` or `MERGE`) that reads the earlier clauses' rows whole first, so every row sees all of what they wrote; one per write, and none in a statement that only reads |
 
 EXPLAIN works the same way in Rust:
 

@@ -227,6 +227,14 @@ impl DataChunk {
         self.count = count;
     }
 
+    /// Appends `column`, which holds a value for each row of a chunk without
+    /// a selection.
+    pub fn push_column(&mut self, column: ValueVector) {
+        debug_assert!(self.selection.is_none(), "a column for every row");
+        debug_assert_eq!(column.len(), self.count, "a value for every row");
+        self.columns.push(column);
+    }
+
     /// Resets the chunk for reuse.
     pub fn reset(&mut self) {
         for col in &mut self.columns {

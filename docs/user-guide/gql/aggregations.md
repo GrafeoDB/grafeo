@@ -25,7 +25,7 @@ GQL provides aggregation functions for computing summaries over query results.
 | `stdev()` | Sample standard deviation (aliases: `stddev()`, `stddev_samp()`) |
 | `stdevp()` | Population standard deviation (aliases: `stddevp()`, `stddev_pop()`) |
 | `listagg()` | Concatenate values with separator |
-| `group_concat()` | Alias for `listagg()` |
+| `group_concat()` | Like `listagg()`; without a separator it joins with a space |
 
 ## Count
 

@@ -56,11 +56,15 @@ pub mod triple_ring;
 
 pub use leapfrog::{AnnotatedPattern, LeapfrogRing, RingIterator};
 pub use packed_dict::{PackedDictError, PackedTermDictionary};
-pub use packed_format::{PackedRingError, deserialize_triple_ring, serialize_triple_ring};
-pub use packed_permutation::{
-    PackedPermutationError, deserialize_permutation, serialize_permutation,
+pub use packed_format::{
+    PackedRingError, assemble_triple_ring, deserialize_triple_ring, serialize_triple_ring,
 };
-pub use packed_wavelet::{PackedWaveletError, deserialize_wavelet_tree, serialize_wavelet_tree};
+pub use packed_permutation::{
+    PackedPermutationError, deserialize_permutation, serialize_permutation, write_permutation,
+};
+pub use packed_wavelet::{
+    PackedWaveletError, deserialize_wavelet_tree, serialize_wavelet_tree, write_wavelet_tree,
+};
 pub use permutation::SuccinctPermutation;
 pub use section::RdfRingSection;
 pub use triple_ring::{TripleRing, TripleRingInvariantError};

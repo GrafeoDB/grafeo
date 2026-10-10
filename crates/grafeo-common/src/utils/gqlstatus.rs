@@ -209,6 +209,8 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::Optimization => GqlStatus::SYNTAX_ERROR,
                 QueryErrorKind::Execution => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::Timeout => GqlStatus::DATA_EXCEPTION,
+                // GQL defines no class for a feature an implementation lacks.
+                QueryErrorKind::Unsupported => GqlStatus::SYNTAX_ERROR,
             },
             Error::Transaction(t) => match t {
                 TransactionError::ReadOnly => GqlStatus::INVALID_TX_READ_ONLY,
@@ -233,7 +235,7 @@ impl From<&super::error::Error> for GqlStatus {
                 GqlStatus::SYNTAX_INVALID_REFERENCE
             }
             Error::Storage(_) => GqlStatus::DATA_EXCEPTION,
-            Error::Serialization(_) => GqlStatus::DATA_EXCEPTION,
+            Error::Serialization(_) | Error::Corruption(_) => GqlStatus::DATA_EXCEPTION,
             Error::Io(_) => GqlStatus::DATA_EXCEPTION,
             Error::Internal(_) => GqlStatus::DATA_EXCEPTION,
         }

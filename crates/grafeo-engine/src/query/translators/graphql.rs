@@ -57,7 +57,8 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 
     let doc = graphql::parse(actual_query)?;
     let translator = GraphQLTranslator::new();
-    let mut plan = translator.translate_document(&doc)?;
+    let plan = translator.translate_document(&doc)?;
+    let mut plan = crate::query::limits::check_plan_depth(plan)?;
     plan.explain = explain;
     plan.profile = profile;
     Ok(plan)
@@ -973,23 +974,8 @@ impl GraphQLTranslator {
 
     /// Combines predicates with AND.
     fn combine_with_and(&self, predicates: Vec<LogicalExpression>) -> Result<LogicalExpression> {
-        if predicates.is_empty() {
-            return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "No predicates",
-            )));
-        }
-
-        let result = predicates
-            .into_iter()
-            .reduce(|acc, pred| LogicalExpression::Binary {
-                left: Box::new(acc),
-                op: BinaryOp::And,
-                right: Box::new(pred),
-            })
-            .expect("predicates non-empty after is_empty check");
-
-        Ok(result)
+        LogicalExpression::conjunction(predicates)
+            .ok_or_else(|| Error::Query(QueryError::new(QueryErrorKind::Semantic, "No predicates")))
     }
 
     fn expand_fragment(

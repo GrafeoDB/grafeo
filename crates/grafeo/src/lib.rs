@@ -71,6 +71,23 @@ pub use grafeo_engine::{
     StatementKind, VERSION,
 };
 
+// Re-export what the `Config` methods take, so a configuration needs no other
+// crate
+#[cfg(feature = "encryption")]
+pub use grafeo_common::encryption::KeyChain;
+// Derives the master key a `KeyChain` takes from a passphrase
+#[cfg(feature = "encryption")]
+pub use grafeo_common::encryption::PasswordKeyProvider;
+#[cfg(feature = "cdc")]
+pub use grafeo_engine::cdc::CdcRetentionConfig;
+#[cfg(feature = "encryption")]
+pub use grafeo_engine::config::EncryptionConfig;
+pub use grafeo_engine::config::StorageFormat;
+
+// Re-export what `GrafeoDB::create_text_index_with` takes
+#[cfg(feature = "text-index")]
+pub use grafeo_engine::{TextIndexOptions, TokenizerKind};
+
 // Re-export submodules for qualified access (e.g. grafeo::auth::Identity)
 pub use grafeo_engine::admin;
 pub use grafeo_engine::auth;

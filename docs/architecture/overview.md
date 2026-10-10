@@ -70,5 +70,5 @@ sequenceDiagram
 ## Threading Model
 
 - **Main Thread** - Coordinates query execution
-- **Worker Threads** - Parallel query processing (morsel-driven)
+- **Worker Threads** - Batch vector search and some graph algorithms (rayon); a query itself runs on one thread
 - **Background Thread** - Checkpointing, compaction

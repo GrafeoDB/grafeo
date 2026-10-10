@@ -33,7 +33,8 @@ impl From<&grafeo_common::utils::error::Error> for GrafeoStatus {
             // no retry opens a closed database. No status of its own, so the
             // C ABI stays as it is; the message names it (GRAFEO-T007).
             ErrorCategory::DatabaseClosed | ErrorCategory::Database => GrafeoStatus::ErrorDatabase,
-            ErrorCategory::Storage => GrafeoStatus::ErrorStorage,
+            // The message starts with GRAFEO-S002.
+            ErrorCategory::Storage | ErrorCategory::Corruption => GrafeoStatus::ErrorStorage,
             ErrorCategory::Io => GrafeoStatus::ErrorIo,
             ErrorCategory::Serialization => GrafeoStatus::ErrorSerialization,
             ErrorCategory::Internal => GrafeoStatus::ErrorInternal,

@@ -198,3 +198,249 @@ fn a_failed_statement_is_not_replayed() {
 
     assert_eq!(doc_ids(&db), ids(&[1]));
 }
+
+// ── A failed statement with auto-commit off, no transaction open (#536) ──
+
+/// The auto-commit setting (deprecated) no longer changes how writes run:
+/// the same writes, with the setting on and off, succeed and fail alike,
+/// leave the same graph, and commit the same number of times (each statement
+/// and call on its own, a failed one not at all), and no transaction stays
+/// open.
+#[test]
+#[expect(deprecated, reason = "the deprecated setting is what this tests")]
+fn the_auto_commit_setting_no_longer_changes_how_writes_run() {
+    use grafeo_common::types::{PropertyKey, Value};
+    use std::collections::HashMap;
+
+    let outcome = |auto_commit: bool| {
+        let db = typed_docs();
+        let mut session = db.session();
+        session.set_auto_commit(auto_commit);
+        let doc = |id: Value| HashMap::from([(PropertyKey::new("id"), id)]);
+        let succeeded = [
+            session.execute("INSERT (:Doc {id: 1})").is_ok(),
+            session
+                .execute("UNWIND [5, 'x'] AS v INSERT (:Doc {id: v})")
+                .is_ok(),
+            session
+                .batch_create_nodes_with_props(
+                    "Doc",
+                    vec![doc(Value::Int64(3)), doc(Value::from("x"))],
+                )
+                .is_ok(),
+            session
+                .create_node_with_props(&["Doc"], [("id", Value::Int64(19))])
+                .is_ok(),
+            session
+                .execute("MATCH (d:Doc {id: 1}) SET d.tag = 'Paris'")
+                .is_ok(),
+        ];
+        assert!(!session.in_transaction(), "auto-commit {auto_commit}");
+        (succeeded, doc_ids(&db), db.current_epoch())
+    };
+    let on = outcome(true);
+    assert_eq!(on.0, [true, false, false, true, true]);
+    assert_eq!(on.1, ids(&[1, 19]));
+    assert_eq!(
+        outcome(false),
+        on,
+        "auto-commit off runs the writes as on does"
+    );
+}
+
+/// With auto-commit off and no transaction open, each write statement is a
+/// transaction of its own: one that fails on its second row leaves nothing,
+/// and the statements around it are committed, each on its own.
+#[test]
+#[expect(
+    deprecated,
+    reason = "auto-commit off is what #536 is about: the setting no longer changes how writes run"
+)]
+fn a_failed_statement_with_auto_commit_off_leaves_nothing() {
+    let db = typed_docs();
+    let mut session = db.session();
+    session.set_auto_commit(false);
+    session.execute("INSERT (:Doc {id: 1})").unwrap();
+    session
+        .execute("UNWIND [5, 'x'] AS v INSERT (:Doc {id: v})")
+        .unwrap_err();
+    session.execute("INSERT (:Doc {id: 2})").unwrap();
+
+    assert!(!session.in_transaction(), "no transaction stays open");
+    assert_eq!(
+        doc_ids(&db),
+        ids(&[1, 2]),
+        "another session sees both statements that succeeded, without a commit"
+    );
+}
+
+/// A MERGE whose `ON CREATE SET` fails does not leave the node it created.
+#[test]
+#[expect(
+    deprecated,
+    reason = "auto-commit off is what #536 is about: the setting no longer changes how writes run"
+)]
+fn a_failed_merge_with_auto_commit_off_leaves_nothing() {
+    let db = typed_docs();
+    let mut session = db.session();
+    session.set_auto_commit(false);
+    session
+        .execute("MERGE (d:Doc {id: 1}) ON CREATE SET d.tag = d.id + 1")
+        .unwrap_err();
+
+    assert_eq!(doc_ids(&db), ids(&[]));
+}
+
+/// A MERGE whose `ON CREATE SET` fails on the new edge does not leave the
+/// edge it created.
+#[test]
+#[expect(
+    deprecated,
+    reason = "auto-commit off is what #536 is about: the setting no longer changes how writes run"
+)]
+fn a_failed_edge_merge_with_auto_commit_off_leaves_nothing() {
+    let db = typed_docs();
+    db.execute("CREATE EDGE TYPE CITES (since INTEGER, note STRING)")
+        .unwrap();
+    db.execute("INSERT (:Doc {id: 1}), (:Doc {id: 2})").unwrap();
+    let mut session = db.session();
+    session.set_auto_commit(false);
+    session
+        .execute(
+            "MATCH (a:Doc {id: 1}), (b:Doc {id: 2}) \
+             MERGE (a)-[r:CITES {since: 2020}]->(b) ON CREATE SET r.note = r.since + 1",
+        )
+        .unwrap_err();
+
+    let edges = db
+        .execute("MATCH ()-[r:CITES]->() RETURN count(r)")
+        .unwrap();
+    assert_eq!(edges.rows()[0][0], grafeo_common::types::Value::Int64(0));
+    assert_eq!(doc_ids(&db), ids(&[1, 2]));
+}
+
+/// The session's batch calls with auto-commit off: a batch whose later row
+/// fails leaves none of its rows.
+#[test]
+#[expect(
+    deprecated,
+    reason = "auto-commit off is what #536 is about: the setting no longer changes how writes run"
+)]
+fn a_failed_direct_batch_with_auto_commit_off_leaves_nothing() {
+    use grafeo_common::types::{PropertyKey, Value};
+    use std::collections::HashMap;
+
+    let db = typed_docs();
+    let mut session = db.session();
+    session.set_auto_commit(false);
+    session
+        .batch_create_nodes_with_props(
+            "Doc",
+            vec![
+                HashMap::from([(PropertyKey::new("id"), Value::Int64(3))]),
+                HashMap::from([(PropertyKey::new("id"), Value::from("x"))]),
+            ],
+        )
+        .unwrap_err();
+    assert_eq!(doc_ids(&db), ids(&[]));
+}
+
+/// `batch_create_nodes` with auto-commit off: a vector of another size than
+/// the property's vector index breaks the batch, and its first vector is
+/// undone with it.
+#[cfg(feature = "vector-index")]
+#[test]
+#[expect(
+    deprecated,
+    reason = "auto-commit off is what #536 is about: the setting no longer changes how writes run"
+)]
+fn a_failed_vector_batch_with_auto_commit_off_leaves_nothing() {
+    let db = GrafeoDB::new_in_memory();
+    db.create_vector_index(
+        "Point",
+        "embedding",
+        Some(3),
+        Some("cosine"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut session = db.session();
+    session.set_auto_commit(false);
+    session
+        .batch_create_nodes(
+            "Point",
+            "embedding",
+            vec![vec![0.3, 0.19, 0.88], vec![0.3, 0.19]],
+        )
+        .unwrap_err();
+    let points = db.execute("MATCH (p:Point) RETURN count(p)").unwrap();
+    assert_eq!(
+        points.rows()[0][0],
+        grafeo_common::types::Value::Int64(0),
+        "the batch's first vector is undone with the failing one"
+    );
+}
+
+/// A write statement with auto-commit off claims what it writes like any
+/// transaction: it fails with a write conflict on a node an open
+/// transaction changed first, and changes nothing.
+#[test]
+#[expect(
+    deprecated,
+    reason = "auto-commit off is what #536 is about: the setting no longer changes how writes run"
+)]
+fn a_statement_with_auto_commit_off_conflicts_with_an_open_transaction() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix', city: 'Amsterdam'})")
+        .unwrap();
+    let mut open = db.session();
+    open.begin_transaction().unwrap();
+    open.execute("MATCH (p:Person) SET p.city = 'Berlin'")
+        .unwrap();
+
+    let mut manual = db.session();
+    manual.set_auto_commit(false);
+    let error = manual
+        .execute("MATCH (p:Person) SET p.city = 'Paris'")
+        .unwrap_err()
+        .to_string();
+    assert!(error.to_lowercase().contains("conflict"), "got: {error}");
+
+    open.commit().unwrap();
+    let city = db.execute("MATCH (p:Person) RETURN p.city").unwrap();
+    assert_eq!(
+        city.rows()[0][0],
+        grafeo_common::types::Value::from("Berlin")
+    );
+}
+
+/// The failed statement leaves nothing in the WAL either, and each
+/// statement that succeeded is replayed: the writes run in a child process
+/// that exits without `close()`, so the reopen replays the WAL.
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+#[test]
+#[expect(
+    deprecated,
+    reason = "auto-commit off is what #536 is about: the setting no longer changes how writes run"
+)]
+fn a_failed_statement_with_auto_commit_off_is_not_replayed() {
+    let (_dir, db) = common::replay::reopened_after_crash(
+        "a_failed_statement_with_auto_commit_off_is_not_replayed",
+        |path| GrafeoDB::open(path).unwrap(),
+        |db| {
+            db.execute("CREATE NODE TYPE Doc (id INTEGER, tag STRING)")
+                .unwrap();
+            let mut session = db.session();
+            session.set_auto_commit(false);
+            session.execute("INSERT (:Doc {id: 1})").unwrap();
+            session
+                .execute("UNWIND [5, 'x'] AS v INSERT (:Doc {id: v})")
+                .unwrap_err();
+            session.execute("INSERT (:Doc {id: 2})").unwrap();
+        },
+    );
+
+    assert_eq!(doc_ids(&db), ids(&[1, 2]));
+}

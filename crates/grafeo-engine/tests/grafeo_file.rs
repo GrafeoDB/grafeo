@@ -478,6 +478,75 @@ fn open_nonexistent_creates_new() {
     db.close().unwrap();
 }
 
+/// The names `CALL db.labels()` and `CALL db.relationshipTypes()` list in
+/// the default graph and in graph "trips", sorted.
+fn catalog_names(db: &GrafeoDB) -> Vec<Vec<String>> {
+    let names = |rows: Vec<Vec<grafeo_common::types::Value>>| {
+        let mut names: Vec<String> = rows
+            .iter()
+            .map(|row| match &row[0] {
+                grafeo_common::types::Value::String(name) => name.to_string(),
+                other => panic!("a name: {other:?}"),
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    let trips = db.graph("trips").unwrap();
+    vec![
+        names(db.execute("CALL db.labels()").unwrap().rows().to_vec()),
+        names(
+            db.execute("CALL db.relationshipTypes()")
+                .unwrap()
+                .rows()
+                .to_vec(),
+        ),
+        names(trips.execute("CALL db.labels()").unwrap().rows().to_vec()),
+        names(
+            trips
+                .execute("CALL db.relationshipTypes()")
+                .unwrap()
+                .rows()
+                .to_vec(),
+        ),
+    ]
+}
+
+/// The labels and edge types a graph lists stay with that graph across a
+/// reopen, also those no node or edge has any more: a label used in the
+/// default graph and only left behind in a named one, and the other way.
+#[test]
+fn every_graph_lists_the_same_names_after_a_reopen() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("names.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+    db.execute("INSERT (:Ghost:City {name: 'Prague'})-[:OLD]->(:Ghost {name: 'Vincent'})")
+        .unwrap();
+    db.execute("MATCH (g:Ghost) DETACH DELETE g").unwrap();
+    db.create_graph("trips").unwrap();
+    let trips = db.graph("trips").unwrap();
+    trips
+        .execute("INSERT (:City {name: 'Berlin'})-[:KNOWS]->(:City {name: 'Paris'})")
+        .unwrap();
+    trips
+        .execute("INSERT (:Museum:Person {name: 'Mia'})-[:FERRY]->(:City {name: 'Amsterdam'})")
+        .unwrap();
+    trips.execute("MATCH (m:Museum) DETACH DELETE m").unwrap();
+    let before = catalog_names(&db);
+    assert!(
+        before[0].contains(&"Ghost".to_string()) && before[2].contains(&"Museum".to_string()),
+        "{before:?}"
+    );
+    db.close().unwrap();
+    drop(db);
+
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(catalog_names(&db), before);
+    db.close().unwrap();
+}
+
 #[test]
 fn file_grows_and_shrinks_with_data() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -487,12 +556,13 @@ fn file_grows_and_shrinks_with_data() {
     let fm = db.file_manager().unwrap();
     let initial_size = fm.file_size().unwrap();
 
-    // Add substantial data
+    // Add substantial data: distinct strings, which a dictionary-encoded
+    // column chunk does not store once for all nodes.
     let session = db.session();
     for i in 0..100 {
         session
             .execute(&format!(
-                "INSERT (:Node {{idx: {i}, data: '{}'}})",
+                "INSERT (:Node {{idx: {i}, data: '{i}{}'}})",
                 "x".repeat(1000)
             ))
             .unwrap();
@@ -1163,10 +1233,9 @@ fn wal_disabled_single_file_persists_on_close() {
     let path = dir.path().join("no_wal.grafeo");
 
     {
-        let config = Config {
-            wal_enabled: false,
-            ..Config::persistent(&path).with_storage_format(StorageFormat::Auto)
-        };
+        let config = Config::persistent(&path)
+            .with_storage_format(StorageFormat::Auto)
+            .without_wal();
         let db = GrafeoDB::with_config(config).unwrap();
         let session = db.session();
         session
@@ -1196,10 +1265,9 @@ fn wal_disabled_single_file_persists_on_close() {
     assert!(path.exists() && path.is_file());
 
     {
-        let config = Config {
-            wal_enabled: false,
-            ..Config::persistent(&path).with_storage_format(StorageFormat::Auto)
-        };
+        let config = Config::persistent(&path)
+            .with_storage_format(StorageFormat::Auto)
+            .without_wal();
         let db = GrafeoDB::with_config(config).unwrap();
         assert_eq!(
             db.node_count(),
@@ -1528,20 +1596,17 @@ fn save_to_a_path_with_a_trailing_separator_writes_the_file_it_names() {
 }
 
 // =========================================================================
-// Layered overlay deletion durability (#323 follow-up)
+// Deletes after compact() are durable (#323 follow-up)
 // =========================================================================
 
-/// Regression test: when a database has been compacted (so deletes go
-/// through the LayeredStore's `deleted_from_base_*` sets rather than
-/// directly modifying an LpgStore), those deletions must survive a
-/// close/reopen cycle. Before the OverlayDeletions section landed, the
-/// deletion sets were in-memory only and previously-deleted base nodes
-/// silently reappeared on reopen.
-#[cfg(all(feature = "compact-store", feature = "lpg"))]
+/// Regression test: deletes of nodes written before `compact()` survive a
+/// close and reopen. A compacted store once kept them in memory only, and
+/// the deleted nodes reappeared on reopen.
+#[cfg(feature = "lpg")]
 #[test]
 fn deleted_base_nodes_stay_deleted_across_reopen() {
     let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("layered_delete_persist.grafeo");
+    let path = dir.path().join("compact_delete_persist.grafeo");
 
     {
         let mut db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
@@ -1555,11 +1620,6 @@ fn deleted_base_nodes_stay_deleted_across_reopen() {
         // the write lock on the store.
         drop(session);
 
-        // Compact: pushes the three nodes into the columnar base and
-        // installs a LayeredStore. Subsequent deletes go through
-        // `LayeredStore::delete_node` and write to
-        // `deleted_from_base_nodes`, which is exactly the path we need
-        // to durably persist.
         db.compact().expect("compact should succeed");
 
         let session = db.session();
@@ -1594,12 +1654,12 @@ fn deleted_base_nodes_stay_deleted_across_reopen() {
     db.close().unwrap();
 }
 
-/// Companion test for edge deletion through the LayeredStore.
-#[cfg(all(feature = "compact-store", feature = "lpg"))]
+/// Companion test for edge deletion after `compact()`.
+#[cfg(feature = "lpg")]
 #[test]
 fn deleted_base_edges_stay_deleted_across_reopen() {
     let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("layered_edge_delete_persist.grafeo");
+    let path = dir.path().join("compact_edge_delete_persist.grafeo");
 
     {
         let mut db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();

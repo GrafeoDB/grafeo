@@ -1,0 +1,73 @@
+# Rosetta: a call to a function that does not exist
+#
+# A call to an unknown function is an error before any row is read, in every
+# language that calls functions, with the closest function name as a hint
+# ("Did you mean 'upper'?"). It used to be null for every row, so a misspelled
+# function in a WHERE clause quietly kept no rows. Function names are matched
+# without regard to case.
+#
+# Setup (GQL): two directories.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Unknown functions
+  dataset: empty
+  requires: [cypher, sql-pgq]
+
+tests:
+
+  - name: an_unknown_function_is_an_error
+    setup:
+      - "INSERT (:Dir {path: 'src/tests'}), (:Dir {path: 'src/app'})"
+    variants:
+      gql: "MATCH (d:Dir) RETURN no_such_function(d.path) AS x"
+      cypher: "MATCH (d:Dir) RETURN no_such_function(d.path) AS x"
+      sql-pgq: "SELECT * FROM GRAPH_TABLE (MATCH (d:Dir) COLUMNS (no_such_function(d.path) AS x))"
+    expect:
+      error: "Unknown function 'no_such_function'"
+
+  - name: a_misspelled_function_in_where_is_an_error
+    setup:
+      - "INSERT (:Dir {path: 'src/tests'}), (:Dir {path: 'src/app'})"
+    variants:
+      gql: "MATCH (d:Dir) WHERE upperr(d.path) = 'SRC/APP' RETURN d.path AS path"
+      cypher: "MATCH (d:Dir) WHERE upperr(d.path) = 'SRC/APP' RETURN d.path AS path"
+    expect:
+      error: "Unknown function 'upperr'"
+
+  - name: a_misspelled_function_names_the_close_one
+    setup:
+      - "INSERT (:Dir {path: 'src/tests'}), (:Dir {path: 'src/app'})"
+    variants:
+      gql: "MATCH (d:Dir) WHERE upperr(d.path) = 'SRC/APP' RETURN d.path AS path"
+      cypher: "MATCH (d:Dir) WHERE upperr(d.path) = 'SRC/APP' RETURN d.path AS path"
+      sql-pgq: "SELECT * FROM GRAPH_TABLE (MATCH (d:Dir) WHERE upperr(d.path) = 'SRC/APP' COLUMNS (d.path AS path))"
+    expect:
+      error: "Did you mean 'upper'?"
+
+  - name: an_unknown_function_in_a_list_comprehension_is_an_error
+    variants:
+      gql: "RETURN [x IN ['a', 'b'] | toUpperr(x)] AS r"
+      cypher: "RETURN [x IN ['a', 'b'] | toUpperr(x)] AS r"
+    expect:
+      error: "Unknown function 'toUpperr'"
+
+  - name: an_unknown_function_in_order_by_is_an_error
+    setup:
+      - "INSERT (:Dir {path: 'src/tests'}), (:Dir {path: 'src/app'})"
+    variants:
+      gql: "MATCH (d:Dir) RETURN d.path AS path ORDER BY lenght(d.path)"
+      cypher: "MATCH (d:Dir) RETURN d.path AS path ORDER BY lenght(d.path)"
+    expect:
+      error: "Unknown function 'lenght'"
+
+  - name: known_functions_in_any_case
+    setup:
+      - "INSERT (:Dir {path: 'src/app'})"
+    variants:
+      gql: "MATCH (d:Dir) RETURN UPPER(d.path) AS a, toupper(d.path) AS b, Size(d.path) AS n, COUNT(d) AS c"
+      cypher: "MATCH (d:Dir) RETURN UPPER(d.path) AS a, toupper(d.path) AS b, Size(d.path) AS n, COUNT(d) AS c"
+    expect:
+      rows:
+        - [SRC/APP, SRC/APP, 7, 1]

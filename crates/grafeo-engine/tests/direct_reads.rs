@@ -24,7 +24,6 @@ fn person(db: &GrafeoDB, name: &str) -> NodeId {
         .unwrap()
 }
 
-#[cfg(feature = "compact-store")]
 #[test]
 fn direct_reads_see_the_compacted_data() {
     let mut db = GrafeoDB::new_in_memory();
@@ -68,7 +67,6 @@ fn direct_reads_see_the_compacted_data() {
 
 /// The schema views count the labels, edge types and property keys of the
 /// compacted data next to those written since.
-#[cfg(feature = "compact-store")]
 #[test]
 fn schema_views_see_the_compacted_data() {
     use grafeo_engine::SchemaInfo;

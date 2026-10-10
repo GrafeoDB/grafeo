@@ -228,6 +228,18 @@ pub trait GraphStore: Send + Sync {
     /// Finds nodes matching multiple property equality conditions.
     fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId>;
 
+    /// The nodes whose `property` may be equal to `value` under `=` (the
+    /// filter's equality, see
+    /// [`HashKey::for_equality`](crate::execution::operators::HashKey::for_equality)),
+    /// found through the property's index: every node `=` finds equal, and
+    /// maybe others, for a filter to decide.
+    ///
+    /// The default returns `None`, as does a store without an index on
+    /// `property`: the caller then scans.
+    fn find_nodes_maybe_equal(&self, _property: &str, _value: &Value) -> Option<Vec<NodeId>> {
+        None
+    }
+
     /// Finds nodes whose property value falls within a range.
     fn find_nodes_in_range(
         &self,
@@ -551,9 +563,23 @@ pub trait GraphStoreMut: GraphStoreSearch {
     // --- Edge creation ---
 
     /// Creates a new edge between two nodes.
+    ///
+    /// The store does not check the endpoints: the caller makes sure both
+    /// exist (the engine's writes go through
+    /// [`create_edge_versioned`](Self::create_edge_versioned)).
     fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> EdgeId;
 
-    /// Creates a new edge within a transaction context.
+    /// Creates a new edge within a transaction context
+    /// (`TransactionId::SYSTEM` outside one).
+    ///
+    /// The caller checks that its transaction sees both endpoints, and claims
+    /// them against a concurrent delete (as `GraphWriter` does).
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict, and creates nothing, when the store knows an
+    /// endpoint is deleted, by a committed delete or one in progress: a
+    /// compacted store's base node with a tombstone.
     fn create_edge_versioned(
         &self,
         src: NodeId,
@@ -561,9 +587,10 @@ pub trait GraphStoreMut: GraphStoreSearch {
         edge_type: &str,
         epoch: EpochId,
         transaction_id: TransactionId,
-    ) -> EdgeId;
+    ) -> Result<EdgeId>;
 
-    /// Creates multiple edges in batch (single lock acquisition).
+    /// Creates multiple edges in batch (single lock acquisition). The
+    /// endpoints are not checked, as for [`create_edge`](Self::create_edge).
     fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId>;
 
     // --- Deletion ---
@@ -575,9 +602,8 @@ pub trait GraphStoreMut: GraphStoreSearch {
     ///
     /// # Errors
     ///
-    /// Returns an error, and deletes nothing, when the node's properties
-    /// (which a rollback restores) cannot be read: a spilled value whose file
-    /// cannot be read.
+    /// Returns an error, and deletes nothing, when the store cannot read the
+    /// node it would delete (a record or value it cannot read).
     fn delete_node_versioned(
         &self,
         id: NodeId,
@@ -607,8 +633,8 @@ pub trait GraphStoreMut: GraphStoreSearch {
     /// Sets a property on an edge.
     fn set_edge_property(&self, id: EdgeId, key: &str, value: Value);
 
-    /// Sets a node property within a transaction, recording the previous value
-    /// so it can be restored on rollback.
+    /// Sets a node property within a transaction context: a store that keeps
+    /// versions writes the value as the transaction's.
     ///
     /// Default delegates to [`set_node_property`](Self::set_node_property).
     ///
@@ -628,8 +654,7 @@ pub trait GraphStoreMut: GraphStoreSearch {
         Ok(())
     }
 
-    /// Sets an edge property within a transaction, recording the previous value
-    /// so it can be restored on rollback.
+    /// Sets an edge property within a transaction context.
     ///
     /// Default delegates to [`set_edge_property`](Self::set_edge_property).
     fn set_edge_property_versioned(
@@ -659,9 +684,8 @@ pub trait GraphStoreMut: GraphStoreSearch {
     /// as [`remove_node_property`](Self::remove_node_property) does.
     fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>>;
 
-    /// Removes a node property within a transaction, recording the previous value
-    /// so it can be restored on rollback. Returns the previous value if it
-    /// existed.
+    /// Removes a node property within a transaction context. Returns the
+    /// previous value if it existed.
     ///
     /// Default delegates to [`remove_node_property`](Self::remove_node_property).
     ///
@@ -678,8 +702,7 @@ pub trait GraphStoreMut: GraphStoreSearch {
         self.remove_node_property(id, key)
     }
 
-    /// Removes an edge property within a transaction, recording the previous value
-    /// so it can be restored on rollback.
+    /// Removes an edge property within a transaction context.
     ///
     /// Default delegates to [`remove_edge_property`](Self::remove_edge_property).
     ///
@@ -704,7 +727,7 @@ pub trait GraphStoreMut: GraphStoreSearch {
     /// Removes a label from a node. Returns `true` if the label existed.
     fn remove_label(&self, node_id: NodeId, label: &str) -> bool;
 
-    /// Adds a label within a transaction, recording the change for rollback.
+    /// Adds a label within a transaction context.
     ///
     /// Default delegates to [`add_label`](Self::add_label).
     fn add_label_versioned(
@@ -716,7 +739,7 @@ pub trait GraphStoreMut: GraphStoreSearch {
         self.add_label(node_id, label)
     }
 
-    /// Removes a label within a transaction, recording the change for rollback.
+    /// Removes a label within a transaction context.
     ///
     /// Default delegates to [`remove_label`](Self::remove_label).
     fn remove_label_versioned(
@@ -1282,8 +1305,8 @@ mod tests {
             edge_type: &str,
             _: EpochId,
             _: TransactionId,
-        ) -> EdgeId {
-            self.create_edge(src, dst, edge_type)
+        ) -> Result<EdgeId> {
+            Ok(self.create_edge(src, dst, edge_type))
         }
         fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
             edges

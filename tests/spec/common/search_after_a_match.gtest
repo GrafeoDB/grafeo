@@ -1,0 +1,155 @@
+# Common: a vector or text search after a MATCH keeps that MATCH's rows
+#
+# A search condition on a node scan that runs for each row of an earlier
+# clause (a second MATCH, a comma-separated part, an UNWIND) checks the
+# condition per row; only a scan without input becomes an index search. The
+# search used to replace the scan with its input, so the earlier rows were
+# lost: cosine_similarity silently returned one row per document, and a
+# RETURN of an earlier variable failed with "Variable 'f' not found in input".
+#
+# Setup: files a.rs and b.rs; documents Amsterdam (emb [1, 0], 'graph
+# database'), Berlin ([0, 1], 'rust compiler'), Paris ([0.8, 0.6], 'graph
+# theory') and Prague ([0.3, 0.95], 'query planner'), with a cosine vector
+# index on Doc.emb and a text index on Doc.body. Against [1, 0] the cosine
+# similarity is 1 for Amsterdam, 0.8 for Paris, about 0.3 for Prague and 0 for
+# Berlin.
+
+meta:
+  model: lpg
+  section: hybrid-queries
+  title: Vector and text search after a MATCH
+  dataset: empty
+  requires: [text-index, vector-index, cypher]
+
+tests:
+
+  - name: vector_search_after_a_match
+    setup:
+      - "INSERT (:File {name: 'a.rs'}), (:File {name: 'b.rs'}), (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0]), body: 'graph database'}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0]), body: 'rust compiler'}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6]), body: 'graph theory'}), (:Doc {name: 'Prague', emb: vector([0.3, 0.95]), body: 'query planner'})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT"
+    variants:
+      gql: "MATCH (f:File) MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 RETURN f.name AS f, d.name AS d"
+      cypher: "MATCH (f:File) MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 RETURN f.name AS f, d.name AS d"
+    expect:
+      rows:
+        - [a.rs, Amsterdam]
+        - [a.rs, Paris]
+        - [b.rs, Amsterdam]
+        - [b.rs, Paris]
+
+  - name: vector_search_after_a_match_counts_every_row
+    setup:
+      - "INSERT (:File {name: 'a.rs'}), (:File {name: 'b.rs'}), (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0]), body: 'graph database'}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0]), body: 'rust compiler'}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6]), body: 'graph theory'}), (:Doc {name: 'Prague', emb: vector([0.3, 0.95]), body: 'query planner'})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT"
+    variants:
+      gql: "MATCH (f:File) MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 RETURN d.name AS d"
+      cypher: "MATCH (f:File) MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 RETURN d.name AS d"
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Amsterdam]
+        - [Paris]
+        - [Paris]
+
+  - name: vector_search_in_a_comma_separated_part
+    setup:
+      - "INSERT (:File {name: 'a.rs'}), (:File {name: 'b.rs'}), (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0]), body: 'graph database'}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0]), body: 'rust compiler'}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6]), body: 'graph theory'}), (:Doc {name: 'Prague', emb: vector([0.3, 0.95]), body: 'query planner'})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT"
+    variants:
+      gql: "MATCH (f:File), (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) >= 0.75 RETURN f.name AS f, d.name AS d"
+      cypher: "MATCH (f:File), (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) >= 0.75 RETURN f.name AS f, d.name AS d"
+    expect:
+      rows:
+        - [a.rs, Amsterdam]
+        - [a.rs, Paris]
+        - [b.rs, Amsterdam]
+        - [b.rs, Paris]
+
+  - name: text_search_after_a_match
+    setup:
+      - "INSERT (:File {name: 'a.rs'}), (:File {name: 'b.rs'}), (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0]), body: 'graph database'}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0]), body: 'rust compiler'}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6]), body: 'graph theory'}), (:Doc {name: 'Prague', emb: vector([0.3, 0.95]), body: 'query planner'})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT"
+    variants:
+      gql: "MATCH (f:File) MATCH (d:Doc) WHERE text_match(d.body, 'graph') RETURN f.name AS f, d.name AS d"
+      cypher: "MATCH (f:File) MATCH (d:Doc) WHERE text_match(d.body, 'graph') RETURN f.name AS f, d.name AS d"
+    expect:
+      rows:
+        - [a.rs, Amsterdam]
+        - [a.rs, Paris]
+        - [b.rs, Amsterdam]
+        - [b.rs, Paris]
+
+  - name: text_search_in_a_comma_separated_part
+    setup:
+      - "INSERT (:File {name: 'a.rs'}), (:File {name: 'b.rs'}), (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0]), body: 'graph database'}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0]), body: 'rust compiler'}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6]), body: 'graph theory'}), (:Doc {name: 'Prague', emb: vector([0.3, 0.95]), body: 'query planner'})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT"
+    variants:
+      gql: "MATCH (f:File), (d:Doc) WHERE text_score(d.body, 'graph') > 0.0 RETURN f.name AS f, d.name AS d"
+      cypher: "MATCH (f:File), (d:Doc) WHERE text_score(d.body, 'graph') > 0.0 RETURN f.name AS f, d.name AS d"
+    expect:
+      rows:
+        - [a.rs, Amsterdam]
+        - [a.rs, Paris]
+        - [b.rs, Amsterdam]
+        - [b.rs, Paris]
+
+  - name: vector_and_text_search_after_a_match
+    setup:
+      - "INSERT (:File {name: 'a.rs'}), (:File {name: 'b.rs'}), (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0]), body: 'graph database'}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0]), body: 'rust compiler'}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6]), body: 'graph theory'}), (:Doc {name: 'Prague', emb: vector([0.3, 0.95]), body: 'query planner'})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT"
+    variants:
+      gql: "MATCH (f:File) MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 AND text_match(d.body, 'theory') RETURN f.name AS f, d.name AS d"
+      cypher: "MATCH (f:File) MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 AND text_match(d.body, 'theory') RETURN f.name AS f, d.name AS d"
+    expect:
+      rows:
+        - [a.rs, Paris]
+        - [b.rs, Paris]
+
+  - name: vector_or_text_search_after_a_match
+    setup:
+      - "INSERT (:File {name: 'a.rs'}), (:File {name: 'b.rs'}), (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0]), body: 'graph database'}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0]), body: 'rust compiler'}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6]), body: 'graph theory'}), (:Doc {name: 'Prague', emb: vector([0.3, 0.95]), body: 'query planner'})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT"
+    variants:
+      gql: "MATCH (f:File), (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.9 OR text_match(d.body, 'rust') RETURN f.name AS f, d.name AS d"
+      cypher: "MATCH (f:File), (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.9 OR text_match(d.body, 'rust') RETURN f.name AS f, d.name AS d"
+    expect:
+      rows:
+        - [a.rs, Amsterdam]
+        - [a.rs, Berlin]
+        - [b.rs, Amsterdam]
+        - [b.rs, Berlin]
+
+  - name: text_search_after_an_unwind
+    setup:
+      - "INSERT (:File {name: 'a.rs'}), (:File {name: 'b.rs'}), (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0]), body: 'graph database'}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0]), body: 'rust compiler'}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6]), body: 'graph theory'}), (:Doc {name: 'Prague', emb: vector([0.3, 0.95]), body: 'query planner'})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT"
+    variants:
+      gql: "UNWIND [3, 19] AS n MATCH (d:Doc) WHERE text_match(d.body, 'graph') RETURN n, d.name AS d"
+      cypher: "UNWIND [3, 19] AS n MATCH (d:Doc) WHERE text_match(d.body, 'graph') RETURN n, d.name AS d"
+    expect:
+      rows:
+        - [3, Amsterdam]
+        - [3, Paris]
+        - [19, Amsterdam]
+        - [19, Paris]
+
+  - name: vector_search_without_an_earlier_match
+    setup:
+      - "INSERT (:File {name: 'a.rs'}), (:File {name: 'b.rs'}), (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0]), body: 'graph database'}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0]), body: 'rust compiler'}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6]), body: 'graph theory'}), (:Doc {name: 'Prague', emb: vector([0.3, 0.95]), body: 'query planner'})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT"
+    variants:
+      gql: "MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 RETURN d.name AS d"
+      cypher: "MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 RETURN d.name AS d"
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Paris]

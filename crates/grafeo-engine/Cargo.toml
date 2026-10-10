@@ -25,12 +25,11 @@ indexmap.workspace = true
 
 # Concurrency
 parking_lot.workspace = true
-crossbeam = { workspace = true, optional = true }
-rayon = { workspace = true, optional = true }
 
 # Serialization
 serde.workspace = true
 bincode.workspace = true
+serde_json = { version = "1", optional = true }  # The backup manifest and cursor (feature `wal`)
 
 # Regex for SPARQL FILTER (use regex-lite for smaller WASM builds)
 regex = { workspace = true, optional = true }
@@ -58,7 +57,7 @@ tokenizers = { version = "0.23", optional = true, default-features = false, feat
 hf-hub = { version = "1.0", optional = true, features = ["blocking"] }
 crc32fast = { workspace = true, optional = true }
 
-# Memory-mapped files (optional, for compact-store mmap spill)
+# Memory-mapped files (optional, for file-backed vector storage)
 memmap2 = { workspace = true, optional = true }
 
 # Refcounted byte slices for mmap-backed column storage (Phase 3c)
@@ -82,20 +81,20 @@ sparql = ["grafeo-adapters/sparql"]
 gremlin = ["grafeo-adapters/gremlin"]
 graphql = ["grafeo-adapters/graphql"]
 sql-pgq = ["grafeo-adapters/sql-pgq"]  # SQL/PGQ (SQL:2023 GRAPH_TABLE)
-triple-store = ["grafeo-core/triple-store", "grafeo-adapters/triple-store", "md5", "sha1", "sha2", "regex"]  # RDF triple store model and planner
+triple-store = ["lpg", "grafeo-core/triple-store", "grafeo-adapters/triple-store", "md5", "sha1", "sha2", "regex"]  # RDF triple store model and planner; with the LPG store, which sessions, persistence and recovery need (#544)
 ring-index = ["grafeo-core/ring-index", "triple-store"]  # Ring Index for compact RDF (3x memory reduction)
 shacl = ["grafeo-core/shacl", "sparql"]  # SHACL validation (core constraints + SPARQL dispatch)
 rdf = ["triple-store"]  # Deprecated: use triple-store
-parallel = ["rayon", "crossbeam", "grafeo-core/parallel", "grafeo-adapters/parallel"]  # Parallel execution
+parallel = ["grafeo-core/parallel", "grafeo-adapters/parallel"]  # rayon in core and adapters: batch vector search, graph algorithms
 algos = ["grafeo-adapters/algos"]  # Graph algorithm plugin (SSSP, PageRank, etc.)
-wal = ["dep:grafeo-storage", "grafeo-storage/wal", "grafeo-file"]  # Write-ahead log storage (the sidecar WAL of a `.grafeo` file)
+wal = ["dep:grafeo-storage", "grafeo-storage/wal", "grafeo-file", "dep:serde_json"]  # Write-ahead log storage (the sidecar WAL of a `.grafeo` file); serde_json writes the backup manifest and cursor
 async-storage = ["dep:grafeo-storage", "grafeo-storage/async-storage", "dep:tokio"]  # Async WAL and storage backend
 grafeo-file = ["dep:grafeo-storage", "grafeo-storage/grafeo-file", "dep:crc32fast"]  # Single-file .grafeo format
 encryption = ["dep:grafeo-storage", "grafeo-common/encryption", "grafeo-storage/encryption"]  # AES-256-GCM encryption at rest
 spill = ["grafeo-core/spill"]  # Disk spilling for out-of-core execution
-mmap = ["grafeo-core/mmap", "dep:memmap2"]  # File-backed vector storage and compact-store spill
+mmap = ["grafeo-core/mmap", "dep:memmap2"]  # File-backed vector storage
 temporal = ["grafeo-core/temporal"]  # Append-only versioned properties
-compact-store = ["grafeo-core/compact-store"]  # CompactStore — columnar graph for read-only workloads
+compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 # Convenience groups
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]  # All query language parsers
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]  # All AI/RAG features

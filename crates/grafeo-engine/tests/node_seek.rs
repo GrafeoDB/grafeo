@@ -387,3 +387,70 @@ fn profile_shows_the_seek() {
     let by_id = profile("MATCH (n) WHERE id(n) = 3 RETURN n.n");
     assert!(by_id.contains("NodeSeek"), "{by_id}");
 }
+
+/// An `IN` list without a value (`[]`, or a parameter list of only NULLs)
+/// finds no node, and the planner returns no rows without reading the index
+/// or the label: `EXPLAIN` shows no hint for it, and an index lookup for a
+/// list with a value.
+#[test]
+fn explain_shows_an_index_lookup_only_for_an_in_list_with_values() {
+    let db = GrafeoDB::new_in_memory();
+    db.create_property_index("k").unwrap();
+    db.execute(
+        "INSERT (:X {name: 'Alix', k: 3}), (:X {name: 'Gus', k: 19}), \
+         (:X {name: 'Vincent', k: 88})",
+    )
+    .unwrap();
+    let explain = |query: &str, params: &[(&str, Value)]| {
+        let params: HashMap<String, Value> = params
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone()))
+            .collect();
+        db.execute_with_params(&format!("EXPLAIN {query}"), params)
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| format!("{:?}", row[0]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let values = |items: Vec<Value>| vec![("ks", Value::List(items.into()))];
+    let by_parameter = "MATCH (n:X) WHERE n.k IN $ks RETURN n.name";
+
+    let without_values: [(&str, Vec<(&str, Value)>); 3] = [
+        ("MATCH (n:X) WHERE n.k IN [] RETURN n.name", vec![]),
+        (by_parameter, values(vec![])),
+        (by_parameter, values(vec![Value::Null, Value::Null])),
+    ];
+    let claimed: Vec<String> = without_values
+        .iter()
+        .map(|(query, params)| (query, params, explain(query, params)))
+        .filter(|(_, _, plan)| plan.contains("[index") || plan.contains("[label-first]"))
+        .map(|(query, params, plan)| format!("{query} {params:?}:\n{plan}"))
+        .collect();
+    assert!(claimed.is_empty(), "{}", claimed.join("\n"));
+    for (query, params) in &without_values {
+        assert!(
+            rows(&db, query, params).is_empty(),
+            "{query} {params:?} finds no node"
+        );
+    }
+
+    let with_values: [(&str, Vec<(&str, Value)>, Vec<Vec<Value>>); 2] = [
+        (
+            "MATCH (n:X) WHERE n.k IN [3, 19] RETURN n.name",
+            vec![],
+            vec![vec![Value::from("Alix")], vec![Value::from("Gus")]],
+        ),
+        (
+            by_parameter,
+            values(vec![Value::Int64(3), Value::Null]),
+            vec![vec![Value::from("Alix")]],
+        ),
+    ];
+    for (query, params, expected) in &with_values {
+        let plan = explain(query, params);
+        assert!(plan.contains("[index: k]"), "{query} {params:?}:\n{plan}");
+        assert_eq!(rows(&db, query, params), *expected, "{query} {params:?}");
+    }
+}

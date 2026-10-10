@@ -15,7 +15,7 @@ use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
 use super::components::UnionFind;
-use super::traits::{MinScored, impl_algorithm, node_id_from_param};
+use super::traits::{MinScored, impl_algorithm, node_id_from_param, visible_edges_from};
 
 // ============================================================================
 // Edge Weight Extraction
@@ -108,7 +108,7 @@ pub fn kruskal(store: &dyn GraphStore, weight_property: Option<&str>) -> MstResu
         std::collections::HashSet::new();
 
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, edge_id) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 // For undirected: only add each edge once
                 let key = if i < j { (i, j) } else { (j, i) };
@@ -215,14 +215,14 @@ pub fn prim(
     in_tree.insert(start_node, true);
 
     // Add edges from start node
-    for (neighbor, edge_id) in store.edges_from(start_node, Direction::Outgoing) {
+    for (neighbor, edge_id) in visible_edges_from(store, start_node, Direction::Outgoing) {
         let weight = extract_weight(store, edge_id, weight_property);
         heap.push(MinScored::new(weight, (start_node, neighbor, edge_id)));
     }
 
     // Also consider incoming edges (for undirected behavior)
     for &other in &nodes {
-        for (neighbor, edge_id) in store.edges_from(other, Direction::Outgoing) {
+        for (neighbor, edge_id) in visible_edges_from(store, other, Direction::Outgoing) {
             if neighbor == start_node {
                 let weight = extract_weight(store, edge_id, weight_property);
                 heap.push(MinScored::new(weight, (other, start_node, edge_id)));
@@ -242,7 +242,7 @@ pub fn prim(
         total_weight += weight;
 
         // Add edges from new node
-        for (neighbor, new_edge_id) in store.edges_from(dst, Direction::Outgoing) {
+        for (neighbor, new_edge_id) in visible_edges_from(store, dst, Direction::Outgoing) {
             if !*in_tree.get(&neighbor).unwrap_or(&false) {
                 let new_weight = extract_weight(store, new_edge_id, weight_property);
                 heap.push(MinScored::new(new_weight, (dst, neighbor, new_edge_id)));
@@ -252,7 +252,8 @@ pub fn prim(
         // Also consider incoming edges
         for &other in &nodes {
             if !*in_tree.get(&other).unwrap_or(&false) {
-                for (neighbor, new_edge_id) in store.edges_from(other, Direction::Outgoing) {
+                for (neighbor, new_edge_id) in visible_edges_from(store, other, Direction::Outgoing)
+                {
                     if neighbor == dst {
                         let new_weight = extract_weight(store, new_edge_id, weight_property);
                         heap.push(MinScored::new(new_weight, (other, dst, new_edge_id)));

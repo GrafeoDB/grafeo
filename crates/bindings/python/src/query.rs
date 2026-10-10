@@ -274,7 +274,7 @@ impl PyQueryResult {
     /// read by any Arrow implementation:
     ///
     /// - `pyarrow.ipc.open_stream(buf).read_all()` for a PyArrow Table
-    /// - `polars.read_ipc(buf)` for a Polars DataFrame
+    /// - `polars.read_ipc_stream(buf)` for a Polars DataFrame
     ///
     /// Example:
     /// ```python

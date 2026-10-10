@@ -165,10 +165,17 @@ fn resolve_mutation_graph(
 ) -> std::result::Result<Option<Arc<RdfStore>>, OperatorError> {
     match graph_name {
         None => Ok(Some(Arc::clone(store))),
-        Some(name) if name.starts_with('?') => Err(OperatorError::Execution(format!(
-            "SPARQL Update cannot target a variable graph ({name}); \
-             use a concrete graph IRI or a WITH clause"
-        ))),
+        Some(name) if name.starts_with('?') => Err(OperatorError::from(
+            grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    format!(
+                        "SPARQL Update cannot target a variable graph ({name}); use a concrete \
+                     graph IRI or a WITH clause"
+                    ),
+                ),
+            ),
+        )),
         Some(name) if create => Ok(Some(store.graph_or_create(name))),
         Some(name) => Ok(store.graph(name)),
     }
@@ -322,11 +329,7 @@ impl RdfPlanner {
             } else {
                 operator
             };
-        Ok(PhysicalPlan {
-            operator,
-            columns,
-            adaptive_context: None,
-        })
+        Ok(PhysicalPlan { operator, columns })
     }
 
     /// Plans a logical plan with profiling: each physical operator is wrapped
@@ -351,14 +354,7 @@ impl RdfPlanner {
         let (operator, columns) = strip_internal_columns(operator, columns);
         let entries = self.profile_entries.borrow_mut().drain(..).collect();
 
-        Ok((
-            PhysicalPlan {
-                operator,
-                columns,
-                adaptive_context: None,
-            },
-            entries,
-        ))
+        Ok((PhysicalPlan { operator, columns }, entries))
     }
 
     /// If profiling is enabled, wraps a planned result in `ProfiledOperator`
@@ -984,6 +980,9 @@ impl RdfPlanner {
                     alias: agg_expr.alias.clone(),
                     percentile: agg_expr.percentile,
                     separator: agg_expr.separator.clone(),
+                    // SPARQL rows hold RDF literals as text: MIN and MAX compare
+                    // those that read as numbers by their numbers.
+                    rdf_literals: true,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1213,7 +1212,7 @@ impl RdfPlanner {
             &right_columns,
             &left_types,
             &right_types,
-            None,
+            std::convert::identity,
         ))
     }
 

@@ -273,14 +273,13 @@ impl PyGraphHandle {
         dst_field: &str,
         replace: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let options = grafeo_engine::database::EdgeUpsertOptions {
-            key: key.to_string(),
-            endpoint_key: endpoint_key.to_string(),
-            endpoint_labels: endpoint_labels.unwrap_or_default(),
-            src_field: src_field.to_string(),
-            dst_field: dst_field.to_string(),
-            replace,
-        };
+        let options = grafeo_engine::database::EdgeUpsertOptions::new()
+            .with_key(key)
+            .with_endpoint_key(endpoint_key)
+            .with_endpoint_labels(endpoint_labels.unwrap_or_default())
+            .with_src_field(src_field)
+            .with_dst_field(dst_field)
+            .with_replace(replace);
         self.with_graph(|graph| crate::direct::upsert_edges(py, graph, edge_type, rows, &options))
     }
 

@@ -15,7 +15,9 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, MinScored, impl_algorithm, node_id_from_param};
+use super::traits::{
+    GraphAlgorithm, MinScored, impl_algorithm, node_id_from_param, visible_edges_from,
+};
 
 // ============================================================================
 // Edge Weight Extraction
@@ -127,7 +129,7 @@ pub fn dijkstra(
         }
 
         // Explore neighbors
-        for (neighbor, edge_id) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
             let weight = extract_weight(store, edge_id, weight_property);
             let new_dist = dist + weight;
 
@@ -193,7 +195,7 @@ pub fn dijkstra_path(
         }
 
         // Explore neighbors
-        for (neighbor, edge_id) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
             let weight = extract_weight(store, edge_id, weight_property);
             let new_dist = dist + weight;
 
@@ -273,7 +275,7 @@ where
         let current_g = *g_score.get(&node).unwrap_or(&f64::INFINITY);
 
         // Explore neighbors
-        for (neighbor, edge_id) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
             let weight = extract_weight(store, edge_id, weight_property);
             let tentative_g = current_g + weight;
 
@@ -372,8 +374,7 @@ pub fn bellman_ford(
     let edges: Vec<(NodeId, NodeId, grafeo_common::types::EdgeId)> = nodes
         .iter()
         .flat_map(|&node| {
-            store
-                .edges_from(node, Direction::Outgoing)
+            visible_edges_from(store, node, Direction::Outgoing)
                 .into_iter()
                 .map(move |(neighbor, edge_id)| (node, neighbor, edge_id))
         })
@@ -534,7 +535,7 @@ pub fn floyd_warshall(
 
     // Initialize with direct edges
     for (idx, &node) in nodes.iter().enumerate() {
-        for (neighbor, edge_id) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&neighbor_idx) = node_to_index.get(&neighbor) {
                 let weight = extract_weight(store, edge_id, weight_property);
                 if weight < distances[idx][neighbor_idx] {

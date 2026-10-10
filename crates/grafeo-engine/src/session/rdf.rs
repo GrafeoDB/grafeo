@@ -25,9 +25,9 @@ use super::Session;
 use super::SessionConfig;
 
 impl Session {
-    /// Creates a new session with RDF store and adaptive configuration.
+    /// Creates a session that reads and writes `store` and `rdf_store`.
     #[cfg(feature = "lpg")]
-    pub(crate) fn with_rdf_store_and_adaptive(
+    pub(crate) fn with_rdf_store(
         store: Arc<LpgStore>,
         rdf_store: Arc<RdfStore>,
         cfg: SessionConfig,
@@ -48,10 +48,11 @@ impl Session {
             db_read_only: cfg.read_only,
             identity: cfg.identity,
             auto_commit: true,
-            adaptive_config: cfg.adaptive_config,
             plan_options: super::PlanOptions {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
+                reachability: true,
+                path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
@@ -66,7 +67,7 @@ impl Session {
             #[cfg(feature = "cdc")]
             cdc_log: Arc::new(crate::cdc::CdcLog::new()),
             #[cfg(feature = "cdc")]
-            cdc_pending_events: None,
+            records_cdc: false,
             current_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
             time_zone: parking_lot::Mutex::new(None),
@@ -74,7 +75,8 @@ impl Session {
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
-            touched_graphs: parking_lot::Mutex::new(Vec::new()),
+            changes: parking_lot::Mutex::new(None),
+            external_target: None,
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]
@@ -126,10 +128,12 @@ impl Session {
             .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
-        let planner = planner.with_wal(self.wal.clone());
+        let planner = planner.with_wal(self.wal().cloned());
         #[cfg(all(feature = "cdc", feature = "lpg"))]
-        let planner =
-            planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
+        let planner = planner.with_cdc_log(
+            Some(Arc::clone(&self.cdc_log)),
+            self.root_store().current_epoch(),
+        );
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         let executor = self.make_executor(physical_plan.columns.clone());
@@ -212,10 +216,12 @@ impl Session {
             .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
-        let planner = planner.with_wal(self.wal.clone());
+        let planner = planner.with_wal(self.wal().cloned());
         #[cfg(all(feature = "cdc", feature = "lpg"))]
-        let planner =
-            planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
+        let planner = planner.with_cdc_log(
+            Some(Arc::clone(&self.cdc_log)),
+            self.root_store().current_epoch(),
+        );
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         let executor = self.make_executor(physical_plan.columns.clone());
@@ -289,10 +295,12 @@ impl Session {
             .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
-        let planner = planner.with_wal(self.wal.clone());
+        let planner = planner.with_wal(self.wal().cloned());
         #[cfg(all(feature = "cdc", feature = "lpg"))]
-        let planner =
-            planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
+        let planner = planner.with_cdc_log(
+            Some(Arc::clone(&self.cdc_log)),
+            self.root_store().current_epoch(),
+        );
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         let executor = self.make_executor(physical_plan.columns.clone());
@@ -371,10 +379,12 @@ impl Session {
             .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_transaction_id(*self.current_transaction.lock());
         #[cfg(feature = "wal")]
-        let planner = planner.with_wal(self.wal.clone());
+        let planner = planner.with_wal(self.wal().cloned());
         #[cfg(all(feature = "cdc", feature = "lpg"))]
-        let planner =
-            planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
+        let planner = planner.with_cdc_log(
+            Some(Arc::clone(&self.cdc_log)),
+            self.root_store().current_epoch(),
+        );
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         let executor = self.make_executor(physical_plan.columns.clone());
@@ -439,13 +449,13 @@ impl Session {
         shapes_graph_name: &str,
     ) -> Result<grafeo_core::graph::rdf::shacl::ValidationReport> {
         let data_store = self.rdf_store.graph(data_graph_name).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "Named graph '{data_graph_name}' not found"
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no named graph '{data_graph_name}' to validate"
             ))
         })?;
         let shapes_store = self.rdf_store.graph(shapes_graph_name).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "Named graph '{shapes_graph_name}' not found"
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no named graph '{shapes_graph_name}' to read the shapes from"
             ))
         })?;
         let executor =

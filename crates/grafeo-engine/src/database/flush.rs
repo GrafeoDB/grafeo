@@ -191,18 +191,7 @@ impl CheckpointSources {
             .last_assigned_transaction_id()
             .map_or(0, |t| t.0);
         #[cfg(feature = "lpg")]
-        if let Some(store) = &self.store {
-            // After `compact()` the store is the overlay: count the base too.
-            #[cfg(feature = "compact-store")]
-            if let Some(layered) = &self.layered {
-                use grafeo_core::graph::GraphStore;
-                return FlushContext {
-                    epoch: store.current_epoch().0,
-                    transaction_id,
-                    node_count: layered.node_count() as u64,
-                    edge_count: layered.edge_count() as u64,
-                };
-            }
+        if let Some(store) = &self.root_store() {
             return FlushContext {
                 epoch: store.current_epoch().0,
                 transaction_id,
@@ -222,7 +211,9 @@ impl CheckpointSources {
 #[cfg(all(test, feature = "grafeo-file"))]
 mod tests {
     use super::*;
-    use grafeo_common::storage::{SectionType, legacy_bytes};
+    use grafeo_common::storage::{
+        SectionSink, SectionSource, SectionType, legacy_bytes, read_raw, write_raw,
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A section holding fixed bytes, with its own dirty flag.
@@ -254,6 +245,14 @@ mod tests {
         fn deserialize(&mut self, data: &[u8]) -> Result<()> {
             self.data = data.to_vec();
             Ok(())
+        }
+
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
 
         fn is_dirty(&self) -> bool {

@@ -15,10 +15,6 @@ use std::sync::Arc;
         not(feature = "temporal")
     ),
     all(feature = "lpg", feature = "text-index"),
-    // OverlayConsumer (lpg + compact-store, no mmap requirement) and
-    // CompactStoreConsumer (lpg + compact-store + mmap) both hold a Weak
-    // back to the layered store. The broader gate covers both.
-    all(feature = "compact-store", feature = "lpg")
 ))]
 use std::sync::Weak;
 
@@ -42,9 +38,14 @@ use grafeo_common::types::{PropertyKey, Value};
 /// without a full checkpoint + mmap cycle. The [`can_spill`](MemoryConsumer::can_spill)
 /// method returns `true` for mmap-able index sections, signaling that future
 /// tiered storage support will enable actual spilling.
-pub struct SectionConsumer {
+///
+/// The consumer is generic over the section's type: a `dyn Section` keeps
+/// every method of the trait linked through its vtable, so a build that never
+/// serializes a section (no `wal`, such as the WASM `edge` profile) would
+/// carry the section's whole encoder and decoder.
+pub struct SectionConsumer<S: Section + ?Sized = dyn Section> {
     name: String,
-    section: Arc<dyn Section>,
+    section: Arc<S>,
     priority: u8,
     region: MemoryRegion,
     mmap_able: bool,
@@ -59,7 +60,7 @@ pub struct SectionConsumer {
     is_spilled: std::sync::atomic::AtomicBool,
 }
 
-impl SectionConsumer {
+impl<S: Section + ?Sized> SectionConsumer<S> {
     /// Creates a consumer for the given section without spill support.
     ///
     /// Priority and region are assigned based on the section type:
@@ -69,7 +70,7 @@ impl SectionConsumer {
     /// Calling `spill()` on a consumer constructed via `new` returns
     /// [`SpillError::NoSpillDirectory`]. Use [`with_spill`](Self::with_spill)
     /// to enable disk-backed eviction.
-    pub fn new(section: Arc<dyn Section>) -> Self {
+    pub fn new(section: Arc<S>) -> Self {
         Self::build(section, None)
     }
 
@@ -81,15 +82,15 @@ impl SectionConsumer {
     /// the resulting [`PageFetcher`](grafeo_common::storage::PageFetcher)
     /// is handed to [`Section::swap_to_mmap`] for the section to consume.
     // Only consumed by the `ring-index` registration path today; other
-    // section consumer types use specialized constructors (CompactStore,
-    // VectorIndex, TextIndex). Allow dead_code under feature combinations
+    // section consumer types use specialized constructors (VectorIndex,
+    // TextIndex). Allow dead_code under feature combinations
     // that don't include ring-index.
     #[cfg_attr(not(feature = "ring-index"), allow(dead_code))]
-    pub fn with_spill(section: Arc<dyn Section>, spill_path: PathBuf) -> Self {
+    pub fn with_spill(section: Arc<S>, spill_path: PathBuf) -> Self {
         Self::build(section, Some(spill_path))
     }
 
-    fn build(section: Arc<dyn Section>, spill_path: Option<PathBuf>) -> Self {
+    fn build(section: Arc<S>, spill_path: Option<PathBuf>) -> Self {
         let section_type = section.section_type();
         let is_data = section_type.is_data_section();
         let flags = section_type.default_flags();
@@ -168,7 +169,7 @@ impl SectionConsumer {
     }
 }
 
-impl MemoryConsumer for SectionConsumer {
+impl<S: Section + ?Sized> MemoryConsumer for SectionConsumer<S> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -520,264 +521,13 @@ impl MemoryConsumer for TextIndexConsumer {
     }
 }
 
-/// Memory consumer for the CompactStore base under a `LayeredStore`.
-///
-/// Delegates spill/reload to a [`CompactStoreTiered`] wrapper and atomically
-/// swaps the `LayeredStore`'s base `Arc<CompactStore>` when tier state
-/// changes, so the old in-memory allocation actually drops after a spill.
-///
-/// Priority is [`GRAPH_STORAGE`](priorities::GRAPH_STORAGE) (evict-last):
-/// the compact base is persistent data, spilling it is the last resort
-/// before query failure.
-#[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
-pub struct CompactStoreConsumer {
-    tiered: Weak<super::compact_tiered::CompactStoreTiered>,
-    layered: Weak<grafeo_core::graph::compact::layered::LayeredStore>,
-    spill_path: Option<PathBuf>,
-}
-
-#[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
-impl CompactStoreConsumer {
-    /// Creates a consumer that spills the base to `<spill_path>/compact_base.grafeo`.
-    ///
-    /// `spill_path = None` disables spilling.
-    pub fn new(
-        tiered: &Arc<super::compact_tiered::CompactStoreTiered>,
-        layered: &Arc<grafeo_core::graph::compact::layered::LayeredStore>,
-        spill_path: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            tiered: Arc::downgrade(tiered),
-            layered: Arc::downgrade(layered),
-            spill_path,
-        }
-    }
-
-    fn spill_file(&self) -> Option<PathBuf> {
-        self.spill_path
-            .as_ref()
-            .map(|dir| dir.join("compact_base.grafeo"))
-    }
-}
-
-#[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
-impl MemoryConsumer for CompactStoreConsumer {
-    fn name(&self) -> &str {
-        "section:CompactStore"
-    }
-
-    fn memory_usage(&self) -> usize {
-        // When OnDisk, the heap copy of CompactStore is still alive (we
-        // deserialized from mmap eagerly). Report its heap bytes in both
-        // states; the OS page cache that backs mmap lives outside the heap.
-        self.tiered.upgrade().map_or(0, |t| t.memory_bytes())
-    }
-
-    fn eviction_priority(&self) -> u8 {
-        priorities::GRAPH_STORAGE
-    }
-
-    fn region(&self) -> MemoryRegion {
-        MemoryRegion::GraphStorage
-    }
-
-    fn evict(&self, _target_bytes: usize) -> usize {
-        // CompactStore cannot evict in-place: use spill() to tier to disk.
-        0
-    }
-
-    fn can_spill(&self) -> bool {
-        let Some(tiered) = self.tiered.upgrade() else {
-            return false;
-        };
-        self.spill_path.is_some() && !tiered.is_on_disk()
-    }
-
-    fn current_tier(&self) -> grafeo_common::memory::StorageTier {
-        use grafeo_common::memory::StorageTier;
-        let Some(tiered) = self.tiered.upgrade() else {
-            return StorageTier::Uninitialized;
-        };
-        if tiered.is_on_disk() {
-            StorageTier::OnDisk
-        } else if self.memory_usage() == 0 {
-            StorageTier::Uninitialized
-        } else {
-            StorageTier::InMemory
-        }
-    }
-
-    fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
-        let tiered = self
-            .tiered
-            .upgrade()
-            .ok_or_else(|| SpillError::IoError("compact-store tiered dropped".to_string()))?;
-
-        if tiered.is_on_disk() {
-            return Ok(0);
-        }
-
-        let path = self.spill_file().ok_or(SpillError::NoSpillDirectory)?;
-
-        let before = tiered.memory_bytes();
-        tiered
-            .persist_to_mmap(&path)
-            .map_err(|e| SpillError::IoError(e.to_string()))?;
-
-        // Publish the fresh (mmap-backed) base to the LayeredStore so readers
-        // switch over and the old allocation can drop. If the LayeredStore has
-        // been reconstructed (e.g. recompact() between registration and this
-        // call), the weak ref returns None: the new LayeredStore already owns
-        // a matching base from the new tiered wrapper, so there's nothing to
-        // swap here.
-        if let Some(layered) = self.layered.upgrade() {
-            layered.swap_base(tiered.store());
-        }
-
-        let after = tiered.memory_bytes();
-        Ok(before.saturating_sub(after))
-    }
-
-    fn reload(&self) -> Result<(), SpillError> {
-        let tiered = self
-            .tiered
-            .upgrade()
-            .ok_or_else(|| SpillError::IoError("compact-store tiered dropped".to_string()))?;
-
-        if !tiered.is_on_disk() {
-            return Ok(());
-        }
-
-        tiered
-            .reload_to_ram()
-            .map_err(|e| SpillError::IoError(e.to_string()))?;
-        if let Some(layered) = self.layered.upgrade() {
-            layered.swap_base(tiered.store());
-        }
-        Ok(())
-    }
-}
-
-// ── Phase 5c: OverlayConsumer ─────────────────────────────────────────
-//
-// Tracks the LpgStore overlay portion of a `LayeredStore`. When memory
-// pressure rises and the consumer is asked to spill, it calls
-// `LayeredStore::merge_overlay_in_place()` which rebuilds the base from
-// the combined view and clears the overlay, freeing all overlay heap.
-//
-// The new base is in-memory; if total memory pressure persists, the
-// `CompactStoreConsumer` will spill that base to mmap on its own. Two
-// independent consumers, one BufferManager — chains naturally.
-
-/// Tracks the mutable overlay (LpgStore) of a `LayeredStore`.
-///
-/// Priority is [`GRAPH_STORAGE`](priorities::GRAPH_STORAGE) (evict-last):
-/// the overlay holds unflushed mutations and merging it requires
-/// rebuilding the base, so this is the last-resort spill before query
-/// failure under sustained mutation pressure.
-///
-/// The merge runs with commits held off (see
-/// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager)):
-/// the base has no versions, so a commit in the middle of being written, or
-/// one that did not complete, would become visible in it. It does not wait:
-/// while a commit is in progress (possibly on the thread that asks for
-/// memory), nothing is merged, and after a commit that did not complete, the
-/// spill fails.
-#[cfg(all(feature = "compact-store", feature = "lpg"))]
-pub struct OverlayConsumer {
-    layered: Weak<grafeo_core::graph::compact::layered::LayeredStore>,
-    transaction_manager: Arc<crate::transaction::TransactionManager>,
-}
-
-#[cfg(all(feature = "compact-store", feature = "lpg"))]
-impl OverlayConsumer {
-    /// Creates a consumer that monitors the overlay of `layered`, whose
-    /// commits `transaction_manager` runs.
-    pub fn new(
-        layered: &Arc<grafeo_core::graph::compact::layered::LayeredStore>,
-        transaction_manager: &Arc<crate::transaction::TransactionManager>,
-    ) -> Self {
-        Self {
-            layered: Arc::downgrade(layered),
-            transaction_manager: Arc::clone(transaction_manager),
-        }
-    }
-}
-
-#[cfg(all(feature = "compact-store", feature = "lpg"))]
-impl MemoryConsumer for OverlayConsumer {
-    fn name(&self) -> &str {
-        "overlay:LpgStore"
-    }
-
-    fn memory_usage(&self) -> usize {
-        self.layered
-            .upgrade()
-            .map_or(0, |layered| layered.overlay_memory_bytes())
-    }
-
-    fn eviction_priority(&self) -> u8 {
-        priorities::GRAPH_STORAGE
-    }
-
-    fn region(&self) -> MemoryRegion {
-        MemoryRegion::GraphStorage
-    }
-
-    fn evict(&self, _target_bytes: usize) -> usize {
-        // Cannot evict in place; spill via merge.
-        0
-    }
-
-    fn can_spill(&self) -> bool {
-        let Some(layered) = self.layered.upgrade() else {
-            return false;
-        };
-        // Only worth spilling if the overlay actually has mutations.
-        layered.overlay_mutation_count() > 0
-    }
-
-    fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
-        let Some(layered) = self.layered.upgrade() else {
-            return Err(SpillError::IoError("layered store dropped".to_string()));
-        };
-
-        if layered.overlay_mutation_count() == 0 {
-            return Ok(0);
-        }
-        let Some(_commits) = self
-            .transaction_manager
-            .try_hold_commits()
-            .map_err(|error| SpillError::IoError(error.to_string()))?
-        else {
-            // A commit is in progress: merge later.
-            return Ok(0);
-        };
-
-        let before = layered.overlay_memory_bytes();
-        layered
-            .merge_overlay_in_place()
-            .map_err(SpillError::IoError)?;
-        let after = layered.overlay_memory_bytes();
-        Ok(before.saturating_sub(after))
-    }
-
-    fn current_tier(&self) -> grafeo_common::memory::StorageTier {
-        // Overlay "spills" by merging into the base store; it never moves
-        // to disk on its own (the base may, separately).
-        if self.memory_usage() == 0 {
-            grafeo_common::memory::StorageTier::Uninitialized
-        } else {
-            grafeo_common::memory::StorageTier::InMemory
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use grafeo_common::storage::page_fetcher::PageFetcher;
-    use grafeo_common::storage::section::SectionType;
+    use grafeo_common::storage::section::{
+        SectionSink, SectionSource, SectionType, read_raw, write_raw,
+    };
     use grafeo_common::utils::error::Result;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -826,6 +576,12 @@ mod tests {
         }
         fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
             Ok(())
+        }
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
         fn is_dirty(&self) -> bool {
             false
@@ -1023,6 +779,12 @@ mod tests {
         }
         fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
             Ok(())
+        }
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
         fn is_dirty(&self) -> bool {
             self.dirty.load(Ordering::Relaxed)

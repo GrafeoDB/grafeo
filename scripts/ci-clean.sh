@@ -6,7 +6,7 @@
 # just like CI does. Use this to catch dependency issues before pushing.
 #
 # Examples:
-#   ./scripts/ci-clean.sh                 # Test all Python versions (3.12, 3.13, 3.14)
+#   ./scripts/ci-clean.sh                 # Test all Python versions (3.12, 3.13, 3.14, 3.15)
 #   ./scripts/ci-clean.sh --skip-rust     # Skip Rust checks, test all Python versions
 #   ./scripts/ci-clean.sh --python 3.12   # Test only Python 3.12
 
@@ -20,7 +20,7 @@ GRAY='\033[0;90m'
 NC='\033[0m'
 
 SKIP_RUST=false
-PYTHON_VERSIONS=("3.12" "3.13" "3.14")
+PYTHON_VERSIONS=("3.12" "3.13" "3.14" "3.15")
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do

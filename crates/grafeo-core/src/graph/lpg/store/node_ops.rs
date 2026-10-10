@@ -98,6 +98,35 @@ impl LpgStore {
         Ok(node)
     }
 
+    /// A `Node` with the labels `id` has at `epoch` and no properties: with
+    /// `temporal`, the label set visible at that epoch, so a set a
+    /// transaction still open wrote (at `EpochId::PENDING`) is left out;
+    /// without it, the current set (the store keeps no label versions).
+    #[cfg(feature = "temporal")]
+    pub(crate) fn node_with_labels_at(&self, id: NodeId, epoch: EpochId) -> Node {
+        let mut node = Node::new(id);
+        let registry = self.label_registry.read();
+        let node_labels = self.node_labels.read();
+        if let Some(log) = node_labels.get(&id)
+            && let Some(label_ids) = log.at(epoch)
+        {
+            for &label_id in label_ids {
+                if let Some(label) = registry.get_name(label_id) {
+                    node.labels.push(label.clone());
+                }
+            }
+        }
+        node
+    }
+
+    /// A `Node` with the labels `id` has at `epoch` and no properties: with
+    /// `temporal`, the label set visible at that epoch; without it, the
+    /// current set (the store keeps no label versions).
+    #[cfg(not(feature = "temporal"))]
+    pub(crate) fn node_with_labels_at(&self, id: NodeId, _epoch: EpochId) -> Node {
+        self.node_with_labels(id)
+    }
+
     /// A `Node` with the current labels of `id` and no properties yet.
     pub(super) fn node_with_labels(&self, id: NodeId) -> Node {
         let mut node = Node::new(id);
@@ -134,20 +163,9 @@ impl LpgStore {
     /// correct historical property values instead of current ones.
     #[cfg(feature = "temporal")]
     fn build_node_at(&self, id: NodeId, epoch: EpochId) -> Node {
-        let mut node = Node::new(id);
-
-        let registry = self.label_registry.read();
-        let node_labels = self.node_labels.read();
-        if let Some(log) = node_labels.get(&id)
-            && let Some(label_ids) = log.at(epoch)
-        {
-            for &label_id in label_ids {
-                if let Some(label) = registry.get_name(label_id) {
-                    node.labels.push(label.clone());
-                }
-            }
-        }
-
+        // The labels as every read at `epoch` resolves them (a checkpoint's
+        // too), so a historical read and a chunked section cannot disagree.
+        let mut node = self.node_with_labels_at(id, epoch);
         node.properties = self
             .node_properties
             .get_all_at(id, epoch)
@@ -188,10 +206,6 @@ impl LpgStore {
         let chain = VersionChain::with_initial(record, version_epoch, transaction_id);
         self.nodes.write().insert(id, chain);
         self.live_node_count.fetch_add(1, Ordering::Relaxed);
-        self.record_change(
-            transaction_id,
-            super::PropertyUndoEntry::NodeCreated { node_id: id },
-        );
         id
     }
 
@@ -249,10 +263,6 @@ impl LpgStore {
         drop(versions);
 
         self.live_node_count.fetch_add(1, Ordering::Relaxed);
-        self.record_change(
-            transaction_id,
-            super::PropertyUndoEntry::NodeCreated { node_id: id },
-        );
         id
     }
 
@@ -641,17 +651,15 @@ impl LpgStore {
         }
     }
 
-    /// Deletes a node within a transaction, capturing undo information for rollback.
-    ///
-    /// Unlike `delete_node_at_epoch`, this method:
-    /// 1. Captures labels and properties before deletion (for undo log)
-    /// 2. Marks the version with `deleted_by` = transaction_id (for rollback)
-    /// 3. Pushes a `NodeDeleted` undo entry so rollback can restore the node
+    /// Deletes a node as `transaction_id`: marks its version deleted by the
+    /// transaction and takes its labels and values out of the store. Nothing
+    /// records what it deleted (a transaction the engine runs deletes
+    /// through the store's change target, `ChangeTarget::apply`, which
+    /// returns the node's image for its change set).
     ///
     /// # Errors
     ///
-    /// Returns an error, and deletes nothing, when a property of the node
-    /// cannot be read (a spilled value whose file cannot be read).
+    /// Never fails in this build; the signature is the tiered build's.
     #[cfg(not(feature = "tiered-storage"))]
     pub(crate) fn delete_node_transactional(
         &self,
@@ -670,12 +678,6 @@ impl LpgStore {
         if !visible {
             return Ok(false);
         }
-        // Capture the properties for the undo log before anything changes: a
-        // value that cannot be read (a spilled value whose file cannot be read)
-        // refuses the delete, as a rollback could not restore it. The lock is
-        // not held for the read; the check below runs again under it.
-        let properties: Vec<(PropertyKey, Value)> =
-            self.node_properties.try_get_all(id)?.into_iter().collect();
         let mut nodes = self.nodes.write();
         if let Some(chain) = nodes.get_mut(&id) {
             if let Some(record) = chain.visible_to(epoch, transaction_id) {
@@ -689,39 +691,9 @@ impl LpgStore {
             // Mark deleted with transaction tracking
             chain.mark_deleted(epoch, transaction_id);
 
-            // Capture labels for undo log
-            let registry = self.label_registry.read();
-            let node_labels_map = self.node_labels.read();
-
-            #[cfg(not(feature = "temporal"))]
-            let label_names: Vec<String> = node_labels_map
-                .get(&id)
-                .map(|label_ids| {
-                    label_ids
-                        .iter()
-                        .filter_map(|&lid| registry.get_name(lid).map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            #[cfg(feature = "temporal")]
-            let label_names: Vec<String> = node_labels_map
-                .get(&id)
-                .and_then(|log| log.latest())
-                .map(|label_ids| {
-                    label_ids
-                        .iter()
-                        .filter_map(|&lid| registry.get_name(lid).map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            drop(registry);
-            drop(node_labels_map);
-
             drop(nodes);
 
-            // Remove from label index (will be restored on rollback)
+            // Remove from label index
             let mut index = self.label_index.write();
             let mut node_labels_w = self.node_labels.write();
             if let Some(removed) = node_labels_w.remove(&id) {
@@ -742,7 +714,7 @@ impl LpgStore {
             #[cfg(feature = "text-index")]
             self.remove_from_all_text_indexes(id);
 
-            // Remove properties (will be restored on rollback)
+            // Remove properties
             // Drop the node from property indexes while its values are known
             self.remove_from_all_property_indexes(id);
             #[cfg(feature = "vector-index")]
@@ -755,33 +727,21 @@ impl LpgStore {
                 .remove_all(id, grafeo_common::types::EpochId::PENDING);
             self.live_node_count.fetch_sub(1, Ordering::Relaxed);
 
-            // Record undo entry for rollback
-            self.property_undo_log
-                .write()
-                .entry(transaction_id)
-                .or_default()
-                .push(super::PropertyUndoEntry::NodeDeleted {
-                    node_id: id,
-                    labels: label_names,
-                    properties,
-                });
-
             Ok(true)
         } else {
             Ok(false)
         }
     }
 
-    /// Deletes a node within a transaction, capturing undo information for rollback.
-    /// (Tiered storage version)
+    /// Deletes a node as `transaction_id` (tiered storage version), as the
+    /// other build does; nothing records what it deleted.
     ///
     /// # Errors
     ///
-    /// Returns an error, and deletes nothing, when a property of the node
-    /// cannot be read (a spilled value whose file cannot be read), or the
-    /// version the transaction sees is a record that cannot be read (a cold
-    /// one that does not decode): the node is there, so `false` would be a
-    /// wrong answer.
+    /// Returns an error, and deletes nothing, when the version the
+    /// transaction sees is a record that cannot be read (a cold one that
+    /// does not decode): the node is there, so `false` would be a wrong
+    /// answer.
     #[cfg(feature = "tiered-storage")]
     pub(crate) fn delete_node_transactional(
         &self,
@@ -809,12 +769,6 @@ impl LpgStore {
         if !visible {
             return Ok(false);
         }
-        // Capture the properties for the undo log before anything changes: a
-        // value that cannot be read (a spilled value whose file cannot be read)
-        // refuses the delete, as a rollback could not restore it. The lock is
-        // not held for the read; the check below runs again under it.
-        let properties: Vec<(PropertyKey, Value)> =
-            self.node_properties.try_get_all(id)?.into_iter().collect();
         let mut versions = self.node_versions.write();
         if let Some(index) = versions.get_mut(&id) {
             if let Some(version_ref) = index.visible_to(epoch, transaction_id) {
@@ -830,36 +784,6 @@ impl LpgStore {
 
             // Mark deleted with transaction tracking
             index.mark_deleted(epoch, transaction_id);
-
-            // Capture labels for undo log
-            let registry = self.label_registry.read();
-            let node_labels_map = self.node_labels.read();
-
-            #[cfg(not(feature = "temporal"))]
-            let label_names: Vec<String> = node_labels_map
-                .get(&id)
-                .map(|label_ids| {
-                    label_ids
-                        .iter()
-                        .filter_map(|&lid| registry.get_name(lid).map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            #[cfg(feature = "temporal")]
-            let label_names: Vec<String> = node_labels_map
-                .get(&id)
-                .and_then(|log| log.latest())
-                .map(|label_ids| {
-                    label_ids
-                        .iter()
-                        .filter_map(|&lid| registry.get_name(lid).map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            drop(registry);
-            drop(node_labels_map);
 
             drop(versions);
 
@@ -896,17 +820,6 @@ impl LpgStore {
             self.node_properties
                 .remove_all(id, grafeo_common::types::EpochId::PENDING);
             self.live_node_count.fetch_sub(1, Ordering::Relaxed);
-
-            // Record undo entry for rollback
-            self.property_undo_log
-                .write()
-                .entry(transaction_id)
-                .or_default()
-                .push(super::PropertyUndoEntry::NodeDeleted {
-                    node_id: id,
-                    labels: label_names,
-                    properties,
-                });
 
             Ok(true)
         } else {
@@ -1271,12 +1184,20 @@ impl LpgStore {
     /// excludes deleted nodes. Results are sorted by NodeId for deterministic
     /// iteration order.
     #[must_use]
-    #[cfg(not(feature = "tiered-storage"))]
     pub fn node_ids(&self) -> Vec<NodeId> {
+        self.with_node_ids_held(|ids| ids)
+    }
+
+    /// Calls `f` with [`node_ids`](Self::node_ids) while the node lock is
+    /// held for a read, so no node is created, adopted or deleted until `f`
+    /// returns. `f` may take only the locks that come after the node lock
+    /// in the store's lock order.
+    pub(super) fn with_node_ids_held<R>(&self, f: impl FnOnce(Vec<NodeId>) -> R) -> R {
         let epoch = self.current_epoch();
-        let mut ids: Vec<NodeId> = self
-            .nodes
-            .read()
+        #[cfg(not(feature = "tiered-storage"))]
+        let nodes = self.nodes.read();
+        #[cfg(not(feature = "tiered-storage"))]
+        let mut ids: Vec<NodeId> = nodes
             .iter()
             .filter_map(|(id, chain)| {
                 chain
@@ -1284,18 +1205,10 @@ impl LpgStore {
                     .and_then(|r| if !r.is_deleted() { Some(*id) } else { None })
             })
             .collect();
-        ids.sort_unstable();
-        ids
-    }
-
-    /// Returns all node IDs in the store.
-    /// (Tiered storage version)
-    #[must_use]
-    #[cfg(feature = "tiered-storage")]
-    pub fn node_ids(&self) -> Vec<NodeId> {
-        let epoch = self.current_epoch();
-        let versions = self.node_versions.read();
-        let mut ids: Vec<NodeId> = versions
+        #[cfg(feature = "tiered-storage")]
+        let nodes = self.node_versions.read();
+        #[cfg(feature = "tiered-storage")]
+        let mut ids: Vec<NodeId> = nodes
             .iter()
             .filter_map(|(id, index)| {
                 index.visible_at(epoch).and_then(|vref| {
@@ -1305,7 +1218,9 @@ impl LpgStore {
             })
             .collect();
         ids.sort_unstable();
-        ids
+        let result = f(ids);
+        drop(nodes);
+        result
     }
 
     /// [`node_ids`](Self::node_ids) for the readers that must not lose a

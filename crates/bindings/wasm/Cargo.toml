@@ -53,13 +53,13 @@ text-index = ["grafeo-engine/text-index"]
 hybrid-search = ["grafeo-engine/hybrid-search"]
 algos = ["grafeo-engine/algos"]
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
-compact-store = ["grafeo-engine/compact-store"]
+compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 # Persona-based profiles
 lpg = ["grafeo-engine/lpg", "gql", "cypher", "gremlin", "sql-pgq", "grafeo-engine/regex"]  # Graph App Developer
 rdf = ["rdf-model", "gql", "sparql", "graphql", "grafeo-engine/regex-lite"]  # Knowledge Engineer
 ai = ["vector-index", "text-index", "hybrid-search"]  # AI/Agent Developer
 analytics = ["ai", "algos"]  # Data Scientist (ai search + graph algorithms)
-edge = ["grafeo-engine/lpg", "gql", "compact-store", "grafeo-engine/regex-lite"]  # Frontend/Edge
+edge = ["grafeo-engine/lpg", "gql", "grafeo-engine/regex-lite"]  # Frontend/Edge
 # Deployment-based profiles (deprecated)
 browser = ["edge"]  # Deprecated: use edge
 full = ["lpg", "languages", "ai", "algos"]

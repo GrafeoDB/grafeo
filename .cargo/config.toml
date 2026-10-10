@@ -4,6 +4,14 @@
 # `grafeo-core/src/index/vector/simd.rs`, giving ~4-5x vector-search speedup
 # in the browser. Supported on Chrome 91+, Firefox 89+, Safari 16.4+
 # (universal on active browsers as of 2026).
+#
+# The module keeps Rust's default 1 MiB stack. wasm32 has no guard page: a
+# stack overflow writes over memory and leaves the module broken (#573), so
+# the statement limits keep every query well within it. The deepest statement
+# they accept (a chain of 125 `WITH` clauses) takes about 415 KiB in the
+# size-optimized build with every language, so 1 MiB holds it more than twice
+# over. A larger stack (`-C link-arg=-zstack-size=...`) would make every page
+# that loads the module reserve that much memory.
 [target.wasm32-unknown-unknown]
 rustflags = [
     '--cfg', 'getrandom_backend="wasm_js"',

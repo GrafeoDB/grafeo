@@ -42,20 +42,10 @@ impl GqlTranslator {
                 args,
                 distinct,
             } => {
-                // Special handling for length() on path variables
-                // When length(p) is called where p is a path alias, we convert it
-                // to a variable reference to the path length column
-                if name.to_lowercase() == "length"
-                    && args.len() == 1
-                    && let ast::Expression::Variable(var_name) = &args[0]
-                {
-                    // Check if this looks like a path variable
-                    // Path lengths are stored in columns named _path_length_{alias}
-                    return Ok(LogicalExpression::Variable(format!(
-                        "_path_length_{}",
-                        var_name
-                    )));
-                }
+                // `length(p)` stays a function of the path value: the planner
+                // reads the length column of a path the pattern binds, and
+                // computes it from the value of any other path (one passed on
+                // by a WITH, unwound from a list).
 
                 // NULLIF(a, b) desugars to CASE WHEN a = b THEN NULL ELSE a END
                 if name.eq_ignore_ascii_case("nullif") {
@@ -355,6 +345,7 @@ impl GqlTranslator {
             ast::BinaryOp::StartsWith => BinaryOp::StartsWith,
             ast::BinaryOp::EndsWith => BinaryOp::EndsWith,
             ast::BinaryOp::Contains => BinaryOp::Contains,
+            ast::BinaryOp::RegexMatch => BinaryOp::Regex,
         }
     }
 
@@ -375,7 +366,7 @@ mod tests {
     use super::*;
 
     fn translator() -> GqlTranslator {
-        GqlTranslator::new()
+        GqlTranslator::new("")
     }
 
     // --- NULLIF desugaring ---
@@ -509,8 +500,9 @@ mod tests {
 
     #[test]
     fn test_length_of_path_variable() {
-        // length(p) where p is a path variable should translate to
-        // Variable("_path_length_p")
+        // length(p) stays a function of p, which may be a path the pattern
+        // binds or a path value from elsewhere (a WITH, an UNWIND): it does
+        // not name the length column of a pattern's path
         let t = translator();
         let expr = ast::Expression::FunctionCall {
             name: "length".to_string(),
@@ -520,25 +512,13 @@ mod tests {
 
         let result = t.translate_expression(&expr).unwrap();
         assert!(
-            matches!(&result, LogicalExpression::Variable(v) if v == "_path_length_p"),
-            "length(p) should produce Variable(\"_path_length_p\"), got: {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_length_case_insensitive() {
-        // LENGTH(myPath) should also work (case-insensitive function name)
-        let t = translator();
-        let expr = ast::Expression::FunctionCall {
-            name: "LENGTH".to_string(),
-            args: vec![ast::Expression::Variable("myPath".to_string())],
-            distinct: false,
-        };
-
-        let result = t.translate_expression(&expr).unwrap();
-        assert!(
-            matches!(&result, LogicalExpression::Variable(v) if v == "_path_length_myPath"),
-            "LENGTH(myPath) should produce _path_length_myPath, got: {result:?}"
+            matches!(
+                &result,
+                LogicalExpression::FunctionCall { name, args, .. }
+                    if name == "length"
+                        && matches!(args.as_slice(), [LogicalExpression::Variable(v)] if v == "p")
+            ),
+            "length(p) should stay length(p), got: {result:?}"
         );
     }
 

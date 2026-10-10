@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, Value};
+use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, TransactionId, Value};
 
 use super::accumulator::AggregateFunction;
 use super::aggregate::AggregateState;
@@ -30,9 +30,11 @@ pub enum EntityKind {
 ///
 /// For each input row:
 /// 1. Reads a `Value::List` from `list_column_idx` (entity IDs from a path)
-/// 2. For each entity ID, looks up `property` via the graph store
+/// 2. For each entity ID, looks up `property` on the entity as the
+///    transaction sees it (see [`with_transaction_context`](Self::with_transaction_context))
 /// 3. Feeds property values through an `AggregateState`
-/// 4. Finalizes and appends the result as a new column
+/// 4. Finalizes and appends the result as a new column, in the type the
+///    aggregate gives (an integer sum stays an integer)
 pub struct HorizontalAggregateOperator {
     /// Child operator.
     child: Box<dyn Operator>,
@@ -42,12 +44,22 @@ pub struct HorizontalAggregateOperator {
     entity_kind: EntityKind,
     /// The aggregate function to compute per row.
     function: AggregateFunction,
+    /// Whether the aggregate reads each distinct value once.
+    distinct: bool,
+    /// The percentile of `PERCENTILE_DISC` and `PERCENTILE_CONT`.
+    percentile: Option<f64>,
+    /// The separator of `LISTAGG` and `GROUP_CONCAT`.
+    separator: Option<String>,
     /// Property name to access on each entity.
     property: String,
     /// Graph store for property lookups.
     store: Arc<dyn GraphStoreSearch>,
     /// Number of input columns (to know where to append the result).
     input_column_count: usize,
+    /// The epoch the query reads at.
+    viewing_epoch: Option<EpochId>,
+    /// The transaction the query runs in, whose own writes it sees.
+    transaction_id: Option<TransactionId>,
 }
 
 impl HorizontalAggregateOperator {
@@ -66,33 +78,74 @@ impl HorizontalAggregateOperator {
             list_column_idx,
             entity_kind,
             function,
+            distinct: false,
+            percentile: None,
+            separator: None,
             property,
             store,
             input_column_count,
+            viewing_epoch: None,
+            transaction_id: None,
         }
     }
 
-    /// Looks up a property value for an entity ID.
+    /// Sets the options of the aggregate: `DISTINCT`, the percentile of the
+    /// percentile functions and the separator of `LISTAGG`.
+    #[must_use]
+    pub fn with_aggregate_options(
+        mut self,
+        distinct: bool,
+        percentile: Option<f64>,
+        separator: Option<String>,
+    ) -> Self {
+        self.distinct = distinct;
+        self.percentile = percentile;
+        self.separator = separator;
+        self
+    }
+
+    /// Reads the entities as `transaction_id` sees them at `viewing_epoch`:
+    /// its own uncommitted writes included.
+    #[must_use]
+    pub fn with_transaction_context(
+        mut self,
+        viewing_epoch: EpochId,
+        transaction_id: Option<TransactionId>,
+    ) -> Self {
+        self.viewing_epoch = Some(viewing_epoch);
+        self.transaction_id = transaction_id;
+        self
+    }
+
+    /// The value of the property of the entity `entity_value` (an id), as
+    /// the query's transaction sees the entity.
     fn get_property_value(&self, entity_value: &Value) -> Option<Value> {
-        let prop_key = PropertyKey::new(&self.property);
+        let Value::Int64(raw) = entity_value else {
+            return None;
+        };
+        let id = u64::try_from(*raw).ok()?;
         match self.entity_kind {
             EntityKind::Edge => {
-                let id = match entity_value {
-                    // reason: ID encoding: i64 <-> u64 round-trip
-                    #[allow(clippy::cast_sign_loss)]
-                    Value::Int64(i) => EdgeId(*i as u64),
-                    _ => return None,
-                };
-                self.store.get_edge_property(id, &prop_key)
+                let id = EdgeId(id);
+                let edge = match (self.viewing_epoch, self.transaction_id) {
+                    (Some(epoch), Some(transaction)) => {
+                        self.store.get_edge_versioned(id, epoch, transaction)
+                    }
+                    (Some(epoch), None) => self.store.get_edge_at_epoch(id, epoch),
+                    (None, _) => self.store.get_edge(id),
+                }?;
+                edge.get_property(&self.property).cloned()
             }
             EntityKind::Node => {
-                let id = match entity_value {
-                    // reason: ID encoding: i64 <-> u64 round-trip
-                    #[allow(clippy::cast_sign_loss)]
-                    Value::Int64(i) => NodeId(*i as u64),
-                    _ => return None,
-                };
-                self.store.get_node_property(id, &prop_key)
+                let id = NodeId(id);
+                let node = match (self.viewing_epoch, self.transaction_id) {
+                    (Some(epoch), Some(transaction)) => {
+                        self.store.get_node_versioned(id, epoch, transaction)
+                    }
+                    (Some(epoch), None) => self.store.get_node_at_epoch(id, epoch),
+                    (None, _) => self.store.get_node(id),
+                }?;
+                node.get_property(&self.property).cloned()
             }
         }
     }
@@ -114,7 +167,9 @@ impl Operator for HorizontalAggregateOperator {
                 ValueVector::with_capacity(column_type, input.row_count())
             })
             .collect();
-        let mut result_column = ValueVector::with_capacity(LogicalType::Float64, input.row_count());
+        // The aggregate's own type: an integer sum or a count is an integer,
+        // `collect_list` a list
+        let mut result_column = ValueVector::with_capacity(LogicalType::Any, input.row_count());
 
         // Collect selected indices since the iterator can only be consumed once
         let rows: Vec<usize> = input.selected_indices().collect();
@@ -134,7 +189,12 @@ impl Operator for HorizontalAggregateOperator {
                 .column(self.list_column_idx)
                 .and_then(|c| c.get_value(row))
             {
-                let mut state = AggregateState::new(self.function, false, None, None);
+                let mut state = AggregateState::new(
+                    self.function,
+                    self.distinct,
+                    self.percentile,
+                    self.separator.as_deref(),
+                );
                 for entity_val in list.iter() {
                     let prop_val = self.get_property_value(entity_val);
                     if prop_val.is_some() && !matches!(prop_val, Some(Value::Null)) {
@@ -251,6 +311,135 @@ mod tests {
         (Arc::new(store), node_ids)
     }
 
+    /// The float in `column` at `row` of `chunk`.
+    fn float_at(chunk: &DataChunk, column: usize, row: usize) -> f64 {
+        match chunk.column(column).unwrap().get_value(row) {
+            Some(Value::Float64(value)) => value,
+            other => panic!("expected a float in column {column}, row {row}, got {other:?}"),
+        }
+    }
+
+    /// One row whose only column is the list `ids`.
+    fn one_list_row(ids: Vec<Value>) -> DataChunk {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+        builder
+            .column_mut(0)
+            .unwrap()
+            .push_value(Value::List(ids.into()));
+        builder.advance_row();
+        builder.finish()
+    }
+
+    /// A sum of integers is an integer: it is not dropped by a float column
+    /// (which returned 0.0 for `sum(e.w)` over integer weights).
+    #[test]
+    fn an_integer_sum_stays_an_integer() {
+        let store = LpgStore::new().unwrap();
+        let a = store.create_node(&[]);
+        let b = store.create_node(&[]);
+        let ids: Vec<Value> = [3, 19, 88]
+            .into_iter()
+            .map(|w| {
+                let edge = store.create_edge(a, b, "ROAD");
+                store.set_edge_property(edge, "w", Value::Int64(w));
+                Value::Int64(i64::try_from(edge.as_u64()).unwrap())
+            })
+            .collect();
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(store);
+        for (function, want) in [
+            (AggregateFunction::Sum, Value::Int64(110)),
+            (AggregateFunction::Max, Value::Int64(88)),
+            (AggregateFunction::CountNonNull, Value::Int64(3)),
+        ] {
+            let mut op = HorizontalAggregateOperator::new(
+                Box::new(MockOperator::new(vec![one_list_row(ids.clone())])),
+                0,
+                EntityKind::Edge,
+                function,
+                "w".to_string(),
+                Arc::clone(&store),
+                1,
+            );
+            let result = op.next().unwrap().unwrap();
+            assert_eq!(
+                result.column(1).unwrap().get_value(0),
+                Some(want),
+                "{function:?} over the weights 3, 19 and 88"
+            );
+        }
+    }
+
+    /// DISTINCT reads each value once: the sum of 3, 3 and 19 is 22.
+    #[test]
+    fn a_distinct_horizontal_sum_reads_each_value_once() {
+        let store = LpgStore::new().unwrap();
+        let a = store.create_node(&[]);
+        let b = store.create_node(&[]);
+        let ids: Vec<Value> = [3, 3, 19]
+            .into_iter()
+            .map(|w| {
+                let edge = store.create_edge(a, b, "ROAD");
+                store.set_edge_property(edge, "w", Value::Int64(w));
+                Value::Int64(i64::try_from(edge.as_u64()).unwrap())
+            })
+            .collect();
+        let mut op = HorizontalAggregateOperator::new(
+            Box::new(MockOperator::new(vec![one_list_row(ids)])),
+            0,
+            EntityKind::Edge,
+            AggregateFunction::Sum,
+            "w".to_string(),
+            Arc::new(store),
+            1,
+        )
+        .with_aggregate_options(true, None, None);
+        let result = op.next().unwrap().unwrap();
+        assert_eq!(
+            result.column(1).unwrap().get_value(0),
+            Some(Value::Int64(22))
+        );
+    }
+
+    /// In a transaction the aggregate reads the transaction's own writes.
+    #[test]
+    fn a_horizontal_aggregate_reads_its_transaction() {
+        let store = LpgStore::new().unwrap();
+        let a = store.create_node(&[]);
+        let b = store.create_node(&[]);
+        // An edge the open transaction 19 created, with its weight
+        let transaction = TransactionId::new(19);
+        let epoch = store.current_epoch();
+        let edge = store.create_edge_versioned(a, b, "ROAD", epoch, transaction);
+        store.set_edge_property_versioned(edge, "w", Value::Int64(88), transaction);
+        let ids = vec![Value::Int64(i64::try_from(edge.as_u64()).unwrap())];
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(store);
+
+        let read = |context: Option<TransactionId>| {
+            let mut op = HorizontalAggregateOperator::new(
+                Box::new(MockOperator::new(vec![one_list_row(ids.clone())])),
+                0,
+                EntityKind::Edge,
+                AggregateFunction::Sum,
+                "w".to_string(),
+                Arc::clone(&store),
+                1,
+            )
+            .with_transaction_context(epoch, context);
+            let result = op.next().unwrap().unwrap();
+            result.column(1).unwrap().get_value(0)
+        };
+        assert_eq!(
+            read(Some(transaction)),
+            Some(Value::Int64(88)),
+            "the transaction sees the edge it created"
+        );
+        assert_eq!(
+            read(Some(TransactionId::new(88))),
+            Some(Value::Null),
+            "another transaction does not see the uncommitted edge"
+        );
+    }
+
     /// The copied input columns keep their types: a node stays a node.
     #[test]
     fn copied_columns_keep_their_types() {
@@ -312,7 +501,7 @@ mod tests {
         let result = op.next().unwrap().unwrap();
         assert_eq!(result.row_count(), 1);
         // Sum of weights: 1.5 + 2.5 + 3.0 = 7.0
-        let agg_val = result.column(2).unwrap().get_float64(0).unwrap();
+        let agg_val = float_at(&result, 2, 0);
         assert!((agg_val - 7.0).abs() < 0.001);
 
         // Should be done
@@ -345,7 +534,7 @@ mod tests {
         let result = op.next().unwrap().unwrap();
         assert_eq!(result.row_count(), 1);
         // Sum of node populations: 100.0 + 200.0 + 300.0 = 600.0
-        let agg_val = result.column(1).unwrap().get_float64(0).unwrap();
+        let agg_val = float_at(&result, 1, 0);
         assert!((agg_val - 600.0).abs() < 0.001);
     }
 
@@ -374,7 +563,7 @@ mod tests {
 
         let result = op.next().unwrap().unwrap();
         // Avg: (1.5 + 2.5 + 3.0) / 3 = 2.333...
-        let agg_val = result.column(1).unwrap().get_float64(0).unwrap();
+        let agg_val = float_at(&result, 1, 0);
         assert!((agg_val - 7.0 / 3.0).abs() < 0.001);
     }
 
@@ -403,7 +592,7 @@ mod tests {
         );
 
         let result = op.next().unwrap().unwrap();
-        let min_val = result.column(1).unwrap().get_float64(0).unwrap();
+        let min_val = float_at(&result, 1, 0);
         assert!((min_val - 1.5).abs() < 0.001);
 
         // Test MAX
@@ -427,7 +616,7 @@ mod tests {
         );
 
         let result = op.next().unwrap().unwrap();
-        let max_val = result.column(1).unwrap().get_float64(0).unwrap();
+        let max_val = float_at(&result, 1, 0);
         assert!((max_val - 3.0).abs() < 0.001);
     }
 
@@ -533,10 +722,10 @@ mod tests {
         assert_eq!(result.row_count(), 2);
 
         // Row 0: sum = 7.0
-        let val0 = result.column(2).unwrap().get_float64(0).unwrap();
+        let val0 = float_at(&result, 2, 0);
         assert!((val0 - 7.0).abs() < 0.001);
         // Row 1: sum = 1.5
-        let val1 = result.column(2).unwrap().get_float64(1).unwrap();
+        let val1 = float_at(&result, 2, 1);
         assert!((val1 - 1.5).abs() < 0.001);
     }
 

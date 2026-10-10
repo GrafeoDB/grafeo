@@ -23,11 +23,13 @@ pub mod accumulator;
 mod aggregate;
 mod apply;
 mod distinct;
+mod eager;
 mod expand;
 mod factorized_aggregate;
 mod factorized_expand;
 mod factorized_filter;
 mod filter;
+mod functions;
 mod horizontal_aggregate;
 mod join;
 mod leapfrog_join;
@@ -63,6 +65,7 @@ pub use accumulator::{AggregateExpr, AggregateFunction, HashableValue};
 pub use aggregate::{HashAggregateOperator, SimpleAggregateOperator};
 pub use apply::ApplyOperator;
 pub use distinct::DistinctOperator;
+pub use eager::EagerOperator;
 pub use expand::ExpandOperator;
 pub use factorized_aggregate::{
     FactorizedAggregate, FactorizedAggregateOperator, FactorizedOperator,
@@ -79,6 +82,9 @@ pub use filter::{
     BinaryFilterOp, ExpressionPredicate, FilterExpression, FilterOperator, LazyValue,
     ListPredicateKind, Predicate, SessionContext, UnaryFilterOp,
 };
+pub use functions::{
+    Arity, FunctionSupport, REGEX_SUPPORT, function_names, function_support, regex_pattern_error,
+};
 pub use horizontal_aggregate::{EntityKind, HorizontalAggregateOperator};
 pub use join::{
     EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType, JoinedRowCondition,
@@ -90,8 +96,8 @@ pub use load_data::{LoadDataFormat, LoadDataOperator};
 pub use map_collect::MapCollectOperator;
 pub use merge::{MergeConfig, MergeOperator, MergeRelationshipConfig, MergeRelationshipOperator};
 pub use mutation::{
-    AddLabelOperator, ConstraintValidator, CreateEdgeOperator, CreateNodeOperator,
-    DeleteEdgeOperator, DeleteNodeOperator, PropertySource, RemoveLabelOperator,
+    AddLabelOperator, ConstraintValidator, CreateEdgeOperator, CreateNodeOperator, CreateOperator,
+    CreateStep, DeleteEdgeOperator, DeleteNodeOperator, PropertySource, RemoveLabelOperator,
     SetPropertyOperator,
 };
 pub use node_seek::{NodeSeekOperator, SeekKey};
@@ -111,57 +117,112 @@ pub use scan_text::TextScanOperator;
 #[cfg(feature = "vector-index")]
 pub use scan_vector::VectorScanOperator;
 pub use set_ops::{ExceptOperator, IntersectOperator, OtherwiseOperator};
-pub use shortest_path::ShortestPathOperator;
+pub use shortest_path::{PathSelection as ExecutionPathSelection, ShortestPathOperator};
 pub use shuffle::ShuffleOperator;
 pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};
 pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};
 pub use top_k::TopKOperator;
 pub use union::UnionOperator;
 pub use unwind::UnwindOperator;
-pub use variable_length_expand::{PathMode as ExecutionPathMode, VariableLengthExpandOperator};
+pub use variable_length_expand::{
+    DEFAULT_PATH_SEARCH_BUDGET, PathMode as ExecutionPathMode, VariableLengthExpandOperator,
+};
 pub use vector_join::VectorJoinOperator;
-pub use writer::{GraphWriter, WriteCounter, WriteCounters};
+pub use writer::{GraphWriter, Recording, WriteCounter, WriteCounters, WriteTarget};
 
-use std::sync::Arc;
-
-use grafeo_common::types::{EdgeId, NodeId, TransactionId};
+use grafeo_common::change::{Before, DataOp, PendingVersion};
+use grafeo_common::types::{EdgeId, NodeId};
 use thiserror::Error;
+
+use crate::graph::apply::Writer;
 
 use super::DataChunk;
 use super::chunk_state::ChunkState;
 use super::factorized_chunk::FactorizedChunk;
 
-/// Trait for recording write operations during query execution.
+/// A store change of an open transaction in progress (see
+/// [`WriteClaims::write_in_progress`]): a shared hold on the database's
+/// write freeze, which a checkpoint or a copy of the store holds exclusively
+/// while it reads the store. Released when dropped.
 ///
-/// This bridges `grafeo-core` mutation operators (which perform writes) with
-/// `grafeo-engine`'s `TransactionManager` (which tracks write sets for conflict
-/// detection). The trait lives in `grafeo-core` to avoid circular dependencies.
-pub trait WriteTracker: Send + Sync {
-    /// Records that a node was written (created, deleted, or modified).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if a write-write conflict is detected (first-writer-wins).
-    fn record_node_write(
-        &self,
-        transaction_id: TransactionId,
-        node_id: NodeId,
-    ) -> Result<(), OperatorError>;
+/// Not reentrant: a thread that holds one must not ask for another, since a
+/// checkpoint waiting for the first would block the second request, and the
+/// thread would wait for itself.
+pub type WriteInProgress<'a> = parking_lot::RwLockReadGuard<'a, ()>;
 
-    /// Records that an edge was written (created, deleted, or modified).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if a write-write conflict is detected (first-writer-wins).
-    fn record_edge_write(
-        &self,
-        transaction_id: TransactionId,
-        edge_id: EdgeId,
-    ) -> Result<(), OperatorError>;
+/// What a transaction claims before it changes the store, for write-conflict
+/// detection: first writer wins between open transactions, and at commit
+/// against the transactions that committed after it began.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteClaim {
+    /// A write of a node: its properties or labels.
+    Node(NodeId),
+    /// The delete of a node: a write, which also conflicts with another
+    /// transaction's claim on the node as an endpoint of an edge it creates.
+    NodeDelete(NodeId),
+    /// A write of an edge: its create, delete or properties.
+    Edge(EdgeId),
+    /// The endpoints of an edge the transaction creates: they conflict only
+    /// with another transaction's delete of either node.
+    Endpoints(NodeId, NodeId),
 }
 
-/// Type alias for a shared write tracker.
-pub type SharedWriteTracker = Arc<dyn WriteTracker>;
+/// The claims and the write freeze of a transaction that writes: the
+/// bridge between the writer in this crate and the engine's transaction
+/// manager (first-writer-wins conflict detection, and the freeze a
+/// checkpoint takes).
+pub trait WriteClaims: Send + Sync {
+    /// Claims what the next store change writes, before the store changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperatorError::WriteConflict`] when another open
+    /// transaction holds a claim that conflicts with it (first writer wins).
+    fn claim(&self, claim: WriteClaim) -> Result<(), OperatorError>;
+
+    /// Marks a store change of the transaction as in progress, for as long
+    /// as the returned guard lives: no checkpoint or copy of the store starts
+    /// reading the store meanwhile, and one that is reading it is waited for,
+    /// so none sees a change without its entry in the change set. `None` for
+    /// a writer that holds checkpoints off itself (an immediate write holds
+    /// commits off for its whole run).
+    ///
+    /// [`GraphWriter`] takes it once per write method, around its store
+    /// changes and their records, and never twice on one thread (see
+    /// [`WriteInProgress`]).
+    fn write_in_progress(&self) -> Option<WriteInProgress<'_>>;
+}
+
+/// Where a [`GraphWriter`] records what it changes: one transaction's
+/// changes in one graph (an entry of its change set per write), with the
+/// claims and the write freeze that go with them.
+///
+/// The bridge between the writer in this crate and the engine's transaction
+/// layer (the change set and the transaction manager's claims), so the
+/// writer records every write it applies the same way, whichever path made
+/// it: a statement, the direct API, a batch.
+pub trait ChangeRecorder: WriteClaims {
+    /// The transaction writing, as the store's change target takes it.
+    fn writer(&self) -> Writer;
+
+    /// Records a write the store applied: `op` with what it replaced
+    /// (`before`) and what it did to the transaction's pending version.
+    /// Called while the write's freeze guard is held, right after the store
+    /// changed, once per change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the change set refuses the entry: a broken
+    /// invariant (the store reported a before-image the op does not have),
+    /// after which the store holds a change no undo knows of; the recorder
+    /// makes sure no commit follows.
+    fn record(
+        &self,
+        op: DataOp,
+        before: Before,
+        version: PendingVersion,
+    ) -> Result<(), OperatorError>;
+}
 
 /// Result of executing an operator.
 pub type OperatorResult = Result<Option<DataChunk>, OperatorError>;
@@ -290,9 +351,37 @@ pub enum OperatorError {
     /// Schema constraint violation during a write operation.
     #[error("constraint violation: {0}")]
     ConstraintViolation(String),
+    /// A value the statement gave cannot be used (a user mistake, such as a
+    /// query vector of another size than the index's), reported as an
+    /// invalid value rather than an execution failure.
+    #[error("invalid value: {0}")]
+    InvalidValue(String),
     /// Write-write conflict detected (first-writer-wins).
     #[error("write conflict: {0}")]
     WriteConflict(String),
+    /// The query would need more of a resource than it may use, such as
+    /// the memory of a path search; the message says what to change.
+    #[error("{0}")]
+    LimitExceeded(String),
+    /// The query ran past its deadline (a retryable timeout, not a failure).
+    #[error("Query exceeded timeout")]
+    Timeout,
+    /// A broken invariant of the engine: a bug in Grafeo, not a mistake in
+    /// the statement or its data. [`Execution`](Self::Execution) is the
+    /// statement's failure.
+    #[error("{0}")]
+    Internal(String),
+    /// An error raised below the operator (a store that refuses a write, a
+    /// procedure, a statement run inside the operator), kept as it is so its
+    /// code reaches the caller.
+    #[error(transparent)]
+    Wrapped(Box<grafeo_common::utils::error::Error>),
+}
+
+impl From<grafeo_common::utils::error::Error> for OperatorError {
+    fn from(error: grafeo_common::utils::error::Error) -> Self {
+        Self::Wrapped(Box::new(error))
+    }
 }
 
 /// The core trait for pull-based operators.

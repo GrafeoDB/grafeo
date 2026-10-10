@@ -497,7 +497,7 @@ mod tests {
         fn push(&mut self, chunk: DataChunk, sink: &mut dyn Sink) -> Result<bool, OperatorError> {
             let col = chunk
                 .column(0)
-                .ok_or_else(|| OperatorError::Execution("Missing column".to_string()))?;
+                .ok_or_else(|| OperatorError::Internal("Missing column".to_string()))?;
 
             let mut filtered = ValueVector::new();
             for i in 0..chunk.len() {

@@ -21,14 +21,17 @@ fn inserts_count_nodes_edges_labels_and_properties() {
         "INSERT (:Person:Employee {name: 'Alix', age: 30})-[:KNOWS {since: 2020}]->(:Person {name: 'Gus'})",
     );
     assert_eq!(
-        c,
-        WriteCounters {
-            nodes_created: 2,
-            edges_created: 1,
-            labels_added: 3,
-            properties_set: 4,
-            ..WriteCounters::default()
-        }
+        (
+            c.nodes_created,
+            c.nodes_deleted,
+            c.edges_created,
+            c.edges_deleted,
+            c.properties_set,
+            c.labels_added,
+            c.labels_removed,
+        ),
+        (2, 0, 1, 0, 4, 3, 0),
+        "nodes, edges, properties and labels created; nothing deleted or removed"
     );
 }
 

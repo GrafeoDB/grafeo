@@ -125,11 +125,21 @@ tests:
       - "INSERT (a:Cyc {name: 'Alix'})-[:R]->(b:Cyc {name: 'Gus'})-[:R]->(a)"
     variants:
       gql: "MATCH p = (s:Cyc {name: 'Alix'})-[:R*1..4]->(s) RETURN length(p) AS len ORDER BY len"
-      cypher: "MATCH p = (s:Cyc {name: 'Alix'})-[:R*1..4]->(s) RETURN length(p) AS len ORDER BY len"
     expect:
       rows:
         - [2]
         - [4]
+
+  - name: cyclic_vlp_same_source_and_target_variable_takes_each_relationship_once
+    # Cypher binds a relationship once per MATCH (openCypher 9), so the
+    # 4-hop cycle, which goes round twice, is no match.
+    setup:
+      - "INSERT (a:Cyc {name: 'Alix'})-[:R]->(b:Cyc {name: 'Gus'})-[:R]->(a)"
+    variants:
+      cypher: "MATCH p = (s:Cyc {name: 'Alix'})-[:R*1..4]->(s) RETURN length(p) AS len ORDER BY len"
+    expect:
+      rows:
+        - [2]
 
   - name: cyclic_vlp_no_cycle_returns_empty
     # When no cycle exists, the same-variable pattern must return nothing.

@@ -14,6 +14,12 @@
 
 #[cfg(feature = "lpg")]
 pub(crate) mod block;
+#[cfg(feature = "lpg")]
+mod chunked;
+#[cfg(feature = "lpg")]
+mod committed;
+#[cfg(feature = "lpg")]
+mod dictionary;
 mod edge;
 mod node;
 pub mod overlay;
@@ -38,4 +44,4 @@ pub use property::{CompareOp, PropertyStorage};
 #[cfg(feature = "lpg")]
 pub use section::LpgStoreSection;
 #[cfg(feature = "lpg")]
-pub use store::{LpgStore, PropertyUndoEntry};
+pub use store::{LpgStore, OpenChangesByGraph};

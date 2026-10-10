@@ -20,7 +20,6 @@ pub mod adjacency;
 pub mod hash;
 #[cfg(feature = "ring-index")]
 pub mod ring;
-#[cfg(feature = "text-index")]
 pub mod text;
 pub mod trie;
 pub mod vector;

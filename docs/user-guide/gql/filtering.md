@@ -54,7 +54,7 @@ WHERE p.email ENDS WITH '@company.com'
 -- Contains
 WHERE p.bio CONTAINS 'engineer'
 
--- Regular expression
+-- Regular expression (the whole string must match)
 WHERE p.email =~ '.*@gmail\\.com'
 ```
 
@@ -114,6 +114,36 @@ WHERE p.name LIKE '_____'
 -- Second character is 'l'
 WHERE p.name LIKE '_l%'
 ```
+
+## Regular Expressions
+
+`s =~ pattern` is true when the regular expression `pattern` matches the whole
+string `s`, as Cypher's `=~` is, and null when either side is null. It is a
+Grafeo extension: ISO GQL has no regular expressions (see
+[Conformance](conformance.md#operators) for the pattern syntax). To find a
+pattern anywhere in a string, put `.*` on both sides; inline flags such as
+`(?i)` apply.
+
+```sql
+-- Leave out tests, specs, caches and version control
+MATCH (d:Directory)
+WHERE NOT d.path =~ '.*(test|spec|__pycache__|node_modules|\\.git).*'
+RETURN d.path
+
+-- Case-insensitive
+MATCH (p:Person)
+WHERE p.name =~ '(?i)alix.*'
+RETURN p.name
+
+-- As a value
+MATCH (p:Person)
+RETURN p.name, p.email =~ '.*@example\\.org' AS internal
+```
+
+In a string, `\\` is one backslash, so `'\\.'` is the pattern `\.` (a dot); a
+backslash before a character that has no string escape, as in `'\.git'`, stays
+as it is. A pattern that is not a regular expression is an error that names
+it, such as `Invalid regular expression '(src': unclosed group`.
 
 ## XOR (Exclusive Or)
 

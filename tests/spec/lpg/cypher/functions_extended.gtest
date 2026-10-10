@@ -365,6 +365,42 @@ tests:
       rows:
         - [15]
 
+  # datetime({epochMillis: n}) and datetime({epochSeconds: n}) are the instant
+  # that long after 1970-01-01T00:00:00Z, and a component of a temporal value
+  # reads like a property (d.month). Both were null.
+  - name: datetime_from_epoch_millis
+    query: "RETURN datetime({epochMillis: 0}) = datetime('1970-01-01T00:00:00Z') AS zero, datetime({epochSeconds: 1590364800}) = datetime({epochMillis: 1590364800000}) AS seconds"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: date_components
+    query: "WITH date('2020-05-25') AS d RETURN d.year, d.quarter, d.month, d.week, d.day, d.dayOfWeek, d.ordinalDay"
+    expect:
+      rows:
+        - [2020, 2, 5, 22, 25, 1, 146]
+
+  - name: datetime_components
+    query: "WITH datetime({epochMillis: 1590433388088}) AS d RETURN d.month, d.day, d.hour, d.minute, d.second, d.millisecond, d.epochMillis, d.epochSeconds"
+    expect:
+      rows:
+        - [5, 25, 19, 3, 8, 88, 1590433388088, 1590433388]
+
+  - name: duration_components
+    query: "WITH duration({years: 1, months: 3, days: 19, hours: 3, minutes: 8}) AS d RETURN d.years, d.months, d.monthsOfYear, d.days, d.weeks, d.minutes, d.minutesOfHour"
+    expect:
+      rows:
+        - [1, 15, 3, 19, 2, 188, 8]
+
+  - name: epoch_birthday_filtered_by_month_and_day
+    setup:
+      - "CREATE (:Person {name: 'Alix', birthday: 585446400000}), (:Person {name: 'Gus', birthday: 585273600000}), (:Person {name: 'Vincent', birthday: 586569600000})"
+    query: "MATCH (p:Person) WITH p, datetime({epochMillis: p.birthday}) AS birthday WHERE (birthday.month = 7 AND birthday.day >= 21) OR (birthday.month = 8 AND birthday.day < 22) RETURN p.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
   - name: time_from_string
     setup:
       - "CREATE (:N {v: 1})"

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::query::plan::{BinaryOp, FilterOp, LogicalExpression, LogicalOperator};
+use crate::query::plan::{BinaryOp, CreateElement, FilterOp, LogicalExpression, LogicalOperator};
 
 /// Rewrites every expand that binds a variable its input already binds: a
 /// target node, such as the last hop of `(a)-->(b)-->(a)` or of
@@ -127,6 +127,22 @@ fn plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
             .into_iter()
             .chain(&create.variable)
             .collect(),
+        LogicalOperator::Create(create) => create
+            .elements
+            .iter()
+            .flat_map(|element| match element {
+                CreateElement::Node { variable, .. } => vec![variable],
+                CreateElement::Edge {
+                    variable,
+                    from_variable,
+                    to_variable,
+                    ..
+                } => [from_variable, to_variable]
+                    .into_iter()
+                    .chain(variable)
+                    .collect(),
+            })
+            .collect(),
         LogicalOperator::Merge(merge) => vec![&merge.variable],
         LogicalOperator::MergeRelationship(merge) => vec![
             &merge.variable,
@@ -142,7 +158,10 @@ fn plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
             vec![&collect.key_var, &collect.value_var, &collect.alias]
         }
         LogicalOperator::ShortestPath(path) => {
-            vec![&path.source_var, &path.target_var, &path.path_alias]
+            [&path.source_var, &path.target_var, &path.path_alias]
+                .into_iter()
+                .chain(&path.edge_variable)
+                .collect()
         }
         LogicalOperator::VectorScan(scan) => vec![&scan.variable],
         LogicalOperator::VectorJoin(join) => std::iter::once(&join.right_variable)

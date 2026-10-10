@@ -401,8 +401,19 @@ async mmrSearch(
 Create a BM25 text index on a node property for full-text search. The index is automatically kept in sync as nodes are created, updated, or deleted. You do not need to call `rebuildTextIndex()` after normal write operations.
 
 ```typescript
-async createTextIndex(label: string, property: string): Promise<void>
+async createTextIndex(
+  label: string,
+  property: string,
+  options?: {
+    k1?: number,          // BM25 term frequency saturation, >= 0 (default 1.2)
+    b?: number,           // BM25 length normalization, 0 to 1 (default 0.75)
+    tokenizer?: string,   // 'simple' (default), 'standard' or 'cjk_bigram'
+    stopWords?: string[]  // in place of the tokenizer's own
+  }
+): Promise<void>
 ```
+
+The database keeps the options with the index: reopening it, recovering after a crash and `rebuildTextIndex()` use them again. An unknown tokenizer, or `k1` or `b` out of range, rejects with `GRAFEO-V001`.
 
 ### dropTextIndex()
 
@@ -429,9 +440,12 @@ async textSearch(
   label: string,
   property: string,
   query: string,
-  k: number
+  k: number,
+  filters?: Record<string, any> // as vectorSearch(): {city: 'Berlin'}, {rank: {$gt: 19}}
 ): Promise<number[][]>
 ```
+
+With `filters`, only matching nodes are searched, so up to `k` of them come back, scored as without the filters.
 
 ### hybridSearch()
 
@@ -453,9 +467,12 @@ async hybridSearch(
   k: number,
   queryVector?: number[],
   fusion?: string,         // 'weighted' for weighted fusion
-  weights?: number[]       // [textWeight, vectorWeight], default [0.5, 0.5]
+  weights?: number[],      // [textWeight, vectorWeight], default [0.5, 0.5]
+  filters?: Record<string, any> // as vectorSearch(): {city: 'Berlin'}, {rank: {$gt: 19}}
 ): Promise<number[][]>
 ```
+
+With `filters`, both the text and the vector search keep only the matching nodes before fusion, so up to `k` matching nodes come back.
 
 ## Embedding (opt-in)
 
@@ -549,6 +566,8 @@ Each `ChangeEvent` is a JSON object:
 
 ## Admin Methods
 
+The objects these methods return gain keys only: a patch release can add a key, never remove or rename one, so read the keys you need rather than comparing whole objects.
+
 ### info()
 
 Returns high-level database information as a JSON object.
@@ -575,19 +594,19 @@ version(): string
 
 ### compact()
 
-Converts the database to a read-only [CompactStore](../../user-guide/compact-store.md). Takes a snapshot of all nodes and edges, builds a columnar store with CSR adjacency, and switches to read-only mode. Write operations will throw after this call.
+Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, and returns what it did: `{ checkpointed, versions_collected, duration_ms }`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Throws if the checkpoint fails, or after `close()`.
 
 ```typescript
-compact(): void
+compact(): { checkpointed: boolean, versions_collected: number, duration_ms: number }
 ```
 
 ```typescript
 const db = GrafeoDB.create();
 await db.execute("INSERT (:Person {name: 'Alix', age: 30})");
 
-db.compact();
+const report = db.compact(); // { checkpointed: false, versions_collected: 0, ... }
 
-const result = await db.execute("MATCH (p:Person) RETURN p.name"); // fast
+const result = await db.execute("MATCH (p:Person) RETURN p.name");
 ```
 
 ### close()

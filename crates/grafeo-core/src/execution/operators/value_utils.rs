@@ -50,7 +50,8 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),
-        _ => None,
+        // Zoned datetimes, also against a timestamp: by their instant.
+        _ => a.compare_instants(b),
     }
 }
 
@@ -283,24 +284,24 @@ pub(crate) fn order_by(
     }
 }
 
-/// Returns `true` if `new` is less than `current` (for MIN aggregation).
+/// Returns `true` if `new` is less than `current` in the order of ORDER BY
+/// ([`compare_values_total`]), as MIN compares values of every type.
 ///
 /// Returns `true` when `current` is `None` (first value always wins).
 pub fn is_less_than(current: &Option<Value>, new: &Value) -> bool {
-    match current {
-        None => true,
-        Some(curr) => compare_values(new, curr) == Some(Ordering::Less),
-    }
+    current
+        .as_ref()
+        .is_none_or(|current| compare_values_total(new, current).is_lt())
 }
 
-/// Returns `true` if `new` is greater than `current` (for MAX aggregation).
+/// Returns `true` if `new` is greater than `current` in the order of ORDER
+/// BY ([`compare_values_total`]), as MAX compares values of every type.
 ///
 /// Returns `true` when `current` is `None` (first value always wins).
 pub fn is_greater_than(current: &Option<Value>, new: &Value) -> bool {
-    match current {
-        None => true,
-        Some(curr) => compare_values(new, curr) == Some(Ordering::Greater),
-    }
+    current
+        .as_ref()
+        .is_none_or(|current| compare_values_total(new, current).is_gt())
 }
 
 #[cfg(test)]

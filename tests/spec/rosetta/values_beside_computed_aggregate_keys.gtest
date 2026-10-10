@@ -1,0 +1,155 @@
+# Rosetta: values beside a computed group key or aggregate operand
+#
+# An aggregate that needs a computed column (a literal or expression group key,
+# or an expression operand) reads every other column as it is. Those columns
+# used to be copied through as nodes, so strings, floats, booleans, lists and
+# maps became 0 (integers survived as IDs): `collect(name)` gave [0, 0], a
+# string group key merged every group into one, `sum` added zeros. Nodes and
+# edges must stay nodes and edges: the dataset gives both a `w` from different
+# ranges and their IDs overlap, so an edge read as a node (or the reverse)
+# shows a value from the wrong range.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Alix (30),
+# Gus (25), Vincent (40), Jules (35) and Mia (28), with w 100, 101 and 103 for
+# the first three; KNOWS edges w 1 to 5: Alix->Gus, Gus->Vincent,
+# Vincent->Alix, Jules->Mia, Alix->Jules. Ages are even for Alix, Vincent and
+# Mia, odd for Gus and Jules.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Values beside a computed group key or aggregate operand
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Scalar values beside a computed column
+  # ---------------------------------------------------------------------------
+
+  - name: strings_grouped_by_a_computed_key
+    variants:
+      gql: "MATCH (p:Person) WITH p.name AS name, p.age AS age RETURN age % 2 AS odd, collect(name) AS names"
+      cypher: "MATCH (p:Person) WITH p.name AS name, p.age AS age RETURN age % 2 AS odd, collect(name) AS names"
+    expect:
+      rows:
+        - [0, "[Alix, Vincent, Mia]"]
+        - [1, "[Gus, Jules]"]
+
+  - name: floats_and_booleans_beside_a_literal_key
+    variants:
+      gql: "MATCH (p:Person) WITH p.age / 16.0 AS share, p.age > 30 AS senior RETURN 'all' AS g, collect(share) AS shares, collect(senior) AS seniors"
+      cypher: "MATCH (p:Person) WITH p.age / 16.0 AS share, p.age > 30 AS senior RETURN 'all' AS g, collect(share) AS shares, collect(senior) AS seniors"
+    expect:
+      rows:
+        - [all, "[1.875, 1.5625, 2.5, 2.1875, 1.75]", "[false, false, true, true, false]"]
+
+  - name: lists_and_maps_beside_a_literal_key
+    variants:
+      gql: "MATCH (p:Person) WITH [p.name, p.age] AS pair, {age: p.age} AS info RETURN 0 AS g, collect(pair) AS pairs, collect(info) AS infos"
+      cypher: "MATCH (p:Person) WITH [p.name, p.age] AS pair, {age: p.age} AS info RETURN 0 AS g, collect(pair) AS pairs, collect(info) AS infos"
+    expect:
+      rows:
+        - [0, "[[Alix, 30], [Gus, 25], [Vincent, 40], [Jules, 35], [Mia, 28]]", "[{age: 30}, {age: 25}, {age: 40}, {age: 35}, {age: 28}]"]
+
+  - name: a_string_group_key_beside_a_computed_operand
+    variants:
+      gql: "MATCH (p:Person) WITH p.name AS name, p.age AS age RETURN name, sum(age * 2) AS doubled"
+      cypher: "MATCH (p:Person) WITH p.name AS name, p.age AS age RETURN name, sum(age * 2) AS doubled"
+    expect:
+      rows:
+        - [Alix, 60]
+        - [Gus, 50]
+        - [Vincent, 80]
+        - [Jules, 70]
+        - [Mia, 56]
+
+  - name: a_computed_operand_without_grouping
+    variants:
+      gql: "MATCH (p:Person) WITH p.name AS name, p.age AS age RETURN count(DISTINCT name) AS names, max(name) AS last, sum(age * 2) AS doubled"
+      cypher: "MATCH (p:Person) WITH p.name AS name, p.age AS age RETURN count(DISTINCT name) AS names, max(name) AS last, sum(age * 2) AS doubled"
+    expect:
+      rows:
+        - [5, Vincent, 316]
+
+  - name: several_aggregates_over_a_computed_key
+    variants:
+      gql: "MATCH (p:Person) WITH p.name AS name, p.age AS age, p.age / 16.0 AS share RETURN age % 2 AS odd, count(*) AS c, count(DISTINCT name) AS names, min(name) AS first, sum(share) AS total"
+      cypher: "MATCH (p:Person) WITH p.name AS name, p.age AS age, p.age / 16.0 AS share RETURN age % 2 AS odd, count(*) AS c, count(DISTINCT name) AS names, min(name) AS first, sum(share) AS total"
+    expect:
+      rows:
+        - [0, 3, 3, Alix, 6.125]
+        - [1, 2, 2, Gus, 3.75]
+
+  - name: nulls_and_strings_beside_a_computed_key
+    variants:
+      gql: "MATCH (p:Person) WITH p.name AS name, p.w AS w RETURN size(name) AS len, count(w) AS ws, max(w) AS top, collect(name) AS names"
+      cypher: "MATCH (p:Person) WITH p.name AS name, p.w AS w RETURN size(name) AS len, count(w) AS ws, max(w) AS top, collect(name) AS names"
+    expect:
+      rows:
+        - [3, 1, 101, "[Gus, Mia]"]
+        - [4, 1, 100, "[Alix]"]
+        - [5, 0, null, "[Jules]"]
+        - [7, 1, 103, "[Vincent]"]
+
+  - name: strings_through_an_aggregating_with_over_a_computed_key
+    variants:
+      gql: "MATCH (p:Person) WITH p.name AS name, p.age AS age WITH age % 2 AS odd, collect(name) AS names RETURN odd, names"
+      cypher: "MATCH (p:Person) WITH p.name AS name, p.age AS age WITH age % 2 AS odd, collect(name) AS names RETURN odd, names"
+    expect:
+      rows:
+        - [0, "[Alix, Vincent, Mia]"]
+        - [1, "[Gus, Jules]"]
+
+  # ---------------------------------------------------------------------------
+  # Nodes and edges beside a computed column stay nodes and edges
+  # ---------------------------------------------------------------------------
+
+  - name: collected_edges_beside_a_computed_key_stay_edges
+    variants:
+      gql: "MATCH (a:Person)-[r:KNOWS]->(b) WITH a.age % 2 AS odd, collect(r) AS rs UNWIND rs AS e RETURN odd, e.w AS w, type(e) AS t"
+      cypher: "MATCH (a:Person)-[r:KNOWS]->(b) WITH a.age % 2 AS odd, collect(r) AS rs UNWIND rs AS e RETURN odd, e.w AS w, type(e) AS t"
+    expect:
+      rows:
+        - [0, 1, KNOWS]
+        - [0, 3, KNOWS]
+        - [0, 5, KNOWS]
+        - [1, 2, KNOWS]
+        - [1, 4, KNOWS]
+
+  - name: collected_nodes_beside_a_computed_key_stay_nodes
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH a.age % 2 AS odd, collect(b) AS bs UNWIND bs AS p RETURN odd, p.name AS n, p.w AS w"
+      cypher: "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH a.age % 2 AS odd, collect(b) AS bs UNWIND bs AS p RETURN odd, p.name AS n, p.w AS w"
+    expect:
+      rows:
+        - [0, Gus, 101]
+        - [0, Alix, 100]
+        - [0, Jules, null]
+        - [1, Vincent, 103]
+        - [1, Mia, null]
+
+  - name: a_node_group_key_beside_a_computed_operand_stays_a_node
+    variants:
+      gql: "MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH b, sum(r.w * 2) AS doubled RETURN b.name AS n, b.w AS w, doubled"
+      cypher: "MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH b, sum(r.w * 2) AS doubled RETURN b.name AS n, b.w AS w, doubled"
+    expect:
+      rows:
+        - [Gus, 101, 2]
+        - [Vincent, 103, 4]
+        - [Alix, 100, 6]
+        - [Mia, null, 8]
+        - [Jules, null, 10]
+
+  - name: an_edge_group_key_beside_a_computed_operand_stays_an_edge
+    variants:
+      gql: "MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH r, sum(b.age + 1) AS older RETURN r.w AS w, type(r) AS t, older"
+      cypher: "MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH r, sum(b.age + 1) AS older RETURN r.w AS w, type(r) AS t, older"
+    expect:
+      rows:
+        - [1, KNOWS, 26]
+        - [2, KNOWS, 41]
+        - [3, KNOWS, 31]
+        - [4, KNOWS, 29]
+        - [5, KNOWS, 36]

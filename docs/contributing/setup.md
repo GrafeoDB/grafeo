@@ -10,7 +10,7 @@ tags:
 ## Prerequisites
 
 - Rust 1.99.0+
-- Python 3.12+ (for Python bindings, CI tests 3.12, 3.13 and 3.14)
+- Python 3.12+ (for Python bindings, CI tests 3.12, 3.13, 3.14 and 3.15)
 - Node.js 22+ (for Node.js bindings, CI tests 22 and 24)
 - Git
 

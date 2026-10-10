@@ -114,3 +114,97 @@ tests:
     expect:
       rows:
         - [2]
+
+  # ---------------------------------------------------------------------------
+  # exists() of a pattern (openCypher 9 predicate function exists()): true
+  # when the pattern has a match for the row, like the pattern predicate.
+  # It used to be true for every row: exists() read the pattern as a value,
+  # which is never null.
+  # ---------------------------------------------------------------------------
+
+  - name: exists_of_a_pattern_in_a_projection
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Vincent'})"
+    query: "MATCH (p:Person) RETURN p.name AS name, exists((p)-[:KNOWS]->()) AS knows ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, true]
+        - [Gus, false]
+        - [Vincent, false]
+
+  - name: exists_of_an_incoming_pattern_in_a_projection
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Vincent'})"
+    query: "MATCH (p:Person) RETURN p.name AS name, exists((p)<-[:KNOWS]-()) AS known ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, false]
+        - [Gus, true]
+        - [Vincent, false]
+
+  - name: exists_of_a_pattern_between_two_bound_nodes
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Vincent'})"
+    query: |
+      MATCH (a:Person), (b:Person) WHERE a.name < b.name
+      RETURN a.name, b.name, exists((a)-[:KNOWS]-(b)) AS linked ORDER BY a.name, b.name
+    expect:
+      ordered: true
+      rows:
+        - [Alix, Gus, true]
+        - [Alix, Vincent, false]
+        - [Gus, Vincent, false]
+
+  - name: negated_exists_of_a_pattern_in_a_projection
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Vincent'})"
+    query: "MATCH (p:Person) RETURN p.name AS name, NOT exists((p)-[:KNOWS]->(:Person {name: 'Gus'})) AS e ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, false]
+        - [Gus, true]
+        - [Vincent, true]
+
+  - name: exists_of_a_pattern_in_where
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Vincent'})"
+    query: "MATCH (p:Person) WHERE exists((p)-[:KNOWS]->()) RETURN p.name"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: negated_exists_of_a_pattern_in_where
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Vincent'})"
+    query: "MATCH (p:Person) WHERE NOT exists((p)-[:KNOWS]->()) RETURN p.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: exists_of_a_pattern_in_case
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Vincent'})"
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name, CASE WHEN exists((p)-[:KNOWS]->()) THEN 'out' ELSE 'none' END AS e
+      ORDER BY name
+    expect:
+      ordered: true
+      rows:
+        - [Alix, out]
+        - [Gus, none]
+        - [Vincent, none]
+
+  - name: exists_of_a_property_is_still_a_null_check
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88})-[:KNOWS]->(:Person {name: 'Gus'})"
+    query: "MATCH (p:Person) RETURN p.name AS name, exists(p.age) AS e ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, true]
+        - [Gus, false]

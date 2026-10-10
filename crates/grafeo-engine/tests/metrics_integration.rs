@@ -139,6 +139,38 @@ fn test_prometheus_output_format() {
     );
 }
 
+/// Block-STM was removed in 0.6.0: neither the snapshot nor the Prometheus
+/// export reports counters for an executor that does not exist (they always
+/// read 0, which a dashboard would take for "no batches ran").
+#[test]
+fn no_metric_names_the_removed_block_stm_executor() {
+    let db = db_with_metrics();
+    let session = db.session();
+    session
+        .execute("INSERT (:City {name: 'Amsterdam', population: 88})")
+        .unwrap();
+
+    let prom = db.metrics_prometheus();
+    assert!(
+        prom.contains("grafeo_query_count"),
+        "the export still lists the query counters"
+    );
+    assert!(
+        !prom.contains("block_stm"),
+        "the Prometheus export names a Block-STM counter:\n{prom}"
+    );
+
+    let json = serde_json::to_string(&db.metrics()).expect("a snapshot serializes");
+    assert!(
+        json.contains("\"query_count\""),
+        "the snapshot still carries the query counters: {json}"
+    );
+    assert!(
+        !json.contains("block_stm"),
+        "the metrics snapshot carries a Block-STM field: {json}"
+    );
+}
+
 #[test]
 fn test_reset_metrics() {
     let db = db_with_metrics();

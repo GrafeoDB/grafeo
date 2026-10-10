@@ -513,10 +513,8 @@ fn an_encrypted_database_never_spills() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("encrypted.grafeo");
     // (`TierOverride::ForceDisk` with encryption is refused by the config.)
-    let mut config = Config::persistent(&path);
-    config.encryption = Some(EncryptionConfig {
-        key_chain: Arc::new(KeyChain::new([7; 32])),
-    });
+    let config = Config::persistent(&path)
+        .with_encryption(EncryptionConfig::new(Arc::new(KeyChain::new([7; 32]))));
     let db = GrafeoDB::with_config(config).unwrap();
     indexed_items(&db);
     assert_eq!(db.buffer_manager().spill_all(), 0);

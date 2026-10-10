@@ -32,11 +32,13 @@
 pub mod bitpack;
 pub mod bitvec;
 pub mod block;
+pub mod column_chunk;
 pub mod delta;
 pub mod dictionary;
 #[cfg(feature = "tiered-storage")]
 pub mod epoch_store;
 pub mod limits;
+pub mod rows_chunker;
 pub mod runlength;
 pub mod selector;
 #[cfg(feature = "succinct-indexes")]
@@ -48,6 +50,7 @@ pub use bitvec::{BitVector, BitVectorBuilder};
 pub use block::{BlockEntry, DEFAULT_BLOCK_ROWS};
 pub use delta::{DeltaEncoding, zigzag_decode, zigzag_encode};
 pub use dictionary::{DictionaryBuilder, DictionaryEncoding};
+pub use rows_chunker::{ChunkColumn, RowsChunker};
 pub use runlength::{Run, RunLengthAnalyzer, RunLengthEncoding, SignedRunLengthEncoding};
 pub use selector::{
     CodecSelector, CompressedData, CompressionCodec, CompressionMetadata, TypeSpecificCompressor,

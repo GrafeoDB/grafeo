@@ -186,9 +186,7 @@ impl Pipeline {
         if let Some(deadline) = self.deadline
             && Instant::now() >= deadline
         {
-            return Err(OperatorError::Execution(
-                "Query exceeded timeout".to_string(),
-            ));
+            return Err(OperatorError::Timeout);
         }
         Ok(())
     }

@@ -24,7 +24,8 @@ use super::format::MAGIC;
 use super::v3::alloc::{PageAllocator, PageRun};
 use super::v3::directory::SkippedEntry;
 use super::v3::header::{
-    DATA_START_PAGE, DbHeaderV3, FileHeaderV3, PAGE_SIZE, active_header, new_database_id,
+    DATA_START_PAGE, DbHeaderV3, FORMAT_REVISION, FileHeaderV3, PAGE_SIZE, active_header,
+    check_format_revision, new_database_id, slot_offset,
 };
 use super::v3::{CheckpointWriter, ChunkCipher, ImageReader};
 
@@ -221,6 +222,7 @@ impl GrafeoFileManager {
             CheckpointWriter::new(&mut file, PageAllocator::from_used([])?, cipher.as_ref())
                 .finish()?;
         let header = DbHeaderV3 {
+            format_revision: FORMAT_REVISION,
             root,
             timestamp_ms: now_ms(),
             ..DbHeaderV3::default()
@@ -367,7 +369,8 @@ impl GrafeoFileManager {
     ///
     /// Copy-on-write: the chunks and the directory go into pages the active
     /// image does not use, and the file is synced; then the next database
-    /// header (iteration + 1, the values of `header`, the new root) is written
+    /// header (iteration + 1, the values of `header`, the new root and the
+    /// active header's format revision) is written
     /// into the inactive slot and synced; then the file is cut after the last
     /// page of the new image. Until the header is on disk the active image is
     /// untouched, so a crash at any point opens either the old or the new
@@ -399,9 +402,14 @@ impl GrafeoFileManager {
         }
 
         let mut file = self.file.lock();
-        let (iteration, slot, spared) = {
+        let (iteration, revision, slot, spared) = {
             let active = self.active.lock();
-            (active.header.iteration, active.slot, active.runs.clone())
+            (
+                active.header.iteration,
+                active.header.format_revision,
+                active.slot,
+                active.runs.clone(),
+            )
         };
         let next_iteration = iteration.checked_add(1).ok_or_else(|| {
             Error::Internal(format!(
@@ -430,6 +438,8 @@ impl GrafeoFileManager {
         self.active.lock().runs.extend(runs.iter().copied());
         let next_slot = 1 - slot;
         let next = DbHeaderV3 {
+            // A file keeps its revision: an upgrade is an explicit step.
+            format_revision: revision,
             iteration: next_iteration,
             checkpoint_lsn: header.checkpoint_lsn,
             epoch: header.epoch,
@@ -503,11 +513,15 @@ impl GrafeoFileManager {
     /// Opens the reader of the active image under the file lock and runs
     /// `read` on it. The lock order (the file, then the active image for as
     /// long as it takes to read its root) is the order of `write_checkpoint`.
+    ///
+    /// Damage found in the image, by the reader or by `read`, names this
+    /// file.
     fn with_active_reader<T>(&self, read: impl FnOnce(&ImageReader<'_>) -> Result<T>) -> Result<T> {
         let mut file = self.file.lock();
         let root = self.active.lock().header.root;
-        let reader = ImageReader::open(&mut file, root, self.cipher.as_ref())?;
-        read(&reader)
+        let reader = ImageReader::open(&mut file, root, self.cipher.as_ref())
+            .map_err(|error| error.in_file(&self.path))?;
+        read(&reader).map_err(|error| error.in_file(&self.path))
     }
 
     /// Returns the path for the sidecar WAL directory.
@@ -668,8 +682,10 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
 /// version, see [`detect`](super::detect::detect)) before `cipher_for` is
 /// called, then a file whose encryption does not match the cipher
 /// `cipher_for` returns for its database id, a file without a valid database
-/// header, an active header without a directory block, and an active image
-/// whose directory cannot be read.
+/// header, an active header of a format revision this build does not read
+/// (see [`check_format_revision`]), an active header without a directory
+/// block, and an active image whose directory cannot be read. Nothing is
+/// written: a refused file stays as it is.
 fn read_active_image(
     file: &mut File,
     path: &Path,
@@ -683,8 +699,11 @@ fn read_active_image(
             path.display()
         )));
     }
-    let context =
-        |error: Error| Error::Serialization(format!("cannot open {}: {error}", path.display()));
+    // Damage names the file; anything else says what could not be opened.
+    let context = |error: Error| match error {
+        Error::Corruption(_) => error.in_file(path),
+        other => other.wrapped(format_args!("cannot open {}", path.display())),
+    };
     let file_header = FileHeaderV3::decode(page_of(&prefix, 0)).map_err(context)?;
     let cipher = cipher_for(file_header.database_id);
     match (file_header.encrypted, cipher.is_some()) {
@@ -706,30 +725,41 @@ fn read_active_image(
         DbHeaderV3::decode(page_of(&prefix, 1)),
         DbHeaderV3::decode(page_of(&prefix, 2)),
     ];
+    // `create` writes a valid header before it returns, so an existing
+    // database file never has two empty slots.
     let (slot, header) = active_header(slots).map_err(context)?.ok_or_else(|| {
-        Error::Serialization(format!(
-            "cannot open {}: both database header slots are empty",
-            path.display()
-        ))
+        Error::corruption_at("both database header slots are empty", slot_offset(0)).in_file(path)
     })?;
+    // Before the directory: a revision this build does not know may use a
+    // directory or chunks it cannot read.
+    check_format_revision(header.format_revision).map_err(context)?;
     // Every image this format writes has a directory block. Without one an
     // encrypted file would open with any key (nothing to decrypt), and the
     // next checkpoint would write with that key.
     if header.root.length == 0 {
-        return Err(Error::Serialization(format!(
-            "cannot open {}: the active database header (iteration {}, slot {slot}) \
-             has no directory block",
-            path.display(),
-            header.iteration
-        )));
+        return Err(Error::corruption_at(
+            format!(
+                "the active database header (iteration {}, slot {slot}) has no directory block",
+                header.iteration
+            ),
+            slot_offset(slot),
+        )
+        .in_file(path));
     }
-    let reader = ImageReader::open(file, header.root, cipher.as_ref()).map_err(|error| {
-        Error::Serialization(format!(
-            "cannot read the active image of {} (iteration {}): {error}",
-            path.display(),
-            header.iteration
-        ))
-    })?;
+    let reader =
+        ImageReader::open(file, header.root, cipher.as_ref()).map_err(|error| match error {
+            Error::Corruption(_) => error
+                .wrapped(format_args!(
+                    "the active image (iteration {})",
+                    header.iteration
+                ))
+                .in_file(path),
+            other => other.wrapped(format_args!(
+                "cannot read the active image of {} (iteration {})",
+                path.display(),
+                header.iteration
+            )),
+        })?;
     // The only warning: later readers see this image or one without
     // skipped entries.
     warn_skipped(reader.skipped());
@@ -804,11 +834,6 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Byte offset of database header slot 0 or 1.
-fn slot_offset(slot: u8) -> u64 {
-    PAGE_SIZE * (1 + u64::from(slot))
-}
-
 /// Writes `bytes` at `offset`.
 fn write_page(file: &mut File, offset: u64, bytes: &[u8]) -> Result<()> {
     file.seek(SeekFrom::Start(offset))?;
@@ -843,11 +868,14 @@ mod tests {
     #[cfg(feature = "testing-crash-injection")]
     use std::panic::AssertUnwindSafe;
 
-    use grafeo_common::storage::{ChunkMeta, Section, SectionSink, SectionType, legacy_bytes};
+    use grafeo_common::storage::{
+        ChunkMeta, Section, SectionSink, SectionSource, SectionType, legacy_bytes, read_raw,
+        write_raw,
+    };
     use tempfile::TempDir;
 
     use super::super::v3::directory::{ENTRY_CHUNK_OPTIONAL, ENTRY_SECTION_OPTIONAL};
-    use super::super::v3::header::HeaderSlot;
+    use super::super::v3::header::{HeaderSlot, MAX_FORMAT_REVISION};
     use super::*;
 
     /// A section holding fixed bytes, written as one raw chunk.
@@ -868,6 +896,14 @@ mod tests {
         fn deserialize(&mut self, data: &[u8]) -> Result<()> {
             self.data = data.to_vec();
             Ok(())
+        }
+
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
 
         fn is_dirty(&self) -> bool {
@@ -909,6 +945,10 @@ mod tests {
             )
         }
 
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
+        }
+
         fn is_dirty(&self) -> bool {
             true
         }
@@ -941,6 +981,10 @@ mod tests {
                 sink.write_chunk(ChunkMeta::stream_piece(0, 3, offset), &[19])?;
             }
             Ok(())
+        }
+
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
 
         fn is_dirty(&self) -> bool {
@@ -1068,6 +1112,76 @@ mod tests {
         let mut file = OpenOptions::new().write(true).open(path).unwrap();
         file.seek(SeekFrom::Start(offset)).unwrap();
         file.write_all(bytes).unwrap();
+    }
+
+    /// Asserts that `error` is a corruption of the file at `path`, at
+    /// `offset`, whose description holds `what`.
+    fn assert_corruption(error: &Error, path: &Path, offset: Option<u64>, what: &str) {
+        let Error::Corruption(corruption) = error else {
+            panic!("damage is a corruption: {error:?}");
+        };
+        assert_eq!(corruption.file.as_deref(), Some(path), "{error}");
+        assert_eq!(corruption.offset, offset, "{error}");
+        assert!(corruption.what.contains(what), "{error}");
+        let message = error.to_string();
+        assert!(
+            message.starts_with("GRAFEO-S002") && message.contains(&path.display().to_string()),
+            "the message names the code and the file: {message}"
+        );
+    }
+
+    /// The offset of the first page that holds `needle`.
+    fn page_holding(bytes: &[u8], needle: &[u8]) -> u64 {
+        let at = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("the bytes are in the file");
+        let at = u64::try_from(at).unwrap();
+        at - at % PAGE_SIZE
+    }
+
+    #[test]
+    fn a_damaged_chunk_is_a_corruption_naming_the_file_and_its_offset() {
+        let dir = test_dir();
+        let path = dir.path().join("prague.grafeo");
+        let manager = GrafeoFileManager::create(&path, None).unwrap();
+        checkpoint(&manager, &[fixed(SectionType::Catalog, "Shosanna")], 1).unwrap();
+        drop(manager);
+        let chunk = page_holding(&fs::read(&path).unwrap(), b"Shosanna");
+        overwrite(&path, chunk, b"s");
+
+        // The directory is intact, so the file opens; the chunk does not read.
+        let manager = GrafeoFileManager::open(&path, None).unwrap();
+        let error = raw_section(&manager, SectionType::Catalog).unwrap_err();
+        assert_corruption(&error, &path, Some(chunk), "fails its checksum");
+    }
+
+    #[test]
+    fn a_damaged_directory_block_is_a_corruption_naming_the_file_and_the_block() {
+        let dir = test_dir();
+        let path = dir.path().join("barcelona.grafeo");
+        let manager = GrafeoFileManager::create(&path, None).unwrap();
+        checkpoint(&manager, &[fixed(SectionType::Catalog, "Beatrix")], 1).unwrap();
+        drop(manager);
+        let mut bytes = fs::read(&path).unwrap();
+        let root = active_slot_of(&bytes).1.root;
+        let at = usize::try_from(root.offset).unwrap() + 30;
+        bytes[at] ^= 0xFF;
+        overwrite(&path, root.offset + 30, &bytes[at..=at]);
+
+        for read_only in [false, true] {
+            let result = if read_only {
+                GrafeoFileManager::open_read_only(&path, None)
+            } else {
+                GrafeoFileManager::open(&path, None)
+            };
+            let error = result.map(|_| ()).unwrap_err();
+            assert_corruption(&error, &path, Some(root.offset), "fails its checksum");
+        }
+        assert!(
+            fs::read(&path).unwrap() == bytes,
+            "a refused open writes nothing"
+        );
     }
 
     #[test]
@@ -1265,12 +1379,8 @@ mod tests {
             overwrite(&path, slot_offset(0), &slot_0);
             let error = GrafeoFileManager::open(&path, None)
                 .map(|_| ())
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains(&path.display().to_string()) && error.contains(expected),
-                "{name}: the error names the file and what is wrong with its headers: {error}"
-            );
+                .unwrap_err();
+            assert_corruption(&error, &path, Some(slot_offset(0)), expected);
         }
     }
 
@@ -1288,11 +1398,8 @@ mod tests {
             } else {
                 GrafeoFileManager::open(&path, None)
             };
-            let error = result.map(|_| ()).unwrap_err().to_string();
-            assert!(
-                error.contains("no directory block"),
-                "read-only {read_only}: {error}"
-            );
+            let error = result.map(|_| ()).unwrap_err();
+            assert_corruption(&error, &path, Some(slot_offset(0)), "no directory block");
         }
 
         // Without a block to decrypt, any key would open an encrypted file.
@@ -1307,6 +1414,77 @@ mod tests {
                 .to_string();
             assert!(error.contains("no directory block"), "{error}");
         }
+    }
+
+    /// A file whose active header has a format revision this build does not
+    /// read (0 from a 0.6.0 development build, or one a newer Grafeo wrote)
+    /// is refused by every open, before its directory is read, and the file
+    /// keeps every byte.
+    #[test]
+    fn a_format_revision_this_build_does_not_read_is_refused_and_the_file_kept() {
+        let dir = test_dir();
+        for revision in [0, MAX_FORMAT_REVISION + 1, u32::MAX] {
+            let path = dir.path().join(format!("revision-{revision}.grafeo"));
+            let manager = GrafeoFileManager::create(&path, None).unwrap();
+            checkpoint(&manager, &[fixed(SectionType::Catalog, "Alix")], 3).unwrap();
+            drop(manager);
+            let bytes = fs::read(&path).unwrap();
+            let (slot, active) = active_slot_of(&bytes);
+            let revised = DbHeaderV3 {
+                format_revision: revision,
+                ..active
+            };
+            overwrite(&path, slot_offset(slot), &revised.encode());
+            let before = fs::read(&path).unwrap();
+            for read_only in [false, true] {
+                let result = if read_only {
+                    GrafeoFileManager::open_read_only(&path, None)
+                } else {
+                    GrafeoFileManager::open(&path, None)
+                };
+                let error = result.map(|_| ()).unwrap_err().to_string();
+                assert!(
+                    error.contains(&path.display().to_string())
+                        && error.contains(&format!("format revision {revision}")),
+                    "revision {revision}, read-only {read_only}: {error}"
+                );
+            }
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                before,
+                "revision {revision}: a refused file is left as it is"
+            );
+        }
+    }
+
+    /// Every header a manager writes carries a format revision: a new file
+    /// the current one, a checkpoint the revision of the header it replaces
+    /// (a file is upgraded only by an explicit step, never by a checkpoint).
+    #[test]
+    fn a_checkpoint_keeps_the_format_revision_of_the_file() {
+        let dir = test_dir();
+        let path = dir.path().join("jules.grafeo");
+        drop(GrafeoFileManager::create(&path, None).unwrap());
+        let created = active_slot_of(&fs::read(&path).unwrap()).1;
+        assert_eq!(created.format_revision, FORMAT_REVISION, "a new file");
+        let manager = GrafeoFileManager::open(&path, None).unwrap();
+        checkpoint(&manager, &[fixed(SectionType::Catalog, "Alix")], 3).unwrap();
+        assert_eq!(manager.active_header().format_revision, FORMAT_REVISION);
+        drop(manager);
+        let manager = GrafeoFileManager::open(&path, None).unwrap();
+        // A revision the build reads but does not give new files: the
+        // checkpoint writes it again.
+        manager.active.lock().header.format_revision = 7;
+        checkpoint(&manager, &[fixed(SectionType::Catalog, "Gus")], 19).unwrap();
+        assert_eq!(manager.active_header().format_revision, 7);
+        drop(manager);
+        let bytes = fs::read(&path).unwrap();
+        let (slot, written) = active_slot_of(&bytes);
+        assert_eq!(
+            (written.iteration, written.format_revision),
+            (2, 7),
+            "slot {slot}: the header on disk keeps the revision"
+        );
     }
 
     /// A section of two chunks is served as both, in order; it is not the

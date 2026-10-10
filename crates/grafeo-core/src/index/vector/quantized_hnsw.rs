@@ -34,10 +34,11 @@
 //! let results = index.search(&query, 10);
 //! ```
 
-use super::VectorAccessor;
 use super::quantization::{BinaryQuantizer, ProductQuantizer, QuantizationType, ScalarQuantizer};
-use super::{HnswConfig, HnswIndex, compute_distance};
+use super::{BrokenLink, HnswConfig, HnswIndex, compute_distance};
+use super::{TopologyVisitor, VectorAccessor};
 use grafeo_common::types::NodeId;
+use grafeo_common::utils::error::Result;
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -365,8 +366,14 @@ impl QuantizedHnswIndex {
     }
 
     /// Searches with a custom ef (beam width) parameter.
+    ///
+    /// A query of another size than the configured `dimensions` finds
+    /// nothing (see [`HnswIndex::search`]).
     #[must_use]
     pub fn search_with_ef(&self, query: &[f32], k: usize, ef: usize) -> Vec<(NodeId, f32)> {
+        if query.len() != self.config().dimensions {
+            return Vec::new();
+        }
         let accessor = self.accessor();
         match self.quantization_type {
             QuantizationType::None => {
@@ -570,8 +577,13 @@ impl QuantizedHnswIndex {
         self.hnsw.contains(id)
     }
 
-    /// Removes a vector from the index.
+    /// Removes a vector from the index, mending the links of the nodes that
+    /// led to it with the full-precision copies this index keeps (see
+    /// [`HnswIndex::remove`]).
     pub fn remove(&self, id: NodeId) -> bool {
+        let vectors = &self.vectors;
+        let accessor = |node: NodeId| -> Option<Arc<[f32]>> { vectors.read().get(&node).cloned() };
+        let removed = self.hnsw.remove(id, &accessor);
         self.vectors.write().remove(&id);
         match self.quantization_type {
             QuantizationType::None => {}
@@ -585,7 +597,7 @@ impl QuantizedHnswIndex {
                 self.product_codes.write().remove(&id);
             }
         }
-        self.hnsw.remove(id)
+        removed
     }
 
     /// Batch insert multiple vectors.
@@ -745,6 +757,36 @@ impl QuantizedHnswIndex {
             .restore_topology(entry_point, max_level, node_data);
     }
 
+    /// Hands the topology to `visitor` one node at a time (see
+    /// [`HnswIndex::visit_topology`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error `visitor` returns.
+    pub fn visit_topology(&self, visitor: &mut dyn TopologyVisitor) -> Result<()> {
+        self.hnsw.visit_topology(visitor)
+    }
+
+    /// Starts restoring a topology node by node (see
+    /// [`HnswIndex::begin_restore`]). The vectors this index keeps are not
+    /// touched.
+    pub fn begin_restore(&self, entry_point: Option<NodeId>, max_level: usize, node_count: usize) {
+        self.hnsw.begin_restore(entry_point, max_level, node_count);
+    }
+
+    /// Restores one node of a topology begun with
+    /// [`begin_restore`](Self::begin_restore) (see
+    /// [`HnswIndex::restore_node`]).
+    pub fn restore_node(&self, id: NodeId, layers: Vec<Vec<NodeId>>) {
+        self.hnsw.restore_node(id, layers);
+    }
+
+    /// The first neighbor reference that breaks the rules of the topology
+    /// (see [`HnswIndex::first_broken_link`]).
+    pub(crate) fn first_broken_link(&self) -> Option<BrokenLink> {
+        self.hnsw.first_broken_link()
+    }
+
     /// Returns estimated heap memory in bytes.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
@@ -855,6 +897,43 @@ mod tests {
         let results = index.search(&vectors[25], 5);
         assert_eq!(results.len(), 5);
         // Without rescoring, might not be exact but should be close
+    }
+
+    /// #593: a query of another size than the index's finds nothing, with
+    /// every quantization (trained or not), and no search panics.
+    #[test]
+    fn a_query_of_another_size_finds_nothing_with_every_quantization() {
+        for quantization in [
+            QuantizationType::None,
+            QuantizationType::Scalar,
+            QuantizationType::Binary,
+            QuantizationType::Product { num_subvectors: 4 },
+        ] {
+            let config = HnswConfig::new(8, DistanceMetric::Euclidean);
+            let index =
+                QuantizedHnswIndex::with_seed(config, quantization, 3).with_training_threshold(19);
+            let vectors = create_test_vectors(88, 8);
+            for (i, vec) in vectors.iter().enumerate() {
+                index.insert(NodeId::new(i as u64 + 1), vec);
+            }
+            let allowlist: std::collections::HashSet<NodeId> = (1..=88).map(NodeId::new).collect();
+            for query in [vec![0.3; 3], vec![0.3; 19], vec![]] {
+                assert!(index.search(&query, 3).is_empty(), "{quantization:?}");
+                assert!(
+                    index.search_with_filter(&query, 3, &allowlist).is_empty(),
+                    "{quantization:?}"
+                );
+                assert!(
+                    index.batch_search(std::slice::from_ref(&query), 3)[0].is_empty(),
+                    "{quantization:?}"
+                );
+            }
+            assert_eq!(
+                index.search(&vectors[19], 1)[0].0,
+                NodeId::new(20),
+                "{quantization:?}"
+            );
+        }
     }
 
     #[test]

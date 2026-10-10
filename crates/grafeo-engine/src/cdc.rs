@@ -41,25 +41,20 @@
 //! timestamp from the embedded [`HlcClock`]. The clock guarantees
 //! strictly-increasing timestamps across all threads within a process
 //! (wall-clock ms in the upper 48 bits, logical counter in the lower
-//! 16, with the logical bits bumped on collision). Timestamps are
-//! assigned inside the write lock, so readers never observe an event
-//! out of timestamp order.
+//! 16, with the logical bits bumped on collision).
 //!
 //! # Integration with the commit path
 //!
-//! Recording happens inline in `database::crud` and the
-//! MutationOperator: each write calls one of the `record_*` methods on
-//! [`CdcLog`] immediately after the corresponding mutation lands in the
-//! overlay store, still holding the writer's logical frame. That means
-//! CDC event visibility tracks LpgStore visibility: a reader that sees
-//! the mutation via MVCC also sees the event, and vice versa. There is
-//! no asynchronous flush queue between the write and the log; the
-//! guarantee is "at the time of commit, events are already recorded."
-//!
-//! WAL wrapping (via `CdcGraphStore`) buffers events per-transaction and
-//! flushes on commit so rolled-back work does not pollute the log. In
-//! the embedded in-process path the store is the source of truth for
-//! ordering; the log records after the store call returns.
+//! A transaction's writes (statements, the direct API of a session or of
+//! the database, batches) are recorded in its change set; nothing reaches
+//! the log while it runs. Its commit builds its events from the change set
+//! (one per change, folded into the creates of the entities it created)
+//! and records them in the commit's ordered step, before its epoch is
+//! published: commits complete one at a time in epoch order, so the events
+//! carry the commit epoch and timestamps that follow the epochs, and a
+//! reader that sees a commit through MVCC also sees its events. A rollback,
+//! a rollback to a savepoint and a statement that fails report nothing.
+//! Bulk imports report no events.
 //!
 //! # CDC epoch vs. MVCC epoch
 //!
@@ -192,7 +187,11 @@ impl EntityId {
 
 /// A recorded change event with before/after property snapshots, or an RDF
 /// triple insert/delete.
+///
+/// Later releases may add fields, so outside this crate an event is read,
+/// not built: a pattern names its fields with `..`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct ChangeEvent {
     /// The entity that was changed.
     pub entity_id: EntityId,
@@ -250,7 +249,35 @@ pub struct ChangeEvent {
 ///
 /// Controls how many events the CDC log keeps in memory. When limits are
 /// exceeded, the oldest events (by epoch) are pruned automatically.
+///
+/// Start from [`CdcRetentionConfig::default()`] (1,000 epochs and 100,000
+/// events) or [`CdcRetentionConfig::unlimited()`] and set a limit with
+/// [`with_max_epochs`](Self::with_max_epochs) and
+/// [`with_max_events`](Self::with_max_events). Later releases may add
+/// settings, so outside this crate it cannot be built with a struct literal.
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_engine::Config;
+/// use grafeo_engine::cdc::CdcRetentionConfig;
+///
+/// let config = Config::in_memory()
+///     .with_cdc()
+///     .with_cdc_retention(CdcRetentionConfig::unlimited().with_max_events(88_000));
+/// assert_eq!(config.cdc_retention.max_epochs, None);
+/// ```
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::cdc::CdcRetentionConfig;
+///
+/// let retention = CdcRetentionConfig {
+///     max_epochs: None,
+///     max_events: Some(88_000),
+/// };
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CdcRetentionConfig {
     /// Maximum number of epochs to retain. Events older than
     /// `current_epoch - max_epochs` are pruned during GC.
@@ -268,6 +295,34 @@ impl Default for CdcRetentionConfig {
             max_epochs: Some(1000),
             max_events: Some(100_000),
         }
+    }
+}
+
+impl CdcRetentionConfig {
+    /// Keeps every event: no limit on epochs or events. Beware of unbounded
+    /// memory growth on long-running instances.
+    #[must_use]
+    pub fn unlimited() -> Self {
+        Self {
+            max_epochs: None,
+            max_events: None,
+        }
+    }
+
+    /// Prunes the events more than `max_epochs` epochs older than the
+    /// current one (see [`max_epochs`](Self::max_epochs)).
+    #[must_use]
+    pub fn with_max_epochs(mut self, max_epochs: u64) -> Self {
+        self.max_epochs = Some(max_epochs);
+        self
+    }
+
+    /// Prunes the oldest events beyond `max_events` in total (see
+    /// [`max_events`](Self::max_events)).
+    #[must_use]
+    pub fn with_max_events(mut self, max_events: usize) -> Self {
+        self.max_events = Some(max_events);
+        self
     }
 }
 
@@ -309,8 +364,6 @@ impl CdcLog {
     }
 
     /// Returns the next HLC timestamp from this log's clock.
-    ///
-    /// Used by `CdcGraphStore` to assign timestamps to buffered events.
     pub fn next_timestamp(&self) -> HlcTimestamp {
         self.clock.now()
     }
@@ -773,6 +826,166 @@ fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>
     h.finish()
 }
 
+impl CdcLog {
+    /// Records the events of a commit at `epoch` that changed what `set`
+    /// holds (see [`events_for_commit`]). Called in the commit's ordered
+    /// step, where no other commit runs: the timestamps the log's clock
+    /// gives follow the commit epochs, so a later commit's events never
+    /// carry an earlier timestamp.
+    pub(crate) fn record_commit(&self, set: &grafeo_common::change::ChangeSet, epoch: EpochId) {
+        if set.is_empty() {
+            return;
+        }
+        self.record_batch(events_for_commit(set, epoch, &self.clock));
+    }
+}
+
+/// The change events of a commit at `epoch` from its change set, one per
+/// entry in recorded order (bulk ranges and triples have none: their
+/// writers report their own), each naming its graph, timestamped by `clock`
+/// in that order. An event is built from its entry's op and before-image: a
+/// create carries its labels or type and endpoints and the values it was
+/// created with, a delete what the entity held, an update the value or the
+/// labels before and after. The transaction's later changes to an entity it
+/// created are then folded into the create (see [`fold_into_creates`]).
+pub(crate) fn events_for_commit(
+    set: &grafeo_common::change::ChangeSet,
+    epoch: EpochId,
+    clock: &HlcClock,
+) -> Vec<ChangeEvent> {
+    use grafeo_common::change::{Before, Change, DataOp};
+
+    let values = |properties: &[(grafeo_common::types::PropertyKey, Value)]| {
+        (!properties.is_empty()).then(|| {
+            properties
+                .iter()
+                .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+                .collect::<HashMap<String, Value>>()
+        })
+    };
+    let one = |key: &grafeo_common::types::PropertyKey, value: &Value| {
+        Some(HashMap::from([(key.as_str().to_string(), value.clone())]))
+    };
+    let names = |labels: &grafeo_common::change::Labels| -> Vec<String> {
+        labels.iter().map(ToString::to_string).collect()
+    };
+    let mut events = Vec::with_capacity(set.len());
+    for change in set.entries() {
+        let Change::Data {
+            graph, op, before, ..
+        } = change
+        else {
+            continue;
+        };
+        let (entity_id, kind) = match op {
+            DataOp::CreateNode { id, .. } => (EntityId::Node(*id), ChangeKind::Create),
+            DataOp::CreateEdge { id, .. } => (EntityId::Edge(*id), ChangeKind::Create),
+            DataOp::DeleteNode { id } => (EntityId::Node(*id), ChangeKind::Delete),
+            DataOp::DeleteEdge { id } => (EntityId::Edge(*id), ChangeKind::Delete),
+            DataOp::SetNodeProperty { id, .. }
+            | DataOp::RemoveNodeProperty { id, .. }
+            | DataOp::AddNodeLabel { id, .. }
+            | DataOp::RemoveNodeLabel { id, .. } => (EntityId::Node(*id), ChangeKind::Update),
+            DataOp::SetEdgeProperty { id, .. } | DataOp::RemoveEdgeProperty { id, .. } => {
+                (EntityId::Edge(*id), ChangeKind::Update)
+            }
+            DataOp::InsertTriple { .. } | DataOp::DeleteTriple { .. } => continue,
+        };
+        let mut event = ChangeEvent {
+            entity_id,
+            graph: set
+                .graph(*graph)
+                .and_then(|graph| graph.key.as_ref().map(ToString::to_string)),
+            kind,
+            epoch,
+            timestamp: clock.now(),
+            before: None,
+            after: None,
+            labels: None,
+            before_labels: None,
+            edge_type: None,
+            src_id: None,
+            dst_id: None,
+            triple_subject: None,
+            triple_predicate: None,
+            triple_object: None,
+            triple_graph: None,
+        };
+        match (op, before) {
+            (
+                DataOp::CreateNode {
+                    labels, properties, ..
+                },
+                _,
+            ) => {
+                event.labels = Some(names(labels));
+                event.after = values(properties);
+            }
+            (
+                DataOp::CreateEdge {
+                    src,
+                    dst,
+                    edge_type,
+                    properties,
+                    ..
+                },
+                _,
+            ) => {
+                event.edge_type = Some(edge_type.to_string());
+                event.src_id = Some(src.as_u64());
+                event.dst_id = Some(dst.as_u64());
+                event.after = values(properties);
+            }
+            (DataOp::DeleteNode { .. }, Before::Node(image)) => {
+                event.labels = Some(names(&image.labels));
+                event.before = values(&image.properties);
+            }
+            (DataOp::DeleteEdge { .. }, Before::Edge(image)) => {
+                event.edge_type = Some(image.edge_type.to_string());
+                event.src_id = Some(image.src.as_u64());
+                event.dst_id = Some(image.dst.as_u64());
+                event.before = values(&image.properties);
+            }
+            (
+                DataOp::SetNodeProperty { key, value, .. }
+                | DataOp::SetEdgeProperty { key, value, .. },
+                Before::Value(old),
+            ) => {
+                event.before = old.as_ref().and_then(|old| one(key, old));
+                event.after = one(key, value);
+            }
+            (
+                DataOp::RemoveNodeProperty { key, .. } | DataOp::RemoveEdgeProperty { key, .. },
+                Before::Value(old),
+            ) => {
+                event.before = old.as_ref().and_then(|old| one(key, old));
+            }
+            (DataOp::AddNodeLabel { label, .. }, Before::Labels(labels)) => {
+                let before = names(labels);
+                let mut after = before.clone();
+                after.push(label.to_string());
+                event.before_labels = Some(before);
+                event.labels = Some(after);
+            }
+            (DataOp::RemoveNodeLabel { label, .. }, Before::Labels(labels)) => {
+                let before = names(labels);
+                let after = before
+                    .iter()
+                    .filter(|name| name.as_str() != label.as_str())
+                    .cloned()
+                    .collect();
+                event.before_labels = Some(before);
+                event.labels = Some(after);
+            }
+            // The change set checks each entry's before-image against its
+            // op, so no other pair is recorded.
+            _ => {}
+        }
+        events.push(event);
+    }
+    fold_into_creates(events)
+}
+
 /// Folds a transaction's changes to the entities it created into their
 /// create events, so a create event carries the entity as the transaction
 /// left it: its final labels and properties.
@@ -782,7 +995,7 @@ fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>
 /// event without properties followed by one update per property.
 /// Changes to entities that existed before the transaction stay as they are.
 /// Entity ids repeat across graphs, so the folding stays within one graph.
-pub(crate) fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
+fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
     let mut folded: Vec<ChangeEvent> = Vec::with_capacity(events.len());
     let mut created: HashMap<(Option<String>, EntityId), usize> = HashMap::new();
     for event in events {
@@ -1028,6 +1241,45 @@ mod tests {
         let config = CdcRetentionConfig::default();
         assert_eq!(config.max_epochs, Some(1000));
         assert_eq!(config.max_events, Some(100_000));
+    }
+
+    /// `unlimited()` keeps every event, where the default drops those more
+    /// than 1,000 epochs old; `with_max_epochs` and `with_max_events` each
+    /// bound the history on their own.
+    #[test]
+    fn retention_constructors_set_the_limits() {
+        let kept = |retention: CdcRetentionConfig| {
+            let log = CdcLog::with_retention(retention);
+            for epoch in 1..=1_003 {
+                log.record_create_node(NodeId::new(epoch), EpochId(epoch), None, None);
+            }
+            log.apply_retention(EpochId(1_003));
+            log.event_count()
+        };
+        assert_eq!(
+            kept(CdcRetentionConfig::default()),
+            1_001,
+            "the default keeps epochs 3 to 1003"
+        );
+        assert_eq!(
+            kept(CdcRetentionConfig::unlimited()),
+            1_003,
+            "unlimited keeps every event"
+        );
+        assert_eq!(
+            kept(CdcRetentionConfig::unlimited().with_max_epochs(3)),
+            4,
+            "3 epochs back from 1003 keeps epochs 1000 to 1003"
+        );
+        assert_eq!(
+            kept(CdcRetentionConfig::unlimited().with_max_events(19)),
+            19,
+            "19 events keeps the 19 newest"
+        );
+        let both = CdcRetentionConfig::unlimited()
+            .with_max_epochs(88)
+            .with_max_events(19);
+        assert_eq!((both.max_epochs, both.max_events), (Some(88), Some(19)));
     }
 
     #[test]

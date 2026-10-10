@@ -122,24 +122,23 @@ impl SectionDirectory {
     ///
     /// # Errors
     ///
-    /// Returns an error if the page is too short or contains invalid data.
+    /// Returns [`Error::Corruption`] if the page is too short or contains
+    /// invalid data: 0.5.x is done, so no newer writer adds to what it wrote.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < 8 {
-            return Err(Error::Serialization(
-                "section directory too short".to_string(),
-            ));
+            return Err(Error::corruption("section directory too short"));
         }
 
         let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
         if count > MAX_SECTIONS {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section directory has {count} entries, max is {MAX_SECTIONS}"
             )));
         }
 
         let required = 8 + count * SectionDirectoryEntry::SIZE;
         if data.len() < required {
-            return Err(Error::Serialization(format!(
+            return Err(Error::corruption(format!(
                 "section directory data too short: need {required} bytes, got {}",
                 data.len()
             )));
@@ -195,9 +194,7 @@ fn read_entry(buf: &[u8]) -> Result<SectionDirectoryEntry> {
         12 => SectionType::RdfRing,
         20 => SectionType::PropertyIndex,
         other => {
-            return Err(Error::Serialization(format!(
-                "unknown section type: {other}"
-            )));
+            return Err(Error::corruption(format!("unknown section type: {other}")));
         }
     };
 

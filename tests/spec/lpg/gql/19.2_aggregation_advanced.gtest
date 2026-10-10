@@ -135,6 +135,105 @@ tests:
         - [Engineering, 170]
         - [Sales, 110]
 
+  # An aggregate written in HAVING is computed per group, like one of the
+  # RETURN list (HAVING follows SQL, ISO/IEC 9075-2 <having clause>).
+  - name: having_with_the_aggregate_of_the_return_list
+    setup:
+      - "INSERT (:Employee {name: 'Alix', dept: 'Engineering', salary: 90})"
+      - "INSERT (:Employee {name: 'Gus', dept: 'Engineering', salary: 80})"
+      - "INSERT (:Employee {name: 'Vincent', dept: 'Sales', salary: 50})"
+      - "INSERT (:Employee {name: 'Jules', dept: 'Sales', salary: 60})"
+      - "INSERT (:Employee {name: 'Mia', dept: 'Marketing', salary: 70})"
+    query: "MATCH (e:Employee) RETURN e.dept AS dept, sum(e.salary) AS total GROUP BY e.dept HAVING sum(e.salary) > 100"
+    expect:
+      rows:
+        - [Engineering, 170]
+        - [Sales, 110]
+
+  # The aggregate HAVING reads stays out of the result
+  - name: having_with_an_aggregate_the_return_list_does_not_compute
+    setup:
+      - "INSERT (:Employee {name: 'Alix', dept: 'Engineering', salary: 90})"
+      - "INSERT (:Employee {name: 'Gus', dept: 'Engineering', salary: 80})"
+      - "INSERT (:Employee {name: 'Vincent', dept: 'Sales', salary: 50})"
+      - "INSERT (:Employee {name: 'Jules', dept: 'Sales', salary: 60})"
+      - "INSERT (:Employee {name: 'Mia', dept: 'Marketing', salary: 70})"
+    query: "MATCH (e:Employee) RETURN e.dept AS dept, max(e.salary) AS top GROUP BY e.dept HAVING count(*) > 1"
+    expect:
+      columns: [dept, top]
+      rows:
+        - [Engineering, 90]
+        - [Sales, 60]
+
+  # Engineering averages 85 with a top of 90; Sales 55; Marketing 70
+  - name: having_with_aggregates_inside_an_expression
+    setup:
+      - "INSERT (:Employee {name: 'Alix', dept: 'Engineering', salary: 90})"
+      - "INSERT (:Employee {name: 'Gus', dept: 'Engineering', salary: 80})"
+      - "INSERT (:Employee {name: 'Vincent', dept: 'Sales', salary: 50})"
+      - "INSERT (:Employee {name: 'Jules', dept: 'Sales', salary: 60})"
+      - "INSERT (:Employee {name: 'Mia', dept: 'Marketing', salary: 70})"
+    query: "MATCH (e:Employee) RETURN e.dept AS dept GROUP BY e.dept HAVING sum(e.salary) / count(*) > 60 AND max(e.salary) < 88"
+    expect:
+      rows:
+        - [Marketing]
+
+  # HAVING reads a grouping key, by its text or by its RETURN alias, and the
+  # alias of a computed aggregate (Engineering 170 + 1, Marketing 70 + 1)
+  - name: having_reads_a_grouping_key_and_aliases
+    setup:
+      - "INSERT (:Employee {name: 'Alix', dept: 'Engineering', salary: 90})"
+      - "INSERT (:Employee {name: 'Gus', dept: 'Engineering', salary: 80})"
+      - "INSERT (:Employee {name: 'Vincent', dept: 'Sales', salary: 50})"
+      - "INSERT (:Employee {name: 'Jules', dept: 'Sales', salary: 60})"
+      - "INSERT (:Employee {name: 'Mia', dept: 'Marketing', salary: 70})"
+    query: "MATCH (e:Employee) RETURN e.dept AS dept, sum(e.salary) + 1 AS total GROUP BY e.dept HAVING e.dept <> 'Sales' AND total > 0"
+    expect:
+      rows:
+        - [Engineering, 171]
+        - [Marketing, 71]
+
+  - name: having_reads_the_alias_of_a_grouping_key
+    setup:
+      - "INSERT (:Employee {name: 'Alix', dept: 'Engineering', salary: 90})"
+      - "INSERT (:Employee {name: 'Gus', dept: 'Engineering', salary: 80})"
+      - "INSERT (:Employee {name: 'Vincent', dept: 'Sales', salary: 50})"
+      - "INSERT (:Employee {name: 'Jules', dept: 'Sales', salary: 60})"
+      - "INSERT (:Employee {name: 'Mia', dept: 'Marketing', salary: 70})"
+    query: "MATCH (e:Employee) RETURN e.dept AS dept, count(*) AS n GROUP BY e.dept HAVING dept <> 'Sales'"
+    expect:
+      rows:
+        - [Engineering, 2]
+        - [Marketing, 1]
+
+  # GROUP BY makes one row per group, also without an aggregate
+  # (ISO/IEC 39075:2024 <group by clause>)
+  - name: group_by_without_an_aggregate
+    setup:
+      - "INSERT (:Employee {name: 'Alix', dept: 'Engineering', salary: 90})"
+      - "INSERT (:Employee {name: 'Gus', dept: 'Engineering', salary: 80})"
+      - "INSERT (:Employee {name: 'Vincent', dept: 'Sales', salary: 50})"
+      - "INSERT (:Employee {name: 'Jules', dept: 'Sales', salary: 60})"
+      - "INSERT (:Employee {name: 'Mia', dept: 'Marketing', salary: 70})"
+    query: "MATCH (e:Employee) RETURN e.dept AS dept GROUP BY e.dept"
+    expect:
+      rows:
+        - [Engineering]
+        - [Marketing]
+        - [Sales]
+
+  - name: group_by_without_an_aggregate_with_having
+    setup:
+      - "INSERT (:Employee {name: 'Alix', dept: 'Engineering', salary: 90})"
+      - "INSERT (:Employee {name: 'Gus', dept: 'Engineering', salary: 80})"
+      - "INSERT (:Employee {name: 'Vincent', dept: 'Sales', salary: 50})"
+      - "INSERT (:Employee {name: 'Jules', dept: 'Sales', salary: 60})"
+      - "INSERT (:Employee {name: 'Mia', dept: 'Marketing', salary: 70})"
+    query: "MATCH (e:Employee) RETURN e.dept AS dept GROUP BY e.dept HAVING count(*) = 1"
+    expect:
+      rows:
+        - [Marketing]
+
   # ---------------------------------------------------------------------------
   # Mixed aggregates with GROUP BY: count + min + max per group
   # ---------------------------------------------------------------------------

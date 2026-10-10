@@ -326,6 +326,49 @@ tests:
       rows:
         - [3]
 
+  # FOREACH passes each row on once, whatever its list holds: it used to
+  # repeat the row once per item, and to drop it for an empty or null list.
+  - name: foreach_keeps_the_row_for_a_longer_list
+    statements:
+      - "UNWIND [3, 19] AS i FOREACH (x IN [1, 2] | CREATE (:Z {i: i, x: x})) RETURN i"
+    expect:
+      rows:
+        - [3]
+        - [19]
+
+  - name: foreach_writes_once_per_item
+    statements:
+      - "UNWIND [3, 19] AS i FOREACH (x IN [1, 2] | CREATE (:Z {i: i, x: x})) RETURN count(*) AS rows"
+      - "MATCH (z:Z) RETURN count(z) AS written"
+    expect:
+      rows:
+        - [4]
+
+  - name: foreach_keeps_the_row_for_an_empty_list
+    query: "UNWIND [3, 19, 88] AS i FOREACH (x IN [] | CREATE (:Z)) RETURN count(*) AS rows"
+    expect:
+      rows:
+        - [3]
+
+  - name: foreach_keeps_the_row_for_a_null_list
+    query: "UNWIND [3, 19, 88] AS i FOREACH (x IN null | CREATE (:Z)) RETURN count(*) AS rows"
+    expect:
+      rows:
+        - [3]
+
+  - name: foreach_variable_is_not_visible_after_it
+    query: "UNWIND [3] AS i FOREACH (x IN [1, 2] | CREATE (:Z)) RETURN x"
+    expect:
+      error: "Undefined variable 'x'"
+
+  # A FOREACH that starts a query passes the one row a query starts from on
+  # (the clauses after it used to see no row).
+  - name: foreach_that_starts_a_query_keeps_its_one_row
+    query: "FOREACH (x IN [3, 19] | CREATE (:Z {x: x})) RETURN count(*) AS rows"
+    expect:
+      rows:
+        - [1]
+
   # ---------------------------------------------------------------------------
   # Computed property values in CREATE and MERGE (used to fail with an internal
   # error in CREATE, and silently became NULL in MERGE)
@@ -430,3 +473,164 @@ tests:
     expect:
       rows:
         - [1]
+
+  # ---------------------------------------------------------------------------
+  # A relationship points the way its arrow does (openCypher 9, CREATE and
+  # MERGE): (a)<-[:T]-(b) is a relationship from b to a. A left arrow used to
+  # be stored from a to b.
+  # ---------------------------------------------------------------------------
+
+  - name: create_left_arrow_points_from_the_right_node
+    statements:
+      - "CREATE (:Person {name: 'Alix'})<-[:KNOWS]-(:Person {name: 'Gus'})"
+      - "MATCH (s)-[:KNOWS]->(t) RETURN s.name, t.name"
+    expect:
+      rows:
+        - [Gus, Alix]
+
+  - name: create_left_arrow_from_a_bound_node
+    statements:
+      - "CREATE (:Person {name: 'Alix'})"
+      - "MATCH (a:Person {name: 'Alix'}) CREATE (a)<-[:KNOWS]-(:Person {name: 'Gus'})"
+      - "MATCH (:Person {name: 'Alix'})<-[:KNOWS]-(x) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+
+  - name: create_chain_with_arrows_both_ways
+    statements:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})<-[:KNOWS]-(:Person {name: 'Vincent'})"
+      - "MATCH (s)-[:KNOWS]->(t) RETURN s.name, t.name"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Vincent, Gus]
+
+  - name: create_chain_of_left_arrows
+    statements:
+      - "CREATE (:Person {name: 'Alix'})<-[:KNOWS {w: 3}]-(:Person {name: 'Gus'})<-[:KNOWS {w: 19}]-(:Person {name: 'Vincent'})"
+      - "MATCH (s)-[r:KNOWS]->(t) RETURN s.name, t.name, r.w"
+    expect:
+      rows:
+        - [Gus, Alix, 3]
+        - [Vincent, Gus, 19]
+
+  - name: create_undirected_relationship_is_an_error
+    query: "CREATE (:Person {name: 'Alix'})-[:KNOWS]-(:Person {name: 'Gus'})"
+    expect:
+      error: "direction"
+
+  - name: merge_left_arrow_creates_from_the_right_node
+    statements:
+      - "CREATE (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)<-[:KNOWS]-(b)"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)<-[:KNOWS]-(b)"
+      - "MATCH (s)-[:KNOWS]->(t) RETURN s.name, t.name"
+    expect:
+      rows:
+        - [Gus, Alix]
+
+  - name: merge_left_arrow_does_not_match_the_other_direction
+    statements:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)<-[:KNOWS]-(b)"
+      - "MATCH (s)-[:KNOWS]->(t) RETURN s.name, t.name"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Gus, Alix]
+
+  - name: merge_undirected_matches_either_direction
+    statements:
+      - "CREATE (:Person {name: 'Alix'})<-[:KNOWS {w: 3}]-(:Person {name: 'Gus'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[r:KNOWS]-(b) ON MATCH SET r.w = 88"
+      - "MATCH (s)-[r:KNOWS]->(t) RETURN s.name, t.name, r.w"
+    expect:
+      rows:
+        - [Gus, Alix, 88]
+
+  - name: merge_undirected_creates_from_left_to_right
+    statements:
+      - "CREATE (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:KNOWS]-(b)"
+      - "MATCH (s)-[:KNOWS]->(t) RETURN s.name, t.name"
+    expect:
+      rows:
+        - [Alix, Gus]
+
+  # ---------------------------------------------------------------------------
+  # ON CREATE SET and ON MATCH SET add labels (openCypher 9, MERGE): the label
+  # items used to be dropped while the property items beside them were written.
+  # An item on another variable than the merged one is an error: it used to be
+  # written to the merged element.
+  # ---------------------------------------------------------------------------
+
+  - name: merge_on_create_set_label
+    statements:
+      - "MERGE (p:Person {name: 'Alix'}) ON CREATE SET p:New, p.since = 2019"
+      - "MATCH (p:New) RETURN p.name, p.since"
+    expect:
+      rows:
+        - [Alix, 2019]
+
+  - name: merge_on_match_set_label
+    statements:
+      - "CREATE (:Person {name: 'Alix'})"
+      - "MERGE (p:Person {name: 'Alix'}) ON CREATE SET p:New ON MATCH SET p:Seen"
+      - "MATCH (p:Person) RETURN p.name, p:New AS new, p:Seen AS seen"
+    expect:
+      rows:
+        - [Alix, false, true]
+
+  - name: merge_on_create_set_on_another_variable_is_an_error
+    statements:
+      - "CREATE (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[r:KNOWS]->(b) ON CREATE SET a.since = 3"
+    expect:
+      error: "MERGE"
+
+  # ---------------------------------------------------------------------------
+  # MERGE of a relationship to or from an anonymous node with a label or
+  # properties merges that node, as for a named one: it used to fail with
+  # "MERGE relationship pattern requires a target node variable".
+  # ---------------------------------------------------------------------------
+
+  - name: merge_relationship_to_an_anonymous_node
+    statements:
+      - "CREATE (:Person {name: 'Alix'})"
+      - "MATCH (h:Person {name: 'Alix'}) WITH h, 3 AS x MERGE (h)-[:KNOWS]->(:Person {name: 'Gus', k: x})"
+      - "MATCH (h:Person {name: 'Alix'}) WITH h, 3 AS x MERGE (h)-[:KNOWS]->(:Person {name: 'Gus', k: x})"
+      - "MATCH (s:Person)-[:KNOWS]->(t:Person) RETURN s.name, t.name, t.k"
+    expect:
+      rows:
+        - [Alix, Gus, 3]
+
+  - name: merge_relationship_from_an_anonymous_node
+    statements:
+      - "CREATE (:Person {name: 'Alix'})"
+      - "MATCH (h:Person {name: 'Alix'}) MERGE (:Person {name: 'Mia'})-[:KNOWS]->(h)"
+      - "MATCH (h:Person {name: 'Alix'}) MERGE (:Person {name: 'Mia'})-[:KNOWS]->(h)"
+      - "MATCH (s:Person)-[:KNOWS]->(t:Person) RETURN s.name, t.name"
+    expect:
+      rows:
+        - [Mia, Alix]
+
+  - name: merge_relationship_to_an_anonymous_node_per_row
+    statements:
+      - "CREATE (:Person {name: 'Alix'})"
+      - "MATCH (h:Person {name: 'Alix'}) UNWIND [3, 19, 3] AS x MERGE (h)-[:RATED]->(:Score {v: x})"
+      - "MATCH (:Person)-[:RATED]->(s:Score) RETURN s.v ORDER BY s.v"
+    expect:
+      ordered: true
+      rows:
+        - [3]
+        - [19]
+
+  # Without a label or a property the node could be any node; that MERGE
+  # is not supported yet and says so.
+  - name: merge_relationship_to_a_bare_anonymous_node_is_an_error
+    statements:
+      - "CREATE (:Person {name: 'Alix'})"
+      - "MATCH (h:Person) MERGE (h)-[:KNOWS]->()"
+    expect:
+      error: "anonymous node"

@@ -1,8 +1,8 @@
 //! Node scan planning, and the choice of the label a node scan reads.
 
 use super::{
-    Arc, BinaryOp, EpochId, ExpressionPredicate, FilterExpression, FilterOp, FilterOperator,
-    GraphStoreSearch, HashMap, LogicalExpression, LogicalOperator, LogicalType,
+    Arc, BinaryOp, EagerOperator, EpochId, ExpressionPredicate, FilterExpression, FilterOp,
+    FilterOperator, GraphStoreSearch, HashMap, LogicalExpression, LogicalOperator, LogicalType,
     NestedLoopJoinOperator, NodeScanOp, Operator, PhysicalJoinType, Result, ScanOperator,
     TransactionId, Value,
 };
@@ -86,7 +86,9 @@ pub(crate) fn with_smallest_scan_label(
 /// ([`with_smallest_scan_label`]). Not at a past epoch outside a transaction
 /// (`current_epoch` is the transaction manager's, `None` without one): a label
 /// scan finds the nodes that have the label now, while the check per row
-/// reads the labels a node had at the epoch.
+/// reads the labels a node had at the epoch. The same rule decides whether a
+/// query may look values up in a property index, which holds the values of
+/// now.
 pub(crate) fn may_choose_scan_label(
     viewing_epoch: EpochId,
     transaction_id: Option<TransactionId>,
@@ -179,7 +181,7 @@ fn move_scan_label(
 /// Whether `predicate` reads a property of `variable` that a vector or text
 /// index on one of `labels` covers.
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-fn search_index_covers(
+pub(super) fn search_index_covers(
     predicate: &LogicalExpression,
     variable: &str,
     labels: [&str; 2],
@@ -231,14 +233,22 @@ impl super::Planner {
     /// nodes (see [`with_smallest_scan_label`]), when this query may choose
     /// (see [`may_choose_scan_label`]).
     pub(super) fn scan_smallest_label(&self, filter: &FilterOp) -> Option<FilterOp> {
+        if !self.reads_the_current_store() {
+            return None;
+        }
+        with_smallest_scan_label(filter, self.store.as_ref())
+    }
+
+    /// Whether this query reads the store as it is now (see
+    /// [`may_choose_scan_label`]): label counts and property indexes describe
+    /// that state, so a read of a past epoch outside a transaction uses
+    /// neither.
+    pub(super) fn reads_the_current_store(&self) -> bool {
         let current_epoch = self
             .transaction_manager
             .as_ref()
             .map(|manager| manager.current_epoch());
-        if !may_choose_scan_label(self.viewing_epoch, self.transaction_id, current_epoch) {
-            return None;
-        }
-        with_smallest_scan_label(filter, self.store.as_ref())
+        may_choose_scan_label(self.viewing_epoch, self.transaction_id, current_epoch)
     }
 
     /// Plans a node scan operator.
@@ -258,12 +268,21 @@ impl super::Planner {
 
         // If there's an input, chain operators with a nested loop join (cross join)
         if let Some(input) = &scan.input {
-            let (input_op, mut input_columns) = self.plan_operator(input)?;
+            let (mut input_op, mut input_columns) = self.plan_operator(input)?;
 
             // If the scan variable already exists in the input (e.g., from a
             // correlated ParameterScan), skip the redundant scan and reuse the
             // bound value. This avoids a cross product in CALL { WITH var MATCH (var)... }.
+            // After a write (`... CREATE (h)-[:R]->() WITH h MATCH (h)-[:R]->(q)`)
+            // the whole input is read first, so that the pattern from the
+            // bound node (its labels and properties, the expands and paths
+            // from it) sees what every row wrote, as the scan below does;
+            // an input a clause read whole already is not read again (see
+            // `after_write`).
             if input_columns.contains(&scan.variable) {
+                if super::after_write::writes_pending(input) {
+                    input_op = Box::new(EagerOperator::new(input_op));
+                }
                 // If the second MATCH clause has a label constraint, enforce it
                 // as a filter on the already-bound variable.
                 if let Some(label) = &scan.label {

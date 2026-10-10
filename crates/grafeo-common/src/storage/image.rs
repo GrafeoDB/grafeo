@@ -97,14 +97,14 @@ impl MemoryImage {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Serialization`] naming the section when a section
-    /// type is listed twice, which only a corrupt 0.5.x file does: neither
-    /// copy is chosen over the other.
+    /// Returns [`Error::Corruption`] naming the section when a section type
+    /// is listed twice, which only a corrupt 0.5.x file does: neither copy is
+    /// chosen over the other.
     pub fn from_raw(sections: Vec<(SectionType, Vec<u8>)>) -> Result<Self> {
         let mut image = Self::new();
         for (section_type, bytes) in sections {
             if image.has_section(section_type) {
-                return Err(Error::Serialization(format!(
+                return Err(Error::corruption(format!(
                     "a 0.5.x file lists section {section_type:?} twice"
                 )));
             }
@@ -201,17 +201,34 @@ impl SectionSource for MemorySection {
     }
 
     fn fetch(&self, index: usize) -> Result<Bytes> {
-        self.chunks.get(index).cloned().ok_or_else(|| {
-            Error::Internal(format!(
-                "chunk {index} out of range: section {:?} has {} chunks",
-                self.section_type,
-                self.chunks.len()
-            ))
-        })
+        self.chunks
+            .get(index)
+            .cloned()
+            .ok_or_else(|| self.out_of_range(index))
+    }
+
+    /// The length of the chunk's bytes: a memory image stores them as they
+    /// were written.
+    fn stored_length(&self, index: usize) -> Result<u64> {
+        self.chunks
+            .get(index)
+            .map(|bytes| bytes.len() as u64)
+            .ok_or_else(|| self.out_of_range(index))
     }
 
     fn section_version(&self) -> u8 {
         self.version
+    }
+}
+
+impl MemorySection {
+    /// The error for a chunk index past the section's chunks.
+    fn out_of_range(&self, index: usize) -> Error {
+        Error::Internal(format!(
+            "chunk {index} out of range: section {:?} has {} chunks",
+            self.section_type,
+            self.chunks.len()
+        ))
     }
 }
 
@@ -266,6 +283,10 @@ impl SectionSource for BorrowedSection<'_> {
         self.0.fetch(index)
     }
 
+    fn stored_length(&self, index: usize) -> Result<u64> {
+        self.0.stored_length(index)
+    }
+
     fn section_version(&self) -> u8 {
         self.0.section_version()
     }
@@ -274,10 +295,12 @@ impl SectionSource for BorrowedSection<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::section::{ChunkMeta, Section, SectionSink, SectionType, legacy_bytes};
+    use crate::storage::section::{
+        ChunkMeta, Section, SectionSink, SectionType, legacy_bytes, read_raw, write_raw,
+    };
     use crate::utils::error::Result;
 
-    /// A test section writing its bytes as one raw chunk (the trait defaults).
+    /// A test section writing its bytes as one raw chunk.
     struct Raw(SectionType, Vec<u8>);
 
     impl Section for Raw {
@@ -290,6 +313,12 @@ mod tests {
         fn deserialize(&mut self, data: &[u8]) -> Result<()> {
             self.1 = data.to_vec();
             Ok(())
+        }
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
         fn is_dirty(&self) -> bool {
             false
@@ -532,7 +561,7 @@ mod tests {
             (SectionType::Catalog, b"Prague".to_vec()),
         ])
         .unwrap_err();
-        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        assert!(matches!(error, Error::Corruption(_)), "{error:?}");
         let error = error.to_string();
         assert!(
             error.contains("Catalog") && error.contains("twice"),

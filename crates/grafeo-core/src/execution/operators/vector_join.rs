@@ -380,7 +380,7 @@ impl Operator for VectorJoinOperator {
         let left_chunk = self
             .current_left_chunk
             .as_ref()
-            .ok_or_else(|| OperatorError::Execution("No left chunk available".into()))?;
+            .ok_or_else(|| OperatorError::Internal("No left chunk available".into()))?;
 
         let left_schema: Vec<LogicalType> = (0..left_chunk.column_count())
             .filter_map(|i| left_chunk.column(i).map(|col| col.data_type().clone()))
@@ -407,7 +407,7 @@ impl Operator for VectorJoinOperator {
             let left_chunk = self
                 .current_left_chunk
                 .as_ref()
-                .ok_or_else(|| OperatorError::Execution("No left chunk available".into()))?;
+                .ok_or_else(|| OperatorError::Internal("No left chunk available".into()))?;
 
             // Copy left columns
             for (col_idx, _) in left_schema.iter().enumerate() {

@@ -46,3 +46,22 @@ Chunk 3: min=18, max=35  -> SKIP (max < 50)
 | `x <= v` | min <= v |
 | `x IS NULL` | null_count > 0 |
 | `x IN (...)` | bloom filter check |
+
+## In the Database File
+
+Since 0.6.0, the column chunks of the database file store zone maps: a chunk
+whose values are all `Int64`, all `Float64` (NaN left out) or all `Bool`
+stores their minimum and maximum, and a chunk of strings stores their minimum
+and maximum cut to 16 bytes (a cut maximum raised so it stays an upper bound)
+with the shortest and longest length. A chunk covers at most 65,536 rows and 1 MiB, so a property
+column gets one zone map per range of node or edge ids. A reader refuses a zone map
+that differs from the chunk's values, so it can be trusted. The file stores no
+null count, as the chunk's presence bitmap and value count give the rows
+without a value, and no bloom filter.
+
+An open still decodes every chunk into memory, so nothing skips chunks in the
+file yet: queries use the zone maps that the property columns in memory keep.
+Skipping chunks in the file comes with the compact-core store
+([#432](https://github.com/GrafeoDB/grafeo/issues/432)), whose cold chunks are
+these chunks. See [Column Chunks](container-format.md#column-chunks) for the
+byte layout.

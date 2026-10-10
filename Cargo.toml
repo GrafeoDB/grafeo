@@ -44,7 +44,6 @@ anyhow = "1.0"
 parking_lot = "0.12"
 crossbeam = "0.8"
 rayon = "1"
-arc-swap = "1.7"
 
 # Data structures
 hashbrown = { version = "0.17", features = ["serde"] }

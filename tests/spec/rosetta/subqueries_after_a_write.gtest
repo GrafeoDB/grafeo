@@ -1,0 +1,203 @@
+# Rosetta: subqueries after a write
+#
+# A CALL, EXISTS, COUNT or VALUE subquery after a write in the same query sees
+# all of what the query wrote before it, also what the rows after the current
+# one wrote: the row i writes (:N {k: i}) and looks for the node k: 4 - i,
+# which for the first row the last row writes. With and without a property
+# index on k, which the subquery then looks the key up in. The subquery used
+# to see only the rows up to its own.
+#
+# GQL's CALL follows the INSERT directly (it takes no CALL after a WITH);
+# Cypher needs a WITH between the write and a reading clause.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Subqueries after a write
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # CALL
+  # ---------------------------------------------------------------------------
+
+  - name: a_call_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) CALL { WITH i MATCH (t:N {k: 4 - i}) RETURN t.k AS k } RETURN i, k"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i CALL { WITH i MATCH (t:N {k: 4 - i}) RETURN t.k AS k } RETURN i, k"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 2]
+        - [3, 1]
+
+  - name: a_call_after_a_write_sees_the_later_rows_through_an_index
+    setup:
+      - "CREATE INDEX idx_k FOR (n:N) ON (n.k)"
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) CALL { WITH i MATCH (t:N {k: 4 - i}) RETURN t.k AS k } RETURN i, k"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i CALL { WITH i MATCH (t:N {k: 4 - i}) RETURN t.k AS k } RETURN i, k"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 2]
+        - [3, 1]
+
+  - name: an_optional_call_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) OPTIONAL CALL { WITH i MATCH (t:N {k: 4 - i}) RETURN t.k AS k } RETURN i, k"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 2]
+        - [3, 1]
+
+  - name: an_uncorrelated_call_after_a_write_sees_every_row
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) CALL { MATCH (t:N) RETURN count(t) AS c } RETURN i, c"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i CALL { MATCH (t:N) RETURN count(t) AS c } RETURN i, c"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 3]
+        - [3, 3]
+
+  # ---------------------------------------------------------------------------
+  # EXISTS, COUNT and VALUE
+  # ---------------------------------------------------------------------------
+
+  - name: an_exists_filter_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) WITH i WHERE EXISTS { MATCH (t:N {k: 4 - i}) } RETURN i"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i WHERE EXISTS { MATCH (t:N {k: 4 - i}) } RETURN i"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  - name: an_exists_filter_after_a_write_sees_the_later_rows_through_an_index
+    setup:
+      - "CREATE INDEX idx_k FOR (n:N) ON (n.k)"
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) WITH i WHERE EXISTS { MATCH (t:N {k: 4 - i}) } RETURN i"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i WHERE EXISTS { MATCH (t:N {k: 4 - i}) } RETURN i"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  - name: a_not_exists_filter_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) WITH i WHERE NOT EXISTS { MATCH (t:N {k: 4 - i}) } RETURN i"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i WHERE NOT EXISTS { MATCH (t:N {k: 4 - i}) } RETURN i"
+    expect:
+      empty: true
+
+  - name: an_exists_value_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) RETURN i, EXISTS { MATCH (t:N {k: 4 - i}) } AS found"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i RETURN i, EXISTS { MATCH (t:N {k: 4 - i}) } AS found"
+    expect:
+      rows:
+        - [1, true]
+        - [2, true]
+        - [3, true]
+
+  - name: a_count_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) RETURN i, COUNT { MATCH (t:N {k: 4 - i}) } AS found"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i RETURN i, COUNT { MATCH (t:N {k: 4 - i}) } AS found"
+    expect:
+      rows:
+        - [1, 1]
+        - [2, 1]
+        - [3, 1]
+
+  - name: a_count_after_a_write_sees_the_later_rows_through_an_index
+    setup:
+      - "CREATE INDEX idx_k FOR (n:N) ON (n.k)"
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) RETURN i, COUNT { MATCH (t:N {k: 4 - i}) } AS found"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i RETURN i, COUNT { MATCH (t:N {k: 4 - i}) } AS found"
+    expect:
+      rows:
+        - [1, 1]
+        - [2, 1]
+        - [3, 1]
+
+  - name: a_value_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) RETURN i, VALUE { MATCH (t:N {k: 4 - i}) RETURN t.k } AS k"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 2]
+        - [3, 1]
+
+  # An EXISTS tied to the row by a node of its pattern alone (a semi-join
+  # when nothing writes) sees the path each row wrote.
+  - name: an_exists_on_a_written_node_sees_its_path
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (a:P {k: i})-[:R]->(:Q)-[:S]->(:T) WITH a WHERE EXISTS { MATCH (a)-[:R]->(:Q)-[:S]->(:T) } RETURN a.k"
+      cypher: "UNWIND range(1, 3) AS i CREATE (a:P {k: i})-[:R]->(:Q)-[:S]->(:T) WITH a WHERE EXISTS { MATCH (a)-[:R]->(:Q)-[:S]->(:T) } RETURN a.k"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  # One edge from a node of the row: the row i links the hubs i and i - 1, so
+  # each hub but the last gets its incoming edge from the row after its own.
+  - name: an_exists_of_one_edge_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) INSERT (a)-[:R]->(b) WITH a, i WHERE EXISTS { (a)<-[:R]-() } RETURN i"
+      cypher: "UNWIND range(1, 4) AS i MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) CREATE (a)-[:R]->(b) WITH a, i WHERE EXISTS { (a)<-[:R]-() } RETURN i"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  - name: a_count_of_one_edge_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) INSERT (a)-[:R]->(b) WITH a, i RETURN i, COUNT { (a)<-[:R]-() } AS linked"
+      cypher: "UNWIND range(1, 4) AS i MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) CREATE (a)-[:R]->(b) WITH a, i RETURN i, COUNT { (a)<-[:R]-() } AS linked"
+    expect:
+      rows:
+        - [1, 1]
+        - [2, 1]
+        - [3, 1]
+        - [4, 0]
+
+  # ---------------------------------------------------------------------------
+  # A CALL that writes runs again for each row after its write for the rows
+  # before, and sees it: the row i looks for the nodes k: 88 and writes one
+  # more for each it finds (one for none), so it finds i - 1. It used to find
+  # none in any row (the planner looked them up while planning).
+  # ---------------------------------------------------------------------------
+
+  - name: a_writing_call_sees_what_it_wrote_for_the_rows_before
+    variants:
+      gql: "FOR i IN range(1, 3) CALL () { OPTIONAL MATCH (t:N {k: 88}) INSERT (:N {k: 88}) RETURN count(t) AS seen } RETURN i, seen"
+      cypher: "UNWIND range(1, 3) AS i CALL { OPTIONAL MATCH (t:N {k: 88}) CREATE (:N {k: 88}) RETURN count(t) AS seen } RETURN i, seen"
+    expect:
+      rows:
+        - [1, 0]
+        - [2, 1]
+        - [3, 2]
+
+  - name: a_writing_call_sees_what_it_wrote_for_the_rows_before_through_an_index
+    setup:
+      - "CREATE INDEX idx_k FOR (n:N) ON (n.k)"
+    variants:
+      gql: "FOR i IN range(1, 3) CALL () { OPTIONAL MATCH (t:N {k: 88}) INSERT (:N {k: 88}) RETURN count(t) AS seen } RETURN i, seen"
+      cypher: "UNWIND range(1, 3) AS i CALL { OPTIONAL MATCH (t:N {k: 88}) CREATE (:N {k: 88}) RETURN count(t) AS seen } RETURN i, seen"
+    expect:
+      rows:
+        - [1, 0]
+        - [2, 1]
+        - [3, 2]

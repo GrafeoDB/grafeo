@@ -62,13 +62,18 @@ The sync mode decides when the WAL is flushed to disk (`fsync`). Every mode hand
 
 `Batch` checks its limits when a commit is written. The last commit before an idle period is therefore synced by the next write or by `close()`, not when the delay passes.
 
-The sync mode is set through the Rust `Config` builder; the Python constructor uses the default.
+The sync mode is set through the Rust `Config` builder; the Python constructor uses the default. Build the modes with settings with `DurabilityMode::batch(max_delay, max_records)` and `DurabilityMode::adaptive(interval)`, in whole milliseconds.
 
 ```rust
+use std::time::Duration;
+
 use grafeo::{Config, DurabilityMode, GrafeoDB};
 
 let config = Config::persistent("my_graph.db").with_wal_durability(DurabilityMode::Sync);
 let db = GrafeoDB::with_config(config)?;
+
+let batched = Config::persistent("my_other_graph.db")
+    .with_wal_durability(DurabilityMode::batch(Duration::from_millis(19), 88));
 ```
 
 ## Single-File Format (`.grafeo`)
@@ -91,6 +96,8 @@ Features:
 
 - Two alternating database headers, and a CRC-32 checksum on every header and every piece of data
 - Checkpoints are copy-on-write: a checkpoint writes the new state into space in the file that the last good state does not use, and switches the database header to it only once it is on disk. A checkpoint that fails or is cut off by a crash (for example on a full disk) leaves the last good state readable. A checkpoint needs free disk space for a second copy of the data while it runs; the next checkpoint reuses the space of the older copy.
+- A checkpoint writes the data in chunks of at most 1 MiB as it goes, without first encoding whole sections in memory. While it writes a vector or text index, changes to that index (inserting, updating or removing a node's vector or text) wait until the index is written, and so do searches of that index that arrive after a waiting change.
+- A checkpoint writes the committed state, also while transactions are open: what an open transaction deleted or changed is written as it was committed, and nothing it created is written. A checkpoint taken while an open transaction has changed the default graph leaves out the vector and text indexes, and the next open builds them from the data. `save()`, `to_memory()`, `export_snapshot()` and the backups copy the committed state in the same way.
 - Exclusive file locking prevents multiple processes from opening the same file simultaneously
 
 ### Storage Format Setting (Rust)
@@ -124,6 +131,8 @@ To share a database between processes, run it behind [Grafeo Server](https://git
 ## After `close()`
 
 Once `close()` of a persistent database starts, the handle takes no more writes: commits and statements that write (in every query language, SPARQL updates included), schema statements and graph commands, the direct calls that write (nodes, edges, properties and labels, named graphs, property, vector and text indexes, imports, `batch_insert_rdf` and `restore_snapshot`), and the calls that persist (`wal_checkpoint()`, `save()`, the backups, `compact()`) fail with the database-closed error (`GRAFEO-T007`, Python `DatabaseClosedError`). A write already in progress, `restore_snapshot` included, completes first and is saved; so does an import or `batch_insert_rdf` that is already writing, while one still reading its input is refused. Reads still work. Open the database again to write. An in-memory database has nothing to persist and keeps working.
+
+A transaction still open when `close()` runs is left out of the file: the final checkpoint writes the committed state (see above). Its commit then fails with the database-closed error; it can only roll back.
 
 ## Reopening a Database
 
@@ -198,6 +207,10 @@ Stop every 0.5.x process that uses the database. 0.5.x cannot open the migrated 
 
 A build without the `wal` feature cannot replay a WAL, so it refuses to open (or migrate) a 0.5.x WAL directory, whose WAL holds all of its data, and a 0.5.x file whose sidecar WAL holds files, and changes nothing. The `grafeo` Rust crate's default profile (`embedded`) is such a build. Open these databases read-write once with a build that has `wal`: the `grafeo` crate with the `lpg` or `storage` feature, the Python, Node.js or C bindings, or the `grafeo` command line tool. A 0.5.x file that was closed cleanly (its sidecar WAL is gone or empty) migrates in every build. For the same reason, a read-only and a read-write open in such a build refuse a 0.6 file whose WAL holds commits a writer left when it exited without `close()`, and change nothing: open it with a build that has `wal`, which replays them.
 
+### Builds Without the `triple-store`, `vector-index` or `text-index` Feature
+
+RDF triples, in the database file, in its WAL or in a 0.5.x WAL directory, can only be read by a build with the `triple-store` feature. Vector and text indexes can only be kept by a build with `vector-index` and `text-index`: a build without them cannot build such an index, and would drop its definition (label, property, dimensions, metric) from the file. A build without one of these features refuses a database that holds such data, a 0.6 or a 0.5.x one, on a read-write open (which would migrate a 0.5.x database), a read-only open and `open_in_memory()`, with an error that names the data and the feature, and changes nothing. It refuses a snapshot that holds such data the same way, where it used to leave the triples or the index definitions out: `import_snapshot()` (`importSnapshot()` in WebAssembly builds without these features) creates no database, and `restore_snapshot()` leaves the database as it was. The `grafeo` Rust crate's default profile lacks `triple-store` (add the `triple-store` or `rdf` feature), its `lpg` and `rdf` profiles lack `vector-index` and `text-index` (add the `ai` feature), and the `grafeo` command line tool lacks all three; the Python, Node.js and C bindings have them. Before 0.6.0 such a build opened these databases without the triples or the indexes, and its next checkpoint lost them for good.
+
 ### Read-Only Opens
 
 A read-only open (`GrafeoDB.open_read_only()` in Python, `GrafeoDB::open_read_only` or `Config::read_only` in Rust) and `open_in_memory()` read a 0.5.x database, a file with its WAL or a WAL directory, without migrating or changing it. A read-only open loads such a database into memory once and then holds no lock on it. If a migration was cut off after the old files were renamed, read-only opens and `open_in_memory()` fail until a read-write open has finished it.
@@ -244,6 +257,8 @@ A database written by a 0.6 development build (before the 0.6.0 release) that sp
 - **A mount point**: a database directory that is a mount point (a container volume, for example) cannot be renamed, so it cannot be migrated in place. For a database at the mount point `/data`, copy `/data/wal/` to `/data/graph/wal/` and open `/data/graph` from then on. Or open `/data` read-only and `save()` it to a new file inside the volume, such as `/data/graph.grafeo`, and open that file from then on.
 - **Open files on Windows**: on Windows a directory cannot be renamed while any process has a file inside it open. The migration of a WAL directory then fails, and changes nothing, until they are closed. A 0.5.x process that still has a database open with spilled embeddings keeps a file in its spill directory open: the migration then stops after moving the database file, the error names the spill directory, and every open fails until that process is stopped; the next read-write open finishes the migration.
 - **The current directory**: a read-write open of a 0.5.x WAL directory from a process whose current directory is inside it (with `.` or by its name) is refused, as a process's own working directory cannot be moved (a read-only open works). Open it read-write from a process whose current directory is outside it.
+- **A value nested deeper than 128 levels**: 0.6 stores property values (lists, maps and paths) nested at most 128 levels deep. The migration of a database that holds a deeper one fails, names the node or edge and the property, and changes nothing: change that value with 0.5.x first.
+- **Properties stored as null**: 0.5.x could store a property whose value is null, and wrote `GCounter` and `OnCounter` values to its file as null. In 0.6 a property with a null value does not exist, so after the migration such a property is gone: `keys()` and `properties()` no longer list it.
 
 ### Going Back to 0.5.x
 

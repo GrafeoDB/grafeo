@@ -2,18 +2,39 @@
 //!
 //! Converts [`QueryResult`](super::QueryResult) to Arrow [`RecordBatch`] and serializes to Arrow IPC format.
 //! Feature-gated behind `arrow-export`.
+//!
+//! # Column types
+//!
+//! A column's Arrow type comes from its values (or from the result's column
+//! type where that names a scalar type):
+//!
+//! - a list is an Arrow `List` of its elements' type, also nested;
+//! - a map is an Arrow `Struct` with one field per key that any map of the
+//!   column has, each field typed by its values: a key a map lacks is null
+//!   in that row (a `Struct` keeps each key's own type, where an Arrow `Map`
+//!   needs one type for all values, and polars reads it natively);
+//! - a duration is a `Struct` of `months`, `days` and `nanos` (`Int64`): an
+//!   Arrow `Duration` cannot hold months, and polars cannot read an Arrow
+//!   `Interval`;
+//! - a vector is a `FixedSizeList` of `Float32`.
+//!
+//! Nulls are null at every level. Values of different types in one column
+//! (or one list) are written as their GQL text in a `Utf8` column, except
+//! integers and floats together, which are `Float64`; vectors of different
+//! lengths are text too.
 
 use std::sync::Arc;
 
 use arrow_array::Array;
 use arrow_array::builder::{
-    BinaryBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int64Builder, StringBuilder,
+    BinaryBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int64Builder, NullBufferBuilder,
+    OffsetBufferBuilder, StringBuilder,
 };
-use arrow_array::{ArrayRef, FixedSizeListArray, RecordBatch};
+use arrow_array::{ArrayRef, FixedSizeListArray, ListArray, RecordBatch, StructArray};
 use arrow_ipc::writer::StreamWriter;
-use arrow_schema::{ArrowError, DataType, Field, Schema, TimeUnit};
+use arrow_schema::{ArrowError, DataType, Field, Fields, Schema, TimeUnit};
 
-use grafeo_common::{LogicalType, Value};
+use grafeo_common::{LogicalType, PropertyKey, Value};
 
 /// Errors from Arrow export operations.
 #[derive(Debug, thiserror::Error)]
@@ -22,6 +43,113 @@ pub enum ArrowExportError {
     /// Error from the Arrow library.
     #[error("Arrow error: {0}")]
     Arrow(#[from] ArrowError),
+}
+
+/// The Arrow type of a list whose elements have type `element`.
+fn list_of(element: DataType) -> DataType {
+    DataType::List(Arc::new(Field::new("item", element, true)))
+}
+
+/// The Arrow type of a map with these keys and value types, in this order.
+fn struct_of(fields: impl IntoIterator<Item = (String, DataType)>) -> DataType {
+    DataType::Struct(
+        fields
+            .into_iter()
+            .map(|(name, data_type)| Field::new(name, data_type, true))
+            .collect::<Fields>(),
+    )
+}
+
+/// The Arrow type of a duration: its months, days and nanoseconds.
+fn duration_type() -> DataType {
+    struct_of(
+        ["months", "days", "nanos"]
+            .into_iter()
+            .map(|name| (name.to_string(), DataType::Int64)),
+    )
+}
+
+/// The Arrow type of `value`, or `None` for null (see the module docs).
+fn value_type(value: &Value) -> Option<DataType> {
+    Some(match value {
+        Value::Null => return None,
+        Value::Bool(_) => DataType::Boolean,
+        Value::Int64(_) => DataType::Int64,
+        Value::Float64(_) => DataType::Float64,
+        Value::String(_) => DataType::Utf8,
+        Value::Bytes(_) => DataType::Binary,
+        Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        }
+        Value::Date(_) => DataType::Date32,
+        Value::Time(_) => DataType::Time64(TimeUnit::Nanosecond),
+        Value::Duration(_) => duration_type(),
+        Value::Vector(v) => DataType::FixedSizeList(
+            Arc::new(Field::new("item", DataType::Float32, false)),
+            i32::try_from(v.len()).unwrap_or(0),
+        ),
+        Value::List(items) => list_of(common_type(items.iter())),
+        Value::Map(map) => struct_of(map.iter().map(|(key, value)| {
+            (
+                key.as_str().to_string(),
+                value_type(value).unwrap_or(DataType::Null),
+            )
+        })),
+        // Paths and counters have no Arrow form: their text
+        _ => DataType::Utf8,
+    })
+}
+
+/// The one Arrow type that holds values of types `left` and `right` (see
+/// the module docs): `Utf8` text when there is none.
+fn unify(left: DataType, right: DataType) -> DataType {
+    match (left, right) {
+        (left, right) if left == right => left,
+        (DataType::Null, other) | (other, DataType::Null) => other,
+        (DataType::Int64, DataType::Float64) | (DataType::Float64, DataType::Int64) => {
+            DataType::Float64
+        }
+        (DataType::List(left), DataType::List(right)) => {
+            list_of(unify(left.data_type().clone(), right.data_type().clone()))
+        }
+        (DataType::Struct(left), DataType::Struct(right)) => {
+            let mut fields: Vec<(String, DataType)> = left
+                .iter()
+                .map(|field| (field.name().clone(), field.data_type().clone()))
+                .collect();
+            for field in &right {
+                match fields.iter_mut().find(|(name, _)| name == field.name()) {
+                    Some((_, data_type)) => {
+                        let known = std::mem::replace(data_type, DataType::Null);
+                        *data_type = unify(known, field.data_type().clone());
+                    }
+                    None => fields.push((field.name().clone(), field.data_type().clone())),
+                }
+            }
+            struct_of(fields)
+        }
+        _ => DataType::Utf8,
+    }
+}
+
+/// The Arrow type that holds every one of `values` (`Null` when all are).
+fn common_type<'a>(values: impl Iterator<Item = &'a Value>) -> DataType {
+    values.filter_map(value_type).fold(DataType::Null, unify)
+}
+
+/// The value of the struct field `key` for `value`, a map or a duration:
+/// null for a key the map lacks and for a null row.
+fn struct_field(value: &Value, key: &PropertyKey) -> Value {
+    match value {
+        Value::Map(map) => map.get(key).cloned().unwrap_or(Value::Null),
+        Value::Duration(duration) => match key.as_str() {
+            "months" => Value::Int64(duration.months()),
+            "days" => Value::Int64(duration.days()),
+            "nanos" => Value::Int64(duration.nanos()),
+            _ => Value::Null,
+        },
+        _ => Value::Null,
+    }
 }
 
 /// Maps a grafeo [`LogicalType`] to an Arrow [`DataType`].
@@ -40,7 +168,7 @@ fn logical_type_to_arrow(logical_type: &LogicalType) -> DataType {
         LogicalType::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         LogicalType::Date => DataType::Date32,
         LogicalType::Time => DataType::Time64(TimeUnit::Nanosecond),
-        LogicalType::Duration => DataType::Utf8, // ISO 8601 string (Arrow Duration lacks months)
+        LogicalType::Duration => duration_type(),
         LogicalType::ZonedDatetime | LogicalType::ZonedTime => {
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
         }
@@ -61,50 +189,17 @@ fn logical_type_to_arrow(logical_type: &LogicalType) -> DataType {
 
 /// Infers the Arrow [`DataType`] for a column from its [`LogicalType`] hint and actual values.
 ///
-/// If the logical type is `Any` (unknown), scans values to find the dominant type.
-/// Falls back to `Utf8` for heterogeneous columns.
+/// A hint that names a scalar type gives the column's type; for any other
+/// (`Any`, a list, a map, a duration) the values do (see the module docs).
 fn infer_column_type(logical_type: &LogicalType, column: &[&Value]) -> DataType {
-    if *logical_type != LogicalType::Any {
-        return logical_type_to_arrow(logical_type);
+    match logical_type {
+        LogicalType::Any
+        | LogicalType::List(_)
+        | LogicalType::Map { .. }
+        | LogicalType::Struct(_)
+        | LogicalType::Duration => common_type(column.iter().copied()),
+        other => logical_type_to_arrow(other),
     }
-
-    // Scan values to find the dominant non-null type
-    let mut seen_type: Option<DataType> = None;
-    for value in column {
-        let dt = match value {
-            Value::Null => continue,
-            Value::Bool(_) => DataType::Boolean,
-            Value::Int64(_) => DataType::Int64,
-            Value::Float64(_) => DataType::Float64,
-            Value::String(_) => DataType::Utf8,
-            Value::Bytes(_) => DataType::Binary,
-            Value::Timestamp(_) => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-            Value::Date(_) => DataType::Date32,
-            Value::Time(_) => DataType::Time64(TimeUnit::Nanosecond),
-            Value::Duration(_) => DataType::Utf8,
-            Value::ZonedDatetime(_) => {
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
-            }
-            Value::Vector(v) => DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, false)),
-                i32::try_from(v.len()).unwrap_or(0),
-            ),
-            Value::List(_)
-            | Value::Map(_)
-            | Value::Path { .. }
-            | Value::GCounter(_)
-            | Value::OnCounter { .. } => DataType::Utf8,
-            _ => DataType::Utf8,
-        };
-
-        match &seen_type {
-            None => seen_type = Some(dt),
-            Some(existing) if *existing == dt => {}
-            Some(_) => return DataType::Utf8, // Mixed types: fall back to string
-        }
-    }
-
-    seen_type.unwrap_or(DataType::Null)
 }
 
 /// Builds an Arrow [`ArrayRef`] from a column of [`Value`] references.
@@ -262,6 +357,66 @@ fn build_array(column: &[&Value], target_type: &DataType) -> Result<ArrayRef, Ar
                 Some(null_mask.into()),
             )?;
             Ok(Arc::new(list_array) as ArrayRef)
+        }
+        DataType::List(field) => {
+            let mut offsets = OffsetBufferBuilder::<i32>::new(len);
+            let mut nulls = NullBufferBuilder::new(len);
+            let mut elements: Vec<&Value> = Vec::new();
+            for value in column {
+                let length = match value {
+                    Value::List(items) => {
+                        elements.extend(items.iter());
+                        nulls.append_non_null();
+                        items.len()
+                    }
+                    _ => {
+                        nulls.append_null();
+                        0
+                    }
+                };
+                offsets.try_push_length(length).map_err(|error| {
+                    ArrowError::InvalidArgumentError(format!(
+                        "the lists of one column hold too many values: {error}"
+                    ))
+                })?;
+            }
+            let offsets = offsets.try_finish().map_err(|error| {
+                ArrowError::InvalidArgumentError(format!(
+                    "the lists of one column hold more than {} values: {error}",
+                    i32::MAX
+                ))
+            })?;
+            let values = build_array(&elements, field.data_type())?;
+            Ok(Arc::new(ListArray::try_new(
+                Arc::clone(field),
+                offsets,
+                values,
+                nulls.finish(),
+            )?) as ArrayRef)
+        }
+        DataType::Struct(fields) => {
+            let mut nulls = NullBufferBuilder::new(len);
+            for value in column {
+                nulls.append(matches!(value, Value::Map(_) | Value::Duration(_)));
+            }
+            if fields.is_empty() {
+                return Ok(Arc::new(StructArray::new_empty_fields(len, nulls.finish())) as ArrayRef);
+            }
+            let mut children = Vec::with_capacity(fields.len());
+            for field in fields {
+                let key = PropertyKey::new(field.name().as_str());
+                let values: Vec<Value> = column
+                    .iter()
+                    .map(|value| struct_field(value, &key))
+                    .collect();
+                let values: Vec<&Value> = values.iter().collect();
+                children.push(build_array(&values, field.data_type())?);
+            }
+            Ok(Arc::new(StructArray::try_new(
+                fields.clone(),
+                children,
+                nulls.finish(),
+            )?) as ArrayRef)
         }
         // Fallback: serialize as string
         _ => {
@@ -535,7 +690,6 @@ pub use bulk_export::{
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Arc as StdArc;
 
     use arrow_array::Array;
@@ -707,17 +861,257 @@ mod tests {
         assert_eq!(batch.num_rows(), 1);
     }
 
+    /// Row `row` of `array` as text: `null`, a number, a string, `[...]` for
+    /// a list and `{key: value, ...}` for a struct.
+    fn render(array: &dyn Array, row: usize) -> String {
+        use arrow_array::cast::AsArray;
+        use arrow_array::types::{Float32Type, Float64Type, Int64Type};
+        if array.data_type() == &DataType::Null || array.is_null(row) {
+            return "null".to_string();
+        }
+        match array.data_type() {
+            DataType::Boolean => array.as_boolean().value(row).to_string(),
+            DataType::Int64 => array.as_primitive::<Int64Type>().value(row).to_string(),
+            DataType::Float64 => format!("{:?}", array.as_primitive::<Float64Type>().value(row)),
+            DataType::Float32 => format!("{:?}", array.as_primitive::<Float32Type>().value(row)),
+            DataType::Utf8 => format!("'{}'", array.as_string::<i32>().value(row)),
+            DataType::List(_) => {
+                let items = array.as_list::<i32>().value(row);
+                let items: Vec<String> = (0..items.len()).map(|i| render(&items, i)).collect();
+                format!("[{}]", items.join(", "))
+            }
+            DataType::FixedSizeList(..) => {
+                let items = array.as_fixed_size_list().value(row);
+                let items: Vec<String> = (0..items.len()).map(|i| render(&items, i)).collect();
+                format!("[{}]", items.join(", "))
+            }
+            DataType::Struct(fields) => {
+                let record = array.as_struct();
+                let fields: Vec<String> = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, field)| {
+                        format!("{}: {}", field.name(), render(record.column(i), row))
+                    })
+                    .collect();
+                format!("{{{}}}", fields.join(", "))
+            }
+            other => format!("<{other:?}>"),
+        }
+    }
+
+    /// The one column of a result whose rows are `values`, with `hint` as
+    /// its column type: its Arrow type and each row as text (see `render`).
+    fn column(hint: LogicalType, values: Vec<Value>) -> (DataType, Vec<String>) {
+        let rows: Vec<Vec<Value>> = values.into_iter().map(|value| vec![value]).collect();
+        let batch = query_result_to_record_batch(&["c".to_string()], &[hint], &rows).unwrap();
+        let array = batch.column(0);
+        let rendered = (0..array.len()).map(|row| render(array, row)).collect();
+        (array.data_type().clone(), rendered)
+    }
+
+    fn list(values: Vec<Value>) -> Value {
+        Value::List(StdArc::from(values))
+    }
+
+    fn map(entries: &[(&str, Value)]) -> Value {
+        Value::Map(StdArc::new(
+            entries
+                .iter()
+                .map(|(key, value)| (PropertyKey::from(*key), value.clone()))
+                .collect(),
+        ))
+    }
+
+    fn text(value: &str) -> Value {
+        Value::String(value.into())
+    }
+
     #[test]
-    fn test_duration_as_string() {
-        let dur = Duration::new(2, 5, 1_000_000_000);
-        let (cols, types, rows) = make_result(
-            vec!["interval"],
-            vec![LogicalType::Duration],
-            vec![vec![Value::Duration(dur)]],
+    fn a_duration_is_a_struct_of_months_days_and_nanos() {
+        let (data_type, rows) = column(
+            LogicalType::Duration,
+            vec![
+                Value::Duration(Duration::new(3, 19, 88)),
+                Value::Null,
+                Value::Duration(Duration::new(0, 0, 0)),
+            ],
         );
-        let batch = query_result_to_record_batch(&cols, &types, &rows).unwrap();
-        // Duration maps to Utf8
-        assert_eq!(*batch.schema().field(0).data_type(), DataType::Utf8);
+        assert_eq!(data_type, super::duration_type());
+        assert_eq!(
+            rows,
+            [
+                "{months: 3, days: 19, nanos: 88}",
+                "null",
+                "{months: 0, days: 0, nanos: 0}"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_list_is_an_arrow_list_of_its_elements() {
+        for hint in [
+            LogicalType::List(Box::new(LogicalType::Int64)),
+            LogicalType::Any,
+        ] {
+            let (data_type, rows) = column(
+                hint,
+                vec![
+                    list(vec![Value::Int64(3), Value::Int64(19)]),
+                    Value::Null,
+                    list(vec![]),
+                    list(vec![Value::Int64(88), Value::Null]),
+                ],
+            );
+            assert_eq!(data_type, super::list_of(DataType::Int64));
+            assert_eq!(rows, ["[3, 19]", "null", "[]", "[88, null]"]);
+        }
+    }
+
+    #[test]
+    fn nested_lists_and_lists_of_maps_keep_their_shape() {
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![list(vec![
+                list(vec![text("Alix")]),
+                list(vec![text("Gus"), text("Mia")]),
+            ])],
+        );
+        assert_eq!(data_type, super::list_of(super::list_of(DataType::Utf8)));
+        assert_eq!(rows, ["[['Alix'], ['Gus', 'Mia']]"]);
+
+        let (_, rows) = column(
+            LogicalType::Any,
+            vec![list(vec![
+                map(&[("city", text("Paris"))]),
+                map(&[("city", text("Prague")), ("years", Value::Int64(3))]),
+            ])],
+        );
+        assert_eq!(
+            rows,
+            ["[{city: 'Paris', years: null}, {city: 'Prague', years: 3}]"]
+        );
+    }
+
+    #[test]
+    fn a_map_is_a_struct_of_every_key_of_the_column() {
+        // A key a map lacks is null in that row; a null row is null.
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                map(&[("age", Value::Int64(19)), ("name", text("Alix"))]),
+                map(&[("city", text("Paris")), ("name", text("Gus"))]),
+                Value::Null,
+                map(&[("tags", list(vec![text("a")])), ("name", Value::Null)]),
+            ],
+        );
+        let DataType::Struct(fields) = &data_type else {
+            panic!("expected a struct, got {data_type:?}");
+        };
+        let fields: Vec<(String, DataType)> = fields
+            .iter()
+            .map(|field| (field.name().clone(), field.data_type().clone()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("age".to_string(), DataType::Int64),
+                ("name".to_string(), DataType::Utf8),
+                ("city".to_string(), DataType::Utf8),
+                ("tags".to_string(), super::list_of(DataType::Utf8)),
+            ]
+        );
+        assert_eq!(
+            rows,
+            [
+                "{age: 19, name: 'Alix', city: null, tags: null}",
+                "{age: null, name: 'Gus', city: 'Paris', tags: null}",
+                "null",
+                "{age: null, name: null, city: null, tags: ['a']}",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_map_hint_reads_the_values() {
+        let (data_type, rows) = column(
+            LogicalType::Map {
+                key: Box::new(LogicalType::String),
+                value: Box::new(LogicalType::Any),
+            },
+            vec![map(&[("k", Value::Float64(0.5))])],
+        );
+        assert!(matches!(data_type, DataType::Struct(_)), "{data_type:?}");
+        assert_eq!(rows, ["{k: 0.5}"]);
+    }
+
+    #[test]
+    fn values_of_different_types_in_one_column() {
+        // Integers and floats are floats.
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![Value::Int64(3), Value::Float64(2.5), Value::Null],
+        );
+        assert_eq!(data_type, DataType::Float64);
+        assert_eq!(rows, ["3.0", "2.5", "null"]);
+        // Any other mix is the values' text, at the level where the types
+        // differ: the column, a list's elements or a map's key.
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![list(vec![Value::Int64(3)]), Value::Int64(19), Value::Null],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, ["'[3]'", "'19'", "null"]);
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![list(vec![Value::Int64(3), text("x"), Value::Null])],
+        );
+        assert_eq!(data_type, super::list_of(DataType::Utf8));
+        assert_eq!(rows, ["['3', 'x', null]"]);
+        let (_, rows) = column(
+            LogicalType::Any,
+            vec![
+                map(&[("k", Value::Int64(88))]),
+                map(&[("k", text("Berlin"))]),
+            ],
+        );
+        assert_eq!(rows, ["{k: '88'}", "{k: 'Berlin'}"]);
+        // Vectors of different lengths are text.
+        let (data_type, _) = column(
+            LogicalType::Any,
+            vec![
+                Value::Vector(StdArc::from(vec![0.5f32].as_slice())),
+                Value::Vector(StdArc::from(vec![0.5f32, 3.0].as_slice())),
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+    }
+
+    #[test]
+    fn nested_types_survive_an_ipc_roundtrip() {
+        let rows = vec![vec![
+            list(vec![Value::Int64(3)]),
+            map(&[("name", text("Vincent"))]),
+            Value::Duration(Duration::new(0, 3, 19)),
+        ]];
+        let columns: Vec<String> = ["l", "m", "d"].map(String::from).to_vec();
+        let batch =
+            query_result_to_record_batch(&columns, &vec![LogicalType::Any; 3], &rows).unwrap();
+        let ipc_bytes = record_batch_to_ipc_stream(&batch).unwrap();
+        let reader =
+            arrow_ipc::reader::StreamReader::try_new(std::io::Cursor::new(ipc_bytes), None)
+                .unwrap();
+        let read: Vec<_> = reader.into_iter().map(|b| b.unwrap()).collect();
+        assert_eq!(read[0].schema(), batch.schema());
+        let rendered: Vec<String> = (0..3).map(|i| render(read[0].column(i), 0)).collect();
+        assert_eq!(
+            rendered,
+            [
+                "[3]",
+                "{name: 'Vincent'}",
+                "{months: 0, days: 3, nanos: 19}"
+            ]
+        );
     }
 
     #[test]
@@ -754,35 +1148,6 @@ mod tests {
             DataType::FixedSizeList(_, 3) => {}
             other => panic!("Expected FixedSizeList(_, 3), got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_list_as_string() {
-        let list = Value::List(StdArc::from(vec![Value::Int64(1), Value::Int64(2)]));
-        let (cols, types, rows) = make_result(
-            vec!["items"],
-            vec![LogicalType::List(Box::new(LogicalType::Int64))],
-            vec![vec![list]],
-        );
-        let batch = query_result_to_record_batch(&cols, &types, &rows).unwrap();
-        assert_eq!(*batch.schema().field(0).data_type(), DataType::Utf8);
-    }
-
-    #[test]
-    fn test_map_as_string() {
-        let mut map = BTreeMap::new();
-        map.insert(PropertyKey::from("key"), Value::String("val".into()));
-        let map_val = Value::Map(StdArc::from(map));
-        let (cols, types, rows) = make_result(
-            vec!["props"],
-            vec![LogicalType::Map {
-                key: Box::new(LogicalType::String),
-                value: Box::new(LogicalType::String),
-            }],
-            vec![vec![map_val]],
-        );
-        let batch = query_result_to_record_batch(&cols, &types, &rows).unwrap();
-        assert_eq!(*batch.schema().field(0).data_type(), DataType::Utf8);
     }
 
     #[test]
@@ -1028,6 +1393,50 @@ mod tests {
                 names.contains(&"is_test".to_string()),
                 "bool property 'is_test' must be present"
             );
+        }
+
+        #[test]
+        fn properties_keep_their_types_in_node_and_edge_batches() {
+            let mut alix = make_node(1, &["Person"]);
+            alix.properties
+                .insert(PropertyKey::new("tags"), list(vec![text("a"), text("b")]));
+            alix.properties.insert(
+                PropertyKey::new("address"),
+                map(&[("city", text("Amsterdam")), ("number", Value::Int64(3))]),
+            );
+            alix.properties.insert(
+                PropertyKey::new("wait"),
+                Value::Duration(Duration::new(0, 19, 0)),
+            );
+            let gus = make_node(2, &["Person"]);
+            let batch = crate::database::arrow::nodes_to_record_batch(&[alix, gus]).unwrap();
+            let rendered = |name: &str| -> Vec<String> {
+                let array = batch.column_by_name(name).unwrap();
+                (0..array.len()).map(|row| render(array, row)).collect()
+            };
+            assert_eq!(rendered("_labels"), ["['Person']", "['Person']"]);
+            assert_eq!(rendered("tags"), ["['a', 'b']", "null"]);
+            assert_eq!(
+                rendered("address"),
+                ["{city: 'Amsterdam', number: 3}", "null"]
+            );
+            assert_eq!(
+                rendered("wait"),
+                ["{months: 0, days: 19, nanos: 0}", "null"]
+            );
+
+            let mut edge = make_edge(1, 10, 20, "KNOWS");
+            edge.properties.insert(
+                PropertyKey::new("weights"),
+                list(vec![Value::Float64(0.5), Value::Int64(3)]),
+            );
+            let batch = crate::database::arrow::edges_to_record_batch(&[edge]).unwrap();
+            let weights = batch.column_by_name("weights").unwrap();
+            assert_eq!(
+                weights.data_type(),
+                &super::super::list_of(DataType::Float64)
+            );
+            assert_eq!(render(weights, 0), "[0.5, 3.0]");
         }
 
         #[test]

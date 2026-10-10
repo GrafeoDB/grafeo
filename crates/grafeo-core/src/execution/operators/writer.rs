@@ -5,15 +5,34 @@
 //! session. For each write it records the entity for write-conflict
 //! detection, checks the schema and constraints, and writes with the
 //! transaction's versioning, so the rules for a valid write live in one place.
+//! A transaction's store changes run as a write in progress (see
+//! [`WriteClaims::write_in_progress`]), which a checkpoint waits for and
+//! which waits for a checkpoint.
+//!
+//! A writer given a [`Recording`] writes through the graph's change target
+//! ([`ChangeTarget::apply`]) instead of the store's versioned methods, and
+//! records each write that changed something in the transaction's change
+//! set ([`ChangeRecorder::record`]): the op with its after-image, what it
+//! replaced, and what it did to the transaction's pending version. A write
+//! that changes nothing, or that a check or the store refuses, records
+//! nothing. The claim of what a write changes comes before the store
+//! changes, except for a node it creates: no other transaction knows the
+//! new id, so it claims nothing.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use grafeo_common::change::{DataOp, Labels, Properties};
+use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
 use grafeo_common::types::{
-    EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, TransactionId, Value,
+    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, TransactionId, Value,
 };
 
-use super::{ConstraintValidator, OperatorError, SharedWriteTracker};
+use super::{
+    ChangeRecorder, ConstraintValidator, OperatorError, WriteClaim, WriteClaims, WriteInProgress,
+};
+use crate::graph::apply::{Applied, ApplyError, ChangeTarget, ExternalTarget, Writer};
 use crate::graph::lpg::{Edge, Node};
 use crate::graph::{Direction, GraphStoreMut};
 
@@ -30,7 +49,10 @@ enum Entity {
 
 /// What the writes of one statement changed, as counts: the summary a query
 /// result reports.
+///
+/// Read, not built, outside this crate: later releases may add counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WriteCounters {
     /// Nodes created, by `INSERT`, `CREATE` or `MERGE`.
     pub nodes_created: u64,
@@ -86,6 +108,47 @@ impl WriteCounter {
     }
 }
 
+/// The store of one graph as a recording writer changes it.
+#[derive(Clone)]
+pub enum WriteTarget {
+    /// A store that creates at ids reserved from it (the built-in store).
+    Store(Arc<dyn ChangeTarget>),
+    /// A store a database was built on, which gives the ids of what it
+    /// creates itself (see [`ExternalTarget::create_node`]).
+    External(Arc<ExternalTarget>),
+}
+
+impl WriteTarget {
+    /// Applies `op` as `writer` (see [`ChangeTarget::apply`]).
+    fn apply(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
+        match self {
+            Self::Store(target) => target.apply(op, writer),
+            Self::External(target) => target.apply(op, writer),
+        }
+    }
+}
+
+impl std::fmt::Debug for WriteTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Store(_) => f.write_str("WriteTarget::Store"),
+            Self::External(_) => f.write_str("WriteTarget::External"),
+        }
+    }
+}
+
+/// What a recording writer writes through and records in (see
+/// [`GraphWriter::with_recording`]): one graph's store and one
+/// transaction's changes in that graph.
+#[derive(Clone)]
+pub struct Recording {
+    /// The graph's store.
+    pub target: WriteTarget,
+    /// The transaction's changes in the graph, with its claims and the write
+    /// freeze.
+    pub recorder: Arc<dyn ChangeRecorder>,
+}
+
 /// Writes to a graph store for one statement or direct call: validated,
 /// tracked for write conflicts and versioned by the transaction.
 #[derive(Clone)]
@@ -94,8 +157,13 @@ pub struct GraphWriter {
     viewing_epoch: Option<EpochId>,
     transaction_id: Option<TransactionId>,
     validator: Option<Arc<dyn ConstraintValidator>>,
-    write_tracker: Option<SharedWriteTracker>,
     counter: Option<Arc<WriteCounter>>,
+    /// Where the writes go and are recorded; `None` to write through the
+    /// store's versioned methods.
+    recording: Option<Recording>,
+    /// The claims of a writer without a recording that writes as a
+    /// transaction through the store's versioned methods.
+    claims: Option<Arc<dyn WriteClaims>>,
 }
 
 impl From<Arc<dyn GraphStoreMut>> for GraphWriter {
@@ -113,13 +181,51 @@ impl GraphWriter {
             viewing_epoch: None,
             transaction_id: None,
             validator: None,
-            write_tracker: None,
             counter: None,
+            recording: None,
+            claims: None,
         }
     }
 
-    /// Writes as `transaction_id` (versioned, undone on rollback), reading at
-    /// `epoch`.
+    /// Claims what each write changes through `claims`, and holds its write
+    /// freeze, for a writer without a recording that writes as a transaction
+    /// through the store's versioned methods (see
+    /// [`with_transaction_context`](Self::with_transaction_context)). A
+    /// recording claims through its own recorder instead.
+    #[must_use]
+    pub fn with_claims(mut self, claims: Arc<dyn WriteClaims>) -> Self {
+        self.claims = Some(claims);
+        self
+    }
+
+    /// Writes through `recording`'s target and records each write that
+    /// changed something in its recorder, which also takes the claims and
+    /// holds the write freeze, as the recorder's writer: a transaction reads
+    /// at its snapshot, its own writes included; an immediate write reads at
+    /// its epoch, as the system. The store this writer was made with stays
+    /// the one it reads.
+    #[must_use]
+    pub fn with_recording(mut self, recording: Recording) -> Self {
+        match recording.recorder.writer() {
+            Writer::Transaction { id, snapshot } => {
+                self.viewing_epoch = Some(snapshot);
+                self.transaction_id = Some(id);
+            }
+            Writer::Immediate { epoch, .. } => {
+                self.viewing_epoch = Some(epoch);
+                self.transaction_id = None;
+            }
+            Writer::Replay { .. } => {}
+        }
+        self.recording = Some(recording);
+        self
+    }
+
+    /// Writes as `transaction_id` through the store's versioned methods,
+    /// reading at `epoch`, without claims or a record of what it changed:
+    /// nothing stamps or undoes the versions it writes (a writer of a
+    /// transaction the engine runs gets a [`Recording`] instead, see
+    /// [`with_recording`](Self::with_recording)).
     #[must_use]
     pub fn with_transaction_context(
         mut self,
@@ -135,13 +241,6 @@ impl GraphWriter {
     #[must_use]
     pub fn with_validator(mut self, validator: Arc<dyn ConstraintValidator>) -> Self {
         self.validator = Some(validator);
-        self
-    }
-
-    /// Records every written entity for write-conflict detection.
-    #[must_use]
-    pub fn with_write_tracker(mut self, tracker: SharedWriteTracker) -> Self {
-        self.write_tracker = Some(tracker);
         self
     }
 
@@ -267,14 +366,46 @@ impl GraphWriter {
         }
     }
 
-    fn record(&self, entity: Entity) -> Result<(), OperatorError> {
-        if let (Some(tracker), Some(transaction_id)) = (&self.write_tracker, self.transaction_id) {
-            match entity {
-                Entity::Node(id) => tracker.record_node_write(transaction_id, id)?,
-                Entity::Edge(id) => tracker.record_edge_write(transaction_id, id)?,
-            }
+    /// Claims what the next store change writes, for write-conflict
+    /// detection, through the recording's recorder or the writer's claims; a
+    /// writer without either claims nothing. An edge's endpoints are claimed
+    /// once the edge passed its checks, right before it is written: an edge
+    /// refused claims nothing, so it holds off no delete. The delete of a
+    /// node also conflicts with an edge another transaction creates to it.
+    fn claim(&self, claim: WriteClaim) -> Result<(), OperatorError> {
+        match (&self.recording, &self.claims) {
+            (Some(recording), _) => recording.recorder.claim(claim),
+            (None, Some(claims)) => claims.claim(claim),
+            (None, None) => Ok(()),
         }
-        Ok(())
+    }
+
+    /// Marks this writer's store changes as in progress while the guard
+    /// lives (see [`WriteClaims::write_in_progress`]): a checkpoint or a
+    /// copy of the store waits for them, and they wait for one. `None` for
+    /// a writer without a recording or claims.
+    ///
+    /// Each public write method takes it once, right before its first store
+    /// change; the methods it calls never take it again (it is not
+    /// reentrant), and the expressions a `derive` of
+    /// [`create_node_with`](Self::create_node_with) evaluates run without it.
+    fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {
+        match (&self.recording, &self.claims) {
+            (Some(recording), _) => recording.recorder.write_in_progress(),
+            (None, Some(claims)) => claims.write_in_progress(),
+            (None, None) => None,
+        }
+    }
+
+    /// Applies `op` through the recording's target and records it when it
+    /// changed something; whether it did. A write the store refuses changes
+    /// nothing and records nothing. Called with the write freeze held.
+    fn apply_op(&self, recording: &Recording, op: DataOp) -> Result<bool, OperatorError> {
+        let applied = recording
+            .target
+            .apply(&op, recording.recorder.writer())
+            .map_err(store_refused)?;
+        record_applied(recording, op, applied)
     }
 
     // === Nodes ===
@@ -288,18 +419,17 @@ impl GraphWriter {
     pub fn create_node(
         &self,
         labels: &[String],
-        mut properties: Vec<(String, Value)>,
+        properties: Vec<(String, Value)>,
     ) -> Result<NodeId, OperatorError> {
+        let properties = self.new_node_properties(labels, properties)?;
         if let Some(validator) = &self.validator {
-            validator.validate_node_labels_allowed(labels)?;
-            validator.inject_defaults(labels, &mut properties);
+            validator.validate_node_properties_declared(labels, &properties)?;
             self.check_node_values(validator.as_ref(), labels, &properties, None)?;
             validator.validate_node_complete(labels, &properties)?;
             validator.check_unique_node(labels, &properties, None)?;
         }
-        let id = self.insert_node(labels)?;
-        self.write_values(Entity::Node(id), &properties)?;
-        Ok(id)
+        let _writing = self.write_in_progress();
+        self.insert_node(labels, &properties)
     }
 
     /// Creates a node whose remaining properties depend on the node itself
@@ -314,24 +444,33 @@ impl GraphWriter {
     pub fn create_node_with(
         &self,
         labels: &[String],
-        mut properties: Vec<(String, Value)>,
+        properties: Vec<(String, Value)>,
         derive: impl FnOnce(NodeId) -> Result<Vec<(String, Value)>, OperatorError>,
     ) -> Result<NodeId, OperatorError> {
+        let properties = self.new_node_properties(labels, properties)?;
         if let Some(validator) = &self.validator {
-            validator.validate_node_labels_allowed(labels)?;
-            validator.inject_defaults(labels, &mut properties);
+            validator.validate_node_properties_declared(labels, &properties)?;
             self.check_node_values(validator.as_ref(), labels, &properties, None)?;
         }
-        let id = self.insert_node(labels)?;
-        self.write_values(Entity::Node(id), &properties)?;
+        let id = {
+            let _writing = self.write_in_progress();
+            self.insert_node(labels, &properties)?
+        };
 
-        let derived = derive(id)?;
+        // Evaluates expressions: no write is in progress meanwhile.
+        let mut derived = derive(id)?;
+        refuse_too_deep(plain_values(&derived))?;
         if let Some(validator) = &self.validator {
+            convert_values(&mut derived, |key, value| {
+                validator.convert_node_property(labels, key, value)
+            });
+            validator.validate_node_properties_declared(labels, &derived)?;
             self.check_node_values(validator.as_ref(), labels, &derived, Some(id))?;
             let all = overlay(properties, &derived);
             validator.validate_node_complete(labels, &all)?;
             validator.check_unique_node(labels, &all, Some(id))?;
         }
+        let _writing = self.write_in_progress();
         self.write_values(Entity::Node(id), &derived)?;
         Ok(id)
     }
@@ -353,21 +492,30 @@ impl GraphWriter {
         assignments: &[(String, Value)],
         replace: bool,
     ) -> Result<(), OperatorError> {
+        refuse_too_deep(assigned_values(assignments))?;
         self.require_node(id)?;
-        self.record(Entity::Node(id))?;
+        self.claim(WriteClaim::Node(id))?;
+        let mut assignments = Cow::Borrowed(assignments);
         if let Some(validator) = &self.validator {
             let needs_node = replace
-                || assigned_values(assignments)
+                || assigned_values(&assignments)
                     .any(|(key, value)| validator.constrains_node_property(key, value));
             if !needs_node {
-                for (key, value) in assigned_values(assignments) {
+                for (key, value) in assigned_values(&assignments) {
                     validator.validate_node_property(&[], key, value)?;
                 }
             } else if let Some(node) = self.node(id) {
-                self.check_node_set(validator.as_ref(), &node, assignments, replace)?;
+                let labels = node_labels(&node);
+                if let Some(converted) = convert_assignments(&assignments, |key, value| {
+                    validator.convert_node_property(&labels, key, value)
+                }) {
+                    assignments = Cow::Owned(converted);
+                }
+                self.check_node_set(validator.as_ref(), &node, &assignments, replace)?;
             }
         }
-        self.apply_set(Entity::Node(id), assignments, replace)?;
+        let _writing = self.write_in_progress();
+        self.apply_set(Entity::Node(id), &assignments, replace)?;
         Ok(())
     }
 
@@ -380,7 +528,7 @@ impl GraphWriter {
     /// or the constraint the removal would violate (`NOT NULL`, `NODE KEY`).
     pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool, OperatorError> {
         self.require_node(id)?;
-        self.record(Entity::Node(id))?;
+        self.claim(WriteClaim::Node(id))?;
         let Some(node) = self.node(id) else {
             return Ok(false);
         };
@@ -395,6 +543,7 @@ impl GraphWriter {
                 false,
             )?;
         }
+        let _writing = self.write_in_progress();
         self.remove_value(Entity::Node(id), key)?;
         Ok(true)
     }
@@ -408,7 +557,7 @@ impl GraphWriter {
     /// or the first constraint violated.
     pub fn add_labels(&self, id: NodeId, labels: &[String]) -> Result<usize, OperatorError> {
         self.require_node(id)?;
-        self.record(Entity::Node(id))?;
+        self.claim(WriteClaim::Node(id))?;
         let Some(node) = self.node(id) else {
             return Ok(0);
         };
@@ -430,11 +579,21 @@ impl GraphWriter {
                 validator.check_unique_node(&added, &values, Some(id))?;
             }
         }
+        let _writing = self.write_in_progress();
         let mut added = 0;
         for label in labels {
-            let new = match self.transaction_id {
-                Some(transaction_id) => self.store.add_label_versioned(id, label, transaction_id),
-                None => self.store.add_label(id, label),
+            let new = match (&self.recording, self.transaction_id) {
+                (Some(recording), _) => self.apply_op(
+                    recording,
+                    DataOp::AddNodeLabel {
+                        id,
+                        label: ArcStr::from(label.as_str()),
+                    },
+                )?,
+                (None, Some(transaction_id)) => {
+                    self.store.add_label_versioned(id, label, transaction_id)
+                }
+                (None, None) => self.store.add_label(id, label),
             };
             added += usize::from(new);
         }
@@ -450,17 +609,25 @@ impl GraphWriter {
     /// conflict.
     pub fn remove_labels(&self, id: NodeId, labels: &[String]) -> Result<usize, OperatorError> {
         self.require_node(id)?;
-        self.record(Entity::Node(id))?;
+        self.claim(WriteClaim::Node(id))?;
         if self.node(id).is_none() {
             return Ok(0);
         }
+        let _writing = self.write_in_progress();
         let mut removed = 0;
         for label in labels {
-            let had = match self.transaction_id {
-                Some(transaction_id) => {
+            let had = match (&self.recording, self.transaction_id) {
+                (Some(recording), _) => self.apply_op(
+                    recording,
+                    DataOp::RemoveNodeLabel {
+                        id,
+                        label: ArcStr::from(label.as_str()),
+                    },
+                )?,
+                (None, Some(transaction_id)) => {
                     self.store.remove_label_versioned(id, label, transaction_id)
                 }
-                None => self.store.remove_label(id, label),
+                (None, None) => self.store.remove_label(id, label),
             };
             removed += usize::from(had);
         }
@@ -473,39 +640,75 @@ impl GraphWriter {
     ///
     /// # Errors
     ///
-    /// Returns a write conflict, or an error for a node with edges and no `detach`.
+    /// Returns a write conflict (also with a transaction that creates an
+    /// edge to the node), or an error for a node with edges and no `detach`.
     pub fn delete_node(&self, id: NodeId, detach: bool) -> Result<bool, OperatorError> {
-        self.record(Entity::Node(id))?;
+        self.claim(WriteClaim::NodeDelete(id))?;
+        let _writing = self.write_in_progress();
         if detach {
             let outgoing = self.store.edges_from(id, Direction::Outgoing);
             let incoming = self.store.edges_from(id, Direction::Incoming);
             for (_, edge) in outgoing.into_iter().chain(incoming) {
-                self.delete_edge(edge)?;
+                self.remove_edge(edge)?;
             }
-        } else {
-            let degree = self.store.out_degree(id) + self.store.in_degree(id);
+        } else if self.store.out_degree(id) + self.store.in_degree(id) > 0 {
+            let degree = self.connected_edge_count(id);
             if degree > 0 {
                 return Err(OperatorError::ConstraintViolation(format!(
                     "Cannot delete node with {degree} connected edge(s). Use DETACH DELETE."
                 )));
             }
         }
-        let deleted = self
-            .store
-            .delete_node_versioned(id, self.epoch(), self.transaction())
-            .map_err(refused)?;
+        let deleted = match &self.recording {
+            Some(recording) => self.apply_op(recording, DataOp::DeleteNode { id })?,
+            None => self
+                .store
+                .delete_node_versioned(id, self.epoch(), self.transaction())
+                .map_err(refused)?,
+        };
         self.count(|c| &c.nodes_deleted, usize::from(deleted));
         Ok(deleted)
     }
 
+    /// The edges of node `id` that a delete without `DETACH` refuses: those
+    /// the store lists for it, less the ones this writer's transaction
+    /// deleted itself. The base of a compacted store lists a transaction's
+    /// deletes until it commits, as other readers still see them; an edge the
+    /// transaction deleted is one visible at its snapshot that it no longer
+    /// sees. Edges others created or committed after the snapshot still
+    /// count.
+    fn connected_edge_count(&self, id: NodeId) -> usize {
+        let outgoing = self.store.edges_from(id, Direction::Outgoing);
+        let incoming = self.store.edges_from(id, Direction::Incoming);
+        let edges = outgoing.into_iter().chain(incoming).map(|(_, edge)| edge);
+        let (Some(epoch), Some(transaction_id)) = (self.viewing_epoch, self.transaction_id) else {
+            return edges.count();
+        };
+        edges
+            .filter(|&edge| {
+                let deleted_by_this_transaction = self.store.is_edge_visible_at_epoch(edge, epoch)
+                    && !self
+                        .store
+                        .is_edge_visible_versioned(edge, epoch, transaction_id);
+                !deleted_by_this_transaction
+            })
+            .count()
+    }
+
     // === Edges ===
 
-    /// Creates an edge after checking it against the schema: allowed type,
-    /// endpoint labels, property types and required properties.
+    /// Creates an edge after checking that the transaction sees both
+    /// endpoints and checking the edge against the schema: allowed type,
+    /// endpoint labels, type defaults, property types and required
+    /// properties. Then it claims the endpoints against a concurrent delete,
+    /// so an edge refused claims nothing.
     ///
     /// # Errors
     ///
-    /// Returns the first constraint the edge would violate; nothing is written then.
+    /// Returns an error for an endpoint the transaction does not see (one it
+    /// deleted, or that does not exist), the first constraint the edge would
+    /// violate, or a write conflict with a transaction that deletes an
+    /// endpoint; nothing is written then.
     pub fn create_edge(
         &self,
         src: NodeId,
@@ -513,25 +716,34 @@ impl GraphWriter {
         edge_type: &str,
         properties: Vec<(String, Value)>,
     ) -> Result<EdgeId, OperatorError> {
+        let mut properties = self.new_edge_properties(edge_type, properties)?;
+        self.require_node(src)?;
+        self.require_node(dst)?;
         if let Some(validator) = &self.validator {
             self.check_new_edge(validator.as_ref(), src, dst, edge_type)?;
+            convert_values(&mut properties, |key, value| {
+                validator.convert_edge_property(edge_type, key, value)
+            });
+            validator.validate_edge_properties_declared(edge_type, &properties)?;
             for (name, value) in &properties {
                 validator.validate_edge_property(edge_type, name, value)?;
             }
             validator.validate_edge_complete(edge_type, &properties)?;
         }
-        let id = self.insert_edge(src, dst, edge_type)?;
-        self.write_values(Entity::Edge(id), &properties)?;
-        Ok(id)
+        self.claim(WriteClaim::Endpoints(src, dst))?;
+        let _writing = self.write_in_progress();
+        self.insert_edge(src, dst, edge_type, &properties)
     }
 
     /// Creates an edge whose remaining properties depend on the edge itself
     /// (MERGE `ON CREATE SET` expressions that read it), like
-    /// [`create_node_with`](Self::create_node_with).
+    /// [`create_node_with`](Self::create_node_with); the endpoints are
+    /// checked and claimed as [`create_edge`](Self::create_edge) does.
     ///
     /// # Errors
     ///
-    /// Returns the first constraint violated, or `derive`'s error.
+    /// Returns the errors of [`create_edge`](Self::create_edge), or
+    /// `derive`'s error.
     pub fn create_edge_with(
         &self,
         src: NodeId,
@@ -540,22 +752,39 @@ impl GraphWriter {
         properties: Vec<(String, Value)>,
         derive: impl FnOnce(EdgeId) -> Result<Vec<(String, Value)>, OperatorError>,
     ) -> Result<EdgeId, OperatorError> {
+        let mut properties = self.new_edge_properties(edge_type, properties)?;
+        self.require_node(src)?;
+        self.require_node(dst)?;
         if let Some(validator) = &self.validator {
             self.check_new_edge(validator.as_ref(), src, dst, edge_type)?;
+            convert_values(&mut properties, |key, value| {
+                validator.convert_edge_property(edge_type, key, value)
+            });
+            validator.validate_edge_properties_declared(edge_type, &properties)?;
             for (name, value) in &properties {
                 validator.validate_edge_property(edge_type, name, value)?;
             }
         }
-        let id = self.insert_edge(src, dst, edge_type)?;
-        self.write_values(Entity::Edge(id), &properties)?;
+        self.claim(WriteClaim::Endpoints(src, dst))?;
+        let id = {
+            let _writing = self.write_in_progress();
+            self.insert_edge(src, dst, edge_type, &properties)?
+        };
 
-        let derived = derive(id)?;
+        // Evaluates expressions: no write is in progress meanwhile.
+        let mut derived = derive(id)?;
+        refuse_too_deep(plain_values(&derived))?;
         if let Some(validator) = &self.validator {
+            convert_values(&mut derived, |key, value| {
+                validator.convert_edge_property(edge_type, key, value)
+            });
+            validator.validate_edge_properties_declared(edge_type, &derived)?;
             for (name, value) in &derived {
                 validator.validate_edge_property(edge_type, name, value)?;
             }
             validator.validate_edge_complete(edge_type, &overlay(properties, &derived))?;
         }
+        let _writing = self.write_in_progress();
         self.write_values(Entity::Edge(id), &derived)?;
         Ok(id)
     }
@@ -573,17 +802,28 @@ impl GraphWriter {
         assignments: &[(String, Value)],
         replace: bool,
     ) -> Result<(), OperatorError> {
+        refuse_too_deep(assigned_values(assignments))?;
         self.require_edge(id)?;
-        self.record(Entity::Edge(id))?;
+        self.claim(WriteClaim::Edge(id))?;
+        let mut assignments = Cow::Borrowed(assignments);
         if let Some(validator) = &self.validator
             && let Some(edge) = self.edge(id)
         {
+            let edge_type = edge.edge_type.as_str();
+            if let Some(converted) = convert_assignments(&assignments, |key, value| {
+                validator.convert_edge_property(edge_type, key, value)
+            }) {
+                assignments = Cow::Owned(converted);
+            }
             let existing = property_list(&edge.properties);
-            for (name, value) in expand_assignments(&existing, assignments, replace) {
-                validator.validate_edge_property(edge.edge_type.as_str(), &name, &value)?;
+            let changes = expand_assignments(&existing, &assignments, replace);
+            validator.validate_edge_properties_declared(edge_type, &changes)?;
+            for (name, value) in changes {
+                validator.validate_edge_property(edge_type, &name, &value)?;
             }
         }
-        self.apply_set(Entity::Edge(id), assignments, replace)?;
+        let _writing = self.write_in_progress();
+        self.apply_set(Entity::Edge(id), &assignments, replace)?;
         Ok(())
     }
 
@@ -596,7 +836,7 @@ impl GraphWriter {
     /// or the constraint the removal would violate.
     pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool, OperatorError> {
         self.require_edge(id)?;
-        self.record(Entity::Edge(id))?;
+        self.claim(WriteClaim::Edge(id))?;
         let Some(edge) = self.edge(id) else {
             return Ok(false);
         };
@@ -606,6 +846,7 @@ impl GraphWriter {
         if let Some(validator) = &self.validator {
             validator.validate_edge_property(edge.edge_type.as_str(), key, &Value::Null)?;
         }
+        let _writing = self.write_in_progress();
         self.remove_value(Entity::Edge(id), key)?;
         Ok(true)
     }
@@ -616,15 +857,61 @@ impl GraphWriter {
     ///
     /// Returns a write conflict.
     pub fn delete_edge(&self, id: EdgeId) -> Result<bool, OperatorError> {
-        self.record(Entity::Edge(id))?;
-        let deleted = self
-            .store
-            .delete_edge_versioned(id, self.epoch(), self.transaction());
+        let _writing = self.write_in_progress();
+        self.remove_edge(id)
+    }
+
+    /// [`delete_edge`](Self::delete_edge), for a caller whose write is
+    /// already in progress.
+    fn remove_edge(&self, id: EdgeId) -> Result<bool, OperatorError> {
+        self.claim(WriteClaim::Edge(id))?;
+        let deleted = match &self.recording {
+            Some(recording) => self.apply_op(recording, DataOp::DeleteEdge { id })?,
+            None => self
+                .store
+                .delete_edge_versioned(id, self.epoch(), self.transaction()),
+        };
         self.count(|c| &c.edges_deleted, usize::from(deleted));
         Ok(deleted)
     }
 
     // === Checks ===
+
+    /// The properties a new node with `labels` gets: `properties` with the
+    /// validator's type defaults added and each value converted to the type
+    /// the schema declares for it, once the labels are allowed. No value may
+    /// nest too deep, a default included: a custom validator's default is
+    /// written like any other value.
+    fn new_node_properties(
+        &self,
+        labels: &[String],
+        mut properties: Vec<(String, Value)>,
+    ) -> Result<Vec<(String, Value)>, OperatorError> {
+        if let Some(validator) = &self.validator {
+            validator.validate_node_labels_allowed(labels)?;
+            validator.inject_defaults(labels, &mut properties);
+            convert_values(&mut properties, |key, value| {
+                validator.convert_node_property(labels, key, value)
+            });
+        }
+        refuse_too_deep(plain_values(&properties))?;
+        Ok(properties)
+    }
+
+    /// The properties a new edge of `edge_type` gets: `properties` with the
+    /// validator's type defaults added. No value may nest too deep, a
+    /// default included, as for a node.
+    fn new_edge_properties(
+        &self,
+        edge_type: &str,
+        mut properties: Vec<(String, Value)>,
+    ) -> Result<Vec<(String, Value)>, OperatorError> {
+        if let Some(validator) = &self.validator {
+            validator.inject_edge_defaults(edge_type, &mut properties);
+        }
+        refuse_too_deep(plain_values(&properties))?;
+        Ok(properties)
+    }
 
     /// Checks property values for a node with `labels`: types, NOT NULL and
     /// single-property UNIQUE. `own` is the node when it exists already: a
@@ -663,6 +950,7 @@ impl GraphWriter {
         let labels = node_labels(node);
         let existing = property_list(&node.properties);
         let changes = expand_assignments(&existing, assignments, replace);
+        validator.validate_node_properties_declared(&labels, &changes)?;
         self.check_node_values(validator, &labels, &changes, Some(node.id))?;
         validator.check_unique_node(&labels, &overlay(existing, &changes), Some(node.id))
     }
@@ -689,30 +977,155 @@ impl GraphWriter {
 
     // === Store writes ===
 
-    fn insert_node(&self, labels: &[String]) -> Result<NodeId, OperatorError> {
+    /// Creates a node with `labels` and `properties` (checked already); a
+    /// null value is no property.
+    fn insert_node(
+        &self,
+        labels: &[String],
+        properties: &[(String, Value)],
+    ) -> Result<NodeId, OperatorError> {
+        if let Some(recording) = &self.recording {
+            return self.create_recorded_node(recording, labels, properties);
+        }
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let id = self
             .store
             .create_node_versioned(&label_refs, self.epoch(), self.transaction());
-        self.record(Entity::Node(id))?;
+        self.claim(WriteClaim::Node(id))?;
         self.count(|c| &c.nodes_created, 1);
         // `(:A:A)` gives the node one label.
         let distinct: std::collections::BTreeSet<&str> = label_refs.into_iter().collect();
         self.count(|c| &c.labels_added, distinct.len());
+        self.write_values(Entity::Node(id), properties)?;
         Ok(id)
     }
 
+    /// Creates a node through the recording's target as one entry, with its
+    /// labels and every value of `properties` that is not null: at an id
+    /// reserved from the store, or the one an external store gives. It
+    /// claims nothing: no other transaction knows the new id before this one
+    /// commits.
+    fn create_recorded_node(
+        &self,
+        recording: &Recording,
+        labels: &[String],
+        properties: &[(String, Value)],
+    ) -> Result<NodeId, OperatorError> {
+        let labels = distinct_labels(labels);
+        let values = present_values(properties);
+        let (label_count, value_count) = (labels.len(), values.len());
+        let writer = recording.recorder.writer();
+        let (id, op, applied) = match &recording.target {
+            WriteTarget::Store(target) => {
+                let id = NodeId::new(target.reserve_node_ids(1).map_err(store_refused)?.start);
+                let op = DataOp::CreateNode {
+                    id,
+                    labels,
+                    properties: values,
+                };
+                let applied = target.apply(&op, writer).map_err(store_refused)?;
+                (id, op, applied)
+            }
+            WriteTarget::External(target) => {
+                let (op, applied) = target
+                    .create_node(labels, values, writer)
+                    .map_err(store_refused)?;
+                let DataOp::CreateNode { id, .. } = op else {
+                    return Err(OperatorError::Internal(
+                        "an external store's node create gave another op".to_string(),
+                    ));
+                };
+                (id, op, applied)
+            }
+        };
+        if !record_applied(recording, op, applied)? {
+            return Err(OperatorError::Internal(format!(
+                "the store created no node {}",
+                id.as_u64()
+            )));
+        }
+        self.count(|c| &c.nodes_created, 1);
+        self.count(|c| &c.labels_added, label_count);
+        self.count(|c| &c.properties_set, value_count);
+        Ok(id)
+    }
+
+    /// Creates an edge (checked already, its endpoints claimed) with
+    /// `properties`; a null value is no property.
     fn insert_edge(
         &self,
         src: NodeId,
         dst: NodeId,
         edge_type: &str,
+        properties: &[(String, Value)],
     ) -> Result<EdgeId, OperatorError> {
-        let id =
-            self.store
-                .create_edge_versioned(src, dst, edge_type, self.epoch(), self.transaction());
-        self.record(Entity::Edge(id))?;
+        if let Some(recording) = &self.recording {
+            return self.create_recorded_edge(recording, src, dst, edge_type, properties);
+        }
+        let id = self
+            .store
+            .create_edge_versioned(src, dst, edge_type, self.epoch(), self.transaction())
+            .map_err(conflict_or_refused)?;
+        self.claim(WriteClaim::Edge(id))?;
         self.count(|c| &c.edges_created, 1);
+        self.write_values(Entity::Edge(id), properties)?;
+        Ok(id)
+    }
+
+    /// Creates an edge through the recording's target as one entry, with
+    /// every value of `properties` that is not null: at an id reserved from
+    /// the store and claimed before the store changes (a concurrent
+    /// `DETACH DELETE` of an endpoint lists the edge), or at the id an
+    /// external store gives, claimed once it is known.
+    fn create_recorded_edge(
+        &self,
+        recording: &Recording,
+        src: NodeId,
+        dst: NodeId,
+        edge_type: &str,
+        properties: &[(String, Value)],
+    ) -> Result<EdgeId, OperatorError> {
+        let values = present_values(properties);
+        let value_count = values.len();
+        let edge_type = ArcStr::from(edge_type);
+        let writer = recording.recorder.writer();
+        let (id, op, applied) = match &recording.target {
+            WriteTarget::Store(target) => {
+                let id = EdgeId::new(target.reserve_edge_ids(1).map_err(store_refused)?.start);
+                self.claim(WriteClaim::Edge(id))?;
+                let op = DataOp::CreateEdge {
+                    id,
+                    src,
+                    dst,
+                    edge_type,
+                    properties: values,
+                };
+                let applied = target.apply(&op, writer).map_err(store_refused)?;
+                (id, op, applied)
+            }
+            WriteTarget::External(target) => {
+                let (op, applied) = target
+                    .create_edge(src, dst, edge_type, values, writer)
+                    .map_err(store_refused)?;
+                let DataOp::CreateEdge { id, .. } = op else {
+                    return Err(OperatorError::Internal(
+                        "an external store's edge create gave another op".to_string(),
+                    ));
+                };
+                (id, op, applied)
+            }
+        };
+        if !record_applied(recording, op, applied)? {
+            return Err(OperatorError::Internal(format!(
+                "the store created no edge {}",
+                id.as_u64()
+            )));
+        }
+        if matches!(recording.target, WriteTarget::External(_)) {
+            self.claim(WriteClaim::Edge(id))?;
+        }
+        self.count(|c| &c.edges_created, 1);
+        self.count(|c| &c.properties_set, value_count);
         Ok(id)
     }
 
@@ -733,6 +1146,16 @@ impl GraphWriter {
         if value.is_null() {
             return self.remove_value(entity, key);
         }
+        if let Some(recording) = &self.recording {
+            let key = PropertyKey::new(key);
+            let op = match entity {
+                Entity::Node(id) => DataOp::SetNodeProperty { id, key, value },
+                Entity::Edge(id) => DataOp::SetEdgeProperty { id, key, value },
+            };
+            let changed = self.apply_op(recording, op)?;
+            self.count(|c| &c.properties_set, usize::from(changed));
+            return Ok(());
+        }
         match (entity, self.transaction_id) {
             (Entity::Node(id), Some(transaction_id)) => {
                 self.store
@@ -751,6 +1174,16 @@ impl GraphWriter {
     }
 
     fn remove_value(&self, entity: Entity, key: &str) -> Result<(), OperatorError> {
+        if let Some(recording) = &self.recording {
+            let key = PropertyKey::new(key);
+            let op = match entity {
+                Entity::Node(id) => DataOp::RemoveNodeProperty { id, key },
+                Entity::Edge(id) => DataOp::RemoveEdgeProperty { id, key },
+            };
+            let removed = self.apply_op(recording, op)?;
+            self.count(|c| &c.properties_set, usize::from(removed));
+            return Ok(());
+        }
         let removed =
             match (entity, self.transaction_id) {
                 (Entity::Node(id), Some(transaction_id)) => self
@@ -819,7 +1252,77 @@ impl GraphWriter {
 /// The statement error of a write the store refused, such as a spilled
 /// property value whose file cannot be read, which a rollback would lose.
 fn refused(error: grafeo_common::utils::error::Error) -> OperatorError {
-    OperatorError::Execution(error.to_string())
+    OperatorError::from(error)
+}
+
+/// A write the store refused: a write conflict stays one (a compacted store
+/// refuses an edge to a node another transaction deleted), anything else is
+/// [`refused`].
+fn conflict_or_refused(error: grafeo_common::utils::error::Error) -> OperatorError {
+    use grafeo_common::utils::error::{Error, TransactionError};
+
+    match error {
+        Error::Transaction(TransactionError::WriteConflict(message)) => {
+            OperatorError::WriteConflict(message)
+        }
+        other => refused(other),
+    }
+}
+
+/// Records in `recording` what the store reported it applied for `op`;
+/// whether the write changed something. A write that changed nothing
+/// records nothing.
+fn record_applied(
+    recording: &Recording,
+    op: DataOp,
+    applied: Applied,
+) -> Result<bool, OperatorError> {
+    match applied {
+        Applied::Changed { before, version } => {
+            recording.recorder.record(op, before, version)?;
+            Ok(true)
+        }
+        Applied::Unchanged => Ok(false),
+        // Committed at once without a before-image (an immediate write whose
+        // entries nothing reads): nothing to record.
+        Applied::Committed => Ok(true),
+    }
+}
+
+/// The statement error of a write the store's change target refused: a
+/// node delete while the node has edges is the constraint a user sees,
+/// anything else (a spilled value that cannot be read, a store limit) an
+/// execution error, as [`refused`].
+fn store_refused(error: ApplyError) -> OperatorError {
+    match error {
+        ApplyError::HasEdges(id) => OperatorError::ConstraintViolation(format!(
+            "Cannot delete node {} with connected edge(s). Use DETACH DELETE.",
+            id.as_u64()
+        )),
+        other => OperatorError::Execution(other.to_string()),
+    }
+}
+
+/// The labels of a new node, each once, in the order given: `(:A:A)` gives
+/// the node one label.
+fn distinct_labels(labels: &[String]) -> Labels {
+    let mut distinct = Labels::new();
+    for label in labels {
+        if !distinct.iter().any(|seen| seen.as_str() == label) {
+            distinct.push(ArcStr::from(label.as_str()));
+        }
+    }
+    distinct
+}
+
+/// The values of a new entity's properties, in the order given: a null is
+/// no property.
+fn present_values(properties: &[(String, Value)]) -> Properties {
+    properties
+        .iter()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(key, value)| (PropertyKey::new(key.as_str()), value.clone()))
+        .collect()
 }
 
 /// The node's labels as strings.
@@ -836,6 +1339,84 @@ fn property_list(properties: &PropertyMap) -> Vec<(String, Value)> {
         .iter()
         .map(|(key, value)| (key.as_str().to_string(), value.clone()))
         .collect()
+}
+
+/// Refuses a property value nested deeper than a database can store
+/// ([`MAX_PROPERTY_VALUE_DEPTH`] lists, maps and paths), before anything is
+/// written, so a checkpoint never meets one. A limit on input, reported as
+/// the property size limit is: a constraint violation (an invalid value).
+fn refuse_too_deep<'v>(
+    mut values: impl Iterator<Item = (&'v str, &'v Value)>,
+) -> Result<(), OperatorError> {
+    match values.find(|(_, value)| nests_too_deep(value)) {
+        Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+            "property {key:?}: the value nests lists, maps and paths more than \
+             {MAX_PROPERTY_VALUE_DEPTH} levels deep, deeper than a database can store"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The `(key, value)` pairs of a property list, as written.
+fn plain_values(properties: &[(String, Value)]) -> impl Iterator<Item = (&str, &Value)> {
+    properties.iter().map(|(key, value)| (key.as_str(), value))
+}
+
+/// Replaces each value of a property list that `convert` converts to the
+/// type the schema declares for its key (see
+/// [`ConstraintValidator::convert_node_property`]).
+fn convert_values(
+    properties: &mut [(String, Value)],
+    convert: impl Fn(&str, &Value) -> Option<Value>,
+) {
+    for (key, value) in properties {
+        if let Some(converted) = convert(key, value) {
+            *value = converted;
+        }
+    }
+}
+
+/// The assignments of a SET with each value that `convert` converts
+/// replaced, also the entries of a map assignment. `None` when no value
+/// converts.
+fn convert_assignments(
+    assignments: &[(String, Value)],
+    convert: impl Fn(&str, &Value) -> Option<Value>,
+) -> Option<Vec<(String, Value)>> {
+    let convert_one = |name: &str, value: &Value| -> Option<Value> {
+        match value {
+            Value::Map(map) if name == MAP_ASSIGNMENT => {
+                let mut converted_any = false;
+                let entries = map
+                    .iter()
+                    .map(|(key, entry)| {
+                        let converted = convert(key.as_str(), entry);
+                        converted_any |= converted.is_some();
+                        (key.clone(), converted.unwrap_or_else(|| entry.clone()))
+                    })
+                    .collect();
+                converted_any.then(|| Value::Map(Arc::new(entries)))
+            }
+            _ if name == MAP_ASSIGNMENT => None,
+            _ => convert(name, value),
+        }
+    };
+    let converted: Vec<Option<Value>> = assignments
+        .iter()
+        .map(|(name, value)| convert_one(name, value))
+        .collect();
+    if converted.iter().all(Option::is_none) {
+        return None;
+    }
+    Some(
+        assignments
+            .iter()
+            .zip(converted)
+            .map(|((name, value), converted)| {
+                (name.clone(), converted.unwrap_or_else(|| value.clone()))
+            })
+            .collect(),
+    )
 }
 
 /// The `(key, value)` pairs a SET writes: the entries of a map assignment,
@@ -896,3 +1477,382 @@ fn overlay(mut base: Vec<(String, Value)>, changes: &[(String, Value)]) -> Vec<(
     }
     base
 }
+
+#[cfg(all(test, feature = "lpg"))]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+    use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
+
+    use super::{GraphWriter, OperatorError};
+    use crate::graph::GraphStoreMut;
+    use crate::graph::lpg::LpgStore;
+
+    /// A string inside `depth` lists.
+    pub(super) fn nested(depth: usize) -> Value {
+        let mut value = Value::from("Prague");
+        for _ in 0..depth {
+            value = Value::List(Arc::from(vec![value]));
+        }
+        value
+    }
+
+    fn writer() -> (Arc<LpgStore>, GraphWriter) {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
+        (store, GraphWriter::new(target))
+    }
+
+    pub(super) fn labels(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    pub(super) fn pairs(key: &str, value: &Value) -> Vec<(String, Value)> {
+        vec![(key.to_string(), value.clone())]
+    }
+
+    #[test]
+    fn values_nested_deeper_than_a_file_holds_are_refused_before_any_write() {
+        let (store, writer) = writer();
+        let too_deep = nested(MAX_PROPERTY_VALUE_DEPTH + 1);
+        let trips = PropertyKey::new("trips");
+
+        let mut properties = pairs("name", &Value::from("Alix"));
+        properties.extend(pairs("trips", &too_deep));
+        let error = writer
+            .create_node(&labels(&["Person"]), properties)
+            .unwrap_err();
+        assert!(
+            matches!(error, super::OperatorError::ConstraintViolation(_)),
+            "an invalid value, not an internal error: {error:?}"
+        );
+        let error = error.to_string();
+        assert!(
+            error.contains("\"trips\"") && error.contains(&MAX_PROPERTY_VALUE_DEPTH.to_string()),
+            "the error names the property and the limit: {error}"
+        );
+        assert_eq!(store.node_count(), 0, "a refused node is not created");
+
+        let deepest = nested(MAX_PROPERTY_VALUE_DEPTH);
+        let alix = writer
+            .create_node(&labels(&["Person"]), pairs("trips", &deepest))
+            .expect("the deepest value a file holds is accepted");
+        assert!(
+            writer
+                .set_node_properties(alix, &pairs("trips", &too_deep), false)
+                .is_err(),
+            "SET n.trips"
+        );
+        let map = Value::Map(Arc::new(
+            [(trips.clone(), too_deep.clone())].into_iter().collect(),
+        ));
+        assert!(
+            writer
+                .set_node_properties(alix, &pairs("*", &map), false)
+                .is_err(),
+            "SET n += {{trips: ...}}"
+        );
+        assert_eq!(
+            store.get_node_property(alix, &trips),
+            Some(deepest),
+            "a refused SET leaves the value as it was"
+        );
+        assert!(
+            writer
+                .create_node_with(&labels(&["Person"]), Vec::new(), |_| Ok(pairs(
+                    "trips", &too_deep
+                )))
+                .is_err(),
+            "a derived value of MERGE ... ON CREATE SET"
+        );
+
+        let gus = writer
+            .create_node(&labels(&["Person"]), Vec::new())
+            .unwrap();
+        let edges_before = store.edge_count();
+        assert!(
+            writer
+                .create_edge(alix, gus, "KNOWS", pairs("route", &too_deep))
+                .is_err(),
+            "CREATE ()-[{{route: ...}}]->()"
+        );
+        assert_eq!(
+            store.edge_count(),
+            edges_before,
+            "a refused edge is not created"
+        );
+        let knows = writer.create_edge(alix, gus, "KNOWS", Vec::new()).unwrap();
+        assert!(
+            writer
+                .set_edge_properties(knows, &pairs("route", &too_deep), false)
+                .is_err(),
+            "SET r.route"
+        );
+        assert!(
+            writer
+                .create_edge_with(alix, gus, "KNOWS", Vec::new(), |_| Ok(pairs(
+                    "route", &too_deep
+                )))
+                .is_err(),
+            "a derived edge value"
+        );
+    }
+
+    /// A validator that accepts every value, gives every node a `trips`
+    /// default nested deeper than a database can store, as a custom
+    /// [`ConstraintValidator`](super::ConstraintValidator) may, and refuses
+    /// edges of type `HATES` and edge properties named `grudge`.
+    pub(super) struct CustomRules;
+
+    impl super::ConstraintValidator for CustomRules {
+        fn validate_node_property(
+            &self,
+            _: &[String],
+            _: &str,
+            _: &Value,
+        ) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
+        fn validate_node_complete(
+            &self,
+            _: &[String],
+            _: &[(String, Value)],
+        ) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
+        fn check_unique_node_property(
+            &self,
+            _: &[String],
+            _: &str,
+            _: &Value,
+        ) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
+        fn validate_edge_property(
+            &self,
+            _: &str,
+            key: &str,
+            _: &Value,
+        ) -> Result<(), OperatorError> {
+            if key == "grudge" {
+                return Err(OperatorError::ConstraintViolation("no grudges".to_string()));
+            }
+            Ok(())
+        }
+
+        fn validate_edge_complete(
+            &self,
+            _: &str,
+            _: &[(String, Value)],
+        ) -> Result<(), OperatorError> {
+            Ok(())
+        }
+
+        fn validate_edge_type_allowed(&self, edge_type: &str) -> Result<(), OperatorError> {
+            if edge_type == "HATES" {
+                return Err(OperatorError::ConstraintViolation("no hate".to_string()));
+            }
+            Ok(())
+        }
+
+        fn inject_defaults(&self, _: &[String], properties: &mut Vec<(String, Value)>) {
+            properties.push(("trips".to_string(), nested(MAX_PROPERTY_VALUE_DEPTH + 1)));
+        }
+
+        /// A `ROUTE` gets `km: 88` unless given one; a `TRAVELS` gets a
+        /// `legs` default nested deeper than a database can store.
+        fn inject_edge_defaults(&self, edge_type: &str, properties: &mut Vec<(String, Value)>) {
+            match edge_type {
+                "ROUTE" if !properties.iter().any(|(key, _)| key == "km") => {
+                    properties.push(("km".to_string(), Value::Int64(88)));
+                }
+                "TRAVELS" => {
+                    properties.push(("legs".to_string(), nested(MAX_PROPERTY_VALUE_DEPTH + 1)));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The validator's edge type defaults fill the properties a new edge is
+    /// not given, through `create_edge` and `create_edge_with`: a value the
+    /// caller gives or MERGE derives wins.
+    #[test]
+    fn edge_defaults_fill_what_the_caller_leaves_out() {
+        let (store, writer) = writer();
+        let writer = writer.with_validator(Arc::new(CustomRules));
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let km = PropertyKey::new("km");
+        let km_of = |edge| store.get_edge_property(edge, &km);
+
+        let route = writer.create_edge(alix, gus, "ROUTE", Vec::new()).unwrap();
+        assert_eq!(km_of(route), Some(Value::Int64(88)), "create_edge");
+        let given = writer
+            .create_edge(alix, gus, "ROUTE", pairs("km", &Value::Int64(3)))
+            .unwrap();
+        assert_eq!(km_of(given), Some(Value::Int64(3)), "a given value");
+        let merged = writer
+            .create_edge_with(alix, gus, "ROUTE", Vec::new(), |_| Ok(Vec::new()))
+            .unwrap();
+        assert_eq!(km_of(merged), Some(Value::Int64(88)), "create_edge_with");
+        let derived = writer
+            .create_edge_with(alix, gus, "ROUTE", Vec::new(), |_| {
+                Ok(pairs("km", &Value::Int64(19)))
+            })
+            .unwrap();
+        assert_eq!(km_of(derived), Some(Value::Int64(19)), "a derived value");
+        let knows = writer.create_edge(alix, gus, "KNOWS", Vec::new()).unwrap();
+        assert_eq!(km_of(knows), None, "another edge type has no default");
+    }
+
+    /// A default the validator adds is checked as a value the caller gives
+    /// is: one nested too deep is refused before the node or edge is
+    /// written.
+    #[test]
+    fn a_default_nested_deeper_than_a_file_holds_is_refused_before_any_write() {
+        let (store, writer) = writer();
+        let writer = writer.with_validator(Arc::new(CustomRules));
+        let refused_trips = |result: &Result<NodeId, OperatorError>| {
+            matches!(result, Err(OperatorError::ConstraintViolation(message))
+                if message.contains("\"trips\""))
+        };
+
+        let created = writer.create_node(&labels(&["Person"]), pairs("name", &Value::from("Alix")));
+        assert!(refused_trips(&created), "create_node: {created:?}");
+        let merged = writer.create_node_with(&labels(&["Person"]), Vec::new(), |_| {
+            Ok(pairs("name", &Value::from("Gus")))
+        });
+        assert!(refused_trips(&merged), "create_node_with: {merged:?}");
+        assert_eq!(store.node_count(), 0, "no node with the default is written");
+
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let refused_legs = |result: &Result<EdgeId, OperatorError>| {
+            matches!(result, Err(OperatorError::ConstraintViolation(message))
+                if message.contains("\"legs\""))
+        };
+        let created = writer.create_edge(alix, gus, "TRAVELS", Vec::new());
+        assert!(refused_legs(&created), "create_edge: {created:?}");
+        let merged = writer.create_edge_with(alix, gus, "TRAVELS", Vec::new(), |_| Ok(Vec::new()));
+        assert!(refused_legs(&merged), "create_edge_with: {merged:?}");
+        assert_eq!(store.edge_count(), 0, "no edge with the default is written");
+    }
+
+    // === Every write method ===
+
+    /// How long a write that should wait gets to finish anyway.
+    pub(super) const BRIEFLY: Duration = Duration::from_millis(100);
+
+    /// The committed graph a transaction writes to: Alix (in Amsterdam), who
+    /// knows Gus since 3, and Vincent, who has no edges.
+    pub(super) struct People {
+        pub(super) alix: NodeId,
+        pub(super) gus: NodeId,
+        pub(super) vincent: NodeId,
+        pub(super) knows: EdgeId,
+    }
+
+    /// A store holding [`People`], committed. Every call builds the same
+    /// store, with the same ids.
+    pub(super) fn people_store() -> (Arc<LpgStore>, People) {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Person"]);
+        store.set_node_property(alix, "city", Value::from("Amsterdam"));
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Person"]);
+        let knows = store.create_edge(alix, gus, "KNOWS");
+        store.set_edge_property(knows, "since", Value::Int64(3));
+        let people = People {
+            alix,
+            gus,
+            vincent,
+            knows,
+        };
+        (store, people)
+    }
+
+    /// A write method of a transaction, called on [`People`].
+    pub(super) type Write = fn(&GraphWriter, &People) -> Result<(), OperatorError>;
+
+    /// Every write method of [`GraphWriter`], each changing what the
+    /// transaction sees.
+    pub(super) fn every_write() -> Vec<(&'static str, Write)> {
+        vec![
+            ("create_node", |writer, _| {
+                writer
+                    .create_node(&labels(&["Person"]), pairs("name", &Value::from("Mia")))
+                    .map(drop)
+            }),
+            ("create_node_with", |writer, _| {
+                writer
+                    .create_node_with(&labels(&["Person"]), Vec::new(), |_| {
+                        Ok(pairs("name", &Value::from("Jules")))
+                    })
+                    .map(drop)
+            }),
+            ("set_node_properties", |writer, people| {
+                writer.set_node_properties(
+                    people.alix,
+                    &pairs("city", &Value::from("Prague")),
+                    false,
+                )
+            }),
+            ("remove_node_property", |writer, people| {
+                writer.remove_node_property(people.alix, "city").map(drop)
+            }),
+            ("add_labels", |writer, people| {
+                writer
+                    .add_labels(people.alix, &labels(&["Traveller"]))
+                    .map(drop)
+            }),
+            ("remove_labels", |writer, people| {
+                writer
+                    .remove_labels(people.alix, &labels(&["Person"]))
+                    .map(drop)
+            }),
+            ("delete_node detaching", |writer, people| {
+                writer.delete_node(people.gus, true).map(drop)
+            }),
+            ("delete_node", |writer, people| {
+                writer.delete_node(people.vincent, false).map(drop)
+            }),
+            ("create_edge", |writer, people| {
+                writer
+                    .create_edge(
+                        people.alix,
+                        people.vincent,
+                        "KNOWS",
+                        pairs("since", &Value::Int64(19)),
+                    )
+                    .map(drop)
+            }),
+            ("create_edge_with", |writer, people| {
+                writer
+                    .create_edge_with(people.alix, people.vincent, "KNOWS", Vec::new(), |_| {
+                        Ok(pairs("since", &Value::Int64(88)))
+                    })
+                    .map(drop)
+            }),
+            ("set_edge_properties", |writer, people| {
+                writer.set_edge_properties(people.knows, &pairs("since", &Value::Int64(88)), false)
+            }),
+            ("remove_edge_property", |writer, people| {
+                writer.remove_edge_property(people.knows, "since").map(drop)
+            }),
+            ("delete_edge", |writer, people| {
+                writer.delete_edge(people.knows).map(drop)
+            }),
+        ]
+    }
+}
+
+/// The writer with a recording: through a change target, into a change set.
+#[cfg(all(test, feature = "lpg"))]
+#[path = "writer_recording_tests.rs"]
+mod recording_tests;

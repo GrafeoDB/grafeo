@@ -113,6 +113,8 @@ pub use zone_map::VectorZoneMap;
 #[cfg(feature = "vector-index")]
 pub use config::HnswConfig;
 #[cfg(feature = "vector-index")]
+pub(crate) use hnsw::BrokenLink;
+#[cfg(feature = "vector-index")]
 pub use hnsw::HnswIndex;
 #[cfg(feature = "vector-index")]
 pub use quantized_hnsw::QuantizedHnswIndex;
@@ -122,7 +124,39 @@ pub use section::VectorStoreSection;
 
 use grafeo_common::types::NodeId;
 #[cfg(feature = "vector-index")]
+use grafeo_common::utils::error::Result;
+#[cfg(feature = "vector-index")]
 use std::collections::HashSet;
+
+// ── TopologyVisitor ────────────────────────────────────────────────
+
+/// Receives an HNSW topology one node at a time.
+///
+/// [`HnswIndex::visit_topology`] calls [`header`](Self::header) once, then
+/// [`node`](Self::node) for every node in increasing id order, so a visitor
+/// can write the topology out without holding a copy of it.
+#[cfg(feature = "vector-index")]
+pub trait TopologyVisitor {
+    /// Receives the entry point, the top level and the number of nodes that
+    /// follow.
+    ///
+    /// # Errors
+    ///
+    /// Returns the visitor's own error, which ends the visit.
+    fn header(
+        &mut self,
+        entry_point: Option<NodeId>,
+        max_level: usize,
+        node_count: usize,
+    ) -> Result<()>;
+
+    /// Receives node `id` and its neighbor lists, layer 0 first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the visitor's own error, which ends the visit.
+    fn node(&mut self, id: NodeId, layers: &[Vec<NodeId>]) -> Result<()>;
+}
 
 // ── VectorIndexKind ────────────────────────────────────────────────
 
@@ -176,10 +210,15 @@ impl VectorIndexKind {
         }
     }
 
-    /// Removes a vector from the index.
-    pub fn remove(&self, id: NodeId) -> bool {
+    /// Removes a vector from the index, mending the links of the nodes that
+    /// led to it (see [`HnswIndex::remove`]).
+    ///
+    /// For `Hnsw`, the accessor reads the vectors of those nodes. For
+    /// `Quantized`, the index reads its own copies and the accessor is
+    /// unused.
+    pub fn remove(&self, id: NodeId, accessor: &impl VectorAccessor) -> bool {
         match self {
-            Self::Hnsw(idx) => idx.remove(id),
+            Self::Hnsw(idx) => idx.remove(id, accessor),
             Self::Quantized(idx) => idx.remove(id),
         }
     }
@@ -339,6 +378,55 @@ impl VectorIndexKind {
         }
     }
 
+    /// Hands the topology to `visitor` one node at a time, in increasing id
+    /// order (see [`HnswIndex::visit_topology`]).
+    ///
+    /// The index's read locks (nodes, entry point and level) are held for the
+    /// whole visit: while a checkpoint writes the topology, inserts into this
+    /// index wait, and so do searches that arrive after a waiting insert
+    /// (`parking_lot`'s locks are fair). Memory meanwhile: the checkpoint
+    /// holds one piece and one node's bytes, and a heap-backed index first
+    /// sorts a reference to each of its nodes (16 bytes per node, O(node
+    /// count)); an mmap-backed one reuses one node's lists from node to node.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error `visitor` returns.
+    pub fn visit_topology(&self, visitor: &mut dyn TopologyVisitor) -> Result<()> {
+        match self {
+            Self::Hnsw(idx) => idx.visit_topology(visitor),
+            Self::Quantized(idx) => idx.visit_topology(visitor),
+        }
+    }
+
+    /// Starts restoring a topology node by node (see
+    /// [`HnswIndex::begin_restore`]).
+    pub fn begin_restore(&self, entry_point: Option<NodeId>, max_level: usize, node_count: usize) {
+        match self {
+            Self::Hnsw(idx) => idx.begin_restore(entry_point, max_level, node_count),
+            Self::Quantized(idx) => idx.begin_restore(entry_point, max_level, node_count),
+        }
+    }
+
+    /// Restores one node of a topology begun with
+    /// [`begin_restore`](Self::begin_restore) (see
+    /// [`HnswIndex::restore_node`]).
+    pub fn restore_node(&self, id: NodeId, layers: Vec<Vec<NodeId>>) {
+        match self {
+            Self::Hnsw(idx) => idx.restore_node(id, layers),
+            Self::Quantized(idx) => idx.restore_node(id, layers),
+        }
+    }
+
+    /// The first neighbor reference that breaks the rules of the topology
+    /// (see [`HnswIndex::first_broken_link`]).
+    pub(crate) fn first_broken_link(&self) -> Option<BrokenLink> {
+        match self {
+            Self::Hnsw(idx) => idx.first_broken_link(),
+            Self::Quantized(idx) => idx.first_broken_link(),
+        }
+    }
+
     /// Returns estimated heap memory in bytes.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
@@ -428,6 +516,67 @@ impl Default for VectorConfig {
     }
 }
 
+/// The first value of `vector` that is NaN or infinite, with its position.
+#[must_use]
+pub fn first_non_finite(vector: &[f32]) -> Option<(usize, f32)> {
+    vector
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+}
+
+/// Whether an index of `dimensions` can measure `vector`: it has that many
+/// values, and none of them is NaN or infinite (a distance to such a vector
+/// is NaN, which orders before or after every other distance at random).
+#[must_use]
+pub fn is_indexable(vector: &[f32], dimensions: usize) -> bool {
+    vector.len() == dimensions && first_non_finite(vector).is_none()
+}
+
+/// Checks that a query vector has only finite values: a NaN or an infinity
+/// makes every distance to it NaN, so a search would return its vectors in
+/// no order, without distances.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidValue`](grafeo_common::utils::error::Error::InvalidValue)
+/// naming the position and the value of the first NaN or infinite value.
+pub fn check_query_values(query: &[f32]) -> grafeo_common::utils::error::Result<()> {
+    match first_non_finite(query) {
+        Some((position, value)) => Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+            "the query vector has {value} at position {position}: a vector search takes \
+                 finite numbers only"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Checks a query vector for a search of the vector index on
+/// `:label(property)`, whose vectors have `dimensions` values: it must have
+/// as many, all of them finite (see [`check_query_values`]). A search with
+/// another size cannot measure a single vector of the index.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidValue`](grafeo_common::utils::error::Error::InvalidValue)
+/// naming the index and both sizes, or the first NaN or infinite value.
+pub fn check_query_vector(
+    query: &[f32],
+    dimensions: usize,
+    label: &str,
+    property: &str,
+) -> grafeo_common::utils::error::Result<()> {
+    if query.len() != dimensions {
+        return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+            "the query vector has {} dimensions; the index on :{label}({property}) expects \
+             {dimensions}",
+            query.len()
+        )));
+    }
+    check_query_values(query)
+}
+
 /// Performs brute-force k-nearest neighbor search.
 ///
 /// This is O(n) where n is the number of vectors. Use this for:
@@ -446,7 +595,9 @@ impl Default for VectorConfig {
 ///
 /// # Returns
 ///
-/// Vector of (id, distance) pairs sorted by distance (ascending).
+/// Vector of (id, distance) pairs sorted by distance (ascending). A vector
+/// with another number of values than `query` has no distance to it and is
+/// left out.
 ///
 /// # Example
 ///
@@ -476,6 +627,7 @@ where
     I: Iterator<Item = (NodeId, &'a [f32])>,
 {
     let mut results: Vec<(NodeId, f32)> = vectors
+        .filter(|(_, vec)| vec.len() == query.len())
         .map(|(id, vec)| (id, compute_distance(query, vec, metric)))
         .collect();
 
@@ -501,7 +653,8 @@ where
 ///
 /// # Returns
 ///
-/// Vector of (id, distance) pairs sorted by distance (ascending).
+/// Vector of (id, distance) pairs sorted by distance (ascending). A vector
+/// with another number of values than `query` is left out.
 pub fn brute_force_knn_filtered<'a, I, F>(
     vectors: I,
     query: &[f32],
@@ -514,12 +667,81 @@ where
     F: Fn(NodeId) -> bool,
 {
     let mut results: Vec<(NodeId, f32)> = vectors
-        .filter(|(id, _)| predicate(*id))
+        .filter(|(id, vec)| vec.len() == query.len() && predicate(*id))
         .map(|(id, vec)| (id, compute_distance(query, vec, metric)))
         .collect();
 
     results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(k);
+    results
+}
+
+/// The vectors in property `property` of the nodes of `store` with `label`
+/// (of every node without one), for a scan.
+#[cfg(feature = "vector-index")]
+fn scanned_vectors(
+    store: &dyn crate::graph::GraphStore,
+    label: Option<&str>,
+    property: &str,
+) -> Vec<(NodeId, std::sync::Arc<[f32]>)> {
+    let node_ids = match label {
+        Some(label) => store.nodes_by_label(label),
+        None => store.node_ids(),
+    };
+    let key = grafeo_common::types::PropertyKey::new(property);
+    // Keeps the `Arc<[f32]>` of each `Value::Vector`: the scan only needs
+    // `&[f32]`, and the store holds the vector behind an Arc already.
+    node_ids
+        .into_iter()
+        .filter_map(|id| match store.get_node_property(id, &key) {
+            Some(grafeo_common::types::Value::Vector(vector)) => Some((id, vector)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `k` nodes of `store` nearest to `query` by `metric`, nearest first,
+/// found by scanning the vectors in property `property` of the nodes with
+/// `label` (of every node without one): the search of a store without an
+/// index of that metric.
+#[cfg(feature = "vector-index")]
+pub(crate) fn scan_nearest(
+    store: &dyn crate::graph::GraphStore,
+    label: Option<&str>,
+    property: &str,
+    query: &[f32],
+    k: usize,
+    metric: DistanceMetric,
+) -> Vec<(NodeId, f64)> {
+    let vectors = scanned_vectors(store, label, property);
+    let candidates = vectors.iter().map(|(id, vector)| (*id, vector.as_ref()));
+    brute_force_knn(candidates, query, k, metric)
+        .into_iter()
+        .map(|(id, distance)| (id, f64::from(distance)))
+        .collect()
+}
+
+/// The nodes of `store` within `threshold` of `query` by `metric`, nearest
+/// first, found by scanning as [`scan_nearest`] does (an HNSW index has no
+/// threshold search).
+#[cfg(feature = "vector-index")]
+pub(crate) fn scan_within(
+    store: &dyn crate::graph::GraphStore,
+    label: Option<&str>,
+    property: &str,
+    query: &[f32],
+    threshold: f64,
+    metric: DistanceMetric,
+) -> Vec<(NodeId, f64)> {
+    let mut results: Vec<(NodeId, f64)> = scanned_vectors(store, label, property)
+        .into_iter()
+        .filter(|(_, vector)| vector.len() == query.len())
+        .filter_map(|(id, vector)| {
+            let distance = f64::from(compute_distance(query, &vector, metric));
+            (distance <= threshold).then_some((id, distance))
+        })
+        .collect();
+    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     results
 }
 
@@ -764,7 +986,7 @@ mod tests {
         #[test]
         fn quantized_kind_remove() {
             let kind = build_quantized_kind(5);
-            assert!(kind.remove(NodeId::new(1)));
+            assert!(kind.remove(NodeId::new(1), &NoopAccessor));
             assert_eq!(kind.len(), 4);
             assert!(!kind.contains(NodeId::new(1)));
         }

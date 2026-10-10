@@ -32,7 +32,7 @@ fn test_text_index_auto_insert_via_create_node() {
 
     // Should be searchable immediately
     let results = db
-        .text_search("Doc", "content", "quick brown fox", 10)
+        .text_search("Doc", "content", "quick brown fox", 10, None)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, id);
@@ -53,7 +53,9 @@ fn test_text_index_auto_update_via_set_property() {
         .unwrap();
 
     // Verify initial text is searchable
-    let results = db.text_search("Doc", "content", "databases", 10).unwrap();
+    let results = db
+        .text_search("Doc", "content", "databases", 10, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
 
     // Update the property
@@ -65,7 +67,9 @@ fn test_text_index_auto_update_via_set_property() {
     .unwrap();
 
     // Old text should no longer match
-    let results = db.text_search("Doc", "content", "databases", 10).unwrap();
+    let results = db
+        .text_search("Doc", "content", "databases", 10, None)
+        .unwrap();
     assert!(
         results.is_empty(),
         "Old text should not be found after update"
@@ -73,7 +77,7 @@ fn test_text_index_auto_update_via_set_property() {
 
     // New text should be searchable
     let results = db
-        .text_search("Doc", "content", "graph theory", 10)
+        .text_search("Doc", "content", "graph theory", 10, None)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, id);
@@ -94,7 +98,9 @@ fn test_text_index_auto_delete() {
         .unwrap();
 
     // Verify it's searchable
-    let results = db.text_search("Doc", "content", "searchable", 10).unwrap();
+    let results = db
+        .text_search("Doc", "content", "searchable", 10, None)
+        .unwrap();
     assert_eq!(results.len(), 1);
 
     // Delete the node
@@ -102,7 +108,9 @@ fn test_text_index_auto_delete() {
     assert!(deleted);
 
     // Should no longer appear in search
-    let results = db.text_search("Doc", "content", "searchable", 10).unwrap();
+    let results = db
+        .text_search("Doc", "content", "searchable", 10, None)
+        .unwrap();
     assert!(
         results.is_empty(),
         "Deleted node should not appear in text search"
@@ -126,7 +134,9 @@ fn test_text_index_add_label() {
         .unwrap();
 
     // Not searchable under Article index
-    let results = db.text_search("Article", "content", "Rust", 10).unwrap();
+    let results = db
+        .text_search("Article", "content", "Rust", 10, None)
+        .unwrap();
     assert!(results.is_empty(), "{results:?}");
 
     // Add the Article label
@@ -135,7 +145,7 @@ fn test_text_index_add_label() {
 
     // Now it should be searchable under the Article text index
     let results = db
-        .text_search("Article", "content", "Rust programming", 10)
+        .text_search("Article", "content", "Rust programming", 10, None)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, id);
@@ -150,7 +160,7 @@ fn test_text_index_non_string_property_ignored() {
         .create_node_with_props(&["Doc"], [("content", Value::Int64(42))])
         .unwrap();
 
-    let results = db.text_search("Doc", "content", "42", 10).unwrap();
+    let results = db.text_search("Doc", "content", "42", 10, None).unwrap();
     assert!(
         results.is_empty(),
         "Non-string values should not be indexed"
@@ -164,7 +174,7 @@ fn test_text_index_non_string_property_ignored() {
     )
     .unwrap();
     let results = db
-        .text_search("Doc", "content", "string value", 10)
+        .text_search("Doc", "content", "string value", 10, None)
         .unwrap();
     assert_eq!(results.len(), 1);
 }
@@ -203,14 +213,14 @@ fn test_text_index_multiple_nodes() {
 
     // "machine learning" should match 2 docs
     let results = db
-        .text_search("Doc", "content", "machine learning", 10)
+        .text_search("Doc", "content", "machine learning", 10, None)
         .unwrap();
     assert_eq!(results.len(), 2);
 
     // Delete one
     db.delete_node(id3).unwrap();
     let results = db
-        .text_search("Doc", "content", "machine learning", 10)
+        .text_search("Doc", "content", "machine learning", 10, None)
         .unwrap();
     assert_eq!(results.len(), 1);
 }

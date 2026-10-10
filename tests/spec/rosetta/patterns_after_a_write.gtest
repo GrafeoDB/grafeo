@@ -1,0 +1,286 @@
+# Rosetta: patterns after a write
+#
+# A pattern after a write in the same query sees all of what the query wrote
+# before it, also what the rows after the current one wrote: an OPTIONAL
+# MATCH, a MATCH that goes on from a node the write binds (an expand, a
+# shortest path, the labels and properties it checks), and a part of a MATCH
+# joined to another on a shared variable. An OPTIONAL MATCH after a write used
+# to see none of it (every row kept nulls), a MATCH from a written node only
+# what the rows up to its own wrote.
+#
+# Cypher needs a WITH between the write and a reading clause; GQL takes no
+# WHERE on a MATCH after a WITH (the WHERE goes into the element pattern).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Patterns after a write
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL MATCH: the row i writes (:N {k: i}) and looks for k: 4 - i
+  # ---------------------------------------------------------------------------
+
+  - name: an_optional_match_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) WITH i OPTIONAL MATCH (t:N {k: 4 - i}) RETURN i, t.k AS k"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i OPTIONAL MATCH (t:N {k: 4 - i}) RETURN i, t.k AS k"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 2]
+        - [3, 1]
+
+  - name: an_optional_match_after_a_write_sees_the_later_rows_through_an_index
+    setup:
+      - "CREATE INDEX idx_k FOR (n:N) ON (n.k)"
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) WITH i OPTIONAL MATCH (t:N {k: 4 - i}) RETURN i, t.k AS k"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i OPTIONAL MATCH (t:N {k: 4 - i}) RETURN i, t.k AS k"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 2]
+        - [3, 1]
+
+  # GQL takes an OPTIONAL MATCH right after an INSERT.
+  - name: an_optional_match_right_after_an_insert_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (n:N {k: i}) OPTIONAL MATCH (t:N {k: 4 - n.k}) RETURN i, t.k AS k"
+    expect:
+      rows:
+        - [1, 3]
+        - [2, 2]
+        - [3, 1]
+
+  # The condition that reads the row decides the matches: the row 1 looks for
+  # k: 4, which no row writes, and keeps its nulls.
+  - name: an_optional_match_after_a_write_keeps_a_row_without_a_match
+    variants:
+      gql: "FOR i IN range(1, 3) INSERT (:N {k: i}) WITH i OPTIONAL MATCH (t:N WHERE t.k = 5 - i) RETURN i, t.k AS k"
+      cypher: "UNWIND range(1, 3) AS i CREATE (:N {k: i}) WITH i OPTIONAL MATCH (t:N) WHERE t.k = 5 - i RETURN i, t.k AS k"
+    expect:
+      rows:
+        - [1, null]
+        - [2, 3]
+        - [3, 2]
+
+  # ---------------------------------------------------------------------------
+  # A MATCH from a written node: the row i merges the one hub and links a new
+  # (:Q {i: i}) to it, so every row sees four.
+  # ---------------------------------------------------------------------------
+
+  - name: an_expand_from_a_written_node_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) INSERT (h)-[:R]->(:Q {i: i}) WITH h, i MATCH (h)-[:R]->(q) RETURN i, count(q) AS found"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) CREATE (h)-[:R]->(:Q {i: i}) WITH h, i MATCH (h)-[:R]->(q) RETURN i, count(q) AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: an_optional_match_from_a_written_node_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) INSERT (h)-[:R]->(:Q {i: i}) WITH h, i OPTIONAL MATCH (h)-[:R]->(q:Q {i: 4}) RETURN i, q.i AS last"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) CREATE (h)-[:R]->(:Q {i: i}) WITH h, i OPTIONAL MATCH (h)-[:R]->(q:Q {i: 4}) RETURN i, q.i AS last"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  # The joined part takes the S relationship: a Cypher MATCH binds the one R
+  # into q once.
+  - name: a_joined_part_of_a_match_after_a_write_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) INSERT (h)-[:R]->(:Q {i: i})-[:S]->(:T) WITH h, i MATCH (h)-[:R]->(q), (q)-[:S]->(g) RETURN i, count(*) AS found"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) CREATE (h)-[:R]->(:Q {i: i})-[:S]->(:T) WITH h, i MATCH (h)-[:R]->(q), (q)-[:S]->(g) RETURN i, count(*) AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  # The row i links the hubs k: i - 1 and k: i, so the path from its hub
+  # k: i - 1 to the last hub k: 4 has 5 - i edges, written by it and later rows.
+  - name: a_shortest_path_from_a_written_node_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (a:Hub {k: i - 1}) MERGE (b:Hub {k: i}) MERGE (z:Hub {k: 4}) INSERT (a)-[:R]->(b) WITH a, z, i MATCH p = ANY SHORTEST (a)-[*]->(z) RETURN i, length(p) AS hops"
+      cypher: "UNWIND range(1, 4) AS i MERGE (a:Hub {k: i - 1}) MERGE (b:Hub {k: i}) MERGE (z:Hub {k: 4}) CREATE (a)-[:R]->(b) WITH a, z, i MATCH p = shortestPath((a)-[*]->(z)) RETURN i, length(p) AS hops"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 3]
+        - [3, 2]
+        - [4, 1]
+
+  # The row i marks the hub k: i - 1, so the hub of each row but the last is
+  # marked by the row after it.
+  - name: the_label_check_on_a_written_node_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) SET b:Seen WITH a, i MATCH (a:Seen) RETURN i"
+      cypher: "UNWIND range(1, 4) AS i MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) SET b:Seen WITH a, i MATCH (a:Seen) RETURN i"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  - name: the_property_check_on_a_written_node_sees_the_later_rows
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) SET b.seen = true WITH a, i MATCH (a {seen: true}) RETURN i"
+      cypher: "UNWIND range(1, 4) AS i MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) SET b.seen = true WITH a, i MATCH (a {seen: true}) RETURN i"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  # ---------------------------------------------------------------------------
+  # Typed patterns over the edges an earlier clause wrote: the write links
+  # (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}) and a shortcut (h)-[:X]->(t).
+  # A typed variable-length expand, a chain of typed expands and a typed
+  # shortest path used to see none of these edges (an untyped one did).
+  # ---------------------------------------------------------------------------
+
+  - name: a_typed_variable_length_expand_sees_the_written_edges
+    variants:
+      gql: "INSERT (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h MATCH (h)-[:R|S]->{1,2}(n) RETURN n.i AS i ORDER BY i"
+      cypher: "CREATE (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h MATCH (h)-[:R|S*1..2]->(n) RETURN n.i AS i ORDER BY i"
+    expect:
+      rows:
+        - [3]
+        - [19]
+
+  - name: a_chain_of_typed_expands_sees_the_written_edges
+    variants:
+      gql: "INSERT (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h MATCH (h)-[:R]->(q)-[:S]->(n) RETURN q.i AS q, n.i AS n"
+      cypher: "CREATE (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h MATCH (h)-[:R]->(q)-[:S]->(n) RETURN q.i AS q, n.i AS n"
+    expect:
+      rows:
+        - [3, 19]
+
+  - name: a_typed_shortest_path_sees_the_written_edges
+    variants:
+      gql: "INSERT (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h, t MATCH p = ANY SHORTEST (h)-[:R|S]->+(t) RETURN length(p) AS hops"
+      cypher: "CREATE (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h, t MATCH p = shortestPath((h)-[:R|S*]->(t)) RETURN length(p) AS hops"
+    expect:
+      rows:
+        - [2]
+
+  - name: all_typed_shortest_paths_see_the_written_edges
+    variants:
+      gql: "INSERT (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h, t MATCH p = ALL SHORTEST (h)-[:R|S]->+(t) RETURN length(p) AS hops"
+      cypher: "CREATE (h:Hub)-[:R]->(:Q {i: 3})-[:S]->(t:T {i: 19}), (h)-[:X]->(t) WITH h, t MATCH p = allShortestPaths((h)-[:R|S*]->(t)) RETURN length(p) AS hops"
+    expect:
+      rows:
+        - [2]
+
+  # ---------------------------------------------------------------------------
+  # A filter on constants after a write: the row i sets c: i on the one hub, so
+  # every row finds the hub with c: 4, which the last row writes. These used to
+  # find it in no row: the planner looked the hub up while planning, before the
+  # write (by its label, an index on c, or the zone map of c).
+  # ---------------------------------------------------------------------------
+
+  - name: an_optional_match_on_a_constant_after_a_write_sees_the_whole_write
+    setup:
+      - "INSERT (:Hub)-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t:Hub {c: 4}) RETURN i, t.c AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t:Hub {c: 4}) RETURN i, t.c AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: an_optional_match_on_a_constant_after_a_write_sees_the_whole_write_through_an_index
+    setup:
+      - "CREATE INDEX idx_c FOR (n:Hub) ON (n.c)"
+      - "INSERT (:Hub)-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t {c: 4}) RETURN i, t.c AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t {c: 4}) RETURN i, t.c AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  # Before the query the hub has c: 3, the only value the zone map of c knows.
+  - name: an_optional_match_on_a_constant_after_a_write_sees_past_the_zone_map
+    setup:
+      - "INSERT (:Hub {c: 3})-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t WHERE t.c = 4) RETURN i, t.c AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i OPTIONAL MATCH (t) WHERE t.c = 4 RETURN i, t.c AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  # The parts take R and W: a Cypher MATCH binds each relationship once.
+  - name: a_joined_part_with_a_constant_after_a_write_sees_the_whole_write
+    setup:
+      - "INSERT (h:Hub)-[:R]->(q:Q), (h)-[:W]->(q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) RETURN i, t.c AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) RETURN i, t.c AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: a_count_subquery_on_a_constant_after_a_write_sees_the_whole_write
+    setup:
+      - "INSERT (:Hub)-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i RETURN i, COUNT { MATCH (t:Hub {c: 4}) } + 3 AS found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i RETURN i, COUNT { MATCH (t:Hub {c: 4}) } + 3 AS found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: an_exists_on_a_constant_after_a_write_sees_the_whole_write
+    setup:
+      - "INSERT (h:Hub)-[:R]->(q:Q), (h)-[:W]->(q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MATCH (h:Hub) SET h.c = i WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) } RETURN i"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i WHERE EXISTS { MATCH (h)-[:R]->(q), (t:Hub {c: 4})-[:W]->(q) } RETURN i"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+        - [4]
+
+  # GQL takes a CALL after a MERGE, not after a SET or a WITH.
+  - name: a_call_on_a_constant_after_a_write_sees_the_whole_write
+    setup:
+      - "INSERT (:Hub)-[:R]->(:Q)"
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) ON MATCH SET h.c = i CALL () { MATCH (t:Hub {c: 4}) RETURN t.c AS found } RETURN i, found"
+      cypher: "UNWIND range(1, 4) AS i MATCH (h:Hub) SET h.c = i WITH h, i CALL { MATCH (t:Hub {c: 4}) RETURN t.c AS found } RETURN i, found"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]

@@ -12,16 +12,12 @@ pub mod user_procedure;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::AdaptiveConfig;
 use crate::database::QueryResult;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, QueryError, Result};
 use grafeo_core::execution::operators::{Operator, OperatorError, WriteCounter};
-use grafeo_core::execution::{
-    AdaptiveContext, AdaptiveSummary, CardinalityTrackingWrapper, DataChunk, Pipeline,
-    SharedAdaptiveContext,
-};
+use grafeo_core::execution::{DataChunk, Pipeline};
 
 /// Executes a physical operator tree and collects results.
 pub struct Executor {
@@ -110,12 +106,18 @@ impl Executor {
         if let Some(deadline) = self.deadline
             && Instant::now() >= deadline
         {
-            return Err(Error::Query(match self.query_timeout {
-                Some(d) => QueryError::timeout_with_limit(d),
-                None => QueryError::timeout(),
-            }));
+            return Err(self.timeout_error());
         }
         Ok(())
+    }
+
+    /// The error of a query that ran past its deadline, naming the limit
+    /// when the executor knows it.
+    fn timeout_error(&self) -> Error {
+        Error::Query(match self.query_timeout {
+            Some(d) => QueryError::timeout_with_limit(d),
+            None => QueryError::timeout(),
+        })
     }
 
     /// Executes a physical operator and collects all results.
@@ -180,7 +182,10 @@ impl Executor {
         // Build and execute the pipeline with deadline enforcement
         let mut pipeline = Pipeline::new(source, push_ops, Box::new(collector));
         pipeline.set_deadline(self.deadline);
-        pipeline.execute().map_err(convert_operator_error)?;
+        pipeline.execute().map_err(|error| match error {
+            OperatorError::Timeout => self.timeout_error(),
+            other => convert_operator_error(other),
+        })?;
 
         // Extract the sink (ChunkCollector) and get the chunks
         // Safety: we know the sink is a ChunkCollector because we just created it
@@ -310,98 +315,6 @@ impl Executor {
 
         Ok(collected)
     }
-
-    /// Executes a physical operator with adaptive cardinality tracking.
-    ///
-    /// This wraps the operator in a cardinality tracking layer and monitors
-    /// deviation from estimates during execution. The adaptive summary is
-    /// returned alongside the query result.
-    ///
-    /// # Arguments
-    ///
-    /// * `operator` - The root physical operator to execute
-    /// * `adaptive_context` - Context with cardinality estimates from planning
-    /// * `config` - Adaptive execution configuration
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if operator execution fails.
-    pub fn execute_adaptive(
-        &self,
-        operator: Box<dyn Operator>,
-        adaptive_context: Option<AdaptiveContext>,
-        config: &AdaptiveConfig,
-    ) -> Result<(QueryResult, Option<AdaptiveSummary>)> {
-        // If adaptive is disabled or no context, fall back to normal execution
-        if !config.enabled {
-            let mut op = operator;
-            let result = self.execute(op.as_mut())?;
-            return Ok((result, None));
-        }
-
-        let Some(ctx) = adaptive_context else {
-            let mut op = operator;
-            let result = self.execute(op.as_mut())?;
-            return Ok((result, None));
-        };
-
-        // Create shared context for tracking
-        let shared_ctx = SharedAdaptiveContext::from_context(AdaptiveContext::with_thresholds(
-            config.threshold,
-            config.min_rows,
-        ));
-
-        // Copy estimates from the planning context to the shared tracking context
-        for (op_id, checkpoint) in ctx.all_checkpoints() {
-            if let Some(mut inner) = shared_ctx.snapshot() {
-                inner.set_estimate(op_id, checkpoint.estimated);
-            }
-        }
-
-        // Wrap operator with tracking
-        let mut wrapped = CardinalityTrackingWrapper::new(operator, "root", shared_ctx.clone());
-
-        // Execute with tracking
-        let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
-        let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
-        let mut total_rows: u64 = 0;
-        let check_interval = config.min_rows;
-
-        loop {
-            self.check_deadline()?;
-
-            match wrapped.next() {
-                Ok(Some(chunk)) => {
-                    let chunk_rows = chunk.row_count();
-                    total_rows += chunk_rows as u64;
-
-                    // Capture column types from first non-empty chunk
-                    if !types_captured && chunk.column_count() > 0 {
-                        self.capture_column_types(&chunk, &mut result);
-                        types_captured = true;
-                    }
-                    self.collect_chunk(&chunk, &mut result)?;
-
-                    // Periodically check for significant deviation
-                    if total_rows >= check_interval
-                        && total_rows.is_multiple_of(check_interval)
-                        && shared_ctx.should_reoptimize()
-                    {
-                        // For now, just log/note that re-optimization would trigger
-                        // Full re-optimization would require plan regeneration
-                        // which is a more invasive change
-                    }
-                }
-                Ok(None) => break,
-                Err(err) => return Err(convert_operator_error(err)),
-            }
-        }
-
-        // Get final summary
-        let summary = shared_ctx.snapshot().map(|ctx| ctx.summary());
-
-        Ok((self.with_counters(result), summary))
-    }
 }
 
 impl Default for Executor {
@@ -411,19 +324,34 @@ impl Default for Executor {
 }
 
 /// Converts an operator error to a common error.
+///
+/// A statement that fails while it runs is a query execution error
+/// (`GRAFEO-Q006`); only a broken invariant ([`OperatorError::Internal`]) is
+/// an internal error, and an error raised below the operator keeps its own.
 pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
     match err {
         OperatorError::TypeMismatch { expected, found } => Error::TypeMismatch { expected, found },
-        OperatorError::ColumnNotFound(name) => {
-            Error::InvalidValue(format!("Column not found: {name}"))
-        }
-        OperatorError::Execution(msg) => Error::Internal(msg),
+        // A column an operator expects and its input lacks: the planner
+        // and the operator disagree, a bug.
+        OperatorError::ColumnNotFound(name) => Error::Internal(format!("Column not found: {name}")),
+        OperatorError::Execution(msg) => Error::Query(QueryError::new(
+            grafeo_common::utils::error::QueryErrorKind::Execution,
+            msg,
+        )),
+        OperatorError::Internal(msg) => Error::Internal(msg),
+        OperatorError::Wrapped(error) => *error,
         OperatorError::ConstraintViolation(msg) => {
             Error::InvalidValue(format!("Constraint violation: {msg}"))
         }
+        OperatorError::InvalidValue(msg) => Error::InvalidValue(msg),
         OperatorError::WriteConflict(msg) => {
             Error::Transaction(grafeo_common::utils::error::TransactionError::WriteConflict(msg))
         }
+        OperatorError::LimitExceeded(msg) => Error::Query(QueryError::new(
+            grafeo_common::utils::error::QueryErrorKind::Execution,
+            msg,
+        )),
+        OperatorError::Timeout => Error::Query(QueryError::timeout()),
         _ => Error::Internal(format!("{err}")),
     }
 }
@@ -432,6 +360,7 @@ pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
 mod tests {
     use super::*;
     use grafeo_common::types::LogicalType;
+    use grafeo_common::utils::error::ErrorCode;
     use grafeo_core::execution::DataChunk;
 
     /// A mock operator that generates chunks with integer data on demand.
@@ -726,11 +655,22 @@ mod tests {
         assert!(matches!(err, Error::TypeMismatch { .. }));
 
         let err = convert_operator_error(OperatorError::ColumnNotFound("col_x".to_string()));
-        assert!(matches!(err, Error::InvalidValue(_)));
+        assert!(matches!(err, Error::Internal(_)));
         assert!(err.to_string().contains("col_x"));
 
-        let err = convert_operator_error(OperatorError::Execution("internal issue".to_string()));
+        let err = convert_operator_error(OperatorError::Execution("Alix left".to_string()));
+        assert_eq!(err.error_code(), ErrorCode::QueryExecution, "{err}");
+
+        let err = convert_operator_error(OperatorError::Internal("internal issue".to_string()));
         assert!(matches!(err, Error::Internal(_)));
+
+        let err = convert_operator_error(OperatorError::from(Error::NodeNotFound(
+            grafeo_common::types::NodeId::new(3),
+        )));
+        assert!(
+            matches!(err, Error::NodeNotFound(_)),
+            "kept as it is: {err}"
+        );
 
         let err = convert_operator_error(OperatorError::ConstraintViolation("unique".to_string()));
         assert!(matches!(err, Error::InvalidValue(_)));
@@ -799,5 +739,9 @@ mod tests {
             err.to_string().contains("Query exceeded timeout"),
             "Expected timeout error, got: {err}"
         );
+        // A timeout in a push pipeline is the timeout a pulled plan reports:
+        // retryable, never an internal error.
+        assert_eq!(err.error_code(), ErrorCode::QueryTimeout, "{err}");
+        assert!(err.error_code().is_retryable());
     }
 }

@@ -9,20 +9,23 @@ mod pattern;
 use std::collections::{HashMap, HashSet};
 
 use super::common::{
-    build_left_join_with_predicates, check_branch_columns, collect_expression_variables,
-    combine_with_and, expand_subquery_return_star, flatten_and_conjuncts, has_all_labels,
-    is_aggregate_function, is_binary_set_function, join_and_conjuncts, optional_join,
-    references_any, to_aggregate_function, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
+    CallImports, GeneratedNames, build_left_join_with_predicates, call_imports,
+    check_branch_columns, collect_expression_variables, combine_with_and,
+    comma_part_join_variables, comma_part_reads_earlier_rows, expand_subquery_return_star,
+    flatten_and_conjuncts, has_all_labels, is_aggregate_function, is_binary_set_function,
+    join_and_conjuncts, no_result, optional_join, push_set_property, references_any,
+    to_aggregate_function, with_imports, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
     wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
-    CallProcedureOp, CountExpr, CreateEdgeOp, CreateNodeOp, DeleteNodeOp, EntityKind, ExceptOp,
+    CallProcedureOp, CountExpr, CreateElement, CreateOp, DeleteNodeOp, EntityKind, ExceptOp,
     ExpandDirection, ExpandOp, HorizontalAggregateOp, IntersectOp, JoinCondition, JoinOp, JoinType,
     LeftJoinOp, LoadDataFormat, LoadDataOp, LogicalExpression, LogicalOperator, LogicalPlan,
     MergeOp, MergeRelationshipOp, NodeScanOp, NullsOrdering, OtherwiseOp, ParameterScanOp,
     PathMode, ProcedureYield, ProjectOp, Projection, RemoveLabelOp, ReturnItem, ReturnOp,
-    SetPropertyOp, ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
+    SetPropertyOp, ShortestPathEdgeCondition, ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp,
+    UnwindOp,
 };
 #[cfg(test)]
 use crate::query::plan::{FilterOp, LimitOp, SkipOp};
@@ -71,19 +74,31 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 /// Returns an error if the query cannot be parsed or translated.
 pub fn translate_full(query: &str) -> Result<GqlTranslationResult> {
     let statement = gql::parse(query)?;
-    let translator = GqlTranslator::new();
-    translator.translate_statement_full(&statement)
+    let translator = GqlTranslator::new(query);
+    match translator.translate_statement_full(&statement)? {
+        GqlTranslationResult::Plan(plan) => Ok(GqlTranslationResult::Plan(
+            crate::query::limits::check_plan_depth(plan)?,
+        )),
+        other => Ok(other),
+    }
 }
 
 /// Translator from GQL AST to LogicalPlan.
 struct GqlTranslator {
-    /// Edge variables from variable-length expand patterns (group-list variables).
-    /// Maps edge variable name to the path alias used for `_path_edges_{alias}` lookup.
+    /// Edge variables from variable-length expand patterns (group-list variables),
+    /// each bound to the list of its path's edges, with the path alias of the
+    /// pattern. An aggregate over one is computed per row
+    /// (see `take_horizontal_aggregates`).
     group_list_variables: std::cell::RefCell<HashMap<String, String>>,
     /// The variables of the row the `CALL` subquery being translated runs
     /// for (`None` outside one, or when they are not known): what a nested
     /// subquery's `RETURN *` leaves out.
     call_scope: std::cell::RefCell<Option<HashSet<String>>>,
+    /// The names made up for anonymous elements and helper columns.
+    names: GeneratedNames,
+    /// The variables the `CALL` body being translated imports, which a
+    /// `WITH` in it passes on whether it names them or not.
+    call_imports: CallImports,
 }
 
 /// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
@@ -209,9 +224,44 @@ fn keys_before_return(keys: &[SortKey], ret: &ReturnOp) -> Option<Vec<SortKey>> 
         .collect()
 }
 
+/// The sort key of an `ORDER BY` item that sorts on `expression`.
+///
+/// Without `NULLS FIRST` or `NULLS LAST`, GQL puts nulls last in both
+/// directions. ISO/IEC 39075 leaves this default to the implementation, as SQL
+/// does; nulls last both ways is what Microsoft Fabric's GQL documents. Cypher
+/// keeps openCypher's order, where null is the largest value (see
+/// `physical_null_order`).
+fn sort_key(item: &ast::OrderByItem, expression: LogicalExpression) -> SortKey {
+    SortKey {
+        expression,
+        order: match item.order {
+            ast::SortOrder::Asc => SortOrder::Ascending,
+            ast::SortOrder::Desc => SortOrder::Descending,
+        },
+        nulls: Some(match item.nulls {
+            Some(ast::NullsOrdering::First) => NullsOrdering::First,
+            Some(ast::NullsOrdering::Last) | None => NullsOrdering::Last,
+        }),
+    }
+}
+
+/// Whether a statement's plan ends without a result: in a `RETURN` of no
+/// items (see `no_result`), as a write without `RETURN` and `FINISH` do.
+fn ends_without_a_result(plan: &LogicalOperator) -> bool {
+    matches!(plan, LogicalOperator::Return(ret) if ret.items.is_empty())
+}
+
+/// Whether a query ends with a result: a `RETURN` with items or `RETURN *`.
+/// A `CALL` body without one (no `RETURN`, or `FINISH`) runs for its writes
+/// and passes each row on once, as it came in.
+fn returns_rows(query: &ast::QueryStatement) -> bool {
+    let result = &query.return_clause;
+    !result.is_finish && (result.is_wildcard || !result.items.is_empty())
+}
+
 /// Combines two queries with a set operator, or with `NEXT` (the right one
-/// runs for each row of the left one; a right side that is a query reads the
-/// left one's rows instead, see `translate_composite_query`).
+/// runs for each row of the left one; a right side that is a query or a lone
+/// write reads the left one's rows instead, see `translate_composite_query`).
 fn combine_queries(
     op: ast::CompositeOp,
     left: LogicalOperator,
@@ -264,16 +314,26 @@ fn combine_queries(
             subplan: Box::new(right),
             shared_variables: Vec::new(),
             optional: false,
+            unit: false,
         }),
     })
 }
 
 impl GqlTranslator {
-    fn new() -> Self {
+    /// A translator for the statement `query`, whose text the generated
+    /// names skip.
+    fn new(query: &str) -> Self {
         Self {
             group_list_variables: std::cell::RefCell::new(HashMap::new()),
             call_scope: std::cell::RefCell::new(None),
+            names: GeneratedNames::new(query),
+            call_imports: CallImports::default(),
         }
+    }
+
+    /// A name for an anonymous element, one the statement does not spell.
+    fn anonymous_name(&self) -> String {
+        self.names.next("_anon_")
     }
 
     fn translate_statement_full(&self, stmt: &ast::Statement) -> Result<GqlTranslationResult> {
@@ -303,7 +363,9 @@ impl GqlTranslator {
     fn translate_statement(&self, stmt: &ast::Statement) -> Result<LogicalPlan> {
         match stmt {
             ast::Statement::Query(query) => self.translate_query(query),
-            ast::Statement::DataModification(dm) => self.translate_data_modification(dm),
+            ast::Statement::DataModification(dm) => {
+                self.translate_data_modification(dm, LogicalOperator::Empty)
+            }
             ast::Statement::Schema(_) => Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Schema DDL commands are handled before query planning",
@@ -329,13 +391,36 @@ impl GqlTranslator {
         right: &ast::Statement,
     ) -> Result<LogicalPlan> {
         let left_plan = self.translate_statement(left)?;
-        // NEXT: the query after it reads the rows the one before returns, as
-        // a query reads the rows of a WITH.
-        if op == ast::CompositeOp::Next
-            && let ast::Statement::Query(right_query) = right
-        {
-            let input = return_as_with(left_plan.root);
-            return self.translate_query_from(right_query, input);
+        // NEXT: the statement after it reads the rows the one before returns,
+        // as a query reads the rows of a WITH; a lone INSERT or DELETE writes
+        // for each, and a procedure call runs for each. After one without a
+        // result (no RETURN, or FINISH) it reads one empty row, as at the
+        // start of a statement: the one before runs once, for its writes,
+        // and nothing it binds is a variable after it.
+        if op == ast::CompositeOp::Next {
+            let input = if ends_without_a_result(&left_plan.root) {
+                LogicalOperator::Apply(ApplyOp {
+                    input: Box::new(LogicalOperator::Empty),
+                    subplan: Box::new(left_plan.root),
+                    shared_variables: Vec::new(),
+                    optional: false,
+                    unit: true,
+                })
+            } else {
+                return_as_with(left_plan.root)
+            };
+            return match right {
+                ast::Statement::Query(right_query) => self.translate_query_from(right_query, input),
+                ast::Statement::DataModification(dm) => self.translate_data_modification(dm, input),
+                other => {
+                    let right_plan = self.translate_statement(other)?;
+                    Ok(LogicalPlan::new(combine_queries(
+                        op,
+                        input,
+                        right_plan.root,
+                    )?))
+                }
+            };
         }
         let right_plan = self.translate_statement(right)?;
         Ok(LogicalPlan::new(combine_queries(
@@ -385,20 +470,30 @@ impl GqlTranslator {
                     .iter()
                     .any(|item| contains_aggregate(&item.expression));
 
-            if has_aggregates {
-                let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
-                    &return_clause.items,
-                    !return_clause.group_by.is_empty(),
-                )?;
+            // GROUP BY makes one row per group, also without an aggregate
+            let groups_rows = !return_clause.items.is_empty() && !return_clause.group_by.is_empty();
+            if has_aggregates || groups_rows {
+                let (aggregates, auto_group_by, mut post_return) = self
+                    .extract_aggregates_and_groups(
+                        &return_clause.items,
+                        !return_clause.group_by.is_empty(),
+                    )?;
                 // Explicit GROUP BY wins over the keys implied by the items.
                 let group_by = if return_clause.group_by.is_empty() {
                     auto_group_by
                 } else {
-                    return_clause
-                        .group_by
-                        .iter()
-                        .map(|e| self.translate_expression(e))
-                        .collect::<Result<Vec<_>>>()?
+                    let keys = self.translate_group_by(
+                        &return_clause.group_by,
+                        &return_clause.items,
+                        &plan,
+                    )?;
+                    self.resolve_grouped_items(
+                        &return_clause.items,
+                        post_return.as_deref_mut().unwrap_or_default(),
+                        &keys,
+                        &aggregates,
+                    )?;
+                    keys
                 };
 
                 plan = LogicalOperator::Aggregate(AggregateOp {
@@ -449,17 +544,7 @@ impl GqlTranslator {
                                     expression = LogicalExpression::Variable(col_name);
                                 }
                             }
-                            Ok(SortKey {
-                                expression,
-                                order: match item.order {
-                                    ast::SortOrder::Asc => SortOrder::Ascending,
-                                    ast::SortOrder::Desc => SortOrder::Descending,
-                                },
-                                nulls: item.nulls.map(|n| match n {
-                                    ast::NullsOrdering::First => NullsOrdering::First,
-                                    ast::NullsOrdering::Last => NullsOrdering::Last,
-                                }),
-                            })
+                            Ok(sort_key(item, expression))
                         })
                         .collect::<Result<Vec<_>>>()?;
 
@@ -509,17 +594,7 @@ impl GqlTranslator {
                         .items
                         .iter()
                         .map(|item| {
-                            Ok(SortKey {
-                                expression: self.translate_expression(&item.expression)?,
-                                order: match item.order {
-                                    ast::SortOrder::Asc => SortOrder::Ascending,
-                                    ast::SortOrder::Desc => SortOrder::Descending,
-                                },
-                                nulls: item.nulls.map(|n| match n {
-                                    ast::NullsOrdering::First => NullsOrdering::First,
-                                    ast::NullsOrdering::Last => NullsOrdering::Last,
-                                }),
-                            })
+                            Ok(sort_key(item, self.translate_expression(&item.expression)?))
                         })
                         .collect::<Result<Vec<_>>>()?;
 
@@ -563,33 +638,19 @@ impl GqlTranslator {
         input: LogicalOperator,
     ) -> Result<LogicalPlan> {
         let mut plan = input;
-        let mut where_applied = false;
 
-        // Process clauses in source order for correct variable scoping.
-        // When ordered_clauses is populated, use it; otherwise fall back to
-        // the legacy field-based ordering (for backward compatibility).
+        // Each clause reads the rows of the ones before it, in source order
+        // (ISO GQL's linear statement: a WHERE or FILTER, an ORDER BY or a
+        // LIMIT applies where it stands). A query without ordered clauses (a
+        // subquery, SELECT ... FROM) has its parts in the per-kind fields.
         if !query.ordered_clauses.is_empty() {
+            // Whether the clause before is an OPTIONAL MATCH, whose graph
+            // pattern a WHERE right after it belongs to
+            let mut after_optional_match = false;
             for clause in &query.ordered_clauses {
-                // Apply WHERE filter before the first mutation clause so that
-                // MATCH ... WHERE ... CREATE/DELETE operates on filtered rows.
-                if !where_applied
-                    && matches!(
-                        clause,
-                        ast::QueryClause::Create(_)
-                            | ast::QueryClause::Delete(_)
-                            | ast::QueryClause::Set(_)
-                            | ast::QueryClause::Remove(_)
-                            | ast::QueryClause::Merge(_)
-                            | ast::QueryClause::With(_)
-                    )
-                {
-                    if let Some(where_clause) = &query.where_clause {
-                        let predicate = self.translate_expression(&where_clause.expression)?;
-                        plan = self.apply_where_with_left_join_awareness(plan, predicate);
-                    }
-                    where_applied = true;
-                }
-
+                // A clause may walk the plan below it recursively (the
+                // variables it binds): stop before that is too deep.
+                crate::query::limits::check_partial_plan_depth(&mut plan)?;
                 match clause {
                     ast::QueryClause::Match(match_clause) => {
                         if matches!(plan, LogicalOperator::Empty) && match_clause.optional {
@@ -597,14 +658,19 @@ impl GqlTranslator {
                             // an implicit unit table so unmatched patterns produce
                             // a single row of NULLs instead of zero rows.
                             let match_plan = self.translate_match(match_clause)?;
-                            plan = optional_join(LogicalOperator::Empty, match_plan);
+                            plan = optional_join(
+                                LogicalOperator::Empty,
+                                match_plan,
+                                self.call_scope.borrow().as_ref(),
+                            );
                         } else if matches!(plan, LogicalOperator::Empty) {
                             // No prior input: standard MATCH
                             plan = self.translate_match(match_clause)?;
                         } else if match_clause.optional {
                             // OPTIONAL MATCH: left join (prior vars on left, match on right)
                             let match_plan = self.translate_match(match_clause)?;
-                            plan = optional_join(plan, match_plan);
+                            plan =
+                                optional_join(plan, match_plan, self.call_scope.borrow().as_ref());
                         } else {
                             // Non-optional MATCH after prior clauses (UNWIND, etc.)
                             // Pass current plan as input so the MATCH's NodeScan creates
@@ -635,12 +701,7 @@ impl GqlTranslator {
                         });
                     }
                     ast::QueryClause::Create(create_clause) => {
-                        // An INSERT that starts the statement has no input rows.
-                        plan = if matches!(plan, LogicalOperator::Empty) {
-                            self.insert_chain(&create_clause.patterns)?.0
-                        } else {
-                            self.translate_create_patterns(&create_clause.patterns, plan)?
-                        };
+                        plan = self.translate_insert(&create_clause.patterns, plan)?;
                     }
                     ast::QueryClause::Delete(delete_clause) => {
                         plan = self.translate_delete_targets(
@@ -652,13 +713,13 @@ impl GqlTranslator {
                     ast::QueryClause::Set(set_clause) => {
                         for assignment in &set_clause.assignments {
                             let value = self.translate_expression(&assignment.value)?;
-                            plan = LogicalOperator::SetProperty(SetPropertyOp {
-                                variable: assignment.variable.clone(),
-                                properties: vec![(assignment.property.clone(), value)],
-                                replace: false,
-                                is_edge: false,
-                                input: Box::new(plan),
-                            });
+                            plan = push_set_property(
+                                plan,
+                                &assignment.variable,
+                                assignment.property.clone(),
+                                value,
+                                false,
+                            );
                         }
                         for map_assign in &set_clause.map_assignments {
                             let value = self.translate_expression(&map_assign.map_expr)?;
@@ -729,6 +790,7 @@ impl GqlTranslator {
                                 subplan: Box::new(call_plan),
                                 shared_variables: Vec::new(),
                                 optional: false,
+                                unit: false,
                             });
                         }
                     }
@@ -746,18 +808,33 @@ impl GqlTranslator {
                             });
                         }
                     }
+                    // A WHERE right after an OPTIONAL MATCH is part of it and
+                    // keeps the rows without a match; a FILTER, and a WHERE
+                    // anywhere else, filters the rows so far.
+                    ast::QueryClause::Filter(filter) => {
+                        plan = self.apply_statement_where(plan, filter, after_optional_match)?;
+                    }
+                    ast::QueryClause::OrderByAndPage(page) => {
+                        plan = self.apply_order_by_and_page(plan, page)?;
+                    }
                 }
+                after_optional_match =
+                    matches!(clause, ast::QueryClause::Match(found) if found.optional);
             }
         } else {
             // Legacy path: process MATCH, then UNWIND, then MERGE separately
             for match_clause in &query.match_clauses {
                 let match_plan = self.translate_match(match_clause)?;
                 if matches!(plan, LogicalOperator::Empty) && match_clause.optional {
-                    plan = optional_join(LogicalOperator::Empty, match_plan);
+                    plan = optional_join(
+                        LogicalOperator::Empty,
+                        match_plan,
+                        self.call_scope.borrow().as_ref(),
+                    );
                 } else if matches!(plan, LogicalOperator::Empty) {
                     plan = match_plan;
                 } else if match_clause.optional {
-                    plan = optional_join(plan, match_plan);
+                    plan = optional_join(plan, match_plan, self.call_scope.borrow().as_ref());
                 } else {
                     plan = LogicalOperator::Join(JoinOp {
                         left: Box::new(plan),
@@ -782,12 +859,13 @@ impl GqlTranslator {
             for merge_clause in &query.merge_clauses {
                 plan = self.translate_merge(merge_clause, plan)?;
             }
-        }
 
-        // Apply WHERE filter (skip if already applied before a mutation clause)
-        if !where_applied && let Some(where_clause) = &query.where_clause {
-            let predicate = self.translate_expression(&where_clause.expression)?;
-            plan = self.apply_where_with_left_join_awareness(plan, predicate);
+            if let Some(where_clause) = &query.where_clause {
+                let after_optional_match = query.unwind_clauses.is_empty()
+                    && query.merge_clauses.is_empty()
+                    && query.match_clauses.last().is_some_and(|last| last.optional);
+                plan = self.apply_statement_where(plan, where_clause, after_optional_match)?;
+            }
         }
 
         // Legacy path: handle SET/REMOVE/CREATE/DELETE from individual fields.
@@ -796,13 +874,13 @@ impl GqlTranslator {
             for set_clause in &query.set_clauses {
                 for assignment in &set_clause.assignments {
                     let value = self.translate_expression(&assignment.value)?;
-                    plan = LogicalOperator::SetProperty(SetPropertyOp {
-                        variable: assignment.variable.clone(),
-                        properties: vec![(assignment.property.clone(), value)],
-                        replace: false,
-                        is_edge: false,
-                        input: Box::new(plan),
-                    });
+                    plan = push_set_property(
+                        plan,
+                        &assignment.variable,
+                        assignment.property.clone(),
+                        value,
+                        false,
+                    );
                 }
                 for map_assign in &set_clause.map_assignments {
                     let value = self.translate_expression(&map_assign.map_expr)?;
@@ -860,90 +938,119 @@ impl GqlTranslator {
             }
         }
 
-        // FINISH: consume input, return empty result (mutations already applied)
+        // FINISH: the statement has no result (ISO GQL's omitted result: no
+        // rows and no columns); the input runs to its end for its writes. A
+        // NEXT after it reads one empty row, as after a write without RETURN
+        // (see `translate_composite_query`).
         if query.return_clause.is_finish {
-            // Wrap in a Limit(0) to consume input but return no rows
-            plan = wrap_limit(plan, 0);
-            return Ok(LogicalPlan::new(plan));
+            return Ok(LogicalPlan::new(no_result(wrap_limit(plan, 0))));
         }
+
+        // Aggregates over a group variable are computed per row first: the
+        // items read their columns (see `take_horizontal_aggregates`)
+        let aggregate::WithoutHorizontalAggregates {
+            items: return_items,
+            order_by: return_order_by,
+            having: having_condition,
+            plan: horizontal_plan,
+        } = self.take_horizontal_aggregates(
+            &query.return_clause.items,
+            query.return_clause.order_by.as_ref(),
+            query
+                .having_clause
+                .as_ref()
+                .map(|having| &having.expression),
+            plan,
+        )?;
+        plan = horizontal_plan;
 
         // Check if RETURN contains aggregate functions
         let has_aggregates = !query.return_clause.is_wildcard
-            && query
-                .return_clause
-                .items
+            && return_items
                 .iter()
                 .any(|item| contains_aggregate(&item.expression));
 
-        if has_aggregates {
+        // GROUP BY makes one row per group (ISO/IEC 39075:2024 <group by
+        // clause>), and so does HAVING, also when the RETURN list has no
+        // aggregate.
+        let groups_rows = !query.return_clause.is_wildcard
+            && (!query.return_clause.group_by.is_empty() || query.having_clause.is_some());
+        // An aggregate in HAVING is computed per group like the ones of the
+        // RETURN list, in a column of its own that the result leaves out.
+        let having_aggregates = having_condition.as_ref().is_some_and(contains_aggregate);
+
+        if has_aggregates || groups_rows {
             // Extract aggregate and group-by expressions.
             // When a return item wraps an aggregate in a binary/unary expression
             // (e.g. `count(n) > 0 AS exists`), we decompose it into:
             //   1. An aggregate (`count(n)` with synthetic alias)
             //   2. A post-aggregate projection (`_agg_0 > 0 AS exists`)
-            let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
-                &query.return_clause.items,
-                !query.return_clause.group_by.is_empty(),
-            )?;
-
-            // Separate horizontal aggregates (over group-list variables from
-            // variable-length paths) from regular aggregates.
-            let glv = self.group_list_variables.borrow();
-            let mut regular_aggregates = Vec::new();
-            for agg_expr in aggregates {
-                if let Some(ref expr) = agg_expr.expression
-                    && let LogicalExpression::Property { variable, property } = expr
-                    && let Some(path_alias) = glv.get(variable)
-                {
-                    // Same name as a regular aggregate, which the post-Return
-                    // built by `extract_aggregates_and_groups` refers to.
-                    let alias = agg_expr.alias.clone().unwrap_or_else(|| {
-                        crate::query::planner::common::aggregate_column_name(&agg_expr)
-                    });
-                    plan = LogicalOperator::HorizontalAggregate(HorizontalAggregateOp {
-                        list_column: format!("_path_edges_{}", path_alias),
-                        entity_kind: EntityKind::Edge,
-                        function: agg_expr.function,
-                        property: property.clone(),
-                        alias,
-                        input: Box::new(plan),
-                    });
-                    continue;
-                }
-                regular_aggregates.push(agg_expr);
-            }
-            drop(glv);
+            // The post-Return also leaves out the columns of HAVING's
+            // aggregates.
+            let (mut aggregates, auto_group_by, mut post_return) = self
+                .extract_aggregates_and_groups(
+                    &return_items,
+                    !query.return_clause.group_by.is_empty() || having_aggregates,
+                )?;
+            // HAVING's aggregates are numbered after the `_agg_N` ones of the
+            // RETURN list.
+            let mut having_counter = u32::try_from(
+                aggregates
+                    .iter()
+                    .filter(|aggregate| {
+                        aggregate
+                            .alias
+                            .as_deref()
+                            .is_some_and(|alias| alias.starts_with("_agg_"))
+                    })
+                    .count(),
+            )
+            .map_err(|_| {
+                Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    "too many aggregates in one RETURN",
+                ))
+            })?;
 
             // Use explicit GROUP BY if provided, otherwise use auto-detected
             let group_by = if query.return_clause.group_by.is_empty() {
                 auto_group_by
             } else {
-                query
-                    .return_clause
-                    .group_by
-                    .iter()
-                    .map(|e| self.translate_expression(e))
-                    .collect::<Result<Vec<_>>>()?
+                let keys =
+                    self.translate_group_by(&query.return_clause.group_by, &return_items, &plan)?;
+                self.resolve_grouped_items(
+                    &return_items,
+                    post_return.as_deref_mut().unwrap_or_default(),
+                    &keys,
+                    &aggregates,
+                )?;
+                keys
             };
 
-            // Translate HAVING clause if present
-            let having = if let Some(having_clause) = &query.having_clause {
-                Some(self.translate_expression(&having_clause.expression)?)
-            } else {
-                None
+            // Translate HAVING clause if present; its aggregates become
+            // columns of the Aggregate (see `having_aggregates`), and its
+            // grouping keys and RETURN aliases read the Aggregate's output.
+            let having_scope = aggregate::HavingScope::new(&group_by, post_return.as_deref());
+            let having = match &having_condition {
+                Some(condition) if having_aggregates => {
+                    Some(having_scope.resolve(self.extract_wrapped_aggregates(
+                        condition,
+                        &mut having_counter,
+                        &mut aggregates,
+                    )?))
+                }
+                Some(condition) => {
+                    Some(having_scope.resolve(self.translate_expression(condition)?))
+                }
+                None => None,
             };
 
-            let agg_op = if regular_aggregates.is_empty() && group_by.is_empty() {
-                // All aggregates were horizontal, no need for a HashAggregate
-                plan
-            } else {
-                LogicalOperator::Aggregate(AggregateOp {
-                    group_by,
-                    aggregates: regular_aggregates,
-                    input: Box::new(plan),
-                    having,
-                })
-            };
+            let agg_op = LogicalOperator::Aggregate(AggregateOp {
+                group_by,
+                aggregates,
+                input: Box::new(plan),
+                having,
+            });
 
             // Collect aggregate output column names before post_return is consumed.
             // These are used to rewrite ORDER BY property references (e.g. `a.species`)
@@ -978,7 +1085,7 @@ impl GqlTranslator {
             // are rewritten to a flat variable reference when that property matches
             // an aggregate output column, since the entity variable no longer exists
             // after aggregation.
-            if let Some(order_by) = &query.return_clause.order_by {
+            if let Some(order_by) = &return_order_by {
                 let keys = order_by
                     .items
                     .iter()
@@ -991,17 +1098,7 @@ impl GqlTranslator {
                                 expression = LogicalExpression::Variable(col_name);
                             }
                         }
-                        Ok(SortKey {
-                            expression,
-                            order: match item.order {
-                                ast::SortOrder::Asc => SortOrder::Ascending,
-                                ast::SortOrder::Desc => SortOrder::Descending,
-                            },
-                            nulls: item.nulls.map(|n| match n {
-                                ast::NullsOrdering::First => NullsOrdering::First,
-                                ast::NullsOrdering::Last => NullsOrdering::Last,
-                            }),
-                        })
+                        Ok(sort_key(item, expression))
                     })
                     .collect::<Result<Vec<_>>>()?;
 
@@ -1020,9 +1117,7 @@ impl GqlTranslator {
                     alias: None,
                 }]
             } else {
-                query
-                    .return_clause
-                    .items
+                return_items
                     .iter()
                     .map(|item| {
                         Ok(ReturnItem {
@@ -1036,23 +1131,11 @@ impl GqlTranslator {
             plan = wrap_return(plan, return_items, query.return_clause.distinct);
 
             // Apply ORDER BY (wraps Return so aliases are visible)
-            if let Some(order_by) = &query.return_clause.order_by {
+            if let Some(order_by) = &return_order_by {
                 let keys = order_by
                     .items
                     .iter()
-                    .map(|item| {
-                        Ok(SortKey {
-                            expression: self.translate_expression(&item.expression)?,
-                            order: match item.order {
-                                ast::SortOrder::Asc => SortOrder::Ascending,
-                                ast::SortOrder::Desc => SortOrder::Descending,
-                            },
-                            nulls: item.nulls.map(|n| match n {
-                                ast::NullsOrdering::First => NullsOrdering::First,
-                                ast::NullsOrdering::Last => NullsOrdering::Last,
-                            }),
-                        })
-                    })
+                    .map(|item| Ok(sort_key(item, self.translate_expression(&item.expression)?)))
                     .collect::<Result<Vec<_>>>()?;
 
                 plan = wrap_sort(plan, keys);
@@ -1178,6 +1261,17 @@ impl GqlTranslator {
         vars
     }
 
+    /// The variable of the node a pattern starts from, if it names one.
+    fn pattern_start(pattern: &ast::Pattern) -> Option<&str> {
+        match pattern {
+            ast::Pattern::Node(node) => node.variable.as_deref(),
+            ast::Pattern::Path(path) => path.source.variable.as_deref(),
+            ast::Pattern::Quantified { .. }
+            | ast::Pattern::Union(_)
+            | ast::Pattern::MultisetUnion(_) => None,
+        }
+    }
+
     /// Translates a MATCH clause with an optional initial input.
     ///
     /// When `initial_input` is provided (e.g. from a preceding UNWIND), the
@@ -1186,42 +1280,78 @@ impl GqlTranslator {
     /// so that property filters like `{id: x}` can reference them.
     ///
     /// When multiple comma-separated patterns share variables, creates proper
-    /// `JoinOp` operators with equality conditions instead of cross products.
+    /// `JoinOp` operators with equality conditions instead of cross products;
+    /// the variables of the input count as shared too (see
+    /// [`comma_part_join_variables`]).
     fn translate_match_with_input(
         &self,
         match_clause: &ast::MatchClause,
         initial_input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        let mut path_mode = match match_clause.path_mode {
-            Some(ast::PathMode::Walk) | None => PathMode::Walk,
-            Some(ast::PathMode::Trail) => PathMode::Trail,
-            Some(ast::PathMode::Simple) => PathMode::Simple,
-            Some(ast::PathMode::Acyclic) => PathMode::Acyclic,
-        };
-
-        // Match mode overrides path mode: DIFFERENT EDGES = Trail, REPEATABLE ELEMENTS = Walk
-        if let Some(mode) = &match_clause.match_mode {
-            match mode {
-                ast::MatchMode::DifferentEdges => path_mode = PathMode::Trail,
-                ast::MatchMode::RepeatableElements => path_mode = PathMode::Walk,
+        // The match mode and the path mode are independent (ISO/IEC
+        // 39075:2024 16.4 and 16.6): REPEATABLE ELEMENTS, the default, keeps
+        // the path mode. DIFFERENT EDGES binds no edge twice in the whole
+        // graph pattern, which a filter over every edge checks below (each
+        // edge pattern then needs a variable); a path that repeats an edge
+        // can never match, so its expands and searches may stop at a
+        // repeated edge.
+        let different_edges = match_clause.match_mode == Some(ast::MatchMode::DifferentEdges);
+        // The path mode of a pattern: its own, else the clause's
+        let path_mode_of = |aliased: &ast::AliasedPattern| {
+            let mode = match aliased.path_mode.or(match_clause.path_mode) {
+                Some(ast::PathMode::Walk) | None => PathMode::Walk,
+                Some(ast::PathMode::Trail) => PathMode::Trail,
+                Some(ast::PathMode::Simple) => PathMode::Simple,
+                Some(ast::PathMode::Acyclic) => PathMode::Acyclic,
+            };
+            if different_edges && mode == PathMode::Walk {
+                PathMode::Trail
+            } else {
+                mode
             }
-        }
+        };
+        let keeps_different_edges =
+            |pattern: &ast::AliasedPattern| pattern.keep == Some(ast::MatchMode::DifferentEdges);
+        let named_edges;
+        let match_clause =
+            if different_edges || match_clause.patterns.iter().any(keeps_different_edges) {
+                named_edges = pattern::with_named_edges(match_clause, &self.names);
+                &named_edges
+            } else {
+                match_clause
+            };
 
-        // Search prefix determines whether we use shortest path operators
-        let use_shortest = matches!(
-            &match_clause.search_prefix,
-            Some(
-                ast::PathSearchPrefix::AnyShortest
-                    | ast::PathSearchPrefix::AllShortest
-                    | ast::PathSearchPrefix::ShortestK(_)
-                    | ast::PathSearchPrefix::ShortestKGroups(_)
-            )
-        );
-        // ANY returns any single matching path (not necessarily shortest)
-        let use_any_limit = matches!(
-            &match_clause.search_prefix,
-            Some(ast::PathSearchPrefix::Any)
-        );
+        // The selection of a selective pattern (ISO/IEC 39075:2024 16.6): its
+        // own search prefix, else the clause's; `ALL` selects nothing. A
+        // lone node pattern has one path in each partition, itself.
+        let selection_of = |aliased: &ast::AliasedPattern| {
+            if let Some(path_function) = aliased.path_function {
+                return Some(match path_function {
+                    ast::PathFunction::ShortestPath => plan::PathSelection::Shortest(1),
+                    ast::PathFunction::AllShortestPaths => plan::PathSelection::ShortestGroups(1),
+                });
+            }
+            if matches!(aliased.pattern, ast::Pattern::Node(_)) {
+                return None;
+            }
+            match aliased
+                .search_prefix
+                .as_ref()
+                .or(match_clause.search_prefix.as_ref())?
+            {
+                ast::PathSearchPrefix::All => None,
+                ast::PathSearchPrefix::Any => Some(plan::PathSelection::Any(1)),
+                ast::PathSearchPrefix::AnyK(count) => Some(plan::PathSelection::Any(*count)),
+                ast::PathSearchPrefix::AnyShortest => Some(plan::PathSelection::Shortest(1)),
+                ast::PathSearchPrefix::AllShortest => Some(plan::PathSelection::ShortestGroups(1)),
+                ast::PathSearchPrefix::ShortestK(count) => {
+                    Some(plan::PathSelection::Shortest(*count))
+                }
+                ast::PathSearchPrefix::ShortestKGroups(count) => {
+                    Some(plan::PathSelection::ShortestGroups(*count))
+                }
+            }
+        };
 
         // Collect variables for each pattern to detect shared variables
         let pattern_vars: Vec<HashSet<String>> = match_clause
@@ -1230,58 +1360,83 @@ impl GqlTranslator {
             .map(|ap| Self::pattern_variables(&ap.pattern))
             .collect();
 
+        // The variables the input binds, those of the outer row for a
+        // subquery's `WITH *` included (none when they are not known here)
+        let input_vars = initial_input
+            .as_ref()
+            .and_then(|input| input.bound_variables(self.call_scope.borrow().as_ref()))
+            .unwrap_or_default();
+
         let mut plan: Option<LogicalOperator> = initial_input;
         let mut bound_vars: HashSet<String> = HashSet::new();
 
         for (index, aliased_pattern) in match_clause.patterns.iter().enumerate() {
             let current_vars = &pattern_vars[index];
-            let shared: Vec<String> = current_vars.intersection(&bound_vars).cloned().collect();
-
-            // Determine the input for this pattern: if shared variables exist,
-            // translate independently and join; otherwise chain as before.
-            let pattern_input = if shared.is_empty() { plan.take() } else { None };
-
-            // Check per-pattern search prefix (e.g., p = ANY SHORTEST (...))
-            let per_pattern_shortest = matches!(
-                &aliased_pattern.search_prefix,
-                Some(
-                    ast::PathSearchPrefix::AnyShortest
-                        | ast::PathSearchPrefix::AllShortest
-                        | ast::PathSearchPrefix::ShortestK(_)
-                        | ast::PathSearchPrefix::ShortestKGroups(_)
-                )
+            let mut shared = comma_part_join_variables(
+                current_vars,
+                Self::pattern_start(&aliased_pattern.pattern),
+                &bound_vars,
+                &input_vars,
             );
 
-            let pattern_plan = if let Some(path_function) = &aliased_pattern.path_function {
-                self.translate_shortest_path(
-                    &aliased_pattern.pattern,
-                    aliased_pattern.alias.as_deref(),
-                    *path_function,
-                    pattern_input,
-                )?
-            } else if use_shortest || per_pattern_shortest {
-                let prefix = aliased_pattern
-                    .search_prefix
-                    .as_ref()
-                    .or(match_clause.search_prefix.as_ref());
-                let pf = match prefix {
-                    Some(ast::PathSearchPrefix::AllShortest) => ast::PathFunction::AllShortestPaths,
-                    _ => ast::PathFunction::ShortestPath,
-                };
-                self.translate_shortest_path(
-                    &aliased_pattern.pattern,
-                    aliased_pattern.alias.as_deref(),
-                    pf,
-                    pattern_input,
-                )?
-            } else {
-                self.translate_pattern_with_alias(
-                    &aliased_pattern.pattern,
-                    pattern_input,
-                    aliased_pattern.alias.as_deref(),
-                    path_mode,
-                )?
+            let selection = selection_of(aliased_pattern);
+            let path_mode = path_mode_of(aliased_pattern);
+
+            // A path search through an edge bound before is limited to that
+            // edge, so it goes on from the rows that bind it: searched on its
+            // own and joined after, it would pick its paths without it.
+            let earlier: HashSet<String> = bound_vars.union(&input_vars).cloned().collect();
+            if selection.is_some()
+                && let ast::Pattern::Path(path) = &aliased_pattern.pattern
+                && path
+                    .edges
+                    .iter()
+                    .filter_map(|edge| edge.variable.as_ref())
+                    .any(|name| earlier.contains(name))
+            {
+                shared.clear();
+            }
+
+            // The part, going on from `pattern_input` when there is one.
+            let translate_part = |pattern_input: Option<LogicalOperator>| {
+                if let Some(selection) = selection {
+                    self.translate_path_search(
+                        &aliased_pattern.pattern,
+                        aliased_pattern.alias.as_deref(),
+                        PathSearch {
+                            selection,
+                            path_mode,
+                        },
+                        pattern_input,
+                        &earlier,
+                    )
+                } else {
+                    self.translate_pattern_with_alias(
+                        &aliased_pattern.pattern,
+                        pattern_input,
+                        aliased_pattern.alias.as_deref(),
+                        path_mode,
+                    )
+                }
             };
+
+            // Determine the input for this pattern: if shared variables exist,
+            // translate independently and join; otherwise go on from the rows
+            // before (a cross product, or an expand from the bound start). A
+            // part that reads a value of those rows goes on from them too.
+            let pattern_input = if shared.is_empty() { plan.take() } else { None };
+            let mut pattern_plan = translate_part(pattern_input)?;
+            if !shared.is_empty()
+                && comma_part_reads_earlier_rows(
+                    &pattern_plan,
+                    current_vars,
+                    &bound_vars,
+                    &input_vars,
+                )
+            {
+                shared.clear();
+                pattern_plan = translate_part(plan.take())?;
+            }
 
             if !shared.is_empty() {
                 // Join on shared variables
@@ -1315,11 +1470,24 @@ impl GqlTranslator {
             ))
         })?;
 
-        // ANY (without SHORTEST): wrap in LIMIT 1 to return a single matching path.
-        // ANY SHORTEST uses ShortestPathOperator which inherently returns one
-        // path per source/target pair, so no LIMIT 1 wrapper is needed.
-        if use_any_limit {
-            result = wrap_limit(result, 1);
+        // DIFFERENT EDGES: no two edge patterns of the clause bind the same
+        // edge. KEEP DIFFERENT EDGES asks the same of the edge patterns of one
+        // path pattern.
+        if different_edges {
+            let patterns: Vec<&ast::Pattern> =
+                match_clause.patterns.iter().map(|p| &p.pattern).collect();
+            if let Some(predicate) = pattern::different_edges(&patterns)? {
+                result = wrap_filter(result, predicate);
+            }
+        }
+        for aliased in match_clause
+            .patterns
+            .iter()
+            .filter(|p| keeps_different_edges(p))
+        {
+            if let Some(predicate) = pattern::different_edges(&[&aliased.pattern])? {
+                result = wrap_filter(result, predicate);
+            }
         }
 
         Ok(result)
@@ -1377,6 +1545,9 @@ impl GqlTranslator {
         mut plan: LogicalOperator,
         with_clause: &ast::WithClause,
     ) -> Result<LogicalOperator> {
+        // Whether the WITH groups its rows by aggregates; its WHERE is then
+        // split around the Aggregate
+        let mut has_aggregates = false;
         if !with_clause.is_wildcard {
             if with_clause.items.iter().any(|item| {
                 item.alias.is_none() && !matches!(item.expression, ast::Expression::Variable(_))
@@ -1384,36 +1555,63 @@ impl GqlTranslator {
                 return Err(super::common::unaliased_with_expression());
             }
 
-            // Check if WITH contains aggregate functions (e.g. WITH count(n) AS cnt)
-            let has_aggregates = with_clause
+            // Aggregates over a group variable are computed per row first
+            // (see `take_horizontal_aggregates`)
+            let aggregate::WithoutHorizontalAggregates {
+                items,
+                plan: horizontal_plan,
+                ..
+            } = self.take_horizontal_aggregates(&with_clause.items, None, None, plan)?;
+            plan = horizontal_plan;
+
+            // In a CALL body, the imports this WITH leaves out pass on too.
+            let projected: Vec<(String, bool)> = with_clause
                 .items
+                .iter()
+                .filter_map(|item| match (&item.alias, &item.expression) {
+                    (Some(alias), ast::Expression::Variable(name)) => {
+                        Some((alias.clone(), alias == name))
+                    }
+                    (Some(alias), _) => Some((alias.clone(), false)),
+                    (None, ast::Expression::Variable(name)) => Some((name.clone(), true)),
+                    (None, _) => None,
+                })
+                .collect();
+            let missing = self.call_imports.left_out(&projected);
+
+            // Check if WITH contains aggregate functions (e.g. WITH count(n) AS cnt)
+            has_aggregates = items
                 .iter()
                 .any(|item| contains_aggregate(&item.expression));
 
             if has_aggregates {
                 let (aggregates, auto_group_by, post_return) =
-                    self.extract_aggregates_and_groups(&with_clause.items, false)?;
+                    self.extract_aggregates_and_groups(&items, false)?;
 
                 // Split the WHERE into HAVING (aggregate-referencing
                 // conjuncts) and a post-aggregate filter (the rest).
                 // This handles mixed predicates like
-                // `WHERE a.name = 'Alix' AND cnt > 2` correctly.
+                // `WHERE a.name = 'Alix' AND cnt > 2` correctly. A conjunct
+                // that reads an import the aggregation leaves out filters
+                // after the import is back.
                 let aggregate_aliases: Vec<String> =
                     aggregates.iter().filter_map(|a| a.alias.clone()).collect();
-                let (having, post_agg_filter) =
-                    if let Some(where_clause) = &with_clause.where_clause {
-                        let pred = self.translate_expression(&where_clause.expression)?;
-                        let conjuncts = flatten_and_conjuncts(&pred);
-                        let (having_parts, filter_parts): (Vec<_>, Vec<_>) = conjuncts
-                            .into_iter()
-                            .partition(|c| references_any(c, &aggregate_aliases));
-                        (
-                            join_and_conjuncts(having_parts.into_iter().cloned().collect()),
-                            join_and_conjuncts(filter_parts.into_iter().cloned().collect()),
-                        )
-                    } else {
-                        (None, None)
-                    };
+                let (having, post_agg_filter) = if let Some(where_clause) =
+                    &with_clause.where_clause
+                {
+                    let pred = self.translate_expression(&where_clause.expression)?;
+                    let conjuncts = flatten_and_conjuncts(&pred);
+                    let (having_parts, filter_parts): (Vec<_>, Vec<_>) =
+                        conjuncts.into_iter().partition(|c| {
+                            references_any(c, &aggregate_aliases) && !references_any(c, &missing)
+                        });
+                    (
+                        join_and_conjuncts(having_parts.into_iter().cloned().collect()),
+                        join_and_conjuncts(filter_parts.into_iter().cloned().collect()),
+                    )
+                } else {
+                    (None, None)
+                };
 
                 plan = LogicalOperator::Aggregate(AggregateOp {
                     group_by: auto_group_by,
@@ -1438,14 +1636,14 @@ impl GqlTranslator {
                         pass_through_input: false,
                     });
                 }
+                plan = with_imports(plan, missing, true);
 
                 // Apply non-aggregate WHERE conjuncts as a post-aggregate filter.
                 if let Some(filter_pred) = post_agg_filter {
                     plan = wrap_filter(plan, filter_pred);
                 }
             } else {
-                let projections: Vec<Projection> = with_clause
-                    .items
+                let projections: Vec<Projection> = items
                     .iter()
                     .map(|item| {
                         Ok(Projection {
@@ -1455,11 +1653,15 @@ impl GqlTranslator {
                     })
                     .collect::<Result<_>>()?;
 
-                plan = LogicalOperator::Project(ProjectOp {
-                    projections,
-                    input: Box::new(plan),
-                    pass_through_input: false,
-                });
+                plan = with_imports(
+                    LogicalOperator::Project(ProjectOp {
+                        projections,
+                        input: Box::new(plan),
+                        pass_through_input: false,
+                    }),
+                    missing,
+                    false,
+                );
             }
         }
         // WITH * skips projection: all variables pass through unchanged
@@ -1485,15 +1687,11 @@ impl GqlTranslator {
         // Apply WHERE filter if present in WITH clause.
         // For aggregate WITH clauses, the WHERE was already split into
         // HAVING + post-aggregate filter above, so skip here.
-        if let Some(where_clause) = &with_clause.where_clause {
-            let has_agg = with_clause
-                .items
-                .iter()
-                .any(|item| contains_aggregate(&item.expression));
-            if !has_agg {
-                let predicate = self.translate_expression(&where_clause.expression)?;
-                plan = wrap_filter(plan, predicate);
-            }
+        if let Some(where_clause) = &with_clause.where_clause
+            && !has_aggregates
+        {
+            let predicate = self.translate_expression(&where_clause.expression)?;
+            plan = wrap_filter(plan, predicate);
         }
 
         // Handle DISTINCT
@@ -1503,12 +1701,53 @@ impl GqlTranslator {
         Ok(plan)
     }
 
+    /// Applies an `<order by and page statement>` before the result statement
+    /// to `plan`: its ORDER BY, then its OFFSET, then its LIMIT. The clauses
+    /// after it read only the rows it keeps, in its order.
+    fn apply_order_by_and_page(
+        &self,
+        mut plan: LogicalOperator,
+        page: &ast::OrderByAndPage,
+    ) -> Result<LogicalOperator> {
+        if let Some(order_by) = &page.order_by {
+            let keys = order_by
+                .items
+                .iter()
+                .map(|item| self.translate_sort_key(item))
+                .collect::<Result<Vec<_>>>()?;
+            plan = wrap_sort(plan, keys);
+        }
+        if let Some(offset) = &page.offset {
+            plan = wrap_skip(plan, Self::eval_as_count_expr(offset)?);
+        }
+        if let Some(limit) = &page.limit {
+            plan = wrap_limit(plan, Self::eval_as_count_expr(limit)?);
+        }
+        Ok(plan)
+    }
+
+    /// Translates one ORDER BY item to a sort key.
+    fn translate_sort_key(&self, item: &ast::OrderByItem) -> Result<SortKey> {
+        Ok(SortKey {
+            expression: self.translate_expression(&item.expression)?,
+            order: match item.order {
+                ast::SortOrder::Asc => SortOrder::Ascending,
+                ast::SortOrder::Desc => SortOrder::Descending,
+            },
+            nulls: item.nulls.map(|n| match n {
+                ast::NullsOrdering::First => NullsOrdering::First,
+                ast::NullsOrdering::Last => NullsOrdering::Last,
+            }),
+        })
+    }
+
     /// Translates `CALL { subquery }` to an `Apply` that runs the subquery for
     /// each row of `outer`. As in GQL, the subquery sees the outer row's
     /// variables: all of them, or the ones its variable scope clause names
     /// (`CALL (a, b) { ... }`; none for `CALL () { ... }`). It starts from a
     /// `ParameterScan` of them, which the planner fills for each row through
-    /// `ParameterState`, so a `WITH` in it is an ordinary `WITH`.
+    /// `ParameterState`. They stay in scope for the whole body: a `WITH` in
+    /// it passes them on whether it names them or not (see [`CallImports`]).
     fn translate_inline_call(
         &self,
         subquery: &ast::QueryStatement,
@@ -1536,9 +1775,16 @@ impl GqlTranslator {
         // out, and the scope of a CALL nested in it.
         let outer_names = outer.bound_variables(self.call_scope.borrow().as_ref());
         let enclosing = self.call_scope.replace(outer_names.clone());
-        // Each query combined in the body starts from the same outer row.
+        let imports = call_imports(&shared_variables, outer_names.as_ref());
+        // Each query combined in the body starts from the same outer row,
+        // with the same imports.
         let translate_part = |part: &ast::QueryStatement| -> Result<LogicalOperator> {
-            let mut plan = self.translate_query_from(part, input.clone())?.root;
+            let mut plan = self
+                .call_imports
+                .within(imports.clone(), || {
+                    self.translate_query_from(part, input.clone())
+                })?
+                .root;
             expand_subquery_return_star(&mut plan, outer_names.as_ref())?;
             Ok(plan)
         };
@@ -1549,11 +1795,15 @@ impl GqlTranslator {
         });
         self.call_scope.replace(enclosing);
         let inner_plan = inner?;
+        // A body that ends without a result (no RETURN, or FINISH) runs for
+        // its writes and passes each row on once, as it came in.
+        let last = combined.last().map_or(subquery, |(_, part)| part);
         Ok(LogicalOperator::Apply(ApplyOp {
             input: Box::new(outer),
             subplan: Box::new(inner_plan),
             shared_variables,
             optional,
+            unit: !returns_rows(last),
         }))
     }
 
@@ -1561,111 +1811,202 @@ impl GqlTranslator {
         self.translate_match_with_input(match_clause, None)
     }
 
-    /// Applies a WHERE predicate with awareness of LeftJoin semantics.
+    /// Applies the WHERE or FILTER of the statement to `plan`.
     ///
-    /// When the current plan ends with a LeftJoin (from OPTIONAL MATCH),
-    /// right-side predicates are pushed into the join instead of being
-    /// placed as a post-filter (which would incorrectly eliminate NULL rows).
-    fn apply_where_with_left_join_awareness(
+    /// After an OPTIONAL MATCH (`after_optional_match`) a WHERE is part of
+    /// its graph pattern (ISO/IEC 39075:2024 16.4): it decides which matches
+    /// count and keeps every row of the clauses before it, so its conjuncts go
+    /// into the optional side or the join condition (see
+    /// [`build_left_join_with_predicates`]). A FILTER, and a WHERE after any
+    /// other clause, filters the rows, also those of a MATCH whose questioned
+    /// edge (`->?`) is a left join of its own.
+    fn apply_statement_where(
         &self,
         plan: LogicalOperator,
-        predicate: LogicalExpression,
-    ) -> LogicalOperator {
-        if let LogicalOperator::LeftJoin(left_join) = plan {
-            let (join, post_filter) = build_left_join_with_predicates(left_join, Some(predicate));
-            if let Some(pf) = post_filter {
-                wrap_filter(join, pf)
+        where_clause: &ast::WhereClause,
+        after_optional_match: bool,
+    ) -> Result<LogicalOperator> {
+        let predicate = self.translate_expression(&where_clause.expression)?;
+        let of_optional_match = after_optional_match && !where_clause.filter;
+        Ok(
+            if of_optional_match && let LogicalOperator::LeftJoin(left_join) = plan {
+                let (join, post_filter) = build_left_join_with_predicates(
+                    left_join,
+                    Some(predicate),
+                    self.call_scope.borrow().as_ref(),
+                );
+                if let Some(pf) = post_filter {
+                    wrap_filter(join, pf)
+                } else {
+                    join
+                }
             } else {
-                join
-            }
-        } else {
-            wrap_filter(plan, predicate)
-        }
+                wrap_filter(plan, predicate)
+            },
+        )
     }
 
-    /// Translates a shortestPath pattern into a logical operator.
-    fn translate_shortest_path(
+    /// Translates a selective path pattern (a path search prefix other than
+    /// `ALL`, or `shortestPath`) into a path search: for each input row and
+    /// each pair of endpoints, the paths of `search.selection` among those
+    /// of `search.path_mode` (ISO/IEC 39075:2024 16.6). The edge pattern's
+    /// own conditions hold during the search, before the selection.
+    ///
+    /// `ANY` searches from the source to every node it reaches, unless the
+    /// target is bound already (by the input rows, or as the source): one
+    /// search per source, instead of one per pair of a source and a node.
+    fn translate_path_search(
         &self,
         pattern: &ast::Pattern,
         alias: Option<&str>,
-        path_function: ast::PathFunction,
+        search: PathSearch,
         input: Option<LogicalOperator>,
+        bound: &HashSet<String>,
     ) -> Result<LogicalOperator> {
-        // Extract source and target from the pattern
-        let (source_node, target_node, edge_types, direction, (min_hops, max_hops)) = match pattern
-        {
-            ast::Pattern::Path(path) => {
-                let target_node = if let Some(edge) = path.edges.last() {
-                    &edge.target
-                } else {
-                    return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        "shortestPath requires a path pattern",
-                    )));
-                };
-                let edge_types = path
-                    .edges
-                    .first()
-                    .map(|e| e.types.clone())
-                    .unwrap_or_default();
-                let direction =
-                    path.edges
-                        .first()
-                        .map_or(ExpandDirection::Both, |e| match e.direction {
-                            ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,
-                            ast::EdgeDirection::Incoming => ExpandDirection::Incoming,
-                            ast::EdgeDirection::Undirected => ExpandDirection::Both,
-                        });
-                // The path must fit the edge's quantifier: `->+` needs at least
-                // one hop, and an edge without one is a single hop.
-                let hop_bounds = path
-                    .edges
-                    .first()
-                    .map_or((1, Some(1)), pattern::edge_hop_bounds);
-                (&path.source, target_node, edge_types, direction, hop_bounds)
-            }
-            ast::Pattern::Node(_)
-            | ast::Pattern::Quantified { .. }
-            | ast::Pattern::Union(_)
-            | ast::Pattern::MultisetUnion(_) => {
+        // One edge pattern between two node patterns
+        let any = matches!(search.selection, plan::PathSelection::Any(_));
+        let what = if any { "an ANY" } else { "a shortest" };
+        let ast::Pattern::Path(path) = pattern else {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "{what} path search over a parenthesized, alternated or node-only path \
+                     pattern is not supported: it runs over one edge pattern between two nodes"
+                ),
+            )));
+        };
+        let edge = match path.edges.as_slice() {
+            [edge] => edge,
+            [] => {
                 return Err(Error::Query(QueryError::new(
                     QueryErrorKind::Semantic,
-                    "shortestPath requires a simple path pattern",
+                    format!("{what} path search needs an edge pattern between two nodes"),
+                )));
+            }
+            // Only the first edge pattern would be searched, and the nodes
+            // between the edge patterns ignored
+            _ => {
+                return Err(Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    format!("{what} path search over more than one edge pattern is not supported"),
                 )));
             }
         };
+        let direction = match edge.direction {
+            ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,
+            ast::EdgeDirection::Incoming => ExpandDirection::Incoming,
+            ast::EdgeDirection::Undirected => ExpandDirection::Both,
+        };
+        // The path must fit the edge's quantifier: `->+` needs at least
+        // one hop, and an edge without one is a single hop.
+        let (min_hops, max_hops) = pattern::edge_hop_bounds(edge);
+        let quantified = edge.min_hops.is_some() || edge.max_hops.is_some();
 
-        // Get variable names
-        let source_var = source_node
-            .variable
-            .clone()
-            .unwrap_or_else(|| format!("_anon_{}", rand_id()));
-        let target_var = target_node
-            .variable
-            .clone()
-            .unwrap_or_else(|| format!("_anon_{}", rand_id()));
+        // The search finds the paths between the endpoints, so they are not
+        // expanded between: the source is scanned, and the target too unless
+        // the search binds it. An anonymous endpoint gets a variable the
+        // search can name.
+        let named = |node: &ast::NodePattern| {
+            let mut node = node.clone();
+            node.variable.get_or_insert_with(|| self.anonymous_name());
+            node
+        };
+        let (source_node, target_node) = (named(&path.source), named(&edge.target));
+        let source_var = source_node.variable.clone().unwrap_or_default();
+        let target_var = target_node.variable.clone().unwrap_or_default();
 
-        // For shortestPath, we need to scan source and target nodes separately
-        // (not expand between them - the ShortestPathOperator will find the path)
+        // The edge variable binds the edges of each path, unless a pattern
+        // before bound it: the path then takes that edge, which the search
+        // checks for each edge like the edge pattern's own conditions
+        let bound_edge = edge.variable.as_ref().filter(|name| bound.contains(*name));
+        if let (Some(name), true) = (bound_edge, quantified) {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "'{name}' is bound to one edge before, so a quantified edge pattern cannot \
+                     bind it to a list of edges"
+                ),
+            )));
+        }
+        let candidate = match (&edge.variable, bound_edge) {
+            (Some(name), None) => name.clone(),
+            _ => self.anonymous_name(),
+        };
+        let mut conditions = Vec::new();
+        if let Some(name) = bound_edge {
+            conditions.push(LogicalExpression::Binary {
+                left: Box::new(LogicalExpression::Id(candidate.clone())),
+                op: BinaryOp::Eq,
+                right: Box::new(LogicalExpression::Id(name.clone())),
+            });
+        }
+        if !edge.properties.is_empty() {
+            conditions.push(self.build_property_predicate(&candidate, &edge.properties)?);
+        }
+        if let Some(where_expr) = &edge.where_clause {
+            conditions.push(self.translate_expression(where_expr)?);
+        }
+        let edge_condition =
+            join_and_conjuncts(conditions).map(|predicate| ShortestPathEdgeCondition {
+                variable: candidate,
+                predicate,
+            });
 
-        // Scan source node first
-        let source_plan = self.translate_node_pattern(source_node, input)?;
+        // ANY searches to every node, unless the target is bound (by the
+        // input rows or as the source) or the edge condition reads it, which
+        // the search to every node has not bound yet
+        let reads_target = edge_condition.as_ref().is_some_and(|condition| {
+            let mut read = HashSet::new();
+            collect_expression_variables(&condition.predicate, &mut read);
+            read.contains(&target_var)
+        });
+        let binds_target = any
+            && target_var != source_var
+            && !(input.is_some() && bound.contains(&target_var))
+            && !reads_target;
+        let source_plan = self.translate_node_pattern(&source_node, input)?;
+        let search_input = if binds_target {
+            source_plan
+        } else {
+            self.translate_node_pattern(&target_node, Some(source_plan))?
+        };
 
-        // Scan target node (cross-product with source)
-        let target_plan = self.translate_node_pattern(target_node, Some(source_plan))?;
+        let path_alias = alias.map_or_else(|| self.names.next("_anon_path_"), String::from);
+        let edge_variable = edge.variable.clone().filter(|_| bound_edge.is_none());
+        // A sum over the edges of the path (`sum(e.w)`) reads its edge column
+        if quantified && let Some(name) = &edge_variable {
+            self.group_list_variables
+                .borrow_mut()
+                .insert(name.clone(), path_alias.clone());
+        }
 
-        // Wrap with ShortestPath operator
-        Ok(LogicalOperator::ShortestPath(ShortestPathOp {
-            input: Box::new(target_plan),
+        let search = LogicalOperator::ShortestPath(ShortestPathOp {
+            input: Box::new(search_input),
             source_var,
             target_var,
-            edge_types,
+            edge_types: edge.types.clone(),
             direction,
-            path_alias: alias.unwrap_or("_path").to_string(),
-            all_paths: matches!(path_function, ast::PathFunction::AllShortestPaths),
+            path_alias,
+            selection: search.selection,
+            path_mode: search.path_mode,
+            binds_target,
             min_hops,
             max_hops,
-        }))
+            edge_variable,
+            quantified,
+            edge_condition,
+        });
+        // The target's labels, properties and WHERE hold for each node the
+        // search binds: they read the target alone, so they keep or drop
+        // whole partitions, after the selection as before it
+        let target_conditions = !target_node.labels.is_empty()
+            || target_node.label_expression.is_some()
+            || !target_node.properties.is_empty()
+            || target_node.where_clause.is_some();
+        if binds_target && target_conditions {
+            return self.translate_node_pattern(&target_node, Some(search));
+        }
+        Ok(search)
     }
 
     fn translate_pattern_with_alias(
@@ -1760,44 +2101,45 @@ impl GqlTranslator {
         }
     }
 
+    /// Translates a data-modifying statement of one clause (a lone `INSERT`
+    /// or `DELETE`) on the rows of `input`: `Empty` for a statement of its
+    /// own, the rows the statement before a `NEXT` passes on. It has no
+    /// `RETURN` or `FINISH`, so it has no result (an omitted result, ISO/IEC
+    /// 39075:2024 13.1; see `no_result`): it returned the last node an INSERT
+    /// created.
     fn translate_data_modification(
         &self,
         dm: &ast::DataModificationStatement,
+        input: LogicalOperator,
     ) -> Result<LogicalPlan> {
-        match dm {
-            ast::DataModificationStatement::Insert(insert) => self.translate_insert(insert),
-            ast::DataModificationStatement::Delete(delete) => self.translate_delete(delete),
-            ast::DataModificationStatement::Set(set) => self.translate_set(set),
-        }
+        let plan = match dm {
+            ast::DataModificationStatement::Insert(insert) => {
+                self.translate_insert(&insert.patterns, input)?
+            }
+            ast::DataModificationStatement::Delete(delete) => {
+                self.translate_delete(delete, input)?
+            }
+            ast::DataModificationStatement::Set(set) => self.translate_set(set, input)?,
+        };
+        Ok(LogicalPlan::new(no_result(plan)))
     }
 
-    fn translate_delete(&self, delete: &ast::DeleteStatement) -> Result<LogicalPlan> {
-        // DELETE requires a preceding MATCH clause to identify what to delete.
-        // For standalone DELETE, we need to scan and delete the specified variables.
-        // This is typically used as: MATCH (n:Label) DELETE n
-
+    /// Translates a lone DELETE on the rows of `input`. Its targets read the
+    /// variables those rows bind: one that starts its statement (`Empty`)
+    /// has none, so the binder refuses `DELETE w` (it scanned the graph for
+    /// `w` and deleted every node).
+    fn translate_delete(
+        &self,
+        delete: &ast::DeleteStatement,
+        input: LogicalOperator,
+    ) -> Result<LogicalOperator> {
         if delete.targets.is_empty() {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "DELETE requires at least one target",
             )));
         }
-
-        // Extract the first variable name for the scan
-        let first_var = match &delete.targets[0] {
-            ast::DeleteTarget::Variable(name) => name.clone(),
-            ast::DeleteTarget::Expression(_) => "__delete_expr_0".to_string(),
-        };
-
-        // Create a scan to find the entities to delete
-        let scan = LogicalOperator::NodeScan(NodeScanOp {
-            variable: first_var.clone(),
-            label: None,
-            input: None,
-        });
-
-        let plan = self.translate_delete_targets(&delete.targets, delete.detach, scan)?;
-        Ok(LogicalPlan::new(plan))
+        self.translate_delete_targets(&delete.targets, delete.detach, input)
     }
 
     /// Translates a list of delete targets into a chain of delete operators.
@@ -1843,10 +2185,14 @@ impl GqlTranslator {
         Ok(plan)
     }
 
-    fn translate_set(&self, set: &ast::SetStatement) -> Result<LogicalPlan> {
-        // SET requires a preceding MATCH clause to identify what to update.
-        // For standalone SET, we error - it should be part of a query.
-
+    /// Translates a lone SET on the rows of `input`, whose variables its
+    /// assignments read (the parser makes none; a SET is a clause of a
+    /// query).
+    fn translate_set(
+        &self,
+        set: &ast::SetStatement,
+        input: LogicalOperator,
+    ) -> Result<LogicalOperator> {
         if set.assignments.is_empty() {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
@@ -1858,13 +2204,6 @@ impl GqlTranslator {
         let first_assignment = &set.assignments[0];
         let var = &first_assignment.variable;
 
-        // Create a scan to find the entity to update
-        let scan = LogicalOperator::NodeScan(NodeScanOp {
-            variable: var.clone(),
-            label: None,
-            input: None,
-        });
-
         // Build property assignments for this variable
         let properties: Vec<(String, LogicalExpression)> = set
             .assignments
@@ -1873,35 +2212,33 @@ impl GqlTranslator {
             .map(|a| Ok((a.property.clone(), self.translate_expression(&a.value)?)))
             .collect::<Result<_>>()?;
 
-        let plan = LogicalOperator::SetProperty(SetPropertyOp {
+        Ok(LogicalOperator::SetProperty(SetPropertyOp {
             variable: var.clone(),
             properties,
             replace: false,
             is_edge: false,
-            input: Box::new(scan),
-        });
-
-        Ok(LogicalPlan::new(plan))
+            input: Box::new(input),
+        }))
     }
 
-    fn translate_insert(&self, insert: &ast::InsertStatement) -> Result<LogicalPlan> {
-        let (plan, last_variable) = self.insert_chain(&insert.patterns)?;
-        let ret = wrap_return(
-            plan,
-            vec![ReturnItem {
-                expression: LogicalExpression::Variable(last_variable),
-                alias: None,
-            }],
-            false,
-        );
-        Ok(LogicalPlan::new(ret))
+    /// Translates the patterns of an INSERT on the rows of `input`: `Empty`
+    /// when the INSERT starts its statement.
+    fn translate_insert(
+        &self,
+        patterns: &[ast::Pattern],
+        input: LogicalOperator,
+    ) -> Result<LogicalOperator> {
+        if matches!(input, LogicalOperator::Empty) {
+            self.insert_chain(patterns)
+        } else {
+            self.translate_create_patterns(patterns, input)
+        }
     }
 
-    /// Builds the CreateNode / CreateEdge chain of an INSERT that starts a
-    /// statement (no input rows). Returns the plan and the last variable
-    /// created. Used for a standalone INSERT and for the first INSERT clause of
-    /// a query such as `INSERT (a) INSERT (b) RETURN a, b`.
-    fn insert_chain(&self, patterns: &[ast::Pattern]) -> Result<(LogicalOperator, String)> {
+    /// Builds the [`CreateOp`] of an INSERT that starts a statement (no input
+    /// rows): a standalone INSERT, or the first INSERT clause of a query such
+    /// as `INSERT (a) INSERT (b) RETURN a, b`.
+    fn insert_chain(&self, patterns: &[ast::Pattern]) -> Result<LogicalOperator> {
         if patterns.is_empty() {
             return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
@@ -1909,10 +2246,7 @@ impl GqlTranslator {
             )));
         }
 
-        // Chain CreateNode operators for all patterns.
-        // First pattern gets input: None, subsequent ones chain via input: Some(prev).
-        let mut plan: Option<LogicalOperator> = None;
-        let mut last_variable = String::new();
+        let mut elements = Vec::new();
         // With no input rows, a variable is bound only if this INSERT created
         // it earlier: `INSERT (a:A), (a)-[:T]->(b)` creates `a` once and `b`.
         let mut bound: HashSet<String> = HashSet::new();
@@ -1920,56 +2254,32 @@ impl GqlTranslator {
         for pattern in patterns {
             match pattern {
                 ast::Pattern::Node(node) => {
-                    let (variable, is_new) = pattern::insert_endpoint(node, &mut bound, true)?;
+                    let (variable, is_new) =
+                        pattern::insert_endpoint(node, &mut bound, true, &self.names)?;
                     if is_new {
-                        plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
-                            variable: variable.clone(),
-                            labels: node.labels.clone(),
-                            properties: self.insert_properties(&node.properties)?,
-                            input: plan.map(Box::new),
-                        }));
+                        elements.push(self.created_node(&variable, node)?);
                     }
-                    last_variable = variable;
                 }
                 ast::Pattern::Path(path) => {
                     let (source_var, is_new) =
-                        pattern::insert_endpoint(&path.source, &mut bound, true)?;
+                        pattern::insert_endpoint(&path.source, &mut bound, true, &self.names)?;
                     if is_new {
-                        plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
-                            variable: source_var.clone(),
-                            labels: path.source.labels.clone(),
-                            properties: self.insert_properties(&path.source.properties)?,
-                            input: plan.map(Box::new),
-                        }));
+                        elements.push(self.created_node(&source_var, &path.source)?);
                     }
 
                     let mut current_src = source_var;
                     for edge in &path.edges {
                         let (target_var, is_new) =
-                            pattern::insert_endpoint(&edge.target, &mut bound, true)?;
+                            pattern::insert_endpoint(&edge.target, &mut bound, true, &self.names)?;
                         if is_new {
-                            plan = Some(LogicalOperator::CreateNode(CreateNodeOp {
-                                variable: target_var.clone(),
-                                labels: edge.target.labels.clone(),
-                                properties: self.insert_properties(&edge.target.properties)?,
-                                input: plan.map(Box::new),
-                            }));
+                            elements.push(self.created_node(&target_var, &edge.target)?);
                         }
 
                         let (from, to) = match edge.direction {
                             ast::EdgeDirection::Incoming => (target_var.clone(), current_src),
                             _ => (current_src, target_var.clone()),
                         };
-
-                        plan = Some(LogicalOperator::CreateEdge(CreateEdgeOp {
-                            variable: edge.variable.clone(),
-                            edge_type: edge.types.first().cloned().unwrap_or_default(),
-                            from_variable: from,
-                            to_variable: to,
-                            properties: self.insert_properties(&edge.properties)?,
-                            input: Box::new(plan.unwrap_or(LogicalOperator::Empty)),
-                        }));
-                        last_variable.clone_from(&target_var);
+                        elements.push(self.created_edge(edge, from, to)?);
                         current_src = target_var;
                     }
                 }
@@ -1984,13 +2294,16 @@ impl GqlTranslator {
             }
         }
 
-        let plan = plan.ok_or_else(|| {
-            Error::Query(QueryError::new(
+        if elements.is_empty() {
+            return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
                 "INSERT must create at least one node",
-            ))
-        })?;
-        Ok((plan, last_variable))
+            )));
+        }
+        Ok(LogicalOperator::Create(CreateOp {
+            elements,
+            input: None,
+        }))
     }
 
     /// Translates a subquery to a logical operator (without Return).
@@ -2011,7 +2324,11 @@ impl GqlTranslator {
             // Each MATCH goes on from the ones before it, as in the outer
             // query, so a variable in two clauses is the same node or edge.
             plan = if match_clause.optional {
-                optional_join(plan, self.translate_match(match_clause)?)
+                optional_join(
+                    plan,
+                    self.translate_match(match_clause)?,
+                    self.call_scope.borrow().as_ref(),
+                )
             } else if matches!(plan, LogicalOperator::Empty) {
                 self.translate_match(match_clause)?
             } else {
@@ -2137,11 +2454,14 @@ impl GqlTranslator {
     }
 }
 
-/// Generate a simple random-ish ID for anonymous variables.
-fn rand_id() -> u32 {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+/// The selection and path mode of a selective path pattern (see
+/// `GqlTranslator::translate_path_search`).
+#[derive(Debug, Clone, Copy)]
+struct PathSearch {
+    /// Which paths of each pair of endpoints the search keeps.
+    selection: plan::PathSelection,
+    /// The paths the search follows.
+    path_mode: PathMode,
 }
 
 use aggregate::contains_aggregate;
@@ -2494,10 +2814,14 @@ mod tests {
         assert!(result.is_ok());
 
         let plan = result.unwrap();
-        // Find CreateNode
+        // Find the Create that creates the node
         fn find_create(op: &LogicalOperator) -> bool {
             match op {
-                LogicalOperator::CreateNode(_) => true,
+                LogicalOperator::Create(create) => matches!(
+                    create.elements.as_slice(),
+                    [CreateElement::Node { variable, labels, .. }]
+                        if variable == "n" && labels == &["Person"]
+                ),
                 LogicalOperator::Return(r) => find_create(&r.input),
                 _ => false,
             }
@@ -2507,13 +2831,50 @@ mod tests {
     }
 
     #[test]
+    fn test_translate_insert_of_many_patterns_is_one_create() {
+        let patterns: Vec<String> = (0..1_000)
+            .map(|i| format!("(:Person {{v: {i}}})-[:KNOWS]->(:Person)"))
+            .collect();
+        let plan = translate(&format!("INSERT {}", patterns.join(", "))).unwrap();
+        let LogicalOperator::Return(ret) = &plan.root else {
+            panic!("a Return over the Create: {:?}", plan.root)
+        };
+        let LogicalOperator::Create(create) = ret.input.as_ref() else {
+            panic!("one Create for every pattern: {:?}", ret.input)
+        };
+        assert!(create.input.is_none());
+        assert_eq!(
+            create.elements.len(),
+            3_000,
+            "two nodes and an edge per pattern"
+        );
+        let CreateElement::Edge {
+            from_variable,
+            to_variable,
+            ..
+        } = &create.elements[2]
+        else {
+            panic!("the edge after its endpoints")
+        };
+        assert_eq!(
+            create.variables().take(2).collect::<Vec<_>>(),
+            [from_variable, to_variable]
+        );
+    }
+
+    #[test]
     fn test_translate_delete() {
         let query = "DELETE n";
         let result = translate(query);
         assert!(result.is_ok());
 
+        // A lone DELETE has no result: a RETURN of no items over the write.
         let plan = result.unwrap();
-        if let LogicalOperator::DeleteNode(del) = &plan.root {
+        let LogicalOperator::Return(ret) = &plan.root else {
+            panic!("Expected Return, got {:?}", plan.root);
+        };
+        assert!(ret.items.is_empty(), "no columns: {ret:?}");
+        if let LogicalOperator::DeleteNode(del) = ret.input.as_ref() {
             assert_eq!(del.variable, "n");
         } else {
             panic!("Expected DeleteNode operator");
@@ -2523,7 +2884,7 @@ mod tests {
     #[test]
     fn test_translate_set() {
         // SET is not a standalone statement in GQL, test the translator method directly
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
         let set_stmt = ast::SetStatement {
             assignments: vec![ast::PropertyAssignment {
                 variable: "n".to_string(),
@@ -2533,11 +2894,19 @@ mod tests {
             span: None,
         };
 
-        let result = translator.translate_set(&set_stmt);
-        assert!(result.is_ok());
+        let plan = translator
+            .translate_data_modification(
+                &ast::DataModificationStatement::Set(set_stmt),
+                LogicalOperator::Empty,
+            )
+            .unwrap();
 
-        let plan = result.unwrap();
-        if let LogicalOperator::SetProperty(set) = &plan.root {
+        // A lone SET has no result: a RETURN of no items over the write.
+        let LogicalOperator::Return(ret) = &plan.root else {
+            panic!("Expected Return, got {:?}", plan.root);
+        };
+        assert!(ret.items.is_empty(), "no columns: {ret:?}");
+        if let LogicalOperator::SetProperty(set) = ret.input.as_ref() {
             assert_eq!(set.variable, "n");
             assert_eq!(set.properties.len(), 1);
             assert_eq!(set.properties[0].0, "name");
@@ -2585,35 +2954,35 @@ mod tests {
     #[test]
     fn test_translate_empty_delete_error() {
         // Create translator directly to test empty delete
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
         let delete = ast::DeleteStatement {
             targets: vec![],
             detach: false,
             span: None,
         };
-        let result = translator.translate_delete(&delete);
+        let result = translator.translate_delete(&delete, LogicalOperator::Empty);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_translate_empty_set_error() {
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
         let set = ast::SetStatement {
             assignments: vec![],
             span: None,
         };
-        let result = translator.translate_set(&set);
+        let result = translator.translate_set(&set, LogicalOperator::Empty);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_translate_empty_insert_error() {
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
         let insert = ast::InsertStatement {
             patterns: vec![],
             span: None,
         };
-        let result = translator.translate_insert(&insert);
+        let result = translator.translate_insert(&insert.patterns, LogicalOperator::Empty);
         assert!(result.is_err());
     }
 
@@ -2671,7 +3040,7 @@ mod tests {
 
     #[test]
     fn test_binary_op_translation() {
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
 
         assert_eq!(
             translator.translate_binary_op(ast::BinaryOp::Eq),
@@ -2737,7 +3106,7 @@ mod tests {
 
     #[test]
     fn test_unary_op_translation() {
-        let translator = GqlTranslator::new();
+        let translator = GqlTranslator::new("");
 
         assert_eq!(
             translator.translate_unary_op(ast::UnaryOp::Not),
@@ -3042,11 +3411,19 @@ mod tests {
         );
 
         let plan = result.unwrap();
-        // FINISH is translated as Limit(0)
-        if let LogicalOperator::Limit(limit) = &plan.root {
+        // FINISH is a statement without a result (a RETURN of no items) over
+        // a Limit(0)
+        let LogicalOperator::Return(ret) = &plan.root else {
+            panic!(
+                "Expected a RETURN of no items for FINISH, got {:?}",
+                plan.root
+            );
+        };
+        assert!(ret.items.is_empty(), "FINISH returns no columns");
+        if let LogicalOperator::Limit(limit) = ret.input.as_ref() {
             assert_eq!(limit.count, 0, "FINISH should produce Limit(0)");
         } else {
-            panic!("Expected Limit operator for FINISH, got {:?}", plan.root);
+            panic!("Expected Limit operator for FINISH, got {:?}", ret.input);
         }
     }
 

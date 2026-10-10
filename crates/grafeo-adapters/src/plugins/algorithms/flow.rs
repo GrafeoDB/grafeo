@@ -15,7 +15,7 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
-use super::traits::{impl_algorithm, node_id_from_param};
+use super::traits::{impl_algorithm, node_id_from_param, visible_edges_from};
 
 // ============================================================================
 // Property Extraction
@@ -128,7 +128,7 @@ pub fn max_flow(
     let mut capacity: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
 
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, edge_id) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 let cap = extract_capacity(store, edge_id, capacity_property);
                 *capacity[i].entry(j).or_insert(0.0) += cap;
@@ -298,7 +298,7 @@ pub fn min_cost_max_flow(
     let mut cost: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
 
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, edge_id) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 let cap = extract_capacity(store, edge_id, capacity_property);
                 let edge_cost = extract_cost(store, edge_id, cost_property);

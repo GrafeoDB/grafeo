@@ -4,6 +4,203 @@
 use super::*;
 
 impl GqlTranslator {
+    /// Takes the horizontal aggregates out of `items` (a RETURN or WITH list),
+    /// the keys of its `order_by` and its `having` condition.
+    ///
+    /// An aggregate over a property of a group variable, as `sum(e.w)` for
+    /// the edges `e` of a quantified edge pattern, is computed for each row
+    /// over the variable's list (horizontal aggregation, ISO/IEC 39075:2024
+    /// 20.9 <aggregate function>; a group variable, 16.7): not over the rows.
+    /// Each one becomes a [`HorizontalAggregateOp`] on `plan`, into a column
+    /// of its own that the returned items read instead, so the items keep a
+    /// regular aggregate only where they have one beside it, and group by
+    /// the horizontal ones then. An item that changes keeps the name it had:
+    /// its alias, or its text (`sum(e.w)`). The keys of `order_by` and the
+    /// `having` condition read the same columns (`ORDER BY sum(e.w)`,
+    /// `HAVING max(sum(e.w)) > 100`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a binary set function (`covar_samp(e.w, e.v)`)
+    /// over a group variable, which is not supported.
+    pub(super) fn take_horizontal_aggregates(
+        &self,
+        items: &[ast::ReturnItem],
+        order_by: Option<&ast::OrderByClause>,
+        having: Option<&ast::Expression>,
+        mut plan: LogicalOperator,
+    ) -> Result<WithoutHorizontalAggregates> {
+        if self.group_list_variables.borrow().is_empty() {
+            return Ok(WithoutHorizontalAggregates {
+                items: items.to_vec(),
+                order_by: order_by.cloned(),
+                having: having.cloned(),
+                plan,
+            });
+        }
+        // The column of each horizontal aggregate, by its text, so the same
+        // aggregate twice is computed once
+        let mut columns: HashMap<String, String> = HashMap::new();
+        let mut taken = Vec::with_capacity(items.len());
+        for item in items {
+            let mut expression = item.expression.clone();
+            if !self.substitute_horizontal(&mut expression, &mut plan, &mut columns)? {
+                taken.push(item.clone());
+                continue;
+            }
+            let alias = match &item.alias {
+                Some(alias) => alias.clone(),
+                None => match self.try_extract_aggregate(&item.expression, &None)? {
+                    Some(aggregate) => {
+                        crate::query::planner::common::aggregate_column_name(&aggregate)
+                    }
+                    None => crate::query::planner::common::expression_to_string(
+                        &self.translate_expression(&item.expression)?,
+                    ),
+                },
+            };
+            taken.push(ast::ReturnItem {
+                expression,
+                alias: Some(alias),
+                span: item.span,
+            });
+        }
+        // A key that is a returned aggregate reads the item's column (the
+        // result names it after the item), any other one the aggregate's own
+        let returned: HashMap<String, String> = taken
+            .iter()
+            .filter_map(|item| match (&item.expression, &item.alias) {
+                (ast::Expression::Variable(column), Some(alias)) => {
+                    Some((column.clone(), alias.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let order_by = order_by
+            .map(|clause| {
+                let mut clause = clause.clone();
+                for key in &mut clause.items {
+                    self.substitute_horizontal(&mut key.expression, &mut plan, &mut columns)?;
+                    if let ast::Expression::Variable(column) = &key.expression
+                        && let Some(alias) = returned.get(column)
+                    {
+                        key.expression = ast::Expression::Variable(alias.clone());
+                    }
+                }
+                Ok::<_, Error>(clause)
+            })
+            .transpose()?;
+        let having = having
+            .map(|condition| {
+                let mut condition = condition.clone();
+                self.substitute_horizontal(&mut condition, &mut plan, &mut columns)?;
+                Ok::<_, Error>(condition)
+            })
+            .transpose()?;
+        Ok(WithoutHorizontalAggregates {
+            items: taken,
+            order_by,
+            having,
+            plan,
+        })
+    }
+
+    /// Replaces each horizontal aggregate in `expr` (see
+    /// [`take_horizontal_aggregates`](Self::take_horizontal_aggregates)) by
+    /// the column a [`HorizontalAggregateOp`] on `plan` computes it into.
+    /// Returns whether `expr` changed.
+    fn substitute_horizontal(
+        &self,
+        expr: &mut ast::Expression,
+        plan: &mut LogicalOperator,
+        columns: &mut HashMap<String, String>,
+    ) -> Result<bool> {
+        let group_variable = match &*expr {
+            ast::Expression::FunctionCall { name, args, .. } if is_aggregate_function(name) => {
+                match args.first() {
+                    Some(ast::Expression::PropertyAccess { variable, property })
+                        if self.group_list_variables.borrow().contains_key(variable)
+                            && binds_edge_list(plan, variable) =>
+                    {
+                        Some((variable.clone(), property.clone()))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some((list_column, property)) = group_variable {
+            let Some(aggregate) = self.try_extract_aggregate(expr, &None)? else {
+                return Ok(false);
+            };
+            if aggregate.expression2.is_some() {
+                return Err(Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    format!(
+                        "a binary set function over the group variable '{list_column}' is not \
+                         supported"
+                    ),
+                )));
+            }
+            let text = crate::query::planner::common::aggregate_column_name(&aggregate);
+            let column = match columns.get(&text) {
+                Some(column) => column.clone(),
+                None => {
+                    let column = self.names.next("_horizontal_");
+                    let input = std::mem::replace(plan, LogicalOperator::Empty);
+                    *plan = LogicalOperator::HorizontalAggregate(HorizontalAggregateOp {
+                        list_column,
+                        entity_kind: EntityKind::Edge,
+                        function: aggregate.function,
+                        distinct: aggregate.distinct,
+                        percentile: aggregate.percentile,
+                        separator: aggregate.separator,
+                        property,
+                        alias: column.clone(),
+                        input: Box::new(input),
+                    });
+                    columns.insert(text, column.clone());
+                    column
+                }
+            };
+            *expr = ast::Expression::Variable(column);
+            return Ok(true);
+        }
+        let mut changed = false;
+        match expr {
+            ast::Expression::FunctionCall { args, .. } | ast::Expression::List(args) => {
+                for arg in args {
+                    changed |= self.substitute_horizontal(arg, plan, columns)?;
+                }
+            }
+            ast::Expression::Binary { left, right, .. } => {
+                changed |= self.substitute_horizontal(left, plan, columns)?;
+                changed |= self.substitute_horizontal(right, plan, columns)?;
+            }
+            ast::Expression::Unary { operand, .. } => {
+                changed |= self.substitute_horizontal(operand, plan, columns)?;
+            }
+            ast::Expression::Case {
+                input,
+                whens,
+                else_clause,
+            } => {
+                if let Some(input) = input {
+                    changed |= self.substitute_horizontal(input, plan, columns)?;
+                }
+                for (condition, result) in whens {
+                    changed |= self.substitute_horizontal(condition, plan, columns)?;
+                    changed |= self.substitute_horizontal(result, plan, columns)?;
+                }
+                if let Some(else_clause) = else_clause {
+                    changed |= self.substitute_horizontal(else_clause, plan, columns)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(changed)
+    }
+
     /// Extracts aggregate and group-by expressions from RETURN items.
     ///
     /// Returns `(aggregates, group_by, post_return)`. The Aggregate operator
@@ -93,6 +290,176 @@ impl GqlTranslator {
         } else {
             Ok((aggregates, group_by, None))
         }
+    }
+
+    /// The grouping keys of the explicit `GROUP BY` `group_by` of the RETURN
+    /// list `items`, whose rows come from `plan`.
+    ///
+    /// In ISO GQL a grouping element is a name: `<grouping element> ::=
+    /// <binding variable reference>` (ISO/IEC 39075:2024 <group by clause>).
+    /// Grafeo also takes an expression over the incoming variables (`GROUP BY
+    /// c.name`), as Microsoft Fabric does. A name that is the alias of a
+    /// RETURN item groups by that item's value (`RETURN c.id AS cityId ...
+    /// GROUP BY cityId`, Fabric's documented example); any other name, and
+    /// every expression, reads the incoming variables. A key that repeats an
+    /// earlier one is left out.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic error for the alias of an aggregate (it is computed
+    /// per group, so it is no key), for an alias that also names an incoming
+    /// variable of another value (the two make different groups), and for
+    /// an alias inside an expression (an alias stands for its item's value
+    /// only on its own).
+    pub(super) fn translate_group_by(
+        &self,
+        group_by: &[ast::Expression],
+        items: &[ast::ReturnItem],
+        plan: &LogicalOperator,
+    ) -> Result<Vec<LogicalExpression>> {
+        let incoming = plan.bound_variables(None);
+        let is_incoming = |name: &str| incoming.as_ref().is_some_and(|names| names.contains(name));
+        // The item an alias names, unless the item returns the variable of
+        // that name (`RETURN c AS c`), which reads the same either way.
+        let aliased = |name: &str| {
+            items.iter().find(|item| {
+                item.alias.as_deref() == Some(name)
+                    && !matches!(&item.expression, ast::Expression::Variable(v) if v == name)
+            })
+        };
+        let mut keys = Vec::new();
+        let mut key_texts = HashSet::new();
+        for element in group_by {
+            let key = match element {
+                ast::Expression::Variable(name) => match aliased(name) {
+                    Some(item) if contains_aggregate(&item.expression) => {
+                        return Err(grouping_error(format!(
+                            "GROUP BY {name}: '{name}' is the alias of an aggregate, which is \
+                             computed per group, so it cannot be a grouping key"
+                        )));
+                    }
+                    Some(item) if is_incoming(name) => {
+                        let value = crate::query::planner::common::expression_to_string(
+                            &self.translate_expression(&item.expression)?,
+                        );
+                        return Err(grouping_error(format!(
+                            "GROUP BY {name} is ambiguous: '{name}' is a variable of the grouped \
+                             rows and the alias of the RETURN item {value} AS {name}, and the two \
+                             make different groups; give that RETURN item another alias"
+                        )));
+                    }
+                    Some(item) => self.translate_expression(&item.expression)?,
+                    None => self.translate_expression(element)?,
+                },
+                _ => {
+                    let key = self.translate_expression(element)?;
+                    let mut names = HashSet::new();
+                    collect_expression_variables(&key, &mut names);
+                    if let Some(alias) = names
+                        .iter()
+                        .filter(|name| aliased(name).is_some() && !is_incoming(name))
+                        .min()
+                    {
+                        return Err(grouping_error(format!(
+                            "GROUP BY {}: '{alias}' is an alias of the RETURN list, which a \
+                             grouping key names only on its own (GROUP BY {alias})",
+                            crate::query::planner::common::expression_to_string(&key)
+                        )));
+                    }
+                    key
+                }
+            };
+            if key_texts.insert(crate::query::planner::common::expression_to_string(&key)) {
+                keys.push(key);
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Makes the items of the RETURN list `items`, grouped by the explicit
+    /// `keys`, read the output of the Aggregate. `post_return` holds what
+    /// [`extract_aggregates_and_groups`](Self::extract_aggregates_and_groups)
+    /// made of them (one item each, in order), and `aggregates` are their
+    /// aggregates.
+    ///
+    /// The result has one row per group, so an item may read the grouping
+    /// keys, the aggregates and constants, which have one value per group:
+    /// a key itself (`p.name` for `GROUP BY p.name`, or through its alias),
+    /// an expression over the keys (`p.name` or `upper(p.name)` for `GROUP BY
+    /// p`, `count(*) + p.age`), as Neo4j's Cypher 25 `GROUP BY` and SQL's
+    /// functionally dependent columns do, or a constant (`3 AS three`). Each
+    /// such item is rewritten to read the key columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic error naming the first item that reads another
+    /// variable of the grouped rows outside an aggregate: it has a value per
+    /// grouped row, not per group.
+    pub(super) fn resolve_grouped_items(
+        &self,
+        items: &[ast::ReturnItem],
+        post_return: &mut [ReturnItem],
+        keys: &[LogicalExpression],
+        aggregates: &[AggregateExpr],
+    ) -> Result<()> {
+        let scope = HavingScope::new(keys, None);
+        let key_texts: Vec<String> = keys
+            .iter()
+            .map(crate::query::planner::common::expression_to_string)
+            .collect();
+        let aggregate_columns: HashSet<&str> = aggregates
+            .iter()
+            .filter_map(|aggregate| aggregate.alias.as_deref())
+            .collect();
+        for (item, returned) in items.iter().zip(post_return.iter_mut()) {
+            // A key or a direct aggregate already reads its column.
+            if let LogicalExpression::Variable(column) = &returned.expression
+                && (key_texts.contains(column) || aggregate_columns.contains(column.as_str()))
+            {
+                continue;
+            }
+            // A wrapped aggregate reads its aggregates' columns already.
+            let expression = if contains_aggregate(&item.expression) {
+                returned.expression.clone()
+            } else {
+                let expression = self.translate_expression(&item.expression)?;
+                returned.alias.get_or_insert_with(|| {
+                    crate::query::planner::common::expression_to_string(&expression)
+                });
+                expression
+            };
+            let resolved = scope.resolve(expression);
+            let mut names = HashSet::new();
+            collect_expression_variables(&resolved, &mut names);
+            if let Some(name) = names
+                .iter()
+                .filter(|name| {
+                    !key_texts.contains(*name) && !aggregate_columns.contains(name.as_str())
+                })
+                .min()
+            {
+                let written = self.translate_expression(&item.expression).map_or_else(
+                    |_| returned.alias.clone().unwrap_or_default(),
+                    |expression| crate::query::planner::common::expression_to_string(&expression),
+                );
+                // An aggregate's text drops its `*` (`count()`): name such an
+                // item by its alias.
+                let item_text = match &item.alias {
+                    Some(alias) if contains_aggregate(&item.expression) => alias.clone(),
+                    Some(alias) => format!("{written} AS {alias}"),
+                    None => written,
+                };
+                return Err(grouping_error(format!(
+                    "RETURN item {item_text} reads {name}, which is not a grouping key: with \
+                     GROUP BY {}, a RETURN item may read the grouping keys, aggregates and \
+                     constants, which have one value per group; add {name} to GROUP BY or \
+                     aggregate it",
+                    key_texts.join(", ")
+                )));
+            }
+            returned.expression = resolved;
+        }
+        Ok(())
     }
 
     /// Extracts all aggregates from a wrapping expression, assigning each a
@@ -308,6 +675,155 @@ impl GqlTranslator {
                 }
             }
             _ => Ok(None),
+        }
+    }
+}
+
+/// A semantic error of a grouping query (see `translate_group_by`).
+fn grouping_error(message: String) -> Error {
+    Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
+}
+
+/// Whether the rows of `plan` hold `variable` as the edge list of a quantified
+/// edge pattern (a group variable): the nearest clause that binds the name is
+/// such a pattern, or passes its list on unchanged (`WITH b, e`). A later
+/// pattern, UNWIND or WITH that binds the name to something else hides it.
+fn binds_edge_list(plan: &LogicalOperator, variable: &str) -> bool {
+    let named = |name: &Option<String>| name.as_deref() == Some(variable);
+    match plan {
+        LogicalOperator::Expand(expand) if named(&expand.edge_variable) => {
+            expand.is_variable_length()
+        }
+        LogicalOperator::ShortestPath(search) if named(&search.edge_variable) => {
+            search.quantified
+        }
+        LogicalOperator::Project(project) => {
+            match project
+                .projections
+                .iter()
+                .find(|projection| match (&projection.alias, &projection.expression) {
+                    (Some(alias), _) => alias == variable,
+                    (None, LogicalExpression::Variable(name)) => name == variable,
+                    _ => false,
+                }) {
+                Some(projection) => {
+                    matches!(&projection.expression, LogicalExpression::Variable(name) if name == variable)
+                        && binds_edge_list(&project.input, variable)
+                }
+                None => project.pass_through_input && binds_edge_list(&project.input, variable),
+            }
+        }
+        LogicalOperator::Return(ret) => ret.items.iter().any(|item| {
+            matches!(&item.expression, LogicalExpression::Variable(name) if name == variable || name == "*")
+                && item.alias.as_deref().is_none_or(|alias| alias == variable)
+        }) && binds_edge_list(&ret.input, variable),
+        LogicalOperator::Aggregate(aggregate) => {
+            aggregate.group_by.iter().any(
+                |key| matches!(key, LogicalExpression::Variable(name) if name == variable),
+            ) && binds_edge_list(&aggregate.input, variable)
+        }
+        LogicalOperator::NodeScan(scan) if scan.variable == variable => false,
+        LogicalOperator::Unwind(unwind) if unwind.variable == variable => false,
+        LogicalOperator::Bind(bind) if bind.variable == variable => false,
+        other => other
+            .children()
+            .into_iter()
+            .any(|child| binds_edge_list(child, variable)),
+    }
+}
+
+/// A RETURN or WITH clause whose horizontal aggregates are computed by its
+/// input `plan` (see `GqlTranslator::take_horizontal_aggregates`): its
+/// items, ORDER BY and HAVING read their columns instead.
+pub(super) struct WithoutHorizontalAggregates {
+    /// The items of the clause.
+    pub(super) items: Vec<ast::ReturnItem>,
+    /// The ORDER BY of the clause.
+    pub(super) order_by: Option<ast::OrderByClause>,
+    /// The HAVING condition of the clause.
+    pub(super) having: Option<ast::Expression>,
+    /// The input of the clause, with the horizontal aggregates.
+    pub(super) plan: LogicalOperator,
+}
+
+/// What a HAVING condition reads: the output of the Aggregate, whose columns
+/// are the grouping keys (named by their text, `m.name`) and the aggregates.
+/// A grouping key written in the condition reads its key column, and an
+/// alias of the RETURN list reads what the result computes for it (`k` for
+/// `m.name AS k`, `c` for `count(*) + 1 AS c`).
+pub(super) struct HavingScope {
+    keys: HashSet<String>,
+    aliases: HashMap<String, LogicalExpression>,
+}
+
+impl HavingScope {
+    /// The scope of an Aggregate grouped by `group_by`, whose result
+    /// `post_return` projects (if it projects one).
+    pub(super) fn new(group_by: &[LogicalExpression], post_return: Option<&[ReturnItem]>) -> Self {
+        let keys = group_by
+            .iter()
+            .map(crate::query::planner::common::expression_to_string)
+            .collect();
+        let aliases = post_return
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|item| Some((item.alias.clone()?, item.expression.clone())))
+            .collect();
+        Self { keys, aliases }
+    }
+
+    /// `expr` reading the Aggregate's output (see [`HavingScope`]).
+    pub(super) fn resolve(&self, expr: LogicalExpression) -> LogicalExpression {
+        if let LogicalExpression::Variable(name) = &expr {
+            return self.aliases.get(name).cloned().unwrap_or(expr);
+        }
+        let text = crate::query::planner::common::expression_to_string(&expr);
+        if self.keys.contains(&text) {
+            return LogicalExpression::Variable(text);
+        }
+        match expr {
+            LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
+                left: Box::new(self.resolve(*left)),
+                op,
+                right: Box::new(self.resolve(*right)),
+            },
+            LogicalExpression::Unary { op, operand } => LogicalExpression::Unary {
+                op,
+                operand: Box::new(self.resolve(*operand)),
+            },
+            LogicalExpression::FunctionCall {
+                name,
+                args,
+                distinct,
+            } => LogicalExpression::FunctionCall {
+                name,
+                args: args.into_iter().map(|arg| self.resolve(arg)).collect(),
+                distinct,
+            },
+            LogicalExpression::List(items) => {
+                LogicalExpression::List(items.into_iter().map(|item| self.resolve(item)).collect())
+            }
+            LogicalExpression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => LogicalExpression::Case {
+                operand: operand.map(|operand| Box::new(self.resolve(*operand))),
+                when_clauses: when_clauses
+                    .into_iter()
+                    .map(|(condition, result)| (self.resolve(condition), self.resolve(result)))
+                    .collect(),
+                else_clause: else_clause.map(|clause| Box::new(self.resolve(*clause))),
+            },
+            LogicalExpression::IndexAccess { base, index } => LogicalExpression::IndexAccess {
+                base: Box::new(self.resolve(*base)),
+                index: Box::new(self.resolve(*index)),
+            },
+            LogicalExpression::MapAccess { base, key } => LogicalExpression::MapAccess {
+                base: Box::new(self.resolve(*base)),
+                key,
+            },
+            other => other,
         }
     }
 }

@@ -266,9 +266,10 @@ impl<T> VersionChain<T> {
     /// Garbage collects old versions that are no longer visible to any transaction.
     ///
     /// Keeps versions that might still be visible to transactions at or after `min_epoch`.
-    pub fn gc(&mut self, min_epoch: EpochId) {
+    /// Returns how many versions it dropped.
+    pub fn gc(&mut self, min_epoch: EpochId) -> usize {
         if self.versions.is_empty() {
-            return;
+            return 0;
         }
 
         let mut keep_count = 0;
@@ -284,7 +285,9 @@ impl<T> VersionChain<T> {
             }
         }
 
+        let before = self.versions.len();
         self.versions.truncate(keep_count);
+        before - self.versions.len()
     }
 
     /// Returns an iterator over all versions with their metadata, newest first.
@@ -850,10 +853,12 @@ impl VersionIndex {
     /// Garbage collects old versions not needed by any active transaction.
     ///
     /// Keeps versions that might still be visible to transactions at or after `min_epoch`.
-    pub fn gc(&mut self, min_epoch: EpochId) {
+    /// Returns how many versions it dropped.
+    pub fn gc(&mut self, min_epoch: EpochId) -> usize {
         if self.is_empty() {
-            return;
+            return 0;
         }
+        let before = self.hot.len() + self.cold.len();
 
         // Keep versions that:
         // 1. Were created at or after min_epoch
@@ -887,6 +892,7 @@ impl VersionIndex {
             // All cold versions are older, only keep those >= min_epoch
             self.cold.retain(|v| v.epoch.as_u64() >= min_epoch.as_u64());
         }
+        before - (self.hot.len() + self.cold.len())
     }
 
     /// Returns epoch IDs of all versions, newest first.

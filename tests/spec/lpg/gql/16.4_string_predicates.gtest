@@ -3,6 +3,12 @@
 # Covers: CONTAINS, STARTS WITH, ENDS WITH, regex matching,
 # case-insensitive operations, string predicates in WHERE and RETURN.
 # Uses ecommerce dataset for realistic string filtering.
+#
+# `s =~ pattern` is a Grafeo extension (ISO GQL has no regular expressions)
+# with the meaning of Cypher's `=~`: true when the pattern matches the whole
+# string. A pattern the query gives that is not a regular expression is an
+# error that names it. The patterns here stay within what the browser build's
+# regex-lite takes (ASCII classes).
 
 meta:
   language: gql
@@ -226,3 +232,77 @@ tests:
     expect:
       rows:
         - [null]
+
+  # ---------------------------------------------------------------------------
+  # =~ regular expression match (Grafeo extension)
+  # ---------------------------------------------------------------------------
+
+  - name: regex_match_keeps_whole_string_matches
+    query: "MATCH (p:Product) WHERE p.sku =~ 'ELEC-00[12]' RETURN p.name"
+    expect:
+      rows:
+        - [Laptop Pro]
+        - [Wireless Headphones]
+
+  - name: regex_match_needs_the_whole_string
+    query: "MATCH (p:Product) WHERE p.sku =~ 'ELEC' RETURN p.name"
+    expect:
+      empty: true
+
+  - name: regex_match_alternation_leaves_out_paths
+    setup:
+      - "INSERT (:Dir {path: 'src/tests'}), (:Dir {path: 'src/app'}), (:Dir {path: 'web/node_modules/x'}), (:Dir {path: 'src/.git/hooks'}), (:Dir {path: 'src/agit'})"
+    query: "MATCH (d:Dir) WHERE NOT d.path =~ '.*(test|spec|__pycache__|node_modules|\.git).*' RETURN d.path"
+    expect:
+      rows:
+        - [src/agit]
+        - [src/app]
+
+  - name: regex_match_inline_flag
+    query: "MATCH (p:Product) WHERE p.name =~ '(?i)laptop.*' RETURN p.name"
+    expect:
+      rows:
+        - [Laptop Pro]
+
+  - name: regex_match_in_return
+    query: "MATCH (c:Customer) RETURN c.name, c.email =~ '[a-z]+@example\.org' AS valid"
+    expect:
+      rows:
+        - [Alix, true]
+        - [Gus, true]
+        - [Vincent, true]
+        - [Jules, true]
+        - [Mia, true]
+
+  - name: regex_match_in_element_where
+    query: "MATCH (c:Customer WHERE c.city =~ 'P.*') RETURN c.name"
+    expect:
+      rows:
+        - [Vincent]
+        - [Mia]
+
+  - name: regex_match_binds_tighter_than_and
+    query: "MATCH (c:Customer) WHERE c.city =~ 'A.*' AND c.tier = 'gold' RETURN c.name"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: regex_match_with_a_parameter
+    params:
+      pattern: "BOOK-.*"
+    query: "MATCH (p:Product) WHERE p.sku =~ $pattern RETURN p.name"
+    expect:
+      rows:
+        - [Graph Databases]
+        - [Rust Programming]
+
+  - name: regex_match_on_null_is_null
+    query: "MATCH (p:Product {name: 'Laptop Pro'}) RETURN p.missing =~ 'x' AS r"
+    expect:
+      rows:
+        - [null]
+
+  - name: regex_match_invalid_pattern_errors
+    query: "MATCH (p:Product) WHERE p.sku =~ '(ELEC' RETURN p.name"
+    expect:
+      error: "Invalid regular expression '(ELEC'"

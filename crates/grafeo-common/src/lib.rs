@@ -10,6 +10,7 @@
 //! ## Modules
 //!
 //! - [`types`] - Core types: [`NodeId`], [`EdgeId`], [`Value`], [`PropertyKey`]
+//! - [`change`] - Change sets: a transaction's writes, for the WAL, undo and CDC
 //! - [`collections`] - Type aliases for hash maps/sets with consistent hashing
 //! - [`memory`] - Allocators for performance-critical paths (arenas, pools)
 //! - [`mvcc`] - Version chains for snapshot isolation
@@ -17,6 +18,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod change;
 pub mod collections;
 pub mod fmt;
 pub mod memory;

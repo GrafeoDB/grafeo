@@ -2,8 +2,10 @@
 //!
 //! These types support both LPG (Labeled Property Graph) and RDF (Resource Description Framework)
 //! data models.
+//!
+//! The result structs are read, not built: later releases may add fields, so
+//! they are `#[non_exhaustive]` and a pattern names their fields with `..`.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,7 @@ impl std::fmt::Display for DatabaseMode {
 
 /// High-level database information returned by `db.info()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DatabaseInfo {
     /// Database mode (LPG or RDF).
     pub mode: DatabaseMode,
@@ -51,6 +54,7 @@ pub struct DatabaseInfo {
 
 /// Detailed database statistics returned by `db.stats()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DatabaseStats {
     /// Number of nodes (LPG) or subjects (RDF).
     pub node_count: usize,
@@ -72,6 +76,7 @@ pub struct DatabaseStats {
 
 /// Schema information for LPG databases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LpgSchemaInfo {
     /// All labels used in the database.
     pub labels: Vec<LabelInfo>,
@@ -83,6 +88,7 @@ pub struct LpgSchemaInfo {
 
 /// Information about a label.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct LabelInfo {
     /// The label name.
     pub name: String,
@@ -92,6 +98,7 @@ pub struct LabelInfo {
 
 /// Information about an edge type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct EdgeTypeInfo {
     /// The edge type name.
     pub name: String,
@@ -101,6 +108,7 @@ pub struct EdgeTypeInfo {
 
 /// Schema information for RDF databases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RdfSchemaInfo {
     /// All predicates used in the database.
     pub predicates: Vec<PredicateInfo>,
@@ -114,6 +122,7 @@ pub struct RdfSchemaInfo {
 
 /// Information about an RDF predicate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PredicateInfo {
     /// The predicate IRI.
     pub iri: String,
@@ -136,6 +145,7 @@ pub enum SchemaInfo {
 
 /// Index information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct IndexInfo {
     /// Index name.
     pub name: String,
@@ -153,6 +163,7 @@ pub struct IndexInfo {
 
 /// WAL (Write-Ahead Log) status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct WalStatus {
     /// Whether WAL is enabled.
     pub enabled: bool,
@@ -170,6 +181,7 @@ pub struct WalStatus {
 
 /// Validation result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ValidationResult {
     /// List of validation errors (empty = valid).
     pub errors: Vec<ValidationError>,
@@ -187,6 +199,7 @@ impl ValidationResult {
 
 /// A validation error.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ValidationError {
     /// Error code.
     pub code: String,
@@ -198,6 +211,7 @@ pub struct ValidationError {
 
 /// A validation warning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ValidationWarning {
     /// Warning code.
     pub code: String,
@@ -261,37 +275,22 @@ impl std::str::FromStr for DumpFormat {
     }
 }
 
-/// Compaction statistics returned after a compact operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionStats {
-    /// Bytes reclaimed.
-    pub bytes_reclaimed: usize,
-    /// Number of nodes compacted.
-    pub nodes_compacted: usize,
-    /// Number of edges compacted.
-    pub edges_compacted: usize,
-    /// Duration in milliseconds.
+/// What [`GrafeoDB::compact`](crate::GrafeoDB::compact) did.
+///
+/// `compact()` may take on more work in later releases, and its report then
+/// gains fields, so the struct is `#[non_exhaustive]`: read its fields, and
+/// expect new ones.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CompactReport {
+    /// Whether a checkpoint of the database file was written: only for a
+    /// persistent database that is not read-only.
+    pub checkpointed: bool,
+    /// The old versions dropped, in every graph: versions no open transaction
+    /// can see any more.
+    pub versions_collected: u64,
+    /// How long `compact()` took, in milliseconds.
     pub duration_ms: u64,
-}
-
-/// Metadata for dump files.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DumpMetadata {
-    /// Grafeo version that created the dump.
-    pub version: String,
-    /// Database mode.
-    pub mode: DatabaseMode,
-    /// Dump format.
-    pub format: DumpFormat,
-    /// Number of nodes.
-    pub node_count: usize,
-    /// Number of edges.
-    pub edge_count: usize,
-    /// Timestamp (ISO 8601).
-    pub created_at: String,
-    /// Additional metadata.
-    #[serde(default)]
-    pub extra: HashMap<String, String>,
 }
 
 /// Trait for administrative database operations.
@@ -576,52 +575,19 @@ mod tests {
     }
 
     #[test]
-    fn test_compaction_stats_serde() {
-        let stats = CompactionStats {
-            bytes_reclaimed: 1024,
-            nodes_compacted: 10,
-            edges_compacted: 20,
-            duration_ms: 150,
+    fn a_compact_report_round_trips_through_json() {
+        let report = CompactReport {
+            checkpointed: true,
+            versions_collected: 19,
+            duration_ms: 88,
         };
-        let json = serde_json::to_string(&stats).unwrap();
-        let parsed: CompactionStats = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.bytes_reclaimed, 1024);
-        assert_eq!(parsed.duration_ms, 150);
-    }
-
-    #[test]
-    fn test_dump_metadata_serde() {
-        let metadata = DumpMetadata {
-            version: "0.4.1".to_string(),
-            mode: DatabaseMode::Lpg,
-            format: DumpFormat::Parquet,
-            node_count: 1000,
-            edge_count: 5000,
-            created_at: "2025-01-15T12:00:00Z".to_string(),
-            extra: HashMap::new(),
-        };
-        let json = serde_json::to_string(&metadata).unwrap();
-        let parsed: DumpMetadata = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.node_count, 1000);
-        assert_eq!(parsed.format, DumpFormat::Parquet);
-    }
-
-    #[test]
-    fn test_dump_metadata_with_extra() {
-        let mut extra = HashMap::new();
-        extra.insert("compression".to_string(), "zstd".to_string());
-        let metadata = DumpMetadata {
-            version: "0.4.1".to_string(),
-            mode: DatabaseMode::Rdf,
-            format: DumpFormat::Turtle,
-            node_count: 0,
-            edge_count: 0,
-            created_at: "2025-01-15T12:00:00Z".to_string(),
-            extra,
-        };
-        let json = serde_json::to_string(&metadata).unwrap();
-        let parsed: DumpMetadata = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.extra.get("compression").unwrap(), "zstd");
+        let json = serde_json::to_string(&report).unwrap();
+        assert_eq!(
+            json, r#"{"checkpointed":true,"versions_collected":19,"duration_ms":88}"#,
+            "the field names the bindings and server clients read"
+        );
+        let parsed: CompactReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, report);
     }
 
     #[test]

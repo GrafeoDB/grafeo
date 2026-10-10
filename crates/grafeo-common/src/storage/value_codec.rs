@@ -47,9 +47,15 @@ use crate::utils::error::{Error, Result};
 /// Deepest nesting of lists, maps and paths a decode accepts.
 ///
 /// A list of scalars is 1 deep, a list holding that list 2 deep.
-/// [`encode_value`] refuses a value nested deeper. 128 is the nesting the
-/// GQL parser accepts.
-pub const MAX_VALUE_DEPTH: usize = 128;
+/// [`encode_value`] refuses a value nested deeper. Two levels above
+/// [`MAX_PROPERTY_VALUE_DEPTH`], so the history of a property (a list of
+/// `[epoch, value]` lists) of any value a write accepts encodes.
+pub const MAX_VALUE_DEPTH: usize = MAX_PROPERTY_VALUE_DEPTH + 2;
+
+/// Deepest nesting of lists, maps and paths a property value may have when
+/// it is written: 128, the nesting the GQL parser accepts. See
+/// [`nests_too_deep`].
+pub const MAX_PROPERTY_VALUE_DEPTH: usize = 128;
 
 const TAG_NULL: u8 = 0;
 const TAG_BOOL: u8 = 1;
@@ -236,44 +242,89 @@ fn put_counter(counts: &HashMap<String, u64>, out: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
+/// Whether `value` nests lists, maps and paths deeper than
+/// [`MAX_PROPERTY_VALUE_DEPTH`], the deepest property value a write accepts.
+///
+/// Writes refuse such a value before it reaches a store, so a checkpoint
+/// never meets one. Looks at most `MAX_PROPERTY_VALUE_DEPTH + 1` levels down,
+/// so a value nested far deeper costs no deeper recursion.
+#[must_use]
+pub fn nests_too_deep(value: &Value) -> bool {
+    deeper_than(value, MAX_PROPERTY_VALUE_DEPTH)
+}
+
+/// Whether `value` nests lists, maps and paths deeper than
+/// [`MAX_VALUE_DEPTH`], so [`encode_value`] refuses it.
+///
+/// Looks at most `MAX_VALUE_DEPTH + 1` levels down, so a value nested far
+/// deeper costs no deeper recursion.
+#[must_use]
+pub fn nests_too_deep_to_encode(value: &Value) -> bool {
+    deeper_than(value, MAX_VALUE_DEPTH)
+}
+
+/// Whether `value` nests lists, maps and paths more than `room` levels deep.
+fn deeper_than(value: &Value, room: usize) -> bool {
+    let inner = |item: &Value| deeper_than(item, room - 1);
+    match value {
+        Value::List(items) => room == 0 || items.iter().any(inner),
+        Value::Map(map) => room == 0 || map.values().any(inner),
+        Value::Path { nodes, edges } => room == 0 || nodes.iter().chain(edges.iter()).any(inner),
+        _ => false,
+    }
+}
+
 /// The number of bytes `encode_value` appends for `value`.
 ///
 /// For a value [`encode_value`] refuses, the size its encoding would have.
+/// The count saturates at `usize::MAX`, which every size limit refuses: a
+/// value shared many times through its `Arc`s (a list of one large value,
+/// repeated) can claim more bytes than a `usize` holds, on a 32-bit target
+/// with no more than a few GiB of claimed encoding, and the count must
+/// never wrap to a small number that passes a limit.
 #[must_use]
 pub fn encoded_len(value: &Value) -> usize {
-    1 + match value {
+    let fields = match value {
         Value::Null => 0,
         Value::Bool(_) => 1,
         Value::Int64(_) | Value::Float64(_) | Value::Timestamp(_) => 8,
-        Value::String(string) => 4 + string.len(),
-        Value::Bytes(bytes) => 4 + bytes.len(),
+        Value::String(string) => 4usize.saturating_add(string.len()),
+        Value::Bytes(bytes) => 4usize.saturating_add(bytes.len()),
         Value::Date(_) => 4,
         Value::Time(_) => 8 + 1 + 4,
         Value::ZonedDatetime(_) => 8 + 4,
         Value::Duration(_) => 3 * 8,
         Value::List(items) => values_len(items),
-        Value::Map(map) => {
-            4 + map
-                .iter()
-                .map(|(key, item)| 4 + key.as_str().len() + encoded_len(item))
-                .sum::<usize>()
-        }
-        Value::Vector(components) => 4 + 4 * components.len(),
-        Value::Path { nodes, edges } => values_len(nodes) + values_len(edges),
+        Value::Map(map) => saturating_total(
+            4,
+            map.iter().map(|(key, item)| {
+                saturating_total(4, [key.as_str().len(), encoded_len(item)].into_iter())
+            }),
+        ),
+        Value::Vector(components) => 4usize.saturating_add(components.len().saturating_mul(4)),
+        Value::Path { nodes, edges } => values_len(nodes).saturating_add(values_len(edges)),
         Value::GCounter(counts) => counter_len(counts),
-        Value::OnCounter { pos, neg } => counter_len(pos) + counter_len(neg),
-    }
+        Value::OnCounter { pos, neg } => counter_len(pos).saturating_add(counter_len(neg)),
+    };
+    fields.saturating_add(1)
 }
 
 fn values_len(values: &[Value]) -> usize {
-    4 + values.iter().map(encoded_len).sum::<usize>()
+    saturating_total(4, values.iter().map(encoded_len))
 }
 
 fn counter_len(counts: &HashMap<String, u64>) -> usize {
-    4 + counts
-        .keys()
-        .map(|replica| 4 + replica.len() + 8)
-        .sum::<usize>()
+    saturating_total(
+        4,
+        counts
+            .keys()
+            .map(|replica| (4 + 8usize).saturating_add(replica.len())),
+    )
+}
+
+/// `start` plus every one of `parts`, saturating at `usize::MAX`.
+fn saturating_total(start: usize, parts: impl Iterator<Item = usize>) -> usize {
+    parts.fold(start, usize::saturating_add)
 }
 
 /// Decodes one value at `*pos` and advances it.
@@ -286,8 +337,8 @@ fn counter_len(counts: &HashMap<String, u64>) -> usize {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] naming the byte offset in `data` of what
-/// is wrong, and leaves `*pos` as it was:
+/// Returns [`Error::Corruption`] naming the byte offset in `data` of what is
+/// wrong (`data` is bytes Grafeo wrote), and leaves `*pos` as it was:
 ///
 /// - an unknown tag;
 /// - a time of day of a full day or more;
@@ -320,7 +371,7 @@ struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     fn error(at: usize, message: impl fmt::Display) -> Error {
-        Error::Serialization(format!("value codec, byte {at}: {message}"))
+        Error::corruption(format!("value codec, byte {at}: {message}"))
     }
 
     fn remaining(&self) -> usize {
@@ -873,6 +924,51 @@ mod tests {
         }
     }
 
+    /// A list of one 1 MiB byte string, shared 5,000 times through its
+    /// `Arc`, claims about 5 GiB of encoding: more than a 32-bit `usize`
+    /// holds. The count is exact where it fits and saturates where it does
+    /// not, so it never wraps to a small size that passes a limit.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds a 1 MiB value and walks 5,000 references to it; plain arithmetic, no unsafe code"
+    )]
+    fn the_encoded_length_saturates_instead_of_wrapping() {
+        const MIB: usize = 1 << 20;
+        const COPIES: usize = 5_000;
+        let shared = Value::Bytes(Arc::from(vec![0x19u8; MIB]));
+        let list = Value::List(vec![shared.clone(); COPIES].into());
+        let claimed = 5u128 + 5_000 * (1 + 4 + 1_048_576);
+        if let Ok(exact) = usize::try_from(claimed) {
+            assert_eq!(
+                encoded_len(&list),
+                exact,
+                "the count is exact where it fits"
+            );
+        } else {
+            assert_eq!(encoded_len(&list), usize::MAX, "the count saturates");
+        }
+        let path = Value::Path {
+            nodes: vec![list.clone(); 3].into(),
+            edges: vec![list; 19].into(),
+        };
+        let claimed = 9 + 22 * (claimed);
+        assert_eq!(
+            encoded_len(&path),
+            usize::try_from(claimed).unwrap_or(usize::MAX)
+        );
+    }
+
+    #[test]
+    fn a_total_saturates_at_the_largest_size() {
+        assert_eq!(saturating_total(4, [3, 19, 88].into_iter()), 114);
+        assert_eq!(
+            saturating_total(4, [usize::MAX - 19, 88, 3].into_iter()),
+            usize::MAX
+        );
+        assert_eq!(saturating_total(usize::MAX, [3].into_iter()), usize::MAX);
+    }
+
     #[test]
     fn values_decode_one_after_another_from_a_shared_buffer() {
         let mut bytes = vec![3, 19, 88];
@@ -1079,7 +1175,7 @@ mod tests {
     fn malformed_fields_are_refused_with_their_offset() {
         let refused = |bytes: &[u8], at: usize| {
             let error = decode_value(bytes, &mut 0).unwrap_err();
-            assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+            assert!(matches!(error, Error::Corruption(_)), "{error:?}");
             let error = error.to_string();
             assert!(error.contains(&format!("byte {at}:")), "{bytes:?}: {error}");
         };
@@ -1225,6 +1321,63 @@ mod tests {
         let one_deeper = [&[11u8, 1, 0, 0, 0][..], &bytes].concat();
         let error = decode_value(&one_deeper, &mut 0).unwrap_err().to_string();
         assert!(error.contains("deeper"), "{error}");
+    }
+
+    /// The write limit leaves two levels below the codec's: a history value
+    /// (a list of `[epoch, value]` lists) of any value a write accepts still
+    /// encodes and decodes.
+    #[test]
+    fn nests_too_deep_holds_values_two_levels_below_the_codec_limit() {
+        assert_eq!(
+            MAX_PROPERTY_VALUE_DEPTH, 128,
+            "the GQL parser's nesting limit"
+        );
+        assert_eq!(MAX_VALUE_DEPTH, MAX_PROPERTY_VALUE_DEPTH + 2);
+        for depth in [
+            0,
+            1,
+            3,
+            MAX_PROPERTY_VALUE_DEPTH,
+            MAX_PROPERTY_VALUE_DEPTH + 1,
+            MAX_VALUE_DEPTH,
+            MAX_VALUE_DEPTH + 1,
+            300,
+        ] {
+            let value = nested(depth);
+            assert_eq!(
+                nests_too_deep(&value),
+                depth > MAX_PROPERTY_VALUE_DEPTH,
+                "{depth} deep: refused by writes"
+            );
+            assert_eq!(
+                encode_value(&value, &mut Vec::new()).is_err(),
+                depth > MAX_VALUE_DEPTH,
+                "{depth} deep: refused by the encoder"
+            );
+        }
+        let deepest = nested(MAX_PROPERTY_VALUE_DEPTH);
+        let version = list(vec![Value::Int64(88), deepest]);
+        let history = list(vec![version]);
+        let bytes = encoded(&history);
+        let back = decode_value(&bytes, &mut 0).unwrap();
+        assert!(
+            same(&history, &back),
+            "a history value of the deepest value"
+        );
+
+        // Width does not count, and each container kind adds a level.
+        let wide = list((0..=MAX_VALUE_DEPTH).map(|_| nested(3)).collect());
+        assert!(!nests_too_deep(&wide), "a list of shallow values");
+        let in_map = map(vec![("Mia", nested(MAX_PROPERTY_VALUE_DEPTH))]);
+        assert!(nests_too_deep(&in_map), "a map around the deepest value");
+        let in_path = Value::Path {
+            nodes: Arc::from(vec![Value::Int64(3)]),
+            edges: Arc::from(vec![nested(MAX_PROPERTY_VALUE_DEPTH)]),
+        };
+        assert!(nests_too_deep(&in_path), "a path around the deepest value");
+        assert!(!nests_too_deep(&Value::Vector(Arc::from(vec![
+            3.0f32, 19.0
+        ]))));
     }
 
     /// Every `Time` is within a day, the decoder's condition, so the encoder

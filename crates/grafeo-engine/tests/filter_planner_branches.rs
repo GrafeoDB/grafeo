@@ -97,14 +97,14 @@ fn sorted_names(result: &QueryResult, col: usize) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Label-first pushdown with Int/Float cross-type equality (values_equal_coerced)
+// Equality on a label scan without an index, Int/Float cross-type
 // ---------------------------------------------------------------------------
 
 #[test]
 fn label_first_equality_coerces_int_property_to_float_literal() {
-    // `age` is Int64 in the store; the literal is Float64. The label-first
-    // scan path (no index, label present) uses `values_equal_coerced` to
-    // decide membership and must accept the cross-type match.
+    // `age` is Int64 in the store; the literal is Float64. The filter over
+    // the label scan (no index) decides membership with `=` and must accept
+    // the cross-type match.
     let db = social_graph();
     let session = db.session();
 
@@ -117,8 +117,7 @@ fn label_first_equality_coerces_int_property_to_float_literal() {
 
 #[test]
 fn label_first_equality_coerces_float_literal_on_left() {
-    // Literal on left exercises the reversed branch of `extract_property_equality`
-    // and hits the same coerced comparison used by label-first pushdown.
+    // Literal on the left: the same `=` decides.
     let db = social_graph();
     let session = db.session();
 
@@ -489,16 +488,12 @@ fn equality_with_null_literal_is_not_pushed_down() {
 }
 
 // ---------------------------------------------------------------------------
-// extract_remaining_predicate returning both sides: combine a pushed-down
-// equality with a pushed-down equality on a second variable in the same AND
-// (forces the AND-combine branch of extract_remaining_predicate).
+// Compound equalities over a label scan
 // ---------------------------------------------------------------------------
 
 #[test]
 fn compound_equality_all_pushed_down_no_remaining_predicate() {
-    // Two equality conditions on the target variable, both pushed through
-    // the label-first path, exercising extract_remaining_predicate returning
-    // (None, None) from the AND branch.
+    // Two equality conditions on the target variable.
     let db = social_graph();
     let session = db.session();
 
@@ -511,11 +506,8 @@ fn compound_equality_all_pushed_down_no_remaining_predicate() {
 
 #[test]
 fn compound_equality_with_unindexed_third_property() {
-    // n.city = 'Amsterdam' AND n.name = 'Vincent' AND n.age > 25
-    // The two equalities push; the range is the remaining predicate --
-    // extract_remaining_predicate's AND branch returns Some for one side
-    // and None for the other, exercising the (None, Some) / (Some, None)
-    // mixed branches.
+    // n.city = 'Amsterdam' AND n.name = 'Vincent' AND n.age > 25: two
+    // equalities and a range in one AND.
     let db = social_graph();
     let session = db.session();
 

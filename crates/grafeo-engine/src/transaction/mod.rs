@@ -79,8 +79,7 @@
 //!   check. It ignores transaction identity entirely: a version is
 //!   visible if `created_epoch <= viewing_epoch` and it is not deleted
 //!   at or before `viewing_epoch`. Callers: GC ("is any active
-//!   transaction still able to see this?"), epoch-scoped scans, and
-//!   post-commit reads from the layered store.
+//!   transaction still able to see this?") and epoch-scoped scans.
 //!
 //! - **`VersionInfo::is_visible_to(viewing_epoch, viewing_tx)`** layers
 //!   "read your own writes" on top. It first rules out versions the
@@ -103,24 +102,28 @@
 //! filtered out. The owning transaction still sees it because
 //! `is_visible_to` short-circuits on `created_by == viewing_tx`.
 //!
-//! On commit, the session walks the transaction's write set and
-//! replaces every `PENDING` epoch with the real commit epoch
-//! (see [`crate::transaction::TransactionWriteTracker`] and the
-//! `finalize_*` paths in `TransactionManager`). A rollback drops the
-//! pending versions instead of finalising them, so neither state
-//! leaks into a concurrent reader's snapshot.
+//! Every write of a transaction is recorded in its change set (see
+//! `TransactionChanges`): the op with its after-image, what it replaced,
+//! and what it did to the transaction's pending version. On commit, each
+//! graph's store stamps the entries recorded for it with the commit epoch;
+//! a rollback, or a rollback to a savepoint, undoes the entries after its
+//! position, last to first, through the same stores. Neither scans a
+//! store: both cost what the transaction changed. So neither state leaks
+//! into a concurrent reader's snapshot.
 //!
 //! ## Write-write conflict detection
 //!
-//! [`TransactionWriteTracker`] is the bridge between execution-time
-//! mutations and the manager's conflict detector. Every mutation
-//! operator (node set/delete, edge set/delete) in
-//! [`grafeo_core::execution::operators`] goes through a `WriteTracker`
-//! trait call *before* touching the store. The engine's implementation
-//! forwards to [`TransactionManager::record_write`], which enforces
-//! **first-writer-wins**: if another active transaction already has
-//! the entity in its write set, the current transaction aborts with
-//! `OperatorError::WriteConflict` before the store mutates.
+//! A [`GraphWriter`](grafeo_core::execution::operators::GraphWriter) claims
+//! what each write changes through its change recorder *before* it touches
+//! the store; the engine's recorder forwards to
+//! [`TransactionManager::record_write`] (and `record_delete`,
+//! `record_endpoints`), which enforces **first-writer-wins**: if another
+//! active transaction already has the entity in its write set, the current
+//! transaction fails with `OperatorError::WriteConflict` before the store
+//! mutates. Direct calls of the database are private transactions of their
+//! own (`TransactionManager::begin_private`), so they conflict with open
+//! transactions, and the other way round. A node a write creates is not
+//! claimed: no other transaction knows its id before the commit.
 //!
 //! This is a commit-time contract, not a best-effort check: the
 //! mutation is refused synchronously, so the overlay store never
@@ -190,13 +193,19 @@
 //! # }
 //! ```
 
+mod changes;
 mod manager;
 mod mvcc;
-#[cfg(feature = "parallel")]
-pub mod parallel;
 #[cfg(feature = "lpg")]
 mod prepared;
+#[cfg(feature = "wal")]
+pub(crate) mod v1_group;
 
+#[cfg(feature = "lpg")]
+pub(crate) use changes::{BuiltIndex, StandaloneChange};
+pub(crate) use changes::{
+    TransactionChanges, UndoFailure, is_kept_by_external_store, kept_by_external_store,
+};
 pub(crate) use manager::CommitsHeld;
 pub use manager::{
     EntityId, GraphEntity, IsolationLevel, TransactionInfo, TransactionManager, TransactionState,
@@ -205,12 +214,6 @@ pub use manager::{
 pub use mvcc::{VersionChain, VersionInfo};
 #[cfg(feature = "lpg")]
 pub use prepared::{CommitInfo, PreparedCommit};
-pub use write_tracker::TransactionWriteTracker;
-
-mod write_tracker;
 
 #[cfg(feature = "wal")]
 pub(crate) mod wal_buffer;
-
-#[cfg(feature = "parallel")]
-pub use parallel::{BatchRequest, BatchResult, ExecutionStatus, ParallelExecutor};

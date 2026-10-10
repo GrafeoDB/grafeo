@@ -7,8 +7,8 @@
 //! - `NodeListOperator`: Produces rows from a pre-computed list of node IDs.
 //!   Used when property index lookups return a specific set of matching nodes.
 
-use super::{Operator, OperatorResult};
-use crate::execution::DataChunk;
+use super::{Operator, OperatorResult, Predicate};
+use crate::execution::{DataChunk, SelectionVector};
 use grafeo_common::types::{LogicalType, NodeId};
 
 /// An operator that produces exactly one empty row.
@@ -122,6 +122,9 @@ pub struct NodeListOperator {
     position: usize,
     /// Number of nodes to produce per chunk.
     chunk_size: usize,
+    /// The condition a node must meet to be produced, when the list holds
+    /// candidates (see [`Self::with_predicate`]).
+    predicate: Option<Box<dyn Predicate>>,
 }
 
 impl NodeListOperator {
@@ -132,35 +135,52 @@ impl NodeListOperator {
             nodes,
             position: 0,
             chunk_size,
+            predicate: None,
         }
+    }
+
+    /// Produces only the nodes of the list that meet `predicate`: an index
+    /// lookup finds candidates (every node `=` may find equal to its key),
+    /// and the predicate decides each, as a filter over a scan would.
+    #[must_use]
+    pub fn with_predicate(mut self, predicate: Box<dyn Predicate>) -> Self {
+        self.predicate = Some(predicate);
+        self
     }
 }
 
 impl Operator for NodeListOperator {
     fn next(&mut self) -> OperatorResult {
-        if self.position >= self.nodes.len() {
-            return Ok(None);
-        }
+        while self.position < self.nodes.len() {
+            let end = (self.position + self.chunk_size).min(self.nodes.len());
+            let count = end - self.position;
 
-        let end = (self.position + self.chunk_size).min(self.nodes.len());
-        let count = end - self.position;
+            let schema = [LogicalType::Node];
+            let mut chunk = DataChunk::with_capacity(&schema, self.chunk_size);
 
-        let schema = [LogicalType::Node];
-        let mut chunk = DataChunk::with_capacity(&schema, self.chunk_size);
-
-        {
-            let col = chunk
-                .column_mut(0)
-                .expect("column 0 exists: chunk created with single-column schema");
-            for i in self.position..end {
-                col.push_node_id(self.nodes[i]);
+            {
+                let col = chunk
+                    .column_mut(0)
+                    .expect("column 0 exists: chunk created with single-column schema");
+                for i in self.position..end {
+                    col.push_node_id(self.nodes[i]);
+                }
             }
+
+            chunk.set_count(count);
+            self.position = end;
+
+            if let Some(predicate) = &self.predicate {
+                let selection =
+                    SelectionVector::from_predicate(count, |row| predicate.evaluate(&chunk, row));
+                if selection.is_empty() {
+                    continue;
+                }
+                chunk.set_selection(selection);
+            }
+            return Ok(Some(chunk));
         }
-
-        chunk.set_count(count);
-        self.position = end;
-
-        Ok(Some(chunk))
+        Ok(None)
     }
 
     fn reset(&mut self) {

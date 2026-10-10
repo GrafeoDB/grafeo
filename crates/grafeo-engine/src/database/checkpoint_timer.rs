@@ -44,8 +44,7 @@ impl CheckpointTimer {
     /// Starts the checkpoint timer.
     ///
     /// The background thread wakes every `interval` and checkpoints the
-    /// database state in `sources`. The database restarts the timer when that
-    /// state changes shape (`compact()`).
+    /// database state in `sources`.
     pub(super) fn start(
         interval: Duration,
         file_manager: Arc<GrafeoFileManager>,
@@ -165,8 +164,6 @@ mod tests {
     fn sources(store: &Arc<LpgStore>) -> CheckpointSources {
         CheckpointSources {
             store: Some(Arc::clone(store)),
-            #[cfg(feature = "compact-store")]
-            layered: None,
             catalog: Arc::new(Catalog::new()),
             transaction_manager: Arc::new(TransactionManager::new()),
             #[cfg(feature = "triple-store")]

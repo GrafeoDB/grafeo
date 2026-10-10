@@ -2,7 +2,7 @@
 
 use super::record::WalEntry;
 use super::{CheckpointMetadata, WalCipher, WalManager, WalRecord};
-use grafeo_common::utils::error::{Error, Result, StorageError};
+use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::{grafeo_debug, grafeo_info, grafeo_warn};
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -395,9 +395,7 @@ impl WalRecovery {
             reader.read_exact(&mut encrypted)?;
             let aad = b"grafeo-wal";
             enc.decrypt(&encrypted, aad).map_err(|_| {
-                Error::Storage(StorageError::Corruption(
-                    "WAL decryption failed: wrong key or corrupted record".to_string(),
-                ))
+                Error::corruption("WAL decryption failed: wrong key or corrupted record")
             })?
         } else {
             // Plaintext frame: data + crc32
@@ -409,9 +407,7 @@ impl WalRecovery {
             let stored_checksum = u32::from_le_bytes(checksum_buf);
             let computed_checksum = crc32fast::hash(&data);
             if stored_checksum != computed_checksum {
-                return Err(Error::Storage(StorageError::Corruption(
-                    "WAL checksum mismatch".to_string(),
-                )));
+                return Err(Error::corruption("WAL checksum mismatch"));
             }
             data
         };
@@ -426,9 +422,7 @@ impl WalRecovery {
             let stored_checksum = u32::from_le_bytes(checksum_buf);
             let computed_checksum = crc32fast::hash(&data);
             if stored_checksum != computed_checksum {
-                return Err(Error::Storage(StorageError::Corruption(
-                    "WAL checksum mismatch".to_string(),
-                )));
+                return Err(Error::corruption("WAL checksum mismatch"));
             }
             data
         };

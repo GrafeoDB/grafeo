@@ -66,6 +66,9 @@ pub struct AdaptiveFlusher {
     shutdown_tx: Option<mpsc::Sender<mpsc::Sender<FlusherStats>>>,
     /// Background thread handle.
     handle: Option<JoinHandle<()>>,
+    /// The statistics so far, which the background thread updates after
+    /// each flush.
+    stats: Arc<parking_lot::Mutex<FlusherStats>>,
 }
 
 impl AdaptiveFlusher {
@@ -99,17 +102,20 @@ impl AdaptiveFlusher {
     ) -> Result<Self, std::io::Error> {
         let target_interval = Duration::from_millis(target_interval_ms);
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let stats = Arc::new(parking_lot::Mutex::new(FlusherStats::default()));
+        let loop_stats = Arc::clone(&stats);
 
         let handle = thread::Builder::new()
             .name("grafeo-wal-flusher".to_string())
             .spawn(move || {
-                Self::flusher_loop(&sync, target_interval, shutdown_rx);
+                Self::flusher_loop(&sync, target_interval, shutdown_rx, &loop_stats);
             })?;
 
         Ok(Self {
             target_interval,
             shutdown_tx: Some(shutdown_tx),
             handle: Some(handle),
+            stats,
         })
     }
 
@@ -117,6 +123,12 @@ impl AdaptiveFlusher {
     #[must_use]
     pub fn target_interval(&self) -> Duration {
         self.target_interval
+    }
+
+    /// The statistics so far, while the flusher runs.
+    #[must_use]
+    pub fn stats(&self) -> FlusherStats {
+        *self.stats.lock()
     }
 
     /// Gracefully shuts down the flusher, performing a final flush.
@@ -152,6 +164,7 @@ impl AdaptiveFlusher {
         sync: &dyn Fn() -> grafeo_common::utils::error::Result<()>,
         target_interval: Duration,
         shutdown_rx: mpsc::Receiver<mpsc::Sender<FlusherStats>>,
+        shared: &parking_lot::Mutex<FlusherStats>,
     ) {
         let mut last_flush_duration = Duration::ZERO;
         let mut stats = FlusherStats::default();
@@ -199,6 +212,7 @@ impl AdaptiveFlusher {
                             target_interval
                         );
                     }
+                    *shared.lock() = stats;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     // Channel closed without shutdown signal - exit gracefully
@@ -266,6 +280,37 @@ mod tests {
 
         let flusher = AdaptiveFlusher::new(Arc::clone(&wal), 75).unwrap();
         assert_eq!(flusher.target_interval(), Duration::from_millis(75));
+    }
+
+    /// The statistics show each flush while the flusher runs, before its
+    /// shutdown returns them.
+    #[test]
+    fn stats_show_the_flushes_while_it_runs() {
+        let flushes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counted = Arc::clone(&flushes);
+        let mut flusher = AdaptiveFlusher::with_sync(
+            move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            },
+            1,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while flusher.stats().flush_count == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let seen = flusher.stats().flush_count;
+        assert!(seen > 0, "a flush shows while the flusher runs");
+        let at_shutdown = flusher.shutdown().unwrap();
+        assert!(
+            at_shutdown.flush_count >= seen,
+            "{at_shutdown:?} after {seen}"
+        );
+        assert!(
+            flushes.load(std::sync::atomic::Ordering::Relaxed) > at_shutdown.flush_count,
+            "the final flush at shutdown is not counted"
+        );
     }
 
     #[test]

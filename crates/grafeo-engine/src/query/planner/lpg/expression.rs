@@ -18,11 +18,19 @@
 
 use super::{
     Direction, Error, ExpandDirection, FilterExpression, LogicalExpression, LogicalOperator,
-    PathMode, Result, Value, convert_binary_op, convert_unary_op,
+    Result, Value, convert_binary_op, convert_unary_op,
 };
+use crate::query::functions::{check_function_call, check_pattern_match};
 
 impl super::Planner {
     /// Converts a logical expression to a filter expression.
+    ///
+    /// # Errors
+    ///
+    /// A call to a function the evaluator does not compute in this build, and
+    /// a `=~` or LIKE this build cannot match (see [`crate::query::functions`]),
+    /// are errors here, before any row is read: the evaluator would answer
+    /// them with a null for every row.
     pub(super) fn convert_expression(&self, expr: &LogicalExpression) -> Result<FilterExpression> {
         match expr {
             LogicalExpression::Literal(v) => Ok(FilterExpression::Literal(v.clone())),
@@ -32,6 +40,9 @@ impl super::Planner {
                 property: property.clone(),
             }),
             LogicalExpression::Binary { left, op, right } => {
+                // `=~` and LIKE need regular expressions, and a `=~` pattern
+                // the query gives must be one.
+                check_pattern_match(*op, right)?;
                 let left_expr = self.convert_expression(left)?;
                 let right_expr = self.convert_expression(right)?;
                 let filter_op = convert_binary_op(*op)?;
@@ -50,6 +61,9 @@ impl super::Planner {
                 })
             }
             LogicalExpression::FunctionCall { name, args, .. } => {
+                // The evaluator answers a call it cannot compute with a null
+                // for every row: refuse it here, before any row is read.
+                check_function_call(name, args.len())?;
                 let filter_args: Vec<FilterExpression> = args
                     .iter()
                     .map(|a| self.convert_expression(a))
@@ -290,7 +304,8 @@ impl super::Planner {
     ///
     /// Accepts a single edge, like `(n)-[:TYPE]->()`, `(n)-[:TYPE]->(:Label)`
     /// or `()-[:TYPE]->(n)`, and a path of at least one edge with no
-    /// condition on its end, like `(n)-[:TYPE*]->()`, in the WALK path mode.
+    /// condition on its end, like `(n)-[:TYPE*]->()`, in the WALK path mode
+    /// (or a directed TRAIL, which reaches the same nodes).
     /// Everything else goes to the semi-join rewrite in `plan_filter`: a path
     /// with a minimum other than one hop, a labeled end or another path mode,
     /// a label on the start, an inner `WHERE` other than a label on the end,
@@ -316,10 +331,11 @@ impl super::Planner {
                     return Err(unsupported());
                 }
                 let one_edge = expand.max_hops == Some(1) && !expand.quantified;
-                // A path mode other than WALK (TRAIL, SIMPLE, ACYCLIC) limits the
-                // paths of a longer pattern, which the check does not; a single
-                // edge is expanded the same way in every mode.
-                if !one_edge && expand.path_mode != PathMode::Walk {
+                // The check follows walks: a path mode that reaches other nodes
+                // (an undirected TRAIL, SIMPLE, ACYCLIC) limits the paths of a
+                // longer pattern, which the check does not; a single edge is
+                // expanded the same way in every mode.
+                if !one_edge && !super::reachability::reaches_as_walks(expand) {
                     return Err(unsupported());
                 }
 

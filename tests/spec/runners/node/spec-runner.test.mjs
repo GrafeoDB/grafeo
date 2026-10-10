@@ -5,7 +5,11 @@
  * vitest tests that execute queries through the Node.js GrafeoDB bindings.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+
+// A test that loads a dataset (the LDBC files) takes seconds through the binding,
+// close to vitest's 5 s default on a busy machine: give each test a minute.
+vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
@@ -191,8 +195,8 @@ for (const filePath of gtestFiles) {
             const db = GrafeoDB.create()
             try {
               if (!isAvailable(db, lang)) return ctx.skip()
-              // Check per-test requires
-              for (const req of (tc.requires || [])) {
+              // Check the file's and the test's requires, as single tests do
+              for (const req of [...(meta.requires || []), ...(tc.requires || [])]) {
                 if (!isAvailable(db, req)) return ctx.skip()
               }
               const effectiveDataset = tc.dataset || meta.dataset

@@ -32,6 +32,11 @@ The rules above cover:
 - the `grafeo` command line tool
 - the database file format
 
+Settings and results grow within a minor version. A patch release can add a setting to `Config` and the other
+option types, a field to a result type, or a key to a dict or object a binding returns, and never removes or renames
+one. In Rust these types are `#[non_exhaustive]`: build options with their constructors and `with_*` methods, and
+name the fields of a result in a pattern with `..`. In the bindings, read the keys you need.
+
 `grafeo-common`, `grafeo-core`, `grafeo-storage`, `grafeo-adapters` and `grafeo-engine` are implementation crates.
 They are published so that `grafeo` can depend on them, and their APIs may change in any release. Depend on
 `grafeo` instead.

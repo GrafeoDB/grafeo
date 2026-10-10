@@ -30,12 +30,15 @@ pub(super) fn chunk_aad(entry: &super::directory::DirectoryEntry) -> Vec<u8> {
 }
 
 /// Associated data binding a chunk to its section and position:
-/// `grafeo-chunk:{section type byte}:{chunk kind byte}:{graph}:{column}:{first row}`.
+/// `grafeo-chunk:{section type byte}:{chunk kind byte}:{namespace byte}:{graph}:{column}:{first row}`.
 ///
 /// The one place that puts a chunk's fields in that order: the writer
 /// encrypts with it and the reader ([`chunk_aad`]) decrypts with it. Every
 /// part is an on-disk number, never a Rust name, so renaming a variant cannot
-/// make an encrypted file undecryptable.
+/// make an encrypted file undecryptable. The namespace is there because
+/// column ids repeat across namespaces: without it a node property chunk and
+/// an edge property chunk of the same key, graph and rows would authenticate
+/// in each other's place.
 pub(super) fn chunk_aad_for(
     section_type: grafeo_common::storage::SectionType,
     meta: &grafeo_common::storage::ChunkMeta,
@@ -43,6 +46,7 @@ pub(super) fn chunk_aad_for(
     chunk_aad_parts(
         section_type.to_u8(),
         meta.kind.to_byte(),
+        meta.namespace.to_byte(),
         meta.graph_id,
         meta.column_id,
         meta.row_start,
@@ -57,11 +61,13 @@ pub(super) fn chunk_aad_for(
 pub(super) fn chunk_aad_parts(
     section_type: u8,
     kind: u8,
+    namespace: u8,
     graph_id: u32,
     column_id: u32,
     row_start: u64,
 ) -> Vec<u8> {
-    format!("grafeo-chunk:{section_type}:{kind}:{graph_id}:{column_id}:{row_start}").into_bytes()
+    format!("grafeo-chunk:{section_type}:{kind}:{namespace}:{graph_id}:{column_id}:{row_start}")
+        .into_bytes()
 }
 
 /// Associated data binding a directory block to its offset:
@@ -73,7 +79,7 @@ pub(super) fn directory_aad(offset: u64) -> Vec<u8> {
 
 #[cfg(all(test, feature = "encryption"))]
 mod tests {
-    use grafeo_common::storage::{ChunkKind, ChunkMeta, SectionType};
+    use grafeo_common::storage::{ChunkKind, ChunkMeta, ChunkNamespace, SectionType};
 
     use super::super::directory::DirectoryEntry;
     use super::{chunk_aad, chunk_aad_parts, directory_aad};
@@ -91,6 +97,7 @@ mod tests {
             section_version: 3,
             meta: ChunkMeta {
                 kind: ChunkKind::Stream,
+                namespace: ChunkNamespace::EdgeProperties,
                 codec: 19,
                 graph_id: 0x0102_0304,
                 column_id: 0x0506_0708,
@@ -112,7 +119,7 @@ mod tests {
         let aad = chunk_aad(&wide_entry());
         assert_eq!(
             aad,
-            b"grafeo-chunk:20:4:16909060:84281096:1230066625199609624",
+            b"grafeo-chunk:20:4:33:16909060:84281096:1230066625199609624",
             "as text: {}",
             String::from_utf8_lossy(&aad)
         );
@@ -121,13 +128,13 @@ mod tests {
     #[test]
     fn the_associated_data_of_raw_numbers_is_that_of_the_entry_holding_them() {
         assert_eq!(
-            chunk_aad_parts(20, 4, 0x0102_0304, 0x0506_0708, 0x1112_1314_1516_1718),
+            chunk_aad_parts(20, 4, 33, 0x0102_0304, 0x0506_0708, 0x1112_1314_1516_1718),
             chunk_aad(&wide_entry()),
             "a known entry's associated data is built from its on-disk numbers"
         );
         assert_eq!(
-            text(chunk_aad_parts(250, 88, 3, 19, 88)),
-            "grafeo-chunk:250:88:3:19:88",
+            text(chunk_aad_parts(250, 88, 250, 3, 19, 88)),
+            "grafeo-chunk:250:88:250:3:19:88",
             "numbers this version does not know are written the same way"
         );
     }
@@ -143,7 +150,7 @@ mod tests {
             crc: 0,
             flags: 0,
         };
-        assert_eq!(text(chunk_aad(&lpg)), "grafeo-chunk:2:0:0:0:0");
+        assert_eq!(text(chunk_aad(&lpg)), "grafeo-chunk:2:0:0:0:0:0");
         let placed = DirectoryEntry {
             section_type: SectionType::PropertyIndex,
             meta: ChunkMeta {
@@ -157,9 +164,24 @@ mod tests {
         };
         assert_eq!(
             text(chunk_aad(&placed)),
-            "grafeo-chunk:20:0:3:19:88",
-            "section type byte, kind byte, graph, column, first row"
+            "grafeo-chunk:20:0:0:3:19:88",
+            "section type byte, kind byte, namespace byte, graph, column, first row"
         );
         assert_eq!(text(directory_aad(12_288)), "grafeo-directory:12288");
+    }
+
+    /// A node and an edge property column share key ids, so the namespace is
+    /// all that tells two such chunks apart: their associated data differs.
+    #[test]
+    fn chunks_that_differ_only_in_namespace_have_different_associated_data() {
+        let entry = |namespace| DirectoryEntry {
+            meta: ChunkMeta::column(3, 19, 88, 2, 0).in_namespace(namespace),
+            ..wide_entry()
+        };
+        let node = chunk_aad(&entry(ChunkNamespace::NodeProperties));
+        let edge = chunk_aad(&entry(ChunkNamespace::EdgeProperties));
+        assert_eq!(text(node.clone()), "grafeo-chunk:20:2:17:3:19:88");
+        assert_eq!(text(edge.clone()), "grafeo-chunk:20:2:33:3:19:88");
+        assert_ne!(node, edge);
     }
 }

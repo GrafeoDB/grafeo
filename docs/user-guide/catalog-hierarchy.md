@@ -66,7 +66,10 @@ DROP SCHEMA reporting;
   or types created under `SESSION SET SCHEMA b`.
 - `CREATE NODE TYPE`, `CREATE EDGE TYPE`, and `CREATE GRAPH TYPE` are scoped
   to the current schema. `SHOW NODE TYPES` lists only the current schema's
-  types.
+  types, and only they check the nodes and edges written in that schema
+  (their property types, `NOT NULL`, defaults and inherited properties), from
+  GQL, Cypher and the direct API alike: a type created without a schema does
+  not check writes in `a`.
 - `DROP SCHEMA` fails unless the schema is empty (no user-created graphs and
   no types). The auto-created default graph is exempt.
 - Schemas and graphs round-trip through snapshot export / import and WAL

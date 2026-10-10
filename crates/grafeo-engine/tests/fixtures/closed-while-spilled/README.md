@@ -5,9 +5,8 @@
 them only there. Each directory holds one such database, `spilled.grafeo` with its `spilled.grafeo.spill/`:
 
 - `0.5.44/`: written by `grafeo-engine` 0.5.44 from crates.io (a 0.5.x file).
-- `0.6.0-dev/`: written by a 0.6 development build before #594 (commit `09b5c45b`, a 0.6 file).
 
-Both went through the same steps, in a persistent database with `TierOverride::ForceDisk` on the vector section:
+It went through these steps, in a persistent database with `TierOverride::ForceDisk` on the vector section:
 
 1. Four `:Item` nodes with a `name` and a 3-dimension `embedding`: Alix `[3, 19, 88]`, Gus `[19, 88, 3]`, Vincent
    `[88, 3, 19]`, Jules `[3.19, 19.88, 88.3]`; then a vector index on `:Item(embedding)` (3 dimensions).
@@ -55,5 +54,7 @@ fn main() {
 }
 ```
 
-The 0.6.0-dev database ran the same steps as a test on commit `09b5c45b`. Regenerate either only to add content; the
-tests describe what each one holds.
+A 0.6 file in this state (old spill files beside a 0.6 database, as a crash leaves them after migrating such a
+database and before deleting them) is built by the tests themselves (`build_0_6` in `tests/legacy_spill.rs`): a file
+written by a 0.6 development build before #594 had format revision 0, which no release reads. Regenerate the 0.5.44
+database only to add content; the tests describe what it holds.

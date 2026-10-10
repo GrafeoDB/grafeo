@@ -1,12 +1,30 @@
 //! Section types and traits for the `.grafeo` container format.
 //!
 //! A `.grafeo` file is a container of typed sections. Each section holds
-//! one kind of data (LPG nodes, RDF triples, vector indexes, etc.) and
-//! can be independently read, written, checksummed, and mmap'd.
+//! one kind of data (LPG nodes, RDF triples, vector indexes, etc.) and is
+//! written and read as a sequence of chunks.
 //!
-//! The [`Section`] trait is the contract between serializers (grafeo-core)
-//! and the container I/O layer (grafeo-storage). Serializers produce opaque
-//! bytes; the container writes them to disk without knowing the contents.
+//! The [`Section`] trait is the contract between the section encodings
+//! (grafeo-core, and the catalog in grafeo-engine) and the container I/O layer
+//! (grafeo-storage). A checkpoint hands each section a [`SectionSink`], into
+//! which [`Section::write_to`] writes its chunks one at a time, each described
+//! by a [`ChunkMeta`] (its kind, graph, column, rows and codec); an open hands
+//! it a [`SectionSource`], from which [`Section::read_from`] fetches them one
+//! at a time. The container stores each chunk's bytes, with its own checksum,
+//! without knowing what they hold.
+//!
+//! A section writes its metadata chunk ([`ChunkKind::Meta`]) and either the
+//! column chunks of its tables ([`ChunkKind::Column`], with
+//! [`ChunkKind::History`] for older versions of the values) or the pieces of
+//! its byte streams ([`ChunkKind::Stream`], cut by
+//! [`ChunkStreamWriter`](crate::storage::ChunkStreamWriter)). A
+//! [`ChunkKind::Raw`] chunk holds a section's bytes whole, in the layout of
+//! [`Section::serialize`]: a 0.5.x file holds each section as one raw chunk,
+//! which `read_from` hands to [`Section::deserialize`] (see [`legacy_bytes`]).
+//! The trait has no default `write_to` or `read_from`, so no section is
+//! written whole by accident; [`write_raw`] and [`read_raw`] write and read
+//! one raw chunk, for test sections and the catalog section, which is still
+//! written whole.
 
 use std::sync::Arc;
 
@@ -300,11 +318,64 @@ impl ChunkKind {
     }
 }
 
+/// Which numbering a chunk's column id belongs to. Within a namespace a
+/// column id has one meaning; across namespaces ids repeat (property key 0
+/// of the node table and of the edge table, say).
+///
+/// The byte of each namespace is part of the file format and never changes.
+/// The bytes come in groups with room to grow: 0 for a section's own
+/// numbering, 16 to 31 for the node table, 32 to 47 for the edge table and
+/// 48 to 63 for adjacency. These are reserved and not written yet, so a
+/// reader refuses them as it refuses any byte it does not know: 18 node
+/// deletes, 19 node label bitmaps, 20 node versions, 34 edge deletes, 36 edge
+/// versions, 48 outgoing adjacency and 49 incoming adjacency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum ChunkNamespace {
+    /// The section's own numbering: metadata, raw chunks, streams, and every
+    /// section without node and edge tables.
+    Section = 0,
+    /// The node table's fixed columns: column 0 holds the labels.
+    NodeStructure = 16,
+    /// The node table's property columns.
+    NodeProperties = 17,
+    /// The edge table's fixed columns: 1 the source node, 2 the target node,
+    /// 3 the edge type.
+    EdgeStructure = 32,
+    /// The edge table's property columns.
+    EdgeProperties = 33,
+}
+
+impl ChunkNamespace {
+    /// The on-disk byte for this namespace.
+    #[must_use]
+    pub const fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// Decodes an on-disk byte, or `None` for one this version does not know
+    /// (reserved bytes included).
+    #[must_use]
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Section),
+            16 => Some(Self::NodeStructure),
+            17 => Some(Self::NodeProperties),
+            32 => Some(Self::EdgeStructure),
+            33 => Some(Self::EdgeProperties),
+            _ => None,
+        }
+    }
+}
+
 /// A chunk as its section describes it; storage adds where it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkMeta {
     /// What the chunk holds.
     pub kind: ChunkKind,
+    /// The numbering [`column_id`](Self::column_id) belongs to.
+    pub namespace: ChunkNamespace,
     /// Codec identifier of the chunk's bytes (0 for none).
     pub codec: u8,
     /// Graph the chunk belongs to (0 when not graph-specific).
@@ -320,11 +391,13 @@ pub struct ChunkMeta {
 }
 
 impl ChunkMeta {
-    /// Metadata of a raw chunk: kind [`ChunkKind::Raw`], everything else zero.
+    /// Metadata of a raw chunk: kind [`ChunkKind::Raw`], namespace
+    /// [`ChunkNamespace::Section`], everything else zero.
     #[must_use]
     pub const fn raw() -> Self {
         Self {
             kind: ChunkKind::Raw,
+            namespace: ChunkNamespace::Section,
             codec: 0,
             graph_id: 0,
             column_id: 0,
@@ -344,7 +417,9 @@ impl ChunkMeta {
     }
 
     /// Metadata of a column chunk: `row_count` rows of column `column_id` of
-    /// graph `graph_id` from row `row_start`, encoded with `codec`.
+    /// graph `graph_id` from row `row_start`, encoded with `codec`, in
+    /// namespace [`ChunkNamespace::Section`] (see
+    /// [`in_namespace`](Self::in_namespace)).
     #[must_use]
     pub const fn column(
         graph_id: u32,
@@ -355,6 +430,7 @@ impl ChunkMeta {
     ) -> Self {
         Self {
             kind: ChunkKind::Column,
+            namespace: ChunkNamespace::Section,
             codec,
             graph_id,
             column_id,
@@ -363,8 +439,11 @@ impl ChunkMeta {
         }
     }
 
-    /// Metadata of a history chunk: the older versions of the values of the
-    /// column chunk with the same graph, column and rows.
+    /// Metadata of a history chunk: the older versions of the values of
+    /// column `column_id` of graph `graph_id` over these rows. The column
+    /// chunk with the same graph, column and rows holds their current values;
+    /// it is absent when no row of the range has one (every property there
+    /// was removed last), so a history chunk can come alone.
     #[must_use]
     pub const fn history(
         graph_id: u32,
@@ -385,6 +464,7 @@ impl ChunkMeta {
     pub const fn stream_piece(graph_id: u32, stream: u32, offset: u64) -> Self {
         Self {
             kind: ChunkKind::Stream,
+            namespace: ChunkNamespace::Section,
             codec: 0,
             graph_id,
             column_id: stream,
@@ -393,12 +473,20 @@ impl ChunkMeta {
         }
     }
 
-    /// What must be unique within a section: (kind byte, graph, column, first
-    /// row). The codec and the row count are not part of it.
+    /// The same chunk with its column id in `namespace`.
     #[must_use]
-    pub const fn identity(&self) -> (u8, u32, u32, u64) {
+    pub const fn in_namespace(self, namespace: ChunkNamespace) -> Self {
+        Self { namespace, ..self }
+    }
+
+    /// What must be unique within a section: (kind byte, namespace byte,
+    /// graph, column, first row). The codec and the row count are not part of
+    /// it.
+    #[must_use]
+    pub const fn identity(&self) -> (u8, u8, u32, u32, u64) {
         (
             self.kind.to_byte(),
+            self.namespace.to_byte(),
             self.graph_id,
             self.column_id,
             self.row_start,
@@ -428,6 +516,17 @@ pub trait SectionSource {
     /// Returns an error if `index` is out of range or the bytes cannot be read.
     fn fetch(&self, index: usize) -> Result<bytes::Bytes>;
 
+    /// The bytes the chunk at `index` is stored in, known without fetching
+    /// it: [`fetch`](Self::fetch) returns at most this many (an encrypted
+    /// chunk is stored with its nonce and tag). In a file it is the length
+    /// the directory gives, which the container checked lies inside the
+    /// file, so a reader can bound what it allocates by it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `index` is out of range.
+    fn stored_length(&self, index: usize) -> Result<u64>;
+
     /// The section version every chunk of the section was written with (0
     /// for 0.5.x bytes).
     fn section_version(&self) -> u8;
@@ -443,7 +542,7 @@ pub trait SectionSource {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Serialization`] when raw chunks come several or next to
+/// Returns [`Error::Corruption`] when raw chunks come several or next to
 /// chunks of other kinds, or when the one raw chunk has a codec, a graph, a
 /// column or rows; any error from fetching the chunk.
 pub fn legacy_bytes(source: &dyn SectionSource) -> Result<Option<bytes::Bytes>> {
@@ -455,12 +554,12 @@ pub fn legacy_bytes(source: &dyn SectionSource) -> Result<Option<bytes::Bytes>> 
     match chunks {
         _ if raw == 0 => Ok(None),
         [meta] if *meta == ChunkMeta::raw() => Ok(Some(source.fetch(0)?)),
-        [meta] => Err(Error::Serialization(format!(
+        [meta] => Err(Error::corruption(format!(
             "the raw chunk of a section has codec {}, graph {}, column {}, first row {}, \
              rows {}; the raw chunk of 0.5.x section bytes has all of them 0",
             meta.codec, meta.graph_id, meta.column_id, meta.row_start, meta.row_count
         ))),
-        _ => Err(Error::Serialization(format!(
+        _ => Err(Error::corruption(format!(
             "a section holds {raw} raw chunks among {} chunks; 0.5.x section bytes are \
              exactly one raw chunk",
             chunks.len()
@@ -490,16 +589,68 @@ pub fn check_version(
     }
 }
 
+/// Writes `section` whole, as one raw chunk ([`ChunkMeta::raw`]) holding the
+/// bytes of [`Section::serialize`]: how a 0.5.x file holds every section.
+///
+/// For sections without chunks of their own: test sections, and the catalog
+/// section, which is still written whole.
+///
+/// # Errors
+///
+/// Returns the error of `serialize`, or the sink's.
+pub fn write_raw(section: &dyn Section, sink: &mut dyn SectionSink) -> Result<()> {
+    sink.write_chunk(ChunkMeta::raw(), &section.serialize()?)
+}
+
+/// Reads `section` from the one raw chunk [`write_raw`] writes and a 0.5.x
+/// file holds, passing its bytes to [`Section::deserialize`].
+///
+/// The chunk must be [`ChunkMeta::raw`] exactly: no codec, graph, column or
+/// rows (as [`legacy_bytes`] requires). The section version is not checked.
+///
+/// # Errors
+///
+/// Returns [`Error::Corruption`] naming the section unless `source` holds
+/// exactly that one chunk; any error from fetching or deserializing it.
+pub fn read_raw(section: &mut dyn Section, source: &dyn SectionSource) -> Result<()> {
+    let section_type = section.section_type();
+    match source.chunks() {
+        [meta] if *meta == ChunkMeta::raw() => {
+            let bytes = source.fetch(0)?;
+            section.deserialize(&bytes)
+        }
+        [meta] if meta.kind == ChunkKind::Raw => Err(Error::corruption(format!(
+            "section {section_type:?}: the raw chunk has codec {}, graph {}, column {}, first \
+             row {} and rows {}, where a raw chunk has all of them 0",
+            meta.codec, meta.graph_id, meta.column_id, meta.row_start, meta.row_count
+        ))),
+        [meta] => Err(Error::corruption(format!(
+            "section {section_type:?}: expected one raw chunk, found one chunk of kind {:?}",
+            meta.kind
+        ))),
+        chunks => Err(Error::corruption(format!(
+            "section {section_type:?}: expected one raw chunk, found {} chunks",
+            chunks.len()
+        ))),
+    }
+}
+
 // ── Section Trait ───────────────────────────────────────────────────
 
-/// A serializable section for the `.grafeo` container.
+/// A section of the `.grafeo` container.
 ///
-/// Implemented in `grafeo-core` for each data model (LPG, RDF) and index
-/// type (Vector, Text, Ring). The container I/O layer in `grafeo-storage`
-/// calls `serialize()` and `deserialize()` without knowing the section internals.
+/// Implemented in `grafeo-core` for each data model (LPG, RDF, the compact
+/// store and its overlay deletions) and index type (vector, text, ring), and
+/// in `grafeo-engine` for the catalog. A checkpoint calls
+/// [`write_to`](Section::write_to) for every section, and an open calls
+/// [`read_from`](Section::read_from) with the chunks the image holds; the
+/// container I/O layer in `grafeo-storage` stores the chunks without knowing
+/// what they hold.
 ///
-/// The unified flush model uses this trait: the engine iterates all sections,
-/// serializes dirty ones, and passes the bytes to the container writer.
+/// [`serialize`](Section::serialize) and [`deserialize`](Section::deserialize)
+/// encode the section as one buffer, in the layout 0.5.x files hold (the
+/// compact store: the encoding its stream holds): the spill path uses them,
+/// and `read_from` hands the one raw chunk of a 0.5.x file to `deserialize`.
 pub trait Section: Send + Sync {
     /// The section type identifier.
     fn section_type(&self) -> SectionType;
@@ -528,49 +679,30 @@ pub trait Section: Send + Sync {
     /// Returns an error if deserialization fails (e.g., corrupt data, version mismatch).
     fn deserialize(&mut self, data: &[u8]) -> Result<()>;
 
-    /// Stream section contents to `sink` as chunks.
+    /// Streams the section to `sink` as chunks.
     ///
-    /// The default writes [`serialize`](Section::serialize) as one raw chunk.
+    /// There is no default: every section writes its own chunks (a metadata
+    /// chunk and column chunks or stream pieces), or calls [`write_raw`] to be
+    /// written whole as one raw chunk.
     ///
     /// # Errors
     ///
-    /// Returns an error if serialization fails or the sink rejects a chunk.
-    fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
-        sink.write_chunk(ChunkMeta::raw(), &self.serialize()?)
-    }
+    /// Returns an error if the section cannot be encoded or the sink rejects
+    /// a chunk.
+    fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()>;
 
-    /// Populate section contents from the chunks of `source`.
+    /// Populates the section from the chunks of `source`.
     ///
-    /// The default requires exactly one raw chunk without a codec and passes
-    /// its bytes to [`deserialize`](Section::deserialize).
+    /// There is no default: every section reads the chunks its
+    /// [`write_to`](Section::write_to) writes and, if 0.5.x files hold it,
+    /// the one raw chunk of their bytes (see [`legacy_bytes`]), or calls
+    /// [`read_raw`].
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Serialization`] unless the source holds exactly one
-    /// raw chunk with codec 0, or any error from fetching or deserializing it.
-    fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
-        match source.chunks() {
-            [meta] if meta.kind == ChunkKind::Raw && meta.codec == 0 => {
-                let bytes = source.fetch(0)?;
-                self.deserialize(&bytes)
-            }
-            [meta] if meta.kind == ChunkKind::Raw => Err(Error::Serialization(format!(
-                "section {:?}: the raw chunk has codec {}, which this section cannot decode",
-                self.section_type(),
-                meta.codec
-            ))),
-            [meta] => Err(Error::Serialization(format!(
-                "section {:?}: expected one raw chunk, found one chunk of kind {:?}",
-                self.section_type(),
-                meta.kind
-            ))),
-            chunks => Err(Error::Serialization(format!(
-                "section {:?}: expected one raw chunk, found {} chunks",
-                self.section_type(),
-                chunks.len()
-            ))),
-        }
-    }
+    /// Returns [`Error::Corruption`] for chunks the section does not read or
+    /// that do not decode, or any error from fetching them.
+    fn read_from(&mut self, source: &dyn SectionSource) -> Result<()>;
 
     /// Whether this section has been modified since the last flush.
     fn is_dirty(&self) -> bool;
@@ -979,6 +1111,14 @@ mod tests {
             Ok(())
         }
 
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
+        }
+
         fn is_dirty(&self) -> bool {
             self.dirty
         }
@@ -1012,6 +1152,7 @@ mod tests {
         stub.mark_clean();
     }
 
+    /// A section written whole: its bytes as one raw chunk.
     struct Bytes3(Vec<u8>);
 
     impl Section for Bytes3 {
@@ -1024,6 +1165,12 @@ mod tests {
         fn deserialize(&mut self, data: &[u8]) -> Result<()> {
             self.0 = data.to_vec();
             Ok(())
+        }
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            write_raw(self, sink)
+        }
+        fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+            read_raw(self, source)
         }
         fn is_dirty(&self) -> bool {
             false
@@ -1054,13 +1201,16 @@ mod tests {
         fn fetch(&self, index: usize) -> Result<bytes::Bytes> {
             Ok(bytes::Bytes::copy_from_slice(&self.1[index]))
         }
+        fn stored_length(&self, index: usize) -> Result<u64> {
+            Ok(self.1[index].len() as u64)
+        }
         fn section_version(&self) -> u8 {
             self.2
         }
     }
 
     #[test]
-    fn a_section_without_chunks_writes_one_raw_chunk_and_reads_it_back() {
+    fn write_raw_writes_one_raw_chunk_and_read_raw_reads_it_back() {
         let mut sink = VecSink::default();
         Bytes3(b"Amsterdam".to_vec()).write_to(&mut sink).unwrap();
         assert_eq!(sink.0, [(ChunkMeta::raw(), b"Amsterdam".to_vec())]);
@@ -1100,6 +1250,54 @@ mod tests {
             .to_string();
         assert!(error.contains("codec 3"), "{error}");
         assert!(section.0.is_empty(), "nothing was deserialized");
+    }
+
+    /// A raw chunk is the whole section: one placed in a graph, a column or
+    /// rows is not one `write_raw` wrote, nor 0.5.x bytes.
+    #[test]
+    fn read_raw_refuses_a_raw_chunk_with_a_graph_a_column_or_rows() {
+        for (case, placed) in [
+            (
+                "graph 3",
+                ChunkMeta {
+                    graph_id: 3,
+                    ..ChunkMeta::raw()
+                },
+            ),
+            (
+                "column 19",
+                ChunkMeta {
+                    column_id: 19,
+                    ..ChunkMeta::raw()
+                },
+            ),
+            (
+                "first row 88",
+                ChunkMeta {
+                    row_start: 88,
+                    ..ChunkMeta::raw()
+                },
+            ),
+            (
+                "rows 19",
+                ChunkMeta {
+                    row_count: 19,
+                    ..ChunkMeta::raw()
+                },
+            ),
+        ] {
+            let mut section = Bytes3(Vec::new());
+            let error = read_raw(
+                &mut section,
+                &VecSource(vec![placed], vec![b"Berlin".to_vec()], 1),
+            )
+            .map_or_else(|error| error.to_string(), |()| "accepted".to_string());
+            assert!(
+                error.contains(case) && error.contains("Catalog"),
+                "{case}: {error}"
+            );
+            assert!(section.0.is_empty(), "{case}: nothing was deserialized");
+        }
     }
 
     #[test]
@@ -1158,13 +1356,65 @@ mod tests {
                 ..ChunkMeta::raw()
             }
         );
-        assert_eq!(column.identity(), (ChunkKind::Column.to_byte(), 3, 19, 88));
+        assert_eq!(
+            column.identity(),
+            (ChunkKind::Column.to_byte(), 0, 3, 19, 88)
+        );
         assert_eq!(
             ChunkMeta::column(3, 19, 88, 1, 0).identity(),
             column.identity(),
             "the row count and the codec are not part of the identity"
         );
         assert_ne!(history.identity(), column.identity(), "the kind is");
+        let node = column.in_namespace(ChunkNamespace::NodeProperties);
+        let edge = column.in_namespace(ChunkNamespace::EdgeProperties);
+        assert_eq!(
+            node.identity(),
+            (ChunkKind::Column.to_byte(), 17, 3, 19, 88)
+        );
+        assert_ne!(
+            node.identity(),
+            edge.identity(),
+            "the namespace is: one key id names a node and an edge column"
+        );
+        assert_eq!(
+            (node.kind, node.graph_id, node.column_id, node.row_start),
+            (column.kind, 3, 19, 88),
+            "in_namespace changes the namespace only"
+        );
+    }
+
+    /// The namespace bytes are part of the format: they never change, and a
+    /// reserved or unknown byte decodes to nothing.
+    #[test]
+    fn chunk_namespaces_keep_their_bytes() {
+        let known = [
+            (ChunkNamespace::Section, 0),
+            (ChunkNamespace::NodeStructure, 16),
+            (ChunkNamespace::NodeProperties, 17),
+            (ChunkNamespace::EdgeStructure, 32),
+            (ChunkNamespace::EdgeProperties, 33),
+        ];
+        for (namespace, byte) in known {
+            assert_eq!(namespace.to_byte(), byte, "{namespace:?}");
+            assert_eq!(ChunkNamespace::from_byte(byte), Some(namespace), "{byte}");
+        }
+        for reserved in [18, 19, 20, 34, 36, 48, 49] {
+            assert_eq!(
+                ChunkNamespace::from_byte(reserved),
+                None,
+                "reserved {reserved}"
+            );
+        }
+        let unknown = (0..=u8::MAX)
+            .filter(|&byte| ChunkNamespace::from_byte(byte).is_some())
+            .count();
+        assert_eq!(unknown, known.len(), "every other byte is unknown");
+        assert_eq!(
+            ChunkMeta::raw().namespace,
+            ChunkNamespace::Section,
+            "chunks are in the section's numbering unless placed in a namespace"
+        );
     }
 
     /// Closes the deferred A1 item: the branch for a chunk of another kind.

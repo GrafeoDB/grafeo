@@ -65,6 +65,9 @@ Operators can also request specific sizes via chunk size hints (Small, Default, 
 
 ## Morsel-Driven Parallelism
 
+!!! note "Not used by queries yet"
+    The morsel scheduler and parallel pipeline below exist in `grafeo-core`, but queries do not run on them: each query runs on one thread through the push pipeline. Parallel query execution is planned on the [roadmap](../../roadmap.md), wired in once a benchmark shows it pays off.
+
 Work is divided into morsels (64K rows by default), which are larger than DataChunks to amortize scheduling overhead. Each worker thread runs its own operator chain on independent morsels:
 
 ```text

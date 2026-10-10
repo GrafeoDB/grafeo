@@ -41,6 +41,8 @@ CREATE GRAPH TYPE social_network (
 CREATE GRAPH my_social TYPED social_network
 ```
 
+A graph type with a body is closed: a graph bound to it takes only nodes whose labels are its node types, edges of its edge types, and the properties those types declare. Writing anything else to the graph, with a query in it (`USE GRAPH my_social`) or through a graph handle, fails with an error naming the label, edge type or property and the graph type. A graph type declared with `{node_types: [...], edge_types: [...], open: true}` is open and checks only the property types.
+
 ### Dropping Graphs
 
 ```sql
@@ -88,6 +90,51 @@ CREATE OR REPLACE NODE TYPE Person (
     age INTEGER,
     email STRING NOT NULL
 )
+```
+
+### Property Types
+
+Each property of a node or edge type has one of these types. A value written to the property (when a node or edge of the type is created, or with `SET`) must have the type, or the write fails; `NULL` is accepted unless the property is `NOT NULL`. Types match strictly, with two conversions that lose nothing: an integer written to a `FLOAT64` property is stored as a float (an integer beyond 2^53 that has no exact float fails), and a zoned datetime written to a `TIMESTAMP` property is stored as its instant in UTC. A float is not an `INT64`, and a zoned datetime is not a `LOCAL DATETIME`.
+
+| Type | Also written | Values |
+|------|--------------|--------|
+| `STRING` | `VARCHAR`, `TEXT` | Strings |
+| `INT64` | `INT`, `INTEGER`, `BIGINT` | Integers |
+| `FLOAT64` | `FLOAT`, `DOUBLE`, `REAL` | Floats |
+| `BOOLEAN` | `BOOL` | `TRUE` and `FALSE` |
+| `DATE` | | Dates, such as `date('2024-03-19')` |
+| `TIME` | | Times of day, such as `time('08:30:00')` |
+| `LOCAL DATETIME` | | Dates with a time and no time zone, such as `local_datetime('2024-03-19T08:30:00')` |
+| `TIMESTAMP` | `DATETIME` | The same values as `LOCAL DATETIME` |
+| `ZONED DATETIME` | | Dates with a time and a UTC offset, such as `zoned_datetime('2024-03-19T08:30:00+01:00')` |
+| `DURATION` | `INTERVAL` | Durations, such as `duration('P3D')` |
+| `BYTES` | `BINARY`, `BLOB` | Byte strings |
+| `LIST` | `ARRAY` | Lists of any values |
+| `LIST<type>` | | Lists whose elements all have `type`, such as `LIST<STRING>` or `LIST<ZONED DATETIME>`; they nest up to 128 levels, as in `LIST<LIST<INT64>>` |
+| `MAP` | `RECORD` | Maps, such as `{mode: 'fast', level: 3}` |
+| `NODE` | | Nodes |
+| `EDGE` | `RELATIONSHIP` | Edges |
+| `ANY` | | Any value |
+
+Any other type name is refused, a typo or a type of ISO GQL that Grafeo does not support (such as `INT32` or `DECIMAL`). A property name may be any name a property map takes, keywords such as `starts`, `ends` and `contains` included.
+
+```sql
+CREATE NODE TYPE Event (
+    title STRING NOT NULL,
+    begins ZONED DATETIME,
+    departs LOCAL DATETIME,
+    tags LIST<STRING>
+)
+```
+
+`SHOW NODE TYPES` and `SHOW EDGE TYPES` list each property with its type, in the first spelling of the table.
+
+A property of a node or edge type can have a default value, a literal after `DEFAULT`: a node or edge created without the property gets it. The literal is a string, a number (signed numbers such as `-3` included), `TRUE`, `FALSE` or `NULL`, and must be a value of the property's type, or the statement fails: an integer is a default of a `FLOAT64` property too, `NULL` is no default of a `NOT NULL` property, and the types without such literals (dates, lists, maps and the others) take `NULL` only.
+
+```sql
+CREATE NODE TYPE City (name STRING NOT NULL, country STRING DEFAULT 'NL')
+CREATE EDGE TYPE ROUTE (km INT64 DEFAULT 88)
+CREATE NODE TYPE Reading (celsius INT64 DEFAULT -3, scale FLOAT64 DEFAULT 1)
 ```
 
 ### Altering Types
@@ -149,6 +196,15 @@ CREATE GRAPH TYPE labeled_type (
     NODE TYPE Person KEY (PersonLabel) (name STRING NOT NULL, age INTEGER),
     EDGE TYPE KNOWS
 )
+```
+
+The element types can also be written as patterns, in braces as ISO GQL writes them or in parentheses. An edge pattern declares its edge type with the node types at its ends as the only sources and targets:
+
+```sql
+CREATE GRAPH TYPE routes {
+    (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City),
+    (:Country {code STRING})
+}
 ```
 
 ### Graph Type from Existing Graph (LIKE)

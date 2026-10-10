@@ -331,8 +331,9 @@ class TestVectorSearch:
     def test_vector_search_no_index_fails(self, db):
         """Searching without an index should fail."""
         db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
-        with pytest.raises(RuntimeError, match="No vector index"):
+        with pytest.raises(RuntimeError, match=r"no vector index on :Doc\(embedding\)") as raised:
             db.vector_search("Doc", "embedding", [1.0, 0.0, 0.0], k=1)
+        assert raised.value.error_code == "GRAFEO-V001"
 
     def test_vector_search_euclidean(self, db):
         """Vector search with euclidean metric should work."""
@@ -431,5 +432,6 @@ class TestBatchVectorSearch:
     def test_batch_vector_search_no_index_fails(self, db):
         """Batch searching without an index should fail."""
         db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
-        with pytest.raises(RuntimeError, match="No vector index"):
+        with pytest.raises(RuntimeError, match=r"no vector index on :Doc\(embedding\)") as raised:
             db.batch_vector_search("Doc", "embedding", [[1.0, 0.0, 0.0]], k=1)
+        assert raised.value.error_code == "GRAFEO-V001"

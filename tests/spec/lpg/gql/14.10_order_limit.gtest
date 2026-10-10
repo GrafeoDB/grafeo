@@ -72,6 +72,47 @@ tests:
         - [C, 3]
         - [B, null]
 
+  # ISO/IEC 39075 leaves the null ordering of a key without NULLS FIRST or
+  # NULLS LAST to the implementation; Grafeo's GQL puts nulls last both ways
+  # (#571). Cypher keeps openCypher's order (nulls first when descending).
+  - name: order_by_desc_puts_nulls_last_by_default
+    setup:
+      - "INSERT (:Item {name: 'A', rank: 1})"
+      - "INSERT (:Item {name: 'B'})"
+      - "INSERT (:Item {name: 'C', rank: 3})"
+    query: MATCH (n:Item) RETURN n.name, n.rank ORDER BY n.rank DESC
+    expect:
+      ordered: true
+      rows:
+        - [C, 3]
+        - [A, 1]
+        - [B, null]
+
+  - name: order_by_asc_puts_nulls_last_by_default
+    setup:
+      - "INSERT (:Item {name: 'A', rank: 1})"
+      - "INSERT (:Item {name: 'B'})"
+      - "INSERT (:Item {name: 'C', rank: 3})"
+    query: MATCH (n:Item) RETURN n.name, n.rank ORDER BY n.rank
+    expect:
+      ordered: true
+      rows:
+        - [A, 1]
+        - [C, 3]
+        - [B, null]
+
+  - name: order_by_desc_limit_skips_nulls_by_default
+    setup:
+      - "INSERT (:Item {name: 'A', rank: 1})"
+      - "INSERT (:Item {name: 'B'})"
+      - "INSERT (:Item {name: 'C', rank: 3})"
+    query: MATCH (n:Item) RETURN n.name ORDER BY n.rank DESC LIMIT 2
+    expect:
+      ordered: true
+      rows:
+        - [C]
+        - [A]
+
   - name: limit_restricts_rows
     query: MATCH (n:Person) RETURN n.name LIMIT 2
     expect:

@@ -338,8 +338,8 @@ def remove_edge_property(self, edge_id: int, key: str) -> bool
 Create or update nodes and edges by a key property, many rows in one statement. The rows are checked like
 a query (constraints, schema), and a call writes all of its rows or none. Rows apply in order: a key
 repeated within one call creates one node or edge, which the later rows update. Both return a dict with
-`created`, `updated`, `skipped` and `skipped_rows` (the indices of the skipped rows, at most 1,000). Graph
-handles (`db.graph(name)`) have the same methods.
+`created`, `updated`, `skipped` and `skipped_rows` (the indices of the skipped rows, at most 1,000); the dict
+gains keys only, as the admin dicts do. Graph handles (`db.graph(name)`) have the same methods.
 
 ### upsert_nodes()
 
@@ -392,7 +392,7 @@ These methods convert between Grafeo and pandas/polars DataFrames. Requires `pan
 
 ### nodes_df()
 
-Export all nodes as a pandas DataFrame. Columns: `id` (int), `labels` (list[str]), plus one column per unique property key. Missing properties are `None`.
+Export all nodes as a pandas DataFrame. Columns: `_id` (int), `_labels` (list[str]), plus one column per unique property key. Missing properties are `None`. Lists, maps and durations are Python lists and dicts, with or without pyarrow installed (see [Property types](#property-types)).
 
 ```python
 def nodes_df(self) -> pandas.DataFrame
@@ -400,12 +400,12 @@ def nodes_df(self) -> pandas.DataFrame
 
 ```python
 df = db.nodes_df()
-print(df[df["labels"].apply(lambda l: "Person" in l)])
+print(df[df["_labels"].apply(lambda l: "Person" in l)])
 ```
 
 ### edges_df()
 
-Export all edges as a pandas DataFrame. Columns: `id` (int), `source` (int), `target` (int), `type` (str), plus one column per unique property key. Missing properties are `None`.
+Export all edges as a pandas DataFrame. Columns: `_id` (int), `_source` (int), `_target` (int), `_type` (str), plus one column per unique property key. Missing properties are `None`.
 
 ```python
 def edges_df(self) -> pandas.DataFrame
@@ -413,7 +413,7 @@ def edges_df(self) -> pandas.DataFrame
 
 ```python
 df = db.edges_df()
-print(df[df["type"] == "KNOWS"])
+print(df[df["_type"] == "KNOWS"])
 ```
 
 ### import_df()
@@ -456,9 +456,22 @@ Zero-copy bulk export using Apache Arrow. These methods are faster than `nodes_d
 !!! note
     `nodes_df()` and `edges_df()` now auto-detect pyarrow at runtime. When pyarrow is available, they use the Arrow fast path internally, so you get the same speed as `nodes_to_pandas()` without changing existing code.
 
-**Node schema:** `id` (uint64), `labels` (list&lt;utf8&gt;), plus one column per unique property key.
+**Node schema:** `_id` (uint64), `_labels` (list&lt;utf8&gt;), plus one column per unique property key.
 
-**Edge schema:** `id` (uint64), `type` (utf8), `source` (uint64), `target` (uint64), plus one column per unique property key.
+**Edge schema:** `_id` (uint64), `_type` (utf8), `_source` (uint64), `_target` (uint64), plus one column per unique property key.
+
+#### Property types
+
+A property column's Arrow type follows its values, and so does `result.to_arrow()` for a query result:
+
+| Values | Arrow type | In Python (pyarrow, polars, `nodes_df()`) |
+| --- | --- | --- |
+| lists | `list<...>` of the elements' type, also nested | `list` |
+| maps | `struct` with one field per key that any map in the column has | `dict`; a key a map lacks is `None` with pyarrow and polars, absent without pyarrow |
+| durations | `struct<months: int64, days: int64, nanos: int64>` | `{"months": ..., "days": ..., "nanos": ...}` |
+| vectors | `fixed_size_list<float>` | `list` of floats |
+
+A null is null at every level. Values of different types in one column, or in one list, are written as text (`utf8`), except integers and floats together, which are floats.
 
 ### nodes_to_arrow()
 
@@ -484,7 +497,7 @@ def edges_to_arrow(self) -> pyarrow.Table
 
 ```python
 table = db.edges_to_arrow()
-print(table.filter(table.column("type") == "KNOWS"))
+print(table.filter(table.column("_type") == "KNOWS"))
 ```
 
 ### nodes_to_polars()
@@ -497,7 +510,7 @@ def nodes_to_polars(self) -> polars.DataFrame
 
 ```python
 df = db.nodes_to_polars()
-print(df.filter(pl.col("labels").list.contains("Person")))
+print(df.filter(pl.col("_labels").list.contains("Person")))
 ```
 
 ### edges_to_polars()
@@ -510,12 +523,12 @@ def edges_to_polars(self) -> polars.DataFrame
 
 ```python
 df = db.edges_to_polars()
-print(df.filter(pl.col("type") == "KNOWS"))
+print(df.filter(pl.col("_type") == "KNOWS"))
 ```
 
 ### nodes_to_pandas()
 
-Export all nodes as a `pandas.DataFrame` via the Arrow fast path. Requires both pandas and pyarrow (`uv add pandas pyarrow`). Faster than `nodes_df()` on older versions, but equivalent now that `nodes_df()` auto-detects pyarrow.
+Export all nodes as a `pandas.DataFrame` via the Arrow fast path. Requires both pandas and pyarrow (`uv add pandas pyarrow`). It keeps pyarrow's own conversion (a list is a numpy array); `nodes_df()` takes the same path when pyarrow is installed and returns lists and dicts.
 
 ```python
 def nodes_to_pandas(self) -> pandas.DataFrame
@@ -523,7 +536,7 @@ def nodes_to_pandas(self) -> pandas.DataFrame
 
 ```python
 df = db.nodes_to_pandas()
-print(df[df["labels"].apply(lambda l: "Person" in l)])
+print(df[df["_labels"].apply(lambda l: "Person" in l)])
 ```
 
 ### edges_to_pandas()
@@ -536,7 +549,7 @@ def edges_to_pandas(self) -> pandas.DataFrame
 
 ```python
 df = db.edges_to_pandas()
-print(df.groupby("type").size())
+print(df.groupby("_type").size())
 ```
 
 ## Batch Operations
@@ -685,10 +698,19 @@ for node_id, distance in results:
 BM25 full-text search. Requires the `text-index` feature and a text index created with `create_text_index()`.
 
 ```python
-def text_search(self, label: str, property: str, query: str, k: int) -> List[Tuple[int, float]]
+def text_search(
+    self,
+    label: str,
+    property: str,
+    query: str,
+    k: int,
+    filters: Optional[Dict[str, Any]] = None
+) -> List[Tuple[int, float]]
 ```
 
 Returns a list of `(node_id, score)` tuples sorted by descending relevance (higher score = more relevant). BM25 scores are unbounded positive floats; compare them only within a single query's results.
+
+`filters` takes the property filters of `vector_search()`: equality (`{"city": "Berlin"}`) and operators (`{"rank": {"$gt": 19}}`). Only matching nodes are searched, so up to `k` of them come back, scored as without the filters.
 
 ```python
 db.create_text_index("Article", "title")
@@ -712,11 +734,14 @@ def hybrid_search(
     query_vector: Optional[List[float]] = None,
     fusion: Optional[str] = None,          # "rrf" (default) or "weighted"
     weights: Optional[List[float]] = None, # [text_weight, vector_weight]
-    rrf_k: Optional[int] = None
+    rrf_k: Optional[int] = None,
+    filters: Optional[Dict[str, Any]] = None
 ) -> List[Tuple[int, float]]
 ```
 
 Returns a list of `(node_id, score)` tuples sorted by fused score **descending** (higher = more relevant). These are fusion scores, **not** distances. With RRF (default), scores are `sum(1/(k+rank))` across sources. With weighted fusion, scores are normalized to `[0, 1]` and combined with explicit weights.
+
+`filters` takes the property filters of `vector_search()`: equality (`{"city": "Berlin"}`) and operators (`{"rank": {"$gt": 19}}`). Both the text and the vector search keep only the matching nodes before fusion, so up to `k` matching nodes come back; text scores stay those of the whole index.
 
 !!! warning "Score convention differs from vector_search"
     `hybrid_search()` returns fusion scores where higher = better.
@@ -728,6 +753,14 @@ results = db.hybrid_search(
     "Article", "title", "embedding",
     "graph databases", k=10,
     query_vector=[1.0, 0.0, 0.0]
+)
+
+# Only articles from Berlin, from both searches
+results = db.hybrid_search(
+    "Article", "title", "embedding",
+    "graph databases", k=10,
+    query_vector=[1.0, 0.0, 0.0],
+    filters={"city": "Berlin"}
 )
 ```
 
@@ -816,7 +849,21 @@ Requires the `text-index` feature.
 Create a BM25 text index on a node property. The index is automatically kept in sync as nodes are created, updated, or deleted. You do not need to call `rebuild_text_index()` after normal write operations.
 
 ```python
-def create_text_index(self, label: str, property: str) -> None
+def create_text_index(
+    self,
+    label: str,
+    property: str,
+    k1: Optional[float] = None,             # BM25 term frequency saturation, >= 0 (default 1.2)
+    b: Optional[float] = None,              # BM25 length normalization, 0 to 1 (default 0.75)
+    tokenizer: Optional[str] = None,        # "simple" (default), "standard" or "cjk_bigram"
+    stop_words: Optional[List[str]] = None  # in place of the tokenizer's own
+) -> None
+```
+
+The database keeps the options with the index: reopening it, recovering after a crash and `rebuild_text_index()` use them again. `simple` keeps words of at least 2 bytes without common English words, `standard` keeps every word (for Russian, Greek and other languages that separate words), and `cjk_bigram` also splits Chinese, Japanese and Korean text into overlapping pairs of characters. An unknown tokenizer, or `k1` or `b` out of range, raises `grafeo.GrafeoError` (`GRAFEO-V001`).
+
+```python
+db.create_text_index("Note", "body", tokenizer="cjk_bigram", k1=1.5, b=0.3)
 ```
 
 ### drop_text_index()
@@ -963,6 +1010,8 @@ else:
 
 ## Admin Methods
 
+The dicts these methods return gain keys only: a patch release can add a key, never remove or rename one, so read the keys you need rather than comparing whole dicts.
+
 ### info()
 
 Get database information. Returns a dict with keys: `mode`, `node_count`, `edge_count`, `is_persistent`, `path`, `wal_enabled`, `version`.
@@ -1062,12 +1111,10 @@ test_db = file_db.to_memory()  # safe copy for experiments, indexes included
 
 ### compact()
 
-Converts the database to a layered [CompactStore](../../user-guide/compact-store.md) for faster queries: a columnar base with CSR adjacency, built from a snapshot of all nodes and edges, plus a mutable overlay. The original store is dropped to free memory.
-
-The database stays writable: new writes land in the overlay, and calling `compact()` again merges them into a fresh base. Gives ~60x memory reduction and 100x+ traversal speedup for read-mostly workloads.
+Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, and returns what it did as a dict: `checkpointed`, `versions_collected` and `duration_ms`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Raises if the checkpoint fails, or after `close()`.
 
 ```python
-def compact(self) -> None
+def compact(self) -> dict
 ```
 
 ```python
@@ -1075,14 +1122,11 @@ db = grafeo.GrafeoDB()
 db.execute("INSERT (:Person {name: 'Alix', age: 30})")
 db.execute("INSERT (:Person {name: 'Gus', age: 25})")
 
-db.compact()  # switch to the columnar base
+report = db.compact()  # {'checkpointed': False, 'versions_collected': 0, 'duration_ms': 0}
 
-result = db.execute("MATCH (p:Person) RETURN p.name")  # fast
-db.execute("INSERT (:Person {name: 'Vincent'})")        # lands in the overlay
+result = db.execute("MATCH (p:Person) RETURN p.name")
+db.execute("INSERT (:Person {name: 'Vincent'})")
 ```
-
-!!! note
-    Requires the `compact-store` feature (included in the default `lpg` profile).
 
 ### close()
 

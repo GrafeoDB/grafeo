@@ -55,7 +55,8 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 
     let sparql_query = sparql::parse(actual_query)?;
     let mut translator = SparqlTranslator::new();
-    let mut plan = translator.translate_query(&sparql_query)?;
+    let plan = translator.translate_query(&sparql_query)?;
+    let mut plan = crate::query::limits::check_plan_depth(plan)?;
     plan.explain = explain;
     plan.profile = profile;
     Ok(plan)
@@ -313,7 +314,7 @@ impl SparqlTranslator {
 
         let plan = if let Some(where_clause) = &describe.where_clause {
             let where_plan = self.translate_graph_pattern(where_clause)?;
-            self.join_patterns(where_plan, cbd_plan)
+            self.join_patterns(where_plan, cbd_plan)?
         } else {
             cbd_plan
         };
@@ -816,13 +817,7 @@ impl SparqlTranslator {
                                     if conditions.is_empty() {
                                         branches.push(plan.clone());
                                     } else {
-                                        let combined = conditions
-                                            .into_iter()
-                                            .reduce(|acc, c| LogicalExpression::Binary {
-                                                left: Box::new(acc),
-                                                op: BinaryOp::And,
-                                                right: Box::new(c),
-                                            })
+                                        let combined = LogicalExpression::conjunction(conditions)
                                             .expect("conditions non-empty");
                                         branches.push(wrap_filter(plan.clone(), combined));
                                     }
@@ -836,7 +831,7 @@ impl SparqlTranslator {
                         }
                         _ => {
                             let p_plan = self.translate_graph_pattern(p)?;
-                            plan = self.join_patterns(plan, p_plan);
+                            plan = self.join_patterns(plan, p_plan)?;
                         }
                     }
                 }
@@ -856,7 +851,7 @@ impl SparqlTranslator {
                 for inner in exists_patterns {
                     let inner_plan = self.translate_graph_pattern(inner)?;
                     if !matches!(plan, LogicalOperator::Empty) {
-                        plan = self.join_patterns(plan, inner_plan);
+                        plan = self.join_patterns(plan, inner_plan)?;
                     }
                 }
 
@@ -868,13 +863,7 @@ impl SparqlTranslator {
                         .collect::<Result<Vec<_>>>()?;
 
                     // Combine all predicates with AND
-                    let combined = predicates
-                        .into_iter()
-                        .reduce(|acc, pred| LogicalExpression::Binary {
-                            left: Box::new(acc),
-                            op: BinaryOp::And,
-                            right: Box::new(pred),
-                        })
+                    let combined = LogicalExpression::conjunction(predicates)
                         .expect("predicates non-empty after is_empty check");
 
                     plan = wrap_filter(plan, combined);
@@ -988,7 +977,7 @@ impl SparqlTranslator {
 
         for triple in triples {
             let triple_scan = self.translate_triple_pattern(triple)?;
-            plan = self.join_patterns(plan, triple_scan);
+            plan = self.join_patterns(plan, triple_scan)?;
         }
 
         Ok(plan)
@@ -1031,7 +1020,7 @@ impl SparqlTranslator {
                     self.translate_triple_pattern(&sub_triple)?
                 };
 
-                plan = self.join_patterns(plan, step);
+                plan = self.join_patterns(plan, step)?;
                 current_subject = next_object;
             }
 
@@ -1622,12 +1611,20 @@ impl SparqlTranslator {
         }
     }
 
-    fn join_patterns(&self, left: LogicalOperator, right: LogicalOperator) -> LogicalOperator {
+    fn join_patterns(
+        &self,
+        mut left: LogicalOperator,
+        mut right: LogicalOperator,
+    ) -> Result<LogicalOperator> {
+        // The variables of each side are collected recursively: a pattern of
+        // many triples joins one at a time, so stop before that is too deep.
+        crate::query::limits::check_partial_plan_depth(&mut right)?;
+        crate::query::limits::check_partial_plan_depth(&mut left)?;
         if matches!(left, LogicalOperator::Empty) {
-            return right;
+            return Ok(right);
         }
         if matches!(right, LogicalOperator::Empty) {
-            return left;
+            return Ok(left);
         }
 
         // Collect output variables from each side and build explicit join
@@ -1646,12 +1643,12 @@ impl SparqlTranslator {
             }
         }
 
-        LogicalOperator::Join(JoinOp {
+        Ok(LogicalOperator::Join(JoinOp {
             left: Box::new(left),
             right: Box::new(right),
             join_type: JoinType::Inner,
             conditions,
-        })
+        }))
     }
 
     /// Collects all variable names produced by an operator subtree.
@@ -1926,13 +1923,7 @@ impl SparqlTranslator {
                 })
                 .collect();
 
-            let predicate = conditions
-                .into_iter()
-                .reduce(|left, right| LogicalExpression::Binary {
-                    left: Box::new(left),
-                    op: BinaryOp::And,
-                    right: Box::new(right),
-                })
+            let predicate = LogicalExpression::conjunction(conditions)
                 .expect("excluded non-empty after is_empty check");
 
             Ok(wrap_filter(scan, predicate))
@@ -2164,7 +2155,7 @@ impl SparqlTranslator {
                 plan = scan;
                 first = false;
             } else {
-                plan = self.join_patterns(plan, scan);
+                plan = self.join_patterns(plan, scan)?;
             }
 
             current_subject = next_object;

@@ -8,8 +8,8 @@
 //! Better to catch these errors early than waste time executing a broken query.
 
 use crate::query::plan::{
-    ExpandOp, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp, ReturnItem,
-    ReturnOp, TripleScanOp,
+    CreateElement, ExpandOp, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
+    ReturnItem, ReturnOp, TripleScanOp,
 };
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
@@ -194,6 +194,10 @@ impl BindingContext {
 pub struct Binder {
     /// The current binding context.
     context: BindingContext,
+    /// The outer variables the `CALL` subquery being bound imports, with what
+    /// they are in the outer query: a parameter scan after a `WITH` in its
+    /// body that leaves one out brings it back as that.
+    imports: BindingContext,
 }
 
 impl Binder {
@@ -202,6 +206,7 @@ impl Binder {
     pub fn new() -> Self {
         Self {
             context: BindingContext::new(),
+            imports: BindingContext::new(),
         }
     }
 
@@ -279,22 +284,35 @@ impl Binder {
                 Ok(())
             }
             LogicalOperator::CreateNode(create) => {
-                // CreateNode introduces a new variable
                 if let Some(ref input) = create.input {
                     self.bind_operator(input)?;
                 }
-                self.context.add_variable(
-                    create.variable.clone(),
-                    VariableInfo {
-                        name: create.variable.clone(),
-                        data_type: LogicalType::Node,
-                        is_node: true,
-                        is_edge: false,
-                    },
-                );
-                // Validate property expressions
-                for (_, expr) in &create.properties {
-                    self.validate_expression(expr)?;
+                self.bind_created_node(&create.variable, &create.properties)
+            }
+            LogicalOperator::Create(create) => {
+                if let Some(ref input) = create.input {
+                    self.bind_operator(input)?;
+                }
+                for element in &create.elements {
+                    match element {
+                        CreateElement::Node {
+                            variable,
+                            properties,
+                            ..
+                        } => self.bind_created_node(variable, properties)?,
+                        CreateElement::Edge {
+                            variable,
+                            from_variable,
+                            to_variable,
+                            properties,
+                            ..
+                        } => self.bind_created_edge(
+                            variable.as_ref(),
+                            from_variable,
+                            to_variable,
+                            properties,
+                        )?,
+                    }
                 }
                 Ok(())
             }
@@ -309,38 +327,12 @@ impl Binder {
             LogicalOperator::Aggregate(agg) => self.bind_aggregate(agg),
             LogicalOperator::CreateEdge(create) => {
                 self.bind_operator(&create.input)?;
-                // Validate that source and target variables are defined
-                if !self.context.contains(&create.from_variable) {
-                    return Err(undefined_variable_error(
-                        &create.from_variable,
-                        &self.context,
-                        " (source in CREATE EDGE)",
-                    ));
-                }
-                if !self.context.contains(&create.to_variable) {
-                    return Err(undefined_variable_error(
-                        &create.to_variable,
-                        &self.context,
-                        " (target in CREATE EDGE)",
-                    ));
-                }
-                // Add edge variable if present
-                if let Some(ref var) = create.variable {
-                    self.context.add_variable(
-                        var.clone(),
-                        VariableInfo {
-                            name: var.clone(),
-                            data_type: LogicalType::Edge,
-                            is_node: false,
-                            is_edge: true,
-                        },
-                    );
-                }
-                // Validate property expressions
-                for (_, expr) in &create.properties {
-                    self.validate_expression(expr)?;
-                }
-                Ok(())
+                self.bind_created_edge(
+                    create.variable.as_ref(),
+                    &create.from_variable,
+                    &create.to_variable,
+                    &create.properties,
+                )
             }
             LogicalOperator::DeleteNode(delete) => {
                 self.bind_operator(&delete.input)?;
@@ -553,12 +545,38 @@ impl Binder {
                         " (source in shortestPath)",
                     ));
                 }
-                if !self.context.contains(&sp.target_var) {
+                // A search to every node binds the target itself
+                if sp.binds_target {
+                    self.bind_element(&sp.target_var, Element::Node)?;
+                } else if !self.context.contains(&sp.target_var) {
                     return Err(undefined_variable_error(
                         &sp.target_var,
                         &self.context,
                         " (target in shortestPath)",
                     ));
+                }
+                // The edge condition reads the candidate edge and the input row
+                if let Some(condition) = &sp.edge_condition {
+                    self.bind_element(&condition.variable, Element::Edge)?;
+                    self.validate_expression(&condition.predicate)?;
+                }
+                if let Some(edge_variable) = &sp.edge_variable {
+                    self.bind_element(edge_variable, Element::Edge)?;
+                }
+                // nodes(p) and edges(p) read these columns
+                for column in [
+                    format!("_path_nodes_{}", sp.path_alias),
+                    format!("_path_edges_{}", sp.path_alias),
+                ] {
+                    self.context.add_variable(
+                        column.clone(),
+                        VariableInfo {
+                            name: column,
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
                 }
                 // Add the path alias variable to the context
                 self.context.add_variable(
@@ -606,8 +624,29 @@ impl Binder {
             | LogicalOperator::LoadGraph(_)
             | LogicalOperator::CopyGraph(_)
             | LogicalOperator::MoveGraph(_)
-            | LogicalOperator::AddGraph(_)
-            | LogicalOperator::HorizontalAggregate(_) => Ok(()),
+            | LogicalOperator::AddGraph(_) => Ok(()),
+            // A horizontal aggregate passes its input's rows on with the
+            // value it computes over the list column of each row.
+            LogicalOperator::HorizontalAggregate(aggregate) => {
+                self.bind_operator(&aggregate.input)?;
+                if !self.context.contains(&aggregate.list_column) {
+                    return Err(undefined_variable_error(
+                        &aggregate.list_column,
+                        &self.context,
+                        " in a horizontal aggregate",
+                    ));
+                }
+                self.context.add_variable(
+                    aggregate.alias.clone(),
+                    VariableInfo {
+                        name: aggregate.alias.clone(),
+                        data_type: LogicalType::Any,
+                        is_node: false,
+                        is_edge: false,
+                    },
+                );
+                Ok(())
+            }
             LogicalOperator::VectorScan(scan) => {
                 // VectorScan introduces a variable for matched nodes
                 if let Some(ref input) = scan.input {
@@ -743,10 +782,7 @@ impl Binder {
                     // Apply imports all of them): the ones its scan starts from.
                     Some(parts) if !imports_all => parts.iter().try_for_each(|part| {
                         let part_context = self.imported(&leading_imports(part));
-                        let outer_context = std::mem::replace(&mut self.context, part_context);
-                        let bound = self.bind_operator(part);
-                        self.context = outer_context;
-                        bound
+                        self.bind_subquery_part(part, part_context)
                     }),
                     _ => {
                         let subplan_context = if imports_all {
@@ -754,10 +790,7 @@ impl Binder {
                         } else {
                             self.imported(&apply.shared_variables)
                         };
-                        let outer_context = std::mem::replace(&mut self.context, subplan_context);
-                        let bound = self.bind_operator(&apply.subplan);
-                        self.context = outer_context;
-                        bound
+                        self.bind_subquery_part(&apply.subplan, subplan_context)
                     }
                 };
                 bound?;
@@ -796,20 +829,20 @@ impl Binder {
             LogicalOperator::ParameterScan(param_scan) => {
                 // Register parameter columns as variables (injected by outer
                 // Apply). A variable of the outer query keeps what it is, so a
-                // CALL subquery can match an imported edge as an edge.
+                // CALL subquery can match an imported edge as an edge, also
+                // where a scan brings an import back after a `WITH` that left
+                // it out.
                 for col in &param_scan.columns {
                     if self.context.contains(col) {
                         continue;
                     }
-                    self.context.add_variable(
-                        col.clone(),
-                        VariableInfo {
-                            name: col.clone(),
-                            data_type: LogicalType::Any,
-                            is_node: true,
-                            is_edge: false,
-                        },
-                    );
+                    let info = self.imports.get(col).cloned().unwrap_or(VariableInfo {
+                        name: col.clone(),
+                        data_type: LogicalType::Any,
+                        is_node: true,
+                        is_edge: false,
+                    });
+                    self.context.add_variable(col.clone(), info);
                 }
                 Ok(())
             }
@@ -1215,13 +1248,13 @@ impl Binder {
                 if name == "*" {
                     return Ok(());
                 }
-                if !self.context.contains(name) && !name.starts_with("_anon_") {
+                if !self.context.contains(name) {
                     return Err(undefined_variable_error(name, &self.context, ""));
                 }
                 Ok(())
             }
             LogicalExpression::Property { variable, .. } => {
-                if !self.context.contains(variable) && !variable.starts_with("_anon_") {
+                if !self.context.contains(variable) {
                     return Err(undefined_variable_error(
                         variable,
                         &self.context,
@@ -1292,7 +1325,7 @@ impl Binder {
             LogicalExpression::Labels(var)
             | LogicalExpression::Type(var)
             | LogicalExpression::Id(var) => {
-                if !self.context.contains(var) && !var.starts_with("_anon_") {
+                if !self.context.contains(var) {
                     return Err(undefined_variable_error(var, &self.context, " in function"));
                 }
                 Ok(())
@@ -1329,7 +1362,7 @@ impl Binder {
                 self.validate_expression(projection)
             }
             LogicalExpression::MapProjection { base, entries } => {
-                if !self.context.contains(base) && !base.starts_with("_anon_") {
+                if !self.context.contains(base) {
                     return Err(undefined_variable_error(
                         base,
                         &self.context,
@@ -1475,6 +1508,67 @@ impl Binder {
         }
     }
 
+    /// Binds a node a CREATE or INSERT creates: it introduces `variable`.
+    fn bind_created_node(
+        &mut self,
+        variable: &str,
+        properties: &[(String, LogicalExpression)],
+    ) -> Result<()> {
+        self.context.add_variable(
+            variable.to_string(),
+            VariableInfo {
+                name: variable.to_string(),
+                data_type: LogicalType::Node,
+                is_node: true,
+                is_edge: false,
+            },
+        );
+        for (_, expr) in properties {
+            self.validate_expression(expr)?;
+        }
+        Ok(())
+    }
+
+    /// Binds an edge a CREATE or INSERT creates: its endpoints must be
+    /// defined, and it introduces `variable` when it has one.
+    fn bind_created_edge(
+        &mut self,
+        variable: Option<&String>,
+        from_variable: &str,
+        to_variable: &str,
+        properties: &[(String, LogicalExpression)],
+    ) -> Result<()> {
+        if !self.context.contains(from_variable) {
+            return Err(undefined_variable_error(
+                from_variable,
+                &self.context,
+                " (source in CREATE EDGE)",
+            ));
+        }
+        if !self.context.contains(to_variable) {
+            return Err(undefined_variable_error(
+                to_variable,
+                &self.context,
+                " (target in CREATE EDGE)",
+            ));
+        }
+        if let Some(var) = variable {
+            self.context.add_variable(
+                var.clone(),
+                VariableInfo {
+                    name: var.clone(),
+                    data_type: LogicalType::Edge,
+                    is_node: false,
+                    is_edge: true,
+                },
+            );
+        }
+        for (_, expr) in properties {
+            self.validate_expression(expr)?;
+        }
+        Ok(())
+    }
+
     /// Binds a join operator.
     fn bind_join(&mut self, join: &crate::query::plan::JoinOp) -> Result<()> {
         // Bind both sides of the join
@@ -1487,6 +1581,23 @@ impl Binder {
         }
 
         Ok(())
+    }
+
+    /// Binds `part`, a `CALL` subquery's body or one part of a `UNION` in it,
+    /// in a context of its own that starts as `imported`, the outer
+    /// variables it imports. Neither its own variables nor a `WITH` in it
+    /// change the outer scope.
+    fn bind_subquery_part(
+        &mut self,
+        part: &LogicalOperator,
+        imported: BindingContext,
+    ) -> Result<()> {
+        let enclosing_imports = std::mem::replace(&mut self.imports, imported.clone());
+        let outer_context = std::mem::replace(&mut self.context, imported);
+        let bound = self.bind_operator(part);
+        self.context = outer_context;
+        self.imports = enclosing_imports;
+        bound
     }
 
     /// The outer variables named in `names`, with what they are in the
@@ -2321,6 +2432,8 @@ mod tests {
                     "updated".to_string(),
                     LogicalExpression::Literal(grafeo_common::types::Value::Bool(true)),
                 )],
+                on_create_labels: Vec::new(),
+                on_match_labels: Vec::new(),
                 input: Box::new(LogicalOperator::Empty),
             })),
         }));
@@ -2350,6 +2463,8 @@ mod tests {
                 },
             )],
             on_match: vec![],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(LogicalOperator::Empty),
         }));
 
@@ -2385,6 +2500,8 @@ mod tests {
                 },
             )],
             on_match: vec![],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(LogicalOperator::Empty),
         }));
 
@@ -2413,6 +2530,8 @@ mod tests {
                     property: "x".to_string(),
                 },
             )],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(LogicalOperator::Empty),
         }));
 
@@ -2441,6 +2560,8 @@ mod tests {
             )],
             on_create: vec![],
             on_match: vec![],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(LogicalOperator::Empty),
         }));
 
@@ -2456,7 +2577,7 @@ mod tests {
 
     #[test]
     fn test_shortest_path_rejects_undefined_source() {
-        use crate::query::plan::{ExpandDirection, ShortestPathOp};
+        use crate::query::plan::{ExpandDirection, PathMode, PathSelection, ShortestPathOp};
 
         let plan = LogicalPlan::new(LogicalOperator::ShortestPath(ShortestPathOp {
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
@@ -2469,9 +2590,14 @@ mod tests {
             edge_types: vec![],
             direction: ExpandDirection::Both,
             path_alias: "p".to_string(),
-            all_paths: false,
+            selection: PathSelection::Shortest(1),
+            path_mode: PathMode::Walk,
+            binds_target: false,
             min_hops: 1,
             max_hops: None,
+            edge_variable: None,
+            quantified: true,
+            edge_condition: None,
         }));
 
         let mut binder = Binder::new();
@@ -2484,7 +2610,9 @@ mod tests {
 
     #[test]
     fn test_shortest_path_adds_path_and_length_variables() {
-        use crate::query::plan::{ExpandDirection, JoinOp, JoinType, ShortestPathOp};
+        use crate::query::plan::{
+            ExpandDirection, JoinOp, JoinType, PathMode, PathSelection, ShortestPathOp,
+        };
 
         let plan = LogicalPlan::new(LogicalOperator::ShortestPath(ShortestPathOp {
             input: Box::new(LogicalOperator::Join(JoinOp {
@@ -2506,9 +2634,14 @@ mod tests {
             edge_types: vec!["ROAD".to_string()],
             direction: ExpandDirection::Outgoing,
             path_alias: "p".to_string(),
-            all_paths: false,
+            selection: PathSelection::Shortest(1),
+            path_mode: PathMode::Walk,
+            binds_target: false,
             min_hops: 1,
             max_hops: None,
+            edge_variable: None,
+            quantified: true,
+            edge_condition: None,
         }));
 
         let mut binder = Binder::new();
@@ -2865,8 +2998,9 @@ mod tests {
     }
 
     #[test]
-    fn test_anon_variables_skip_validation() {
-        // Variables starting with _anon_ are anonymous and should be silently accepted
+    fn an_undefined_variable_named_like_a_generated_one_is_undefined() {
+        // A generated name never collides with one the statement spells, so
+        // `_anon_42` that nothing binds is the user's undefined variable
         let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
             items: vec![ReturnItem {
                 expression: LogicalExpression::Variable("_anon_42".to_string()),
@@ -2877,10 +3011,10 @@ mod tests {
         }));
 
         let mut binder = Binder::new();
-        let result = binder.bind(&plan);
+        let message = binder.bind(&plan).unwrap_err().to_string();
         assert!(
-            result.is_ok(),
-            "Anonymous variables should bypass validation"
+            message.contains("Undefined variable '_anon_42'"),
+            "{message}"
         );
     }
 
@@ -2984,6 +3118,7 @@ mod tests {
             )],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: Box::new(LogicalOperator::Join(JoinOp {
                 left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "a".to_string(),
@@ -3025,6 +3160,7 @@ mod tests {
             )],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: Box::new(LogicalOperator::Join(JoinOp {
                 left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "a".to_string(),
@@ -3782,6 +3918,7 @@ mod tests {
             })),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         }));
 
         let mut binder = Binder::new();
@@ -3816,6 +3953,7 @@ mod tests {
             })),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         }));
 
         let mut binder = Binder::new();
@@ -3840,6 +3978,7 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "b".to_string(),
                 label: None,
@@ -3858,6 +3997,7 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "a".to_string(),
                 label: None,
@@ -3889,6 +4029,7 @@ mod tests {
                 "updated_at".to_string(),
                 LogicalExpression::Literal(grafeo_common::types::Value::Int64(2)),
             )],
+            undirected: false,
             input: Box::new(LogicalOperator::Join(JoinOp {
                 left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "a".to_string(),
@@ -4610,6 +4751,7 @@ mod tests {
             subplan: Box::new(subplan),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         }));
 
         let mut binder = Binder::new();
@@ -4669,6 +4811,7 @@ mod tests {
             subplan: Box::new(subplan),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         }));
 
         let mut binder = Binder::new();
@@ -4679,22 +4822,39 @@ mod tests {
         assert!(ctx.contains("n.name"));
     }
 
+    /// A horizontal aggregate keeps the variables of its input, adds its
+    /// result, and needs its list column to be bound.
     #[test]
-    fn test_horizontal_aggregate_is_noop_in_binder() {
+    fn test_horizontal_aggregate_binds_its_input_and_result() {
         use crate::query::plan::{AggregateFunction, EntityKind, HorizontalAggregateOp};
 
-        let plan = LogicalPlan::new(LogicalOperator::HorizontalAggregate(
-            HorizontalAggregateOp {
-                list_column: "_path_edges_p".to_string(),
-                entity_kind: EntityKind::Edge,
-                function: AggregateFunction::Sum,
-                property: "weight".to_string(),
-                alias: "total".to_string(),
-                input: Box::new(LogicalOperator::Empty),
-            },
-        ));
-        let mut binder = Binder::new();
-        assert!(binder.bind(&plan).is_ok());
+        let aggregate = |list_column: &str| {
+            LogicalPlan::new(LogicalOperator::HorizontalAggregate(
+                HorizontalAggregateOp {
+                    list_column: list_column.to_string(),
+                    entity_kind: EntityKind::Edge,
+                    function: AggregateFunction::Sum,
+                    distinct: false,
+                    percentile: None,
+                    separator: None,
+                    property: "weight".to_string(),
+                    alias: "total".to_string(),
+                    input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "e".to_string(),
+                        label: None,
+                        input: None,
+                    })),
+                },
+            ))
+        };
+        let ctx = Binder::new().bind(&aggregate("e")).unwrap();
+        assert!(ctx.contains("e"), "the input's variable stays bound");
+        assert!(ctx.contains("total"), "the result is bound");
+        let error = Binder::new().bind(&aggregate("missing")).unwrap_err();
+        assert!(
+            error.to_string().contains("missing"),
+            "an unbound list column is an error: {error}"
+        );
     }
 
     // ========================================================================

@@ -489,11 +489,9 @@ fn persisting_after_close_fails_and_writes_nothing() {
         );
     }
     // `compact()` takes `&mut self`.
-    #[cfg(feature = "compact-store")]
     let db = {
         let mut db = db;
         assert_closed_error("compact", db.compact());
-        assert_closed_error("recompact", db.recompact());
         db
     };
     assert!(
@@ -533,14 +531,11 @@ fn a_closed_handle_overwrites_nothing_a_later_handle_wrote() {
     }
 
     assert_closed_error("wal_checkpoint", first.wal_checkpoint());
-    #[cfg(feature = "compact-store")]
     {
         // `compact()` takes `&mut self`.
         let mut first = first;
         assert_closed_error("compact", first.compact());
     }
-    #[cfg(not(feature = "compact-store"))]
-    drop(first);
 
     let db = GrafeoDB::with_config(config()).unwrap();
     assert_eq!(

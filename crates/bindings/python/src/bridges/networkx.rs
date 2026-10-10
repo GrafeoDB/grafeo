@@ -390,7 +390,7 @@ impl PyNetworkXAdapter {
 
         let db = self.db.read();
         let store = db.store();
-        let result = algorithms::pagerank(&**store, alpha, max_iter, tol, self.directed);
+        let result = algorithms::pagerank(&*store, alpha, max_iter, tol, self.directed);
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
@@ -401,7 +401,7 @@ impl PyNetworkXAdapter {
 
         let db = self.db.read();
         let store = db.store();
-        let result = algorithms::betweenness_centrality(&**store, normalized);
+        let result = algorithms::betweenness_centrality(&*store, normalized);
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
@@ -412,7 +412,7 @@ impl PyNetworkXAdapter {
 
         let db = self.db.read();
         let store = db.store();
-        let result = algorithms::closeness_centrality(&**store, wf_improved);
+        let result = algorithms::closeness_centrality(&*store, wf_improved);
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
@@ -423,7 +423,7 @@ impl PyNetworkXAdapter {
 
         let db = self.db.read();
         let store = db.store();
-        let components = algorithms::connected_components(&**store);
+        let components = algorithms::connected_components(&*store);
 
         // Group by component, each in node-id order (the result is a hash map,
         // whose order changes from call to call).
@@ -457,7 +457,7 @@ impl PyNetworkXAdapter {
 
         if let Some(target_id) = target {
             match algorithms::dijkstra_path(
-                &**store,
+                &*store,
                 NodeId::new(source),
                 NodeId::new(target_id),
                 weight,
@@ -470,7 +470,7 @@ impl PyNetworkXAdapter {
             }
         } else {
             // Return paths to all reachable nodes
-            let result = algorithms::dijkstra(&**store, NodeId::new(source), weight);
+            let result = algorithms::dijkstra(&*store, NodeId::new(source), weight);
             let dict = PyDict::new(py);
 
             for (target_node, _) in &result.distances {
@@ -500,7 +500,7 @@ impl PyNetworkXAdapter {
 
         if let Some(target_id) = target {
             match algorithms::dijkstra_path(
-                &**store,
+                &*store,
                 NodeId::new(source),
                 NodeId::new(target_id),
                 weight,
@@ -509,7 +509,7 @@ impl PyNetworkXAdapter {
                 None => Err(PyGrafeoError::InvalidArgument("No path found".into()).into()),
             }
         } else {
-            let result = algorithms::dijkstra(&**store, NodeId::new(source), weight);
+            let result = algorithms::dijkstra(&*store, NodeId::new(source), weight);
             let distances: BTreeMap<u64, f64> = result
                 .distances
                 .into_iter()

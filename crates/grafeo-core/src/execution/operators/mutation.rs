@@ -3,20 +3,20 @@
 //! These operators modify the graph structure:
 //! - `CreateNodeOperator`: Creates new nodes
 //! - `CreateEdgeOperator`: Creates new edges
+//! - `CreateOperator`: Creates the nodes and edges of a whole clause
 //! - `DeleteNodeOperator`: Deletes nodes
 //! - `DeleteEdgeOperator`: Deletes edges
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use grafeo_common::types::{
-    EdgeId, EpochId, LogicalType, NodeId, PropertyKey, TransactionId, Value,
-};
+use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, Value};
 
 use super::filter::{ExpressionPredicate, FilterExpression};
 use super::{GraphWriter, Operator, OperatorError, OperatorResult, SessionContext};
 use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
-use crate::graph::{GraphStore, GraphStoreSearch};
+use crate::execution::vector::ValueVector;
+use crate::graph::GraphStoreSearch;
 
 /// Trait for validating schema constraints during mutation operations.
 ///
@@ -162,6 +162,65 @@ pub trait ConstraintValidator: Send + Sync {
     fn inject_defaults(&self, labels: &[String], properties: &mut Vec<(String, Value)>) {
         let _ = (labels, properties);
     }
+
+    /// Injects the default values of the edge type `edge_type` for the
+    /// properties a new edge is not given, like
+    /// [`inject_defaults`](Self::inject_defaults) for a node.
+    fn inject_edge_defaults(&self, edge_type: &str, properties: &mut Vec<(String, Value)>) {
+        let _ = (edge_type, properties);
+    }
+
+    /// The value a node with `labels` stores for property `key` when the
+    /// type the schema declares for it takes `value` by an implicit
+    /// conversion, such as an integer written to a `FLOAT64` property.
+    /// `None` when `value` is stored as it is (also when it does not conform:
+    /// [`validate_node_property`](Self::validate_node_property) refuses it).
+    /// A writer converts before it validates.
+    fn convert_node_property(&self, labels: &[String], key: &str, value: &Value) -> Option<Value> {
+        let _ = (labels, key, value);
+        None
+    }
+
+    /// The value an edge of `edge_type` stores for property `key`, like
+    /// [`convert_node_property`](Self::convert_node_property).
+    fn convert_edge_property(&self, edge_type: &str, key: &str, value: &Value) -> Option<Value> {
+        let _ = (edge_type, key, value);
+        None
+    }
+
+    /// Checks that a node with `labels` (all of its labels) may have each
+    /// property `properties` gives a value (a null removes one): in a graph
+    /// of a closed graph type, one that a node type of its labels declares.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` naming the first property no node type of the node
+    /// declares.
+    fn validate_node_properties_declared(
+        &self,
+        labels: &[String],
+        properties: &[(String, Value)],
+    ) -> Result<(), OperatorError> {
+        let _ = (labels, properties);
+        Ok(())
+    }
+
+    /// Checks that an edge of `edge_type` may have each property
+    /// `properties` gives a value, like
+    /// [`validate_node_properties_declared`](Self::validate_node_properties_declared).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` naming the first property the edge type does not
+    /// declare.
+    fn validate_edge_properties_declared(
+        &self,
+        edge_type: &str,
+        properties: &[(String, Value)],
+    ) -> Result<(), OperatorError> {
+        let _ = (edge_type, properties);
+        Ok(())
+    }
 }
 
 /// Operator that creates new nodes.
@@ -213,15 +272,13 @@ impl PropertyExpressions {
     }
 
     /// Resolves every property for one input row, evaluating computed values
-    /// against that row.
+    /// against that row. Both read as `writer`'s transaction sees the graph.
     pub(super) fn resolve_row(
         &mut self,
         properties: &[(String, PropertySource)],
         chunk: &DataChunk,
         row: usize,
-        store: &dyn GraphStore,
-        viewing_epoch: Option<EpochId>,
-        transaction_id: Option<TransactionId>,
+        writer: &GraphWriter,
     ) -> Result<Vec<(String, Value)>, OperatorError> {
         if self.compiled.is_none() {
             let mut compiled = Vec::with_capacity(properties.len());
@@ -235,7 +292,7 @@ impl PropertyExpressions {
                     continue;
                 };
                 let search_store = self.search_store.as_ref().ok_or_else(|| {
-                    OperatorError::Execution(
+                    OperatorError::Internal(
                         "computed property value requires a search store; planner did not attach one"
                             .to_string(),
                     )
@@ -246,8 +303,8 @@ impl PropertyExpressions {
                     Arc::clone(search_store),
                 )
                 .with_session_context(self.session_context.clone());
-                if let Some(epoch) = viewing_epoch {
-                    predicate = predicate.with_transaction_context(epoch, transaction_id);
+                if let Some(epoch) = writer.viewing_epoch() {
+                    predicate = predicate.with_transaction_context(epoch, writer.transaction_id());
                 }
                 compiled.push(Some(predicate));
             }
@@ -260,7 +317,7 @@ impl PropertyExpressions {
             .map(|(i, (name, source))| {
                 let value = match compiled.get(i).and_then(Option::as_ref) {
                     Some(predicate) => predicate.eval_at(chunk, row).unwrap_or(Value::Null),
-                    None => source.resolve(chunk, row, store),
+                    None => source.resolve(chunk, row, writer),
                 };
                 (name.clone(), value)
             })
@@ -301,6 +358,10 @@ pub enum PropertySource {
 impl PropertySource {
     /// Resolves a property value from a data chunk row.
     ///
+    /// A property of a node or edge is read as `writer`'s transaction sees
+    /// it, so a value comes also from a node or edge the statement created
+    /// earlier (`CREATE (a:N {k: 3}) CREATE (:P {k: a.k})`).
+    ///
     /// Returns `Value::Null` for [`PropertySource::Expression`]: those sources
     /// require an operator-specific augmented row and must be intercepted by
     /// the producing operator (currently the MERGE node and edge operators).
@@ -308,7 +369,7 @@ impl PropertySource {
         &self,
         chunk: &crate::execution::chunk::DataChunk,
         row: usize,
-        store: &dyn GraphStore,
+        writer: &GraphWriter,
     ) -> Value {
         match self {
             PropertySource::Column(col_idx) => chunk
@@ -322,20 +383,25 @@ impl PropertySource {
                 };
                 // Try node ID first, then edge ID, then map value
                 if let Some(node_id) = col.get_node_id(row) {
-                    store
-                        .get_node(node_id)
+                    writer
+                        .node(node_id)
                         .and_then(|node| node.get_property(property).cloned())
                         .unwrap_or(Value::Null)
                 } else if let Some(edge_id) = col.get_edge_id(row) {
-                    store
-                        .get_edge(edge_id)
+                    writer
+                        .edge(edge_id)
                         .and_then(|edge| edge.get_property(property).cloned())
                         .unwrap_or(Value::Null)
-                } else if let Some(Value::Map(map)) = col.get_value(row) {
-                    let key = PropertyKey::new(property);
-                    map.get(&key).cloned().unwrap_or(Value::Null)
                 } else {
-                    Value::Null
+                    match col.get_value(row) {
+                        Some(Value::Map(map)) => map
+                            .get(&PropertyKey::new(property))
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        // A component of a temporal value (`d.month`)
+                        Some(value) => value.temporal_component(property).unwrap_or(Value::Null),
+                        None => Value::Null,
+                    }
                 }
             }
             // Expression sources require an augmented row built by the producer.
@@ -406,14 +472,9 @@ impl Operator for CreateNodeOperator {
             let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
             for row in chunk.selected_indices() {
-                let properties = self.expressions.resolve_row(
-                    &self.properties,
-                    &chunk,
-                    row,
-                    self.writer.store().as_ref() as &dyn GraphStore,
-                    self.writer.viewing_epoch(),
-                    self.writer.transaction_id(),
-                )?;
+                let properties =
+                    self.expressions
+                        .resolve_row(&self.properties, &chunk, row, &self.writer)?;
                 let node_id = self.writer.create_node(&self.labels, properties)?;
 
                 // The input columns before the new node's column, then the node.
@@ -617,14 +678,9 @@ impl Operator for CreateEdgeOperator {
         for row in chunk.selected_indices() {
             let from = NodeId(id_at(&chunk, self.from_column, row, "from", "node")?);
             let to = NodeId(id_at(&chunk, self.to_column, row, "to", "node")?);
-            let properties = self.expressions.resolve_row(
-                &self.properties,
-                &chunk,
-                row,
-                self.writer.store().as_ref() as &dyn GraphStore,
-                self.writer.viewing_epoch(),
-                self.writer.transaction_id(),
-            )?;
+            let properties =
+                self.expressions
+                    .resolve_row(&self.properties, &chunk, row, &self.writer)?;
             let edge_id = self
                 .writer
                 .create_edge(from, to, &self.edge_type, properties)?;
@@ -647,6 +703,203 @@ impl Operator for CreateEdgeOperator {
 
     fn name(&self) -> &'static str {
         "CreateEdge"
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+/// One node or edge a [`CreateOperator`] creates for each row.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum CreateStep {
+    /// A node, whose id goes to a new column.
+    Node {
+        /// Labels for the node.
+        labels: Vec<String>,
+        /// Properties to set, resolved against the row so far.
+        properties: Vec<(String, PropertySource)>,
+    },
+    /// An edge between the nodes in two columns of the row so far.
+    Edge {
+        /// Column index for the source node.
+        from_column: usize,
+        /// Column index for the target node.
+        to_column: usize,
+        /// Edge type.
+        edge_type: String,
+        /// Properties to set, resolved against the row so far.
+        properties: Vec<(String, PropertySource)>,
+        /// Whether the edge's id goes to a new column (a named edge).
+        output: bool,
+    },
+}
+
+impl CreateStep {
+    /// A node with `labels` and `properties`.
+    #[must_use]
+    pub fn node(labels: Vec<String>, properties: Vec<(String, PropertySource)>) -> Self {
+        Self::Node { labels, properties }
+    }
+
+    /// An edge of `edge_type` with `properties`, from the node in
+    /// `from_column` to the one in `to_column`; its id goes to a new column
+    /// when `output`.
+    #[must_use]
+    pub fn edge(
+        from_column: usize,
+        to_column: usize,
+        edge_type: String,
+        properties: Vec<(String, PropertySource)>,
+        output: bool,
+    ) -> Self {
+        Self::Edge {
+            from_column,
+            to_column,
+            edge_type,
+            properties,
+            output,
+        }
+    }
+}
+
+/// Operator that creates the nodes and edges of the patterns of an INSERT
+/// or CREATE clause.
+///
+/// For each input chunk, runs the steps in order over all its rows: a node
+/// step creates a node per row and adds a column of their ids, an edge step
+/// creates an edge per row between two nodes of the row and, for a named
+/// edge, adds a column. A step reads the columns of the input and of the
+/// steps before it. That is what a chain of [`CreateNodeOperator`] and
+/// [`CreateEdgeOperator`] does, without an operator per node or edge: a
+/// clause of thousands of patterns is one operator, not a chain as long, and
+/// the columns are not copied once per step.
+pub struct CreateOperator {
+    /// Validated, versioned writes.
+    writer: GraphWriter,
+    /// Input operator; a single empty row for a clause that starts a
+    /// statement.
+    input: Box<dyn Operator>,
+    /// The input columns passed on: the planner's hidden expression columns
+    /// past them are not.
+    input_width: usize,
+    /// What to create for each row, in order.
+    steps: Vec<CreateStep>,
+    /// Evaluates the computed property values of each step.
+    expressions: Vec<PropertyExpressions>,
+}
+
+impl CreateOperator {
+    /// Creates an operator that runs `steps` for each row of `input`,
+    /// passing on its first `input_width` columns and a column per node and
+    /// named edge it creates.
+    pub fn new(
+        writer: impl Into<GraphWriter>,
+        input: Box<dyn Operator>,
+        input_width: usize,
+        steps: Vec<CreateStep>,
+    ) -> Self {
+        let expressions = steps
+            .iter()
+            .map(|_| PropertyExpressions::default())
+            .collect();
+        Self {
+            writer: writer.into(),
+            input,
+            input_width,
+            steps,
+            expressions,
+        }
+    }
+
+    /// Provides a search-store handle so computed property values
+    /// (`PropertySource::Expression`) can be evaluated.
+    #[must_use]
+    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStoreSearch>) -> Self {
+        for expressions in &mut self.expressions {
+            expressions.search_store = Some(Arc::clone(&search_store));
+        }
+        self
+    }
+
+    /// Sets the session context used when evaluating computed property values.
+    #[must_use]
+    pub fn with_session_context(mut self, context: SessionContext) -> Self {
+        for expressions in &mut self.expressions {
+            expressions.session_context = context.clone();
+        }
+        self
+    }
+}
+
+impl Operator for CreateOperator {
+    fn next(&mut self) -> OperatorResult {
+        let Some(chunk) = self.input.next()? else {
+            return Ok(None);
+        };
+        // The passed-on input columns of the selected rows, densely.
+        let rows: Vec<usize> = chunk.selected_indices().collect();
+        let columns = chunk
+            .columns()
+            .iter()
+            .take(self.input_width)
+            .map(|column| {
+                let mut passed = ValueVector::with_capacity(column.data_type().clone(), rows.len());
+                for &row in &rows {
+                    column.copy_row_to(row, &mut passed);
+                }
+                passed
+            })
+            .collect();
+        let mut out = DataChunk::new(columns);
+        out.set_count(rows.len());
+
+        for (step, expressions) in self.steps.iter().zip(&mut self.expressions) {
+            match step {
+                CreateStep::Node { labels, properties } => {
+                    let mut ids = ValueVector::with_capacity(LogicalType::Node, rows.len());
+                    for row in 0..rows.len() {
+                        let properties =
+                            expressions.resolve_row(properties, &out, row, &self.writer)?;
+                        ids.push_node_id(self.writer.create_node(labels, properties)?);
+                    }
+                    out.push_column(ids);
+                }
+                CreateStep::Edge {
+                    from_column,
+                    to_column,
+                    edge_type,
+                    properties,
+                    output,
+                } => {
+                    let mut ids =
+                        output.then(|| ValueVector::with_capacity(LogicalType::Edge, rows.len()));
+                    for row in 0..rows.len() {
+                        let from = NodeId(id_at(&out, *from_column, row, "from", "node")?);
+                        let to = NodeId(id_at(&out, *to_column, row, "to", "node")?);
+                        let properties =
+                            expressions.resolve_row(properties, &out, row, &self.writer)?;
+                        let edge_id = self.writer.create_edge(from, to, edge_type, properties)?;
+                        if let Some(ids) = &mut ids {
+                            ids.push_edge_id(edge_id);
+                        }
+                    }
+                    if let Some(ids) = ids {
+                        out.push_column(ids);
+                    }
+                }
+            }
+        }
+        Ok(Some(out))
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+
+    fn name(&self) -> &'static str {
+        "Create"
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
@@ -1002,11 +1255,10 @@ impl Operator for SetPropertyOperator {
 
         for row in chunk.selected_indices() {
             let entity_id = id_at(&chunk, self.entity_column, row, "entity", "entity")?;
-            let store = self.writer.store().as_ref() as &dyn GraphStore;
             let assignments: Vec<(String, Value)> = self
                 .properties
                 .iter()
-                .map(|(name, source)| (name.clone(), source.resolve(&chunk, row, store)))
+                .map(|(name, source)| (name.clone(), source.resolve(&chunk, row, &self.writer)))
                 .collect();
             if self.is_edge {
                 self.writer
@@ -1043,6 +1295,7 @@ mod tests {
     use crate::execution::chunk::DataChunkBuilder;
     use crate::graph::GraphStoreMut;
     use crate::graph::lpg::LpgStore;
+    use grafeo_common::types::{EpochId, TransactionId};
 
     // ── Helpers ────────────────────────────────────────────────────
 
@@ -2147,40 +2400,40 @@ mod tests {
 
     #[test]
     fn test_property_source_column() {
-        let store = LpgStore::new().unwrap();
+        let writer = GraphWriter::new(create_test_store());
         let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         builder.column_mut(0).unwrap().push_int64(42);
         builder.advance_row();
         let chunk = builder.finish();
 
         let src = PropertySource::Column(0);
-        assert_eq!(src.resolve(&chunk, 0, &store), Value::Int64(42));
+        assert_eq!(src.resolve(&chunk, 0, &writer), Value::Int64(42));
     }
 
     #[test]
     fn test_property_source_constant() {
-        let store = LpgStore::new().unwrap();
+        let writer = GraphWriter::new(create_test_store());
         let chunk = DataChunk::empty();
 
         let src = PropertySource::Constant(Value::String("hello".into()));
         assert_eq!(
-            src.resolve(&chunk, 0, &store),
+            src.resolve(&chunk, 0, &writer),
             Value::String("hello".into()),
         );
     }
 
     #[test]
     fn test_property_source_column_out_of_bounds() {
-        let store = LpgStore::new().unwrap();
+        let writer = GraphWriter::new(create_test_store());
         let chunk = DataChunk::empty();
 
         let src = PropertySource::Column(99);
-        assert_eq!(src.resolve(&chunk, 0, &store), Value::Null);
+        assert_eq!(src.resolve(&chunk, 0, &writer), Value::Null);
     }
 
     #[test]
     fn test_property_source_property_access_from_map() {
-        let store = LpgStore::new().unwrap();
+        let writer = GraphWriter::new(create_test_store());
         let mut map = std::collections::BTreeMap::new();
         map.insert(PropertyKey::new("age"), Value::Int64(30));
 
@@ -2196,18 +2449,75 @@ mod tests {
             column: 0,
             property: "age".to_string(),
         };
-        assert_eq!(src.resolve(&chunk, 0, &store), Value::Int64(30));
+        assert_eq!(src.resolve(&chunk, 0, &writer), Value::Int64(30));
     }
 
     #[test]
     fn test_property_source_property_access_missing_column() {
-        let store = LpgStore::new().unwrap();
+        let writer = GraphWriter::new(create_test_store());
         let chunk = DataChunk::empty();
 
         let src = PropertySource::PropertyAccess {
             column: 99,
             property: "name".to_string(),
         };
-        assert_eq!(src.resolve(&chunk, 0, &store), Value::Null);
+        assert_eq!(src.resolve(&chunk, 0, &writer), Value::Null);
+    }
+
+    /// A property of a node or edge the writer's transaction created, not
+    /// yet committed, reads as that transaction sees it, not as missing.
+    #[test]
+    fn a_property_access_reads_what_its_transaction_wrote() {
+        let store = create_test_store();
+        let writer = GraphWriter::new(Arc::clone(&store))
+            .with_transaction_context(EpochId::INITIAL, Some(TransactionId::new(3)));
+        let alix = writer
+            .create_node(
+                &["Person".to_string()],
+                vec![("age".to_string(), Value::Int64(19))],
+            )
+            .unwrap();
+        let gus = writer
+            .create_node(&["Person".to_string()], Vec::new())
+            .unwrap();
+        let knows = writer
+            .create_edge(
+                alix,
+                gus,
+                "KNOWS",
+                vec![("since".to_string(), Value::Int64(88))],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_node(alix)
+                .and_then(|node| node.get_property("age").cloned()),
+            None,
+            "a read outside the transaction does not see its value"
+        );
+        assert_eq!(
+            store
+                .get_edge(knows)
+                .and_then(|edge| edge.get_property("since").cloned()),
+            None,
+            "a read outside the transaction does not see its value"
+        );
+
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node, LogicalType::Edge]);
+        builder.column_mut(0).unwrap().push_node_id(alix);
+        builder.column_mut(1).unwrap().push_edge_id(knows);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        let age = PropertySource::PropertyAccess {
+            column: 0,
+            property: "age".to_string(),
+        };
+        let since = PropertySource::PropertyAccess {
+            column: 1,
+            property: "since".to_string(),
+        };
+        assert_eq!(age.resolve(&chunk, 0, &writer), Value::Int64(19));
+        assert_eq!(since.resolve(&chunk, 0, &writer), Value::Int64(88));
     }
 }

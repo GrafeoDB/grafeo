@@ -1,0 +1,156 @@
+# Rosetta: statements without a result
+#
+# A statement that ends with a write and no RETURN has no result: no rows and
+# no columns (openCypher; ISO GQL's omitted result, which FINISH asks for
+# too). A Cypher query ending with CREATE, MERGE, SET, REMOVE, DELETE,
+# FOREACH or a unit CALL used to return a row of internal columns for each
+# row it wrote, and a GQL one a row without columns. The runners check the
+# rows; the engine tests (statement_without_a_result) check the columns and
+# the write counters.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Statements without a result
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: a_create_without_return_has_no_rows
+    variants:
+      gql: "FOR i IN [1, 2] INSERT (:W {i: i})"
+      cypher: "UNWIND [1, 2] AS i CREATE (:W {i: i})"
+    expect:
+      empty: true
+
+  - name: a_standalone_create_has_no_rows
+    variants:
+      cypher: "CREATE (:W {k: 3})-[:R]->(:W {k: 19})"
+    expect:
+      empty: true
+
+  - name: a_merge_without_return_has_no_rows
+    variants:
+      gql: "FOR i IN [3, 19, 3] MERGE (:W {k: i})"
+      cypher: "UNWIND [3, 19, 3] AS i MERGE (:W {k: i})"
+    expect:
+      empty: true
+
+  - name: a_set_without_return_has_no_rows
+    setup:
+      - "INSERT (:W {k: 3}), (:W {k: 19})"
+    variants:
+      gql: "MATCH (w:W) SET w.k = 88"
+      cypher: "MATCH (w:W) SET w.k = 88"
+    expect:
+      empty: true
+
+  - name: a_remove_without_return_has_no_rows
+    setup:
+      - "INSERT (:W {k: 3}), (:W {k: 19})"
+    variants:
+      gql: "MATCH (w:W) REMOVE w.k"
+      cypher: "MATCH (w:W) REMOVE w.k"
+    expect:
+      empty: true
+
+  - name: a_delete_without_return_has_no_rows
+    setup:
+      - "INSERT (:W {k: 3})-[:R]->(:W {k: 19})"
+    variants:
+      gql: "MATCH (w:W) DETACH DELETE w"
+      cypher: "MATCH (w:W) DETACH DELETE w"
+    expect:
+      empty: true
+
+  - name: a_foreach_without_return_has_no_rows
+    variants:
+      cypher: "UNWIND [1, 2] AS i FOREACH (x IN [i, i] | CREATE (:W {x: x}))"
+    expect:
+      empty: true
+
+  # GQL used to refuse a statement ending with a CALL for want of a RETURN.
+  - name: a_unit_call_at_the_end_has_no_rows
+    variants:
+      gql: "FOR i IN [1, 2] CALL (i) { INSERT (:W {i: i}) }"
+      cypher: "UNWIND [1, 2] AS i CALL { WITH i CREATE (:W {i: i}) }"
+    expect:
+      empty: true
+
+  - name: a_unit_call_at_the_end_writes
+    statements:
+      - "FOR i IN [3, 19] CALL (i) { INSERT (:W {i: i}) }"
+      - "MATCH (w:W) RETURN count(w) AS nodes, sum(w.i) AS total"
+    expect:
+      rows:
+        - [2, 22]
+
+  - name: finish_has_no_rows
+    variants:
+      gql: "FOR i IN [1, 2] INSERT (:W {i: i}) FINISH"
+    expect:
+      empty: true
+
+  # The write still runs to its end, past the first chunk of rows.
+  - name: a_write_without_return_writes_every_row
+    statements:
+      - "FOR i IN range(1, 3000) INSERT (:W {i: i})"
+      - "MATCH (w:W) RETURN count(w) AS nodes, sum(w.i) AS total"
+    expect:
+      rows:
+        - [3000, 4501500]
+
+  # A GQL statement of one INSERT (or CREATE) returned the last node it
+  # created (#580).
+  - name: a_lone_insert_has_no_rows
+    variants:
+      gql: "INSERT (:W {k: 3})-[:R]->(:W {k: 19})"
+      cypher: "CREATE (:W {k: 3})-[:R]->(:W {k: 19})"
+    expect:
+      empty: true
+
+  - name: a_lone_create_has_no_rows
+    variants:
+      gql: "CREATE (:W {k: 3}), (:W {k: 19})"
+    expect:
+      empty: true
+
+  # After NEXT, a lone INSERT reads the rows the statement before returns and
+  # writes for each; it returned the last node of each INSERT and could not
+  # read the rows ("Undefined variable").
+  - name: a_lone_insert_after_next_has_no_rows
+    variants:
+      gql: "INSERT (:W {k: 3}) NEXT INSERT (:W {k: 19})"
+    expect:
+      empty: true
+
+  - name: a_lone_insert_after_next_writes_for_each_row
+    setup:
+      - "INSERT (:W {k: 3}), (:W {k: 19})"
+    statements:
+      - "MATCH (w:W) RETURN w.k AS k NEXT INSERT (:V {k: k})"
+      - "MATCH (v:V) RETURN count(v) AS nodes, sum(v.k) AS total"
+    expect:
+      rows:
+        - [2, 22]
+
+  # After a statement without a result (no RETURN, or FINISH), the statement
+  # after NEXT reads one empty row, as at the start of a statement. A lone
+  # INSERT there wrote nothing; after FINISH nothing ran.
+  - name: next_after_a_write_without_a_result_reads_one_row
+    setup:
+      - "INSERT (:W {k: 3}), (:W {k: 19})"
+    statements:
+      - "MATCH (w:W) SET w.k = 88 NEXT INSERT (:V {k: 3})"
+      - "MATCH (v:V) RETURN count(v) AS nodes"
+    expect:
+      rows:
+        - [1]
+
+  - name: next_after_finish_reads_one_row
+    variants:
+      gql: "FOR i IN [1, 2] INSERT (:W {i: i}) FINISH NEXT RETURN count(*) AS rows"
+    expect:
+      rows:
+        - [1]

@@ -44,4 +44,4 @@ pub use property::{CompareOp, PropertyStorage};
 #[cfg(feature = "lpg")]
 pub use section::LpgStoreSection;
 #[cfg(feature = "lpg")]
-pub use store::{LpgStore, PropertyUndoEntry};
+pub use store::{LpgStore, OpenChangesByGraph, PropertyUndoEntry};

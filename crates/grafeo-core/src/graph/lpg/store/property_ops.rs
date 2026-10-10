@@ -149,7 +149,7 @@ impl LpgStore {
 
     /// Brings the indexes in line with the removal of `key` from a node,
     /// whose value was `removed`.
-    fn update_indexes_on_remove(&self, id: NodeId, key: &str, removed: Option<&Value>) {
+    pub(super) fn update_indexes_on_remove(&self, id: NodeId, key: &str, removed: Option<&Value>) {
         if let Some(old_value) = removed {
             self.update_property_index_on_remove(id, &PropertyKey::new(key), old_value);
         }
@@ -496,7 +496,7 @@ impl LpgStore {
     /// property index on the key then keeps its entry for the node, as the
     /// value it was filed under is unknown.
     #[cfg(not(feature = "temporal"))]
-    fn undo_node_property_set(&self, id: NodeId, key: &PropertyKey) {
+    pub(super) fn undo_node_property_set(&self, id: NodeId, key: &PropertyKey) {
         if self.remove_node_property(id, key.as_str()).is_err() {
             self.node_properties.discard(id, key);
             self.update_indexes_on_remove(id, key.as_str(), None);
@@ -505,7 +505,7 @@ impl LpgStore {
 
     /// [`undo_node_property_set`](Self::undo_node_property_set) for an edge.
     #[cfg(not(feature = "temporal"))]
-    fn undo_edge_property_set(&self, id: EdgeId, key: &PropertyKey) {
+    pub(super) fn undo_edge_property_set(&self, id: EdgeId, key: &PropertyKey) {
         if self.remove_edge_property(id, key.as_str()).is_err() {
             self.edge_properties.discard(id, key);
         }

@@ -198,15 +198,24 @@ impl LpgStore {
     /// rolls back: its version, labels, properties, index entries and count.
     /// Nothing of it was ever visible to others.
     pub(super) fn discard_created_node(&self, id: NodeId, transaction_id: TransactionId) {
+        if self.remove_created_node(id, transaction_id) {
+            self.live_node_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Removes a node that `transaction_id` created: its version, labels,
+    /// properties and index entries, not the counters (a change set's create
+    /// counts at commit). Returns whether the node was there and is gone.
+    pub(super) fn remove_created_node(&self, id: NodeId, transaction_id: TransactionId) -> bool {
         #[cfg(not(feature = "tiered-storage"))]
         {
             let mut nodes = self.nodes.write();
             let Some(chain) = nodes.get_mut(&id) else {
-                return;
+                return false;
             };
             chain.remove_versions_by(transaction_id);
             if !chain.is_empty() {
-                return;
+                return false;
             }
             nodes.remove(&id);
         }
@@ -214,11 +223,11 @@ impl LpgStore {
         {
             let mut versions = self.node_versions.write();
             let Some(index) = versions.get_mut(&id) else {
-                return;
+                return false;
             };
             index.remove_versions_by(transaction_id);
             if !index.is_empty() {
-                return;
+                return false;
             }
             versions.remove(&id);
         }
@@ -237,23 +246,35 @@ impl LpgStore {
         }
         drop(label_index);
         self.node_labels.write().remove(&id);
-
-        self.live_node_count.fetch_sub(1, Ordering::Relaxed);
+        true
     }
 
     /// Removes an edge that `transaction_id` created, when the transaction
     /// rolls back: its version, adjacency entries, properties and counts.
     pub(super) fn discard_created_edge(&self, id: EdgeId, transaction_id: TransactionId) {
+        if let Some(type_id) = self.remove_created_edge(id, transaction_id) {
+            self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
+            self.decrement_edge_type_count(type_id);
+        }
+    }
+
+    /// Removes an edge that `transaction_id` created: its version, adjacency
+    /// entries and properties, not the counters (a change set's create counts
+    /// at commit). Returns the edge's type id when the edge was there and is
+    /// gone.
+    pub(super) fn remove_created_edge(
+        &self,
+        id: EdgeId,
+        transaction_id: TransactionId,
+    ) -> Option<u32> {
         #[cfg(not(feature = "tiered-storage"))]
         let record = {
             let mut edges = self.edges.write();
-            let Some(chain) = edges.get_mut(&id) else {
-                return;
-            };
+            let chain = edges.get_mut(&id)?;
             let record = chain.latest().copied();
             chain.remove_versions_by(transaction_id);
             if !chain.is_empty() {
-                return;
+                return None;
             }
             edges.remove(&id);
             record
@@ -261,30 +282,25 @@ impl LpgStore {
         #[cfg(feature = "tiered-storage")]
         let record = {
             let mut versions = self.edge_versions.write();
-            let Some(index) = versions.get_mut(&id) else {
-                return;
-            };
+            let index = versions.get_mut(&id)?;
             let record = index
-                .visible_to(self.current_epoch(), transaction_id)
+                .latest()
                 .and_then(|version| self.read_edge_record(&version));
             index.remove_versions_by(transaction_id);
             if !index.is_empty() {
-                return;
+                return None;
             }
             versions.remove(&id);
             record
         };
-        let Some(record) = record else {
-            return;
-        };
+        let record = record?;
 
         self.forward_adj.mark_deleted(record.src, id);
         if let Some(ref backward) = self.backward_adj {
             backward.mark_deleted(record.dst, id);
         }
         self.edge_properties.purge(id);
-        self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
-        self.decrement_edge_type_count(record.type_id);
+        Some(record.type_id)
     }
 
     /// Garbage collects the versions no reader at `min_epoch` or later can

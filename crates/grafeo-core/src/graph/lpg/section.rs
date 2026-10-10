@@ -20,7 +20,8 @@ use grafeo_common::utils::error::Result;
 
 use super::block::{self, BlockEdge, BlockNamedGraph, BlockNode};
 use super::chunked::{LPG_SECTION_VERSION, read_lpg_chunks, write_lpg_chunks};
-use crate::graph::lpg::LpgStore;
+use super::store::OpenChangeSource;
+use crate::graph::lpg::{LpgStore, OpenChangesByGraph};
 
 // ── Collection helpers ──────────────────────────────────────────────
 
@@ -144,6 +145,9 @@ pub struct LpgStoreSection {
     store: Arc<LpgStore>,
     dirty: AtomicBool,
     caps: ChunkCaps,
+    /// What the transactions open while the section is written changed,
+    /// from their change sets; `None` to read it from the stores' undo logs.
+    open_changes: Option<OpenChangesByGraph>,
 }
 
 impl LpgStoreSection {
@@ -161,7 +165,18 @@ impl LpgStoreSection {
             store,
             dirty: AtomicBool::new(false),
             caps,
+            open_changes: None,
         }
+    }
+
+    /// Writes the committed state of what the open transactions changed
+    /// from `changes`, indexed from their change sets, instead of from the
+    /// stores' undo logs. The caller holds their writes, rollbacks and
+    /// commits until the section is written (see [`OpenChangesByGraph`]).
+    #[must_use]
+    pub fn with_open_changes(mut self, changes: OpenChangesByGraph) -> Self {
+        self.open_changes = Some(changes);
+        self
     }
 
     /// Mark this section as dirty (has unsaved changes).
@@ -214,10 +229,15 @@ impl Section for LpgStoreSection {
     /// Streams the store's committed state as chunks of version 3: per graph
     /// the node and edge tables in row groups, then the metadata chunk. What
     /// open transactions changed is written as it was committed, from their
-    /// undo logs, so the caller holds their writes and rollbacks and commits
-    /// for the whole write (a checkpoint's write freeze).
+    /// undo logs or the change sets the section was given, so the caller
+    /// holds their writes and rollbacks and commits for the whole write (a
+    /// checkpoint's write freeze).
     fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
-        write_lpg_chunks(&self.store, self.caps, sink)
+        let open = match &self.open_changes {
+            Some(changes) => OpenChangeSource::ChangeSets(changes),
+            None => OpenChangeSource::UndoLogs,
+        };
+        write_lpg_chunks(&self.store, self.caps, open, sink)
     }
 
     /// Loads 0.5.x bytes (one raw chunk) through

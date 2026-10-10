@@ -2,9 +2,7 @@
 
 use super::super::dictionary::NameDictionary;
 use super::{LpgStore, PropertyUndoEntry};
-#[cfg(feature = "temporal")]
-use grafeo_common::types::EpochId;
-use grafeo_common::types::{NodeId, PropertyKey, TransactionId};
+use grafeo_common::types::{EpochId, NodeId, PropertyKey, TransactionId};
 use grafeo_common::utils::hash::FxHashMap;
 
 impl LpgStore {
@@ -35,6 +33,17 @@ impl LpgStore {
     ///
     /// Returns false if the node already has the label.
     fn add_label_to_existing(&self, node_id: NodeId, label: &str) -> bool {
+        self.add_label_at(node_id, label, self.current_epoch())
+    }
+
+    /// Adds a label to a node the caller found to exist, with `temporal` as
+    /// a new label set at `at` (`EpochId::PENDING` for a transaction's
+    /// write); without it the set changes in place and `at` is not used.
+    ///
+    /// Returns false if the node already has the label.
+    pub(super) fn add_label_at(&self, node_id: NodeId, label: &str, at: EpochId) -> bool {
+        #[cfg(not(feature = "temporal"))]
+        let _ = at;
         let label_id = self.get_or_create_label_id(label);
 
         // Add to node_labels map
@@ -61,7 +70,7 @@ impl LpgStore {
             }
             let mut new_set = current;
             new_set.insert(label_id);
-            self.append_labels(&mut node_labels, node_id, self.current_epoch(), new_set);
+            self.append_labels(&mut node_labels, node_id, at, new_set);
         }
 
         drop(node_labels);
@@ -86,6 +95,16 @@ impl LpgStore {
     ///
     /// Returns false if the node doesn't have the label.
     fn remove_label_from_existing(&self, node_id: NodeId, label: &str) -> bool {
+        self.remove_label_at(node_id, label, self.current_epoch())
+    }
+
+    /// Removes a label from a node the caller found to exist, as
+    /// [`add_label_at`](Self::add_label_at) adds one.
+    ///
+    /// Returns false if the node doesn't have the label.
+    pub(super) fn remove_label_at(&self, node_id: NodeId, label: &str, at: EpochId) -> bool {
+        #[cfg(not(feature = "temporal"))]
+        let _ = at;
         // Get label ID
         let label_id = {
             let reg = self.label_registry.read();
@@ -121,7 +140,7 @@ impl LpgStore {
             }
             let mut new_set = current;
             new_set.remove(&label_id);
-            self.append_labels(&mut node_labels, node_id, self.current_epoch(), new_set);
+            self.append_labels(&mut node_labels, node_id, at, new_set);
         }
 
         drop(node_labels);
@@ -142,7 +161,7 @@ impl LpgStore {
 
     /// Stores the node's label count in its newest record.
     #[cfg(not(any(feature = "temporal", feature = "tiered-storage")))]
-    fn update_label_count(&self, node_id: NodeId) {
+    pub(super) fn update_label_count(&self, node_id: NodeId) {
         if let Some(chain) = self.nodes.write().get_mut(&node_id)
             && let Some(record) = chain.latest_mut()
         {

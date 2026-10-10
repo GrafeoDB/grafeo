@@ -91,7 +91,7 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 
 use super::dictionary::NameDictionary;
 use super::property::{EntityId, PropertyStorage};
-use super::store::{Labels, OpenChanges};
+use super::store::{Labels, OpenChangeSource, OpenChanges};
 use super::{Edge, LpgStore};
 use crate::codec::column_chunk::{ColumnChunk, decode_column_chunk_bytes};
 use crate::codec::{ChunkColumn, RowsChunker};
@@ -218,8 +218,9 @@ impl Table {
 /// table's, then the metadata chunk: the committed state (see the module
 /// docs). While transactions are open, the caller holds their writes and
 /// rollbacks and commits (a checkpoint's write freeze) for the whole write:
-/// the committed state is read from the store and the open transactions'
-/// undo logs together ([`LpgStore::open_changes`]).
+/// the committed state is read from the store and what the open
+/// transactions changed together, from `open` (their undo logs,
+/// [`LpgStore::open_changes`], or their change sets).
 ///
 /// # Errors
 ///
@@ -233,6 +234,7 @@ impl Table {
 pub(crate) fn write_lpg_chunks(
     store: &LpgStore,
     caps: ChunkCaps,
+    open: OpenChangeSource<'_>,
     sink: &mut dyn SectionSink,
 ) -> Result<()> {
     caps.validate()?;
@@ -260,8 +262,10 @@ pub(crate) fn write_lpg_chunks(
             graph: describe_graph(graph.graph_id(), name),
             caps,
         };
-        // Each graph is a store with its own undo log.
-        let changes = graph.open_changes();
+        // Each graph is a store with its own undo log, and a graph of its
+        // own in a change set (a named graph's name may be empty).
+        let key = (!std::ptr::eq(*graph, store)).then_some(*name);
+        let changes = open.changes_of(graph, key);
         let nodes_end = write_node_table(graph, &changes, epoch, &place, sink)?;
         let edges_end = write_edge_table(graph, &changes, &place, sink)?;
         // Read after the rows: every row written is below the next ids, and
@@ -2176,13 +2180,24 @@ mod tests {
         write_lpg_chunks,
     };
     use crate::codec::column_chunk::{ColumnChunk, decode_column_chunk};
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::lpg::store::OpenChangeSource;
+    use crate::graph::lpg::{LpgStore, OpenChangesByGraph};
 
     /// The chunks `write_lpg_chunks` writes for `store`, in order.
     fn try_chunks(store: &LpgStore, caps: ChunkCaps) -> Result<Vec<(ChunkMeta, Bytes)>> {
+        try_chunks_from(store, caps, OpenChangeSource::UndoLogs)
+    }
+
+    /// The chunks `write_lpg_chunks` writes for `store`, reading what open
+    /// transactions changed from `open`.
+    fn try_chunks_from(
+        store: &LpgStore,
+        caps: ChunkCaps,
+        open: OpenChangeSource<'_>,
+    ) -> Result<Vec<(ChunkMeta, Bytes)>> {
         let mut image = MemoryImage::new();
         image.begin_section(SectionType::LpgStore, LPG_SECTION_VERSION)?;
-        write_lpg_chunks(store, caps, &mut image)?;
+        write_lpg_chunks(store, caps, open, &mut image)?;
         let Some(section) = image.take_section(SectionType::LpgStore) else {
             return Ok(Vec::new());
         };
@@ -3506,8 +3521,13 @@ mod tests {
             .inner
             .begin_section(SectionType::LpgStore, LPG_SECTION_VERSION)
             .unwrap();
-        write_lpg_chunks(&store, caps(2, 1 << 20), &mut image)
-            .expect("the write tolerates new names");
+        write_lpg_chunks(
+            &store,
+            caps(2, 1 << 20),
+            OpenChangeSource::UndoLogs,
+            &mut image,
+        )
+        .expect("the write tolerates new names");
         assert!(image.hook.is_none(), "the hook ran during the write");
         let section = image.inner.take_section(SectionType::LpgStore).unwrap();
         let written: Vec<(ChunkMeta, Bytes)> = section
@@ -3752,6 +3772,167 @@ mod tests {
         }
     }
 
+    // ── The committed state from change sets ────────────────────────
+
+    /// A change set's slot for `graph` (`None`: the default graph).
+    fn lpg_slot(
+        set: &mut grafeo_common::change::ChangeSet,
+        graph: Option<&str>,
+    ) -> grafeo_common::change::GraphSlot {
+        use grafeo_common::change::{DataModel, GraphRef};
+
+        set.slot(GraphRef {
+            model: DataModel::Lpg,
+            key: graph.map(arcstr::ArcStr::from),
+        })
+        .unwrap()
+    }
+
+    /// Makes the changes of [`change_travellers_in_an_open_transaction`]
+    /// through each graph's change target, recording them in one change set
+    /// left open, and returns the committed view of its entries.
+    fn change_travellers_through_a_change_set(store: &LpgStore) -> OpenChangesByGraph {
+        use crate::graph::apply::Writer;
+        use crate::graph::lpg::store::testing::Recorder;
+        use grafeo_common::change::ChangeSet;
+        use grafeo_common::types::TransactionId;
+
+        let writer = Writer::Transaction {
+            id: TransactionId::new(19),
+            snapshot: store.current_epoch(),
+        };
+        let mut set = ChangeSet::new();
+        let default = lpg_slot(&mut set, None);
+        let trips_slot = lpg_slot(&mut set, Some("trips"));
+        let main = Recorder {
+            store,
+            slot: default,
+            writer,
+        };
+        // Alix: a value set twice, one added, one removed.
+        for age in [88, 3] {
+            main.set_node(&mut set, ALIX, "age", Value::Int64(age));
+        }
+        main.set_node(&mut set, ALIX, "nickname", Value::from("Al"));
+        main.remove_node(&mut set, ALIX, "city");
+        // Mia: a label added then removed, one removed then added back, one
+        // removed.
+        main.add_label(&mut set, MIA, "Traveller");
+        main.remove_label(&mut set, MIA, "Traveller");
+        main.remove_label(&mut set, MIA, "Person");
+        main.add_label(&mut set, MIA, "Person");
+        main.remove_label(&mut set, MIA, "Employee");
+        // Gus: values and labels changed, then deleted with his edges, one of
+        // them changed first.
+        main.set_node(&mut set, GUS, "age", Value::Int64(19));
+        main.set_node(&mut set, GUS, "nickname", Value::from("G"));
+        main.add_label(&mut set, GUS, "Traveller");
+        main.remove_label(&mut set, GUS, "Employee");
+        main.set_edge(&mut set, ALIX_GUS, "since", Value::Int64(3));
+        main.set_edge(&mut set, ALIX_GUS, "note", Value::from("Paris"));
+        main.delete_edge(&mut set, ALIX_GUS);
+        main.delete_edge(&mut set, GUS_MIA);
+        main.delete_node(&mut set, GUS);
+        // Nodes and edges the transaction created, and some of them deleted.
+        let vincent = main.create_node(&mut set, &["Person"], &[]);
+        main.set_node(&mut set, vincent, "name", Value::from("Vincent"));
+        main.create_edge(&mut set, vincent, MIA, "KNOWS", &[]);
+        let jules = main.create_node(&mut set, &["Person"], &[("name", Value::from("Jules"))]);
+        let visited = main.create_edge(&mut set, ALIX, MIA, "VISITED", &[]);
+        main.set_edge(&mut set, visited, "since", Value::Int64(88));
+        main.delete_edge(&mut set, visited);
+        main.delete_node(&mut set, jules);
+        // The named graph: a value changed, an edge and a node deleted.
+        let trips = store.graph("trips").unwrap();
+        let named = Recorder {
+            store: &trips,
+            slot: trips_slot,
+            writer,
+        };
+        named.set_node(&mut set, NodeId(0), "name", Value::from("Paris"));
+        named.delete_edge(&mut set, EdgeId(0));
+        named.delete_node(&mut set, NodeId(1));
+        OpenChangesByGraph::index([
+            (None, set.in_graph(default)),
+            (Some("trips"), set.in_graph(trips_slot)),
+        ])
+    }
+
+    /// The committed view indexed from an open transaction's change set is
+    /// the one its undo log gives for the same changes, and a write and a
+    /// committed copy from it hold the committed state, in the default graph
+    /// and in a named graph.
+    #[test]
+    fn open_changes_from_entries_matches_the_committed_state() {
+        let logged = travellers();
+        change_travellers_in_an_open_transaction(&logged);
+        let recorded = travellers();
+        let view = change_travellers_through_a_change_set(&recorded);
+
+        assert_eq!(
+            view.of(None).unwrap().normalized(),
+            logged.open_changes().normalized(),
+            "the default graph's view"
+        );
+        assert_eq!(
+            view.of(Some("trips")).unwrap().normalized(),
+            logged.graph("trips").unwrap().open_changes().normalized(),
+            "the named graph's view"
+        );
+        let open = OpenChangeSource::ChangeSets(&view);
+        for caps in [caps(2, 1 << 20), caps(1, 64), ChunkCaps::DEFAULT] {
+            assert_layout(&try_chunks_from(&recorded, caps, open).unwrap());
+            assert_same_graph(&travellers(), &round_trip_from(&recorded, caps, open));
+        }
+        assert_same_graph(&travellers(), &recorded.committed_copy_with(&view).unwrap());
+        assert!(
+            recorded.get_node(GUS).is_none(),
+            "the store holds the open transaction's delete"
+        );
+    }
+
+    /// A rollback to a savepoint undoes the change set's tail: a write from
+    /// what the set keeps holds the committed state of it, of what the
+    /// rollback restored, and of what the transaction changed after it.
+    #[test]
+    fn a_write_after_a_savepoint_rollback_holds_the_committed_state_from_change_sets() {
+        use crate::graph::apply::{ChangeTarget, Writer};
+        use crate::graph::lpg::store::testing::Recorder;
+        use grafeo_common::change::ChangeSet;
+        use grafeo_common::types::TransactionId;
+
+        let store = travellers();
+        let transaction = TransactionId::new(88);
+        let mut set = ChangeSet::new();
+        let slot = lpg_slot(&mut set, None);
+        let recorder = Recorder {
+            store: &store,
+            slot,
+            writer: Writer::Transaction {
+                id: transaction,
+                snapshot: store.current_epoch(),
+            },
+        };
+        recorder.set_node(&mut set, GUS, "age", Value::Int64(19));
+        let savepoint = set.mark();
+        recorder.set_node(&mut set, ALIX, "age", Value::Int64(88));
+        recorder.delete_edge(&mut set, ALIX_GUS);
+        recorder.delete_edge(&mut set, GUS_MIA);
+        recorder.delete_node(&mut set, GUS);
+        let tail = set.split_off(savepoint);
+        store.undo(transaction, &mut tail.iter()).unwrap();
+        assert!(store.get_node(GUS).is_some(), "the rollback restored Gus");
+        recorder.add_label(&mut set, ALIX, "Traveller");
+        recorder.set_node(&mut set, MIA, "age", Value::Int64(3));
+
+        let view = OpenChangesByGraph::index([(None, set.in_graph(slot))]);
+        let open = OpenChangeSource::ChangeSets(&view);
+        for caps in [caps(2, 1 << 20), ChunkCaps::DEFAULT] {
+            assert_layout(&try_chunks_from(&store, caps, open).unwrap());
+            assert_same_graph(&travellers(), &round_trip_from(&store, caps, open));
+        }
+    }
+
     /// A key that only a committed value an open transaction replaced has
     /// (no column of the store holds it) joins the property columns with the
     /// next key id, and its value is written.
@@ -3883,11 +4064,17 @@ mod tests {
 
     // ── Reading (F4) ────────────────────────────────────────────────
 
-    /// Writes `store` with `caps` and loads the chunks into `into`.
-    fn load_into(store: &LpgStore, caps: ChunkCaps, into: &LpgStore) -> Result<()> {
+    /// Writes `store` with `caps`, reading what open transactions changed
+    /// from `open`, and loads the chunks into `into`.
+    fn load_into_from(
+        store: &LpgStore,
+        caps: ChunkCaps,
+        open: OpenChangeSource<'_>,
+        into: &LpgStore,
+    ) -> Result<()> {
         let mut image = MemoryImage::new();
         image.begin_section(SectionType::LpgStore, LPG_SECTION_VERSION)?;
-        write_lpg_chunks(store, caps, &mut image)?;
+        write_lpg_chunks(store, caps, open, &mut image)?;
         let source = image
             .section_source(SectionType::LpgStore)
             .expect("the section holds its metadata chunk");
@@ -3896,8 +4083,14 @@ mod tests {
 
     /// `store` written with `caps` and loaded into a new store.
     fn round_trip(store: &LpgStore, caps: ChunkCaps) -> LpgStore {
+        round_trip_from(store, caps, OpenChangeSource::UndoLogs)
+    }
+
+    /// `store` written with `caps`, reading what open transactions changed
+    /// from `open`, and loaded into a new store.
+    fn round_trip_from(store: &LpgStore, caps: ChunkCaps, open: OpenChangeSource<'_>) -> LpgStore {
         let back = LpgStore::new().unwrap();
-        load_into(store, caps, &back).unwrap();
+        load_into_from(store, caps, open, &back).unwrap();
         back
     }
 
@@ -4724,7 +4917,13 @@ mod tests {
             .inner
             .begin_section(SectionType::LpgStore, LPG_SECTION_VERSION)
             .unwrap();
-        write_lpg_chunks(&store, caps(2, 1 << 20), &mut image).unwrap();
+        write_lpg_chunks(
+            &store,
+            caps(2, 1 << 20),
+            OpenChangeSource::UndoLogs,
+            &mut image,
+        )
+        .unwrap();
         let back = LpgStore::new().unwrap();
         let source = image.inner.section_source(SectionType::LpgStore).unwrap();
         read_lpg_chunks(&back, &*source).unwrap();
@@ -4778,7 +4977,7 @@ mod tests {
         image
             .begin_section(SectionType::LpgStore, LPG_SECTION_VERSION)
             .unwrap();
-        write_lpg_chunks(&store, caps(4, 512), &mut image).unwrap();
+        write_lpg_chunks(&store, caps(4, 512), OpenChangeSource::UndoLogs, &mut image).unwrap();
         let source = Counting {
             inner: image.section_source(SectionType::LpgStore).unwrap(),
             fetched: std::cell::RefCell::new(Vec::new()),

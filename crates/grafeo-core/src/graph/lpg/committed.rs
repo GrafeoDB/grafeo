@@ -15,7 +15,6 @@ use grafeo_common::types::EpochId;
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_common::utils::error::{Error, Result};
 
-use super::LpgStore;
 #[cfg(feature = "temporal")]
 use super::chunked::committed_versions;
 #[cfg(not(feature = "temporal"))]
@@ -23,6 +22,8 @@ use super::chunked::{column_rows, for_each_committed_value};
 use super::chunked::{committed_edges, committed_nodes, section_epoch};
 #[cfg(not(feature = "temporal"))]
 use super::property::{EntityId, PropertyStorage};
+use super::store::{OpenChangeSource, OpenChanges};
+use super::{LpgStore, OpenChangesByGraph};
 
 impl LpgStore {
     /// A new store holding the committed state of this store and its named
@@ -46,9 +47,25 @@ impl LpgStore {
     /// Returns the error of reading a node or edge record or a spilled
     /// property value, and an allocation error of the copy.
     pub fn committed_copy(&self) -> Result<Self> {
+        self.committed_copy_from(OpenChangeSource::UndoLogs)
+    }
+
+    /// [`committed_copy`](Self::committed_copy), reading what the open
+    /// transactions changed from `changes`, indexed from their change sets,
+    /// instead of from the stores' undo logs. The caller holds their writes,
+    /// rollbacks and commits for the whole copy (see [`OpenChangesByGraph`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`committed_copy`](Self::committed_copy).
+    pub fn committed_copy_with(&self, changes: &OpenChangesByGraph) -> Result<Self> {
+        self.committed_copy_from(OpenChangeSource::ChangeSets(changes))
+    }
+
+    fn committed_copy_from(&self, open: OpenChangeSource<'_>) -> Result<Self> {
         let copy = Self::new()?;
         let epoch = section_epoch(self);
-        copy_graph(self, &copy, epoch)?;
+        copy_graph(self, &copy, epoch, &open.changes_of(self, None))?;
         // A graph dropped since the names were read is left out.
         let graphs: Vec<(String, std::sync::Arc<LpgStore>)> = self
             .graph_names()
@@ -64,29 +81,38 @@ impl LpgStore {
             .restore_graphs(&ids, self.next_graph_id())
             .map_err(|error| Error::Internal(format!("the committed copy: {error}")))?;
         // In any order: each graph is copied on its own.
-        for ((_, graph), target) in graphs.iter().zip(&targets) {
-            copy_graph(graph, target, epoch)?;
+        for ((name, graph), target) in graphs.iter().zip(&targets) {
+            copy_graph(
+                graph,
+                target,
+                epoch,
+                &open.changes_of(graph, Some(name.as_str())),
+            )?;
         }
         Ok(copy)
     }
 }
 
-/// Copies the committed state of `graph` (one store, with its own undo log)
-/// into `target`, a new store: its name dictionaries (ids included, so the
-/// nodes and edges find their names' ids), its nodes, then its edges, then
-/// their values, then its next ids and, with `temporal`, `epoch` (the root
-/// store's).
-fn copy_graph(graph: &LpgStore, target: &LpgStore, epoch: u64) -> Result<()> {
+/// Copies the committed state of `graph` (one store, whose open
+/// transactions changed `changes`) into `target`, a new store: its name
+/// dictionaries (ids included, so the nodes and edges find their names'
+/// ids), its nodes, then its edges, then their values, then its next ids
+/// and, with `temporal`, `epoch` (the root store's).
+fn copy_graph(
+    graph: &LpgStore,
+    target: &LpgStore,
+    epoch: u64,
+    changes: &OpenChanges,
+) -> Result<()> {
     target.copy_name_dictionaries(graph);
-    let changes = graph.open_changes();
     let mut nodes = Vec::new();
-    for (id, labels) in committed_nodes(graph, &changes, epoch)? {
+    for (id, labels) in committed_nodes(graph, changes, epoch)? {
         let labels: Vec<&str> = labels.iter().map(|label| label.as_str()).collect();
         target.create_node_with_id(id, &labels)?;
         nodes.push(id);
     }
     let mut edges = Vec::new();
-    for edge in committed_edges(graph, &changes) {
+    for edge in committed_edges(graph, changes) {
         let edge = edge?;
         target.create_edge_with_id(edge.id, edge.src, edge.dst, &edge.edge_type)?;
         edges.push(edge.id);

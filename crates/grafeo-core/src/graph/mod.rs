@@ -22,6 +22,7 @@
 //! `compact` (with `lpg`) is not a model: it reads the compacted base of a
 //! 0.5.x database file, so that opening the file folds it into the LPG store.
 
+pub mod apply;
 pub mod lpg;
 pub mod projection;
 pub mod traits;

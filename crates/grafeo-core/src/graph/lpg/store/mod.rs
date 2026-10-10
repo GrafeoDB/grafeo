@@ -9,6 +9,7 @@
 //! - Columnar properties with zone maps for fast filtering
 //! - Forward and backward adjacency indexes
 
+mod apply;
 mod edge_ops;
 mod graph_store_impl;
 mod index;
@@ -26,7 +27,10 @@ mod versioning;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use open_changes::{Labels, OpenChanges};
+#[cfg(test)]
+pub(crate) use apply::testing;
+pub use open_changes::OpenChangesByGraph;
+pub(crate) use open_changes::{Labels, OpenChangeSource, OpenChanges};
 
 use super::PropertyStorage;
 use super::dictionary::NameDictionary;

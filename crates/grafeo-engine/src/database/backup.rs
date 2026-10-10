@@ -35,7 +35,13 @@ pub enum BackupKind {
 }
 
 /// Metadata for a single backup segment (full or incremental).
+///
+/// Read, not built, outside this crate: later releases may add fields. It is
+/// stored with bincode, which has no field names, so a field added later
+/// needs a reader for the layout without it (`#[serde(default)]` alone does
+/// not read an older file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BackupSegment {
     /// Segment type.
     pub kind: BackupKind,
@@ -54,7 +60,13 @@ pub struct BackupSegment {
 }
 
 /// Tracks the full backup chain for a database.
+///
+/// Read, not built, outside this crate: later releases may add fields. It is
+/// stored with bincode, which has no field names, so a field added later
+/// needs a reader for the layout without it (`#[serde(default)]` alone does
+/// not read an older file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BackupManifest {
     /// Manifest format version.
     pub version: u32,
@@ -107,7 +119,13 @@ impl Default for BackupManifest {
 /// Tracks the WAL position of the last completed backup.
 ///
 /// Persisted as `backup_cursor.meta` in the WAL directory.
+///
+/// Read, not built, outside this crate: later releases may add fields. It is
+/// stored with bincode, which has no field names, so a field added later
+/// needs a reader for the layout without it (`#[serde(default)]` alone does
+/// not read an older file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BackupCursor {
     /// The epoch up to which WAL records have been backed up.
     pub backed_up_epoch: EpochId,
@@ -870,6 +888,81 @@ mod tests {
         assert_eq!(loaded.backed_up_epoch, EpochId::new(42));
         assert_eq!(loaded.log_sequence, 7);
         assert_eq!(loaded.timestamp_ms, 12345);
+    }
+
+    /// A backup manifest as 0.6.0 writes it (bincode, standard config): a
+    /// full segment of epochs 3 to 19 and an incremental one of 20 to 88.
+    const MANIFEST_0_6_0: [u8; 79] = [
+        1, 2, 0, 23, 98, 97, 99, 107, 117, 112, 95, 102, 117, 108, 108, 95, 48, 48, 48, 51, 46,
+        103, 114, 97, 102, 101, 111, 3, 19, 88, 251, 0, 16, 253, 0, 236, 168, 19, 161, 1, 0, 0, 1,
+        20, 98, 97, 99, 107, 117, 112, 95, 105, 110, 99, 114, 95, 48, 48, 50, 48, 46, 119, 97, 108,
+        20, 88, 3, 251, 63, 1, 253, 192, 67, 170, 19, 161, 1, 0, 0,
+    ];
+
+    /// A backup cursor as 0.6.0 writes it: epoch 88, log sequence 3.
+    const CURSOR_0_6_0: [u8; 11] = [88, 3, 253, 192, 67, 170, 19, 161, 1, 0, 0];
+
+    /// The manifest and cursor that 0.6.0 writes still read. They are
+    /// bincode, which has no field names: a field added to `BackupManifest`,
+    /// `BackupSegment` or `BackupCursor` makes these bytes unreadable, even
+    /// with `#[serde(default)]`, so such a change needs a reader for the old
+    /// layout.
+    #[test]
+    fn a_manifest_and_cursor_written_by_0_6_0_still_read() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(MANIFEST_FILENAME), MANIFEST_0_6_0).unwrap();
+        std::fs::write(dir.path().join(BACKUP_CURSOR_FILENAME), CURSOR_0_6_0).unwrap();
+
+        let manifest = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(manifest.version, 1);
+        let segments: Vec<_> = manifest
+            .segments
+            .iter()
+            .map(|segment| {
+                (
+                    segment.kind,
+                    segment.filename.as_str(),
+                    segment.start_epoch.as_u64(),
+                    segment.end_epoch.as_u64(),
+                    segment.checksum,
+                    segment.size_bytes,
+                    segment.created_at_ms,
+                )
+            })
+            .collect();
+        assert_eq!(
+            segments,
+            [
+                (
+                    BackupKind::Full,
+                    "backup_full_0003.grafeo",
+                    3,
+                    19,
+                    88,
+                    4096,
+                    1_791_331_200_000
+                ),
+                (
+                    BackupKind::Incremental,
+                    "backup_incr_0020.wal",
+                    20,
+                    88,
+                    3,
+                    319,
+                    1_791_331_288_000
+                ),
+            ]
+        );
+
+        let cursor = read_backup_cursor(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            (
+                cursor.backed_up_epoch.as_u64(),
+                cursor.log_sequence,
+                cursor.timestamp_ms
+            ),
+            (88, 3, 1_791_331_288_000)
+        );
     }
 
     #[test]

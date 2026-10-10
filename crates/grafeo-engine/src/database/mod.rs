@@ -51,6 +51,10 @@ pub use upsert::{EdgeUpsertOptions, UpsertSummary};
 mod import;
 #[cfg(feature = "lpg")]
 mod index;
+#[cfg(all(feature = "lpg", feature = "gql", feature = "vector-index"))]
+pub(crate) use index::{
+    check_vector_for_index, check_vector_index_dimensions, vector_index_metric,
+};
 #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
 mod legacy_spill;
 #[cfg(feature = "grafeo-file")]
@@ -1828,7 +1832,6 @@ impl GrafeoDB {
             transaction_manager: Arc::clone(&self.transaction_manager),
             query_cache: Arc::clone(&self.query_cache),
             catalog: Arc::clone(&self.catalog),
-            adaptive_config: self.config.adaptive.clone(),
             factorized_execution: self.config.factorized_execution,
             shuffle_unordered: self.config.shuffle_unordered,
             graph_model: self.config.graph_model,
@@ -1855,13 +1858,10 @@ impl GrafeoDB {
         }
 
         #[cfg(all(feature = "lpg", feature = "triple-store"))]
-        let mut session = Session::with_rdf_store_and_adaptive(
-            self.lpg_store(),
-            Arc::clone(&self.rdf_store),
-            session_cfg(),
-        );
+        let mut session =
+            Session::with_rdf_store(self.lpg_store(), Arc::clone(&self.rdf_store), session_cfg());
         #[cfg(all(feature = "lpg", not(feature = "triple-store")))]
-        let mut session = Session::with_adaptive(self.lpg_store(), session_cfg());
+        let mut session = Session::with_store(self.lpg_store(), session_cfg());
         #[cfg(not(feature = "lpg"))]
         let mut session =
             Session::with_external_store(self.graph_store(), self.graph_store_mut(), session_cfg())
@@ -1969,12 +1969,6 @@ impl GrafeoDB {
         }
         *self.current_schema.write() = name.map(ToString::to_string);
         Ok(())
-    }
-
-    /// Returns the adaptive execution configuration.
-    #[must_use]
-    pub fn adaptive_config(&self) -> &crate::config::AdaptiveConfig {
-        &self.config.adaptive
     }
 
     /// Returns `true` if this database was opened in read-only mode.
@@ -4448,14 +4442,6 @@ mod tests {
         let config = Config::in_memory().with_memory_limit(128 * 1024 * 1024);
         let db = GrafeoDB::with_config(config).unwrap();
         assert_eq!(db.memory_limit(), Some(128 * 1024 * 1024));
-    }
-
-    #[test]
-    fn test_database_adaptive_config() {
-        let db = GrafeoDB::new_in_memory();
-        let adaptive = db.adaptive_config();
-        assert!(adaptive.enabled);
-        assert!((adaptive.threshold - 3.0).abs() < f64::EPSILON);
     }
 
     #[test]

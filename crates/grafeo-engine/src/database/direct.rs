@@ -270,10 +270,19 @@ impl GrafeoDB {
             target
         };
 
-        let validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
+        // A graph of a schema has the storage key `schema/graph`: the types of
+        // that schema check the call.
+        let schema = graph
+            .and_then(|key| key.split_once('/'))
+            .map(|(schema, _)| schema);
+        let mut validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
             .with_store(Arc::clone(store) as Arc<dyn GraphStoreSearch>)
             .with_max_property_size(self.config.max_property_size)
-            .with_transaction_context(view, transaction);
+            .with_transaction_context(view, transaction)
+            .with_schema(schema);
+        if let Some(graph) = graph {
+            validator = validator.with_graph_name(graph);
+        }
         let writer = GraphWriter::new(target)
             .with_transaction_context(view, transaction)
             .with_validator(Arc::new(validator));

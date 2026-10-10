@@ -20,7 +20,10 @@ use crate::session::Session;
 const MAX_SKIPPED_ROWS: usize = 1_000;
 
 /// What an upsert did with its rows.
+///
+/// Read, not built, outside this crate: later releases may add fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UpsertSummary {
     /// Rows that created a node or edge.
     pub created: usize,
@@ -35,7 +38,34 @@ pub struct UpsertSummary {
 }
 
 /// How [`GrafeoDB::upsert_edges`] finds edges and their endpoints.
+///
+/// Start from [`EdgeUpsertOptions::new()`] (the defaults) and change options
+/// with the `with_*` methods. Later releases may add options, so outside this
+/// crate it cannot be built with a struct literal.
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_engine::database::EdgeUpsertOptions;
+///
+/// let options = EdgeUpsertOptions::new()
+///     .with_endpoint_labels(["File"])
+///     .with_src_field("from")
+///     .with_dst_field("to")
+///     .with_replace(true);
+/// assert_eq!(options.key, "id");
+/// ```
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::database::EdgeUpsertOptions;
+///
+/// let options = EdgeUpsertOptions {
+///     replace: true,
+///     ..EdgeUpsertOptions::default()
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EdgeUpsertOptions {
     /// The property that identifies an edge between two nodes (default `id`).
     pub key: String,
@@ -63,6 +93,61 @@ impl Default for EdgeUpsertOptions {
             dst_field: "dst".to_string(),
             replace: false,
         }
+    }
+}
+
+impl EdgeUpsertOptions {
+    /// The default options: edges keyed by `id`, endpoints found by their
+    /// `id` property from the `src` and `dst` fields, properties merged.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the property that identifies an edge between two nodes.
+    #[must_use]
+    pub fn with_key(mut self, key: impl Into<String>) -> Self {
+        self.key = key.into();
+        self
+    }
+
+    /// Sets the node property the endpoint fields hold.
+    #[must_use]
+    pub fn with_endpoint_key(mut self, endpoint_key: impl Into<String>) -> Self {
+        self.endpoint_key = endpoint_key.into();
+        self
+    }
+
+    /// Sets the labels an endpoint must have.
+    #[must_use]
+    pub fn with_endpoint_labels(
+        mut self,
+        labels: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.endpoint_labels = labels.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the row field with the source node's key.
+    #[must_use]
+    pub fn with_src_field(mut self, src_field: impl Into<String>) -> Self {
+        self.src_field = src_field.into();
+        self
+    }
+
+    /// Sets the row field with the target node's key.
+    #[must_use]
+    pub fn with_dst_field(mut self, dst_field: impl Into<String>) -> Self {
+        self.dst_field = dst_field.into();
+        self
+    }
+
+    /// Sets whether an edge's properties become exactly the row's (`true`)
+    /// or the row's properties are merged into the edge's (`false`).
+    #[must_use]
+    pub fn with_replace(mut self, replace: bool) -> Self {
+        self.replace = replace;
+        self
     }
 }
 

@@ -6,9 +6,75 @@ use std::sync::Arc;
 #[cfg(feature = "text-index")]
 use parking_lot::RwLock;
 
-use grafeo_common::utils::error::Result;
+use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::graph::GraphStoreSearch;
 use grafeo_core::graph::lpg::LpgStore;
+
+/// The distance metric `name` names for a new vector index (cosine when
+/// `None`).
+///
+/// # Errors
+///
+/// An invalid-value error naming the metrics there are, for a name that is
+/// none of them.
+pub(crate) fn vector_index_metric(
+    name: Option<&str>,
+) -> Result<grafeo_core::index::vector::DistanceMetric> {
+    use grafeo_core::index::vector::DistanceMetric;
+    match name {
+        Some(name) => DistanceMetric::from_str(name).ok_or_else(|| {
+            Error::InvalidValue(format!(
+                "Unknown distance metric '{name}'. Use: cosine, euclidean, dot_product, manhattan"
+            ))
+        }),
+        None => Ok(DistanceMetric::Cosine),
+    }
+}
+
+/// Checks the dimensions given for a new vector index.
+///
+/// # Errors
+///
+/// An invalid-value error for 0: a vector index measures vectors with at
+/// least one value.
+pub(crate) fn check_vector_index_dimensions(dimensions: Option<usize>) -> Result<()> {
+    if dimensions == Some(0) {
+        return Err(Error::InvalidValue(
+            "a vector index needs at least 1 dimension".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks a vector a new vector index of `dimensions` would hold, the vector
+/// of `node`: the index can measure it only when it has that many values
+/// (at least one), none of them NaN or infinite.
+///
+/// # Errors
+///
+/// An invalid-value error naming the node and what is wrong with its vector.
+pub(crate) fn check_vector_for_index(
+    node: grafeo_common::types::NodeId,
+    vector: &[f32],
+    dimensions: usize,
+) -> Result<()> {
+    check_vector_index_dimensions(Some(dimensions))?;
+    if vector.len() != dimensions {
+        return Err(Error::InvalidValue(format!(
+            "Vector dimension mismatch: expected {dimensions}, found {} on node {}",
+            vector.len(),
+            node.0
+        )));
+    }
+    if let Some((position, value)) = grafeo_core::index::vector::first_non_finite(vector) {
+        return Err(Error::InvalidValue(format!(
+            "the vector of node {} has {value} at position {position}: a vector index cannot \
+             measure it",
+            node.0
+        )));
+    }
+    Ok(())
+}
 
 /// The name [`create_vector_index`](super::GrafeoDB::create_vector_index)
 /// takes for a quantization.
@@ -225,18 +291,10 @@ impl super::GrafeoDB {
         quantization: Option<&str>,
     ) -> Result<()> {
         use grafeo_common::types::{PropertyKey, Value};
-        use grafeo_core::index::vector::DistanceMetric;
 
         self.check_index_change()?;
-        let metric = match metric {
-            Some(m) => DistanceMetric::from_str(m).ok_or_else(|| {
-                grafeo_common::utils::error::Error::Internal(format!(
-                    "Unknown distance metric '{}'. Use: cosine, euclidean, dot_product, manhattan",
-                    m
-                ))
-            })?,
-            None => DistanceMetric::Cosine,
-        };
+        let metric = vector_index_metric(metric)?;
+        check_vector_index_dimensions(dimensions)?;
 
         #[cfg(feature = "vector-index")]
         let quantization_type = Self::parse_quantization(quantization)?;
@@ -257,18 +315,8 @@ impl super::GrafeoDB {
         let (graph, _) = self.index_target(graph_key)?;
         for node_id in graph.nodes_by_label(label) {
             if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &prop_key) {
-                if let Some(expected) = found_dims {
-                    if v.len() != expected {
-                        return Err(grafeo_common::utils::error::Error::Internal(format!(
-                            "Vector dimension mismatch: expected {}, found {} on node {}",
-                            expected,
-                            v.len(),
-                            node_id.0
-                        )));
-                    }
-                } else {
-                    found_dims = Some(v.len());
-                }
+                let expected = *found_dims.get_or_insert(v.len());
+                check_vector_for_index(node_id, &v, expected)?;
                 vector_count += 1;
                 #[cfg(feature = "vector-index")]
                 vectors.push((node_id, v.to_vec()));
@@ -307,7 +355,7 @@ impl super::GrafeoDB {
                 );
                 Ok(())
             } else {
-                Err(grafeo_common::utils::error::Error::Internal(format!(
+                Err(grafeo_common::utils::error::Error::InvalidValue(format!(
                     "No vector properties found on :{label}({property}) and no dimensions specified"
                 )))
             };

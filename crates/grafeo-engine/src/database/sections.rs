@@ -506,44 +506,25 @@ pub(super) fn load_sections(
     Ok(loaded)
 }
 
-/// Folds the compacted base of an image written after `compact()` (by 0.5.x
-/// or a 0.6 development build) into `store`, which holds its overlay: every
-/// base node and edge the overlay neither copied nor deleted is created in
-/// it under its id (see
-/// [`fold_into`](grafeo_core::graph::compact::fold::fold_into)).
+/// Folds the compacted base of a 0.5.x image (one `compact()` wrote) into
+/// `store`, which holds its overlay: every base node and edge the overlay
+/// neither copied nor deleted is created in it under its id (see
+/// [`fold_0_5_base`](grafeo_core::graph::compact::fold::fold_0_5_base)).
 /// The database then has one store, and its next checkpoint writes it as a
-/// plain one. Deletes without a base name nothing, and are dropped.
+/// plain one. A deletion log without a base names nothing, and is dropped.
 ///
 /// # Errors
 ///
-/// Returns an error if a section cannot be read or decoded, or if the base
-/// cannot be folded.
+/// Returns an error if a section cannot be read or is not the 0.5.x layout,
+/// or if the base cannot be folded.
 #[cfg(all(feature = "lpg", feature = "compact-store", feature = "grafeo-file"))]
 fn fold_compacted_base(image: &dyn ImageSource, store: &LpgStore) -> Result<()> {
-    use grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection;
-    use grafeo_core::graph::compact::fold::fold_into;
-    use grafeo_core::graph::compact::section::CompactStoreSection;
-
-    let base = match image.section_source(SectionType::CompactStore) {
-        Some(source) => {
-            let mut section = CompactStoreSection::empty();
-            section.read_from(&*source)?;
-            section.store()
-        }
-        None => None,
-    };
-    let (nodes, edges) = match image.section_source(SectionType::OverlayDeletions) {
-        Some(source) => {
-            let mut section = OverlayDeletionsSection::empty();
-            section.read_from(&*source)?;
-            section.take()
-        }
-        None => (Vec::new(), Vec::new()),
-    };
-    let Some(base) = base else {
+    let Some(base) = image.section_source(SectionType::CompactStore) else {
         return Ok(());
     };
-    let folded = fold_into(&base, store, &nodes, &edges)?;
+    let deletions = image.section_source(SectionType::OverlayDeletions);
+    let folded =
+        grafeo_core::graph::compact::fold::fold_0_5_base(&*base, deletions.as_deref(), store)?;
     if folded.dangling_edges > 0 {
         grafeo_common::grafeo_warn!(
             "left out {} edges of the compacted base whose endpoint was deleted",
@@ -1529,108 +1510,106 @@ mod tests {
         );
     }
 
-    /// The ids of [`compacted_image`].
+    /// The image of a database file 0.5.44 wrote with `compact()` between two
+    /// sessions: the three sections of the core fixture `compact-0.5.44`, each
+    /// one raw chunk. The base holds Alix, Gus, Vincent, Amsterdam, Berlin and
+    /// two documents, with Alix knowing Gus and living in Amsterdam; the
+    /// overlay copies of Alix (age 31, no score) and Amsterdam, and Mia, the
+    /// Rijksmuseum (in Amsterdam) and a third document; the log Vincent.
     #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
-    struct CompactedIds {
-        amsterdam: grafeo_common::types::NodeId,
-        berlin: grafeo_common::types::NodeId,
-        paris: grafeo_common::types::NodeId,
-        to_berlin: grafeo_common::types::EdgeId,
-        to_paris: grafeo_common::types::EdgeId,
+    fn compacted_image() -> MemoryImage {
+        use grafeo_common::storage::ChunkMeta;
+
+        macro_rules! fixture {
+            ($name:literal) => {
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../grafeo-core/tests/fixtures/compact-0.5.44/",
+                    $name
+                ))
+                .as_slice()
+            };
+        }
+        let mut image = MemoryImage::new();
+        for (section_type, bytes) in [
+            (SectionType::LpgStore, fixture!("lpg_store.bin")),
+            (SectionType::CompactStore, fixture!("compact_store.bin")),
+            (
+                SectionType::OverlayDeletions,
+                fixture!("overlay_deletions.bin"),
+            ),
+        ] {
+            image.begin_section(section_type, 1).unwrap();
+            image.write_chunk(ChunkMeta::raw(), bytes).unwrap();
+        }
+        image
     }
 
-    /// The image of a database file `compact()` wrote: Amsterdam, Berlin and
-    /// Paris with a route from Amsterdam to each in the base; since then
-    /// Berlin and its route deleted, Amsterdam changed (its copy in the
-    /// overlay) and Prague created, with a route from Paris.
-    #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
-    fn compacted_image() -> (MemoryImage, CompactedIds) {
-        use grafeo_common::types::Value;
-        use grafeo_core::graph::compact::deletions_section::OverlayDeletionsSection;
-        use grafeo_core::graph::compact::from_graph_store_preserving_ids;
-        use grafeo_core::graph::compact::section::CompactStoreSection;
-
-        let source = LpgStore::new().unwrap();
-        let city = |name: &str| {
-            let id = source.create_node(&["City"]);
-            source.set_node_property(id, "name", Value::from(name));
-            id
-        };
-        let (amsterdam, berlin, paris) = (city("Amsterdam"), city("Berlin"), city("Paris"));
-        let to_berlin = source.create_edge(amsterdam, berlin, "ROUTE");
-        source.set_edge_property(to_berlin, "km", Value::Int64(653));
-        let to_paris = source.create_edge(amsterdam, paris, "ROUTE");
-        source.set_edge_property(to_paris, "km", Value::Int64(501));
-        let base = from_graph_store_preserving_ids(&source).unwrap();
-
-        let overlay = LpgStore::new().unwrap();
-        overlay.set_next_node_id(paris.as_u64() + 1);
-        overlay.set_next_edge_id(to_paris.as_u64() + 1);
-        overlay.create_node_with_id(amsterdam, &["City"]).unwrap();
-        overlay.set_node_property(amsterdam, "name", Value::from("Amsterdam"));
-        overlay.set_node_property(amsterdam, "country", Value::from("NL"));
-        let prague = overlay.create_node(&["City"]);
-        overlay.set_node_property(prague, "name", Value::from("Prague"));
-        overlay.create_edge(paris, prague, "ROUTE");
-
-        let lpg = grafeo_core::graph::lpg::LpgStoreSection::new(Arc::new(overlay));
-        let compacted = CompactStoreSection::new(Arc::new(base));
-        let deletions = OverlayDeletionsSection::from_ids(vec![berlin], vec![to_berlin]);
-        let sections: [&dyn Section; 3] = [&lpg, &compacted, &deletions];
-        let image = MemoryImage::from_sections(&sections).unwrap();
-        let ids = CompactedIds {
-            amsterdam,
-            berlin,
-            paris,
-            to_berlin,
-            to_paris,
-        };
-        (image, ids)
-    }
-
-    /// The load folds a compacted base into the store its overlay loads into:
-    /// the base's nodes and edges come back under their ids, the overlay's
-    /// copy of a changed one wins, and the deleted ones stay deleted.
+    /// The load folds a compacted base into the store its overlay loads into,
+    /// reading the base and the deletion log once: the base's nodes and edges
+    /// come back under their ids, the overlay's copy of a changed one wins,
+    /// and the deleted ones stay deleted.
     #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
     #[test]
     fn a_compacted_base_folds_into_the_store() {
         use grafeo_common::types::{PropertyKey, Value};
 
-        let (image, ids) = compacted_image();
-        let image = ServedOnce::new(image);
+        let image = ServedOnce::new(compacted_image());
         let store = Arc::new(LpgStore::new().unwrap());
         load(&image, &store).unwrap();
 
         assert!(
             image.section_types().is_empty(),
-            "the base and the deletion log are read"
+            "the overlay, the base and the deletion log are read"
         );
-        let mut names: Vec<String> = store
-            .nodes_by_label("City")
+        let values = |label: &str, key: &str| {
+            let mut values: Vec<String> = store
+                .nodes_by_label(label)
+                .into_iter()
+                .filter_map(|id| store.get_node_property(id, &PropertyKey::from(key)))
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect();
+            values.sort();
+            values
+        };
+        assert_eq!(values("Person", "name"), ["Alix", "Gus", "Mia"]);
+        assert_eq!(values("City", "name"), ["Amsterdam", "Berlin"]);
+        assert_eq!(
+            values("Document", "title"),
+            ["Bridges", "Canals", "Museums"]
+        );
+
+        let alix = store
+            .nodes_by_label("Person")
             .into_iter()
-            .filter_map(|id| store.get_node_property(id, &PropertyKey::from("name")))
-            .filter_map(|name| name.as_str().map(str::to_string))
+            .find(|&id| {
+                store.get_node_property(id, &PropertyKey::from("name")) == Some(Value::from("Alix"))
+            })
+            .unwrap();
+        assert_eq!(
+            store.get_node_property(alix, &PropertyKey::from("age")),
+            Some(Value::Int64(31)),
+            "the overlay's copy of Alix wins"
+        );
+        let knows: Vec<_> = store
+            .edges_from(alix, grafeo_core::graph::Direction::Outgoing)
+            .filter(|&(_, edge)| store.edge_type(edge).as_deref() == Some("KNOWS"))
             .collect();
-        names.sort();
-        assert_eq!(names, ["Amsterdam", "Paris", "Prague"]);
+        assert_eq!(knows.len(), 1);
         assert_eq!(
-            store.get_node_property(ids.amsterdam, &PropertyKey::from("country")),
-            Some(Value::from("NL")),
-            "the overlay's copy of Amsterdam wins"
+            store.get_edge_property(knows[0].1, &PropertyKey::from("since")),
+            Some(Value::Int64(2019)),
+            "a base edge keeps its properties"
         );
-        assert!(store.get_node(ids.berlin).is_none(), "Berlin stays deleted");
-        assert!(store.edge_type(ids.to_berlin).is_none());
-        let route = store.get_edge(ids.to_paris).unwrap();
-        assert_eq!((route.src, route.dst), (ids.amsterdam, ids.paris));
         assert_eq!(
-            store.get_edge_property(ids.to_paris, &PropertyKey::from("km")),
-            Some(Value::Int64(501))
+            store.edge_count(),
+            3,
+            "knows and lives in from the base, the museum's from the overlay"
         );
-        assert_eq!(store.edge_count(), 2, "Amsterdam to Paris, Paris to Prague");
-        let created = store.create_node(&["City"]);
+        let highest = store.node_ids().into_iter().max().unwrap();
         assert!(
-            created.as_u64() > ids.paris.as_u64(),
-            "new ids stay clear of the base's"
+            store.create_node(&["City"]) > highest,
+            "new ids stay clear of the base's and the overlay's"
         );
     }
 
@@ -1640,18 +1619,21 @@ mod tests {
     #[cfg(all(feature = "compact-store", feature = "grafeo-file"))]
     #[test]
     fn a_folded_database_checkpoints_as_a_plain_one() {
-        let (image, _) = compacted_image();
         let db = GrafeoDB::new_in_memory();
-        let loaded = load(&image, &db.lpg_store()).unwrap();
+        let loaded = load(&compacted_image(), &db.lpg_store()).unwrap();
         db.finish_load(loaded);
         let names = |db: &GrafeoDB| {
-            db.execute("MATCH (c:City) RETURN c.name ORDER BY c.name")
+            db.execute("MATCH (n) WHERE n.name IS NOT NULL RETURN n.name ORDER BY n.name")
                 .unwrap()
                 .rows()
                 .to_vec()
         };
         let before = names(&db);
-        assert_eq!(before.len(), 3);
+        assert_eq!(
+            before.len(),
+            6,
+            "Alix, Amsterdam, Berlin, Gus, Mia, Rijksmuseum"
+        );
 
         let checkpoint = image_of(&db);
         assert_eq!(
@@ -1662,10 +1644,10 @@ mod tests {
         let loaded = load(&checkpoint, &reopened.lpg_store()).unwrap();
         reopened.finish_load(loaded);
         assert_eq!(names(&reopened), before);
-        let routes = reopened
-            .execute("MATCH (:City)-[r:ROUTE]->(:City) RETURN count(r)")
+        let edges = reopened
+            .execute("MATCH ()-[r]->() RETURN count(r)")
             .unwrap();
-        assert_eq!(routes.rows(), [[grafeo_common::types::Value::Int64(2)]]);
+        assert_eq!(edges.rows(), [[grafeo_common::types::Value::Int64(3)]]);
     }
 
     /// `to_memory` copies the RDF ring from its section.
@@ -1914,6 +1896,104 @@ mod tests {
             ],
             "both text indexes are left to build from the data"
         );
+    }
+
+    /// The image of a checkpoint of `db` in which `section_type` claims the
+    /// section version `version`, as a later release that changed its layout
+    /// would write it (its chunks as this release writes them).
+    fn image_with_version(db: &GrafeoDB, section_type: SectionType, version: u8) -> MemoryImage {
+        let commits = db.transaction_manager.hold_commits().unwrap();
+        let mut image = MemoryImage::new();
+        for section in db.checkpoint_sources().sections(&commits) {
+            let claimed = if section.section_type() == section_type {
+                version
+            } else {
+                section.version()
+            };
+            image
+                .begin_section(section.section_type(), claimed)
+                .unwrap();
+            section.write_to(&mut image).unwrap();
+        }
+        image
+    }
+
+    /// A derived section (a vector or a text index's) of a section version
+    /// this build does not read is no error: the indexes it holds are built
+    /// from the data they mirror, and the other derived section still
+    /// restores its own. So a later 0.6 release may change a derived layout
+    /// (under a new version, or a new optional section type this build
+    /// skips) without making its files unreadable here.
+    #[test]
+    fn an_index_section_of_another_version_is_built_from_the_data() {
+        for section_type in [SectionType::VectorStore, SectionType::TextIndex] {
+            let db = indexed_database();
+            let image = image_with_version(&db, section_type, 250);
+            let source = image.section_source(section_type).unwrap();
+            assert_eq!(source.section_version(), 250, "{section_type:?}");
+            drop(source);
+
+            let store = Arc::new(LpgStore::new().unwrap());
+            let loaded = load(&image, &store).unwrap();
+            assert_eq!(
+                store.node_count(),
+                2,
+                "{section_type:?}: the data is loaded"
+            );
+            assert_eq!(
+                loaded.unbuilt.len(),
+                1,
+                "{section_type:?}: the default graph"
+            );
+            let graph = &loaded.unbuilt[0];
+            let vector: Vec<&str> = graph.vector.iter().map(|def| def.label.as_str()).collect();
+            let text: Vec<&str> = graph.text.iter().map(|(label, _)| label.as_str()).collect();
+            match section_type {
+                SectionType::VectorStore => {
+                    assert_eq!(
+                        (vector, text),
+                        (vec!["Doc"], vec![]),
+                        "the vector index builds from the data, the text index is restored"
+                    );
+                    assert!(store.get_vector_index("Doc", "emb").is_none());
+                    assert!(store.get_text_index("Doc", "body").is_some());
+                }
+                _ => {
+                    assert_eq!(
+                        (vector, text),
+                        (vec![], vec!["Doc"]),
+                        "the text index builds from the data, the vector index is restored"
+                    );
+                    assert!(store.get_text_index("Doc", "body").is_none());
+                    assert!(store.get_vector_index("Doc", "emb").is_some());
+                }
+            }
+        }
+    }
+
+    /// An RDF ring section of a section version this build does not read is
+    /// no error either: the ring is built from the triples it mirrors.
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
+    #[test]
+    fn a_ring_section_of_another_version_is_rebuilt() {
+        use grafeo_core::graph::rdf::RdfStore;
+
+        let db = ringed_database();
+        let image = image_with_version(&db, SectionType::RdfRing, 250);
+        let rdf_store = Arc::new(RdfStore::new());
+        load_sections(
+            &image,
+            None,
+            &Arc::new(LpgStore::new().unwrap()),
+            &Arc::new(crate::catalog::Catalog::new()),
+            &rdf_store,
+        )
+        .expect("the load succeeds");
+        assert_eq!(rdf_store.len(), 2, "the triples are loaded");
+        let ring = rdf_store
+            .ring()
+            .expect("the ring is built from the triples");
+        assert_eq!(ring.len(), 2);
     }
 
     /// A section read through `read_mirror` sees the version it was written

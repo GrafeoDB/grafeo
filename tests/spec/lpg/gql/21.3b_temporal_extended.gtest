@@ -334,6 +334,50 @@ tests:
       rows:
         - [true]
 
+  # ISO/IEC 39075:2024 19.3 <comparison predicate>: zoned datetimes order by
+  # the instant they denote, with every ordering operator (they gave null,
+  # #584). 2022-01-01T00:00+01:00 is 2021-12-31T23:00Z.
+  - name: zoned_datetime_ordering_compares_instants
+    query: "RETURN zoned_datetime('2022-01-01T00:00:00+01:00') < zoned_datetime('2021-12-31T23:30:00Z') AS lt, zoned_datetime('2022-01-01T00:00:00+01:00') <= zoned_datetime('2021-12-31T23:30:00Z') AS le, zoned_datetime('2022-01-01T00:00:00+01:00') > zoned_datetime('2021-12-31T23:30:00Z') AS gt, zoned_datetime('2022-01-01T00:00:00+01:00') >= zoned_datetime('2021-12-31T23:30:00Z') AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: zoned_datetime_literals_compare_as_instants
+    query: "RETURN ZONED DATETIME '2022-01-01T00:00:00Z' > ZONED DATETIME '2000-01-01T00:00:00+00:00' AS later, ZONED DATETIME '2021-12-31T23:00:00Z' >= ZONED DATETIME '2022-01-01T00:00:00+01:00' AS same_instant"
+    expect:
+      rows:
+        - [true, true]
+
+  # A timestamp compares with a zoned datetime as an instant in UTC (it was
+  # null, and `=` was false).
+  - name: timestamp_and_zoned_datetime_compare_as_instants
+    query: "RETURN datetime('2024-03-15T10:30:00Z') = zoned_datetime('2024-03-15T11:30:00+01:00') AS eq, datetime('2024-03-15T10:30:00Z') < zoned_datetime('2024-03-15T11:31:00+01:00') AS lt, zoned_datetime('2024-03-15T11:31:00+01:00') > datetime('2024-03-15T10:30:00Z') AS gt"
+    expect:
+      rows:
+        - [true, true, true]
+
+  - name: filter_on_stored_zoned_datetimes_keeps_later_instants
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: ZONED DATETIME '2024-03-15T10:30:00+01:00'})"
+      - "INSERT (:Event {name: 'Gus', at: ZONED DATETIME '2019-03-15T10:30:00Z'})"
+      - "INSERT (:Event {name: 'Jules', at: ZONED DATETIME '2020-01-01T00:30:00+01:00'})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+    query: "MATCH (e:Event) FILTER e.at >= ZONED_DATETIME('2020-01-01T00:00:00Z') RETURN e.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Mia]
+
+  - name: zoned_datetime_range_on_stored_values
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: ZONED DATETIME '2024-03-15T10:30:00+01:00'})"
+      - "INSERT (:Event {name: 'Gus', at: ZONED DATETIME '2019-03-15T10:30:00Z'})"
+    query: "MATCH (e:Event) WHERE e.at > ZONED DATETIME '2020-01-01T00:00:00Z' AND e.at < ZONED DATETIME '2030-01-01T00:00:00Z' RETURN e.name"
+    expect:
+      rows:
+        - [Alix]
+
   - name: temporal_in_list
     query: "RETURN DATE '2024-03-15' IN [DATE '2024-03-14', DATE '2024-03-15'] AS r"
     expect:

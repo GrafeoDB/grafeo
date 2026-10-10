@@ -105,6 +105,98 @@ tests:
     expect:
       error: "property 'location' on :Sensor expects String"
 
+  # An integer written to a FLOAT64 property is stored as a float (#568):
+  # GQL converts between numeric types on assignment. JavaScript sends every
+  # whole number as an integer.
+  - name: float64_property_stores_an_integer_as_a_float
+    statements:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, totalSpend FLOAT64)"
+      - "INSERT (:Customer {customerId: 'a', totalSpend: 3})"
+      - "MATCH (c:Customer) RETURN c.totalSpend IS TYPED FLOAT64 AS float, c.totalSpend / 2 AS half"
+    expect:
+      rows:
+        - [true, 1.5]
+
+  - name: float64_property_stores_a_set_integer_as_a_float
+    statements:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, totalSpend FLOAT64)"
+      - "INSERT (:Customer {customerId: 'a', totalSpend: 1.5})"
+      - "MATCH (c:Customer) SET c.totalSpend = 19"
+      - "MATCH (c:Customer) RETURN c.totalSpend IS TYPED FLOAT64 AS float, c.totalSpend / 2 AS half"
+    expect:
+      rows:
+        - [true, 9.5]
+
+  - name: float64_property_refuses_an_integer_without_an_exact_float
+    setup:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, totalSpend FLOAT64)"
+    query: "INSERT (:Customer {customerId: 'a', totalSpend: 9007199254740993})"
+    expect:
+      error: "no exact Float64 value"
+
+  # A zoned datetime written to a DATETIME property is stored as its instant
+  # (#584), so the property compares with zoned values.
+  - name: datetime_property_stores_a_zoned_datetime_as_its_instant
+    statements:
+      - "CREATE NODE TYPE Trip (departs DATETIME)"
+      - "INSERT (:Trip {departs: ZONED_DATETIME('2024-03-15T10:30:00+01:00')})"
+      - "MATCH (t:Trip) RETURN t.departs = datetime('2024-03-15T09:30:00Z') AS same, t.departs > ZONED_DATETIME('2020-01-01T00:00:00Z') AS later"
+    expect:
+      rows:
+        - [true, true]
+
+  # A closed graph type holds only the labels, edge types and properties it
+  # declares (#567, ISO/IEC 39075:2024 4.13).
+  - name: closed_graph_type_refuses_an_undeclared_label
+    statements:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, totalSpend FLOAT64)"
+      - "CREATE NODE TYPE Product (sku STRING NOT NULL)"
+      - "CREATE EDGE TYPE buys CONNECTING (Customer) TO (Product)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Customer, NODE TYPE Product, EDGE TYPE buys)"
+      - "CREATE GRAPH g TYPED shop"
+      - "USE GRAPH g"
+      - "INSERT (:Spaceship {id: 'x'})"
+    expect:
+      error: "label 'Spaceship' is not a node type of closed graph type 'shop'"
+
+  - name: closed_graph_type_refuses_an_undeclared_property
+    statements:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, totalSpend FLOAT64)"
+      - "CREATE NODE TYPE Product (sku STRING NOT NULL)"
+      - "CREATE EDGE TYPE buys CONNECTING (Customer) TO (Product)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Customer, NODE TYPE Product, EDGE TYPE buys)"
+      - "CREATE GRAPH g TYPED shop"
+      - "USE GRAPH g"
+      - "INSERT (:Customer {customerId: 'c5', shoeSize: 44})"
+    expect:
+      error: "property 'shoeSize' is not declared by node type 'Customer' of closed graph type 'shop'"
+
+  - name: closed_graph_type_refuses_an_undeclared_edge_type
+    statements:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL)"
+      - "CREATE NODE TYPE Product (sku STRING NOT NULL)"
+      - "CREATE EDGE TYPE buys CONNECTING (Customer) TO (Product)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Customer, NODE TYPE Product, EDGE TYPE buys)"
+      - "CREATE GRAPH g TYPED shop"
+      - "USE GRAPH g"
+      - "INSERT (:Customer {customerId: 'c1'})-[:likes]->(:Product {sku: 'p1'})"
+    expect:
+      error: "edge type 'likes' is not an edge type of closed graph type 'shop'"
+
+  - name: closed_graph_type_takes_what_it_declares
+    statements:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, totalSpend FLOAT64)"
+      - "CREATE NODE TYPE Product (sku STRING NOT NULL)"
+      - "CREATE EDGE TYPE buys CONNECTING (Customer) TO (Product)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Customer, NODE TYPE Product, EDGE TYPE buys)"
+      - "CREATE GRAPH g TYPED shop"
+      - "USE GRAPH g"
+      - "INSERT (:Customer {customerId: 'c1', totalSpend: 19})-[:buys]->(:Product {sku: 'p1'})"
+      - "MATCH (c:Customer)-[:buys]->(p:Product) RETURN c.customerId, p.sku"
+    expect:
+      rows:
+        - [c1, p1]
+
   - name: alter_node_type_add_property_shows_in_schema
     setup:
       - "CREATE NODE TYPE Sensor (id INTEGER NOT NULL)"
@@ -652,3 +744,103 @@ tests:
     query: "CREATE NODE TYPE Town (x INT64 NOT NULL DEFAULT NULL)"
     expect:
       error: "DEFAULT NULL"
+
+  # ---------------------------------------------------------------------------
+  # Types created inside a schema check the writes in that schema: they are
+  # registered as `s1/Customer`, and the checks used to look them up by the
+  # bare label, so their nodes were never checked. A schema sees its own types
+  # only (as SHOW NODE TYPES does).
+  # ---------------------------------------------------------------------------
+
+  - name: node_type_in_a_schema_requires_its_not_null_property
+    statements:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, age INT64)"
+      - "INSERT (:Customer {age: 3})"
+    expect:
+      error: "missing required property 'customerId' on :Customer"
+
+  - name: node_type_in_a_schema_checks_property_types
+    statements:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, age INT64)"
+      - "INSERT (:Customer {customerId: 'c3', age: 'old'})"
+    expect:
+      error: "property 'age' on :Customer expects Int64"
+
+  - name: node_type_in_a_schema_checks_set
+    statements:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, age INT64)"
+      - "INSERT (:Customer {customerId: 'c3', age: 19})"
+      - "MATCH (c:Customer) SET c.customerId = NULL"
+    expect:
+      error: "customerId"
+
+  - name: edge_type_in_a_schema_checks_property_types
+    statements:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE EDGE TYPE Buys (amount INT64 NOT NULL)"
+      - "INSERT (:Shop)-[:Buys {amount: 'x'}]->(:Item)"
+    expect:
+      error: "property 'amount' on :Buys expects Int64"
+
+  - name: edge_type_in_a_schema_requires_its_not_null_property
+    statements:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE EDGE TYPE Buys (amount INT64 NOT NULL)"
+      - "INSERT (:Shop)-[:Buys]->(:Item)"
+    expect:
+      error: "missing required property 'amount' on :Buys"
+
+  - name: node_type_in_a_schema_inherits_in_its_schema
+    statements:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Base (code STRING NOT NULL)"
+      - "CREATE NODE TYPE Child EXTENDS Base (x INT64)"
+      - "INSERT (:Child {x: 3})"
+    expect:
+      error: "code"
+
+  - name: node_type_in_a_schema_gives_its_default
+    statements:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Ticket (id INT64, status STRING NOT NULL DEFAULT 'new')"
+      - "INSERT (:Ticket {id: 19})"
+      - "MATCH (t:Ticket) RETURN t.id, t.status"
+    expect:
+      rows:
+        - [19, new]
+
+  # s1's Customer takes an integer age, s2's a string.
+  - name: node_type_of_another_schema_does_not_apply
+    statements:
+      - "CREATE SCHEMA s1"
+      - "CREATE SCHEMA s2"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, age INT64)"
+      - "SESSION SET SCHEMA s2"
+      - "CREATE NODE TYPE Customer (age STRING)"
+      - "INSERT (:Customer {age: 'old'})"
+      - "MATCH (c:Customer) RETURN c.age"
+    expect:
+      rows:
+        - [old]
+
+  - name: node_type_of_the_default_schema_does_not_apply_in_a_schema
+    statements:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL)"
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "INSERT (:Customer {age: 3})"
+      - "MATCH (c:Customer) RETURN c.age"
+    expect:
+      rows:
+        - [3]

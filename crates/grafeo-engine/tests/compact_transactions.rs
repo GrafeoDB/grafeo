@@ -253,6 +253,29 @@ fn a_delete_without_detach_counts_only_the_edges_the_transaction_kept() {
     assert_eq!(db.state(), without_gus());
 }
 
+/// An unlabeled scan inside a transaction after `compact()` finds the nodes
+/// the transaction created next to the ones from before, and other sessions
+/// find them once it commits.
+#[test]
+fn an_unlabeled_scan_in_a_transaction_finds_its_own_creates() {
+    const EVERY_NAME: &str = "MATCH (n) RETURN n.name AS name ORDER BY name";
+    let db = compacted_people();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session
+        .execute("INSERT (:City {name: 'Prague'}), ({name: 'Vincent'})")
+        .unwrap();
+    let with_creates = names(&["Alix", "Gus", "Mia", "Prague", "Vincent"]);
+    assert_eq!(session.rows(EVERY_NAME), with_creates, "the transaction");
+    assert_eq!(
+        db.rows(EVERY_NAME),
+        names(&["Alix", "Gus", "Mia"]),
+        "another session, before the commit"
+    );
+    session.commit().unwrap();
+    assert_eq!(db.rows(EVERY_NAME), with_creates, "after the commit");
+}
+
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod file {
     use std::path::{Path, PathBuf};

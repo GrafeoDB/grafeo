@@ -473,19 +473,27 @@ impl GqlTranslator {
             // GROUP BY makes one row per group, also without an aggregate
             let groups_rows = !return_clause.items.is_empty() && !return_clause.group_by.is_empty();
             if has_aggregates || groups_rows {
-                let (aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
-                    &return_clause.items,
-                    !return_clause.group_by.is_empty(),
-                )?;
+                let (aggregates, auto_group_by, mut post_return) = self
+                    .extract_aggregates_and_groups(
+                        &return_clause.items,
+                        !return_clause.group_by.is_empty(),
+                    )?;
                 // Explicit GROUP BY wins over the keys implied by the items.
                 let group_by = if return_clause.group_by.is_empty() {
                     auto_group_by
                 } else {
-                    return_clause
-                        .group_by
-                        .iter()
-                        .map(|e| self.translate_expression(e))
-                        .collect::<Result<Vec<_>>>()?
+                    let keys = self.translate_group_by(
+                        &return_clause.group_by,
+                        &return_clause.items,
+                        &plan,
+                    )?;
+                    self.resolve_grouped_items(
+                        &return_clause.items,
+                        post_return.as_deref_mut().unwrap_or_default(),
+                        &keys,
+                        &aggregates,
+                    )?;
+                    keys
                 };
 
                 plan = LogicalOperator::Aggregate(AggregateOp {
@@ -979,10 +987,11 @@ impl GqlTranslator {
             //   2. A post-aggregate projection (`_agg_0 > 0 AS exists`)
             // The post-Return also leaves out the columns of HAVING's
             // aggregates.
-            let (mut aggregates, auto_group_by, post_return) = self.extract_aggregates_and_groups(
-                &return_items,
-                !query.return_clause.group_by.is_empty() || having_aggregates,
-            )?;
+            let (mut aggregates, auto_group_by, mut post_return) = self
+                .extract_aggregates_and_groups(
+                    &return_items,
+                    !query.return_clause.group_by.is_empty() || having_aggregates,
+                )?;
             // HAVING's aggregates are numbered after the `_agg_N` ones of the
             // RETURN list.
             let mut having_counter = u32::try_from(
@@ -1007,12 +1016,15 @@ impl GqlTranslator {
             let group_by = if query.return_clause.group_by.is_empty() {
                 auto_group_by
             } else {
-                query
-                    .return_clause
-                    .group_by
-                    .iter()
-                    .map(|e| self.translate_expression(e))
-                    .collect::<Result<Vec<_>>>()?
+                let keys =
+                    self.translate_group_by(&query.return_clause.group_by, &return_items, &plan)?;
+                self.resolve_grouped_items(
+                    &return_items,
+                    post_return.as_deref_mut().unwrap_or_default(),
+                    &keys,
+                    &aggregates,
+                )?;
+                keys
             };
 
             // Translate HAVING clause if present; its aggregates become

@@ -3243,7 +3243,10 @@ pub struct QueryResult {
     pub rows_scanned: Option<u64>,
     /// Status message for DDL and session commands (e.g., "Created node type 'Person'").
     pub status_message: Option<String>,
-    /// GQLSTATUS code per ISO/IEC 39075:2024, sec 23.
+    /// GQLSTATUS code per ISO/IEC 39075:2024, sec 23: `00001` (omitted
+    /// result) for a statement without a result (a write without `RETURN`,
+    /// `FINISH`, a schema or transaction command), `00000` for one with a
+    /// result, also when it has no rows.
     pub gql_status: grafeo_common::utils::GqlStatus,
     /// What the statement's writes changed: nodes and edges created and
     /// deleted, properties set, labels added and removed.
@@ -3276,6 +3279,17 @@ impl QueryResult {
         Ok(())
     }
 
+    /// The GQLSTATUS of a successful statement whose result has `columns`:
+    /// none means the statement has no result (an omitted result, `00001`),
+    /// as a write without `RETURN` and `FINISH` plan it.
+    fn success_status(columns: &[String]) -> grafeo_common::utils::GqlStatus {
+        if columns.is_empty() {
+            grafeo_common::utils::GqlStatus::SUCCESS_OMITTED_RESULT
+        } else {
+            grafeo_common::utils::GqlStatus::SUCCESS
+        }
+    }
+
     /// Creates a fully empty query result (no columns, no rows).
     #[must_use]
     pub fn empty() -> Self {
@@ -3291,7 +3305,8 @@ impl QueryResult {
         }
     }
 
-    /// Creates a query result with only a status message (for DDL commands).
+    /// Creates a query result with only a status message (for DDL commands),
+    /// an omitted result (GQLSTATUS `00001`).
     #[must_use]
     pub fn status(msg: impl Into<String>) -> Self {
         Self {
@@ -3301,7 +3316,7 @@ impl QueryResult {
             execution_time_ms: None,
             rows_scanned: None,
             status_message: Some(msg.into()),
-            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            gql_status: grafeo_common::utils::GqlStatus::SUCCESS_OMITTED_RESULT,
             counters: Default::default(),
         }
     }
@@ -3313,6 +3328,7 @@ impl QueryResult {
     /// Returns a semantic error if `columns` contains a repeated column name.
     pub fn new(columns: Vec<String>) -> Result<Self> {
         Self::validate_unique_columns(&columns)?;
+        let gql_status = Self::success_status(&columns);
         let len = columns.len();
         Ok(Self {
             columns,
@@ -3321,7 +3337,7 @@ impl QueryResult {
             execution_time_ms: None,
             rows_scanned: None,
             status_message: None,
-            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            gql_status,
             counters: Default::default(),
         })
     }
@@ -3336,6 +3352,7 @@ impl QueryResult {
         column_types: Vec<grafeo_common::types::LogicalType>,
     ) -> Result<Self> {
         Self::validate_unique_columns(&columns)?;
+        let gql_status = Self::success_status(&columns);
         Ok(Self {
             columns,
             column_types,
@@ -3343,7 +3360,7 @@ impl QueryResult {
             execution_time_ms: None,
             rows_scanned: None,
             status_message: None,
-            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            gql_status,
             counters: Default::default(),
         })
     }
@@ -3358,6 +3375,7 @@ impl QueryResult {
         rows: Vec<Vec<grafeo_common::types::Value>>,
     ) -> Result<Self> {
         Self::validate_unique_columns(&columns)?;
+        let gql_status = Self::success_status(&columns);
         let len = columns.len();
         Ok(Self {
             columns,
@@ -3366,7 +3384,7 @@ impl QueryResult {
             execution_time_ms: None,
             rows_scanned: None,
             status_message: None,
-            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            gql_status,
             counters: Default::default(),
         })
     }

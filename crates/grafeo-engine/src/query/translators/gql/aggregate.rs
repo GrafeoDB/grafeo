@@ -292,6 +292,176 @@ impl GqlTranslator {
         }
     }
 
+    /// The grouping keys of the explicit `GROUP BY` `group_by` of the RETURN
+    /// list `items`, whose rows come from `plan`.
+    ///
+    /// In ISO GQL a grouping element is a name: `<grouping element> ::=
+    /// <binding variable reference>` (ISO/IEC 39075:2024 <group by clause>).
+    /// Grafeo also takes an expression over the incoming variables (`GROUP BY
+    /// c.name`), as Microsoft Fabric does. A name that is the alias of a
+    /// RETURN item groups by that item's value (`RETURN c.id AS cityId ...
+    /// GROUP BY cityId`, Fabric's documented example); any other name, and
+    /// every expression, reads the incoming variables. A key that repeats an
+    /// earlier one is left out.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic error for the alias of an aggregate (it is computed
+    /// per group, so it is no key), for an alias that also names an incoming
+    /// variable of another value (the two make different groups), and for
+    /// an alias inside an expression (an alias stands for its item's value
+    /// only on its own).
+    pub(super) fn translate_group_by(
+        &self,
+        group_by: &[ast::Expression],
+        items: &[ast::ReturnItem],
+        plan: &LogicalOperator,
+    ) -> Result<Vec<LogicalExpression>> {
+        let incoming = plan.bound_variables(None);
+        let is_incoming = |name: &str| incoming.as_ref().is_some_and(|names| names.contains(name));
+        // The item an alias names, unless the item returns the variable of
+        // that name (`RETURN c AS c`), which reads the same either way.
+        let aliased = |name: &str| {
+            items.iter().find(|item| {
+                item.alias.as_deref() == Some(name)
+                    && !matches!(&item.expression, ast::Expression::Variable(v) if v == name)
+            })
+        };
+        let mut keys = Vec::new();
+        let mut key_texts = HashSet::new();
+        for element in group_by {
+            let key = match element {
+                ast::Expression::Variable(name) => match aliased(name) {
+                    Some(item) if contains_aggregate(&item.expression) => {
+                        return Err(grouping_error(format!(
+                            "GROUP BY {name}: '{name}' is the alias of an aggregate, which is \
+                             computed per group, so it cannot be a grouping key"
+                        )));
+                    }
+                    Some(item) if is_incoming(name) => {
+                        let value = crate::query::planner::common::expression_to_string(
+                            &self.translate_expression(&item.expression)?,
+                        );
+                        return Err(grouping_error(format!(
+                            "GROUP BY {name} is ambiguous: '{name}' is a variable of the grouped \
+                             rows and the alias of the RETURN item {value} AS {name}, and the two \
+                             make different groups; give that RETURN item another alias"
+                        )));
+                    }
+                    Some(item) => self.translate_expression(&item.expression)?,
+                    None => self.translate_expression(element)?,
+                },
+                _ => {
+                    let key = self.translate_expression(element)?;
+                    let mut names = HashSet::new();
+                    collect_expression_variables(&key, &mut names);
+                    if let Some(alias) = names
+                        .iter()
+                        .filter(|name| aliased(name).is_some() && !is_incoming(name))
+                        .min()
+                    {
+                        return Err(grouping_error(format!(
+                            "GROUP BY {}: '{alias}' is an alias of the RETURN list, which a \
+                             grouping key names only on its own (GROUP BY {alias})",
+                            crate::query::planner::common::expression_to_string(&key)
+                        )));
+                    }
+                    key
+                }
+            };
+            if key_texts.insert(crate::query::planner::common::expression_to_string(&key)) {
+                keys.push(key);
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Makes the items of the RETURN list `items`, grouped by the explicit
+    /// `keys`, read the output of the Aggregate. `post_return` holds what
+    /// [`extract_aggregates_and_groups`](Self::extract_aggregates_and_groups)
+    /// made of them (one item each, in order), and `aggregates` are their
+    /// aggregates.
+    ///
+    /// The result has one row per group, so an item may read the grouping
+    /// keys, the aggregates and constants, which have one value per group:
+    /// a key itself (`p.name` for `GROUP BY p.name`, or through its alias),
+    /// an expression over the keys (`p.name` or `upper(p.name)` for `GROUP BY
+    /// p`, `count(*) + p.age`), as Neo4j's Cypher 25 `GROUP BY` and SQL's
+    /// functionally dependent columns do, or a constant (`3 AS three`). Each
+    /// such item is rewritten to read the key columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic error naming the first item that reads another
+    /// variable of the grouped rows outside an aggregate: it has a value per
+    /// grouped row, not per group.
+    pub(super) fn resolve_grouped_items(
+        &self,
+        items: &[ast::ReturnItem],
+        post_return: &mut [ReturnItem],
+        keys: &[LogicalExpression],
+        aggregates: &[AggregateExpr],
+    ) -> Result<()> {
+        let scope = HavingScope::new(keys, None);
+        let key_texts: Vec<String> = keys
+            .iter()
+            .map(crate::query::planner::common::expression_to_string)
+            .collect();
+        let aggregate_columns: HashSet<&str> = aggregates
+            .iter()
+            .filter_map(|aggregate| aggregate.alias.as_deref())
+            .collect();
+        for (item, returned) in items.iter().zip(post_return.iter_mut()) {
+            // A key or a direct aggregate already reads its column.
+            if let LogicalExpression::Variable(column) = &returned.expression
+                && (key_texts.contains(column) || aggregate_columns.contains(column.as_str()))
+            {
+                continue;
+            }
+            // A wrapped aggregate reads its aggregates' columns already.
+            let expression = if contains_aggregate(&item.expression) {
+                returned.expression.clone()
+            } else {
+                let expression = self.translate_expression(&item.expression)?;
+                returned.alias.get_or_insert_with(|| {
+                    crate::query::planner::common::expression_to_string(&expression)
+                });
+                expression
+            };
+            let resolved = scope.resolve(expression);
+            let mut names = HashSet::new();
+            collect_expression_variables(&resolved, &mut names);
+            if let Some(name) = names
+                .iter()
+                .filter(|name| {
+                    !key_texts.contains(*name) && !aggregate_columns.contains(name.as_str())
+                })
+                .min()
+            {
+                let written = self.translate_expression(&item.expression).map_or_else(
+                    |_| returned.alias.clone().unwrap_or_default(),
+                    |expression| crate::query::planner::common::expression_to_string(&expression),
+                );
+                // An aggregate's text drops its `*` (`count()`): name such an
+                // item by its alias.
+                let item_text = match &item.alias {
+                    Some(alias) if contains_aggregate(&item.expression) => alias.clone(),
+                    Some(alias) => format!("{written} AS {alias}"),
+                    None => written,
+                };
+                return Err(grouping_error(format!(
+                    "RETURN item {item_text} reads {name}, which is not a grouping key: with \
+                     GROUP BY {}, a RETURN item may read the grouping keys, aggregates and \
+                     constants, which have one value per group; add {name} to GROUP BY or \
+                     aggregate it",
+                    key_texts.join(", ")
+                )));
+            }
+            returned.expression = resolved;
+        }
+        Ok(())
+    }
+
     /// Extracts all aggregates from a wrapping expression, assigning each a
     /// unique synthetic alias via `agg_counter`. Extracted aggregates are
     /// pushed to `aggregates_out`. Returns the substituted expression with
@@ -509,6 +679,11 @@ impl GqlTranslator {
     }
 }
 
+/// A semantic error of a grouping query (see `translate_group_by`).
+fn grouping_error(message: String) -> Error {
+    Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
+}
+
 /// Whether the rows of `plan` hold `variable` as the edge list of a quantified
 /// edge pattern (a group variable): the nearest clause that binds the name is
 /// such a pattern, or passes its list on unchanged (`WITH b, e`). A later
@@ -639,6 +814,14 @@ impl HavingScope {
                     .map(|(condition, result)| (self.resolve(condition), self.resolve(result)))
                     .collect(),
                 else_clause: else_clause.map(|clause| Box::new(self.resolve(*clause))),
+            },
+            LogicalExpression::IndexAccess { base, index } => LogicalExpression::IndexAccess {
+                base: Box::new(self.resolve(*base)),
+                index: Box::new(self.resolve(*index)),
+            },
+            LogicalExpression::MapAccess { base, key } => LogicalExpression::MapAccess {
+                base: Box::new(self.resolve(*base)),
+                key,
             },
             other => other,
         }

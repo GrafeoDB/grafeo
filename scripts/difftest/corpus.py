@@ -1424,4 +1424,24 @@ for case_id, query, languages in [
     case(case_id, query, languages)
 case("BS4", "DELETE w", CYPHER, "writes")
 
+# BT: a GQL GROUP BY names an alias of the RETURN list, as Microsoft Fabric documents it
+#     (it was an undefined variable): a computed key (BT1), an alias and an expression at
+#     once in the shape of Fabric's example (BT2), an alias key after an aggregate item,
+#     with ORDER BY (BT3), the alias of a node (BT4). A RETURN item that is neither a
+#     grouping key nor an aggregate says so (BT5; it was "Undefined variable 'p.name'").
+#     A RETURN item over a grouped node or key is computed per group (BT6, BT7; they were
+#     undefined variables), and one that reads another variable of the grouped rows
+#     beside an aggregate says so (BT8; it was null in every group)
+for case_id, query, is_ordered in [
+    ("BT1", "MATCH (p:Person) RETURN p.age % 2 AS odd, count(*) AS n GROUP BY odd", False),
+    ("BT2", "MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN c.w AS cityW, c.name, count(*) AS population, avg(p.age) AS average_age GROUP BY cityW, c.name", False),
+    ("BT3", "MATCH (a:Person)-[k:KNOWS]-(b:Person) RETURN count(*) AS n, a.name AS who, max(k.since) AS last GROUP BY who ORDER BY who", True),
+    ("BT4", "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b AS friend, count(*) AS n GROUP BY friend", False),
+    ("BT5", "MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN p.name AS name, count(*) AS n GROUP BY c", False),
+    ("BT6", "MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN c.name AS city, count(*) AS n GROUP BY c", False),
+    ("BT7", "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN upper(a.name) AS who, count(*) * 100 + a.age AS code GROUP BY a", False),
+    ("BT8", "MATCH (p:Person) RETURN p.name AS name, count(*) + p.age AS n GROUP BY p.name", False),
+]:
+    case(case_id, query, GQL, "social", is_ordered)
+
 # fmt: on

@@ -392,7 +392,7 @@ These methods convert between Grafeo and pandas/polars DataFrames. Requires `pan
 
 ### nodes_df()
 
-Export all nodes as a pandas DataFrame. Columns: `id` (int), `labels` (list[str]), plus one column per unique property key. Missing properties are `None`.
+Export all nodes as a pandas DataFrame. Columns: `_id` (int), `_labels` (list[str]), plus one column per unique property key. Missing properties are `None`. Lists, maps and durations are Python lists and dicts, with or without pyarrow installed (see [Property types](#property-types)).
 
 ```python
 def nodes_df(self) -> pandas.DataFrame
@@ -400,12 +400,12 @@ def nodes_df(self) -> pandas.DataFrame
 
 ```python
 df = db.nodes_df()
-print(df[df["labels"].apply(lambda l: "Person" in l)])
+print(df[df["_labels"].apply(lambda l: "Person" in l)])
 ```
 
 ### edges_df()
 
-Export all edges as a pandas DataFrame. Columns: `id` (int), `source` (int), `target` (int), `type` (str), plus one column per unique property key. Missing properties are `None`.
+Export all edges as a pandas DataFrame. Columns: `_id` (int), `_source` (int), `_target` (int), `_type` (str), plus one column per unique property key. Missing properties are `None`.
 
 ```python
 def edges_df(self) -> pandas.DataFrame
@@ -413,7 +413,7 @@ def edges_df(self) -> pandas.DataFrame
 
 ```python
 df = db.edges_df()
-print(df[df["type"] == "KNOWS"])
+print(df[df["_type"] == "KNOWS"])
 ```
 
 ### import_df()
@@ -456,9 +456,22 @@ Zero-copy bulk export using Apache Arrow. These methods are faster than `nodes_d
 !!! note
     `nodes_df()` and `edges_df()` now auto-detect pyarrow at runtime. When pyarrow is available, they use the Arrow fast path internally, so you get the same speed as `nodes_to_pandas()` without changing existing code.
 
-**Node schema:** `id` (uint64), `labels` (list&lt;utf8&gt;), plus one column per unique property key.
+**Node schema:** `_id` (uint64), `_labels` (list&lt;utf8&gt;), plus one column per unique property key.
 
-**Edge schema:** `id` (uint64), `type` (utf8), `source` (uint64), `target` (uint64), plus one column per unique property key.
+**Edge schema:** `_id` (uint64), `_type` (utf8), `_source` (uint64), `_target` (uint64), plus one column per unique property key.
+
+#### Property types
+
+A property column's Arrow type follows its values, and so does `result.to_arrow()` for a query result:
+
+| Values | Arrow type | In Python (pyarrow, polars, `nodes_df()`) |
+| --- | --- | --- |
+| lists | `list<...>` of the elements' type, also nested | `list` |
+| maps | `struct` with one field per key that any map in the column has | `dict`; a key a map lacks is `None` with pyarrow and polars, absent without pyarrow |
+| durations | `struct<months: int64, days: int64, nanos: int64>` | `{"months": ..., "days": ..., "nanos": ...}` |
+| vectors | `fixed_size_list<float>` | `list` of floats |
+
+A null is null at every level. Values of different types in one column, or in one list, are written as text (`utf8`), except integers and floats together, which are floats.
 
 ### nodes_to_arrow()
 
@@ -484,7 +497,7 @@ def edges_to_arrow(self) -> pyarrow.Table
 
 ```python
 table = db.edges_to_arrow()
-print(table.filter(table.column("type") == "KNOWS"))
+print(table.filter(table.column("_type") == "KNOWS"))
 ```
 
 ### nodes_to_polars()
@@ -497,7 +510,7 @@ def nodes_to_polars(self) -> polars.DataFrame
 
 ```python
 df = db.nodes_to_polars()
-print(df.filter(pl.col("labels").list.contains("Person")))
+print(df.filter(pl.col("_labels").list.contains("Person")))
 ```
 
 ### edges_to_polars()
@@ -510,12 +523,12 @@ def edges_to_polars(self) -> polars.DataFrame
 
 ```python
 df = db.edges_to_polars()
-print(df.filter(pl.col("type") == "KNOWS"))
+print(df.filter(pl.col("_type") == "KNOWS"))
 ```
 
 ### nodes_to_pandas()
 
-Export all nodes as a `pandas.DataFrame` via the Arrow fast path. Requires both pandas and pyarrow (`uv add pandas pyarrow`). Faster than `nodes_df()` on older versions, but equivalent now that `nodes_df()` auto-detects pyarrow.
+Export all nodes as a `pandas.DataFrame` via the Arrow fast path. Requires both pandas and pyarrow (`uv add pandas pyarrow`). It keeps pyarrow's own conversion (a list is a numpy array); `nodes_df()` takes the same path when pyarrow is installed and returns lists and dicts.
 
 ```python
 def nodes_to_pandas(self) -> pandas.DataFrame
@@ -523,7 +536,7 @@ def nodes_to_pandas(self) -> pandas.DataFrame
 
 ```python
 df = db.nodes_to_pandas()
-print(df[df["labels"].apply(lambda l: "Person" in l)])
+print(df[df["_labels"].apply(lambda l: "Person" in l)])
 ```
 
 ### edges_to_pandas()
@@ -536,7 +549,7 @@ def edges_to_pandas(self) -> pandas.DataFrame
 
 ```python
 df = db.edges_to_pandas()
-print(df.groupby("type").size())
+print(df.groupby("_type").size())
 ```
 
 ## Batch Operations

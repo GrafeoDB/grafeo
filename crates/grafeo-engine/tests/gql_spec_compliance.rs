@@ -2702,6 +2702,49 @@ fn test_gqlstatus_success() {
 }
 
 #[test]
+fn test_gqlstatus_omitted_result_for_a_statement_without_a_result() {
+    use grafeo_common::utils::GqlStatus;
+
+    // A statement without a result reports 00001 (omitted result), one with
+    // a result 00000, also when the result has no rows (ISO/IEC 39075:2024,
+    // 23 Status codes).
+    let db = setup_db();
+    let session = db.session();
+    for statement in [
+        "INSERT (:Person {name: 'Mia', age: 19})",
+        "MATCH (p:Person {name: 'Mia'}) SET p.age = 88",
+        "MATCH (p:Person {name: 'Mia'}) DETACH DELETE p",
+        "MATCH (p:Person) FINISH",
+        "CREATE NODE TYPE City (name STRING)",
+        "START TRANSACTION",
+        "COMMIT",
+    ] {
+        let result = session.execute(statement).unwrap();
+        assert_eq!(
+            result.gql_status,
+            GqlStatus::SUCCESS_OMITTED_RESULT,
+            "{statement}"
+        );
+        assert!(result.gql_status.is_success(), "{statement}");
+    }
+    for query in [
+        "MATCH (p:Person) RETURN p.name",
+        "MATCH (p:Person {name: 'Nobody'}) RETURN p.name",
+        "INSERT (:Person {name: 'Jules', age: 3}) RETURN 3 AS three",
+    ] {
+        let result = session.execute(query).unwrap();
+        assert_eq!(result.gql_status, GqlStatus::SUCCESS, "{query}");
+    }
+    #[cfg(feature = "cypher")]
+    {
+        let result = session
+            .execute_cypher("CREATE (:Person {name: 'Butch'})")
+            .unwrap();
+        assert_eq!(result.gql_status, GqlStatus::SUCCESS_OMITTED_RESULT);
+    }
+}
+
+#[test]
 fn test_gqlstatus_error_mapping() {
     use grafeo_common::utils::GqlStatus;
 

@@ -76,6 +76,55 @@ fn tier_to_str(tier: grafeo_common::memory::buffer::StorageTier) -> &'static str
     }
 }
 
+/// Converts the PyArrow `table` of `nodes_df()` or `edges_df()` to a pandas
+/// DataFrame (with `pd`, the pandas module) whose nested columns hold the
+/// Python values the fallback without pyarrow builds: lists (the `_labels`
+/// of nodes, list and vector properties) and dicts (map and duration
+/// properties). pyarrow's `to_pandas()` makes a list a numpy array, so the
+/// type of a value depended on whether pyarrow is installed.
+#[cfg(feature = "arrow-export")]
+fn arrow_table_to_pandas<'py>(
+    py: Python<'py>,
+    pd: &Bound<'py, PyAny>,
+    table: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let types = py.import("pyarrow")?.getattr("types")?;
+    let df = table.call_method0("to_pandas")?;
+    let index = df.getattr("index")?;
+    // The new columns replace the old ones through `assign`: a `df[name] =`
+    // from here looks like a chained assignment to pandas 3, which warns.
+    let nested = pyo3::types::PyDict::new(py);
+    for field in table.getattr("schema")?.try_iter()? {
+        let field = field?;
+        let data_type = field.getattr("type")?;
+        let mut is_nested = false;
+        for check in [
+            "is_list",
+            "is_large_list",
+            "is_fixed_size_list",
+            "is_struct",
+            "is_map",
+        ] {
+            is_nested |= types.call_method1(check, (&data_type,))?.is_truthy()?;
+        }
+        if is_nested {
+            let name = field.getattr("name")?;
+            let values = table
+                .call_method1("column", (&name,))?
+                .call_method0("to_pylist")?;
+            let options = pyo3::types::PyDict::new(py);
+            options.set_item("dtype", "object")?;
+            options.set_item("index", &index)?;
+            nested.set_item(name, pd.call_method("Series", (values,), Some(&options))?)?;
+        }
+    }
+    if nested.is_empty() {
+        Ok(df)
+    } else {
+        df.call_method("assign", (), Some(&nested))
+    }
+}
+
 #[cfg(feature = "algos")]
 use crate::bridges::{PyAlgorithms, PyNetworkXAdapter, PySolvORAdapter};
 use crate::error::PyGrafeoError;
@@ -2713,7 +2762,7 @@ impl PyGrafeoDB {
     /// Example:
     /// ```python
     /// df = db.nodes_to_polars()
-    /// print(df.filter(pl.col("labels").list.contains("Person")))
+    /// print(df.filter(pl.col("_labels").list.contains("Person")))
     /// ```
     #[cfg(feature = "arrow-export")]
     #[pyo3(signature = ())]
@@ -2727,7 +2776,7 @@ impl PyGrafeoDB {
         let ipc_bytes = self.nodes_ipc_bytes()?;
         let py_bytes = pyo3::types::PyBytes::new(py, &ipc_bytes);
         let buf = io.call_method1("BytesIO", (py_bytes,))?;
-        let df = pl.call_method1("read_ipc", (buf,))?;
+        let df = pl.call_method1("read_ipc_stream", (buf,))?;
         Ok(df.unbind())
     }
 
@@ -2753,30 +2802,35 @@ impl PyGrafeoDB {
 
     /// Export all nodes as a pandas DataFrame.
     ///
-    /// Columns: `id` (int), `labels` (list[str]), plus one column per unique
+    /// Columns: `_id` (int), `_labels` (list[str]), plus one column per unique
     /// property key found across all nodes. Missing properties are `None`.
+    /// Lists (the labels, list and vector properties) are Python lists, maps
+    /// and durations dicts, with or without pyarrow installed; with pyarrow a
+    /// key a map lacks is `None`.
     ///
     /// Requires pandas (`uv add pandas`).
     ///
     /// Example:
     /// ```python
     /// df = db.nodes_df()
-    /// print(df[df["labels"].apply(lambda l: "Person" in l)])
+    /// print(df[df["_labels"].apply(lambda l: "Person" in l)])
     /// ```
     #[pyo3(signature = ())]
     fn nodes_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // Fast path: use Arrow IPC when pyarrow is available
-        #[cfg(feature = "arrow-export")]
-        if py.import("pyarrow").is_ok() {
-            return self.nodes_to_pandas(py);
-        }
-
-        // Slow fallback: element-by-element via PyO3
         let pd = py.import("pandas").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "pandas is required for nodes_df(). Install it with: uv add pandas",
             )
         })?;
+
+        // Fast path: use Arrow IPC when pyarrow is available
+        #[cfg(feature = "arrow-export")]
+        if py.import("pyarrow").is_ok() {
+            let table = self.nodes_to_arrow(py)?;
+            return Ok(arrow_table_to_pandas(py, &pd, table.bind(py))?.unbind());
+        }
+
+        // Slow fallback: element-by-element via PyO3
 
         let db = self.inner.read();
         let store = db.store();
@@ -2887,7 +2941,7 @@ impl PyGrafeoDB {
         let ipc_bytes = self.edges_ipc_bytes()?;
         let py_bytes = pyo3::types::PyBytes::new(py, &ipc_bytes);
         let buf = io.call_method1("BytesIO", (py_bytes,))?;
-        let df = pl.call_method1("read_ipc", (buf,))?;
+        let df = pl.call_method1("read_ipc_stream", (buf,))?;
         Ok(df.unbind())
     }
 
@@ -2906,6 +2960,9 @@ impl PyGrafeoDB {
     ///
     /// Columns: `_id` (int), `_source` (int), `_target` (int), `_type` (str),
     /// plus one column per unique property key. Missing properties are `None`.
+    /// Lists (list and vector properties) are Python lists, maps and
+    /// durations dicts, with or without pyarrow installed; with pyarrow a key
+    /// a map lacks is `None`.
     ///
     /// Requires pandas (`uv add pandas`).
     ///
@@ -2916,18 +2973,20 @@ impl PyGrafeoDB {
     /// ```
     #[pyo3(signature = ())]
     fn edges_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // Fast path: use Arrow IPC when pyarrow is available
-        #[cfg(feature = "arrow-export")]
-        if py.import("pyarrow").is_ok() {
-            return self.edges_to_pandas(py);
-        }
-
-        // Slow fallback: element-by-element via PyO3
         let pd = py.import("pandas").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "pandas is required for edges_df(). Install it with: uv add pandas",
             )
         })?;
+
+        // Fast path: use Arrow IPC when pyarrow is available
+        #[cfg(feature = "arrow-export")]
+        if py.import("pyarrow").is_ok() {
+            let table = self.edges_to_arrow(py)?;
+            return Ok(arrow_table_to_pandas(py, &pd, table.bind(py))?.unbind());
+        }
+
+        // Slow fallback: element-by-element via PyO3
 
         let db = self.inner.read();
         let store = db.store();

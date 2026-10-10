@@ -88,6 +88,8 @@ Once CDC is enabled, every mutation records a `ChangeEvent` with:
 
 A field that does not apply is `None` (Rust, Python) or `null` (Node.js). Adding
 or removing a label is an `Update` event with `labels` and `before_labels`.
+Events gain fields only: a patch release can add a field (a key in Python and
+Node.js), never remove or rename one.
 
 A node or edge created in a transaction has one `Create` event that shows it as
 the transaction left it: property and label changes made later in the same

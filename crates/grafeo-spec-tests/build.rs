@@ -957,7 +957,6 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
         "succinct-indexes",
         "ring-index",
         "shacl",
-        "block-stm",
         "wal",
         "spill",
         "mmap",

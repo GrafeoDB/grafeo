@@ -44,12 +44,13 @@ any other, and transactions, indexes and named graphs work the same before and a
 ## Databases Compacted by 0.5.44 or Older
 
 A file written after `compact()` by 0.5.44 or older holds the compacted base, the nodes and
-edges deleted from it since, and the writes made since. Opening it folds the base into the
-database's store: every node and edge of the base comes back with its id, its labels and
-its properties, a change made after `compact()` wins over the base's version, and what was
-deleted stays deleted. A read-write open migrates the file, as it migrates every 0.5.x
-file (see [Persistent Mode](persistence/persistent.md)), so the migrated file holds one
-store; a read-only open folds the base in memory and leaves the file as it is.
+edges deleted from it since (from 0.5.42 on), and the writes made since. Opening it folds
+the base into the database's store: every node and edge of the base comes back with its
+id, its labels and its properties, a change made after `compact()` wins over the base's
+version, and what was deleted stays deleted. A read-write open migrates the file, as it
+migrates every 0.5.x file (see [Persistent Mode](persistence/persistent.md)), so the
+migrated file holds one store; a read-only open folds the base in memory and leaves the
+file as it is.
 
 What those versions stored differently stays as they stored it:
 
@@ -65,6 +66,9 @@ What those versions stored differently stays as they stored it:
   strings, such as `'["amsterdam", "jazz"]'` or `'1994-03-19'`.
 - **Vector and text indexes** were dropped by `compact()`: create them again
   (`SHOW INDEXES` may still list the name of a text index).
+- **Deletes in 0.5.40 and 0.5.41**: these versions kept no record of the nodes and edges
+  of the base deleted after `compact()`, so they come back, as they did when 0.5.42 to
+  0.5.44 opened such a file.
 
 ## Feature Flag
 

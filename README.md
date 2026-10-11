@@ -53,7 +53,7 @@ Grafeo supports both **Labeled Property Graph (LPG)** and **Resource Description
 - **Vector as a first-class type**: `Value::Vector(Arc<[f32]>)` stored alongside graph data
 - **HNSW index**: O(log n) approximate nearest neighbor search with tunable recall
 - **Distance functions**: Cosine, Euclidean, Dot Product, Manhattan (SIMD-accelerated: AVX2, SSE, NEON)
-- **Vector quantization**: Scalar (f32 → u8), Binary (1-bit) and Product Quantization (8-32x compression)
+- **Vector quantization**: Scalar (f32 â†’ u8), Binary (1-bit) and Product Quantization (8-32x compression)
 - **BM25 text search**: Full-text inverted index with Unicode tokenizer and stop word removal
 - **Hybrid search**: Combined text + vector search with Reciprocal Rank Fusion (RRF) or weighted fusion
 - **Change data capture**: Before/after property snapshots for audit trails and history tracking
@@ -122,12 +122,12 @@ Full results: [embedded](https://github.com/GrafeoDB/graph-bench/blob/main/RESUL
 
 | Query Language | LPG | RDF |
 |----------------|-----|-----|
-| GQL | ✅ | - |
-| Cypher | ✅ | - |
-| GraphQL | ✅ | ✅ | 
-| Gremlin | ✅ | - |
-| SPARQL | - | ✅ |
-| SQL/PGQ | ✅ | - |
+| GQL | âœ… | - |
+| Cypher | âœ… | - |
+| GraphQL | âœ… | âœ… | 
+| Gremlin | âœ… | - |
+| SPARQL | - | âœ… |
+| SQL/PGQ | âœ… | - |
 
 Grafeo uses a modular translator architecture where query languages are parsed into ASTs, then translated to a unified logical plan that executes against the appropriate storage backend (LPG or RDF).
 
@@ -200,7 +200,7 @@ dotnet add package Grafeo
 ```yaml
 # pubspec.yaml
 dependencies:
-  grafeo: ^0.5.44
+  grafeo: ^0.6.0-beta.1
 ```
 
 ### Python
@@ -460,7 +460,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 Thank you to the people and organizations supporting Grafeo's development:
 
-- [**Thibaut Mélen**](https://github.com/ThibautMelen) from [Supernovae](https://github.com/supernovae-st)
+- [**Thibaut MÃ©len**](https://github.com/ThibautMelen) from [Supernovae](https://github.com/supernovae-st)
 
 ## Acknowledgments
 

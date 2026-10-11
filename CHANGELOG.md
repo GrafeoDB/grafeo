@@ -2,7 +2,9 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.6.0] - Unreleased
+## [0.6.0-beta.1] - 2026-10-11
+
+> **0.6.0-beta.1 is a preview of this release.** The file format is not final: a database written by the beta may not open in 0.6.0 or in a later beta. The first read-write open of a 0.5.x database keeps the old files under `.pre-0.6` names; keep that copy, it is the way back. Known gaps in the beta: a failed write of the write-ahead log is logged and the commit still succeeds ([#498](https://github.com/GrafeoDB/grafeo/issues/498)), and recovery can stop at damage in the log without an error ([#425](https://github.com/GrafeoDB/grafeo/issues/425)). The npm packages are published under the `next` tag (`npm install @grafeo-db/js@next`), the Python package as `0.6.0b1` (`uv pip install --pre grafeo`).
 
 File format release: every database is now a single file in a new format, and 0.5.x databases migrate to it on their first read-write open. Encryption at rest now encrypts, writes after `close()` fail instead of being lost, and read-only opens recover the last commits after a crash. Plus graph algorithms on projections and named graphs, algorithm results in a fixed order, corrected k-core and Louvain, and faster GQL statements and multi-label patterns.
 

@@ -4071,7 +4071,7 @@ impl Session {
         // and sets its own flag after it.
         *self.read_only_tx.lock() = self.db_read_only;
         self.savepoints.lock().clear();
-        commit.complete();
+        commit.complete()?;
         let written = changes
             .as_ref()
             .map(|changes| changes.written_graphs())

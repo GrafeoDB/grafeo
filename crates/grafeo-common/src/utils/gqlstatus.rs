@@ -227,6 +227,12 @@ impl From<&super::error::Error> for GqlStatus {
                 // (which did not happen): it holds an earlier commit whose
                 // completion is unknown, and must be reopened.
                 TransactionError::IncompleteCommit => GqlStatus::TX_COMPLETION_UNKNOWN,
+                // Rolled back, or never started: nothing of the commit remains.
+                TransactionError::LogWriteFailed(_) | TransactionError::LogUnavailable(_) => {
+                    GqlStatus::TX_ROLLBACK
+                }
+                // The one case the class was made for.
+                TransactionError::CommitOutcomeUnknown(_) => GqlStatus::TX_COMPLETION_UNKNOWN,
             },
             Error::TypeMismatch { .. } => GqlStatus::DATA_INVALID_VALUE_TYPE,
             Error::InvalidValue(_) => GqlStatus::DATA_EXCEPTION,
@@ -418,6 +424,30 @@ mod tests {
     /// refuses for that reason gets `40003` ("completion unknown"), so a
     /// client knows to reopen, not the generic invalid state of a closed
     /// database.
+    /// A commit that was rolled back for its log (the write failed, or the
+    /// log takes no more writes) is a rollback; one whose log could not be
+    /// made durable is the case `40003` exists for.
+    #[test]
+    fn the_commit_log_errors_say_whether_the_commit_may_exist() {
+        use super::super::error::{Error, TransactionError};
+
+        for gone in [
+            TransactionError::LogWriteFailed("disk full".into()),
+            TransactionError::LogUnavailable("an earlier sync failed".into()),
+        ] {
+            assert_eq!(
+                GqlStatus::from(&Error::Transaction(gone)),
+                GqlStatus::TX_ROLLBACK
+            );
+        }
+        assert_eq!(
+            GqlStatus::from(&Error::Transaction(TransactionError::CommitOutcomeUnknown(
+                "fsync failed".into()
+            ))),
+            GqlStatus::TX_COMPLETION_UNKNOWN
+        );
+    }
+
     #[test]
     fn an_incomplete_commit_is_completion_unknown() {
         use super::super::error::{Error, TransactionError};

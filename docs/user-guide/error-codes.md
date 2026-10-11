@@ -53,6 +53,9 @@ Categories:
 | `GRAFEO-T006` | TransactionDeadlock      | **yes**   | Lock manager detected a cycle. Retry. |
 | `GRAFEO-T007` | DatabaseClosed           | no        | A write to a database whose `close()` started (persistent databases), or a checkpoint, backup or save after it. Open it again to write. Python raises `DatabaseClosedError`, a subclass of `GrafeoError`; the C API returns `GRAFEO_ERROR_DATABASE`. |
 | `GRAFEO-T008` | IncompleteCommit         | no        | An earlier commit did not complete, so nothing commits, checkpoints, saves or copies the database (`to_memory()`, snapshots) until it is reopened (reads still work). Python raises `GrafeoError`; the C API returns `GRAFEO_ERROR_DATABASE`. |
+| `GRAFEO-T009` | LogWriteFailed           | **yes**   | The commit could not be written to the write-ahead log (a full disk, an I/O error) and was rolled back: nothing of it is in the log or the database. Retry the transaction once the cause is gone. |
+| `GRAFEO-T010` | CommitOutcomeUnknown     | no        | The commit was written to the write-ahead log, but the log could not be made durable. Nobody sees the commit, and whether it exists is known only after the database is reopened; nothing commits until then. Do not retry before the reopen: the commit may already be there. The C API returns `GRAFEO_ERROR_DATABASE`. |
+| `GRAFEO-T011` | LogUnavailable           | no        | The write-ahead log takes no more writes after an earlier failure. Nothing of this commit was written, and nothing commits until the database is reopened. The C API returns `GRAFEO_ERROR_DATABASE`. |
 
 ## Storage (S)
 

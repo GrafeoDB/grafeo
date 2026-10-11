@@ -636,7 +636,7 @@ impl GrafeoDB {
         // (the stamp moved the written store's).
         let root = self.lpg_store();
         root.sync_epoch(epoch);
-        commit.complete();
+        commit.complete()?;
 
         self.prune_versions(&root, store);
         Ok(())

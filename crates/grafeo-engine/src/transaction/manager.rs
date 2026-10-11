@@ -7,7 +7,7 @@ use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::execution::operators::WriteInProgress;
-use parking_lot::{Mutex, MutexGuard, RwLock, RwLockWriteGuard};
+use parking_lot::{Condvar, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 use super::changes::TransactionChanges;
 
@@ -315,6 +315,21 @@ pub struct TransactionManager {
     /// database closes: no commit and no write outside a transaction can run
     /// afterwards.
     closed: AtomicBool,
+    /// The lowest epoch that is never published: the epoch of a commit that
+    /// did not complete (nothing at or above it is published, see
+    /// [`Publish`]), 0 after a broken invariant ([`poison`](Self::poison)),
+    /// `u64::MAX` otherwise.
+    unpublishable_from: AtomicU64,
+    /// Whose turn it is to publish: held while a commit publishes its epoch,
+    /// and while a waiter checks the published epoch, so no wake-up is lost.
+    ///
+    /// Lock order: after the commit lock (a hold waits for the written
+    /// commits while it holds the commit lock), before the `transactions`
+    /// lock.
+    publish_turn: Mutex<()>,
+    /// Signalled when an epoch is published, and when a commit does not
+    /// complete.
+    published: Condvar,
 }
 
 /// Commits held off (see [`TransactionManager::hold_commits`]): while this
@@ -330,83 +345,200 @@ pub(crate) struct CommitsHeld<'a> {
     _commit: MutexGuard<'a, ()>,
 }
 
-/// A commit in progress, from [`TransactionManager::start_commit`] until
-/// [`complete`](Self::complete). Until then the transaction is
+/// A commit in progress, from [`TransactionManager::start_commit`] until it
+/// is published. Until then the transaction is
 /// [`TransactionState::Committing`]: it still counts as open, its writes
-/// still conflict with other transactions' writes, readers do not see its
-/// epoch yet, and no other commit and no [`begin`](TransactionManager::begin)
-/// can run. Complete it once the commit's versions, events and WAL records
-/// are written.
+/// still conflict with other transactions' writes, and readers do not see
+/// its epoch yet.
 ///
-/// A guard dropped without `complete` (only when the commit code panics) does
-/// not report the transaction as committed and does not publish its epoch: it
-/// stays `Committing`, so its half-written entities stay locked against other
-/// writers, and only the commit lock is released. It also poisons the
-/// manager: versions the commit already stamped with its epoch would become
-/// visible with the epoch of any later commit, so every later
+/// The guard holds the commit lock: no other commit takes an epoch, and no
+/// [`begin`](TransactionManager::begin) runs. It ends in one of three ways:
+///
+/// - [`abort`](Self::abort): the commit's log write failed and nothing of it
+///   remains. The epoch goes back, and the transaction is active again for
+///   the caller's rollback.
+/// - [`written`](Self::written): the commit's log group is written. The
+///   commit lock is released, so the next commit starts, and the returned
+///   [`Publish`] publishes this one in its turn.
+/// - [`complete`](Self::complete): both at once, while the lock is held.
+///
+/// A guard dropped without any of them (only when the commit code panics)
+/// does not report the transaction as committed and does not publish its
+/// epoch: it stays `Committing`, so its half-written entities stay locked
+/// against other writers, and only the commit lock is released. It also
+/// poisons the manager: versions the commit already stamped with its epoch
+/// would become visible with the epoch of any later commit, so every later
 /// [`start_commit`](TransactionManager::start_commit) fails until the
 /// database is reopened (see [`TransactionManager`]).
-#[must_use = "a commit is complete only after `complete()`"]
+#[must_use = "a commit ends with `complete()`, `written()` or `abort()`"]
 pub(crate) struct CommitGuard<'a> {
-    manager: &'a TransactionManager,
-    transaction_id: TransactionId,
-    epoch: EpochId,
-    completed: bool,
+    // Fields drop in order: an unfinished commit poisons the manager before
+    // the commit lock is released, so a commit waiting for the lock sees it.
+    commit: Publish<'a>,
     _commit: MutexGuard<'a, ()>,
 }
 
 impl CommitGuard<'_> {
     /// The commit epoch.
     pub(crate) fn epoch(&self) -> EpochId {
-        self.epoch
+        self.commit.epoch
     }
 
-    /// Completes the commit: the transaction is committed, readers see its
-    /// epoch, and what waited for it can run.
-    pub(crate) fn complete(mut self) {
-        self.completed = true;
+    /// Publishes the commit while the commit lock is held: the transaction is
+    /// committed, readers see its epoch, and what waited for it can run.
+    ///
+    /// # Errors
+    ///
+    /// As [`Publish::complete`].
+    pub(crate) fn complete(self) -> Result<()> {
+        let Self { commit, _commit } = self;
+        commit.complete()
+    }
+
+    /// Takes the commit back before anything of it is written or stamped
+    /// (its log write failed and was cut back): the epoch is free again,
+    /// which is safe because the commit lock is still held and no later
+    /// commit took one, and the transaction is active again, with its claims,
+    /// for the caller to roll back. Nothing is published or poisoned.
+    ///
+    /// Built for tests only until a failed log write fails the commit
+    /// (WAL v2, #498).
+    #[cfg(test)]
+    pub(crate) fn abort(self) {
+        let Self {
+            mut commit,
+            _commit,
+        } = self;
+        let manager = commit.manager;
+        {
+            let mut transactions = manager.transactions.write();
+            let mut committed = manager.committed_epochs.write();
+            if let Some(info) = transactions.get_mut(&commit.transaction_id) {
+                info.state = TransactionState::Active;
+            }
+            committed.remove(&commit.transaction_id);
+            // The last epoch handed out is this commit's (the commit lock).
+            manager
+                .assigned_epoch
+                .store(commit.epoch.as_u64() - 1, Ordering::SeqCst);
+        }
+        commit.finished = true;
     }
 }
 
-impl Drop for CommitGuard<'_> {
+#[cfg(test)]
+impl<'a> CommitGuard<'a> {
+    /// The commit's group is in the log: releases the commit lock, so the
+    /// next commit can take its epoch and write, and returns the handle that
+    /// publishes this one after every commit below it.
+    ///
+    /// Built for tests only until the engine's commit writes its own log
+    /// group and publishes outside the commit lock (WAL v2).
+    pub(crate) fn written(self) -> Publish<'a> {
+        let Self { commit, _commit } = self;
+        commit
+    }
+}
+
+/// A written commit that waits to be published (see
+/// [`CommitGuard::written`]): its log group is written, the commit lock is
+/// released, and its transaction is still [`TransactionState::Committing`].
+///
+/// Commits publish in the order of their epochs, so a reader that sees an
+/// epoch sees every commit below it: [`complete`](Self::complete) waits for
+/// the commit below this one.
+///
+/// A handle dropped without `complete` is a commit that did not complete, as
+/// a dropped [`CommitGuard`] is: the manager is poisoned, and neither this
+/// epoch nor any above it is published.
+#[must_use = "a written commit is committed only after `complete()`"]
+pub(crate) struct Publish<'a> {
+    manager: &'a TransactionManager,
+    transaction_id: TransactionId,
+    epoch: EpochId,
+    /// Whether the commit was published or taken back.
+    finished: bool,
+}
+
+impl Publish<'_> {
+    /// The commit epoch.
+    #[cfg(test)]
+    pub(crate) fn epoch(&self) -> EpochId {
+        self.epoch
+    }
+
+    /// Publishes the commit once every commit below it is published: the
+    /// transaction is committed, its claims are released, readers see its
+    /// epoch, and what waited for it can run.
+    ///
+    /// # Errors
+    ///
+    /// [`TransactionError::IncompleteCommit`] when a commit at a lower epoch
+    /// did not complete meanwhile (or the manager was poisoned): this one is
+    /// then not published either (its epoch would show the other's stamped
+    /// versions) and stays `Committing`, in the log as it was written, until
+    /// the database is reopened.
+    pub(crate) fn complete(mut self) -> Result<()> {
+        let manager = self.manager;
+        let mut turn = manager.publish_turn.lock();
+        loop {
+            if self.epoch.as_u64() >= manager.unpublishable_from.load(Ordering::Acquire) {
+                // Reported here: the drop of this handle says nothing more.
+                self.finished = true;
+                return Err(Error::Transaction(TransactionError::IncompleteCommit));
+            }
+            if manager.published_epoch.load(Ordering::Acquire) + 1 >= self.epoch.as_u64() {
+                break;
+            }
+            manager.published.wait(&mut turn);
+        }
+        {
+            let mut transactions = manager.transactions.write();
+            if let Some(info) = transactions.get_mut(&self.transaction_id) {
+                info.state = TransactionState::Committed;
+                // Stamped: what it changed is committed state now.
+                info.changes = None;
+                // A private transaction no open one began before: only a
+                // transaction that began before this commit was published
+                // can conflict with it, and each is counted while the
+                // `transactions` lock is held (see `register`), so its
+                // claims are of no further use.
+                if info.private && manager.active_count.load(Ordering::Acquire) == 1 {
+                    transactions.remove(&self.transaction_id);
+                    manager
+                        .committed_epochs
+                        .write()
+                        .remove(&self.transaction_id);
+                }
+            }
+            // Counted down under the `transactions` lock, like the count up
+            // of a transaction that begins.
+            manager.active_count.fetch_sub(1, Ordering::Release);
+            // Commits publish one at a time and in epoch order (the turn), so
+            // the published epoch only moves forward.
+            manager
+                .published_epoch
+                .fetch_max(self.epoch.as_u64(), Ordering::Release);
+        }
+        self.finished = true;
+        drop(turn);
+        manager.published.notify_all();
+        Ok(())
+    }
+}
+
+impl Drop for Publish<'_> {
     fn drop(&mut self) {
-        if !self.completed {
-            // Set while the commit lock is held: a commit waiting for the
-            // lock sees it.
-            self.manager.poisoned.store(true, Ordering::Release);
-            grafeo_common::grafeo_error!(
-                "commit of transaction {:?} at epoch {:?} did not complete; its writes stay \
-                 locked, and no transaction can commit until the database is reopened",
-                self.transaction_id,
-                self.epoch
-            );
+        if self.finished {
             return;
         }
-        let mut transactions = self.manager.transactions.write();
-        if let Some(info) = transactions.get_mut(&self.transaction_id) {
-            info.state = TransactionState::Committed;
-            // Stamped: what it changed is committed state now.
-            info.changes = None;
-            // A private transaction no open one began before: only a
-            // transaction that began before this commit can conflict with it
-            // (and none begins during it, see `commit_lock`), so its claims
-            // are of no further use.
-            if info.private && self.manager.active_count.load(Ordering::Acquire) == 1 {
-                transactions.remove(&self.transaction_id);
-                self.manager
-                    .committed_epochs
-                    .write()
-                    .remove(&self.transaction_id);
-            }
-        }
-        drop(transactions);
-        // Commits complete one at a time and in epoch order (the commit
-        // lock), so the published epoch only moves forward.
-        self.manager
-            .published_epoch
-            .fetch_max(self.epoch.as_u64(), Ordering::Release);
-        self.manager.active_count.fetch_sub(1, Ordering::Release);
-        // The commit lock is released after this, with `_commit`.
+        grafeo_common::grafeo_error!(
+            "commit of transaction {:?} at epoch {:?} did not complete; its writes stay \
+             locked, and no transaction can commit until the database is reopened",
+            self.transaction_id,
+            self.epoch
+        );
+        self.manager.incomplete_from(self.epoch);
     }
 }
 
@@ -428,6 +560,9 @@ impl TransactionManager {
             write_freeze: RwLock::new(()),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            unpublishable_from: AtomicU64::new(u64::MAX),
+            publish_turn: Mutex::new(()),
+            published: Condvar::new(),
         }
     }
 
@@ -506,8 +641,14 @@ impl TransactionManager {
         let epoch = self.current_epoch();
         let changes = Arc::new(TransactionChanges::new(transaction_id, epoch));
         let info = TransactionInfo::new(epoch, isolation_level, Arc::clone(&changes), private);
-        self.transactions.write().insert(transaction_id, info);
-        self.active_count.fetch_add(1, Ordering::Relaxed);
+        // Counted while the `transactions` lock is held: a commit that
+        // publishes meanwhile sees this transaction or does not, never half
+        // (it drops a private transaction's claims only when no other is
+        // counted, see `Publish::complete`).
+        let mut transactions = self.transactions.write();
+        transactions.insert(transaction_id, info);
+        self.active_count.fetch_add(1, Ordering::Release);
+        drop(transactions);
         (transaction_id, changes)
     }
 
@@ -540,10 +681,43 @@ impl TransactionManager {
     /// recorded, an undo that failed): from now on every commit and
     /// checkpoint fails, as after a commit that did not complete.
     pub(crate) fn poison(&self, reason: &str) {
-        self.poisoned.store(true, Ordering::Release);
         grafeo_common::grafeo_error!(
             "{reason}; no transaction can commit until the database is reopened"
         );
+        // Nothing more is published: no commit may build on this store.
+        self.incomplete_from(EpochId::new(0));
+    }
+
+    /// Records that the commit at `epoch` did not complete: the manager is
+    /// poisoned, no epoch at or above it is published, and everything that
+    /// waits for an epoch to be published is woken to see it.
+    fn incomplete_from(&self, epoch: EpochId) {
+        self.poisoned.store(true, Ordering::Release);
+        self.unpublishable_from
+            .fetch_min(epoch.as_u64(), Ordering::AcqRel);
+        self.wake_publish_waiters();
+    }
+
+    /// Wakes whatever waits for an epoch to be published. Taking the turn
+    /// first means a waiter is either before its check, and sees the new
+    /// state, or already waiting, and is woken.
+    fn wake_publish_waiters(&self) {
+        drop(self.publish_turn.lock());
+        self.published.notify_all();
+    }
+
+    /// Waits until every written commit is published (see [`Publish`]):
+    /// called with the commit lock held, so no further commit is written
+    /// meanwhile. Returns at once when a commit did not complete: the
+    /// commits at and above it are never published.
+    fn wait_for_written_commits(&self) {
+        let mut turn = self.publish_turn.lock();
+        while !self.has_incomplete_commit()
+            && self.published_epoch.load(Ordering::Acquire)
+                < self.assigned_epoch.load(Ordering::Acquire)
+        {
+            self.published.wait(&mut turn);
+        }
     }
 
     /// Returns the isolation level of a transaction.
@@ -744,7 +918,7 @@ impl TransactionManager {
                 ))
             })?;
         }
-        commit.complete();
+        commit.complete()?;
         Ok(epoch)
     }
 
@@ -883,10 +1057,12 @@ impl TransactionManager {
         committed.insert(transaction_id, commit_epoch);
 
         Ok(CommitGuard {
-            manager: self,
-            transaction_id,
-            epoch: commit_epoch,
-            completed: false,
+            commit: Publish {
+                manager: self,
+                transaction_id,
+                epoch: commit_epoch,
+                finished: false,
+            },
             _commit: commit_lock,
         })
     }
@@ -912,6 +1088,7 @@ impl TransactionManager {
     /// the store holds its stamped versions, which no image may contain.
     pub(crate) fn hold_commits(&self) -> Result<CommitsHeld<'_>> {
         let commit = self.commit_lock.lock();
+        self.wait_for_written_commits();
         self.check_no_incomplete_commit()?;
         let writes = self.write_freeze.write();
         Ok(CommitsHeld {
@@ -937,6 +1114,7 @@ impl TransactionManager {
     /// [`TransactionError::DatabaseClosed`].
     pub(crate) fn hold_commits_for_change(&self) -> Result<CommitsHeld<'_>> {
         let commit = self.commit_lock.lock();
+        self.wait_for_written_commits();
         self.check_no_incomplete_commit()?;
         self.check_open()?;
         Ok(CommitsHeld {
@@ -968,6 +1146,7 @@ impl TransactionManager {
     /// removes. Transactions still begin, and reads still work.
     pub(crate) fn close_for_writes(&self) {
         let _commit = self.commit_lock.lock();
+        self.wait_for_written_commits();
         // Set while the commit lock is held: a commit or a write outside a
         // transaction waiting for the lock sees it.
         self.closed.store(true, Ordering::Release);
@@ -1160,6 +1339,7 @@ impl TransactionManager {
             .fetch_max(epoch.as_u64(), Ordering::SeqCst);
         self.published_epoch
             .fetch_max(epoch.as_u64(), Ordering::SeqCst);
+        self.wake_publish_waiters();
     }
 
     /// Returns the minimum epoch that must be preserved for active transactions.
@@ -1955,7 +2135,7 @@ mod tests {
             "a direct call that commits at once waits for the commit"
         );
 
-        commit.complete();
+        commit.complete().unwrap();
         assert_eq!(mgr.state(tx), Some(TransactionState::Committed));
         assert!(mgr.changes(tx).is_none(), "a commit drops its change set");
         assert!(mgr.idle_gate().is_some());
@@ -1981,7 +2161,7 @@ mod tests {
             let (finished, late) =
                 spawn_and_wait(scope, BRIEFLY, move || manager.begin_private().unwrap());
             assert!(!finished, "begin_private returned during the commit");
-            commit.complete();
+            commit.complete().unwrap();
             let (direct, changes) = late.join().unwrap();
             assert_eq!(mgr.start_epoch(direct), Some(epoch));
             assert_eq!((changes.id(), changes.snapshot()), (direct, epoch));
@@ -2021,7 +2201,7 @@ mod tests {
                     .is_err(),
                 "begin returned while the commit was in progress"
             );
-            commit.complete();
+            commit.complete().unwrap();
             let late = late.join().unwrap();
             assert_eq!(mgr.start_epoch(late), Some(epoch));
         });
@@ -2039,8 +2219,333 @@ mod tests {
         assert!(epoch > before);
         assert_eq!(mgr.current_epoch(), before);
 
-        commit.complete();
+        commit.complete().unwrap();
         assert_eq!(mgr.current_epoch(), epoch);
+    }
+
+    // ---- A commit in phases (W4.1) ----
+
+    /// A commit whose log write failed is aborted: its epoch goes back (no
+    /// later commit took one yet), nothing is published or poisoned, and the
+    /// transaction is active again for the caller's rollback, still holding
+    /// its claims until then. The next commit takes the same epoch.
+    ///
+    /// After `a_cancelled_prepare_releases_claims_without_publishing` of
+    /// pull request #614 (temporaryfix), with the epoch given back.
+    #[test]
+    fn an_aborted_commit_gives_its_epoch_back_and_keeps_the_manager_usable() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        mgr.record_write(tx, NodeId::new(1)).unwrap();
+        let commit = mgr.start_commit(tx).unwrap();
+        assert_eq!(commit.epoch(), EpochId::new(1));
+        commit.abort();
+
+        assert_eq!(mgr.state(tx), Some(TransactionState::Active));
+        assert_eq!(mgr.committed_epoch(tx), None);
+        assert_eq!(mgr.current_epoch(), EpochId::new(0));
+        assert!(!mgr.has_incomplete_commit());
+        let other = mgr.begin();
+        assert!(
+            matches!(
+                mgr.record_write(other, NodeId::new(1)),
+                Err(Error::Transaction(TransactionError::WriteConflict(_)))
+            ),
+            "the transaction of an aborted commit holds its claim until it is rolled back"
+        );
+        mgr.abort(other).unwrap();
+        mgr.abort(tx).unwrap();
+        assert_eq!(mgr.active_count(), 0);
+        assert!(mgr.idle_gate().is_some());
+
+        // Every assigned epoch is published: a hold does not wait.
+        std::thread::scope(|scope| {
+            let _end = EndWaits(&mgr);
+            let manager = &mgr;
+            let (finished, _) = spawn_and_wait(scope, PATIENTLY, move || {
+                drop(manager.hold_commits_for_change().unwrap());
+                drop(manager.hold_commits().unwrap());
+            });
+            assert!(
+                finished,
+                "a hold waits for the epoch of the aborted commit, which nothing publishes"
+            );
+        });
+        let next = mgr.begin();
+        mgr.record_write(next, NodeId::new(1))
+            .expect("the rolled-back transaction holds no claim");
+        assert_eq!(
+            mgr.commit(next).unwrap(),
+            EpochId::new(1),
+            "the next commit takes the epoch the aborted one gave back"
+        );
+    }
+
+    /// A written commit has released the commit lock, so the next one starts,
+    /// but its transaction is still committing: its claims stay, readers do
+    /// not see its epoch, and a direct call that commits at once waits.
+    #[test]
+    fn claims_stay_until_publish() {
+        let mgr = TransactionManager::new();
+        let before = mgr.begin();
+        let tx = mgr.begin();
+        mgr.record_write(tx, NodeId::new(1)).unwrap();
+        let publish = mgr.start_commit(tx).unwrap().written();
+        let epoch = publish.epoch();
+
+        assert_eq!(mgr.state(tx), Some(TransactionState::Committing));
+        assert_eq!(mgr.current_epoch(), EpochId::new(0));
+        let after = mgr.begin();
+        assert_eq!(
+            mgr.start_epoch(after),
+            Some(EpochId::new(0)),
+            "a transaction begins while a written commit waits to publish, below its epoch"
+        );
+        for other in [before, after] {
+            assert!(matches!(
+                mgr.record_write(other, NodeId::new(1)),
+                Err(Error::Transaction(TransactionError::WriteConflict(_)))
+            ));
+        }
+        assert!(mgr.idle_gate().is_none());
+
+        // The next commit runs meanwhile, and publishes after this one.
+        mgr.record_write(after, NodeId::new(2)).unwrap();
+        let second = mgr.start_commit(after).unwrap().written();
+        let second_epoch = second.epoch();
+        assert_eq!(second_epoch.as_u64(), epoch.as_u64() + 1);
+
+        publish.complete().unwrap();
+        assert_eq!(mgr.state(tx), Some(TransactionState::Committed));
+        assert_eq!(mgr.current_epoch(), epoch);
+        second.complete().unwrap();
+        assert_eq!(mgr.current_epoch(), second_epoch);
+        mgr.abort(before).unwrap();
+        let next = mgr.begin();
+        mgr.record_write(next, NodeId::new(1)).unwrap();
+    }
+
+    /// Eight written commits publish in the order of their epochs, whatever
+    /// order their committers finish in: none publishes before the one
+    /// below it, so no reader sees an epoch with a gap under it.
+    #[test]
+    fn publish_follows_epoch_order_under_eight_committers() {
+        let mgr = TransactionManager::new();
+        let mut written: Vec<_> = (0..8)
+            .map(|_| {
+                let tx = mgr.begin();
+                mgr.start_commit(tx).unwrap().written()
+            })
+            .collect();
+        let epochs: Vec<u64> = written
+            .iter()
+            .map(|publish| publish.epoch().as_u64())
+            .collect();
+        assert_eq!(epochs, (1..=8).collect::<Vec<u64>>());
+        let first = written.remove(0);
+
+        let manager = &mgr;
+        std::thread::scope(|scope| {
+            // The highest epochs first: each waits for the one below it.
+            let waiting: Vec<_> = written
+                .into_iter()
+                .rev()
+                .map(|publish| {
+                    let epoch = publish.epoch();
+                    let (finished, handle) = spawn_and_wait(scope, BRIEFLY, move || {
+                        publish.complete().unwrap();
+                        // Published in order: nothing below is missing.
+                        assert!(manager.current_epoch() >= epoch);
+                    });
+                    assert!(!finished, "epoch {epoch:?} was published before epoch 1");
+                    handle
+                })
+                .collect();
+            assert_eq!(mgr.current_epoch(), EpochId::new(0));
+            assert!(mgr.idle_gate().is_none(), "eight commits are still open");
+
+            first.complete().unwrap();
+            for handle in waiting {
+                handle.join().unwrap();
+            }
+        });
+        assert_eq!(mgr.current_epoch(), EpochId::new(8));
+        assert!(mgr.idle_gate().is_some(), "every commit is published");
+        assert!(!mgr.has_incomplete_commit());
+    }
+
+    /// A checkpoint's hold, a change outside a commit and `close()` take the
+    /// commit lock and then wait until every written commit is published:
+    /// the committed state they see, log or close on holds every commit that
+    /// is in the log.
+    #[test]
+    fn a_hold_waits_for_every_written_commit_to_publish() {
+        type Hold = fn(&TransactionManager);
+        let holds: [(&str, Hold); 3] = [
+            ("hold_commits", |mgr| drop(mgr.hold_commits().unwrap())),
+            ("hold_commits_for_change", |mgr| {
+                drop(mgr.hold_commits_for_change().unwrap());
+            }),
+            ("close_for_writes", TransactionManager::close_for_writes),
+        ];
+        for (name, hold) in holds {
+            let mgr = TransactionManager::new();
+            let tx = mgr.begin();
+            let publish = mgr.start_commit(tx).unwrap().written();
+            let epoch = publish.epoch();
+            let manager = &mgr;
+            std::thread::scope(|scope| {
+                let (finished, held) = spawn_and_wait(scope, BRIEFLY, move || {
+                    hold(manager);
+                    manager.current_epoch()
+                });
+                assert!(
+                    !finished,
+                    "{name} returned before the written commit was published"
+                );
+                publish.complete().unwrap();
+                assert_eq!(held.join().unwrap(), epoch, "{name}");
+            });
+        }
+    }
+
+    /// A publish handle dropped without `complete` (the commit code panicked
+    /// after its group was written) is a commit that did not complete: its
+    /// epoch is never published, and neither is any epoch above it, since
+    /// that would show its stamped versions. Later commits fail, a written
+    /// one at its publish, and a hold fails instead of waiting for ever.
+    #[test]
+    fn a_dropped_publish_handle_poisons_as_an_incomplete_commit() {
+        let mgr = TransactionManager::new();
+        let (first, tx, later) = (mgr.begin(), mgr.begin(), mgr.begin());
+        mgr.record_write(tx, NodeId::new(1)).unwrap();
+        let below = mgr.start_commit(first).unwrap().written();
+        let publish = mgr.start_commit(tx).unwrap().written();
+        let above = mgr.start_commit(later).unwrap().written();
+        let below_epoch = below.epoch();
+
+        drop(publish);
+        assert!(mgr.has_incomplete_commit());
+        assert_eq!(mgr.state(tx), Some(TransactionState::Committing));
+        std::thread::scope(|scope| {
+            let _end = EndWaits(&mgr);
+            let above = publishing(scope, above);
+            assert!(matches!(
+                above.recv_timeout(PATIENTLY),
+                Ok(Err(Error::Transaction(TransactionError::IncompleteCommit)))
+            ));
+            assert_eq!(mgr.state(later), Some(TransactionState::Committing));
+            assert_eq!(mgr.current_epoch(), EpochId::new(0));
+            // The commit below it holds nothing of it: it is published.
+            let below = publishing(scope, below);
+            assert!(matches!(below.recv_timeout(PATIENTLY), Ok(Ok(()))));
+        });
+        assert_eq!(mgr.state(first), Some(TransactionState::Committed));
+        assert_eq!(mgr.current_epoch(), below_epoch);
+
+        let next = mgr.begin();
+        assert!(matches!(
+            mgr.start_commit(next),
+            Err(Error::Transaction(TransactionError::IncompleteCommit))
+        ));
+        assert!(matches!(
+            mgr.hold_commits(),
+            Err(Error::Transaction(TransactionError::IncompleteCommit))
+        ));
+        assert!(matches!(
+            mgr.hold_commits_for_change(),
+            Err(Error::Transaction(TransactionError::IncompleteCommit))
+        ));
+        // Returns: the database closes on what was published.
+        mgr.close_for_writes();
+        assert_eq!(mgr.current_epoch(), below_epoch);
+    }
+
+    /// After a broken invariant ([`TransactionManager::poison`]) nothing is
+    /// published any more, a written commit included: no commit may build
+    /// on that store.
+    #[test]
+    fn a_poisoned_manager_publishes_nothing_more() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        let written = mgr.start_commit(tx).unwrap().written();
+        mgr.poison("an undo failed");
+        std::thread::scope(|scope| {
+            let _end = EndWaits(&mgr);
+            let written = publishing(scope, written);
+            assert!(matches!(
+                written.recv_timeout(PATIENTLY),
+                Ok(Err(Error::Transaction(TransactionError::IncompleteCommit)))
+            ));
+        });
+        assert_eq!(mgr.current_epoch(), EpochId::new(0));
+    }
+
+    /// A commit that waits to publish when a commit below it does not
+    /// complete is woken and fails: it does not wait for ever.
+    #[test]
+    fn a_waiting_publish_fails_when_the_commit_below_it_does_not_complete() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        let later = mgr.begin();
+        let publish = mgr.start_commit(tx).unwrap().written();
+        let above = mgr.start_commit(later).unwrap().written();
+        std::thread::scope(|scope| {
+            let _end = EndWaits(&mgr);
+            let above = publishing(scope, above);
+            assert!(
+                above.recv_timeout(BRIEFLY).is_err(),
+                "published before the commit below it"
+            );
+            drop(publish);
+            assert!(matches!(
+                above.recv_timeout(PATIENTLY),
+                Ok(Err(Error::Transaction(TransactionError::IncompleteCommit)))
+            ));
+        });
+        assert_eq!(mgr.current_epoch(), EpochId::new(0));
+    }
+
+    /// Ends every wait for an epoch when a test fails, so a failed assertion
+    /// fails the test instead of leaving a thread waiting for a commit that
+    /// never publishes.
+    struct EndWaits<'a>(&'a TransactionManager);
+
+    impl Drop for EndWaits<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                // Both ways a wait ends: refused, or its turn has come.
+                self.0.incomplete_from(EpochId::new(0));
+                self.0.sync_epoch(EpochId::new(u64::MAX - 1));
+            }
+        }
+    }
+
+    /// Publishes `publish` on a scoped thread; the result arrives on the
+    /// returned channel once it is published or refused.
+    fn publishing<'scope>(
+        scope: &'scope std::thread::Scope<'scope, '_>,
+        publish: Publish<'scope>,
+    ) -> std::sync::mpsc::Receiver<Result<()>> {
+        let (done, result) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let _ = done.send(publish.complete());
+        });
+        result
+    }
+
+    /// `complete` on the guard publishes while it holds the commit lock, as
+    /// every caller did before the phases: nothing starts in between.
+    #[test]
+    fn a_commit_completed_under_its_lock_is_published_at_once() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        let commit = mgr.start_commit(tx).unwrap();
+        let epoch = commit.epoch();
+        commit.complete().unwrap();
+        assert_eq!(mgr.current_epoch(), epoch);
+        assert_eq!(mgr.state(tx), Some(TransactionState::Committed));
+        assert!(mgr.idle_gate().is_some());
     }
 
     /// A commit that does not complete (its code panicked between the commit

@@ -348,7 +348,7 @@ pub(crate) fn update_privately<T>(
     // A set that fails to apply drops the guard uncompleted, which poisons
     // the manager.
     changes.apply_triples(store)?;
-    commit.complete();
+    commit.complete()?;
     Ok(value)
 }
 

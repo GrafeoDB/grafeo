@@ -40,7 +40,11 @@ pub fn classify_error(err: &Error) -> ErrorCategory {
         Error::Query(_) => ErrorCategory::Query,
         Error::Transaction(TransactionError::DatabaseClosed) => ErrorCategory::DatabaseClosed,
         // Only a reopen helps, never a retry of the transaction.
-        Error::Transaction(TransactionError::IncompleteCommit) => ErrorCategory::Database,
+        Error::Transaction(
+            TransactionError::IncompleteCommit
+            | TransactionError::CommitOutcomeUnknown(_)
+            | TransactionError::LogUnavailable(_),
+        ) => ErrorCategory::Database,
         Error::Transaction(_) => ErrorCategory::Transaction,
         Error::Storage(_) => ErrorCategory::Storage,
         Error::Io(_) => ErrorCategory::Io,
@@ -92,6 +96,30 @@ mod tests {
         let err = Error::Transaction(TransactionError::IncompleteCommit);
         assert_eq!(classify_error(&err), ErrorCategory::Database);
         assert_eq!(err.error_code().as_str(), "GRAFEO-T008");
+    }
+
+    /// A commit whose log write failed was rolled back: a transaction error,
+    /// which a retry can fix. An unknown outcome and a log that takes no more
+    /// writes need a reopen: database errors.
+    #[test]
+    fn classifies_the_commit_log_errors_by_what_helps() {
+        let err = Error::Transaction(TransactionError::LogWriteFailed("disk full".into()));
+        assert_eq!(classify_error(&err), ErrorCategory::Transaction);
+        assert_eq!(err.error_code().as_str(), "GRAFEO-T009");
+        for (err, code) in [
+            (
+                TransactionError::CommitOutcomeUnknown("fsync".into()),
+                "GRAFEO-T010",
+            ),
+            (
+                TransactionError::LogUnavailable("poisoned".into()),
+                "GRAFEO-T011",
+            ),
+        ] {
+            let err = Error::Transaction(err);
+            assert_eq!(classify_error(&err), ErrorCategory::Database, "{err}");
+            assert_eq!(err.error_code().as_str(), code);
+        }
     }
 
     #[test]

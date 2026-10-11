@@ -110,6 +110,8 @@ mod tests {
         for error in [
             Error::Transaction(TransactionError::DatabaseClosed),
             Error::Transaction(TransactionError::IncompleteCommit),
+            Error::Transaction(TransactionError::CommitOutcomeUnknown("fsync".into())),
+            Error::Transaction(TransactionError::LogUnavailable("poisoned".into())),
         ] {
             assert_eq!(
                 GrafeoStatus::from(&error),
@@ -121,6 +123,13 @@ mod tests {
             GrafeoStatus::from(&Error::Transaction(TransactionError::Conflict)),
             GrafeoStatus::ErrorTransaction,
             "a conflict stays a transaction error"
+        );
+        assert_eq!(
+            GrafeoStatus::from(&Error::Transaction(TransactionError::LogWriteFailed(
+                "disk full".into()
+            ))),
+            GrafeoStatus::ErrorTransaction,
+            "a commit that was rolled back can be retried"
         );
     }
 }

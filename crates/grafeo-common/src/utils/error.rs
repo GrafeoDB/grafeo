@@ -63,6 +63,15 @@ pub enum ErrorCode {
     /// A commit did not complete: nothing commits, checkpoints or saves until
     /// the database is reopened.
     IncompleteCommit,
+    /// A commit could not be written to the write-ahead log and was rolled
+    /// back (retry possible).
+    LogWriteFailed,
+    /// A commit was written to the write-ahead log, but the log could not be
+    /// made durable: whether the commit exists is known after a reopen.
+    CommitOutcomeUnknown,
+    /// The write-ahead log takes no more writes until the database is
+    /// reopened.
+    LogUnavailable,
 
     // Storage errors (S)
     /// Memory or disk limit reached.
@@ -115,6 +124,9 @@ impl ErrorCode {
             Self::TransactionDeadlock => "GRAFEO-T006",
             Self::DatabaseClosed => "GRAFEO-T007",
             Self::IncompleteCommit => "GRAFEO-T008",
+            Self::LogWriteFailed => "GRAFEO-T009",
+            Self::CommitOutcomeUnknown => "GRAFEO-T010",
+            Self::LogUnavailable => "GRAFEO-T011",
 
             Self::StorageFull => "GRAFEO-S001",
             Self::StorageCorrupted => "GRAFEO-S002",
@@ -141,6 +153,7 @@ impl ErrorCode {
             Self::TransactionConflict
                 | Self::TransactionTimeout
                 | Self::TransactionDeadlock
+                | Self::LogWriteFailed
                 | Self::QueryTimeout
         )
     }
@@ -446,6 +459,22 @@ pub enum TransactionError {
     /// until the database is reopened. Reads still see every commit
     /// published before it.
     IncompleteCommit,
+
+    /// The commit could not be written to the write-ahead log (the reason
+    /// follows), and was rolled back: nothing of it is in the log or the
+    /// database, and the same changes can be committed again.
+    LogWriteFailed(String),
+
+    /// The commit was written to the write-ahead log, but the log could not
+    /// be made durable (the reason follows), so the commit may or may not
+    /// survive: nobody sees it now, and a reopen finds it or not. Nothing
+    /// commits until the database is reopened.
+    CommitOutcomeUnknown(String),
+
+    /// The write-ahead log takes no more writes (the reason follows): an
+    /// earlier write or sync of it failed. Nothing of this commit was
+    /// written, and nothing commits until the database is reopened.
+    LogUnavailable(String),
 }
 
 impl TransactionError {
@@ -463,6 +492,9 @@ impl TransactionError {
             Self::InvalidState(_) => ErrorCode::TransactionInvalidState,
             Self::DatabaseClosed => ErrorCode::DatabaseClosed,
             Self::IncompleteCommit => ErrorCode::IncompleteCommit,
+            Self::LogWriteFailed(_) => ErrorCode::LogWriteFailed,
+            Self::CommitOutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
+            Self::LogUnavailable(_) => ErrorCode::LogUnavailable,
         }
     }
 }
@@ -489,6 +521,22 @@ impl fmt::Display for TransactionError {
                 "an earlier commit did not complete, so no transaction can commit and nothing \
                  can be checkpointed, saved or copied: reopen the database (reads still see \
                  every commit published before it)"
+            ),
+            TransactionError::LogWriteFailed(reason) => write!(
+                f,
+                "the commit could not be written to the write-ahead log and was rolled back, \
+                 so nothing of it remains and it can be retried: {reason}"
+            ),
+            TransactionError::CommitOutcomeUnknown(reason) => write!(
+                f,
+                "the commit was written to the write-ahead log, but the log could not be made \
+                 durable, so whether the commit exists is known only after the database is \
+                 reopened; nothing commits until then: {reason}"
+            ),
+            TransactionError::LogUnavailable(reason) => write!(
+                f,
+                "the write-ahead log takes no more writes, so nothing was written and nothing \
+                 commits until the database is reopened: {reason}"
             ),
         }
     }
@@ -785,6 +833,48 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "GRAFEO-T007: the database is closed, so it takes no more writes: open it again to write"
+        );
+    }
+
+    /// A commit whose log write failed was rolled back and can be retried; one
+    /// whose log write may or may not be on disk, and a log that takes no more
+    /// writes, need a reopen. Each has its own code, so a caller can tell
+    /// "retry", "may exist" and "reopen" apart.
+    #[test]
+    fn the_commit_log_errors_have_their_own_codes() {
+        let failed = Error::Transaction(TransactionError::LogWriteFailed("disk full".into()));
+        assert_eq!(failed.error_code(), ErrorCode::LogWriteFailed);
+        assert_eq!(failed.error_code().as_str(), "GRAFEO-T009");
+        assert!(failed.error_code().is_retryable(), "nothing of it remains");
+        assert_eq!(
+            failed.to_string(),
+            "GRAFEO-T009: the commit could not be written to the write-ahead log and was \
+             rolled back, so nothing of it remains and it can be retried: disk full"
+        );
+
+        let unknown = Error::Transaction(TransactionError::CommitOutcomeUnknown(
+            "fsync failed".into(),
+        ));
+        assert_eq!(unknown.error_code(), ErrorCode::CommitOutcomeUnknown);
+        assert_eq!(unknown.error_code().as_str(), "GRAFEO-T010");
+        assert!(!unknown.error_code().is_retryable(), "it may exist already");
+        assert_eq!(
+            unknown.to_string(),
+            "GRAFEO-T010: the commit was written to the write-ahead log, but the log could not \
+             be made durable, so whether the commit exists is known only after the database is \
+             reopened; nothing commits until then: fsync failed"
+        );
+
+        let unavailable = Error::Transaction(TransactionError::LogUnavailable(
+            "an earlier sync failed".into(),
+        ));
+        assert_eq!(unavailable.error_code(), ErrorCode::LogUnavailable);
+        assert_eq!(unavailable.error_code().as_str(), "GRAFEO-T011");
+        assert!(!unavailable.error_code().is_retryable());
+        assert_eq!(
+            unavailable.to_string(),
+            "GRAFEO-T011: the write-ahead log takes no more writes, so nothing was written and \
+             nothing commits until the database is reopened: an earlier sync failed"
         );
     }
 

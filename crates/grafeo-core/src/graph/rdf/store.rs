@@ -16,10 +16,11 @@ use std::sync::Arc;
 
 #[cfg(test)]
 mod path_lookup_tests {
+    use std::time::{Duration, Instant};
+
     use super::super::path_budget::PathBudget;
     use super::*;
     use crate::execution::operators::OperatorError;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn path_lookup_polls_rejected_index_candidates() {

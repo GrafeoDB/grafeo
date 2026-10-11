@@ -1,12 +1,14 @@
 //! Query-local accounting and deadline checks for native RDF paths.
 
-use crate::execution::operators::OperatorError;
-use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
-use parking_lot::{RwLock, RwLockReadGuard};
 use std::collections::VecDeque;
 use std::hash::Hash;
 use std::mem::{align_of, size_of};
 use std::time::{Duration, Instant};
+
+use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
+use parking_lot::{RwLock, RwLockReadGuard};
+
+use crate::execution::operators::OperatorError;
 
 /// Local only: charging never calls an allocator manager or evicts a store.
 pub(crate) struct PathBudget {

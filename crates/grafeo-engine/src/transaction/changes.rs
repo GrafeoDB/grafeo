@@ -1124,17 +1124,19 @@ pub(crate) enum BuiltIndex {
 
 #[cfg(all(test, feature = "triple-store"))]
 mod path_overlay_tests {
-    use super::super::rdf::RdfWriter;
-    use super::{TransactionChanges, TransactionManager};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
     use grafeo_common::types::{EpochId, TransactionId};
     use grafeo_core::execution::operators::{
         Operator, OperatorError, PathStep, RdfPathConfig, RdfPathGraph, RdfPathOperator,
         RdfPathPendingGraph, RdfPathReadControl, RdfPathReadOverlay,
     };
     use grafeo_core::graph::rdf::{RdfStore, Term, Triple, TriplePattern};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+
+    use super::super::rdf::RdfWriter;
+    use super::{TransactionChanges, TransactionManager};
 
     enum Probe {
         Lock,

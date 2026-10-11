@@ -31,17 +31,19 @@ pub enum RdfPathGraph {
 
 #[cfg(feature = "triple-store")]
 mod physical {
+    use std::collections::VecDeque;
+    use std::mem::size_of;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use grafeo_common::types::{LogicalType, TransactionId};
+    use grafeo_common::utils::hash::FxHashSet;
+
     use super::super::{DEFAULT_PATH_SEARCH_BUDGET, Operator, OperatorError, OperatorResult};
     use super::{PathStep, RdfPathGraph};
     use crate::execution::{DataChunk, ValueVector};
     use crate::graph::rdf::path_budget::{PathBudget, term_payload};
     use crate::graph::rdf::{RdfStore, Term, TriplePattern};
-    use grafeo_common::types::{LogicalType, TransactionId};
-    use grafeo_common::utils::hash::FxHashSet;
-    use std::collections::VecDeque;
-    use std::mem::size_of;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
 
     /// Internal cross-crate control for borrowing a transaction's RDF net.
     /// It never calls a global memory manager while a store lock is held.

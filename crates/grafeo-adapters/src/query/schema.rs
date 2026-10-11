@@ -297,6 +297,14 @@ pub struct IndexOptions {
     pub dimensions: Option<usize>,
     /// Distance metric (for vector indexes).
     pub metric: Option<String>,
+    /// BM25 term frequency saturation (for text indexes).
+    pub k1: Option<f64>,
+    /// BM25 length normalization (for text indexes).
+    pub b: Option<f64>,
+    /// Tokenizer name (for text indexes).
+    pub tokenizer: Option<String>,
+    /// Stop words in place of the tokenizer's own (for text indexes).
+    pub stop_words: Option<Vec<String>>,
 }
 
 /// A CREATE CONSTRAINT statement.
@@ -344,8 +352,100 @@ pub struct PropertyDefinition {
     pub data_type: String,
     /// Whether the property is nullable.
     pub nullable: bool,
-    /// Optional default value (literal text from the DDL).
+    /// Optional default value: a literal of the property type, spelled
+    /// `NULL`, `TRUE`, `FALSE`, a decimal integer, a float with a `.` or an
+    /// exponent, or a string between single quotes (its escapes resolved).
     pub default_value: Option<String>,
+}
+
+/// What a property type takes as a `DEFAULT`: the kind of literal its
+/// default may be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PropertyTypeKind {
+    /// `STRING`: a string literal.
+    String,
+    /// `INT64`: an integer literal.
+    Integer,
+    /// `FLOAT64`: a float literal, or an integer literal a float holds
+    /// exactly.
+    Float,
+    /// `BOOLEAN`: `TRUE` or `FALSE`.
+    Boolean,
+    /// `ANY`: any literal.
+    Any,
+    /// The temporal types, lists, maps, bytes, nodes and edges: no literal a
+    /// `DEFAULT` takes is one of their values.
+    Other,
+}
+
+/// Every name type DDL takes for a property type other than `LIST<...>`, in
+/// capitals, with its kind: the property value types Grafeo supports
+/// (ISO/IEC 39075:2024 18.7 `<property value type>`, Syntax Rule 4). The
+/// first name of each type is the one `SHOW NODE TYPES` lists.
+///
+/// The catalog of grafeo-engine reads the same names
+/// (`PropertyDataType::from_type_name`); a test there keeps the two lists
+/// equal.
+pub const PROPERTY_TYPE_NAMES: &[(&str, PropertyTypeKind)] = &[
+    ("STRING", PropertyTypeKind::String),
+    ("VARCHAR", PropertyTypeKind::String),
+    ("TEXT", PropertyTypeKind::String),
+    ("INT64", PropertyTypeKind::Integer),
+    ("INT", PropertyTypeKind::Integer),
+    ("INTEGER", PropertyTypeKind::Integer),
+    ("BIGINT", PropertyTypeKind::Integer),
+    ("FLOAT64", PropertyTypeKind::Float),
+    ("FLOAT", PropertyTypeKind::Float),
+    ("DOUBLE", PropertyTypeKind::Float),
+    ("REAL", PropertyTypeKind::Float),
+    ("BOOLEAN", PropertyTypeKind::Boolean),
+    ("BOOL", PropertyTypeKind::Boolean),
+    ("DATE", PropertyTypeKind::Other),
+    ("TIME", PropertyTypeKind::Other),
+    ("TIMESTAMP", PropertyTypeKind::Other),
+    ("DATETIME", PropertyTypeKind::Other),
+    ("ZONED DATETIME", PropertyTypeKind::Other),
+    ("ZONED_DATETIME", PropertyTypeKind::Other),
+    ("ZONEDDATETIME", PropertyTypeKind::Other),
+    ("LOCAL DATETIME", PropertyTypeKind::Other),
+    ("LOCAL_DATETIME", PropertyTypeKind::Other),
+    ("LOCALDATETIME", PropertyTypeKind::Other),
+    ("DURATION", PropertyTypeKind::Other),
+    ("INTERVAL", PropertyTypeKind::Other),
+    ("LIST", PropertyTypeKind::Other),
+    ("ARRAY", PropertyTypeKind::Other),
+    ("MAP", PropertyTypeKind::Other),
+    ("RECORD", PropertyTypeKind::Other),
+    ("BYTES", PropertyTypeKind::Other),
+    ("BINARY", PropertyTypeKind::Other),
+    ("BLOB", PropertyTypeKind::Other),
+    ("NODE", PropertyTypeKind::Other),
+    ("EDGE", PropertyTypeKind::Other),
+    ("RELATIONSHIP", PropertyTypeKind::Other),
+    ("ANY", PropertyTypeKind::Any),
+];
+
+/// The kind of the property type called `name` (any case; `LIST<...>`
+/// excluded: its kind is [`PropertyTypeKind::Other`]), or `None` when
+/// `name` is not a property type Grafeo supports.
+#[must_use]
+pub fn property_type_kind(name: &str) -> Option<PropertyTypeKind> {
+    PROPERTY_TYPE_NAMES
+        .iter()
+        .find(|(known, _)| known.eq_ignore_ascii_case(name))
+        .map(|(_, kind)| *kind)
+}
+
+/// The message that refuses `name` as a property type, with the types to
+/// use instead.
+#[must_use]
+pub fn unknown_property_type(name: &str) -> String {
+    format!(
+        "'{name}' is not a property type: use STRING, INT64, FLOAT64, BOOLEAN, DATE, TIME, \
+         TIMESTAMP, ZONED DATETIME, LOCAL DATETIME, DURATION, LIST, LIST<type>, MAP, BYTES, \
+         NODE, EDGE or ANY"
+    )
 }
 
 /// An ALTER NODE TYPE or ALTER EDGE TYPE statement.

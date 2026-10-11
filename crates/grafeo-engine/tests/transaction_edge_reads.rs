@@ -105,7 +105,6 @@ fn in_a_file_without_the_grafeo_extension() {
     db.close().unwrap();
 }
 
-#[cfg(feature = "compact-store")]
 #[test]
 fn after_compact() {
     let mut db = GrafeoDB::new_in_memory();

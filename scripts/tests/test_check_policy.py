@@ -197,6 +197,23 @@ def test_d5_matches_the_store_trait_not_a_mention(repo: Path) -> None:
     assert found(result) == ["D5 crates/grafeo-core/src/writer.rs:2"]
 
 
+def test_d5_lets_the_stores_implement_the_store_traits(repo: Path) -> None:
+    write(
+        repo,
+        "crates/grafeo-core/src/graph/rowgroup/read.rs",
+        "impl GraphStore for RowGroupStore {}\n"
+        "impl crate::graph::traits::GraphStoreSearch for RowGroupStore {}\n"
+        "impl GraphStoreMut for super::lpg::LpgStore {}\n"
+        "impl GraphStore for RowGroupStoreWrapper {}\n"
+        "impl<S: GraphStore> GraphStore for Logged<S> {}\n",
+    )
+    result = policy(repo, "diff", "--base", "HEAD")
+    assert found(result) == [
+        "D5 crates/grafeo-core/src/graph/rowgroup/read.rs:4",
+        "D5 crates/grafeo-core/src/graph/rowgroup/read.rs:5",
+    ]
+
+
 def test_d5_can_be_allowed_as_a_warning(repo: Path) -> None:
     write(repo, "crates/grafeo-engine/src/x.rs", "impl GraphStore for X {}\n")
     result = policy(repo, "diff", "--base", "HEAD", "--allow", "D5")

@@ -200,7 +200,6 @@ tests:
 
   # IC1. Transitive friends with certain name.
   - name: ic1_transitive_friends_with_a_name_maria
-    skip: "a list-valued grouping key next to collect() becomes 0 (friendUniversities)"
     params:
       personId: 228
       firstName: "Maria"
@@ -257,7 +256,6 @@ tests:
 
   # IC1. Transitive friends with certain name.
   - name: ic1_transitive_friends_with_a_name_john
-    skip: "a list-valued grouping key next to collect() becomes 0 (friendUniversities)"
     params:
       personId: 228
       firstName: "John"
@@ -357,7 +355,6 @@ tests:
 
   # IC3. Friends and friends of friends that have been to given countries.
   - name: ic3_friends_in_countries_x_and_y
-    skip: "the chained comparison $endDate > message.creationDate >= $startDate returns null"
     params:
       personId: 228
       countryXName: "Uruguay"
@@ -400,7 +397,6 @@ tests:
 
   # IC4. New topics.
   - name: ic4_new_topics
-    skip: "the chained comparison $startDate <= post.creationDate < $endDate returns null"
     params:
       personId: 228
       startDate: 1272672000000
@@ -437,7 +433,6 @@ tests:
 
   # IC5. New groups.
   - name: ic5_new_groups
-    skip: "OPTIONAL MATCH ... WHERE friend IN friends (a list from the WITH before it) drops the forums without a match instead of keeping them with a count of 0"
     params:
       personId: 228
       minDate: 1275350400000
@@ -487,7 +482,6 @@ tests:
 
   # IC6. Tag co-occurrence.
   - name: ic6_tag_co_occurrence
-    skip: "a comma-separated MATCH whose second pattern uses a variable from an earlier WITH ({id: knownTagId}) returns no rows"
     params:
       personId: 228
       tagName: "Luis_Horna"
@@ -528,7 +522,6 @@ tests:
 
   # IC7. Recent likers.
   - name: ic7_recent_likers
-    skip: "a node stored in a map loses its kind: latestLike.msg.id is null"
     params:
       personId: 228
     query: |
@@ -634,7 +627,7 @@ tests:
 
   # IC10. Friend recommendation.
   - name: ic10_friend_recommendation
-    skip: "#543: a pattern predicate in a list comprehension fails with Unsupported EXISTS subquery pattern; then datetime({epochMillis: ...}) and birthday.month return null"
+    skip: "#543: a pattern predicate in a list comprehension fails with Unsupported EXISTS subquery pattern"
     params:
       personId: 228
       month: 7
@@ -756,7 +749,6 @@ tests:
 
   # IC13. Single shortest path.
   - name: ic13_single_shortest_path_ldbc_pair
-    skip: "#318: path IS NULL is true for a shortestPath path, so the query returns -1"
     params:
       person1Id: 8796093022357
       person2Id: 8796093022390
@@ -777,7 +769,6 @@ tests:
 
   # IC13. Single shortest path.
   - name: ic13_single_shortest_path_three_hops
-    skip: "#318: path IS NULL is true for a shortestPath path, so the query returns -1"
     params:
       person1Id: 228
       person2Id: 41
@@ -798,7 +789,7 @@ tests:
 
   # IC14. Trusted connection paths.
   - name: ic14_trusted_connection_paths
-    skip: "startNode(r).id is rejected (property access on a function result); #318: the path of allShortestPaths with *0.. is not bound"
+    skip: "a pattern comprehension inside reduce inside a list comprehension reaches the planner unrewritten (Internal error); #318: the path of allShortestPaths with *0.. is not bound"
     params:
       person1Id: 228
       person2Id: 41
@@ -1015,7 +1006,6 @@ tests:
   # IU6. Add post: Jae-Jin posts about Emilio Aguinaldo (LDBC update stream, tag list inline).
   # The left arrows must store author <- post <- forum.
   - name: iu6_add_post
-    skip: "CREATE (a)<-[:T]-(b) stores the edge as a -> b (HAS_CREATOR and CONTAINER_OF are reversed)"
     params:
       authorPersonId: 76
       countryId: 98
@@ -1094,7 +1084,6 @@ tests:
   # IU7. Add comment: Jie Yang replies to the post of IU6 (LDBC update stream, tag list
   # inline). The message id is $replyToPostId + $replyToCommentId + 1.
   - name: iu7_add_comment
-    skip: "CREATE (a)<-[:T]-(b) stores the edge as a -> b (HAS_CREATOR is reversed)"
     setup:
       - |
         MATCH (author:Person {id: 76}), (country:Country {id: 98}), (forum:Forum {id: 767})

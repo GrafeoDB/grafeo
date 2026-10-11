@@ -744,8 +744,10 @@ fn test_optional_match_where_right_side_preserves_left() {
 
 #[cfg(feature = "cypher")]
 #[test]
-fn test_optional_match_where_left_side_filters_correctly() {
-    // WHERE on left-side variable should filter left rows normally.
+fn test_optional_match_where_left_side_keeps_every_row() {
+    // A WHERE on a left-side variable is part of the OPTIONAL MATCH
+    // (openCypher): it decides which matches count, it does not filter the
+    // rows of the MATCH before it.
     let db = create_social_network();
     let session = db.session();
 
@@ -759,18 +761,21 @@ fn test_optional_match_where_left_side_filters_correctly() {
         )
         .unwrap();
 
-    // Only NYC persons: Alix+TechCorp, Gus+TechCorp (Harm is in London, filtered out)
-    assert_eq!(result.rows().len(), 2);
+    // Alix+TechCorp, Gus+TechCorp, and Harm (London) with null
+    assert_eq!(result.rows().len(), 3, "Harm's row is kept");
     assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
+    assert_eq!(result.rows()[0][1], Value::String("TechCorp".into()));
     assert_eq!(result.rows()[1][0], Value::String("Gus".into()));
+    assert_eq!(result.rows()[1][1], Value::String("TechCorp".into()));
+    assert_eq!(result.rows()[2][0], Value::String("Harm".into()));
+    assert_eq!(result.rows()[2][1], Value::Null);
 }
 
 #[cfg(feature = "cypher")]
 #[test]
 fn test_optional_match_where_mixed_predicates() {
-    // WHERE with both left-side and right-side predicates.
-    // Left predicate (a.city = 'NYC') filters left rows.
-    // Right predicate (c.name = 'TechCorp') becomes a join condition.
+    // WHERE with both left-side and right-side predicates: together they
+    // decide which matches count, and every person keeps a row.
     let db = create_social_network();
     let session = db.session();
 
@@ -784,12 +789,14 @@ fn test_optional_match_where_mixed_predicates() {
         )
         .unwrap();
 
-    // Only NYC persons: Alix+TechCorp, Gus+TechCorp
-    assert_eq!(result.rows().len(), 2);
+    // Alix+TechCorp, Gus+TechCorp, Harm+null
+    assert_eq!(result.rows().len(), 3, "Harm's row is kept");
     assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
     assert_eq!(result.rows()[0][1], Value::String("TechCorp".into()));
     assert_eq!(result.rows()[1][0], Value::String("Gus".into()));
     assert_eq!(result.rows()[1][1], Value::String("TechCorp".into()));
+    assert_eq!(result.rows()[2][0], Value::String("Harm".into()));
+    assert_eq!(result.rows()[2][1], Value::Null);
 }
 
 #[cfg(feature = "cypher")]

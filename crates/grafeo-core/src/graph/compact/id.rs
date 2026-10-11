@@ -81,17 +81,6 @@ pub fn decode_edge_id(id: EdgeId) -> (u16, u64) {
     (rel_table_id, csr_position)
 }
 
-/// Returns `true` if the given [`NodeId`] was produced by [`encode_node_id`].
-///
-/// Compact IDs always have bit 63 = 0 and are never [`NodeId::INVALID`].
-#[inline]
-#[must_use]
-pub fn is_compact_id(id: NodeId) -> bool {
-    let raw = id.as_u64();
-    // Bit 63 must be 0 and the ID must not be INVALID (u64::MAX, which has bit 63 = 1).
-    (raw & (1 << 63)) == 0
-}
-
 #[cfg(test)]
 // Compact IDs have bit 63 = 0, so u64<->i64 casts are lossless
 // reason: compact IDs have bit 63 = 0, so u64 to i64 casts are lossless
@@ -167,16 +156,6 @@ mod tests {
         // Even (0, 0) must not be INVALID.
         let zero_id = encode_node_id(0, 0);
         assert_ne!(zero_id, NodeId::INVALID);
-    }
-
-    #[test]
-    fn test_is_compact_id() {
-        assert!(is_compact_id(encode_node_id(0, 0)));
-        assert!(is_compact_id(encode_node_id(1, 42)));
-        assert!(is_compact_id(encode_node_id(MAX_TABLE_ID, MAX_OFFSET)));
-
-        // NodeId::INVALID has bit 63 = 1, so it is not a compact ID.
-        assert!(!is_compact_id(NodeId::INVALID));
     }
 
     #[test]

@@ -45,6 +45,13 @@ enum Layout {
     Unflushed,
     /// `directory/`: a WAL-directory database, closed cleanly.
     Directory,
+    /// `compacted.grafeo` (0.5.44 only): the first session, `compact()`, then the second
+    /// session, closed cleanly: a compacted base, the writes after it and the deletes of base
+    /// nodes and edges, all in the file, which the open folds into one store. It holds what
+    /// `closed.grafeo` holds, but for what 0.5.44's `compact()` lost (see
+    /// [`Fixture::has_search_indexes`], [`Fixture::gus_is_a_manager`] and
+    /// [`Fixture::values_are_typed`]).
+    Compacted,
 }
 
 #[derive(Clone, Copy)]
@@ -53,7 +60,7 @@ struct Fixture {
     layout: Layout,
 }
 
-const FIXTURES: [Fixture; 6] = [
+const FIXTURES: [Fixture; 7] = [
     Fixture {
         version: "0.5.43",
         layout: Layout::Closed,
@@ -77,6 +84,10 @@ const FIXTURES: [Fixture; 6] = [
     Fixture {
         version: "0.5.44",
         layout: Layout::Directory,
+    },
+    Fixture {
+        version: "0.5.44",
+        layout: Layout::Compacted,
     },
 ];
 
@@ -86,6 +97,7 @@ impl Fixture {
             Layout::Closed => "closed.grafeo",
             Layout::Unflushed => "unflushed.grafeo",
             Layout::Directory => "directory",
+            Layout::Compacted => "compacted.grafeo",
         }
     }
 
@@ -148,7 +160,7 @@ impl Fixture {
 
     /// Whether the second session's schema is only in WAL records.
     fn second_session_schema_in_wal(self) -> bool {
-        self.layout != Layout::Closed
+        matches!(self.layout, Layout::Unflushed | Layout::Directory)
     }
 
     /// The constraint names `SHOW CONSTRAINTS` lists. 0.5.43 files store no constraint
@@ -167,7 +179,9 @@ impl Fixture {
     /// (#401), so an index created in a WAL is missing.
     fn index_names(self) -> &'static [&'static str] {
         match (self.version, self.layout) {
-            ("0.5.44", Layout::Closed) => &["doc_content", "museum_name_index", "person_name"],
+            ("0.5.44", Layout::Closed | Layout::Compacted) => {
+                &["doc_content", "museum_name_index", "person_name"]
+            }
             ("0.5.44", Layout::Unflushed) => &["doc_content", "person_name"],
             _ => &[],
         }
@@ -176,13 +190,27 @@ impl Fixture {
     /// Whether the vector and text indexes of the first session are there. 0.5.43 wrote
     /// them to the file but lost them on reopen, so the checkpoint at the end of its second
     /// session wrote the file without them; in a WAL directory they are only index records
-    /// (#401).
+    /// (#401). 0.5.44's `compact()` dropped both definitions (`SHOW INDEXES` still lists the
+    /// text index's name, which its catalog kept).
     fn has_search_indexes(self) -> bool {
         match self.layout {
             Layout::Closed => self.version != "0.5.43",
             Layout::Unflushed => true,
-            Layout::Directory => false,
+            Layout::Directory | Layout::Compacted => false,
         }
+    }
+
+    /// Whether Alix's list, map, date, datetime and duration values keep their types:
+    /// 0.5.44's `compact()` stored them as their text, which the file keeps.
+    fn values_are_typed(self) -> bool {
+        self.layout != Layout::Compacted
+    }
+
+    /// Whether the second session's `SET g:Manager` reached Gus. After 0.5.44's `compact()`
+    /// his labels were one name, `Employee|Person`, so `MATCH (g:Person {name: 'Gus'})` did
+    /// not find him and the file holds him without `Manager`.
+    fn gus_is_a_manager(self) -> bool {
+        self.layout != Layout::Compacted
     }
 }
 
@@ -490,12 +518,17 @@ fn check_default_graph(fixture: Fixture, db: &GrafeoDB) {
     let name = fixture.name();
     let complete = !fixture.replays_into_a_named_graph();
 
+    let gus = if fixture.gus_is_a_manager() {
+        strings(&["Employee", "Manager", "Person"])
+    } else {
+        strings(&["Employee", "Person"])
+    };
     let (labels, edges, people) = if complete {
         (
             vec![
                 vec![strings(&["City"]), Value::Int64(2)],
                 vec![strings(&["Document"]), Value::Int64(3)],
-                vec![strings(&["Employee", "Manager", "Person"]), Value::Int64(1)],
+                vec![gus, Value::Int64(1)],
                 vec![strings(&["Museum"]), Value::Int64(1)],
                 vec![strings(&["Person"]), Value::Int64(2)],
             ],
@@ -553,6 +586,24 @@ fn check_default_graph(fixture: Fixture, db: &GrafeoDB) {
         (PropertyKey::new("city"), Value::from("Amsterdam")),
         (PropertyKey::new("number"), Value::Int64(19)),
     ]);
+    let typed = if fixture.values_are_typed() {
+        [
+            strings(&["amsterdam", "jazz"]),
+            Value::Map(address.into()),
+            Value::Date(Date::parse("1994-03-19").unwrap()),
+            Value::ZonedDatetime(ZonedDatetime::parse("2024-03-19T08:30:00+01:00").unwrap()),
+            Value::Duration(Duration::parse("P3D").unwrap()),
+        ]
+    } else {
+        [
+            Value::from(r#"["amsterdam", "jazz"]"#),
+            Value::from(r#"{city: "Amsterdam", number: 19}"#),
+            Value::from("1994-03-19"),
+            Value::from("2024-03-19T08:30:00+01:00"),
+            Value::from("P3D"),
+        ]
+    };
+    let [tags, address, born, seen, stay] = typed;
     assert_eq!(
         rows(
             db,
@@ -565,11 +616,11 @@ fn check_default_graph(fixture: Fixture, db: &GrafeoDB) {
             score,
             Value::Float64(1.88),
             Value::Bool(true),
-            strings(&["amsterdam", "jazz"]),
-            Value::Map(address.into()),
-            Value::Date(Date::parse("1994-03-19").unwrap()),
-            Value::ZonedDatetime(ZonedDatetime::parse("2024-03-19T08:30:00+01:00").unwrap()),
-            Value::Duration(Duration::parse("P3D").unwrap()),
+            tags,
+            address,
+            born,
+            seen,
+            stay,
             Value::Vector(vec![3.0, 19.0, 88.0].into()),
         ]],
         "{name}: Alix"
@@ -805,7 +856,7 @@ fn check_indexes(fixture: Fixture, db: &GrafeoDB) {
         "{name}: indexes"
     );
     let vector = db.vector_search("Document", "embedding", &[1.0, 0.0, 0.0], 1, None, None);
-    let text = db.text_search("Document", "content", "canals", 3);
+    let text = db.text_search("Document", "content", "canals", 3, None);
     if !fixture.has_search_indexes() {
         assert!(vector.is_err(), "{name}: a vector index");
         assert!(text.is_err(), "{name}: a text index");

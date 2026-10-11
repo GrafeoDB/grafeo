@@ -1,0 +1,73 @@
+# Rosetta: write values from nodes and edges created earlier in the statement
+#
+# A write that takes a value from a node or edge the same statement created
+# earlier writes that value. The value used to come from a read that did not
+# see the statement's own writes, so it was null: a MERGE merged every row
+# into one P without k, and a CREATE, SET or relationship MERGE wrote no
+# value.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Write values from new nodes and edges
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # The MATCH after the write finds the node the row 5 - i created.
+  - name: a_merge_reads_a_node_created_earlier
+    variants:
+      gql: "FOR i IN range(1, 4) INSERT (:N {k: i}) WITH i MATCH (a:N {k: 5 - i}) MERGE (b:P {k: a.k}) RETURN b.k AS k"
+      cypher: "UNWIND range(1, 4) AS i CREATE (:N {k: i}) WITH i MATCH (a:N {k: 5 - i}) MERGE (b:P {k: a.k}) RETURN b.k AS k"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - [3]
+        - [4]
+
+  - name: a_create_reads_a_node_created_earlier
+    variants:
+      gql: "FOR i IN [3, 19] INSERT (a:N {k: i}) INSERT (b:P {k: a.k}) RETURN b.k AS k"
+      cypher: "UNWIND [3, 19] AS i CREATE (a:N {k: i}) CREATE (b:P {k: a.k}) RETURN b.k AS k"
+    expect:
+      rows:
+        - [3]
+        - [19]
+
+  - name: a_create_reads_an_edge_created_earlier
+    variants:
+      gql: "FOR i IN [3, 19] INSERT (:N)-[r:R {w: i}]->(:Q) INSERT (b:P {k: r.w}) RETURN b.k AS k"
+      cypher: "UNWIND [3, 19] AS i CREATE (:N)-[r:R {w: i}]->(:Q) CREATE (b:P {k: r.w}) RETURN b.k AS k"
+    expect:
+      rows:
+        - [3]
+        - [19]
+
+  - name: a_set_reads_a_node_created_earlier
+    variants:
+      gql: "FOR i IN [3, 19] INSERT (a:N {k: i}), (b:P) SET b.k = a.k RETURN b.k AS k"
+      cypher: "UNWIND [3, 19] AS i CREATE (a:N {k: i}), (b:P) SET b.k = a.k RETURN b.k AS k"
+    expect:
+      rows:
+        - [3]
+        - [19]
+
+  - name: a_relationship_merge_reads_a_node_created_earlier
+    variants:
+      gql: "FOR i IN [3, 19] INSERT (a:N {k: i}), (c:Q) MERGE (a)-[r:R {w: a.k}]->(c) RETURN r.w AS w"
+      cypher: "UNWIND [3, 19] AS i CREATE (a:N {k: i}), (c:Q) MERGE (a)-[r:R {w: a.k}]->(c) RETURN r.w AS w"
+    expect:
+      rows:
+        - [3]
+        - [19]
+
+  - name: an_on_create_set_reads_a_node_created_earlier
+    variants:
+      gql: "FOR i IN [3, 19] INSERT (a:N {k: i}) MERGE (b:P {id: i}) ON CREATE SET b.k = a.k RETURN b.k AS k"
+      cypher: "UNWIND [3, 19] AS i CREATE (a:N {k: i}) MERGE (b:P {id: i}) ON CREATE SET b.k = a.k RETURN b.k AS k"
+    expect:
+      rows:
+        - [3]
+        - [19]

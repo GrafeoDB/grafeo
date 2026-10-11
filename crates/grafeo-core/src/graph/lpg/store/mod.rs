@@ -9,11 +9,14 @@
 //! - Columnar properties with zone maps for fast filtering
 //! - Forward and backward adjacency indexes
 
+mod apply;
 mod edge_ops;
 mod graph_store_impl;
 mod index;
 mod memory;
 mod node_ops;
+mod open_changes;
+mod property_index;
 mod property_ops;
 mod schema;
 mod search;
@@ -24,26 +27,25 @@ mod versioning;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use apply::testing;
+pub use open_changes::OpenChangesByGraph;
+pub(crate) use open_changes::{Labels, OpenChangeSource, OpenChanges};
+
 use super::PropertyStorage;
+use super::dictionary::NameDictionary;
 #[cfg(not(feature = "tiered-storage"))]
 use super::{EdgeRecord, NodeRecord};
 use crate::index::adjacency::ChunkedAdjacency;
 use crate::statistics::Statistics;
-use arcstr::ArcStr;
-use dashmap::DashMap;
 #[cfg(not(feature = "tiered-storage"))]
 use grafeo_common::mvcc::VersionChain;
-use grafeo_common::types::{
-    EdgeId, EpochId, HashableValue, NodeId, PropertyKey, TransactionId, Value,
-};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::RwLock;
 use std::cmp::Ordering as CmpOrdering;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-
-#[cfg(feature = "vector-index")]
-use crate::index::vector::VectorIndexKind;
 
 #[cfg(feature = "tiered-storage")]
 use crate::codec::EpochStore;
@@ -54,79 +56,6 @@ use grafeo_common::memory::arena::ArenaAllocator;
 use grafeo_common::mvcc::VersionIndex;
 #[cfg(feature = "temporal")]
 use grafeo_common::temporal::VersionLog;
-
-/// One change made by a transaction, with what rollback needs to undo it.
-///
-/// The entries of a transaction list everything it touched in this store, so
-/// commit and rollback walk them instead of scanning every entity.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum PropertyUndoEntry {
-    /// A node was created.
-    NodeCreated {
-        /// The new node.
-        node_id: NodeId,
-    },
-    /// An edge was created.
-    EdgeCreated {
-        /// The new edge.
-        edge_id: EdgeId,
-    },
-    /// A node property was changed or added.
-    NodeProperty {
-        /// The node that was modified.
-        node_id: NodeId,
-        /// The property key that was set or removed.
-        key: PropertyKey,
-        /// The previous value, or `None` if the property did not exist before.
-        old_value: Option<Value>,
-    },
-    /// An edge property was changed or added.
-    EdgeProperty {
-        /// The edge that was modified.
-        edge_id: EdgeId,
-        /// The property key that was set or removed.
-        key: PropertyKey,
-        /// The previous value, or `None` if the property did not exist before.
-        old_value: Option<Value>,
-    },
-    /// A label was added to a node.
-    LabelAdded {
-        /// The node that had a label added.
-        node_id: NodeId,
-        /// The label string that was added.
-        label: String,
-    },
-    /// A label was removed from a node.
-    LabelRemoved {
-        /// The node that had a label removed.
-        node_id: NodeId,
-        /// The label string that was removed.
-        label: String,
-    },
-    /// A node was deleted (for rollback restoration).
-    NodeDeleted {
-        /// The node that was deleted.
-        node_id: NodeId,
-        /// The labels the node had before deletion.
-        labels: Vec<String>,
-        /// The properties the node had before deletion.
-        properties: Vec<(PropertyKey, Value)>,
-    },
-    /// An edge was deleted (for rollback restoration).
-    EdgeDeleted {
-        /// The edge that was deleted.
-        edge_id: EdgeId,
-        /// The source node.
-        src: NodeId,
-        /// The destination node.
-        dst: NodeId,
-        /// The edge type name.
-        edge_type: String,
-        /// The properties the edge had before deletion.
-        properties: Vec<(PropertyKey, Value)>,
-    },
-}
 
 /// Compares two values for ordering (used for range checks).
 pub(super) fn compare_values_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
@@ -140,7 +69,9 @@ pub(super) fn compare_values_for_range(a: &Value, b: &Value) -> Option<CmpOrderi
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),
-        _ => None,
+        // Zoned datetimes, also against a timestamp: by their instant, as a
+        // filter compares them.
+        _ => a.compare_instants(b),
     }
 }
 
@@ -201,76 +132,6 @@ impl Default for LpgStoreConfig {
     }
 }
 
-/// Bidirectional label name/ID registry.
-///
-/// Combines the name-to-ID and ID-to-name mappings behind a single lock,
-/// reducing lock acquisitions on both the read path (`build_node`) and the
-/// write path (`get_or_create_label_id`).
-pub(super) struct LabelRegistry {
-    /// Label name to numeric ID.
-    name_to_id: FxHashMap<ArcStr, u32>,
-    /// Numeric ID to label name (index = ID).
-    id_to_name: Vec<ArcStr>,
-}
-
-impl LabelRegistry {
-    fn new() -> Self {
-        Self {
-            name_to_id: FxHashMap::default(),
-            id_to_name: Vec::new(),
-        }
-    }
-
-    /// Looks up an existing label ID by name.
-    pub(super) fn get_id(&self, name: &str) -> Option<u32> {
-        self.name_to_id.get(name).copied()
-    }
-
-    /// Returns the label name for a given ID.
-    pub(super) fn get_name(&self, id: u32) -> Option<&ArcStr> {
-        self.id_to_name.get(id as usize)
-    }
-
-    /// Returns or creates a label ID for the given name.
-    pub(super) fn get_or_create(&mut self, name: &str) -> u32 {
-        if let Some(&id) = self.name_to_id.get(name) {
-            return id;
-        }
-        // reason: label registry size bounded by practical limits, fits u32
-        #[allow(clippy::cast_possible_truncation)]
-        let id = self.id_to_name.len() as u32;
-        let label: ArcStr = name.into();
-        self.name_to_id.insert(label.clone(), id);
-        self.id_to_name.push(label);
-        id
-    }
-
-    /// Returns the total number of distinct labels.
-    pub(super) fn len(&self) -> usize {
-        self.id_to_name.len()
-    }
-
-    /// Returns the ID-to-name slice for iteration.
-    pub(super) fn names(&self) -> &[ArcStr] {
-        &self.id_to_name
-    }
-
-    /// Clears all label mappings.
-    pub(super) fn clear(&mut self) {
-        self.name_to_id.clear();
-        self.id_to_name.clear();
-    }
-
-    /// Estimates heap memory usage in bytes.
-    pub(super) fn heap_bytes(&self) -> usize {
-        let map_bytes = self.name_to_id.capacity()
-            * (std::mem::size_of::<ArcStr>() + std::mem::size_of::<u32>());
-        let vec_bytes = self.id_to_name.capacity() * std::mem::size_of::<ArcStr>();
-        let string_bytes: usize = self.id_to_name.iter().map(|s| s.len()).sum();
-        map_bytes + vec_bytes + string_bytes
-    }
-}
-
 /// The entities whose history garbage collection has to trim.
 #[cfg(any(feature = "temporal", feature = "tiered-storage"))]
 #[derive(Default)]
@@ -325,7 +186,7 @@ pub(super) struct GcCandidates {
 ///
 /// ## Level 2: Catalogs
 /// 3. `label_registry`
-/// 4. `edge_type_to_id` + `id_to_edge_type`
+/// 4. `edge_types`
 ///
 /// ## Level 3: Indexes
 /// 5. `label_index`
@@ -395,17 +256,37 @@ pub struct LpgStore {
     /// Property storage for edges.
     pub(super) edge_properties: PropertyStorage<EdgeId>,
 
-    /// Bidirectional label name/ID registry.
+    /// The labels' ids, append-only (see [`NameDictionary`]).
     /// Lock order: 3
-    pub(super) label_registry: RwLock<LabelRegistry>,
+    pub(super) label_registry: RwLock<NameDictionary>,
 
-    /// Edge type name to ID mapping.
-    /// Lock order: 4 (acquire with id_to_edge_type)
-    pub(super) edge_type_to_id: RwLock<FxHashMap<ArcStr, u32>>,
+    /// The edge types' ids, append-only (see [`NameDictionary`]).
+    /// Lock order: 4
+    pub(super) edge_types: RwLock<NameDictionary>,
 
-    /// Edge type ID to name mapping.
-    /// Lock order: 4 (acquire with edge_type_to_id)
-    pub(super) id_to_edge_type: RwLock<Vec<ArcStr>>,
+    /// The property keys' ids, shared by the node and edge tables,
+    /// append-only (see [`NameDictionary`]): the columns of the LPG section
+    /// are keyed by them. A key gets its id when a checkpoint first writes
+    /// it, or from the file at a load. Lock order: independent (never held
+    /// with another lock of the store).
+    pub(super) property_keys: RwLock<NameDictionary>,
+
+    /// This graph's id in the file: 0 for the default graph, the id it was
+    /// created with for a named graph (never reused, see
+    /// [`next_graph_id`](Self::next_graph_id)). Atomic only so a load can
+    /// give a graph an earlier step of the same open created the id the file
+    /// holds (see [`restore_graphs`](Self::restore_graphs)).
+    graph_id: std::sync::atomic::AtomicU32,
+
+    /// The id the next named graph created in this store gets (1 for a new
+    /// store); it only grows, so a dropped graph's id is never given again.
+    next_graph_id: std::sync::atomic::AtomicU32,
+
+    /// Whether this store is a named graph that was dropped (see
+    /// [`drop_graph`](Self::drop_graph)): its [`ChangeTarget`](crate::graph::apply::ChangeTarget)
+    /// refuses every write from then on, so a writer that resolved the graph
+    /// before the drop changes nothing a commit would log for it.
+    dropped: std::sync::atomic::AtomicBool,
 
     /// Forward adjacency lists (outgoing edges).
     pub(super) forward_adj: ChunkedAdjacency,
@@ -428,20 +309,23 @@ pub struct LpgStore {
     #[cfg(feature = "temporal")]
     pub(super) node_labels: RwLock<FxHashMap<NodeId, VersionLog<FxHashSet<u32>>>>,
 
-    /// Property indexes: property_key -> (value -> set of node IDs).
+    /// Property indexes: property_key -> (value -> set of node IDs, see
+    /// [`PropertyIndex`](property_index::PropertyIndex)).
     ///
     /// When a property is indexed, lookups by value are O(1) instead of O(n).
     /// Use [`create_property_index`] to enable indexing for a property.
-    /// Lock order: 7
-    pub(super) property_indexes:
-        RwLock<FxHashMap<PropertyKey, DashMap<HashableValue, FxHashSet<NodeId>>>>,
+    /// Lock order: 7, after the node lock (1): an adoption of a base node
+    /// holds the node lock while it adds the copy here, so a reader that
+    /// needs the node lock too (`create_property_index`, whose scan reads
+    /// the node ids) takes it first, never while it holds this one.
+    pub(super) property_indexes: RwLock<FxHashMap<PropertyKey, property_index::PropertyIndex>>,
 
-    /// Vector indexes: "label:property" -> HNSW index.
+    /// Vector indexes: "label:property" -> HNSW index, with the property.
     ///
     /// Created via [`GrafeoDB::create_vector_index`](grafeo_engine::GrafeoDB::create_vector_index).
     /// Lock order: 7 (same level as property_indexes, disjoint keys)
     #[cfg(feature = "vector-index")]
-    pub(super) vector_indexes: RwLock<FxHashMap<String, Arc<VectorIndexKind>>>,
+    pub(super) vector_indexes: RwLock<FxHashMap<String, index::StoredVectorIndex>>,
 
     /// Text indexes: "label:property" -> inverted index with BM25 scoring.
     ///
@@ -487,15 +371,6 @@ pub struct LpgStore {
     /// Zero overhead for single-graph databases (empty HashMap).
     /// Lock order: 9 (after statistics)
     named_graphs: RwLock<FxHashMap<String, Arc<LpgStore>>>,
-
-    /// What each open transaction changed in this store.
-    ///
-    /// Maps transaction IDs to their changes in order: created and deleted
-    /// entities, property and label changes with the previous state. Commit
-    /// finalizes the versions of the entities listed there and discards the
-    /// entries; rollback replays them in reverse. Both cost O(changes).
-    /// Lock order: 10 (after named_graphs, independent of other locks)
-    property_undo_log: RwLock<FxHashMap<TransactionId, Vec<PropertyUndoEntry>>>,
 }
 
 impl LpgStore {
@@ -537,9 +412,12 @@ impl LpgStore {
             epoch_store: Arc::new(EpochStore::new()),
             node_properties: PropertyStorage::new(),
             edge_properties: PropertyStorage::new(),
-            label_registry: RwLock::new(LabelRegistry::new()),
-            edge_type_to_id: RwLock::new(FxHashMap::default()),
-            id_to_edge_type: RwLock::new(Vec::new()),
+            label_registry: RwLock::new(NameDictionary::new()),
+            edge_types: RwLock::new(NameDictionary::new()),
+            property_keys: RwLock::new(NameDictionary::new()),
+            graph_id: std::sync::atomic::AtomicU32::new(0),
+            next_graph_id: std::sync::atomic::AtomicU32::new(1),
+            dropped: std::sync::atomic::AtomicBool::new(false),
             forward_adj: ChunkedAdjacency::new(),
             backward_adj,
             label_index: RwLock::new(Vec::with_capacity(16)),
@@ -559,7 +437,6 @@ impl LpgStore {
             edge_type_live_counts: RwLock::new(Vec::new()),
             statistics: RwLock::new(Arc::new(Statistics::new())),
             named_graphs: RwLock::new(FxHashMap::default()),
-            property_undo_log: RwLock::new(FxHashMap::default()),
         })
     }
 
@@ -602,8 +479,8 @@ impl LpgStore {
 
     /// Sets the next node ID counter.
     ///
-    /// Used by [`LayeredStore`](crate::graph::compact::layered::LayeredStore)
-    /// to seed the overlay's ID allocator above the compact base's maximum ID.
+    /// Used when loading a store, to keep its ID allocator above every ID
+    /// the store holds.
     #[doc(hidden)]
     pub fn set_next_node_id(&self, id: u64) {
         self.next_node_id.store(id, Ordering::Release);
@@ -620,7 +497,10 @@ impl LpgStore {
     /// Removes all data from the store, resetting it to an empty state.
     ///
     /// Acquires locks in the documented ordering to prevent deadlocks.
-    /// After clearing, the store behaves as if freshly constructed.
+    /// After clearing, the store behaves as if freshly constructed, except
+    /// that its name dictionaries (labels, edge types, property keys) keep
+    /// every id they gave out: ids are never reassigned, so a name used
+    /// again gets its old id and a new name a new one.
     pub fn clear(&self) {
         // Level 1: Entity storage
         #[cfg(not(feature = "tiered-storage"))]
@@ -635,12 +515,7 @@ impl LpgStore {
             // Arena allocator chunks are leaked; epochs are cleared via epoch_store.
         }
 
-        // Level 2: Catalogs
-        self.label_registry.write().clear();
-        {
-            self.edge_type_to_id.write().clear();
-            self.id_to_edge_type.write().clear();
-        }
+        // Level 2: the catalogs (name dictionaries) keep their ids.
 
         // Level 3: Indexes
         self.label_index.write().clear();
@@ -669,9 +544,6 @@ impl LpgStore {
         self.live_edge_count.store(0, Ordering::Release);
         self.edge_type_live_counts.write().clear();
         *self.statistics.write() = Arc::new(Statistics::new());
-
-        // Level 5: Undo log
-        self.property_undo_log.write().clear();
     }
 
     /// Returns whether backward adjacency (incoming edge index) is available.
@@ -708,7 +580,7 @@ impl LpgStore {
         if let Some(g) = graphs.get(name) {
             return Ok(Arc::clone(g));
         }
-        let store = Arc::new(LpgStore::new()?);
+        let store = Arc::new(self.new_named_graph()?);
         graphs.insert(name.to_string(), Arc::clone(&store));
         Ok(store)
     }
@@ -723,38 +595,126 @@ impl LpgStore {
         if graphs.contains_key(name) {
             return Ok(false);
         }
-        graphs.insert(name.to_string(), Arc::new(LpgStore::new()?));
+        graphs.insert(name.to_string(), Arc::new(self.new_named_graph()?));
         Ok(true)
     }
 
-    /// Drops a named graph. Returns `false` if it did not exist.
+    /// A new store for a named graph, with the next graph id. The caller
+    /// holds `named_graphs` for writing, so ids are given out one at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError`] if the store cannot be allocated, or
+    /// [`AllocError::IdsExhausted`] once every graph id was given out.
+    fn new_named_graph(&self) -> Result<LpgStore, AllocError> {
+        let id = self.next_graph_id.load(Ordering::Acquire);
+        let next = id
+            .checked_add(1)
+            .ok_or(AllocError::IdsExhausted { what: "graph" })?;
+        let store = LpgStore::new()?;
+        store.graph_id.store(id, Ordering::Release);
+        self.next_graph_id.store(next, Ordering::Release);
+        Ok(store)
+    }
+
+    /// Restores the named graphs `graphs` (`(id, name)`, each id from 1 and
+    /// below `next_graph_id`, each id and name once) with their ids, as a
+    /// load does, and makes `next_graph_id` the next graph id at least.
+    /// Returns the graphs' stores, in the order of `graphs`.
+    ///
+    /// A graph this store holds already was created in this process (an
+    /// earlier step of the open creates some, as the catalog does for a
+    /// schema's graphs), so its id was never written: a listed one takes its
+    /// id from `graphs`, and one not listed moves to an id at or above
+    /// `next_graph_id`, so no two graphs share an id.
+    ///
+    /// # Errors
+    ///
+    /// Returns what is wrong when an id is 0 or not below `next_graph_id`,
+    /// when every graph id is given out, or when a store cannot be allocated.
+    pub(crate) fn restore_graphs(
+        &self,
+        graphs: &[(u32, &str)],
+        next_graph_id: u32,
+    ) -> Result<Vec<Arc<LpgStore>>, String> {
+        let mut named = self.named_graphs.write();
+        if let Some((id, name)) = graphs
+            .iter()
+            .find(|(id, _)| *id == 0 || *id >= next_graph_id)
+        {
+            return Err(format!(
+                "graph {name:?} has id {id}, where named graphs have ids from 1 below \
+                 {next_graph_id}"
+            ));
+        }
+        self.next_graph_id
+            .fetch_max(next_graph_id, Ordering::AcqRel);
+        let listed: FxHashSet<&str> = graphs.iter().map(|(_, name)| *name).collect();
+        for (name, graph) in named.iter() {
+            if !listed.contains(name.as_str()) {
+                let id = self.next_graph_id.load(Ordering::Acquire);
+                let next = id
+                    .checked_add(1)
+                    .ok_or_else(|| AllocError::IdsExhausted { what: "graph" }.to_string())?;
+                graph.graph_id.store(id, Ordering::Release);
+                self.next_graph_id.store(next, Ordering::Release);
+            }
+        }
+        let mut restored = Vec::with_capacity(graphs.len());
+        for &(id, name) in graphs {
+            let graph = match named.get(name) {
+                Some(graph) => Arc::clone(graph),
+                None => {
+                    let graph = Arc::new(LpgStore::new().map_err(|error| error.to_string())?);
+                    named.insert(name.to_string(), Arc::clone(&graph));
+                    graph
+                }
+            };
+            graph.graph_id.store(id, Ordering::Release);
+            restored.push(graph);
+        }
+        Ok(restored)
+    }
+
+    /// This graph's id: 0 for the default graph (see the `graph_id` field).
+    #[must_use]
+    pub(crate) fn graph_id(&self) -> u32 {
+        self.graph_id.load(Ordering::Acquire)
+    }
+
+    /// The id the next named graph created in this store gets.
+    #[must_use]
+    pub(crate) fn next_graph_id(&self) -> u32 {
+        self.next_graph_id.load(Ordering::Acquire)
+    }
+
+    /// Drops a named graph. Returns `false` if it did not exist. Its id is
+    /// not given out again: a graph created later under the same name gets
+    /// a new one.
+    ///
+    /// The dropped graph's store refuses every write through its
+    /// [`ChangeTarget`](crate::graph::apply::ChangeTarget) from now on (see
+    /// [`is_dropped`](Self::is_dropped)): a writer that resolved the graph
+    /// before the drop and writes after it changes nothing.
     pub fn drop_graph(&self, name: &str) -> bool {
-        self.named_graphs.write().remove(name).is_some()
+        let removed = self.named_graphs.write().remove(name);
+        if let Some(graph) = &removed {
+            graph.dropped.store(true, Ordering::Release);
+        }
+        removed.is_some()
+    }
+
+    /// Whether this store is a named graph that was dropped (see
+    /// [`drop_graph`](Self::drop_graph)).
+    #[must_use]
+    pub fn is_dropped(&self) -> bool {
+        self.dropped.load(Ordering::Acquire)
     }
 
     /// Returns all named graph names.
     #[must_use]
     pub fn graph_names(&self) -> Vec<String> {
         self.named_graphs.read().keys().cloned().collect()
-    }
-
-    /// Drains the named-graph map, leaving it empty.
-    ///
-    /// Used by the engine's `compact()` / `recompact()` to carry named graphs
-    /// across a store rebuild. Named graphs are LPG-specific and outside the
-    /// `GraphStore` trait, so the columnar base cannot preserve them; the
-    /// engine moves them across the pre- and post-compact overlays with this.
-    #[must_use]
-    pub fn take_named_graphs(&self) -> FxHashMap<String, Arc<LpgStore>> {
-        std::mem::take(&mut *self.named_graphs.write())
-    }
-
-    /// Replaces the named-graph map, overwriting any existing entries.
-    ///
-    /// Paired with [`take_named_graphs`](Self::take_named_graphs) to transfer
-    /// named graphs across a compact rebuild.
-    pub fn install_named_graphs(&self, graphs: FxHashMap<String, Arc<LpgStore>>) {
-        *self.named_graphs.write() = graphs;
     }
 
     /// Returns the number of named graphs.
@@ -803,27 +763,10 @@ impl LpgStore {
     }
 
     pub(super) fn get_or_create_edge_type_id(&self, edge_type: &str) -> u32 {
-        {
-            let type_to_id = self.edge_type_to_id.read();
-            if let Some(&id) = type_to_id.get(edge_type) {
-                return id;
-            }
-        }
-
-        let mut type_to_id = self.edge_type_to_id.write();
-        let mut id_to_type = self.id_to_edge_type.write();
-
-        // Double-check
-        if let Some(&id) = type_to_id.get(edge_type) {
+        if let Some(id) = self.edge_types.read().get_id(edge_type) {
             return id;
         }
-
-        // reason: edge type registry size bounded by practical limits, fits u32
-        #[allow(clippy::cast_possible_truncation)]
-        let id = id_to_type.len() as u32;
-        let edge_type: ArcStr = edge_type.into();
-        type_to_id.insert(edge_type.clone(), id);
-        id_to_type.push(edge_type);
+        let id = self.edge_types.write().get_or_create(edge_type);
 
         // Grow edge type live counts to match
         let mut counts = self.edge_type_live_counts.write();

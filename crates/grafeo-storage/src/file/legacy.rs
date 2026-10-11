@@ -60,10 +60,14 @@ impl<'cipher> LegacyFile<'cipher> {
     /// # Errors
     ///
     /// Returns an error if the file does not exist, cannot be locked, has
-    /// invalid magic or an unsupported format version.
+    /// invalid magic or an unsupported format version, and
+    /// [`Error::Corruption`] naming the file read if a header does not
+    /// decode.
     pub fn open(path: &Path, cipher: Option<&'cipher ChunkCipher>) -> Result<Self> {
         let (mut file, lock_holder) = open_shared(path)?;
-        let (_, header) = read_active_header(&mut file)?;
+        let read_path = read_path(path, lock_holder.is_some());
+        let (_, header) =
+            read_active_header(&mut file).map_err(|error| error.in_file(&read_path))?;
         Ok(Self {
             path: path.to_path_buf(),
             file,
@@ -97,9 +101,16 @@ impl<'cipher> LegacyFile<'cipher> {
     ///
     /// # Errors
     ///
-    /// Returns an error if a checksum does not match, the directory is
-    /// corrupt, or a section cannot be decrypted.
+    /// Returns [`Error::Corruption`] naming the file read if a checksum does
+    /// not match, the directory is corrupt, or data lies beyond the end of the
+    /// file, and an error if a section cannot be decrypted.
     pub fn contents(&self) -> Result<LegacyContents> {
+        let read_path = read_path(&self.path, self.lock_holder.is_some());
+        self.read_contents()
+            .map_err(|error| error.in_file(&read_path))
+    }
+
+    fn read_contents(&self) -> Result<LegacyContents> {
         let mut file = self.file.try_clone()?;
         if let Some(directory) = read_directory(&mut file, &self.header)? {
             let mut sections = Vec::with_capacity(directory.len());
@@ -160,6 +171,16 @@ fn checkpoint_image_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The file that is read for the database at `path`: its pending image
+/// when there is one, else the database file.
+fn read_path(path: &Path, pending_image: bool) -> PathBuf {
+    if pending_image {
+        checkpoint_image_path(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Reads and validates the file header, then selects the active database
 /// header. Returns its slot and the header.
 pub(super) fn read_active_header(file: &mut File) -> Result<(u8, DbHeader)> {
@@ -197,11 +218,14 @@ pub(super) fn read_snapshot_blob(file: &mut File, active_header: &DbHeader) -> R
         .checked_add(active_header.snapshot_length)
         .is_none_or(|end| end > file_length)
     {
-        return Err(Error::Internal(format!(
-            "snapshot at offset {DATA_OFFSET} (length {}) lies beyond the end of the file \
-             ({file_length} bytes)",
-            active_header.snapshot_length
-        )));
+        return Err(Error::corruption_at(
+            format!(
+                "snapshot at offset {DATA_OFFSET} (length {}) lies beyond the end of the file \
+                 ({file_length} bytes)",
+                active_header.snapshot_length
+            ),
+            DATA_OFFSET,
+        ));
     }
     let length = usize::try_from(active_header.snapshot_length).map_err(|_| {
         Error::Internal(format!(
@@ -218,9 +242,13 @@ pub(super) fn read_snapshot_blob(file: &mut File, active_header: &DbHeader) -> R
 
     let actual_checksum = crc32fast::hash(&data);
     if actual_checksum != expected_checksum {
-        return Err(Error::Internal(format!(
-            "snapshot checksum mismatch: expected {expected_checksum:#010X}, got {actual_checksum:#010X}"
-        )));
+        return Err(Error::corruption_at(
+            format!(
+                "snapshot checksum mismatch: expected {expected_checksum:#010X}, got \
+                 {actual_checksum:#010X}"
+            ),
+            DATA_OFFSET,
+        ));
     }
 
     Ok(data)
@@ -264,10 +292,13 @@ pub(super) fn read_directory(
     // CRC logic would mask the underlying cause.
     let file_size = file.metadata()?.len();
     if file_size < DIRECTORY_OFFSET + 4096 {
-        return Err(Error::Internal(format!(
-            "v2 header indicates section directory at offset {DIRECTORY_OFFSET:#X}, \
-             but file is only {file_size} bytes",
-        )));
+        return Err(Error::corruption_at(
+            format!(
+                "v2 header indicates section directory at offset {DIRECTORY_OFFSET:#X}, but \
+                 file is only {file_size} bytes",
+            ),
+            DIRECTORY_OFFSET,
+        ));
     }
 
     file.seek(SeekFrom::Start(DIRECTORY_OFFSET))?;
@@ -275,11 +306,8 @@ pub(super) fn read_directory(
     let mut buf = vec![0u8; 4096];
     file.read_exact(&mut buf)?;
 
-    let dir = SectionDirectory::from_bytes(&buf).map_err(|e| {
-        Error::Internal(format!(
-            "v2 section directory at offset {DIRECTORY_OFFSET:#X} failed to parse: {e}",
-        ))
-    })?;
+    let dir = SectionDirectory::from_bytes(&buf)
+        .map_err(|e| e.wrapped("v2 section directory").at(DIRECTORY_OFFSET))?;
 
     // Cross-check the directory bytes against the CRC the writer recorded
     // in the active header. A mismatch means the directory page is torn or
@@ -287,10 +315,13 @@ pub(super) fn read_directory(
     // format ambiguity.
     let actual_checksum = crc32fast::hash(&buf);
     if actual_checksum != expected_checksum {
-        return Err(Error::Internal(format!(
-            "v2 section directory checksum mismatch: \
-             header recorded {expected_checksum:#010X}, computed {actual_checksum:#010X}",
-        )));
+        return Err(Error::corruption_at(
+            format!(
+                "v2 section directory checksum mismatch: header recorded \
+                 {expected_checksum:#010X}, computed {actual_checksum:#010X}",
+            ),
+            DIRECTORY_OFFSET,
+        ));
     }
 
     if dir.is_empty() {
@@ -319,11 +350,14 @@ pub(super) fn read_section(
         .checked_add(entry.length)
         .is_none_or(|end| end > file_length)
     {
-        return Err(Error::Internal(format!(
-            "section {:?} at offset {} (length {}) lies beyond the end of the file \
-             ({file_length} bytes)",
-            entry.section_type, entry.offset, entry.length
-        )));
+        return Err(Error::corruption_at(
+            format!(
+                "section {:?} at offset {} (length {}) lies beyond the end of the file \
+                 ({file_length} bytes)",
+                entry.section_type, entry.offset, entry.length
+            ),
+            entry.offset,
+        ));
     }
     file.seek(SeekFrom::Start(entry.offset))?;
 
@@ -339,10 +373,13 @@ pub(super) fn read_section(
     // Verify CRC on the raw bytes (encrypted or plaintext)
     let actual_crc = crc32fast::hash(&data);
     if actual_crc != entry.checksum {
-        return Err(Error::Internal(format!(
-            "section {:?} CRC mismatch: expected {:#010X}, got {actual_crc:#010X}",
-            entry.section_type, entry.checksum
-        )));
+        return Err(Error::corruption_at(
+            format!(
+                "section {:?} CRC mismatch: expected {:#010X}, got {actual_crc:#010X}",
+                entry.section_type, entry.checksum
+            ),
+            entry.offset,
+        ));
     }
 
     #[cfg(feature = "encryption")]

@@ -110,10 +110,7 @@ impl LpgStore {
             let hv = HashableValue::new(value.clone());
 
             if let Some(index) = indexes.get(&key) {
-                let matches: Vec<NodeId> = index
-                    .get(&hv)
-                    .map(|nodes| nodes.iter().copied().collect())
-                    .unwrap_or_default();
+                let matches: Vec<NodeId> = index.nodes(&hv);
 
                 // Short-circuit if any indexed condition has no matches
                 if matches.is_empty() {
@@ -190,10 +187,7 @@ impl LpgStore {
         // Try indexed lookup first
         let indexes = self.property_indexes.read();
         if let Some(index) = indexes.get(&key) {
-            if let Some(nodes) = index.get(&hv) {
-                return nodes.iter().copied().collect();
-            }
-            return Vec::new();
+            return index.nodes(&hv);
         }
         drop(indexes);
 
@@ -283,7 +277,9 @@ impl LpgStore {
             (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
             (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
             (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),
-            _ => None,
+            // Zoned datetimes, also against a timestamp: by their instant, as
+            // a filter compares them.
+            _ => a.compare_instants(b),
         }
     }
 

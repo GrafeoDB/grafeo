@@ -293,3 +293,45 @@ tests:
     expect:
       ordered: true
       count: 2
+
+  # ---------------------------------------------------------------------------
+  # A query vector the index cannot measure (#593): an error that names the
+  # index and both sizes, where it was a crash
+  # ---------------------------------------------------------------------------
+
+  - name: search_procedure_refuses_a_shorter_query_vector
+    requires: [vector-index, algos]
+    setup:
+      - "INSERT (:Doc {id: 'a', embedding: vector([1.0, 0.0, 0.0])})"
+      - "INSERT (:Doc {id: 'b', embedding: vector([0.0, 1.0, 0.0])})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(embedding) DIMENSION 3"
+    query: "CALL grafeo.search.vector('Doc', 'embedding', [0.3, 0.19], 2)"
+    expect:
+      error: "the query vector has 2 dimensions; the index on :Doc(embedding) expects 3"
+
+  - name: mmr_procedure_refuses_a_longer_query_vector
+    requires: [vector-index, algos]
+    setup:
+      - "INSERT (:Doc {id: 'a', embedding: vector([1.0, 0.0, 0.0])})"
+      - "INSERT (:Doc {id: 'b', embedding: vector([0.0, 1.0, 0.0])})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(embedding) DIMENSION 3"
+    query: "CALL grafeo.search.mmr('Doc', 'embedding', [0.3, 0.19, 0.88, 0.3], 2, 3, 0.5)"
+    expect:
+      error: "the query vector has 4 dimensions; the index on :Doc(embedding) expects 3"
+
+  - name: indexed_similarity_predicate_refuses_a_query_vector_of_another_size
+    setup:
+      - "INSERT (:Doc {id: 'a', embedding: vector([1.0, 0.0, 0.0])})"
+      - "INSERT (:Doc {id: 'b', embedding: vector([0.0, 1.0, 0.0])})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(embedding) DIMENSION 3"
+    query: "MATCH (n:Doc) WHERE cosine_similarity(n.embedding, [0.3, 0.19]) > 0.1 RETURN n.id"
+    expect:
+      error: "the query vector has 2 dimensions; the index on :Doc(embedding) expects 3"
+
+  - name: unindexed_similarity_of_vectors_of_different_sizes_is_null
+    setup:
+      - "INSERT (:Doc {id: 'a', embedding: vector([1.0, 0.0, 0.0])})"
+    query: "MATCH (n:Doc) RETURN cosine_similarity(n.embedding, [0.3, 0.19]) AS s"
+    expect:
+      rows:
+        - [null]

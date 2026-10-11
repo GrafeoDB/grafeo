@@ -1,5 +1,6 @@
 //! Relationship expansion and factorized chain planning.
 
+use super::reachability::ReachabilityMode;
 use super::{
     Arc, Direction, Error, ExecutionPathMode, ExpandDirection, ExpandOp, ExpandOperator,
     ExpandStep, GraphStoreSearch, LazyFactorizedChainOperator, LogicalOperator, Operator, PathMode,
@@ -33,11 +34,7 @@ impl super::Planner {
             ExpandDirection::Both => Direction::Both,
         };
 
-        // Check if this is a variable-length path. The GQL, Cypher and SQL/PGQ
-        // translators set `quantified` for one; other plans (Gremlin, built
-        // in code) only set hop bounds, so those count too.
-        let is_variable_length =
-            expand.quantified || expand.min_hops != 1 || expand.max_hops != Some(1);
+        let is_variable_length = expand.is_variable_length();
 
         // Use VariableLengthExpandOperator when multi-hop OR when a named path
         // needs path detail columns (length, nodes, edges)
@@ -56,11 +53,24 @@ impl super::Planner {
                 1
             };
             let max_hops = if is_variable_length {
-                expand.max_hops.unwrap_or(expand.min_hops + 100)
+                // An unbounded walk can go round a cycle forever, so it stops
+                // after `min + 100` hops. A path in any other mode repeats no
+                // edge (TRAIL) or node, so it ends on its own.
+                expand
+                    .max_hops
+                    .unwrap_or(if expand.path_mode == PathMode::Walk {
+                        expand.min_hops + 100
+                    } else {
+                        u32::MAX
+                    })
             } else {
                 1
             };
+            let reachability = self.reachability_mode(expand);
             let exec_path_mode = match expand.path_mode {
+                // A reachability search follows walks: it runs only where the
+                // paths reach what the walks reach (see `reaches_as_walks`)
+                _ if reachability.is_some() => ExecutionPathMode::Walk,
                 PathMode::Walk => ExecutionPathMode::Walk,
                 PathMode::Trail => ExecutionPathMode::Trail,
                 PathMode::Simple => ExecutionPathMode::Simple,
@@ -78,7 +88,8 @@ impl super::Planner {
             )
             .with_path_mode(exec_path_mode)
             .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_read_only(self.read_only);
+            .with_read_only(self.read_only)
+            .with_memory_budget(self.path_search_budget);
 
             // If a path alias is set, enable path length and detail output
             if needs_path_details {
@@ -88,6 +99,15 @@ impl super::Planner {
             }
             if binds_edge_list {
                 expand_op = expand_op.with_edge_list_output();
+            }
+            match reachability {
+                Some(ReachabilityMode::PerInputRow) => {
+                    expand_op = expand_op.with_reachability();
+                }
+                Some(ReachabilityMode::AcrossInputRows) => {
+                    expand_op = expand_op.with_reachability_across_rows();
+                }
+                None => {}
             }
 
             Box::new(expand_op)
@@ -136,8 +156,14 @@ impl super::Planner {
             self.scalar_columns.borrow_mut().insert(length_col.clone());
             self.scalar_columns.borrow_mut().insert(nodes_col.clone());
             self.scalar_columns.borrow_mut().insert(edges_col.clone());
-            // The path alias itself is also a scalar column containing Value::Path
-            self.scalar_columns.borrow_mut().insert(path_alias.clone());
+            // The path alias itself holds a Value::Path of node and edge ids,
+            // which RETURN gives as nodes and edges.
+            self.set_column_entity(
+                path_alias,
+                Some(grafeo_core::execution::operators::EntityValue::Nested(
+                    grafeo_common::types::LogicalType::Path,
+                )),
+            );
             columns.push(length_col);
             columns.push(nodes_col);
             columns.push(edges_col);

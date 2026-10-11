@@ -65,7 +65,7 @@ All labeled property graph query languages plus persistence. The default choice 
 rdf = ["triple-store", "grafeo-engine/lpg", "gql", "sparql", "graphql", "storage", "regex", "shacl"]
 ```
 
-RDF triple store with SPARQL, GraphQL, SHACL validation and persistence, for knowledge engineers working with ontologies and linked data. Persistence needs the LPG store for now, so the profile includes it ([#544](https://github.com/GrafeoDB/grafeo/issues/544)): without it a database lost its triples on reopen. Add the `ring-index` atom for compact RDF indexing (it pulls in `succinct-indexes`).
+RDF triple store with SPARQL, GraphQL, SHACL validation and persistence, for knowledge engineers working with ontologies and linked data. The triple store comes with the LPG store, which sessions, persistence and recovery need: the engine's `triple-store` feature enables `lpg`, so every database build with the triple store has it ([#544](https://github.com/GrafeoDB/grafeo/issues/544); such a build lost its triples on reopen). Add the `ring-index` atom for compact RDF indexing (it pulls in `succinct-indexes`).
 
 > **Note:** in the lower-level crates (`grafeo-core`, `grafeo-adapters`, `grafeo-engine`), `rdf` is a deprecated alias for the `triple-store` atom only. The profile above applies to the facade and binding crates.
 
@@ -93,7 +93,7 @@ Structured memory for LLMs, agents and RAG pipelines: vector and text retrieval 
 edge = ["grafeo-engine/lpg", "gql", "regex-lite"]
 ```
 
-Minimal profile for browsers, mobile and other constrained environments, with the smallest possible binary. Add `compact-store` for pre-built read-only datasets.
+Minimal profile for browsers, mobile and other constrained environments, with the smallest possible binary.
 
 ### Enterprise
 
@@ -110,7 +110,7 @@ Production operations. In the engine this enables observability and the async st
 
 | Deprecated name | Use instead | Notes |
 | --- | --- | --- |
-| `embedded` | `lpg` + `ai` + `algos` + `parallel` + `arrow-export` | Currently still the default of the facade and the Python, Node.js and C bindings. `lpg` adds Cypher, Gremlin, SQL/PGQ and the rest of `storage`; the bindings' `embedded` also includes `compact-store` |
+| `embedded` | `lpg` + `ai` + `algos` + `parallel` + `arrow-export` | Currently still the default of the facade and the Python, Node.js and C bindings. `lpg` adds Cypher, Gremlin, SQL/PGQ and the rest of `storage` |
 | `browser` | `edge` | Currently still the default of the WASM binding |
 | `server` | `lpg` + `rdf` + `ai` + `algos` + `parallel` + `arrow-export` + `async-storage` + `tracing` | `enterprise` without `metrics`; no bulk import |
 | `full` | same as `server` | In the facade, `full` is an alias of `server`. The bindings' `full` is all languages, `ai`, `algos` and the RDF triple store |
@@ -144,8 +144,7 @@ The profile names are consistent across every project. The table below shows whi
 The bindings use the same profile names, with a few differences from the facade:
 
 - **C** (and C#, Dart, Go): `rdf` has no SHACL validation.
-- **WASM**: `lpg` and `rdf` have no storage, `rdf` has no SHACL and uses the lightweight regex engine, `ai` has no change data capture, `analytics` is `ai` plus `algos` (no bulk import), and `edge` includes `compact-store`.
-- **Python, Node.js, C**: `embedded` also includes `compact-store`.
+- **WASM**: `lpg` and `rdf` have no storage, `rdf` has no SHACL and uses the lightweight regex engine, `ai` has no change data capture, and `analytics` is `ai` plus `algos` (no bulk import).
 
 ### AI / Agent Ecosystem
 
@@ -212,13 +211,13 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 | `spill` | (storage) | Out-of-core disk spilling | Implemented |
 | `mmap` | (storage) | Memory-mapped file storage | Implemented |
 | `async-storage` | Enterprise | Async WAL backend (tokio) | Implemented |
-| `compact-store` | (standalone); in the bindings' `embedded` and in WASM `edge` | Columnar store for read-mostly datasets | Implemented |
+| `compact-store` | (standalone) | Enables nothing since 0.6.0: every build that opens files reads databases compacted by 0.5.44 or older; removed in 0.7.0 | Deprecated |
 
 ### Graph Model
 
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
-| `triple-store` | RDF | RDF triple store with 6-way indexing | Implemented |
+| `triple-store` | RDF | RDF triple store with 6-way indexing; enables `lpg` | Implemented |
 | `shacl` | RDF | SHACL validation (core and SPARQL-based constraints) | Implemented |
 | `ring-index` | (standalone) | Space-efficient RDF index (pulls in succinct-indexes) | Implemented |
 | `succinct-indexes` | (pulled in by ring-index) | Rank/select bitvectors, Elias-Fano, wavelet trees | Implemented |
@@ -254,10 +253,8 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
-| `parallel` | (standalone); in `embedded` | Parallel execution (rayon) | Implemented |
+| `parallel` | (standalone); in `embedded` | Multi-core batch vector search and graph algorithms (rayon); a query runs on one thread | Implemented |
 | `tiered-storage` | (standalone) | Hot/cold version storage with epochs | Implemented |
-
-> **Note:** Block-STM parallel transaction execution is compiled unconditionally. It is not gated behind a feature flag.
 
 ### Operations
 

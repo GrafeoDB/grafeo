@@ -1,18 +1,13 @@
 //! After `compact()`, sessions use the database's CDC, RDF store and
-//! selected graph, and direct calls are written to the WAL.
-//!
-//! Queries after `compact()` are not written to the WAL yet: the session's
-//! WAL records writes to a plain store, and a compacted database writes the
-//! layered store (#448 takes the WAL from the transaction's change set).
-//! After a crash, replay brings back what direct calls created after
-//! `compact()`, but not their updates and deletes of data from before it
-//! (#432 replaces the overlay).
+//! selected graph, and every write, a query's or a direct call's, is written
+//! to the WAL (#558): after a crash, replay brings them all back, their
+//! changes to data from before `compact()` included.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test compact_sessions
 //! ```
 
-#![cfg(all(feature = "compact-store", feature = "lpg", feature = "gql"))]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB};
@@ -78,7 +73,7 @@ mod crash {
                 db.create_graph("model").unwrap();
                 db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
                 db.compact().unwrap();
-                // The file itself is compacted from here on: it reopens layered.
+                // The checkpoint holds Alix; the WAL holds the rest.
                 db.wal_checkpoint().unwrap();
                 let person = |name: &str| {
                     db.create_node_with_props(&["Person"], [("name", Value::from(name))])
@@ -93,6 +88,10 @@ mod crash {
                     .unwrap()
                     .create_node_with_props(&["Component"], [("id", Value::from("c0"))])
                     .unwrap();
+                // Queries, also on data from before `compact()`.
+                db.execute("MATCH (a:Person {name: 'Alix'}) SET a.city = 'Berlin'")
+                    .unwrap();
+                db.execute("INSERT (:Person {name: 'Mia'})").unwrap();
             }
             // No checkpoint: the file stays empty, the WAL holds everything.
             "compact_without_checkpoint" => {
@@ -146,8 +145,8 @@ mod crash {
         std::process::exit(0);
     }
 
-    /// Direct calls after `compact()` are in the WAL, so a crash loses none
-    /// of them, in the default graph and in a named graph.
+    /// Direct calls and queries after `compact()` are in the WAL, so a crash
+    /// loses none of them, in the default graph and in a named graph.
     #[test]
     fn writes_after_compact_survive_a_crash() {
         let dir = tempfile::tempdir().unwrap();
@@ -160,13 +159,22 @@ mod crash {
             [
                 Value::from("Alix"),
                 Value::from("Gus"),
-                Value::from("Jules")
+                Value::from("Jules"),
+                Value::from("Mia")
             ]
         );
         let city = db
             .execute("MATCH (p:Person {name: 'Jules'}) RETURN p.city")
             .unwrap();
         assert_eq!(city.rows(), [[Value::from("Paris")]]);
+        let city = db
+            .execute("MATCH (p:Person {name: 'Alix'}) RETURN p.city")
+            .unwrap();
+        assert_eq!(
+            city.rows(),
+            [[Value::from("Berlin")]],
+            "a query's update of data from before compact()"
+        );
         let knows = db
             .execute("MATCH (:Person {name: 'Gus'})-[:KNOWS]->(p) RETURN p.name")
             .unwrap();

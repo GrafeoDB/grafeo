@@ -35,7 +35,7 @@ hybrid-search = ["grafeo-engine/hybrid-search"]
 cdc = ["grafeo-engine/cdc"]
 algos = ["grafeo-engine/algos"]
 triple-store = ["grafeo-engine/triple-store"]
-compact-store = ["grafeo-engine/compact-store"]
+compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 jsonl-import = ["grafeo-engine/jsonl-import"]
 parquet-import = ["grafeo-engine/parquet-import"]
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
@@ -47,7 +47,7 @@ rdf = ["triple-store", "gql", "sparql", "graphql", "storage", "grafeo-engine/reg
 analytics = ["algos", "vector-index", "text-index", "hybrid-search", "jsonl-import", "parquet-import"]
 edge = ["grafeo-engine/lpg", "gql", "grafeo-engine/regex-lite"]
 # Deployment-based profiles (deprecated)
-embedded = ["gql", "ai", "algos", "compact-store", "grafeo-engine/parallel", "grafeo-engine/regex", "grafeo-engine/grafeo-file"]
+embedded = ["gql", "ai", "algos", "grafeo-engine/parallel", "grafeo-engine/regex", "grafeo-engine/grafeo-file"]
 full = ["languages", "ai", "algos", "triple-store"]
 
 [lints]

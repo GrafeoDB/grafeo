@@ -572,17 +572,20 @@ class TestErrorHandling:
         assert node is None
 
     def test_set_property_nonexistent_node_raises(self, db):
-        with pytest.raises(Exception, match="node 999999 does not exist"):
+        with pytest.raises(Exception, match="Node not found: 999999") as raised:
             db.set_node_property(999999, "key", "value")
+        assert raised.value.error_code == "GRAFEO-V002"
 
     def test_set_property_nonexistent_edge_raises(self, db):
-        with pytest.raises(Exception, match="edge 999999 does not exist"):
+        with pytest.raises(Exception, match="Edge not found: 999999") as raised:
             db.set_edge_property(999999, "key", "value")
+        assert raised.value.error_code == "GRAFEO-V003"
 
     def test_create_edge_to_a_nonexistent_node_raises(self, db):
         alix = db.create_node(["Person"], {"name": "Alix"})
-        with pytest.raises(Exception, match="node 999999 does not exist"):
+        with pytest.raises(Exception, match="Node not found: 999999") as raised:
             db.create_edge(alix.id, 999999, "KNOWS")
+        assert raised.value.error_code == "GRAFEO-V002"
         assert db.edge_count == 0
 
     def test_delete_node_with_edges_raises(self, db):

@@ -11,7 +11,7 @@ use crate::query::plan::{
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
-    DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator, JoinCondition,
+    DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator,
     JoinType as PhysicalJoinType, LimitOperator, NullOrder, Operator, OtherwiseOperator,
     ProjectExpr, ProjectOperator, SkipOperator, UnionOperator,
 };
@@ -293,7 +293,9 @@ pub(crate) fn build_semi_join(
 /// Builds a LEFT JOIN physical operator.
 ///
 /// Joins left and right sides, deduplicates shared columns by projecting away
-/// right-side columns that already appear on the left.
+/// right-side columns that already appear on the left. `configure` sets up
+/// the hash join beyond its keys (a residual condition, reading the left side
+/// first); `std::convert::identity` keeps it as it is.
 pub(crate) fn build_left_join(
     left: Box<dyn Operator>,
     right: Box<dyn Operator>,
@@ -301,7 +303,7 @@ pub(crate) fn build_left_join(
     right_columns: &[String],
     left_types: &[LogicalType],
     right_types: &[LogicalType],
-    residual: Option<Box<dyn JoinCondition>>,
+    configure: impl FnOnce(HashJoinOperator) -> HashJoinOperator,
 ) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
     let (probe_keys, build_keys) = find_shared_join_keys(left_columns, right_columns);
 
@@ -311,18 +313,14 @@ pub(crate) fn build_left_join(
     let mut join_schema: Vec<LogicalType> = left_types.to_vec();
     join_schema.extend(right_types.iter().cloned());
 
-    let mut hash_join = HashJoinOperator::new(
+    let join_op: Box<dyn Operator> = Box::new(configure(HashJoinOperator::new(
         left,
         right,
         probe_keys,
         build_keys,
         PhysicalJoinType::Left,
         join_schema.clone(),
-    );
-    if let Some(residual) = residual {
-        hash_join = hash_join.with_residual(residual);
-    }
-    let join_op: Box<dyn Operator> = Box::new(hash_join);
+    )));
 
     // Deduplicate: keep left columns, then only right columns not already on the left
     let left_set: std::collections::HashSet<&str> =
@@ -918,7 +916,7 @@ mod tests {
             &right_cols,
             &left_types,
             &right_types,
-            None,
+            std::convert::identity,
         );
 
         assert_eq!(output_columns, vec!["s", "name", "age"]);

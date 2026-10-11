@@ -74,7 +74,7 @@ impl VectorSource {
             .into_iter()
             .map(|id| {
                 let signed = i64::try_from(id.0).map_err(|_| {
-                    OperatorError::Execution(format!("NodeId {} exceeds i64 range", id.0))
+                    OperatorError::Internal(format!("NodeId {} exceeds i64 range", id.0))
                 })?;
                 Ok(Value::Int64(signed))
             })

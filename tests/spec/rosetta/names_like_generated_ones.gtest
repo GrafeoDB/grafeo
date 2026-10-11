@@ -1,0 +1,58 @@
+# Rosetta: variables named like the ones a translator makes up
+#
+# The names a translator gives anonymous nodes and edges (`_anon_0`) are
+# counted per statement and skip every name the statement spells, so a user
+# variable named like one is the user's own. GQL took them from a counter
+# shared by every statement, so `(_anon_0)-[:T]->()` could match only
+# self-loops, depending on what ran before. A variable no pattern binds is
+# undefined, whatever its name (one starting with `_anon_` was let through to
+# fail with an internal error).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Variables named like generated ones
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: user_variable_spelled_like_an_anonymous_node
+    setup:
+      - "INSERT (:N {id: 3})-[:T]->(:N {id: 19}), (:N {id: 88})-[:T]->(:N {id: 1})"
+    variants:
+      gql: "MATCH (_anon_0)-[:T]->() RETURN _anon_0.id AS id"
+      cypher: "MATCH (_anon_0)-[:T]->() RETURN _anon_0.id AS id"
+    expect:
+      rows:
+        - [3]
+        - [88]
+
+  - name: user_variables_spelled_like_two_anonymous_nodes
+    setup:
+      - "INSERT (:N {id: 3})-[:T]->(:N {id: 19})-[:T]->(:N {id: 88})"
+    variants:
+      gql: "MATCH ()-[:T]->(_anon_1)-[:T]->(_anon_0) RETURN _anon_1.id AS mid, _anon_0.id AS last"
+      cypher: "MATCH ()-[:T]->(_anon_1)-[:T]->(_anon_0) RETURN _anon_1.id AS mid, _anon_0.id AS last"
+    expect:
+      rows:
+        - [19, 88]
+
+  - name: user_variable_spelled_like_a_merged_relationship
+    setup:
+      - "INSERT (:N {id: 3}), (:N {id: 19})"
+    variants:
+      gql: "MATCH (_merge_rel_0:N {id: 3}), (b:N {id: 19}) MERGE (_merge_rel_0)-[:T]->(b) RETURN _merge_rel_0.id AS id"
+      cypher: "MATCH (_merge_rel_0:N {id: 3}), (b:N {id: 19}) MERGE (_merge_rel_0)-[:T]->(b) RETURN _merge_rel_0.id AS id"
+    expect:
+      rows:
+        - [3]
+
+  - name: undefined_variable_spelled_like_an_anonymous_one
+    setup:
+      - "INSERT (:N {id: 3})"
+    variants:
+      gql: "MATCH (n:N) RETURN _anon_5"
+      cypher: "MATCH (n:N) RETURN _anon_5"
+    expect:
+      error: "Undefined variable '_anon_5'"

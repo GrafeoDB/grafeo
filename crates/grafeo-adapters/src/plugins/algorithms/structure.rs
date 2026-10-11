@@ -13,7 +13,7 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, impl_algorithm};
+use super::traits::{GraphAlgorithm, impl_algorithm, visible_edges_from};
 
 // ============================================================================
 // Articulation Points (Cut Vertices)
@@ -26,7 +26,9 @@ use super::traits::{GraphAlgorithm, impl_algorithm};
 ///
 /// # Arguments
 ///
-/// * `store` - The graph store (treated as undirected)
+/// * `store` - The graph store, treated as simple and undirected: edge
+///   direction is ignored, parallel edges count as one and self-loops are
+///   ignored
 ///
 /// # Returns
 ///
@@ -47,29 +49,13 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
         return FxHashSet::default();
     }
 
-    // Build node index mapping
-    let mut node_to_idx: FxHashMap<NodeId, usize> = FxHashMap::default();
-    let mut idx_to_node: Vec<NodeId> = Vec::with_capacity(n);
-    for (idx, &node) in nodes.iter().enumerate() {
-        node_to_idx.insert(node, idx);
-        idx_to_node.push(node);
-    }
-
-    // Build undirected adjacency list
-    let mut adj: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
-    for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
-            if let Some(&j) = node_to_idx.get(&neighbor) {
-                adj[i].insert(j);
-                adj[j].insert(i); // Undirected
-            }
-        }
-    }
+    let adj = simple_undirected_adjacency(store, &nodes);
 
     let mut visited = vec![false; n];
     let mut disc = vec![0usize; n]; // Discovery time
     let mut low = vec![0usize; n]; // Low-link value
     let mut parent = vec![None::<usize>; n];
+    let mut children = vec![0usize; n]; // DFS tree children
     let mut ap = vec![false; n]; // Is articulation point
     let mut time = 0usize;
 
@@ -79,9 +65,8 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
             continue;
         }
 
-        // Iterative DFS using explicit stack
-        let mut stack: Vec<(usize, usize)> = vec![(start, 0)]; // (node, neighbor_idx)
-        let mut children_count: FxHashMap<usize, usize> = FxHashMap::default();
+        // (node, index of its next neighbour to visit)
+        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
 
         while let Some(&(u, idx)) = stack.last() {
             if !visited[u] {
@@ -89,18 +74,14 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
                 disc[u] = time;
                 low[u] = time;
                 time += 1;
-                children_count.insert(u, 0);
             }
 
-            let neighbors: Vec<usize> = adj[u].iter().copied().collect();
-
-            if idx < neighbors.len() {
-                let v = neighbors[idx];
+            if let Some(&v) = adj[u].get(idx) {
                 stack.last_mut().expect("DFS: stack non-empty").1 += 1;
 
                 if !visited[v] {
                     parent[v] = Some(u);
-                    *children_count.entry(u).or_insert(0) += 1;
+                    children[u] += 1;
                     stack.push((v, 0));
                 } else if parent[u] != Some(v) {
                     low[u] = low[u].min(disc[v]);
@@ -118,7 +99,7 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
                 }
 
                 // Root is articulation point if it has more than one child
-                if parent[u].is_none() && *children_count.get(&u).unwrap_or(&0) > 1 {
+                if parent[u].is_none() && children[u] > 1 {
                     ap[u] = true;
                 }
             }
@@ -128,7 +109,7 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
     ap.iter()
         .enumerate()
         .filter(|&(_, is_ap)| *is_ap)
-        .map(|(idx, _)| idx_to_node[idx])
+        .map(|(idx, _)| nodes[idx])
         .collect()
 }
 
@@ -239,7 +220,7 @@ fn simple_undirected_adjacency(store: &dyn GraphStore, nodes: &[NodeId]) -> Vec<
 
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor)
                 && j != i
             {
@@ -454,7 +435,9 @@ impl KTrussResult {
 /// Computes the number of triangles containing each edge (edge support).
 ///
 /// For each edge (u, v), the support is the number of common neighbors of u and v.
-/// This is a standalone metric useful for edge importance analysis.
+/// This is a standalone metric useful for edge importance analysis. The graph is
+/// treated as simple and undirected: edge direction is ignored, parallel edges
+/// count once, and self-loops are no edges (they close no triangle).
 ///
 /// # Complexity
 ///
@@ -465,7 +448,7 @@ pub fn edge_triangle_support(store: &dyn GraphStore) -> FxHashMap<(NodeId, NodeI
         return FxHashMap::default();
     }
 
-    let neighbors = build_undirected_neighbors_set(store);
+    let neighbors = simple_undirected_neighbor_sets(store, &nodes);
     let mut support: FxHashMap<(NodeId, NodeId), u64> = FxHashMap::default();
 
     // For each node u, for each pair of neighbors (v, w), if v-w is also
@@ -508,6 +491,10 @@ pub fn edge_triangle_support(store: &dyn GraphStore) -> FxHashMap<(NodeId, NodeI
 /// Uses iterative edge peeling: repeatedly remove edges with the lowest support,
 /// recording their truss number, and updating support counts for affected edges.
 ///
+/// The decomposition is that of the simple undirected graph: edge direction is
+/// ignored, parallel edges count once, and self-loops are no edges, so they are
+/// in no k-truss (k = 2 included). Every other edge has truss number 2 or more.
+///
 /// # Complexity
 ///
 /// O(m^1.5) total across all peeling iterations
@@ -520,21 +507,8 @@ pub fn ktruss_decomposition(store: &dyn GraphStore) -> KTrussResult {
         };
     }
 
-    // Build undirected adjacency using HashSets for fast membership tests.
-    let mut neighbors: FxHashMap<NodeId, FxHashSet<NodeId>> = FxHashMap::default();
-    for &node in &nodes {
-        neighbors.insert(node, FxHashSet::default());
-    }
-    for &node in &nodes {
-        for (nb, _) in store.edges_from(node, Direction::Outgoing) {
-            if let Some(set) = neighbors.get_mut(&node) {
-                set.insert(nb);
-            }
-            if let Some(set) = neighbors.get_mut(&nb) {
-                set.insert(node);
-            }
-        }
-    }
+    // The simple undirected graph, as sets for fast membership tests.
+    let mut neighbors = simple_undirected_neighbor_sets(store, &nodes);
 
     // Collect all undirected edges.
     let mut live_edges: FxHashSet<(NodeId, NodeId)> = FxHashSet::default();
@@ -644,7 +618,8 @@ pub fn ktruss_decomposition(store: &dyn GraphStore) -> KTrussResult {
     }
 }
 
-/// Extracts edges in the k-truss subgraph.
+/// Extracts edges in the k-truss subgraph (of the simple undirected graph, see
+/// [`ktruss_decomposition`]), in node-id order.
 pub fn k_truss(store: &dyn GraphStore, k: usize) -> Vec<(NodeId, NodeId)> {
     let result = ktruss_decomposition(store);
     result.k_truss(k)
@@ -655,15 +630,22 @@ fn ordered_pair(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
-/// Builds undirected neighbor sets for all nodes (same as clustering.rs helper).
-fn build_undirected_neighbors_set(store: &dyn GraphStore) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
-    let nodes = store.node_ids();
-    let mut neighbors: FxHashMap<NodeId, FxHashSet<NodeId>> = FxHashMap::default();
-    for &node in &nodes {
-        neighbors.insert(node, FxHashSet::default());
-    }
-    for &node in &nodes {
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+/// The simple undirected graph of `nodes` as neighbour sets: edge direction
+/// is ignored, each neighbour is in the set once however many edges join the
+/// two, and self-loops are left out (a self-loop closes no triangle).
+fn simple_undirected_neighbor_sets(
+    store: &dyn GraphStore,
+    nodes: &[NodeId],
+) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
+    let mut neighbors: FxHashMap<NodeId, FxHashSet<NodeId>> = nodes
+        .iter()
+        .map(|&node| (node, FxHashSet::default()))
+        .collect();
+    for &node in nodes {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
+            if neighbor == node || !neighbors.contains_key(&neighbor) {
+                continue;
+            }
             if let Some(set) = neighbors.get_mut(&node) {
                 set.insert(neighbor);
             }
@@ -1650,6 +1632,212 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(3),
             "bridges of a 50,000-leaf star took {elapsed:?}"
+        );
+    }
+
+    /// A triangle 0-1-2 with a self-loop on 0, every edge doubled in both
+    /// directions, and node 3 whose only edge is a self-loop.
+    fn triangle_with_loops_and_parallel_edges() -> (LpgStore, Vec<NodeId>) {
+        store_from_edges(
+            4,
+            &[
+                (0, 0),
+                (0, 1),
+                (1, 0),
+                (0, 1),
+                (1, 2),
+                (2, 1),
+                (2, 0),
+                (0, 2),
+                (3, 3),
+            ],
+        )
+    }
+
+    #[test]
+    fn ktruss_is_the_truss_of_the_simple_graph() {
+        let (store, n) = triangle_with_loops_and_parallel_edges();
+        let triangle = vec![(n[0], n[1]), (n[0], n[2]), (n[1], n[2])];
+
+        let result = ktruss_decomposition(&store);
+        let mut numbers: Vec<((NodeId, NodeId), usize)> = result
+            .truss_numbers
+            .iter()
+            .map(|(&edge, &truss)| (edge, truss))
+            .collect();
+        numbers.sort_unstable();
+        assert_eq!(
+            numbers,
+            triangle.iter().map(|&edge| (edge, 3)).collect::<Vec<_>>(),
+            "a self-loop closes no triangle and is no edge of the simple graph"
+        );
+        assert_eq!(result.max_truss, 3);
+        assert_eq!(k_truss(&store, 2), triangle);
+        assert_eq!(k_truss(&store, 3), triangle);
+        assert!(k_truss(&store, 4).is_empty(), "{:?}", k_truss(&store, 4));
+    }
+
+    #[test]
+    fn edge_triangle_support_ignores_self_loops_and_parallel_edges() {
+        let (store, n) = triangle_with_loops_and_parallel_edges();
+        let mut support: Vec<((NodeId, NodeId), u64)> =
+            edge_triangle_support(&store).into_iter().collect();
+        support.sort_unstable();
+        assert_eq!(
+            support,
+            vec![((n[0], n[1]), 1), ((n[0], n[2]), 1), ((n[1], n[2]), 1)]
+        );
+    }
+
+    /// The k-truss of a simple undirected graph by definition: repeatedly
+    /// drop every edge in fewer than k - 2 triangles of the edges left.
+    fn reference_k_truss(n: usize, edges: &[(usize, usize)], k: usize) -> Vec<(usize, usize)> {
+        let mut alive: std::collections::BTreeSet<(usize, usize)> = edges
+            .iter()
+            .filter(|(u, v)| u != v)
+            .map(|&(u, v)| (u.min(v), u.max(v)))
+            .collect();
+        loop {
+            let has = |alive: &std::collections::BTreeSet<(usize, usize)>, a: usize, b: usize| {
+                alive.contains(&(a.min(b), a.max(b)))
+            };
+            let doomed: Vec<(usize, usize)> = alive
+                .iter()
+                .copied()
+                .filter(|&(u, v)| {
+                    let triangles = (0..n)
+                        .filter(|&w| w != u && w != v && has(&alive, u, w) && has(&alive, v, w))
+                        .count();
+                    triangles + 2 < k
+                })
+                .collect();
+            if doomed.is_empty() {
+                return alive.into_iter().collect();
+            }
+            for edge in doomed {
+                alive.remove(&edge);
+            }
+        }
+    }
+
+    #[test]
+    fn ktruss_matches_the_definition_on_random_multigraphs() {
+        let mut state: u64 = 0x0019_0088_0003;
+        let mut next = |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state % bound as u64).unwrap()
+        };
+        for case in 0..88 {
+            let n = 1 + next(12);
+            let edge_count = next(n * 4 + 1);
+            let edges: Vec<(usize, usize)> = (0..edge_count).map(|_| (next(n), next(n))).collect();
+            let (store, nodes) = store_from_edges(n, &edges);
+            let result = ktruss_decomposition(&store);
+            for k in 2..=6 {
+                let expected: Vec<(NodeId, NodeId)> = reference_k_truss(n, &edges, k)
+                    .into_iter()
+                    .map(|(u, v)| (nodes[u], nodes[v]))
+                    .collect();
+                assert_eq!(result.k_truss(k), expected, "case {case}, k={k}: {edges:?}");
+            }
+        }
+    }
+
+    /// The articulation points of `store` by definition: the nodes whose
+    /// removal leaves more components among the other nodes, in node-id
+    /// order.
+    fn articulation_points_by_definition(store: &LpgStore) -> Vec<NodeId> {
+        let nodes = store.node_ids();
+        let components_without = |removed: Option<NodeId>| {
+            let mut seen: FxHashSet<NodeId> = removed.into_iter().collect();
+            let mut components = 0;
+            for &start in &nodes {
+                if !seen.insert(start) {
+                    continue;
+                }
+                components += 1;
+                let mut stack = vec![start];
+                while let Some(u) = stack.pop() {
+                    let around = store
+                        .edges_from(u, Direction::Outgoing)
+                        .chain(store.edges_from(u, Direction::Incoming));
+                    for (v, _) in around {
+                        if seen.insert(v) {
+                            stack.push(v);
+                        }
+                    }
+                }
+            }
+            components
+        };
+        let all = components_without(None);
+        nodes
+            .iter()
+            .copied()
+            // A node alone in its component takes that component away.
+            .filter(|&node| components_without(Some(node)) > all)
+            .collect()
+    }
+
+    /// Articulation points are the nodes whose removal disconnects their
+    /// component, on graphs with parallel edges, self-loops and several
+    /// components.
+    #[test]
+    fn articulation_points_match_the_definition() {
+        let mut state: u64 = 0x0088_0019_0003;
+        let mut next = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        for round in 0..19 {
+            let store = LpgStore::new().unwrap();
+            let nodes: Vec<NodeId> = (0..30).map(|_| store.create_node(&["Node"])).collect();
+            for _ in 0..(20 + round * 2) {
+                let a = nodes[usize::try_from(next(30)).unwrap()];
+                let b = nodes[usize::try_from(next(30)).unwrap()];
+                store.create_edge(a, b, "EDGE");
+                if next(19) == 0 {
+                    store.create_edge(b, a, "EDGE");
+                }
+            }
+            let mut found: Vec<NodeId> = articulation_points(&store).into_iter().collect();
+            found.sort_unstable();
+            assert_eq!(
+                found,
+                articulation_points_by_definition(&store),
+                "round {round}"
+            );
+        }
+    }
+
+    /// Articulation points stay O(V + E) at a node of high degree: the hub
+    /// of a star of 50,000 leaves takes milliseconds. A search that copied a
+    /// node's neighbours at every step took O(degree squared) there.
+    #[test]
+    #[ignore = "timing bench: run with --ignored in release mode, CI machine speed varies too much"]
+    fn articulation_points_of_a_high_degree_star_take_milliseconds() {
+        let store = LpgStore::new().unwrap();
+        let hub = store.create_node(&["Node"]);
+        for leaf in 0..50_000 {
+            // With `tiered-storage` (on under the workspace's --all-features),
+            // the records of one epoch must fit its arena chunk.
+            if leaf % 1_000 == 0 {
+                store.new_epoch();
+            }
+            let leaf = store.create_node(&["Node"]);
+            store.create_edge(hub, leaf, "EDGE");
+        }
+        let started = std::time::Instant::now();
+        let found = articulation_points(&store);
+        let elapsed = started.elapsed();
+        assert_eq!(found.into_iter().collect::<Vec<_>>(), vec![hub]);
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "articulation points of a 50,000-leaf star took {elapsed:?}"
         );
     }
 }

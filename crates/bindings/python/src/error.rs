@@ -8,7 +8,8 @@
 //! `GrafeoError` inherits from `RuntimeError`, so existing code that catches
 //! `RuntimeError` continues to work. New code can catch `GrafeoError`
 //! specifically and inspect `e.error_code` / `e.is_retryable`. A write to a
-//! closed database raises `DatabaseClosedError`, a subclass of `GrafeoError`.
+//! closed database raises `DatabaseClosedError`, and a damaged database file
+//! `GrafeoCorruptionError`, both subclasses of `GrafeoError`.
 
 use grafeo_common::utils::error::ErrorCode;
 use pyo3::create_exception;
@@ -28,6 +29,13 @@ create_exception!(
     DatabaseClosedError,
     GrafeoError,
     "Raised by a write to a database whose `close()` started (persistent databases only). Open it again to write."
+);
+
+create_exception!(
+    grafeo,
+    GrafeoCorruptionError,
+    GrafeoError,
+    "Raised when a file Grafeo wrote is damaged (error code GRAFEO-S002): a checksum, a header, a section or a WAL record that does not read back. The message names the file and, when known, the byte."
 );
 
 /// Grafeo errors that translate to Python exceptions.
@@ -56,6 +64,9 @@ pub enum PyGrafeoError {
 
     #[error("Database closed: {message}")]
     DatabaseClosed { message: String },
+
+    #[error("Corrupt file: {message}")]
+    Corruption { message: String },
 
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
@@ -104,6 +115,11 @@ impl From<PyGrafeoError> for PyErr {
                 set_code(&err, py, ErrorCode::DatabaseClosed);
                 err
             }),
+            PyGrafeoError::Corruption { message } => Python::attach(|py| {
+                let err = GrafeoCorruptionError::new_err(message);
+                set_code(&err, py, ErrorCode::StorageCorrupted);
+                err
+            }),
         }
     }
 }
@@ -136,6 +152,7 @@ impl From<grafeo_common::utils::error::Error> for PyGrafeoError {
             ErrorCategory::Query => PyGrafeoError::Query { message, code },
             ErrorCategory::Transaction => PyGrafeoError::Transaction { message, code },
             ErrorCategory::DatabaseClosed => PyGrafeoError::DatabaseClosed { message },
+            ErrorCategory::Corruption => PyGrafeoError::Corruption { message },
             _ => PyGrafeoError::Database { message, code },
         }
     }

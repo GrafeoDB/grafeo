@@ -405,10 +405,7 @@ fn a_panic_before_the_sidecar_wal_removal_leaves_a_usable_database() {
 
 /// Helper: build a WAL-disabled persistent config for a `.grafeo` path.
 fn wal_disabled_config(path: &std::path::Path) -> Config {
-    Config {
-        wal_enabled: false,
-        ..Config::persistent(path)
-    }
+    Config::persistent(path).without_wal()
 }
 
 /// With WAL disabled, a clean close triggers `checkpoint_to_file` which writes

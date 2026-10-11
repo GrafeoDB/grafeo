@@ -42,6 +42,19 @@ tests:
         - [1]
         - [1]
 
+  # GROUP BY groups the procedure rows also without an aggregate: Person and
+  # Planet have six letters, City four.
+  - name: call_db_labels_group_by_without_an_aggregate
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:Planet {name: 'Earth'})"
+      - "INSERT (:City {name: 'Amsterdam'})"
+    query: "CALL db.labels() YIELD label RETURN size(label) AS letters GROUP BY size(label)"
+    expect:
+      rows:
+        - [4]
+        - [6]
+
   - name: call_db_labels_empty
     query: "CALL db.labels() YIELD label RETURN label"
     expect:

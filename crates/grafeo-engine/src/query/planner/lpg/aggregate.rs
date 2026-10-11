@@ -21,8 +21,17 @@ impl super::Planner {
         // 2. Input is an expand chain (multi-hop)
         // 3. No GROUP BY
         // 4. All aggregates are simple (COUNT, SUM, AVG, MIN, MAX)
+        // 5. It does not read after a write (the regular path reads the
+        //    writing input whole first, see `after_write`). A `count(*)` or
+        //    an aggregated variable reads nothing itself, and the chain
+        //    reads its whole source before its first expand (the lazy chain
+        //    collects every batch, and the node scan of a MATCH from a bound
+        //    node reads a writing input whole, see `plan_node_scan`): the
+        //    count over the chain counts what the whole write left.
         if self.factorized_execution
             && agg.group_by.is_empty()
+            && !(super::after_write::aggregate_reads(agg)
+                && super::after_write::writes_pending(&agg.input))
             && Self::count_expand_chain(&agg.input).0 >= 2
             && self.is_simple_aggregate(agg)
             && let Ok((op, cols)) = self.plan_factorized_aggregate(agg)
@@ -31,7 +40,14 @@ impl super::Planner {
         }
         // Fall through to regular aggregate if factorized planning fails
 
-        let (mut input_op, input_columns) = self.plan_operator(&agg.input)?;
+        // An aggregate that comes first (`RETURN count(*)`) aggregates the
+        // one empty row.
+        let (mut input_op, input_columns) = self.plan_input(&agg.input)?;
+        // Values that read the graph after a write (`... SET h.c = i RETURN
+        // sum(h.c)`) read what the whole write left (see `after_write`).
+        if super::after_write::aggregate_reads(agg) {
+            input_op = super::mutation::read_first_after_a_write(input_op, &agg.input);
+        }
 
         // Build variable to column index mapping
         let mut variable_columns: HashMap<String, usize> = input_columns
@@ -121,11 +137,19 @@ impl super::Planner {
             let mut projections = Vec::new();
             let mut output_types = Vec::new();
 
-            // First, pass through all existing columns (use Node type to preserve node IDs
-            // for subsequent property access - nodes need VectorData::NodeId for get_node_id())
-            for (i, _) in input_columns.iter().enumerate() {
+            // First, pass through every input column as it is, typed as the
+            // other pass-through projections type it: an edge column as
+            // edges, every other column `Any`, a copy that keeps the input's
+            // vector type (node IDs stay nodes) and copies strings, floats,
+            // booleans, lists, maps and paths unchanged. A copy typed `Node`
+            // turns every value that is not an integer into node 0.
+            for (i, column_type) in self
+                .derive_schema_from_columns(&input_columns)
+                .into_iter()
+                .enumerate()
+            {
                 projections.push(ProjectExpr::Column(i));
-                output_types.push(LogicalType::Node);
+                output_types.push(column_type);
             }
 
             // Add extra projections in the same order as index assignment
@@ -204,6 +228,7 @@ impl super::Planner {
                     alias: agg_expr.alias.clone(),
                     percentile: agg_expr.percentile,
                     separator: agg_expr.separator.clone(),
+                    rdf_literals: false,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -216,13 +241,11 @@ impl super::Planner {
         let mut output_columns = Vec::new();
         let mut output_entities = Vec::new();
 
-        // Add group-by columns
+        // Add group-by columns: a group key keeps what it holds, also one
+        // computed by an expression (`{msg: m}`, `x.msg`, `startNode(r)`).
         for expr in &agg.group_by {
-            let entity = match expr {
-                LogicalExpression::Variable(name) => self.column_entity(name),
-                _ => None,
-            };
-            output_schema.push(entity_type(entity));
+            let entity = self.held_entity(expr);
+            output_schema.push(entity_type(entity.as_ref()));
             output_columns.push(expression_to_string(expr));
             output_entities.push(entity);
         }
@@ -232,17 +255,10 @@ impl super::Planner {
             let collected = match (agg_expr.function, &agg_expr.expression) {
                 // The list of what `collect` gathers keeps its kind: a node or
                 // edge column, or an expression that yields one (`head(rs)`,
-                // `last(relationships(p))`).
+                // `last(relationships(p))`), or a value with them inside
+                // (`collect({msg: m})`, `collect(p)`).
                 (LogicalAggregateFunction::Collect, Some(expression)) => {
-                    let item = match expression {
-                        LogicalExpression::Variable(name) => self.column_entity(name),
-                        other => self.entity_value(other),
-                    };
-                    match item {
-                        Some(EntityValue::Node) => Some(EntityValue::Nodes),
-                        Some(EntityValue::Edge) => Some(EntityValue::Edges),
-                        _ => None,
-                    }
+                    self.held_entity(expression).map(|item| item.list())
                 }
                 _ => None,
             };
@@ -259,7 +275,7 @@ impl super::Planner {
                     LogicalType::Any
                 }
                 // A list of nodes or edges, or of any values
-                LogicalAggregateFunction::Collect => entity_type(collected),
+                LogicalAggregateFunction::Collect => entity_type(collected.as_ref()),
                 LogicalAggregateFunction::GroupConcat => LogicalType::String,
                 LogicalAggregateFunction::Sample => LogicalType::Any,
                 // Statistical functions return Float64
@@ -293,7 +309,7 @@ impl super::Planner {
         }
 
         for (column, entity) in output_columns.iter().zip(&output_entities) {
-            self.set_column_entity(column, *entity);
+            self.set_column_entity(column, entity.clone());
         }
 
         // Choose operator based on whether there are group-by columns
@@ -502,13 +518,109 @@ impl super::Planner {
 }
 
 /// The declared type of a column that holds `entity`: a node, an edge, a list
-/// of them, or any value.
-fn entity_type(entity: Option<EntityValue>) -> LogicalType {
-    match entity {
-        Some(EntityValue::Node) => LogicalType::Node,
-        Some(EntityValue::Edge) => LogicalType::Edge,
-        Some(EntityValue::Nodes) => LogicalType::List(Box::new(LogicalType::Node)),
-        Some(EntityValue::Edges) => LogicalType::List(Box::new(LogicalType::Edge)),
-        _ => LogicalType::Any,
+/// of them, a value with them inside, or any value.
+fn entity_type(entity: Option<&EntityValue>) -> LogicalType {
+    entity.map_or(LogicalType::Any, EntityValue::logical_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Planner;
+    use crate::query::plan::{
+        AggregateExpr, AggregateFunction, AggregateOp, CreateNodeOp, ExpandDirection, ExpandOp,
+        LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp, PathMode, ProjectOp,
+        Projection,
+    };
+    use crate::transaction::TransactionManager;
+    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
+    use std::sync::Arc;
+
+    /// A one-hop expand from `from` to `to` along `edge_type` over `input`.
+    fn expand(from: &str, edge_type: &str, to: &str, input: LogicalOperator) -> LogicalOperator {
+        LogicalOperator::Expand(ExpandOp {
+            from_variable: from.to_string(),
+            to_variable: to.to_string(),
+            edge_variable: None,
+            direction: ExpandDirection::Outgoing,
+            edge_types: vec![edge_type.to_string()],
+            min_hops: 1,
+            max_hops: Some(1),
+            input: Box::new(input),
+            path_alias: None,
+            path_mode: PathMode::Walk,
+            quantified: false,
+        })
+    }
+
+    /// `CREATE (h:Hub) WITH h MATCH (h)-[:R]->(q)-[:S]->(t) RETURN count(*)`
+    /// runs factorized: the chain reads its whole source (the node scan of
+    /// the bound `h`, which reads its writing input whole, see
+    /// `plan_node_scan`) before its first expand, so the count reads after
+    /// the whole write without a step of its own (the queries in
+    /// `tests/pattern_after_write.rs` check the count).
+    #[test]
+    fn a_count_over_a_chain_from_a_written_node_is_planned_factorized() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let transaction_manager = Arc::new(TransactionManager::new());
+        let transaction_id = transaction_manager.begin();
+        let epoch = transaction_manager.current_epoch();
+        // The transaction's writers record in its change set.
+        let recording = transaction_manager
+            .changes(transaction_id)
+            .unwrap()
+            .recording(
+                &transaction_manager,
+                None,
+                grafeo_core::execution::operators::WriteTarget::Store(
+                    Arc::clone(&store) as Arc<dyn grafeo_core::graph::apply::ChangeTarget>
+                ),
+            )
+            .unwrap();
+        let planner = Planner::with_context(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>),
+            Arc::clone(&transaction_manager),
+            Some(transaction_id),
+            epoch,
+        )
+        .with_recording(Some(recording));
+        let write = LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Variable("h".to_string()),
+                alias: None,
+            }],
+            input: Box::new(LogicalOperator::CreateNode(CreateNodeOp {
+                variable: "h".to_string(),
+                labels: vec!["Hub".to_string()],
+                properties: Vec::new(),
+                input: None,
+            })),
+            pass_through_input: false,
+        });
+        let scan = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "h".to_string(),
+            label: None,
+            input: Some(Box::new(write)),
+        });
+        let count = LogicalOperator::Aggregate(AggregateOp {
+            group_by: Vec::new(),
+            aggregates: vec![AggregateExpr {
+                function: AggregateFunction::Count,
+                expression: None,
+                expression2: None,
+                distinct: false,
+                alias: Some("found".to_string()),
+                percentile: None,
+                separator: None,
+            }],
+            input: Box::new(expand("q", "S", "t", expand("h", "R", "q", scan))),
+            having: None,
+        });
+
+        let physical = planner.plan(&LogicalPlan::new(count)).unwrap();
+
+        assert_eq!(physical.operator.name(), "FactorizedAggregate");
+        assert_eq!(physical.columns, ["found"]);
     }
 }

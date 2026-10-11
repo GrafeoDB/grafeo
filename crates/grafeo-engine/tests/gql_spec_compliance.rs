@@ -2702,6 +2702,49 @@ fn test_gqlstatus_success() {
 }
 
 #[test]
+fn test_gqlstatus_omitted_result_for_a_statement_without_a_result() {
+    use grafeo_common::utils::GqlStatus;
+
+    // A statement without a result reports 00001 (omitted result), one with
+    // a result 00000, also when the result has no rows (ISO/IEC 39075:2024,
+    // 23 Status codes).
+    let db = setup_db();
+    let session = db.session();
+    for statement in [
+        "INSERT (:Person {name: 'Mia', age: 19})",
+        "MATCH (p:Person {name: 'Mia'}) SET p.age = 88",
+        "MATCH (p:Person {name: 'Mia'}) DETACH DELETE p",
+        "MATCH (p:Person) FINISH",
+        "CREATE NODE TYPE City (name STRING)",
+        "START TRANSACTION",
+        "COMMIT",
+    ] {
+        let result = session.execute(statement).unwrap();
+        assert_eq!(
+            result.gql_status,
+            GqlStatus::SUCCESS_OMITTED_RESULT,
+            "{statement}"
+        );
+        assert!(result.gql_status.is_success(), "{statement}");
+    }
+    for query in [
+        "MATCH (p:Person) RETURN p.name",
+        "MATCH (p:Person {name: 'Nobody'}) RETURN p.name",
+        "INSERT (:Person {name: 'Jules', age: 3}) RETURN 3 AS three",
+    ] {
+        let result = session.execute(query).unwrap();
+        assert_eq!(result.gql_status, GqlStatus::SUCCESS, "{query}");
+    }
+    #[cfg(feature = "cypher")]
+    {
+        let result = session
+            .execute_cypher("CREATE (:Person {name: 'Butch'})")
+            .unwrap();
+        assert_eq!(result.gql_status, GqlStatus::SUCCESS_OMITTED_RESULT);
+    }
+}
+
+#[test]
 fn test_gqlstatus_error_mapping() {
     use grafeo_common::utils::GqlStatus;
 
@@ -2724,7 +2767,7 @@ fn test_property_data_type_typed_list() {
     use grafeo_engine::catalog::PropertyDataType;
 
     // LIST<STRING> should parse from type name
-    let t = PropertyDataType::from_type_name("LIST<STRING>");
+    let t = PropertyDataType::from_type_name("LIST<STRING>").unwrap();
     assert_eq!(t.to_string(), "LIST<STRING>");
 
     // Should match a list of strings
@@ -2736,12 +2779,12 @@ fn test_property_data_type_typed_list() {
     assert!(!t.matches(&mixed));
 
     // Untyped LIST should match any list
-    let untyped = PropertyDataType::from_type_name("LIST");
+    let untyped = PropertyDataType::from_type_name("LIST").unwrap();
     assert!(untyped.matches(&list));
     assert!(untyped.matches(&mixed));
 
     // Nested: LIST<LIST<INT64>>
-    let nested = PropertyDataType::from_type_name("LIST<LIST>");
+    let nested = PropertyDataType::from_type_name("LIST<LIST>").unwrap();
     assert_eq!(nested.to_string(), "LIST<LIST>");
 }
 
@@ -2749,13 +2792,13 @@ fn test_property_data_type_typed_list() {
 fn test_property_data_type_node_edge() {
     use grafeo_engine::catalog::PropertyDataType;
 
-    let node_type = PropertyDataType::from_type_name("NODE");
+    let node_type = PropertyDataType::from_type_name("NODE").unwrap();
     assert_eq!(node_type.to_string(), "NODE");
 
-    let edge_type = PropertyDataType::from_type_name("EDGE");
+    let edge_type = PropertyDataType::from_type_name("EDGE").unwrap();
     assert_eq!(edge_type.to_string(), "EDGE");
 
-    let edge_type2 = PropertyDataType::from_type_name("RELATIONSHIP");
+    let edge_type2 = PropertyDataType::from_type_name("RELATIONSHIP").unwrap();
     assert_eq!(edge_type2.to_string(), "EDGE");
 }
 
@@ -3169,7 +3212,7 @@ fn test_viewing_epoch_limits_visibility() {
 }
 
 // ---------------------------------------------------------------------------
-// Coverage: wal_store.rs conditional logging
+// Coverage: writes that change nothing
 // ---------------------------------------------------------------------------
 
 #[test]

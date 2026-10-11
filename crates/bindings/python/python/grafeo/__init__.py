@@ -16,6 +16,7 @@ Example:
 from grafeo.grafeo import (
     DatabaseClosedError,
     Edge,
+    GrafeoCorruptionError,
     GrafeoDB,
     GrafeoError,
     GraphHandle,
@@ -34,6 +35,7 @@ __all__ = [
     "GrafeoDB",
     "GrafeoError",
     "DatabaseClosedError",
+    "GrafeoCorruptionError",
     "GraphHandle",
     "Node",
     "Edge",

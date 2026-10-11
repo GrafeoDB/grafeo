@@ -107,6 +107,12 @@ impl GraphProjection {
             .is_some_and(|n| self.node_matches(&n))
     }
 
+    /// Returns true if every node with `label` is in the projection: no
+    /// label filter, or a label of the spec.
+    fn label_is_projected(&self, label: &str) -> bool {
+        !self.spec.filters_labels() || self.spec.node_labels.contains(label)
+    }
+
     /// Returns true if an edge type passes the type filter.
     fn edge_type_matches(&self, edge_type: &str) -> bool {
         if !self.spec.filters_edge_types() {
@@ -361,18 +367,30 @@ impl GraphStore for GraphProjection {
             .collect()
     }
 
+    // A node with a label outside the spec is in the projection when it has
+    // a label of the spec too, and `get_node` shows it with both: the inner
+    // store's nodes with the label are filtered, in their order.
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
-        if self.spec.filters_labels() && !self.spec.node_labels.contains(label) {
-            return Vec::new();
+        let ids = self.inner.nodes_by_label(label);
+        if self.label_is_projected(label) {
+            return ids;
         }
-        self.inner.nodes_by_label(label)
+        ids.into_iter()
+            .filter(|&id| self.node_id_matches(id))
+            .collect()
     }
 
+    // Exact for a label outside the spec as well: `count(n)` reads it, not
+    // only the planner.
     fn nodes_by_label_count(&self, label: &str) -> usize {
-        if self.spec.filters_labels() && !self.spec.node_labels.contains(label) {
-            return 0;
+        if self.label_is_projected(label) {
+            return self.inner.nodes_by_label_count(label);
         }
-        self.inner.nodes_by_label_count(label)
+        self.inner
+            .nodes_by_label(label)
+            .into_iter()
+            .filter(|&id| self.node_id_matches(id))
+            .count()
     }
 
     fn node_count(&self) -> usize {
@@ -453,6 +471,17 @@ impl GraphStore for GraphProjection {
             .collect()
     }
 
+    fn find_nodes_maybe_equal(&self, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+        self.inner
+            .find_nodes_maybe_equal(property, value)
+            .map(|nodes| {
+                nodes
+                    .into_iter()
+                    .filter(|&id| self.node_id_matches(id))
+                    .collect()
+            })
+    }
+
     fn find_nodes_in_range(
         &self,
         property: &str,
@@ -495,10 +524,13 @@ impl GraphStore for GraphProjection {
     }
 
     fn estimate_label_cardinality(&self, label: &str) -> f64 {
-        if self.spec.filters_labels() && !self.spec.node_labels.contains(label) {
-            return 0.0;
+        if self.label_is_projected(label) {
+            return self.inner.estimate_label_cardinality(label);
         }
-        self.inner.estimate_label_cardinality(label)
+        // The projection's nodes with the label, as its scan finds them; an
+        // estimate, so a count beyond `u32::MAX` saturates.
+        let count = u32::try_from(self.nodes_by_label_count(label)).unwrap_or(u32::MAX);
+        f64::from(count)
     }
 
     fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
@@ -512,6 +544,18 @@ impl GraphStore for GraphProjection {
 
     fn current_epoch(&self) -> EpochId {
         self.inner.current_epoch()
+    }
+
+    // --- Visibility (no node or edge built, as the inner store checks) ---
+
+    fn is_node_visible_at_epoch(&self, id: NodeId, epoch: EpochId) -> bool {
+        self.inner.is_node_visible_at_epoch(id, epoch) && self.node_id_matches(id)
+    }
+
+    fn is_edge_visible_at_epoch(&self, id: EdgeId, epoch: EpochId) -> bool {
+        // `edge_type` applies the type filter and, under a label filter, the
+        // endpoint filter.
+        self.inner.is_edge_visible_at_epoch(id, epoch) && self.edge_type(id).is_some()
     }
 
     // --- Schema introspection ---
@@ -583,6 +627,49 @@ mod tests {
         assert_eq!(proj.nodes_by_label("Person").len(), 2);
         assert!(proj.nodes_by_label("City").is_empty(), "expected empty");
         assert!(proj.nodes_by_label("Software").is_empty(), "expected empty");
+    }
+
+    /// A label scan of a projection holds every node in it that has the
+    /// label, as `get_node` reports its labels, in ID order, and the count is
+    /// its length: for a label of the spec and for one outside it (`Admin`).
+    /// Vincent is an `Admin` only, outside the projection of `Person`.
+    #[test]
+    fn nodes_by_label_holds_the_projected_nodes_with_any_label() {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let alix = store.create_node(&["Person", "Admin"]);
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Admin"]);
+        let mia = store.create_node(&["Admin", "Person"]);
+        let jules = store.create_node(&["City", "Admin"]);
+        let spec = ProjectionSpec::new().with_node_labels(["Person", "City"]);
+        let proj = GraphProjection::new(store, spec);
+
+        assert_eq!(proj.nodes_by_label("Admin"), [alix, mia, jules]);
+        assert_eq!(proj.nodes_by_label_count("Admin"), 3);
+        assert_eq!(proj.nodes_by_label("Person"), [alix, gus, mia]);
+        assert_eq!(proj.nodes_by_label("Missing"), []);
+        assert_eq!(proj.nodes_by_label_count("Missing"), 0);
+        assert!(proj.get_node(vincent).is_none(), "Vincent is outside");
+        for label in ["Admin", "Person", "City", "Missing"] {
+            let with_label: Vec<NodeId> = proj
+                .node_ids()
+                .into_iter()
+                .filter(|&id| {
+                    proj.get_node(id)
+                        .is_some_and(|node| node.labels.iter().any(|l| l.as_str() == label))
+                })
+                .collect();
+            assert_eq!(proj.nodes_by_label(label), with_label, "{label}");
+            assert_eq!(
+                proj.nodes_by_label_count(label),
+                with_label.len(),
+                "{label}"
+            );
+        }
+        // The estimate of a label outside the spec counts the projection's
+        // nodes with it, as the scan finds them.
+        assert!((proj.estimate_label_cardinality("Admin") - 3.0).abs() < f64::EPSILON);
+        assert!(proj.estimate_label_cardinality("Missing").abs() < f64::EPSILON);
     }
 
     #[test]
@@ -827,6 +914,36 @@ mod tests {
         assert!(proj.get_edge_at_epoch(edges[1], epoch).is_some());
         // KNOWS edge filtered out
         assert!(proj.get_edge_at_epoch(edges[0], epoch).is_none());
+    }
+
+    #[test]
+    fn visibility_at_epoch_respects_the_filters_and_deletes() {
+        let (store, nodes, edges) = setup_social_graph_with_ids();
+        let people = GraphProjection::new(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            ProjectionSpec::new().with_node_labels(["Person"]),
+        );
+        let knows = GraphProjection::new(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            ProjectionSpec::new().with_edge_types(["KNOWS"]),
+        );
+        let epoch = store.current_epoch();
+
+        assert!(people.is_node_visible_at_epoch(nodes[0], epoch));
+        assert!(!people.is_node_visible_at_epoch(nodes[2], epoch), "a City");
+        assert!(people.is_edge_visible_at_epoch(edges[0], epoch), "KNOWS");
+        assert!(
+            !people.is_edge_visible_at_epoch(edges[1], epoch),
+            "to a City"
+        );
+        assert!(knows.is_edge_visible_at_epoch(edges[0], epoch));
+        assert!(!knows.is_edge_visible_at_epoch(edges[1], epoch), "LIVES_IN");
+
+        assert!(store.delete_edge(edges[0]));
+        assert!(store.delete_node(nodes[1]));
+        let epoch = store.current_epoch();
+        assert!(!people.is_node_visible_at_epoch(nodes[1], epoch), "deleted");
+        assert!(!knows.is_edge_visible_at_epoch(edges[0], epoch), "deleted");
     }
 
     // 4. get_edge_property for edges in/out of projection

@@ -1,4 +1,4 @@
-//! Targeted tests for the MVCC versioning layer (undo log, property rollback,
+//! Targeted tests for the MVCC versioning layer (change sets, property rollback,
 //! label rollback, deletion rollback).
 //!
 //! These tests exercise edge cases and interleaved operations that the existing

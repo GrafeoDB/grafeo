@@ -62,7 +62,13 @@ def test_a_column_without_alias_is_named_as_written(db, cypher):
 
 
 @pytest.mark.parametrize("cypher", LANGUAGES)
-def test_dotted_access_on_a_node_expression_is_an_error(db, cypher):
+def test_dotted_access_on_a_node_expression_reads_the_node(db, cypher):
     db.execute("MATCH (a:A {id: 'a'}), (b:A {id: 'b'}) INSERT (a)-[:R]->(b)")
+    query = "MATCH (:A)-[r:R]->(:A) RETURN startNode(r).id AS s, endNode(r).id AS e"
+    assert rows(db, query, cypher) == [{"s": "a", "e": "b"}]
+
+
+@pytest.mark.parametrize("cypher", LANGUAGES)
+def test_dotted_access_on_a_string_expression_is_an_error(db, cypher):
     with pytest.raises(Exception, match="not a map value"):
-        rows(db, "MATCH (:A)-[r:R]->(:A) RETURN startNode(r).id", cypher)
+        rows(db, "MATCH (n:A) RETURN toUpper(n.id).route", cypher)

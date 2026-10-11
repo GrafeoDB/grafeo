@@ -1,0 +1,480 @@
+# Procedure arguments from parameters
+#
+# A parameter, or an expression of parameters and literals, in a CALL argument
+# runs exactly like the same literal, in GQL and Cypher, for every built-in
+# procedure with arguments. The expected rows are those of the same call with
+# literals. An argument that is not a constant, a missing parameter and a value
+# of the wrong type are errors, never the argument's default.
+#
+# The graph: Alix (0) -> Gus (1) -> Vincent (2) -> Mia (3), and
+# Alix -> Jules (4) -> Vincent, with weights w and costs c.
+
+meta:
+  language: gql
+  model: lpg
+  section: "25.1"
+  title: Procedure arguments from parameters
+  dataset: empty
+  requires: [algos]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Centrality
+  # ---------------------------------------------------------------------------
+
+  - name: pagerank_positional_parameters
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      d: 0.5
+      m: 3
+      t: 0.0001
+    variants:
+      gql: "CALL grafeo.pagerank($d, $m, $t) YIELD node_id, score RETURN node_id, score ORDER BY node_id"
+      cypher: "CALL grafeo.pagerank($d, $m, $t) YIELD node_id, score RETURN node_id, score ORDER BY node_id"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 0.1282]
+        - [1, 0.1587]
+        - [2, 0.2802]
+        - [3, 0.2742]
+        - [4, 0.1587]
+
+  # An expression of parameters runs like its value: $half * 2 is 0.5.
+  - name: pagerank_expression_of_parameters
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      half: 0.25
+      m: 3
+    variants:
+      gql: "CALL grafeo.pagerank($half * 2, $m, 0.0001) YIELD node_id, score RETURN node_id, score ORDER BY node_id"
+      cypher: "CALL grafeo.pagerank($half * 2, $m, 0.0001) YIELD node_id, score RETURN node_id, score ORDER BY node_id"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 0.1282]
+        - [1, 0.1587]
+        - [2, 0.2802]
+        - [3, 0.2742]
+        - [4, 0.1587]
+
+  - name: pagerank_parameters_in_a_map
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      d: 0.5
+      directed: false
+    variants:
+      gql: "CALL grafeo.pagerank({damping: $d, directed: $directed}) YIELD node_id, score RETURN node_id, score ORDER BY node_id"
+      cypher: "CALL grafeo.pagerank({damping: $d, directed: $directed}) YIELD node_id, score RETURN node_id, score ORDER BY node_id"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 0.197101653]
+        - [1, 0.194202695]
+        - [2, 0.269565523]
+        - [3, 0.144927435]
+        - [4, 0.194202695]
+
+  - name: betweenness_centrality_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      normalized: false
+    variants:
+      gql: "CALL grafeo.betweenness_centrality($normalized) YIELD node_id, centrality RETURN node_id, centrality ORDER BY node_id"
+      cypher: "CALL grafeo.betweenness_centrality($normalized) YIELD node_id, centrality RETURN node_id, centrality ORDER BY node_id"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 0.0]
+        - [1, 1.0]
+        - [2, 3.0]
+        - [3, 0.0]
+        - [4, 1.0]
+
+  - name: closeness_centrality_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      improved: true
+    variants:
+      gql: "CALL grafeo.closeness_centrality($improved) YIELD node_id, centrality RETURN node_id, centrality ORDER BY node_id"
+      cypher: "CALL grafeo.closeness_centrality($improved) YIELD node_id, centrality RETURN node_id, centrality ORDER BY node_id"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 0.571428571]
+        - [1, 0.333333333]
+        - [2, 0.25]
+        - [3, 0.0]
+        - [4, 0.333333333]
+
+  - name: degree_centrality_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      normalized: false
+    variants:
+      gql: "CALL grafeo.degree_centrality($normalized) YIELD node_id, in_degree, out_degree, total_degree RETURN node_id, in_degree, out_degree, total_degree ORDER BY node_id"
+      cypher: "CALL grafeo.degree_centrality($normalized) YIELD node_id, in_degree, out_degree, total_degree RETURN node_id, in_degree, out_degree, total_degree ORDER BY node_id"
+    expect:
+      ordered: true
+      rows:
+        - [0, 0, 2, 2]
+        - [1, 1, 1, 2]
+        - [2, 2, 1, 3]
+        - [3, 1, 0, 1]
+        - [4, 1, 1, 2]
+
+  - name: clustering_coefficient_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      parallel: false
+    variants:
+      gql: "CALL grafeo.clustering_coefficient($parallel) YIELD node_id, coefficient RETURN node_id, coefficient ORDER BY node_id"
+      cypher: "CALL grafeo.clustering_coefficient($parallel) YIELD node_id, coefficient RETURN node_id, coefficient ORDER BY node_id"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 0.0]
+        - [1, 0.0]
+        - [2, 0.0]
+        - [3, 0.0]
+        - [4, 0.0]
+
+  # Communities: the graph is one community at these settings.
+  - name: label_propagation_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      iterations: 3
+    variants:
+      gql: "CALL grafeo.label_propagation($iterations) YIELD node_id, community_id RETURN node_id, community_id ORDER BY node_id"
+      cypher: "CALL grafeo.label_propagation($iterations) YIELD node_id, community_id RETURN node_id, community_id ORDER BY node_id"
+    expect:
+      ordered: true
+      rows:
+        - [0, 0]
+        - [1, 0]
+        - [2, 0]
+        - [3, 0]
+        - [4, 0]
+
+  - name: louvain_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      resolution: 0.5
+    variants:
+      gql: "CALL grafeo.louvain($resolution) YIELD node_id, community_id RETURN node_id, community_id ORDER BY node_id"
+      cypher: "CALL grafeo.louvain($resolution) YIELD node_id, community_id RETURN node_id, community_id ORDER BY node_id"
+    expect:
+      ordered: true
+      rows:
+        - [0, 0]
+        - [1, 0]
+        - [2, 0]
+        - [3, 0]
+        - [4, 0]
+
+  # ---------------------------------------------------------------------------
+  # Traversal
+  # ---------------------------------------------------------------------------
+
+  - name: bfs_start_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      start: 0
+    variants:
+      gql: "CALL grafeo.bfs($start) YIELD node_id, depth RETURN node_id, depth ORDER BY node_id"
+      cypher: "CALL grafeo.bfs($start) YIELD node_id, depth RETURN node_id, depth ORDER BY node_id"
+    expect:
+      ordered: true
+      rows:
+        - [0, 0]
+        - [1, 1]
+        - [2, 2]
+        - [3, 3]
+        - [4, 1]
+
+  # depth is the depth in the DFS tree: Jules is reached from Alix directly
+  # (depth 1), last (discovery 4).
+  - name: dfs_start_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      start: 0
+    variants:
+      gql: "CALL grafeo.dfs($start) YIELD node_id, depth, discovery, finish RETURN node_id, depth, discovery, finish ORDER BY node_id"
+      cypher: "CALL grafeo.dfs($start) YIELD node_id, depth, discovery, finish RETURN node_id, depth, discovery, finish ORDER BY node_id"
+    expect:
+      ordered: true
+      rows:
+        - [0, 0, 0, 4]
+        - [1, 1, 1, 2]
+        - [2, 2, 2, 1]
+        - [3, 3, 3, 0]
+        - [4, 1, 4, 3]
+
+  # ---------------------------------------------------------------------------
+  # Shortest paths
+  # ---------------------------------------------------------------------------
+
+  - name: dijkstra_parameters_in_a_map
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      source: 0
+      weight: "w"
+    variants:
+      gql: "CALL grafeo.dijkstra({source: $source, weight: $weight}) YIELD node_id, distance RETURN node_id, distance ORDER BY node_id"
+      cypher: "CALL grafeo.dijkstra({source: $source, weight: $weight}) YIELD node_id, distance RETURN node_id, distance ORDER BY node_id"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 0.0]
+        - [1, 3.0]
+        - [2, 22.0]
+        - [3, 110.0]
+        - [4, 19.0]
+
+  - name: sssp_parameters
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      source: "Alix"
+      weight: "w"
+    variants:
+      gql: "CALL grafeo.sssp($source, $weight) YIELD node_id, distance RETURN node_id, distance ORDER BY node_id"
+      cypher: "CALL grafeo.sssp($source, $weight) YIELD node_id, distance RETURN node_id, distance ORDER BY node_id"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 0.0]
+        - [1, 3.0]
+        - [2, 22.0]
+        - [3, 110.0]
+        - [4, 19.0]
+
+  - name: bellman_ford_parameters
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      source: 0
+      weight: "w"
+    variants:
+      gql: "CALL grafeo.bellman_ford($source, $weight) YIELD node_id, distance RETURN node_id, distance ORDER BY node_id"
+      cypher: "CALL grafeo.bellman_ford($source, $weight) YIELD node_id, distance RETURN node_id, distance ORDER BY node_id"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 0.0]
+        - [1, 3.0]
+        - [2, 22.0]
+        - [3, 110.0]
+        - [4, 19.0]
+
+  - name: floyd_warshall_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      weight: "w"
+    variants:
+      gql: "CALL grafeo.floyd_warshall($weight) YIELD source, target, distance WHERE source = 0 RETURN target, distance ORDER BY target"
+      cypher: "CALL grafeo.floyd_warshall($weight) YIELD source, target, distance WHERE source = 0 RETURN target, distance ORDER BY target"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 0.0]
+        - [1, 3.0]
+        - [2, 22.0]
+        - [3, 110.0]
+        - [4, 19.0]
+
+  # ---------------------------------------------------------------------------
+  # Spanning trees, flow, structure
+  # ---------------------------------------------------------------------------
+
+  - name: kruskal_weight_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      weight: "w"
+    variants:
+      gql: "CALL grafeo.kruskal($weight) YIELD source, target, weight RETURN source, target, weight ORDER BY source, target"
+      cypher: "CALL grafeo.kruskal($weight) YIELD source, target, weight RETURN source, target, weight ORDER BY source, target"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 1, 3.0]
+        - [0, 4, 19.0]
+        - [2, 3, 88.0]
+        - [4, 2, 3.0]
+
+  - name: max_flow_parameters
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      source: 0
+      sink: 2
+      capacity: "w"
+    variants:
+      gql: "CALL grafeo.max_flow($source, $sink, $capacity) YIELD max_flow RETURN DISTINCT max_flow"
+      cypher: "CALL grafeo.max_flow($source, $sink, $capacity) YIELD max_flow RETURN DISTINCT max_flow"
+    expect:
+      precision: 9
+      rows:
+        - [6.0]
+
+  - name: prim_weight_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      weight: "w"
+    variants:
+      gql: "CALL grafeo.prim($weight) YIELD source, target, weight RETURN source, target, weight ORDER BY source, target"
+      cypher: "CALL grafeo.prim($weight) YIELD source, target, weight RETURN source, target, weight ORDER BY source, target"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 1, 3.0]
+        - [0, 4, 19.0]
+        - [2, 3, 88.0]
+        - [4, 2, 3.0]
+
+  - name: min_cost_max_flow_parameters
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      source: 0
+      sink: 2
+      capacity: "w"
+      cost: "c"
+    variants:
+      gql: "CALL grafeo.min_cost_max_flow($source, $sink, $capacity, $cost) YIELD source, target, flow RETURN source, target, flow ORDER BY source, target"
+      cypher: "CALL grafeo.min_cost_max_flow($source, $sink, $capacity, $cost) YIELD source, target, flow RETURN source, target, flow ORDER BY source, target"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [0, 1, 3.0]
+        - [0, 4, 3.0]
+        - [1, 2, 3.0]
+        - [4, 2, 3.0]
+
+  - name: kcore_parameter
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS {w: 3, c: 1}]->(:Person {name: 'Gus'})-[:KNOWS {w: 19, c: 1}]->(v:Person {name: 'Vincent'})-[:KNOWS {w: 88, c: 1}]->(:Person {name: 'Mia'}), (a)-[:KNOWS {w: 19, c: 3}]->(:Person {name: 'Jules'})-[:KNOWS {w: 3, c: 1}]->(v)"
+    params:
+      k: 2
+    variants:
+      gql: "CALL grafeo.kcore($k) YIELD node_id RETURN node_id ORDER BY node_id"
+      cypher: "CALL grafeo.kcore($k) YIELD node_id RETURN node_id ORDER BY node_id"
+    expect:
+      ordered: true
+      rows:
+        - [0]
+        - [1]
+        - [2]
+        - [4]
+
+  # ---------------------------------------------------------------------------
+  # Search procedures
+  # ---------------------------------------------------------------------------
+
+  - name: vector_search_query_parameter
+    requires: [vector-index]
+    # Amsterdam (0) and Paris (2) are nearest to [1.0, 0.0].
+    setup:
+      - "INSERT (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0])}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0])}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6])})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    params:
+      q: [1.0, 0.0]
+      k: 2
+    variants:
+      gql: "CALL grafeo.search.vector('Doc', 'emb', $q, $k) YIELD node_id RETURN node_id ORDER BY node_id"
+      cypher: "CALL grafeo.search.vector('Doc', 'emb', $q, $k) YIELD node_id RETURN node_id ORDER BY node_id"
+    expect:
+      ordered: true
+      rows:
+        - [0]
+        - [2]
+
+  - name: mmr_search_query_parameter
+    requires: [vector-index]
+    setup:
+      - "INSERT (:Doc {name: 'Amsterdam', emb: vector([1.0, 0.0])}), (:Doc {name: 'Berlin', emb: vector([0.0, 1.0])}), (:Doc {name: 'Paris', emb: vector([0.8, 0.6])})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    params:
+      q: [1.0, 0.0]
+      k: 1
+    variants:
+      gql: "CALL grafeo.search.mmr('Doc', 'emb', $q, $k) YIELD node_id RETURN node_id"
+      cypher: "CALL grafeo.search.mmr('Doc', 'emb', $q, $k) YIELD node_id RETURN node_id"
+    expect:
+      rows:
+        - [0]
+
+  - name: text_search_query_parameter
+    requires: [text-index]
+    setup:
+      - "INSERT (:Doc {name: 'Amsterdam', body: 'graph database'}), (:Doc {name: 'Berlin', body: 'rust compiler'})"
+      - "CREATE INDEX doc_body FOR (n:Doc) ON (n.body) USING TEXT"
+    params:
+      words: "graph"
+    variants:
+      gql: "CALL grafeo.search.text('Doc', 'body', $words, 3) YIELD node_id RETURN node_id"
+      cypher: "CALL grafeo.search.text('Doc', 'body', $words, 3) YIELD node_id RETURN node_id"
+    expect:
+      rows:
+        - [0]
+
+  # ---------------------------------------------------------------------------
+  # Arguments a procedure cannot use
+  # ---------------------------------------------------------------------------
+
+  - name: missing_parameter_is_an_error
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "CALL grafeo.bfs($start) YIELD node_id RETURN node_id"
+      cypher: "CALL grafeo.bfs($start) YIELD node_id RETURN node_id"
+    expect:
+      error: "Missing parameter: $start"
+
+  - name: optional_parameter_of_the_wrong_type_is_an_error
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    params:
+      d: "high"
+    variants:
+      gql: "CALL grafeo.pagerank($d) YIELD score RETURN score"
+      cypher: "CALL grafeo.pagerank($d) YIELD score RETURN score"
+    expect:
+      error: "Argument 'damping' of grafeo.pagerank"
+
+  - name: argument_read_from_a_row_is_an_error
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      cypher: "MATCH (p:Person {name: 'Alix'}) WITH id(p) AS s CALL grafeo.bfs(s) YIELD node_id RETURN node_id"
+    expect:
+      error: "must be a constant"

@@ -528,7 +528,7 @@ impl<Id: EntityId> PropertyStorage<Id> {
 
     /// [`get`](Self::get) as a fallible read: a spilled value that cannot be
     /// read is an error. For the readers that must not lose it, such as the
-    /// undo log of a transactional write.
+    /// before-image of a transaction's write.
     ///
     /// # Errors
     ///
@@ -1168,12 +1168,11 @@ impl<Id: EntityId> PropertyStorage<Id> {
         }
     }
 
-    /// Garbage-collects old versions from all columns.
-    pub fn gc(&self, min_epoch: EpochId) {
+    /// Garbage-collects old versions from all columns, and returns how many
+    /// it dropped.
+    pub fn gc(&self, min_epoch: EpochId) -> usize {
         let mut columns = self.columns.write();
-        for col in columns.values_mut() {
-            col.gc(min_epoch);
-        }
+        columns.values_mut().map(|col| col.gc(min_epoch)).sum()
     }
 
     /// Returns the full version history for all properties of an entity.
@@ -2617,29 +2616,22 @@ impl<Id: EntityId> PropertyColumn<Id> {
     /// Garbage-collects old versions, visiting only the logs that hold more
     /// than one entry. A log keeps the version visible at `min_epoch` and
     /// every later one, and stays a candidate while it has more than one.
-    pub fn gc(&mut self, min_epoch: EpochId) {
+    /// Returns how many versions it dropped.
+    pub fn gc(&mut self, min_epoch: EpochId) -> usize {
         let candidates = std::mem::take(&mut self.gc_candidates);
+        let mut dropped = 0;
         for id in candidates {
             let Some(log) = self.values.get_mut(&id) else {
                 continue;
             };
-            log.gc(min_epoch);
+            dropped += log.gc(min_epoch);
             if log.is_empty() {
                 self.values.remove(&id);
             } else if log.len() > 1 {
                 self.gc_candidates.insert(id);
             }
         }
-    }
-
-    /// Removes PENDING entries for a specific entity (targeted rollback).
-    pub fn remove_pending_for(&mut self, id: Id) {
-        if let Some(log) = self.values.get_mut(&id) {
-            log.remove_pending();
-            if log.is_empty() {
-                self.values.remove(&id);
-            }
-        }
+        dropped
     }
 
     /// Removes up to `n` PENDING entries for a specific entity.
@@ -2753,7 +2745,9 @@ fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),
-        _ => None,
+        // Zoned datetimes, also against a timestamp: by their instant, as a
+        // filter compares them, so zone maps prune them right.
+        _ => a.compare_instants(b),
     }
 }
 
@@ -3493,7 +3487,7 @@ mod tests {
         assert_eq!(storage.get(gus, &key), Some(vector(&[88.0, 3.19])));
     }
 
-    /// Removing a spilled value hides it, returns it (the undo log records
+    /// Removing a spilled value hides it, returns it (a change set records
     /// it), and it stays removed after the reload: the bug where a reload
     /// brought it back.
     #[test]

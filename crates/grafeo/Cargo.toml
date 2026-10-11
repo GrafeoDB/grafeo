@@ -57,7 +57,7 @@ parquet-import = ["grafeo-engine/parquet-import"]  # Apache Parquet bulk import
 
 # Persona-based profiles
 lpg = ["grafeo-engine/lpg", "gql", "cypher", "gremlin", "sql-pgq", "storage", "regex"]  # Graph App Developer: LPG model + all LPG query languages
-rdf = ["triple-store", "grafeo-engine/lpg", "gql", "sparql", "graphql", "storage", "regex", "shacl"]  # Knowledge Engineer: RDF model + SPARQL/GraphQL + SHACL validation; the LPG store is needed for persistence until #544
+rdf = ["triple-store", "grafeo-engine/lpg", "gql", "sparql", "graphql", "storage", "regex", "shacl"]  # Knowledge Engineer: RDF model + SPARQL/GraphQL + SHACL validation; the engine's triple store brings the LPG store, which persistence needs (#544)
 analytics = ["algos", "vector-index", "text-index", "hybrid-search", "jsonl-import", "parquet-import"]  # Data Scientist: algorithms + search + bulk import
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]  # AI/Agent Developer: search + change tracking
 edge = ["grafeo-engine/lpg", "gql", "regex-lite"]  # Frontend/Edge: minimal WASM-friendly
@@ -75,9 +75,10 @@ wal = ["grafeo-engine/wal"]
 spill = ["grafeo-engine/spill"]
 mmap = ["grafeo-engine/mmap"]
 temporal = ["grafeo-engine/temporal"]  # Append-only versioned properties
-compact-store = ["grafeo-engine/compact-store"]  # CompactStore: columnar graph for read-only workloads
+compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 grafeo-file = ["grafeo-engine/grafeo-file"]  # Single-file .grafeo database format
 async-storage = ["grafeo-engine/async-storage"]  # Async WAL and storage backend
+encryption = ["grafeo-engine/encryption", "grafeo-common/encryption"]  # AES-256-GCM encryption at rest (Config::with_encryption)
 
 # Enable platform-optimized memory allocator (10-20% faster allocations)
 jemalloc = ["tikv-jemallocator"]

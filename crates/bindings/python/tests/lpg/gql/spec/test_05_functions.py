@@ -585,20 +585,20 @@ class TestGraphElementFunctions:
         assert result[0]["r"] is True
 
     def test_start_node(self, db):
-        """startNode(r) returns source node ID (#180)."""
+        """startNode(r) returns the source node (0.6.0; its ID before)."""
         db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
         result = list(db.execute("MATCH ()-[r:KNOWS]->() RETURN startNode(r) AS sn"))
         assert len(result) == 1
-        assert result[0]["sn"] is not None
-        assert isinstance(result[0]["sn"], int)
+        assert result[0]["sn"]["name"] == "Alix"
+        assert result[0]["sn"]["_labels"] == ["Person"]
 
     def test_end_node(self, db):
-        """endNode(r) returns destination node ID (#180)."""
+        """endNode(r) returns the destination node (0.6.0; its ID before)."""
         db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
         result = list(db.execute("MATCH ()-[r:KNOWS]->() RETURN endNode(r) AS en"))
         assert len(result) == 1
-        assert result[0]["en"] is not None
-        assert isinstance(result[0]["en"], int)
+        assert result[0]["en"]["name"] == "Gus"
+        assert result[0]["en"]["_labels"] == ["Person"]
 
     def test_start_node_matches_source(self, db):
         """startNode(r) == id(s) and endNode(r) == id(t) (#180)."""

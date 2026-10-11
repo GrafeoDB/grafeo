@@ -62,7 +62,7 @@ fn query_label_changes_reach_the_text_index() {
     let found = || {
         ids(
             &db,
-            db.text_search("Doc", "body", "graph", 10)
+            db.text_search("Doc", "body", "graph", 10, None)
                 .unwrap()
                 .into_iter()
                 .map(|(node, _)| node),

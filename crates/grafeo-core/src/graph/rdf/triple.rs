@@ -6,6 +6,7 @@
 //! - Object: the value (IRI, blank node, or literal)
 
 use super::term::Term;
+use grafeo_common::storage::log_record::{TermRecord, TripleRecord};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -85,6 +86,29 @@ impl Triple {
     #[must_use]
     pub fn as_tuple(&self) -> (&Term, &Term, &Term) {
         (&self.subject, &self.predicate, &self.object)
+    }
+}
+
+/// A triple as a log record or a change set stores it.
+impl From<&Triple> for TripleRecord {
+    fn from(triple: &Triple) -> Self {
+        Self {
+            subject: TermRecord::from(&triple.subject),
+            predicate: TermRecord::from(&triple.predicate),
+            object: TermRecord::from(&triple.object),
+        }
+    }
+}
+
+/// The triple a log record or a change set stores. A record holds what a
+/// triple held, so it is not checked again.
+impl From<&TripleRecord> for Triple {
+    fn from(record: &TripleRecord) -> Self {
+        Self::new_unchecked(
+            Term::from(&record.subject),
+            Term::from(&record.predicate),
+            Term::from(&record.object),
+        )
     }
 }
 
@@ -193,6 +217,35 @@ mod tests {
         assert!(display.contains("<http://xmlns.com/foaf/0.1/name>"));
         assert!(display.contains("\"Alix\""));
         assert!(display.ends_with('.'));
+    }
+
+    /// A triple a change set or a log record stores comes back equal, with
+    /// every part of its terms: a literal's datatype and language tag, text
+    /// that N-Triples escapes, whitespace and empty strings.
+    #[test]
+    fn a_triple_record_gives_the_triple_back() {
+        let knows = Term::iri("http://example.org/knows");
+        for term in super::super::term::unusual_terms() {
+            let subject = if term.is_literal() {
+                Term::blank("b1")
+            } else {
+                term.clone()
+            };
+            let triple = Triple::new_unchecked(subject, knows.clone(), term);
+            let record = TripleRecord::from(&triple);
+            assert_eq!(Triple::from(&record), triple, "{record:?}");
+        }
+        let tagged = Term::lang_literal("Amsterdam", "nl");
+        let TermRecord::Literal {
+            datatype, language, ..
+        } = TermRecord::from(&tagged)
+        else {
+            panic!("a literal's record is a literal");
+        };
+        assert_eq!(
+            (datatype.as_str(), language.as_deref()),
+            (super::super::term::Literal::RDF_LANG_STRING, Some("nl"))
+        );
     }
 
     #[test]

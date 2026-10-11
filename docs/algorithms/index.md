@@ -202,7 +202,7 @@ Works the same way across all three languages:
 | `grafeo.closeness_centrality()` | Centrality | node_id, centrality |
 | `grafeo.degree_centrality()` | Centrality | node_id, in_degree, out_degree, total_degree |
 | `grafeo.bfs(start)` | Traversal | node_id, depth |
-| `grafeo.dfs(start)` | Traversal | node_id, depth |
+| `grafeo.dfs(start)` | Traversal | node_id, depth, discovery, finish |
 | `grafeo.dijkstra(source)` | Shortest Path | node_id, distance |
 | `grafeo.bellman_ford(source)` | Shortest Path | node_id, distance, has_negative_cycle |
 | `grafeo.sssp(source, weight)` | Shortest Path | node_id, distance |
@@ -224,6 +224,15 @@ Works the same way across all three languages:
 | `grafeo.total_triangles()` | Clustering | total_triangles |
 | `grafeo.stochastic_block_partition()` | Community | node_id, block_id, description_length |
 | `grafeo.subgraph_isomorphism()` | Structure | count |
+
+`grafeo.bfs` reports each reached node's distance from the start as `depth`.
+`grafeo.dfs` reports its depth in the DFS tree (0 for the start, which can be
+more than the distance), and its positions in the order DFS reaches the nodes
+(`discovery`, pre-order) and finishes them (`finish`, post-order).
+
+Arguments are constants: literals, parameters (`CALL grafeo.bfs($start)`) and
+expressions of them. An argument that reads a row variable, or a value of the
+wrong type for its parameter, is an error.
 
 ## Determinism
 

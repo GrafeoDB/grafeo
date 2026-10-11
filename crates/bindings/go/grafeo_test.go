@@ -966,3 +966,68 @@ func TestConcurrentErrorMessages(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// --- Values that hold nodes and edges ---
+
+// TestValuesHoldNodesAndEdges: a node or edge in a list or map literal, a
+// returned path and startNode come back as node and edge objects (`_id`,
+// `_labels` or `_type`, the properties), as `RETURN n` does; they used to come
+// back as bare IDs. A path keeps its JSON shape,
+// {"$path": {"nodes": [...], "edges": [...]}}.
+func TestValuesHoldNodesAndEdges(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.Execute("INSERT (:Person {name: 'Alix', age: 19})-[:KNOWS {w: 3}]->(:Person {name: 'Gus', age: 88})"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.Execute("MATCH p = (:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN p, [b, 3] AS l, {k: b} AS m, startNode(r) AS s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(result.Rows))
+	}
+	row := result.Rows[0]
+	object := func(value any) map[string]any {
+		t.Helper()
+		obj, ok := value.(map[string]any)
+		if !ok {
+			t.Fatalf("expected an object, got %#v", value)
+		}
+		return obj
+	}
+
+	path := object(object(row["p"])["$path"])
+	var names []string
+	for _, n := range path["nodes"].([]any) {
+		names = append(names, fmt.Sprint(object(n)["name"]))
+	}
+	if fmt.Sprint(names) != "[Alix Gus]" {
+		t.Errorf("path nodes: got %v", names)
+	}
+	if labels := fmt.Sprint(object(path["nodes"].([]any)[0])["_labels"]); labels != "[Person]" {
+		t.Errorf("first node labels: got %s", labels)
+	}
+	knows := object(path["edges"].([]any)[0])
+	if knows["_type"] != "KNOWS" || fmt.Sprint(knows["w"]) != "3" {
+		t.Errorf("path edge: got %v", knows)
+	}
+
+	list := row["l"].([]any)
+	if gus := object(list[0]); gus["name"] != "Gus" || fmt.Sprint(gus["age"]) != "88" {
+		t.Errorf("list node: got %v", gus)
+	}
+	if fmt.Sprint(list[1]) != "3" {
+		t.Errorf("list number: got %v", list[1])
+	}
+	if name := object(object(row["m"])["k"])["name"]; name != "Gus" {
+		t.Errorf("map node: got %v", name)
+	}
+	if name := object(row["s"])["name"]; name != "Alix" {
+		t.Errorf("startNode: got %v", name)
+	}
+}

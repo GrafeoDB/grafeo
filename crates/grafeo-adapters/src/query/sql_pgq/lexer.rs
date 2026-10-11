@@ -248,6 +248,16 @@ impl<'a> Lexer<'a> {
 
     /// Returns the next token.
     pub fn next_token(&mut self) -> Token {
+        // A loop, not a recursion: a query may hold any number of comments.
+        loop {
+            if let Some(token) = self.scan_token() {
+                return token;
+            }
+        }
+    }
+
+    /// Scans the next token, or skips a `-- ` line comment and returns `None`.
+    fn scan_token(&mut self) -> Option<Token> {
         self.skip_whitespace_and_comments();
 
         self.start = self.pos;
@@ -255,7 +265,7 @@ impl<'a> Lexer<'a> {
         let start_col = self.column;
 
         if self.is_at_end() {
-            return self.make_token(TokenKind::Eof, start_line, start_col);
+            return Some(self.make_token(TokenKind::Eof, start_line, start_col));
         }
 
         let ch = self.advance();
@@ -324,12 +334,12 @@ impl<'a> Lexer<'a> {
                         || next == '\r'
                         || self.is_at_end()
                     {
-                        // SQL line comment: skip to end of line
+                        // SQL line comment: skip to end of line, then
+                        // scan the next real token
                         while !self.is_at_end() && self.current_char() != '\n' {
                             self.advance();
                         }
-                        // Recursively get the next real token
-                        return self.next_token();
+                        return None;
                     }
                     // Not a comment - restore and return DoubleDash
                     self.pos = saved_pos;
@@ -347,7 +357,7 @@ impl<'a> Lexer<'a> {
             _ => TokenKind::Error,
         };
 
-        self.make_token(kind, start_line, start_col)
+        Some(self.make_token(kind, start_line, start_col))
     }
 
     fn make_token(&self, kind: TokenKind, start_line: usize, start_col: usize) -> Token {

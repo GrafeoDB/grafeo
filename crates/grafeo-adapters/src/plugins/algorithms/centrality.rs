@@ -8,14 +8,14 @@ use std::sync::OnceLock;
 
 use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::Result;
-use grafeo_common::utils::hash::FxHashMap;
+use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, NodeValueResultBuilder, impl_algorithm};
+use super::traits::{GraphAlgorithm, NodeValueResultBuilder, impl_algorithm, visible_edges_from};
 
 // ============================================================================
 // Degree Centrality
@@ -62,11 +62,11 @@ pub fn degree_centrality(store: &dyn GraphStore) -> DegreeCentralityResult {
 
     // Count degrees
     for &node in &nodes {
-        let out_count = store.edges_from(node, Direction::Outgoing).len();
-        out_degree.insert(node, out_count);
+        let out_edges = visible_edges_from(store, node, Direction::Outgoing);
+        out_degree.insert(node, out_edges.len());
 
         // For incoming edges, we count edges targeting this node
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _) in out_edges {
             *in_degree.entry(neighbor).or_insert(0) += 1;
         }
     }
@@ -188,7 +188,7 @@ pub fn pagerank_in_order(
     // The nodes each node passes its score to.
     let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (idx, &node) in nodes.iter().enumerate() {
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             let Some(&j) = node_to_idx.get(&neighbor) else {
                 continue;
             };
@@ -265,6 +265,25 @@ pub fn pagerank_in_order(
         .collect()
 }
 
+/// The visible out-neighbours of each of `nodes` among `nodes`, in adjacency
+/// order, read once for the algorithms that walk them from every node. A node
+/// committed after `nodes` was read is left out, so a walk never reaches a
+/// node outside them.
+fn out_neighbors(store: &dyn GraphStore, nodes: &[NodeId]) -> FxHashMap<NodeId, Vec<NodeId>> {
+    let members: FxHashSet<NodeId> = nodes.iter().copied().collect();
+    nodes
+        .iter()
+        .map(|&node| {
+            let neighbors = visible_edges_from(store, node, Direction::Outgoing)
+                .into_iter()
+                .map(|(neighbor, _)| neighbor)
+                .filter(|neighbor| members.contains(neighbor))
+                .collect();
+            (node, neighbors)
+        })
+        .collect()
+}
+
 // ============================================================================
 // Betweenness Centrality (Brandes' Algorithm)
 // ============================================================================
@@ -303,6 +322,8 @@ pub fn betweenness_centrality(store: &dyn GraphStore, normalized: bool) -> FxHas
         return centrality;
     }
 
+    let neighbors = out_neighbors(store, &nodes);
+
     // Brandes' algorithm: run BFS from each source
     for &source in &nodes {
         // BFS data structures
@@ -328,7 +349,7 @@ pub fn betweenness_centrality(store: &dyn GraphStore, normalized: bool) -> FxHas
             stack.push(v);
             let dist_v = *dist.get(&v).expect("BFS: node popped from queue has dist");
 
-            for (w, _) in store.edges_from(v, Direction::Outgoing) {
+            for &w in &neighbors[&v] {
                 // First visit?
                 if *dist.get(&w).expect("BFS: all nodes initialized with dist") < 0 {
                     dist.insert(w, dist_v + 1);
@@ -423,6 +444,8 @@ pub fn closeness_centrality(store: &dyn GraphStore, wf_improved: bool) -> FxHash
         return centrality;
     }
 
+    let neighbors = out_neighbors(store, &nodes);
+
     for &source in &nodes {
         // BFS to find shortest paths
         let mut dist: FxHashMap<NodeId, usize> = FxHashMap::default();
@@ -434,7 +457,7 @@ pub fn closeness_centrality(store: &dyn GraphStore, wf_improved: bool) -> FxHash
         while let Some(v) = queue.pop_front() {
             let dist_v = *dist.get(&v).expect("BFS: node popped from queue has dist");
 
-            for (w, _) in store.edges_from(v, Direction::Outgoing) {
+            for &w in &neighbors[&v] {
                 if !dist.contains_key(&w) {
                     dist.insert(w, dist_v + 1);
                     queue.push_back(w);

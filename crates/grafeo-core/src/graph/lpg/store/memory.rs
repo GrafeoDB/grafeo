@@ -54,14 +54,13 @@ impl LpgStore {
             (n, e)
         };
 
-        let mut store = StoreMemory {
-            nodes_bytes,
-            edges_bytes,
-            node_properties_bytes: node_props_bytes,
-            edge_properties_bytes: edge_props_bytes,
-            property_column_count: col_count,
-            ..Default::default()
-        };
+        // `#[non_exhaustive]` in grafeo-common: built field by field.
+        let mut store = StoreMemory::default();
+        store.nodes_bytes = nodes_bytes;
+        store.edges_bytes = edges_bytes;
+        store.node_properties_bytes = node_props_bytes;
+        store.edge_properties_bytes = edge_props_bytes;
+        store.property_column_count = col_count;
         store.compute_total();
         store
     }
@@ -101,13 +100,11 @@ impl LpgStore {
                 0.0
             };
 
-            let mut mvcc = MvccMemory {
-                node_version_chains_bytes: node_chain_bytes,
-                edge_version_chains_bytes: edge_chain_bytes,
-                average_chain_depth,
-                max_chain_depth: max_depth,
-                ..Default::default()
-            };
+            let mut mvcc = MvccMemory::default();
+            mvcc.node_version_chains_bytes = node_chain_bytes;
+            mvcc.edge_version_chains_bytes = edge_chain_bytes;
+            mvcc.average_chain_depth = average_chain_depth;
+            mvcc.max_chain_depth = max_depth;
             mvcc.compute_total();
             (mvcc, 0)
         }
@@ -124,13 +121,12 @@ impl LpgStore {
             let node_chain_bytes = node_count * 64;
             let edge_chain_bytes = edge_count * 64;
             let total_chains = node_count + edge_count;
-            let mvcc = MvccMemory {
-                node_version_chains_bytes: node_chain_bytes,
-                edge_version_chains_bytes: edge_chain_bytes,
-                average_chain_depth: if total_chains > 0 { 1.0 } else { 0.0 },
-                max_chain_depth: usize::from(total_chains > 0),
-                total_bytes: node_chain_bytes + edge_chain_bytes,
-            };
+            let mut mvcc = MvccMemory::default();
+            mvcc.node_version_chains_bytes = node_chain_bytes;
+            mvcc.edge_version_chains_bytes = edge_chain_bytes;
+            mvcc.average_chain_depth = if total_chains > 0 { 1.0 } else { 0.0 };
+            mvcc.max_chain_depth = usize::from(total_chains > 0);
+            mvcc.compute_total();
             (mvcc, 0)
         }
     }
@@ -181,9 +177,9 @@ impl LpgStore {
         let prop_indexes = self.property_indexes.read();
         let property_index_bytes: usize = prop_indexes
             .values()
-            .map(|dmap| {
+            .map(|index| {
                 // DashMap: approximate as capacity * entry size
-                dmap.len()
+                index.len()
                     * (size_of::<grafeo_common::types::HashableValue>()
                         + size_of::<
                             grafeo_common::utils::hash::FxHashSet<grafeo_common::types::NodeId>,
@@ -199,10 +195,10 @@ impl LpgStore {
             use grafeo_common::memory::NamedMemory;
             let vidx = self.vector_indexes.read();
             vidx.iter()
-                .map(|(name, idx)| NamedMemory {
+                .map(|(name, stored)| NamedMemory {
                     name: name.clone(),
-                    bytes: idx.heap_memory_bytes(),
-                    item_count: idx.len(),
+                    bytes: stored.index.heap_memory_bytes(),
+                    item_count: stored.index.len(),
                 })
                 .collect()
         };
@@ -228,45 +224,33 @@ impl LpgStore {
         #[cfg(not(feature = "text-index"))]
         let text_indexes = Vec::new();
 
-        let mut indexes = IndexMemory {
-            forward_adjacency_bytes: forward_bytes,
-            backward_adjacency_bytes: backward_bytes,
-            label_index_bytes,
-            node_labels_bytes,
-            property_index_bytes,
-            vector_indexes,
-            text_indexes,
-            ..Default::default()
-        };
+        let mut indexes = IndexMemory::default();
+        indexes.forward_adjacency_bytes = forward_bytes;
+        indexes.backward_adjacency_bytes = backward_bytes;
+        indexes.label_index_bytes = label_index_bytes;
+        indexes.node_labels_bytes = node_labels_bytes;
+        indexes.property_index_bytes = property_index_bytes;
+        indexes.vector_indexes = vector_indexes;
+        indexes.text_indexes = text_indexes;
         indexes.compute_total();
         indexes
     }
 
     fn string_pool_memory(&self) -> StringPoolMemory {
         let label_reg = self.label_registry.read();
-        let edge_type_to_id = self.edge_type_to_id.read();
-        let id_to_edge_type = self.id_to_edge_type.read();
+        let edge_types = self.edge_types.read();
 
         let label_count = label_reg.len();
-        let edge_type_count = id_to_edge_type.len();
+        let edge_type_count = edge_types.len();
 
         let label_registry_bytes = label_reg.heap_bytes();
+        let edge_type_registry_bytes = edge_types.heap_bytes();
 
-        // Same for edge types
-        let et_map_bytes = edge_type_to_id.capacity()
-            * (size_of::<arcstr::ArcStr>() + size_of::<u32>() + 1)
-            + edge_type_to_id.keys().map(|s| s.len()).sum::<usize>();
-        let et_vec_bytes = id_to_edge_type.capacity() * size_of::<arcstr::ArcStr>()
-            + id_to_edge_type.iter().map(|s| s.len()).sum::<usize>();
-        let edge_type_registry_bytes = et_map_bytes + et_vec_bytes;
-
-        let mut sp = StringPoolMemory {
-            label_registry_bytes,
-            edge_type_registry_bytes,
-            label_count,
-            edge_type_count,
-            ..Default::default()
-        };
+        let mut sp = StringPoolMemory::default();
+        sp.label_registry_bytes = label_registry_bytes;
+        sp.edge_type_registry_bytes = edge_type_registry_bytes;
+        sp.label_count = label_count;
+        sp.edge_type_count = edge_type_count;
         sp.compute_total();
         sp
     }

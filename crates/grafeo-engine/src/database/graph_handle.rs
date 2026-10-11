@@ -170,8 +170,7 @@ impl GraphHandle<'_> {
             None => true,
             Some(key) => self
                 .db
-                .store
-                .as_ref()
+                .root_store()
                 .is_some_and(|store| store.graph(&key).is_some()),
         };
         if exists {

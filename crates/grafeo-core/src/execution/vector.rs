@@ -11,6 +11,13 @@ pub const DEFAULT_VECTOR_CAPACITY: usize = 2048;
 ///
 /// ValueVector stores data in columnar format for efficient SIMD processing
 /// and cache utilization during query execution.
+///
+/// A vector of a typed column (bool, integer, float, string, node or edge)
+/// keeps its values in typed storage. A value that does not fit that type
+/// means a planner or an operator declared the wrong column type: debug
+/// builds panic so tests find it, and release builds turn the vector generic
+/// ([`LogicalType::Any`]), so every value is kept. A vector never writes a
+/// default value (`0`, `''`, node 0) in place of one it cannot hold.
 #[derive(Debug, Clone)]
 pub struct ValueVector {
     /// The logical type of values in this vector.
@@ -128,101 +135,96 @@ impl ValueVector {
         }
     }
 
-    /// Pushes a boolean value.
+    /// Pushes a boolean value (see the type for a value that does not fit).
     pub fn push_bool(&mut self, value: bool) {
         match &mut self.data {
-            VectorData::Bool(vec) => {
-                vec.push(value);
-                self.len += 1;
-            }
-            VectorData::Generic(vec) => {
-                vec.push(Value::Bool(value));
-                self.len += 1;
-            }
-            _ => {}
+            VectorData::Bool(vec) => vec.push(value),
+            VectorData::Generic(vec) => vec.push(Value::Bool(value)),
+            _ => self.push_unfit(Value::Bool(value)),
         }
+        self.len += 1;
     }
 
-    /// Pushes an integer value.
+    /// Pushes an integer value (see the type for a value that does not fit).
     pub fn push_int64(&mut self, value: i64) {
         match &mut self.data {
-            VectorData::Int64(vec) => {
-                vec.push(value);
-                self.len += 1;
-            }
-            VectorData::Generic(vec) => {
-                vec.push(Value::Int64(value));
-                self.len += 1;
-            }
-            _ => {}
+            VectorData::Int64(vec) => vec.push(value),
+            VectorData::Generic(vec) => vec.push(Value::Int64(value)),
+            _ => self.push_unfit(Value::Int64(value)),
         }
+        self.len += 1;
     }
 
-    /// Pushes a float value.
+    /// Pushes a float value (see the type for a value that does not fit).
     pub fn push_float64(&mut self, value: f64) {
         match &mut self.data {
-            VectorData::Float64(vec) => {
-                vec.push(value);
-                self.len += 1;
-            }
-            VectorData::Generic(vec) => {
-                vec.push(Value::Float64(value));
-                self.len += 1;
-            }
-            _ => {}
+            VectorData::Float64(vec) => vec.push(value),
+            VectorData::Generic(vec) => vec.push(Value::Float64(value)),
+            _ => self.push_unfit(Value::Float64(value)),
         }
+        self.len += 1;
     }
 
-    /// Pushes a string value.
+    /// Pushes a string value (see the type for a value that does not fit).
     pub fn push_string(&mut self, value: impl Into<ArcStr>) {
         match &mut self.data {
-            VectorData::String(vec) => {
-                vec.push(value.into());
-                self.len += 1;
-            }
-            VectorData::Generic(vec) => {
-                vec.push(Value::String(value.into()));
-                self.len += 1;
-            }
-            _ => {}
+            VectorData::String(vec) => vec.push(value.into()),
+            VectorData::Generic(vec) => vec.push(Value::String(value.into())),
+            _ => self.push_unfit(Value::String(value.into())),
         }
+        self.len += 1;
     }
 
-    /// Pushes a node ID.
+    /// Pushes a node ID (see the type for a value that does not fit).
     pub fn push_node_id(&mut self, value: NodeId) {
+        // A generic vector keeps an ID as its bits in an i64, which
+        // `get_node_id` casts back to the same u64.
+        let id = Value::Int64(value.as_u64().cast_signed());
         match &mut self.data {
-            VectorData::NodeId(vec) => {
-                vec.push(value);
-                self.len += 1;
-            }
-            VectorData::Generic(vec) => {
-                // reason: entity IDs stored as i64, standard encoding
-                #[allow(clippy::cast_possible_wrap)]
-                vec.push(Value::Int64(value.as_u64() as i64));
-                self.len += 1;
-            }
-            _ => {}
+            VectorData::NodeId(vec) => vec.push(value),
+            VectorData::Generic(vec) => vec.push(id),
+            _ => self.push_unfit(id),
         }
+        self.len += 1;
     }
 
-    /// Pushes an edge ID.
+    /// Pushes an edge ID (see the type for a value that does not fit).
     pub fn push_edge_id(&mut self, value: EdgeId) {
+        // As in `push_node_id`: the ID's bits, which `get_edge_id` reads back.
+        let id = Value::Int64(value.as_u64().cast_signed());
         match &mut self.data {
-            VectorData::EdgeId(vec) => {
-                vec.push(value);
-                self.len += 1;
-            }
-            VectorData::Generic(vec) => {
-                // reason: entity IDs stored as i64, standard encoding
-                #[allow(clippy::cast_possible_wrap)]
-                vec.push(Value::Int64(value.as_u64() as i64));
-                self.len += 1;
-            }
-            _ => {}
+            VectorData::EdgeId(vec) => vec.push(value),
+            VectorData::Generic(vec) => vec.push(id),
+            _ => self.push_unfit(id),
         }
+        self.len += 1;
     }
 
-    /// Pushes a generic value.
+    /// Stores `value`, which does not fit this vector's typed storage, by
+    /// turning the vector generic: every value so far is kept as a [`Value`]
+    /// (nulls stay null) and the type becomes [`LogicalType::Any`]. The
+    /// caller counts the row.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, always: a value that does not fit means a planner or
+    /// an operator declared the wrong column type, and tests should find it.
+    fn push_unfit(&mut self, value: Value) {
+        debug_assert!(
+            false,
+            "a {} value does not fit a {:?} column: a planner or an operator declared the wrong column type",
+            value.type_name(),
+            self.data_type
+        );
+        let mut values: Vec<Value> = (0..self.len)
+            .map(|row| self.get_value(row).unwrap_or(Value::Null))
+            .collect();
+        values.push(value);
+        self.data = VectorData::Generic(values);
+        self.data_type = LogicalType::Any;
+    }
+
+    /// Pushes a generic value (see the type for a value that does not fit).
     pub fn push_value(&mut self, value: Value) {
         // Handle null values specially - push a default and mark as null
         if matches!(value, Value::Null) {
@@ -240,32 +242,21 @@ impl ValueVector {
             return;
         }
 
-        match (&mut self.data, &value) {
-            (VectorData::Bool(vec), Value::Bool(b)) => vec.push(*b),
-            (VectorData::Int64(vec), Value::Int64(i)) => vec.push(*i),
-            (VectorData::Float64(vec), Value::Float64(f)) => vec.push(*f),
-            (VectorData::String(vec), Value::String(s)) => vec.push(s.clone()),
+        match (&mut self.data, value) {
+            (VectorData::Bool(vec), Value::Bool(b)) => vec.push(b),
+            (VectorData::Int64(vec), Value::Int64(i)) => vec.push(i),
+            (VectorData::Float64(vec), Value::Float64(f)) => vec.push(f),
+            (VectorData::String(vec), Value::String(s)) => vec.push(s),
             // Handle Int64 -> NodeId conversion (from get_value roundtrip)
             // reason: ID encoding: i64 <-> u64 round-trip
             #[allow(clippy::cast_sign_loss)]
-            (VectorData::NodeId(vec), Value::Int64(i)) => vec.push(NodeId::new(*i as u64)),
+            (VectorData::NodeId(vec), Value::Int64(i)) => vec.push(NodeId::new(i as u64)),
             // Handle Int64 -> EdgeId conversion (from get_value roundtrip)
             // reason: ID encoding: i64 <-> u64 round-trip
             #[allow(clippy::cast_sign_loss)]
-            (VectorData::EdgeId(vec), Value::Int64(i)) => vec.push(EdgeId::new(*i as u64)),
-            (VectorData::Generic(vec), _) => vec.push(value),
-            _ => {
-                // Type mismatch - push a default value to maintain vector alignment
-                match &mut self.data {
-                    VectorData::Bool(vec) => vec.push(false),
-                    VectorData::Int64(vec) => vec.push(0),
-                    VectorData::Float64(vec) => vec.push(0.0),
-                    VectorData::String(vec) => vec.push("".into()),
-                    VectorData::NodeId(vec) => vec.push(NodeId::new(0)),
-                    VectorData::EdgeId(vec) => vec.push(EdgeId::new(0)),
-                    VectorData::Generic(vec) => vec.push(value),
-                }
-            }
+            (VectorData::EdgeId(vec), Value::Int64(i)) => vec.push(EdgeId::new(i as u64)),
+            (VectorData::Generic(vec), value) => vec.push(value),
+            (_, value) => self.push_unfit(value),
         }
         self.len += 1;
     }
@@ -461,7 +452,8 @@ impl ValueVector {
     /// Copies a row from this vector to the destination vector.
     ///
     /// The destination vector should have a compatible type. The value at `row`
-    /// is read from this vector and pushed to the destination vector.
+    /// is read from this vector and pushed to the destination vector (see the
+    /// type for a value that does not fit the destination).
     pub fn copy_row_to(&self, row: usize, dest: &mut ValueVector) {
         if self.is_null(row) {
             dest.push_value(Value::Null);
@@ -654,16 +646,96 @@ mod tests {
         assert_eq!(vec.get_value(3), Some(Value::Float64(99.5)));
     }
 
-    /// Pushing a typed value into a mismatched non-Generic vector is a no-op.
-    #[test]
-    fn test_type_mismatch_noop() {
-        let mut vec = ValueVector::with_type(LogicalType::Int64);
-        vec.push_string("wrong type");
-        assert_eq!(vec.len(), 0);
+    // A value that does not fit the vector's type means a planner or an
+    // operator declared the wrong column type. Debug builds (and so every
+    // test run without --release) panic to find it; release builds keep the
+    // value in a generic vector. It used to write `''`, `0`, `0.0`, `false`
+    // or node or edge 0 in its place (a typed push wrote nothing, so the
+    // column fell out of step with the others).
 
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "does not fit"))]
+    fn a_list_in_a_string_column_is_kept_not_written_as_an_empty_string() {
         let mut vec = ValueVector::with_type(LogicalType::String);
-        vec.push_int64(42);
-        assert_eq!(vec.len(), 0);
+        vec.push_value(Value::String("Alix".into()));
+        vec.push_value(Value::Null);
+        let list = Value::List(vec![Value::Int64(3), Value::Int64(19)].into());
+        vec.push_value(list.clone());
+        vec.push_value(Value::String("Gus".into()));
+        assert_eq!(vec.len(), 4);
+        assert_eq!(vec.get_value(0), Some(Value::String("Alix".into())));
+        assert_eq!(vec.get_value(1), Some(Value::Null), "a null stays null");
+        assert_eq!(vec.get_value(2), Some(list));
+        assert_eq!(vec.get_value(3), Some(Value::String("Gus".into())));
+        assert_eq!(
+            vec.data_type(),
+            &LogicalType::Any,
+            "the vector says it holds values of any type"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "does not fit"))]
+    fn a_string_in_a_node_column_is_kept_not_read_as_node_zero() {
+        let mut vec = ValueVector::with_type(LogicalType::Node);
+        vec.push_node_id(NodeId::new(3));
+        vec.push_value(Value::String("Amsterdam".into()));
+        assert_eq!(vec.len(), 2);
+        assert_eq!(vec.get_node_id(0), Some(NodeId::new(3)));
+        assert_eq!(vec.get_value(1), Some(Value::String("Amsterdam".into())));
+        assert_eq!(vec.get_node_id(1), None, "a string is no node");
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "does not fit"))]
+    fn a_float_in_an_integer_column_is_kept_not_written_as_zero() {
+        let mut vec = ValueVector::with_type(LogicalType::Int64);
+        vec.push_int64(19);
+        vec.push_value(Value::Float64(88.5));
+        assert_eq!(vec.get_value(0), Some(Value::Int64(19)));
+        assert_eq!(vec.get_value(1), Some(Value::Float64(88.5)));
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "does not fit"))]
+    fn a_typed_push_that_does_not_fit_keeps_the_column_in_step() {
+        let mut vec = ValueVector::with_type(LogicalType::Int64);
+        vec.push_int64(3);
+        vec.push_string("Mia");
+        vec.push_bool(true);
+        assert_eq!(vec.len(), 3, "every push adds a row");
+        assert_eq!(vec.get_value(0), Some(Value::Int64(3)));
+        assert_eq!(vec.get_value(1), Some(Value::String("Mia".into())));
+        assert_eq!(vec.get_value(2), Some(Value::Bool(true)));
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "does not fit"))]
+    fn a_row_copied_into_a_column_of_another_type_is_kept() {
+        let mut source = ValueVector::with_type(LogicalType::String);
+        source.push_string("Vincent");
+        let mut destination = ValueVector::with_type(LogicalType::Float64);
+        destination.push_float64(3.5);
+        source.copy_row_to(0, &mut destination);
+        assert_eq!(destination.len(), 2);
+        assert_eq!(destination.get_value(0), Some(Value::Float64(3.5)));
+        assert_eq!(
+            destination.get_value(1),
+            Some(Value::String("Vincent".into()))
+        );
+    }
+
+    #[test]
+    fn values_that_fit_keep_the_typed_storage() {
+        let mut vec = ValueVector::with_type(LogicalType::Node);
+        vec.push_value(Value::Int64(19));
+        vec.push_value(Value::Null);
+        vec.push_node_id(NodeId::new(88));
+        assert_eq!(vec.data_type(), &LogicalType::Node);
+        assert_eq!(vec.as_node_id_slice().map(<[NodeId]>::len), Some(3));
+        assert_eq!(vec.get_node_id(0), Some(NodeId::new(19)));
+        assert!(vec.is_null(1));
+        assert_eq!(vec.get_node_id(2), Some(NodeId::new(88)));
     }
 
     #[test]

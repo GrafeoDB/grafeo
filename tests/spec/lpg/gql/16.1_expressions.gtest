@@ -243,3 +243,10 @@ tests:
     expect:
       rows:
         - [20]
+
+  # GQL has no chained comparison (Cypher reads one as a conjunction): a
+  # second comparison operator is a syntax error, not a null.
+  - name: chained_comparison_is_a_syntax_error
+    query: "RETURN 1 <= 2 < 3 AS r"
+    expect:
+      error: "syntax error"

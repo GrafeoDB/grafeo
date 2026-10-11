@@ -18,9 +18,9 @@ use grafeo_core::graph::lpg::LpgStore;
 use rayon::prelude::*;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::GraphAlgorithm;
 #[cfg(feature = "parallel")]
 use super::traits::ParallelGraphAlgorithm;
+use super::traits::{GraphAlgorithm, visible_edges_from};
 
 // ============================================================================
 // Result Types
@@ -43,33 +43,23 @@ pub struct ClusteringCoefficientResult {
 // Helper Functions
 // ============================================================================
 
-/// Builds undirected neighbor sets for all nodes.
-///
-/// Treats the graph as undirected by combining both outgoing and incoming edges.
+/// Builds the neighbour sets of the simple undirected graph: edge direction is
+/// ignored, each neighbour is in the set once however many edges join the
+/// two, and self-loops are left out (a node is not its own neighbour, and a
+/// self-loop closes no triangle).
 fn build_undirected_neighbors(store: &dyn GraphStore) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
     let nodes = store.node_ids();
-    let mut neighbors: FxHashMap<NodeId, FxHashSet<NodeId>> = FxHashMap::default();
+    let mut neighbors: FxHashMap<NodeId, FxHashSet<NodeId>> = nodes
+        .iter()
+        .map(|&node| (node, FxHashSet::default()))
+        .collect();
 
-    // Initialize all nodes with empty sets
+    // Every edge is an outgoing edge of its source: add it both ways.
     for &node in &nodes {
-        neighbors.insert(node, FxHashSet::default());
-    }
-
-    // Add edges in both directions (undirected treatment)
-    for &node in &nodes {
-        // Outgoing edges: node -> neighbor
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
-            if let Some(set) = neighbors.get_mut(&node) {
-                set.insert(neighbor);
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
+            if neighbor == node || !neighbors.contains_key(&neighbor) {
+                continue;
             }
-            // Add reverse direction for undirected
-            if let Some(set) = neighbors.get_mut(&neighbor) {
-                set.insert(node);
-            }
-        }
-
-        // Incoming edges: neighbor -> node (ensures we capture all connections)
-        for (neighbor, _) in store.edges_from(node, Direction::Incoming) {
             if let Some(set) = neighbors.get_mut(&node) {
                 set.insert(neighbor);
             }
@@ -274,8 +264,10 @@ fn build_oriented_adjacency(store: &dyn GraphStore) -> (Vec<Vec<usize>>, Vec<(us
     // Collect both outgoing and incoming, deduplicate via sort+dedup.
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (u, &node_u) in node_list.iter().enumerate() {
-        for (neighbor, _) in store.edges_from(node_u, Direction::Outgoing) {
-            if let Some(&v) = node_to_idx.get(&neighbor) {
+        for (neighbor, _) in visible_edges_from(store, node_u, Direction::Outgoing) {
+            if let Some(&v) = node_to_idx.get(&neighbor)
+                && v != u
+            {
                 adj[u].push(v);
                 adj[v].push(u);
             }
@@ -1205,5 +1197,111 @@ mod tests {
             );
         }
         assert_eq!(rdf_result.total_triangles, 1);
+    }
+
+    /// A store with `n` nodes and one directed edge per pair in `edges`.
+    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (LpgStore, Vec<NodeId>) {
+        let store = LpgStore::new().unwrap();
+        let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
+        for &(u, v) in edges {
+            store.create_edge(nodes[u], nodes[v], "EDGE");
+        }
+        (store, nodes)
+    }
+
+    #[test]
+    fn a_self_loop_is_no_neighbour_and_closes_no_triangle() {
+        // 0 knows 1 and 2, which do not know each other, and 0 has a
+        // self-loop: no triangle, coefficient 0 (a loop counted as a
+        // neighbour made 2 "triangles" out of 3 pairs).
+        let (store, n) = store_from_edges(3, &[(0, 1), (0, 2), (0, 0)]);
+        let result = clustering_coefficient(&store);
+        assert_eq!(result.triangle_counts[&n[0]], 0);
+        assert_eq!(result.coefficients[&n[0]], 0.0);
+        assert_eq!(result.total_triangles, 0);
+        assert_eq!(total_triangles(&store), 0);
+        assert_eq!(triangle_count(&store)[&n[0]], 0);
+        assert_eq!(local_clustering_coefficient(&store)[&n[0]], 0.0);
+    }
+
+    #[test]
+    fn clustering_reads_the_simple_graph() {
+        // A triangle with a self-loop on 0 and every edge doubled in both
+        // directions: the triangle's numbers, each node in one triangle with
+        // coefficient 1.
+        let (store, n) = store_from_edges(
+            3,
+            &[
+                (0, 0),
+                (0, 1),
+                (1, 0),
+                (0, 1),
+                (1, 2),
+                (2, 1),
+                (2, 0),
+                (0, 2),
+            ],
+        );
+        let result = clustering_coefficient(&store);
+        for node in &n {
+            assert_eq!(result.triangle_counts[node], 1, "{node:?}");
+            assert_eq!(result.coefficients[node], 1.0, "{node:?}");
+        }
+        assert_eq!(result.total_triangles, 1);
+        assert_eq!(result.global_coefficient, 1.0);
+        assert_eq!(total_triangles(&store), 1);
+    }
+
+    /// Local clustering coefficients by definition on the simple undirected
+    /// graph: the share of a node's neighbour pairs that know each other.
+    fn reference_coefficients(n: usize, edges: &[(usize, usize)]) -> (Vec<f64>, u64) {
+        let mut adjacency: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
+        for &(u, v) in edges {
+            if u != v {
+                adjacency[u].insert(v);
+                adjacency[v].insert(u);
+            }
+        }
+        let mut triangles = 0u64;
+        let coefficients = (0..n)
+            .map(|v| {
+                let around: Vec<usize> = adjacency[v].iter().copied().collect();
+                let k = around.len();
+                let closed = (0..k)
+                    .flat_map(|i| ((i + 1)..k).map(move |j| (i, j)))
+                    .filter(|&(i, j)| adjacency[around[i]].contains(&around[j]))
+                    .count();
+                triangles += closed as u64;
+                if k < 2 {
+                    0.0
+                } else {
+                    closed as f64 / (k * (k - 1) / 2) as f64
+                }
+            })
+            .collect();
+        (coefficients, triangles / 3)
+    }
+
+    #[test]
+    fn clustering_matches_the_definition_on_random_multigraphs() {
+        let mut state: u64 = 0x0003_0088_0019;
+        let mut next = |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state % bound as u64).unwrap()
+        };
+        for case in 0..88 {
+            let n = 1 + next(12);
+            let edge_count = next(n * 4 + 1);
+            let edges: Vec<(usize, usize)> = (0..edge_count).map(|_| (next(n), next(n))).collect();
+            let (store, nodes) = store_from_edges(n, &edges);
+            let (coefficients, triangles) = reference_coefficients(n, &edges);
+            let result = clustering_coefficient(&store);
+            let actual: Vec<f64> = nodes.iter().map(|node| result.coefficients[node]).collect();
+            assert_eq!(actual, coefficients, "case {case}: {edges:?}");
+            assert_eq!(result.total_triangles, triangles, "case {case}: {edges:?}");
+            assert_eq!(total_triangles(&store), triangles, "case {case}: {edges:?}");
+        }
     }
 }

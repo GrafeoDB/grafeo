@@ -489,11 +489,9 @@ fn persisting_after_close_fails_and_writes_nothing() {
         );
     }
     // `compact()` takes `&mut self`.
-    #[cfg(feature = "compact-store")]
     let db = {
         let mut db = db;
         assert_closed_error("compact", db.compact());
-        assert_closed_error("recompact", db.recompact());
         db
     };
     assert!(
@@ -533,14 +531,11 @@ fn a_closed_handle_overwrites_nothing_a_later_handle_wrote() {
     }
 
     assert_closed_error("wal_checkpoint", first.wal_checkpoint());
-    #[cfg(feature = "compact-store")]
     {
         // `compact()` takes `&mut self`.
         let mut first = first;
         assert_closed_error("compact", first.compact());
     }
-    #[cfg(not(feature = "compact-store"))]
-    drop(first);
 
     let db = GrafeoDB::with_config(config()).unwrap();
     assert_eq!(
@@ -894,8 +889,8 @@ fn a_checkpoint_waits_for_a_direct_write_and_counts_it() {
 }
 
 /// Bulk imports, RDF batch inserts and snapshot restores after `close()`
-/// fail with the database-closed error and change nothing (they write no WAL,
-/// so what they changed after the final checkpoint was lost).
+/// fail with the database-closed error and change nothing (what they changed
+/// after the final checkpoint would be lost: the close removes the WAL).
 #[test]
 fn imports_and_restores_after_close_fail() {
     let dir = tempfile::tempdir().unwrap();
@@ -996,7 +991,7 @@ type Import = (
     usize,
 );
 
-/// The bulk imports and the RDF batch insert, which write no WAL record.
+/// The bulk imports and the RDF batch insert.
 fn imports() -> Vec<Import> {
     let imports: Vec<Import> = vec![
         (
@@ -1199,10 +1194,10 @@ fn rdf_database_with_alix(path: &Path) -> GrafeoDB {
     db
 }
 
-/// A SPARQL update outside a transaction changes the RDF store at once and
-/// logs its own WAL group: it holds commits off for its whole run, so a
-/// `close()` started from a hook inside it (once it holds them, before it
-/// changes anything) waits for it, and the final checkpoint holds the triple.
+/// A SPARQL update outside a transaction runs in a transaction of its own,
+/// whose commit applies its triples and logs them: a `close()` started from a
+/// hook inside that commit (once the triples are applied, before they are
+/// logged) waits for it, and the final checkpoint holds the triple (#414).
 /// Through a session and through `GrafeoDB::execute_sparql`.
 #[cfg(all(
     feature = "testing-statement-injection",
@@ -1213,7 +1208,7 @@ fn rdf_database_with_alix(path: &Path) -> GrafeoDB {
 fn close_waits_for_a_sparql_update_holding_commits_off() {
     use std::sync::{Arc, mpsc};
 
-    use grafeo_common::testing::commit_hook::during_next_held_change;
+    use grafeo_common::testing::commit_hook::after_next_commit_stamped;
 
     for through_session in [true, false] {
         let dir = tempfile::tempdir().unwrap();
@@ -1221,14 +1216,14 @@ fn close_waits_for_a_sparql_update_holding_commits_off() {
         let db = Arc::new(rdf_database_with_alix(&path));
         let closer = Arc::clone(&db);
         let (sender, started) = mpsc::channel();
-        during_next_held_change(move || {
+        after_next_commit_stamped(move || {
             let close = Started::spawn(move || closer.close().map_err(|e| e.to_string()));
             let finished = close.finishes_briefly();
             sender.send((close, finished)).unwrap();
         });
         add_gus_with_sparql(&db, through_session);
 
-        // The hook runs inside the update, so its message is there now.
+        // The hook runs inside the update's commit, so its message is there now.
         let (close, finished) = started.try_recv().expect("the update ran the hook");
         assert!(
             !finished,
@@ -1247,8 +1242,9 @@ fn close_waits_for_a_sparql_update_holding_commits_off() {
     }
 }
 
-/// A checkpoint that starts while a SPARQL update holds commits off waits for
-/// it, and its image holds the update's triple.
+/// A checkpoint that starts while a SPARQL update commits (its triples
+/// applied, not yet logged) waits for the commit, and its image holds the
+/// update's triple.
 #[cfg(all(
     feature = "testing-statement-injection",
     feature = "sparql",
@@ -1258,7 +1254,7 @@ fn close_waits_for_a_sparql_update_holding_commits_off() {
 fn a_checkpoint_waits_for_a_sparql_update_and_holds_all_of_it() {
     use std::sync::{Arc, mpsc};
 
-    use grafeo_common::testing::commit_hook::during_next_held_change;
+    use grafeo_common::testing::commit_hook::after_next_commit_stamped;
 
     for through_session in [true, false] {
         let dir = tempfile::tempdir().unwrap();
@@ -1266,7 +1262,7 @@ fn a_checkpoint_waits_for_a_sparql_update_and_holds_all_of_it() {
         let db = Arc::new(rdf_database_with_alix(&path));
         let checkpointer = Arc::clone(&db);
         let (sender, started) = mpsc::channel();
-        during_next_held_change(move || {
+        after_next_commit_stamped(move || {
             let checkpoint =
                 Started::spawn(move || checkpointer.wal_checkpoint().map_err(|e| e.to_string()));
             let finished = checkpoint.finishes_briefly();
@@ -1274,7 +1270,7 @@ fn a_checkpoint_waits_for_a_sparql_update_and_holds_all_of_it() {
         });
         add_gus_with_sparql(&db, through_session);
 
-        // The hook runs inside the update, so its message is there now.
+        // The hook runs inside the update's commit, so its message is there now.
         let (checkpoint, finished) = started.try_recv().expect("the update ran the hook");
         assert!(
             !finished,

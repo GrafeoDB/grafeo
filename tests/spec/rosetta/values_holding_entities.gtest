@@ -1,0 +1,126 @@
+# Rosetta: nodes and edges inside list and map values, and startNode/endNode
+#
+# A node or edge put into a list or map literal stays a node or edge (openCypher;
+# ISO/IEC 39075 list and record values hold node and edge references): an
+# item's or key's property is the entity's, also through WITH, collect,
+# grouping and UNWIND, and startNode and endNode return nodes. These values
+# used to hold bare IDs, so `{msg: m}.msg.id` was null (LDBC SNB IC7) and
+# `startNode(r).name` an error. The dataset gives nodes and edges a property
+# with the same name (`w`) and overlapping IDs (nodes 100 and up, edges 1 to
+# 8; Jules, Mia and Berlin have none), so an entity read as the other kind
+# shows a value from the wrong range.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Nodes and edges in list and map values
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # List and map literals
+  # ---------------------------------------------------------------------------
+
+  # Jules (no w) read as the edge with its ID would have w 4; the edge to Mia
+  # (w 4) read as the node with its ID would have none.
+  - name: items_of_a_list_literal_keep_their_kind
+    variants:
+      gql: "MATCH (a:Person {name: 'Jules'})-[r:KNOWS]->(b) WITH [a, r, b, 3] AS l RETURN l[0].name AS a, l[0].w AS aw, l[1].w AS rw, l[2].name AS b, l[3] AS n"
+      cypher: "MATCH (a:Person {name: 'Jules'})-[r:KNOWS]->(b) WITH [a, r, b, 3] AS l RETURN l[0].name AS a, l[0].w AS aw, l[1].w AS rw, l[2].name AS b, l[3] AS n"
+    expect:
+      rows:
+        - [Jules, null, 4, Mia, 3]
+
+  - name: keys_of_a_map_literal_keep_their_kind
+    variants:
+      gql: "MATCH (m:Person {name: 'Mia'})<-[r:KNOWS]-() WITH {msg: m, e: r, t: 19} AS x RETURN x.msg.name AS n, x.msg.w AS mw, x.e.w AS ew, x.t AS t"
+      cypher: "MATCH (m:Person {name: 'Mia'})<-[r:KNOWS]-() WITH {msg: m, e: r, t: 19} AS x RETURN x.msg.name AS n, x.msg.w AS mw, x.e.w AS ew, x.t AS t"
+    expect:
+      rows:
+        - [Mia, null, 4, 19]
+
+  # Alix (w 100) and Gus (w 101); read as edges 0 and 1 they would be w 1 and 2.
+  - name: unwind_of_a_list_literal_of_nodes
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'})-[:KNOWS {w: 1}]->(b) UNWIND [a, b] AS x RETURN x.name AS n, x.w AS w"
+      cypher: "MATCH (a:Person {name: 'Alix'})-[:KNOWS {w: 1}]->(b) UNWIND [a, b] AS x RETURN x.name AS n, x.w AS w"
+    expect:
+      rows:
+        - [Alix, 100]
+        - [Gus, 101]
+
+  # ---------------------------------------------------------------------------
+  # Maps through collect, grouping and UNWIND
+  # ---------------------------------------------------------------------------
+
+  # The shape of LDBC SNB IC7: the first of the collected maps per group.
+  - name: head_of_collected_maps_reads_its_node
+    variants:
+      gql: "MATCH (a:Person {name: 'Jules'})-[:KNOWS]->(b) WITH a, head(collect({msg: b, t: 3})) AS latest RETURN a.name AS a, latest.msg.name AS b, latest.msg.w AS w, latest.t AS t"
+      cypher: "MATCH (a:Person {name: 'Jules'})-[:KNOWS]->(b) WITH a, head(collect({msg: b, t: 3})) AS latest RETURN a.name AS a, latest.msg.name AS b, latest.msg.w AS w, latest.t AS t"
+    expect:
+      rows:
+        - [Jules, Mia, null, 3]
+
+  # LIVES_IN edges have w 6 to 8; read as the nodes with their IDs they would
+  # be the cities (w 104, none, 105).
+  - name: unwind_of_collected_maps_keeps_their_entities
+    variants:
+      gql: "MATCH (a:Person)-[r:LIVES_IN]->(c) WITH collect({p: a, e: r}) AS xs UNWIND xs AS x RETURN x.p.name AS p, x.e.w AS w"
+      cypher: "MATCH (a:Person)-[r:LIVES_IN]->(c) WITH collect({p: a, e: r}) AS xs UNWIND xs AS x RETURN x.p.name AS p, x.e.w AS w"
+    expect:
+      rows:
+        - [Alix, 6]
+        - [Gus, 7]
+        - [Mia, 8]
+
+  - name: grouping_on_a_map_keeps_its_node
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->(b) WITH {p: a} AS x, count(b) AS c RETURN x.p.name AS name, x.p.w AS w, c"
+      cypher: "MATCH (a:Person)-[:KNOWS]->(b) WITH {p: a} AS x, count(b) AS c RETURN x.p.name AS name, x.p.w AS w, c"
+    expect:
+      rows:
+        - [Alix, 100, 2]
+        - [Gus, 101, 1]
+        - [Vincent, 103, 1]
+        - [Jules, null, 1]
+
+  # ---------------------------------------------------------------------------
+  # startNode and endNode
+  # ---------------------------------------------------------------------------
+
+  - name: startnode_and_endnode_are_nodes
+    variants:
+      gql: "MATCH ()-[r:LIVES_IN]->() RETURN startNode(r).name AS s, startNode(r).w AS sw, endNode(r).name AS e, labels(endNode(r)) AS l"
+      cypher: "MATCH ()-[r:LIVES_IN]->() RETURN startNode(r).name AS s, startNode(r).w AS sw, endNode(r).name AS e, labels(endNode(r)) AS l"
+    expect:
+      rows:
+        - [Alix, 100, Amsterdam, "[City]"]
+        - [Gus, 101, Berlin, "[City]"]
+        - [Mia, null, Paris, "[City]"]
+
+  - name: startnode_through_with
+    variants:
+      gql: "MATCH ()-[r:KNOWS {w: 4}]->() WITH startNode(r) AS s RETURN s.name AS n, s.w AS w"
+      cypher: "MATCH ()-[r:KNOWS {w: 4}]->() WITH startNode(r) AS s RETURN s.name AS n, s.w AS w"
+    expect:
+      rows:
+        - [Jules, null]
+
+  # ---------------------------------------------------------------------------
+  # size() of a string
+  # ---------------------------------------------------------------------------
+
+  # Characters, as char_length counts them (openCypher size(); ISO/IEC 39075
+  # CHAR_LENGTH), not UTF-8 bytes (4 for the tulip, 6 for Plzeň).
+  - name: size_of_a_string_counts_characters
+    variants:
+      gql: "RETURN size('🌷') AS tulip, size('Plzeň') AS city, size('Amsterdam') AS ascii"
+      cypher: "RETURN size('🌷') AS tulip, size('Plzeň') AS city, size('Amsterdam') AS ascii"
+    expect:
+      rows:
+        - [1, 5, 9]

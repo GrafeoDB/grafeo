@@ -1,0 +1,64 @@
+# Rosetta: a path search that would hold too many paths fails, with advice
+#
+# Paths multiply with every hop on a graph with cycles. A variable-length
+# pattern whose search would hold more paths at once than a path search may
+# (256 MiB) fails with an error that names what to do instead: an upper
+# bound, DISTINCT targets, or a shortest path search. Before 0.6.0 the search
+# held them all until the process ran out of memory and aborted. The distinct
+# targets and an EXISTS over the same pattern search each node once, and
+# answer.
+#
+# Setup (GQL): Alix and Gus with twelve KNOWS edges each way, so the walks
+# (and the trails) from Alix multiply by twelve with each edge.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Path searches over their memory budget
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: an_unbounded_pattern_over_parallel_cycles_fails_with_advice
+    setup:
+      - "INSERT (:Hub {name: 'Alix'}), (:Hub {name: 'Gus'})"
+      - "MATCH (a:Hub {name: 'Alix'}), (g:Hub {name: 'Gus'}) FOR i IN range(1, 12) INSERT (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(a)"
+    variants:
+      gql: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS]->{1,}(b) RETURN count(b) AS walks"
+      cypher: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS*]->(b) RETURN count(b) AS walks"
+    expect:
+      error: "give the pattern an upper bound"
+
+  - name: the_distinct_targets_of_the_same_pattern_answer
+    setup:
+      - "INSERT (:Hub {name: 'Alix'}), (:Hub {name: 'Gus'})"
+      - "MATCH (a:Hub {name: 'Alix'}), (g:Hub {name: 'Gus'}) FOR i IN range(1, 12) INSERT (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(a)"
+    variants:
+      gql: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS]->{1,}(b) RETURN count(DISTINCT b) AS reached"
+      cypher: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS*]->(b) RETURN count(DISTINCT b) AS reached"
+    expect:
+      rows:
+        - [2]
+
+  - name: an_exists_over_the_same_pattern_answers
+    setup:
+      - "INSERT (:Hub {name: 'Alix'}), (:Hub {name: 'Gus'})"
+      - "MATCH (a:Hub {name: 'Alix'}), (g:Hub {name: 'Gus'}) FOR i IN range(1, 12) INSERT (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(a)"
+    variants:
+      gql: "MATCH (a:Hub {name: 'Alix'}), (b:Hub) WHERE EXISTS { MATCH (a)-[:KNOWS]->{1,}(b) } RETURN b.name"
+      cypher: "MATCH (a:Hub {name: 'Alix'}), (b:Hub) WHERE EXISTS { (a)-[:KNOWS*]->(b) } RETURN b.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: a_bounded_pattern_over_the_same_cycles_counts_its_walks
+    setup:
+      - "INSERT (:Hub {name: 'Alix'}), (:Hub {name: 'Gus'})"
+      - "MATCH (a:Hub {name: 'Alix'}), (g:Hub {name: 'Gus'}) FOR i IN range(1, 12) INSERT (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(a)"
+    variants:
+      gql: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS]->{1,3}(b) RETURN count(b) AS walks"
+    expect:
+      rows:
+        - [1884]

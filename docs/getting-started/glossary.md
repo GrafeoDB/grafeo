@@ -73,7 +73,7 @@ This finds all pairs of people where one knows the other.
 A batch of rows (typically 2048) processed together for efficiency. Grafeo processes data in chunks rather than row-by-row to maximize CPU cache utilization.
 
 ### Morsel
-A unit of work in parallel query execution. The scheduler divides work into morsels that workers can steal from each other for load balancing.
+A unit of work in morsel-driven parallel execution: a range of rows that a worker thread claims, with idle workers stealing morsels from busy ones. Grafeo's queries do not run on morsels yet: each query runs on one thread.
 
 ### Vectorized Execution
 Processing multiple values at once using SIMD (Single Instruction Multiple Data) CPU instructions. Grafeo uses vectorized execution for operations like filtering and aggregation.
@@ -108,9 +108,6 @@ When two transactions try to modify the same entity. The second transaction to c
 
 ### SSI (Serializable Snapshot Isolation)
 The strongest isolation level, detecting potential anomalies like write skew. Enabled with `Serializable` isolation.
-
-### Block-STM
-An optional parallel transaction execution strategy for batch workloads. Executes transactions optimistically and re-executes on conflicts.
 
 ---
 
@@ -204,7 +201,6 @@ Compile-time option enabling/disabling functionality:
 - `gql`, `cypher`, `sparql`, `gremlin`, `graphql`: Query languages
 - `rdf`: RDF triple store support
 - `vector-index`: HNSW similarity search
-- `block-stm`: Parallel batch transactions
 
 ---
 

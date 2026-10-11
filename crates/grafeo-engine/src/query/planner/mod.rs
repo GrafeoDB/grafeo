@@ -25,7 +25,6 @@ use crate::query::plan::{
 };
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::execution::AdaptiveContext;
 use grafeo_core::execution::operators::{
     AggregateFunction as PhysicalAggregateFunction, BinaryFilterOp, FilterExpression, Operator,
     UnaryFilterOp,
@@ -37,12 +36,6 @@ pub struct PhysicalPlan {
     pub operator: Box<dyn Operator>,
     /// Column names for the result.
     pub columns: Vec<String>,
-    /// Adaptive execution context with cardinality estimates.
-    ///
-    /// When adaptive execution is enabled, this context contains estimated
-    /// cardinalities at various checkpoints in the plan. During execution,
-    /// actual row counts are recorded and compared against estimates.
-    pub adaptive_context: Option<AdaptiveContext>,
 }
 
 impl PhysicalPlan {
@@ -55,17 +48,6 @@ impl PhysicalPlan {
     /// Consumes the plan and returns the operator.
     pub fn into_operator(self) -> Box<dyn Operator> {
         self.operator
-    }
-
-    /// Returns the adaptive context, if adaptive execution is enabled.
-    #[must_use]
-    pub fn adaptive_context(&self) -> Option<&AdaptiveContext> {
-        self.adaptive_context.as_ref()
-    }
-
-    /// Takes ownership of the adaptive context.
-    pub fn take_adaptive_context(&mut self) -> Option<AdaptiveContext> {
-        self.adaptive_context.take()
     }
 }
 
@@ -405,35 +387,5 @@ pub(crate) fn value_to_logical_type(value: &grafeo_common::types::Value) -> Logi
         Value::Path { .. } => LogicalType::Any,
         Value::GCounter(_) | Value::OnCounter { .. } => LogicalType::Any,
         _ => LogicalType::Any,
-    }
-}
-
-/// Evaluates a constant logical expression to a Value.
-///
-/// Only handles literals, unary minus on numeric literals, and simple expressions.
-/// Returns an error for runtime-dependent expressions (variables, property accesses, etc.).
-#[cfg(feature = "algos")]
-pub(crate) fn eval_constant_expression(
-    expr: &crate::query::plan::LogicalExpression,
-) -> Result<grafeo_common::types::Value> {
-    use crate::query::plan::LogicalExpression;
-    use grafeo_common::types::Value;
-
-    match expr {
-        LogicalExpression::Literal(val) => Ok(val.clone()),
-        LogicalExpression::Unary {
-            op: crate::query::plan::UnaryOp::Neg,
-            operand,
-        } => {
-            let val = eval_constant_expression(operand)?;
-            match val {
-                Value::Int64(n) => Ok(Value::Int64(-n)),
-                Value::Float64(f) => Ok(Value::Float64(-f)),
-                _ => Err(Error::Internal("Cannot negate non-numeric value".into())),
-            }
-        }
-        _ => Err(Error::Internal(
-            "Procedure argument must be a constant value".into(),
-        )),
     }
 }

@@ -3,6 +3,11 @@
 //! Store-level types (`StoreMemory`, `IndexMemory`, etc.) live in grafeo-common.
 //! This module defines the top-level `MemoryUsage` aggregate and engine-specific
 //! types (`CacheMemory`, `BufferManagerMemory`, `RdfMemory`, `CdcMemory`).
+//!
+//! The breakdowns are read, not built, outside this crate: later releases may
+//! add fields. [`GrafeoDB::memory_usage`](crate::GrafeoDB::memory_usage)
+//! returns one; another crate that needs its own starts from
+//! `MemoryUsage::default()` and sets the fields it fills.
 
 pub use grafeo_common::memory::usage::{
     IndexMemory, MvccMemory, NamedMemory, StoreMemory, StringPoolMemory,
@@ -10,7 +15,27 @@ pub use grafeo_common::memory::usage::{
 use serde::{Deserialize, Serialize};
 
 /// Hierarchical memory usage breakdown for the entire database.
+///
+/// ```
+/// use grafeo_engine::MemoryUsage;
+///
+/// let mut usage = MemoryUsage::default();
+/// usage.store.nodes_bytes = 88;
+/// usage.caches.total_bytes = 19;
+/// usage.compute_total();
+/// assert_eq!(usage.total_bytes, 19);
+/// ```
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::MemoryUsage;
+///
+/// let usage = MemoryUsage {
+///     total_bytes: 88,
+///     ..MemoryUsage::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MemoryUsage {
     /// Total estimated memory usage in bytes.
     pub total_bytes: usize,
@@ -49,7 +74,17 @@ impl MemoryUsage {
 }
 
 /// Cache memory usage.
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::memory_usage::CacheMemory;
+///
+/// let caches = CacheMemory {
+///     cached_plan_count: 3,
+///     ..CacheMemory::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CacheMemory {
     /// Total cache memory.
     pub total_bytes: usize,
@@ -72,7 +107,17 @@ impl CacheMemory {
 ///
 /// Default is empty (all zeros) when the `triple-store` feature is disabled,
 /// so users on LPG-only builds see no RDF line in the hierarchical report.
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::memory_usage::RdfMemory;
+///
+/// let rdf = RdfMemory {
+///     triple_count: 88,
+///     ..RdfMemory::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RdfMemory {
     /// Total estimated RDF memory in bytes.
     pub total_bytes: usize,
@@ -107,7 +152,17 @@ impl RdfMemory {
 /// CDC log memory breakdown.
 ///
 /// Default is empty when the `cdc` feature is disabled.
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::memory_usage::CdcMemory;
+///
+/// let cdc = CdcMemory {
+///     event_count: 19,
+///     ..CdcMemory::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CdcMemory {
     /// Total estimated CDC memory in bytes.
     pub total_bytes: usize,
@@ -126,7 +181,17 @@ impl CdcMemory {
 }
 
 /// Buffer manager tracked allocations.
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::memory_usage::BufferManagerMemory;
+///
+/// let buffer_manager = BufferManagerMemory {
+///     budget_bytes: 88,
+///     ..BufferManagerMemory::default()
+/// };
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BufferManagerMemory {
     /// Budget configured for the buffer manager.
     pub budget_bytes: usize,
@@ -160,25 +225,11 @@ mod tests {
 
     #[test]
     fn compute_total_sums_children() {
+        // The grafeo-common parts are `#[non_exhaustive]` here: set field by
+        // field.
         let mut usage = MemoryUsage {
-            store: StoreMemory {
-                total_bytes: 100,
-                ..Default::default()
-            },
-            indexes: IndexMemory {
-                total_bytes: 200,
-                ..Default::default()
-            },
-            mvcc: MvccMemory {
-                total_bytes: 50,
-                ..Default::default()
-            },
             caches: CacheMemory {
                 total_bytes: 30,
-                ..Default::default()
-            },
-            string_pool: StringPoolMemory {
-                total_bytes: 10,
                 ..Default::default()
             },
             buffer_manager: BufferManagerMemory {
@@ -198,6 +249,10 @@ mod tests {
             },
             ..Default::default()
         };
+        usage.store.total_bytes = 100;
+        usage.indexes.total_bytes = 200;
+        usage.mvcc.total_bytes = 50;
+        usage.string_pool.total_bytes = 10;
         usage.compute_total();
         assert_eq!(usage.total_bytes, 950);
     }

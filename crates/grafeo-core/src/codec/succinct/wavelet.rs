@@ -73,6 +73,30 @@ pub enum WaveletInvariantError {
         /// Alphabet size claimed in the packed header.
         sigma: u64,
     },
+    /// The alphabet size is not the number of symbols, which
+    /// [`WaveletTree::new`] makes it.
+    SigmaMismatch {
+        /// Symbols supplied.
+        symbols_len: usize,
+        /// Alphabet size claimed in the packed header.
+        sigma: u64,
+    },
+    /// A sequence without symbols has an alphabet, or one with symbols
+    /// has none.
+    AlphabetMismatch {
+        /// Declared sequence length.
+        len: usize,
+        /// Symbols supplied.
+        symbols_len: usize,
+    },
+    /// The height is not the number of bits the codes of the alphabet
+    /// take; a code past the alphabet would be read as another symbol.
+    HeightMismatch {
+        /// Tree height declared in the packed metadata.
+        height: usize,
+        /// The height the alphabet implies.
+        expected: usize,
+    },
 }
 
 impl std::fmt::Display for WaveletInvariantError {
@@ -96,6 +120,18 @@ impl std::fmt::Display for WaveletInvariantError {
             Self::SymbolsExceedSigma { symbols_len, sigma } => write!(
                 f,
                 "wavelet symbol table size ({symbols_len}) exceeds sigma ({sigma})"
+            ),
+            Self::SigmaMismatch { symbols_len, sigma } => write!(
+                f,
+                "wavelet sigma ({sigma}) is not the symbol table size ({symbols_len})"
+            ),
+            Self::AlphabetMismatch { len, symbols_len } => write!(
+                f,
+                "wavelet sequence of {len} symbols over an alphabet of {symbols_len}"
+            ),
+            Self::HeightMismatch { height, expected } => write!(
+                f,
+                "wavelet height ({height}) is not the height its alphabet implies ({expected})"
             ),
         }
     }
@@ -187,6 +223,16 @@ impl WaveletTree {
             len: sequence.len(),
             symbols,
             symbol_to_code,
+        }
+    }
+
+    /// The height of a tree over `symbols` distinct symbols: the bits of
+    /// the largest code, at least 1 for a sequence, 0 for none.
+    fn height_for(symbols: usize) -> usize {
+        match symbols {
+            0 => 0,
+            1 => 1,
+            n => (n - 1).bit_width() as usize,
         }
     }
 
@@ -287,9 +333,12 @@ impl WaveletTree {
     /// Returns [`WaveletInvariantError`] if the supplied parts violate
     /// any structural invariant: levels count must match height, every
     /// level's bit count must equal `len`, the symbol table must be
-    /// sorted, and `symbols.len()` must not exceed `sigma`. Without
-    /// these checks malformed packed data could create a tree whose
-    /// `access` and `rank` queries return inconsistent results.
+    /// sorted, `sigma` must be the number of symbols, a sequence has
+    /// symbols exactly when it is not empty, and the height must be the
+    /// one [`WaveletTree::new`] gives that many symbols. Without these
+    /// checks malformed packed data could create a tree whose `access`
+    /// and `rank` queries return inconsistent results, or walk more
+    /// levels than a code has bits.
     pub fn from_packed_parts(
         levels: Vec<SuccinctBitVector>,
         height: usize,
@@ -320,12 +369,30 @@ impl WaveletTree {
                 sigma,
             });
         }
+        if (symbols.len() as u64) != sigma {
+            return Err(WaveletInvariantError::SigmaMismatch {
+                symbols_len: symbols.len(),
+                sigma,
+            });
+        }
         // Symbols must be sorted ascending so that index = code maps
         // back to the original alphabet (mirrors `WaveletTree::new`).
         for i in 1..symbols.len() {
             if symbols[i - 1] >= symbols[i] {
                 return Err(WaveletInvariantError::SymbolsNotSorted { index: i });
             }
+        }
+        if (len == 0) != symbols.is_empty() {
+            return Err(WaveletInvariantError::AlphabetMismatch {
+                len,
+                symbols_len: symbols.len(),
+            });
+        }
+        // The height `new` gives the alphabet: a code then names a symbol
+        // or none, never past the codes, and queries walk at most 64 levels.
+        let expected = Self::height_for(symbols.len());
+        if height != expected {
+            return Err(WaveletInvariantError::HeightMismatch { height, expected });
         }
 
         let mut symbol_to_code = hashbrown::HashMap::with_capacity(symbols.len());

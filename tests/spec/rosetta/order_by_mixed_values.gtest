@@ -4,8 +4,9 @@
 # maps, lists, paths, temporal values, strings, booleans, numbers, then null.
 # Integers and floats compare as numbers, with NaN after infinity; lists
 # compare element by element and maps by size, keys and values. Nulls go
-# last ascending and first descending, unless NULLS FIRST or NULLS LAST (GQL)
-# says otherwise, in either direction.
+# last in both directions in GQL (#571), and last ascending and first
+# descending in Cypher, unless NULLS FIRST or NULLS LAST (GQL) says otherwise,
+# in either direction.
 
 meta:
   model: lpg
@@ -37,7 +38,6 @@ tests:
 
   - name: mixed_types_descending
     variants:
-      gql: "UNWIND [3, 'a', 2.5, true, null, [1], {k: 1}] AS x RETURN x ORDER BY x DESC"
       cypher: "UNWIND [3, 'a', 2.5, true, null, [1], {k: 1}] AS x RETURN x ORDER BY x DESC"
     expect:
       ordered: true
@@ -49,6 +49,19 @@ tests:
         - [a]
         - ["[1]"]
         - ["{k: 1}"]
+
+  - name: mixed_types_descending_nulls_last_in_gql
+    query: "UNWIND [3, 'a', 2.5, true, null, [1], {k: 1}] AS x RETURN x ORDER BY x DESC"
+    expect:
+      ordered: true
+      rows:
+        - [3]
+        - [2.5]
+        - [true]
+        - [a]
+        - ["[1]"]
+        - ["{k: 1}"]
+        - [null]
 
   - name: the_order_does_not_depend_on_the_input_order
     variants:
@@ -230,7 +243,6 @@ tests:
 
   - name: nulls_first_by_default_descending
     variants:
-      gql: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x DESC"
       cypher: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x DESC"
     expect:
       ordered: true
@@ -239,6 +251,24 @@ tests:
         - [3]
         - [2]
         - [1]
+
+  - name: nulls_last_by_default_descending_in_gql
+    query: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x DESC"
+    expect:
+      ordered: true
+      rows:
+        - [3]
+        - [2]
+        - [1]
+        - [null]
+
+  - name: nulls_last_by_default_descending_top_k_in_gql
+    query: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x DESC LIMIT 2"
+    expect:
+      ordered: true
+      rows:
+        - [3]
+        - [2]
 
   - name: nulls_last_descending
     query: "UNWIND [1, null, 3, 2] AS x RETURN x ORDER BY x DESC NULLS LAST"

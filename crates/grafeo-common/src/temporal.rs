@@ -173,16 +173,17 @@ impl<T> VersionLog<T> {
     ///
     /// Retains the latest entry with epoch < `min_epoch` (the baseline visible
     /// to readers at `min_epoch`) plus all entries at or after `min_epoch`.
-    /// If all entries are before `min_epoch`, keeps only the last one.
-    pub fn gc(&mut self, min_epoch: EpochId) {
+    /// If all entries are before `min_epoch`, keeps only the last one. Returns
+    /// how many entries it dropped.
+    pub fn gc(&mut self, min_epoch: EpochId) -> usize {
         if self.entries.len() <= 1 {
-            return;
+            return 0;
         }
         // Find the first entry at or after min_epoch
         let first_recent = self.entries.partition_point(|(e, _)| *e < min_epoch);
         if first_recent == 0 {
             // All entries are at or after min_epoch: nothing to GC
-            return;
+            return 0;
         }
         // Keep one baseline (the entry just before first_recent) plus all recent entries.
         // The baseline is at index first_recent - 1.
@@ -190,6 +191,7 @@ impl<T> VersionLog<T> {
         if baseline > 0 {
             self.entries.drain(..baseline);
         }
+        baseline
     }
 
     /// Returns the number of versions in the log.

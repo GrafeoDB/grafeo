@@ -244,21 +244,26 @@ impl Operator for RangeScanOperator {
     }
 }
 
-#[cfg(all(test, feature = "compact-store"))]
+#[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
-    use crate::graph::compact::CompactStore;
-    use crate::graph::compact::builder::CompactStoreBuilder;
+    use crate::graph::lpg::LpgStore;
+
+    /// A store holding, per `(label, property, values)`, one node with that
+    /// label for each value of the property.
+    fn store_with(tables: &[(&str, &str, &[i64])]) -> Arc<dyn GraphStoreSearch> {
+        let store = LpgStore::new().unwrap();
+        for (label, property, values) in tables {
+            for value in *values {
+                let id = store.create_node(&[label]);
+                store.set_node_property(id, property, Value::Int64(*value));
+            }
+        }
+        Arc::new(store)
+    }
 
     fn build_person_store() -> Arc<dyn GraphStoreSearch> {
-        Arc::new(
-            CompactStoreBuilder::new()
-                .node_table("Person", |t| {
-                    t.column_bitpacked("age", &[25, 30, 35, 40, 45], 6)
-                })
-                .build()
-                .unwrap(),
-        )
+        store_with(&[("Person", "age", &[25, 30, 35, 40, 45])])
     }
 
     #[test]
@@ -282,13 +287,8 @@ mod tests {
 
     #[test]
     fn gus_range_scan_chunks_in_capacity_sized_batches() {
-        let values: Vec<u64> = (0..100u64).collect();
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(
-            CompactStoreBuilder::new()
-                .node_table("Big", |t| t.column_bitpacked("v", &values, 7))
-                .build()
-                .unwrap(),
-        );
+        let values: Vec<i64> = (0..100).collect();
+        let store = store_with(&[("Big", "v", &values)]);
 
         let mut op = RangeScanOperator::new(store, "v", None, None, true, true, 10);
 
@@ -305,13 +305,8 @@ mod tests {
 
     #[test]
     fn vincent_range_scan_with_limit_short_circuits() {
-        let values: Vec<u64> = (0..1000u64).collect();
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(
-            CompactStoreBuilder::new()
-                .node_table("Big", |t| t.column_bitpacked("v", &values, 10))
-                .build()
-                .unwrap(),
-        );
+        let values: Vec<i64> = (0..1000).collect();
+        let store = store_with(&[("Big", "v", &values)]);
 
         let mut op = RangeScanOperator::new(store, "v", None, None, true, true, 64).with_limit(5);
 
@@ -382,13 +377,7 @@ mod tests {
     fn hans_range_scan_with_label_filter_intersects() {
         // Two labels carry the same property name; label filter must
         // restrict results to one label only.
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(
-            CompactStoreBuilder::new()
-                .node_table("A", |t| t.column_bitpacked("v", &[1, 2, 3], 4))
-                .node_table("B", |t| t.column_bitpacked("v", &[1, 2, 3], 4))
-                .build()
-                .unwrap(),
-        );
+        let store = store_with(&[("A", "v", &[1, 2, 3]), ("B", "v", &[1, 2, 3])]);
 
         let mut op = RangeScanOperator::new(Arc::clone(&store), "v", None, None, true, true, 2048)
             .with_label_filter("A");
@@ -405,12 +394,7 @@ mod tests {
 
     #[test]
     fn beatrix_range_scan_label_filter_with_disjoint_label_yields_nothing() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(
-            CompactStoreBuilder::new()
-                .node_table("A", |t| t.column_bitpacked("v", &[1, 2, 3], 4))
-                .build()
-                .unwrap(),
-        );
+        let store = store_with(&[("A", "v", &[1, 2, 3])]);
 
         let mut op =
             RangeScanOperator::new(store, "v", None, None, true, true, 2048).with_label_filter("Z");
@@ -420,12 +404,9 @@ mod tests {
     }
 
     #[test]
-    fn django_range_scan_default_trait_impl_works_for_non_compact_stores() {
-        // Validates the default `find_nodes_in_range_iter` impl on
-        // `GraphStoreSearch`: a CompactStore exposed as `Arc<dyn>` should
-        // STILL hit the override; the trait dispatch is correct.
-        // (The non-CompactStore path is exercised via the LpgStore tests
-        // separately; here we assert the dyn-dispatch wiring is sound.)
+    fn django_range_scan_through_a_dyn_store_finds_every_match() {
+        // The store reached as `Arc<dyn GraphStoreSearch>`: the trait
+        // dispatch of `find_nodes_in_range_iter` finds every match.
         let store = build_person_store();
         let mut op = RangeScanOperator::new(
             Arc::clone(&store),
@@ -440,11 +421,8 @@ mod tests {
         assert_eq!(chunk.row_count(), 5);
     }
 
-    /// Sanity check that the trait dispatch reaches the CompactStore
-    /// override (and not the eager default) for a CompactStore-backed
-    /// `Arc<dyn GraphStoreSearch>`. We can't easily observe block skip
-    /// from outside, so we verify behavioral equivalence: the iterator
-    /// must yield the same set as the eager `find_nodes_in_range`.
+    /// The lazy `find_nodes_in_range_iter` of an `Arc<dyn GraphStoreSearch>`
+    /// yields the same set as the eager `find_nodes_in_range`.
     #[test]
     fn tarantino_dyn_dispatch_yields_same_results_as_eager() {
         let store = build_person_store();
@@ -459,8 +437,4 @@ mod tests {
         eager.sort_unstable();
         assert_eq!(lazy_sorted, eager);
     }
-
-    /// Helper to silence "unused import" when compact-store gates change.
-    #[allow(dead_code)]
-    fn _compact_store_marker(_: Arc<CompactStore>) {}
 }

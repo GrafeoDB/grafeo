@@ -152,7 +152,6 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: ask_with_property_path
-    skip: "ASK with property path"
     setup:
       - |
         INSERT DATA {
@@ -163,11 +162,11 @@ tests:
       PREFIX ex: <http://ex.org/>
       ASK { <http://ex.org/p/alix> ex:knows+ <http://ex.org/p/vincent> }
     expect:
+      columns: [boolean]
       rows:
         - [true]
 
   - name: ask_negative
-    skip: "ASK returns false"
     setup:
       - |
         INSERT DATA {
@@ -177,6 +176,7 @@ tests:
       PREFIX ex: <http://ex.org/>
       ASK { <http://ex.org/p/alix> ex:knows <http://ex.org/p/vincent> }
     expect:
+      columns: [boolean]
       rows:
         - [false]
 

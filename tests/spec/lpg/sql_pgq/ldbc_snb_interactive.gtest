@@ -292,7 +292,6 @@ tests:
 
   # IC3. Friends and friends of friends that have been to given countries.
   - name: ic3_friends_in_countries_x_and_y
-    skip: "an aggregate over a CASE expression breaks GROUP BY: the grouping columns come out as 0 (friendFirstName, friendLastName)"
     params:
       personId: 228
       countryXName: "Uruguay"
@@ -325,7 +324,6 @@ tests:
 
   # IC4. New topics.
   - name: ic4_new_topics
-    skip: "an aggregate over a CASE expression breaks GROUP BY: no rows"
     params:
       personId: 228
       startDate: 1272672000000
@@ -356,7 +354,6 @@ tests:
 
   # IC5. New groups.
   - name: ic5_new_groups
-    skip: "LIMIT is applied before GROUP BY: 3 of the 16 forums are missing"
     params:
       personId: 228
       minDate: 1275350400000
@@ -393,7 +390,6 @@ tests:
 
   # IC6. Tag co-occurrence.
   - name: ic6_tag_co_occurrence
-    skip: "a property map on a later node of the pattern is ignored ((:Tag {name: $tagName})), so every post of a friend counts"
     params:
       personId: 228
       tagName: "Luis_Horna"
@@ -448,7 +444,6 @@ tests:
 
   # IC9. Recent messages by friends or friends of friends.
   - name: ic9_recent_messages_by_friends_of_friends
-    skip: "LIMIT is applied before DISTINCT: 10 rows instead of 20"
     params:
       personId: 228
       maxDate: 1285891200000
@@ -490,7 +485,6 @@ tests:
 
   # IC11. Job referral.
   - name: ic11_job_referral
-    skip: "a property map on a later node of the pattern is ignored ((:Country {name: $countryName})), so every company counts"
     params:
       personId: 228
       countryName: "Philippines"

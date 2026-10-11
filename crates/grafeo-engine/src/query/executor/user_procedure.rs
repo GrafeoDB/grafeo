@@ -1,20 +1,59 @@
 //! Operator for executing user-defined stored procedures.
 //!
-//! Re-parses the stored GQL body, substitutes parameters, and executes
-//! as a sub-query using a fresh planner/executor pipeline.
+//! `bind_body` puts the call's arguments into the stored GQL body, and
+//! translates and binds it when the call is planned; the operator plans and
+//! executes it as a sub-query using a fresh planner/executor pipeline.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, TransactionId, Value};
+use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::DataChunk;
-use grafeo_core::execution::operators::{Operator, OperatorError, OperatorResult, WriteCounter};
+use grafeo_core::execution::operators::{
+    Operator, OperatorError, OperatorResult, Recording, WriteCounter,
+};
 use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
 
 use crate::catalog::Catalog;
 use crate::database::QueryResult;
+use crate::query::binder::Binder;
+use crate::query::plan::LogicalPlan;
 use crate::query::planner::Planner;
 use crate::transaction::TransactionManager;
+
+/// The body of procedure `name` with the call's arguments in place of its
+/// parameters, translated and bound as a statement is, so a mistake in it is
+/// found when the call is planned, before anything runs.
+///
+/// # Errors
+///
+/// Returns the syntax or semantic error of the body (an unbound variable,
+/// for one), its message naming the procedure.
+pub(crate) fn bind_body(
+    name: &str,
+    body: &str,
+    params: &HashMap<String, Value>,
+) -> Result<LogicalPlan> {
+    let mut body = body.to_string();
+    for (param, value) in params {
+        body = body.replace(&format!("${param}"), &value_to_gql_literal(value));
+    }
+    let in_procedure = |error: Error| match error {
+        Error::Query(mut query) => {
+            query.message = format!("procedure '{name}': {}", query.message);
+            Error::Query(query)
+        }
+        other => other,
+    };
+    let mut plan = crate::query::translators::gql::translate(&body).map_err(in_procedure)?;
+    Binder::new().bind(&plan).map_err(in_procedure)?;
+    // A pattern through a node or edge bound before is checked, as in a
+    // session's plan (the optimizer's first pass; the body skips the
+    // optimizer).
+    plan.root = crate::query::optimizer::close_cycles(plan.root);
+    Ok(plan)
+}
 
 /// Execution context shared across sub-query operators.
 pub struct ProcedureContext {
@@ -32,6 +71,9 @@ pub struct ProcedureContext {
     pub catalog: Option<Arc<Catalog>>,
     /// The calling statement's write counter: the body's writes count there.
     pub write_counter: Arc<WriteCounter>,
+    /// The calling statement's recording: the body's writes are its
+    /// transaction's.
+    pub recording: Option<Recording>,
     /// The database's projections, so a `CALL ... {projection: ...}` in the
     /// body runs as it does at the top level.
     #[cfg(feature = "lpg")]
@@ -41,16 +83,13 @@ pub struct ProcedureContext {
 /// An operator that executes a user-defined stored procedure.
 ///
 /// On first call to `next()`, it:
-/// 1. Parses the stored GQL body
-/// 2. Substitutes parameter values
-/// 3. Executes the query via a sub-planner
-/// 4. Buffers the results
-/// 5. Returns results in chunks
+/// 1. Plans the bound body (`bind_body`) with a sub-planner
+/// 2. Executes it
+/// 3. Buffers the results
+/// 4. Returns results in chunks
 pub struct UserProcedureOperator {
-    /// Raw GQL body of the procedure.
-    body: String,
-    /// Parameter name to value mapping.
-    params: HashMap<String, Value>,
+    /// The bound body, with the call's arguments in place.
+    plan: LogicalPlan,
     /// Return column names (from procedure definition).
     return_columns: Vec<String>,
     /// YIELD column filter (if specified by caller).
@@ -69,6 +108,8 @@ pub struct UserProcedureOperator {
     catalog: Option<Arc<Catalog>>,
     /// The calling statement's write counter.
     write_counter: Arc<WriteCounter>,
+    /// The calling statement's recording.
+    recording: Option<Recording>,
     /// The database's projections, for `CALL ... {projection: ...}` in the body.
     #[cfg(feature = "lpg")]
     projections: Option<crate::session::ProjectionRegistry>,
@@ -81,10 +122,10 @@ pub struct UserProcedureOperator {
 }
 
 impl UserProcedureOperator {
-    /// Creates a new user procedure operator.
+    /// Creates a new user procedure operator running `plan`, a body
+    /// `bind_body` bound.
     pub fn new(
-        body: String,
-        params: HashMap<String, Value>,
+        plan: LogicalPlan,
         return_columns: Vec<String>,
         yield_columns: Option<Vec<String>>,
         ctx: ProcedureContext,
@@ -95,8 +136,7 @@ impl UserProcedureOperator {
             return_columns.clone()
         };
         Self {
-            body,
-            params,
+            plan,
             return_columns,
             yield_columns,
             store: ctx.store,
@@ -106,6 +146,7 @@ impl UserProcedureOperator {
             viewing_epoch: ctx.viewing_epoch,
             catalog: ctx.catalog,
             write_counter: ctx.write_counter,
+            recording: ctx.recording,
             #[cfg(feature = "lpg")]
             projections: ctx.projections,
             result_rows: None,
@@ -115,23 +156,8 @@ impl UserProcedureOperator {
     }
 
     /// Executes the stored procedure body and buffers the results.
-    fn execute_body(&mut self) -> Result<(), OperatorError> {
-        // Substitute parameters into the body
-        let mut body = self.body.clone();
-        for (name, value) in &self.params {
-            let placeholder = format!("${name}");
-            let replacement = value_to_gql_literal(value);
-            body = body.replace(&placeholder, &replacement);
-        }
-
-        // Use the module-level translate function
-        let mut logical_plan = crate::query::translators::gql::translate(&body).map_err(|e| {
-            OperatorError::Execution(format!("Failed to translate procedure body: {e}"))
-        })?;
-        // A pattern through a node or edge bound before is checked, as in a
-        // session's plan (the optimizer's first pass; the body skips the
-        // optimizer).
-        logical_plan.root = crate::query::optimizer::close_cycles(logical_plan.root);
+    fn execute_body(&mut self) -> std::result::Result<(), OperatorError> {
+        let logical_plan = &self.plan;
 
         // Plan physical operators
         let planner = if let Some(ref tx_mgr) = self.transaction_manager {
@@ -145,7 +171,7 @@ impl UserProcedureOperator {
             if let Some(ref cat) = self.catalog {
                 p = p.with_catalog(Arc::clone(cat));
             }
-            p
+            p.with_recording(self.recording.clone())
         } else {
             let mut p = Planner::new(Arc::clone(&self.store));
             if let Some(ref cat) = self.catalog {
@@ -160,16 +186,14 @@ impl UserProcedureOperator {
             None => planner,
         };
 
-        let physical = planner
-            .plan(&logical_plan)
-            .map_err(|e| OperatorError::Execution(format!("Failed to plan procedure body: {e}")))?;
+        let physical = planner.plan(logical_plan).map_err(OperatorError::from)?;
 
         // Execute
         let executor = crate::query::executor::Executor::with_columns(physical.columns().to_vec());
         let mut root_op = physical.into_operator();
         let result: QueryResult = executor
             .execute(root_op.as_mut())
-            .map_err(|e| OperatorError::Execution(format!("Procedure execution failed: {e}")))?;
+            .map_err(OperatorError::from)?;
 
         // Map result columns to expected return columns, handling YIELD filtering
         let column_indices = if let Some(ref yields) = self.yield_columns {

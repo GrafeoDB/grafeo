@@ -1,8 +1,8 @@
-//! A 0.5.x file or WAL directory in a build without the `lpg` feature (such
-//! as the `rdf` profile), which can neither read it nor migrate it to the 0.6
-//! format: a read-write or read-only open fails with an error saying so and
-//! naming the feature a build needs to migrate it, and leaves the database as
-//! it is. Run it with:
+//! A 0.5.x file or WAL directory in a build without the `lpg` feature (and so
+//! without `triple-store`, which enables it), which can neither read it nor
+//! migrate it to the 0.6 format: a read-write or read-only open fails with an
+//! error saying so and naming the feature a build needs to migrate it, and
+//! leaves the database as it is. Run it with:
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --no-default-features --features gql,grafeo-file,wal \

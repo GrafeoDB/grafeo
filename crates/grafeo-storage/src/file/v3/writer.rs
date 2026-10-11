@@ -281,7 +281,7 @@ impl<'a> CheckpointWriter<'a> {
         let what = format!("chunk of section type {section_type}, kind {kind}");
         let stored = self.store(
             &what,
-            || super::cipher::chunk_aad_parts(section_type, kind, 0, 0, 0),
+            || super::cipher::chunk_aad_parts(section_type, kind, 0, 0, 0, 0),
             bytes,
         )?;
         let version = match self.current {

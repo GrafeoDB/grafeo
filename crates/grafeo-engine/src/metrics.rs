@@ -295,11 +295,6 @@ pub struct MetricsRegistry {
     // -- WAL --
     pub(crate) wal_records_written: AtomicU64,
     pub(crate) wal_flush_duration: AtomicHistogram,
-
-    // -- Block-STM --
-    pub(crate) block_stm_batches: AtomicU64,
-    pub(crate) block_stm_reexecutions: AtomicU64,
-    pub(crate) block_stm_sequential_fallbacks: AtomicU64,
 }
 
 impl MetricsRegistry {
@@ -330,10 +325,6 @@ impl MetricsRegistry {
 
             wal_records_written: AtomicU64::new(0),
             wal_flush_duration: AtomicHistogram::new(LATENCY_BUCKETS),
-
-            block_stm_batches: AtomicU64::new(0),
-            block_stm_reexecutions: AtomicU64::new(0),
-            block_stm_sequential_fallbacks: AtomicU64::new(0),
         }
     }
 
@@ -370,11 +361,6 @@ impl MetricsRegistry {
             gc_duration_mean_ms: self.gc_duration.mean(),
             wal_records_written: self.wal_records_written.load(Ordering::Relaxed),
             wal_flush_duration_mean_ms: self.wal_flush_duration.mean(),
-            block_stm_batches: self.block_stm_batches.load(Ordering::Relaxed),
-            block_stm_reexecutions: self.block_stm_reexecutions.load(Ordering::Relaxed),
-            block_stm_sequential_fallbacks: self
-                .block_stm_sequential_fallbacks
-                .load(Ordering::Relaxed),
             cache_hits: 0,
             cache_misses: 0,
             cache_size: 0,
@@ -572,23 +558,6 @@ impl MetricsRegistry {
             &self.wal_flush_duration,
         );
 
-        // Block-STM metrics
-        counter!(
-            "grafeo_block_stm_batches",
-            "Parallel batches executed.",
-            self.block_stm_batches.load(Ordering::Relaxed)
-        );
-        counter!(
-            "grafeo_block_stm_reexecutions",
-            "Operations re-executed due to conflicts.",
-            self.block_stm_reexecutions.load(Ordering::Relaxed)
-        );
-        counter!(
-            "grafeo_block_stm_sequential_fallbacks",
-            "Batches that fell back to sequential.",
-            self.block_stm_sequential_fallbacks.load(Ordering::Relaxed)
-        );
-
         out
     }
 
@@ -637,11 +606,6 @@ impl MetricsRegistry {
 
         self.wal_records_written.store(0, Ordering::Relaxed);
         self.wal_flush_duration.reset();
-
-        self.block_stm_batches.store(0, Ordering::Relaxed);
-        self.block_stm_reexecutions.store(0, Ordering::Relaxed);
-        self.block_stm_sequential_fallbacks
-            .store(0, Ordering::Relaxed);
     }
 }
 
@@ -656,7 +620,10 @@ impl Default for MetricsRegistry {
 // ---------------------------------------------------------------------------
 
 /// A serializable point-in-time view of all metrics.
+///
+/// Read, not built, outside this crate: later releases may add metrics.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct MetricsSnapshot {
     // -- Query --
     /// Total number of queries executed.
@@ -723,14 +690,6 @@ pub struct MetricsSnapshot {
     pub wal_records_written: u64,
     /// Mean WAL flush duration in milliseconds.
     pub wal_flush_duration_mean_ms: f64,
-
-    // -- Block-STM --
-    /// Total parallel batches executed.
-    pub block_stm_batches: u64,
-    /// Total operations re-executed due to conflicts.
-    pub block_stm_reexecutions: u64,
-    /// Batches that fell back to sequential execution.
-    pub block_stm_sequential_fallbacks: u64,
 
     // -- Cache --
     /// Total plan cache hits (parsed + optimized).

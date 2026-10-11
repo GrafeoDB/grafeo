@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use super::expand::visible_edges_from;
 use super::{FactorizedOperator, Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::execution::factorized_chunk::FactorizedChunk;
@@ -116,45 +117,18 @@ impl FactorizedExpandOperator {
         self
     }
 
-    /// Gets neighbors for a source node with type and visibility filtering.
+    /// Gets neighbors for a source node with type and visibility filtering
+    /// (see [`visible_edges_from`]).
     fn get_neighbors(&self, source_id: NodeId) -> Vec<(NodeId, EdgeId)> {
-        let epoch = self.viewing_epoch;
-        let transaction_id = self.transaction_id;
-        let use_versioned = !self.read_only;
-
-        self.store
-            .edges_from(source_id, self.direction)
-            .into_iter()
-            .filter(|(target_id, edge_id)| {
-                // Filter by edge type if specified
-                let type_matches = if self.edge_types.is_empty() {
-                    true
-                } else if let Some(actual_type) = self.store.edge_type(*edge_id) {
-                    self.edge_types
-                        .iter()
-                        .any(|t| actual_type.as_str().eq_ignore_ascii_case(t.as_str()))
-                } else {
-                    false
-                };
-
-                if !type_matches {
-                    return false;
-                }
-
-                // Filter by visibility
-                if let Some(epoch) = epoch {
-                    if use_versioned && let Some(tx) = transaction_id {
-                        self.store.is_edge_visible_versioned(*edge_id, epoch, tx)
-                            && self.store.is_node_visible_versioned(*target_id, epoch, tx)
-                    } else {
-                        self.store.is_edge_visible_at_epoch(*edge_id, epoch)
-                            && self.store.is_node_visible_at_epoch(*target_id, epoch)
-                    }
-                } else {
-                    true
-                }
-            })
-            .collect()
+        visible_edges_from(
+            self.store.as_ref(),
+            source_id,
+            self.direction,
+            &self.edge_types,
+            self.viewing_epoch,
+            self.transaction_id,
+            self.read_only,
+        )
     }
 
     /// Processes an input chunk and produces a factorized chunk with expansion.
@@ -173,7 +147,7 @@ impl FactorizedExpandOperator {
 
         for row_idx in 0..row_count {
             let source_id = source_col.get_node_id(row_idx).ok_or_else(|| {
-                OperatorError::Execution("Expected node ID in source column".into())
+                OperatorError::Internal("Expected node ID in source column".into())
             })?;
 
             let neighbors = self.get_neighbors(source_id);
@@ -450,15 +424,11 @@ impl FactorizedExpandChain {
         direction: Direction,
         edge_types: Vec<String>,
     ) -> Result<(), OperatorError> {
-        let epoch = self.viewing_epoch;
-        let transaction_id = self.transaction_id;
-        let use_versioned = !self.read_only;
-
         // Get the deepest level to find source nodes
         let deepest_level = chunk.level_count() - 1;
         let level = chunk
             .level(deepest_level)
-            .ok_or_else(|| OperatorError::Execution("No levels in factorized chunk".into()))?;
+            .ok_or_else(|| OperatorError::Internal("No levels in factorized chunk".into()))?;
 
         // Check if the source column exists in this level
         // If not, it means the previous expansion produced no edges (no level 1 was added)
@@ -479,44 +449,19 @@ impl FactorizedExpandChain {
         // Iterate through all physical values in the source column
         for idx in 0..source_len {
             let source_id = source_col.data().get_node_id(idx).ok_or_else(|| {
-                OperatorError::Execution("Expected node ID in source column".into())
+                OperatorError::Internal("Expected node ID in source column".into())
             })?;
 
             // Get neighbors with filtering
-            let neighbors: Vec<(NodeId, EdgeId)> = self
-                .store
-                .edges_from(source_id, direction)
-                .into_iter()
-                .filter(|(target_id, edge_id)| {
-                    // Filter by edge type if specified
-                    let type_matches = if edge_types.is_empty() {
-                        true
-                    } else if let Some(actual_type) = self.store.edge_type(*edge_id) {
-                        edge_types
-                            .iter()
-                            .any(|t| actual_type.as_str().eq_ignore_ascii_case(t.as_str()))
-                    } else {
-                        false
-                    };
-
-                    if !type_matches {
-                        return false;
-                    }
-
-                    // Filter by visibility
-                    if let Some(e) = epoch {
-                        if use_versioned && let Some(tx) = transaction_id {
-                            self.store.is_edge_visible_versioned(*edge_id, e, tx)
-                                && self.store.is_node_visible_versioned(*target_id, e, tx)
-                        } else {
-                            self.store.is_edge_visible_at_epoch(*edge_id, e)
-                                && self.store.is_node_visible_at_epoch(*target_id, e)
-                        }
-                    } else {
-                        true
-                    }
-                })
-                .collect();
+            let neighbors = visible_edges_from(
+                self.store.as_ref(),
+                source_id,
+                direction,
+                &edge_types,
+                self.viewing_epoch,
+                self.transaction_id,
+                self.read_only,
+            );
 
             for (target_id, edge_id) in neighbors {
                 edge_ids.push_edge_id(edge_id);
@@ -687,11 +632,7 @@ impl LazyFactorizedChainOperator {
 
         // Execute each expand step
         for step in &self.steps {
-            chain = chain
-                .expand(step.source_column, step.direction, step.edge_types.clone())
-                .map_err(|e| {
-                    OperatorError::Execution(format!("Factorized expand failed: {}", e))
-                })?;
+            chain = chain.expand(step.source_column, step.direction, step.edge_types.clone())?;
         }
 
         // Return the factorized result (not flattened)

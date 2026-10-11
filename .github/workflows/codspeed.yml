@@ -33,12 +33,18 @@ jobs:
           cargo codspeed build --all-features \
             -p grafeo-common --bench arena_bench \
             -p grafeo-core --bench index_bench \
+                           --bench store_apply \
             -p grafeo-engine --bench query_bench \
                              --bench serialization_bench \
-                             --bench regression_bench
+                             --bench regression_bench \
+                             --bench write_path_bench
 
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
+        env:
+          # The write-path bench at a tenth of its sizes: simulation counts
+          # instructions, so smaller batches keep the run short.
+          GRAFEO_BENCH_SCALE: '10'
         with:
           mode: simulation
           run: cargo codspeed run

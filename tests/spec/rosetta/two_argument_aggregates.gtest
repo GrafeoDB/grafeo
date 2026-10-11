@@ -1,0 +1,113 @@
+# Rosetta: aggregates that take two arguments
+#
+# The binary set functions take a dependent and an independent value, in that
+# order (ISO/IEC 9075-2 <binary set function>: COVAR_SAMP(y, x), REGR_SLOPE(y,
+# x), ...), PERCENTILE_DISC and PERCENTILE_CONT take the value and the
+# percentile, and LISTAGG the value and the separator. SQL/PGQ dropped the
+# second argument: COVAR_SAMP gave null, REGR_COUNT 0, PERCENTILE_DISC null
+# and LISTAGG an empty string; Cypher dropped the second argument of the
+# binary set functions and the separator of listagg and group_concat. LISTAGG
+# joins with a comma unless it names a separator, group_concat with a space,
+# in every language.
+#
+# Setup (GQL): (x, y) = (3, 9), (19, 41), (88, 179), on the line y = 2x + 3,
+# all in group g = 'g'. Sxx = 4080.666..., so COVAR_SAMP(y, x) = 2 * Sxx / 2 =
+# 4080.666..., COVAR_POP(y, x) = 2 * Sxx / 3 = 2720.444..., REGR_SLOPE 2 and
+# REGR_INTERCEPT 3.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Aggregates that take two arguments
+  dataset: empty
+  requires: [sql-pgq, cypher]
+
+tests:
+
+  - name: covariances_and_regression_of_a_line
+    setup:
+      - "INSERT (:P {g: 'g', x: 3, y: 9}), (:P {g: 'g', x: 19, y: 41}), (:P {g: 'g', x: 88, y: 179})"
+    variants:
+      gql: "MATCH (p:P) RETURN covar_samp(p.y, p.x) AS cs, covar_pop(p.y, p.x) AS cp, regr_count(p.y, p.x) AS n, regr_slope(p.y, p.x) AS s, regr_intercept(p.y, p.x) AS i"
+      cypher: "MATCH (p:P) RETURN covar_samp(p.y, p.x) AS cs, covar_pop(p.y, p.x) AS cp, regr_count(p.y, p.x) AS n, regr_slope(p.y, p.x) AS s, regr_intercept(p.y, p.x) AS i"
+      sql-pgq: "SELECT COVAR_SAMP(y, x) AS cs, COVAR_POP(y, x) AS cp, REGR_COUNT(y, x) AS n, REGR_SLOPE(y, x) AS s, REGR_INTERCEPT(y, x) AS i FROM GRAPH_TABLE (MATCH (p:P) COLUMNS (p.x AS x, p.y AS y))"
+    expect:
+      precision: 9
+      rows:
+        - [4080.6666666666665, 2720.4444444444443, 3, 2, 3]
+
+  - name: covariance_per_group
+    setup:
+      - "INSERT (:P {g: 'g', x: 3, y: 9}), (:P {g: 'g', x: 19, y: 41}), (:P {g: 'g', x: 88, y: 179}), (:P {g: 'h', x: 3, y: 3}), (:P {g: 'h', x: 19, y: 3})"
+    variants:
+      gql: "MATCH (p:P) RETURN p.g AS g, covar_samp(p.y, p.x) AS cs, regr_count(p.y, p.x) AS n ORDER BY g"
+      cypher: "MATCH (p:P) RETURN p.g AS g, covar_samp(p.y, p.x) AS cs, regr_count(p.y, p.x) AS n ORDER BY g"
+      sql-pgq: "SELECT g, COVAR_SAMP(y, x) AS cs, REGR_COUNT(y, x) AS n FROM GRAPH_TABLE (MATCH (p:P) COLUMNS (p.g AS g, p.x AS x, p.y AS y)) GROUP BY g ORDER BY g"
+    expect:
+      ordered: true
+      precision: 9
+      rows:
+        - [g, 4080.6666666666665, 3]
+        - [h, 0, 2]
+
+  - name: a_two_argument_aggregate_in_having
+    setup:
+      - "INSERT (:P {g: 'g', x: 3, y: 9}), (:P {g: 'g', x: 19, y: 41}), (:P {g: 'g', x: 88, y: 179}), (:P {g: 'h', x: 3, y: 3}), (:P {g: 'h', x: 19, y: 3})"
+    variants:
+      sql-pgq: "SELECT g FROM GRAPH_TABLE (MATCH (p:P) COLUMNS (p.g AS g, p.x AS x, p.y AS y)) GROUP BY g HAVING REGR_COUNT(y, x) > 2"
+    expect:
+      rows:
+        - [g]
+
+  - name: listagg_takes_its_separator
+    setup:
+      - "INSERT (:Q {name: 'Alix'}), (:Q {name: 'Alix'})"
+    variants:
+      gql: "MATCH (q:Q) RETURN listagg(q.name, ';') AS names"
+      cypher: "MATCH (q:Q) RETURN listagg(q.name, ';') AS names"
+      sql-pgq: "SELECT LISTAGG(name, ';') AS names FROM GRAPH_TABLE (MATCH (q:Q) COLUMNS (q.name AS name))"
+    expect:
+      rows:
+        - ["Alix;Alix"]
+
+  - name: a_percentile_takes_its_second_argument
+    setup:
+      - "INSERT (:P {g: 'g', x: 3, y: 9}), (:P {g: 'g', x: 19, y: 41}), (:P {g: 'g', x: 88, y: 179})"
+    variants:
+      gql: "MATCH (p:P) RETURN percentile_disc(p.x, 0.0) AS lo, percentile_disc(p.x, 1.0) AS hi, percentile_cont(p.x, 0.25) AS q"
+      cypher: "MATCH (p:P) RETURN percentile_disc(p.x, 0.0) AS lo, percentile_disc(p.x, 1.0) AS hi, percentile_cont(p.x, 0.25) AS q"
+      sql-pgq: "SELECT PERCENTILE_DISC(x, 0.0) AS lo, PERCENTILE_DISC(x, 1.0) AS hi, PERCENTILE_CONT(x, 0.25) AS q FROM GRAPH_TABLE (MATCH (p:P) COLUMNS (p.x AS x))"
+    expect:
+      precision: 9
+      rows:
+        - [3, 88, 11]
+
+  - name: group_concat_takes_its_separator
+    setup:
+      - "INSERT (:Q {name: 'Alix'}), (:Q {name: 'Alix'})"
+    variants:
+      gql: "MATCH (q:Q) RETURN group_concat(q.name, '|') AS names"
+      cypher: "MATCH (q:Q) RETURN group_concat(q.name, '|') AS names"
+    expect:
+      rows:
+        - ["Alix|Alix"]
+
+  - name: listagg_without_a_separator_joins_with_a_comma
+    setup:
+      - "INSERT (:Q {name: 'Alix'}), (:Q {name: 'Alix'})"
+    variants:
+      gql: "MATCH (q:Q) RETURN listagg(q.name) AS names"
+      cypher: "MATCH (q:Q) RETURN listagg(q.name) AS names"
+    expect:
+      rows:
+        - ["Alix,Alix"]
+
+  - name: group_concat_without_a_separator_joins_with_a_space
+    setup:
+      - "INSERT (:Q {name: 'Alix'}), (:Q {name: 'Alix'})"
+    variants:
+      gql: "MATCH (q:Q) RETURN group_concat(q.name) AS names"
+      cypher: "MATCH (q:Q) RETURN group_concat(q.name) AS names"
+    expect:
+      rows:
+        - ["Alix Alix"]

@@ -231,7 +231,7 @@ Reproduce locally:
 # Pin matches .github/workflows/codspeed.yml; bump both in lock-step.
 cargo install cargo-codspeed --version 4.5.0
 cargo codspeed build --package grafeo-core \
-    --features "vector-index compact-store" --bench index_bench
+    --features vector-index --bench index_bench
 cargo codspeed run --package grafeo-core
 ```
 

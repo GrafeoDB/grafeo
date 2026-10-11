@@ -150,15 +150,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arc-swap"
-version = "1.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1511,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -1523,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "bincode",
  "grafeo-common",
@@ -1541,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-bindings-common"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "grafeo-common",
  "grafeo-engine",
@@ -1550,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-c"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "grafeo-bindings-common",
  "grafeo-common",
@@ -1562,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-cli"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1583,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "aes-gcm",
  "arcstr",
@@ -1610,9 +1601,8 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
- "arc-swap",
  "arcstr",
  "bincode",
  "byteorder",
@@ -1642,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "arcstr",
  "arrow-array",
@@ -1652,7 +1642,6 @@ dependencies = [
  "bytes",
  "codspeed-criterion-compat",
  "crc32fast",
- "crossbeam",
  "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",
@@ -1665,7 +1654,6 @@ dependencies = [
  "ort",
  "parking_lot",
  "proptest",
- "rayon",
  "regex",
  "regex-lite",
  "serde",
@@ -1682,14 +1670,14 @@ dependencies = [
 
 [[package]]
 name = "grafeo-examples"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "grafeo",
 ]
 
 [[package]]
 name = "grafeo-node"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "grafeo-adapters",
  "grafeo-bindings-common",
@@ -1707,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-python"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "grafeo-adapters",
  "grafeo-bindings-common",
@@ -1724,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-spec-tests"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "grafeo-common",
  "grafeo-engine",
@@ -1734,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-storage"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1756,7 +1744,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-wasm"
-version = "0.5.44"
+version = "0.6.0-beta.1"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.4.3",

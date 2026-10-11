@@ -1,9 +1,8 @@
 //! Schema, label, edge-type, and property-key methods for [`LpgStore`].
 
-use super::{LpgStore, PropertyUndoEntry};
-#[cfg(feature = "temporal")]
-use grafeo_common::types::EpochId;
-use grafeo_common::types::{NodeId, TransactionId};
+use super::super::dictionary::NameDictionary;
+use super::LpgStore;
+use grafeo_common::types::{EpochId, NodeId, PropertyKey, TransactionId};
 use grafeo_common::utils::hash::FxHashMap;
 
 impl LpgStore {
@@ -34,6 +33,17 @@ impl LpgStore {
     ///
     /// Returns false if the node already has the label.
     fn add_label_to_existing(&self, node_id: NodeId, label: &str) -> bool {
+        self.add_label_at(node_id, label, self.current_epoch())
+    }
+
+    /// Adds a label to a node the caller found to exist, with `temporal` as
+    /// a new label set at `at` (`EpochId::PENDING` for a transaction's
+    /// write); without it the set changes in place and `at` is not used.
+    ///
+    /// Returns false if the node already has the label.
+    pub(super) fn add_label_at(&self, node_id: NodeId, label: &str, at: EpochId) -> bool {
+        #[cfg(not(feature = "temporal"))]
+        let _ = at;
         let label_id = self.get_or_create_label_id(label);
 
         // Add to node_labels map
@@ -60,7 +70,7 @@ impl LpgStore {
             }
             let mut new_set = current;
             new_set.insert(label_id);
-            self.append_labels(&mut node_labels, node_id, self.current_epoch(), new_set);
+            self.append_labels(&mut node_labels, node_id, at, new_set);
         }
 
         drop(node_labels);
@@ -85,6 +95,16 @@ impl LpgStore {
     ///
     /// Returns false if the node doesn't have the label.
     fn remove_label_from_existing(&self, node_id: NodeId, label: &str) -> bool {
+        self.remove_label_at(node_id, label, self.current_epoch())
+    }
+
+    /// Removes a label from a node the caller found to exist, as
+    /// [`add_label_at`](Self::add_label_at) adds one.
+    ///
+    /// Returns false if the node doesn't have the label.
+    pub(super) fn remove_label_at(&self, node_id: NodeId, label: &str, at: EpochId) -> bool {
+        #[cfg(not(feature = "temporal"))]
+        let _ = at;
         // Get label ID
         let label_id = {
             let reg = self.label_registry.read();
@@ -120,7 +140,7 @@ impl LpgStore {
             }
             let mut new_set = current;
             new_set.remove(&label_id);
-            self.append_labels(&mut node_labels, node_id, self.current_epoch(), new_set);
+            self.append_labels(&mut node_labels, node_id, at, new_set);
         }
 
         drop(node_labels);
@@ -141,7 +161,7 @@ impl LpgStore {
 
     /// Stores the node's label count in its newest record.
     #[cfg(not(any(feature = "temporal", feature = "tiered-storage")))]
-    fn update_label_count(&self, node_id: NodeId) {
+    pub(super) fn update_label_count(&self, node_id: NodeId) {
         if let Some(chain) = self.nodes.write().get_mut(&node_id)
             && let Some(record) = chain.latest_mut()
         {
@@ -182,23 +202,6 @@ impl LpgStore {
             .map_or(0, |set| set.len())
     }
 
-    /// Whether [`nodes_by_label`](Self::nodes_by_label) holds `id` for
-    /// `label`, in O(1) through the label index. Like `nodes_by_label`, it
-    /// reads the labels nodes have now, whatever the transaction or epoch.
-    /// The compacted store's label counts use it.
-    #[cfg(feature = "compact-store")]
-    #[must_use]
-    pub(crate) fn node_in_label(&self, id: NodeId, label: &str) -> bool {
-        let reg = self.label_registry.read();
-        let Some(label_id) = reg.get_id(label) else {
-            return false;
-        };
-        self.label_index
-            .read()
-            .get(label_id as usize)
-            .is_some_and(|set| set.contains_key(&id))
-    }
-
     /// Returns the number of distinct labels in the store.
     #[must_use]
     pub fn label_count(&self) -> usize {
@@ -221,25 +224,24 @@ impl LpgStore {
     /// Returns the number of distinct edge types in the store.
     #[must_use]
     pub fn edge_type_count(&self) -> usize {
-        self.id_to_edge_type.read().len()
+        self.edge_types.read().len()
     }
 
     /// Returns all label names in the database.
     pub fn all_labels(&self) -> Vec<String> {
         self.label_registry
             .read()
-            .names()
             .iter()
-            .map(|s| s.to_string())
+            .map(|(_, name)| name.to_string())
             .collect()
     }
 
     /// Returns all edge type names in the database.
     pub fn all_edge_types(&self) -> Vec<String> {
-        self.id_to_edge_type
+        self.edge_types
             .read()
             .iter()
-            .map(|s| s.to_string())
+            .map(|(_, name)| name.to_string())
             .collect()
     }
 
@@ -255,6 +257,137 @@ impl LpgStore {
         keys.into_iter().collect()
     }
 
+    /// The id of `label`, `None` when no node of this graph ever had it.
+    pub(crate) fn label_id(&self, label: &str) -> Option<u32> {
+        self.label_registry.read().get_id(label)
+    }
+
+    /// The id of `edge_type`, `None` when this graph never had it.
+    pub(crate) fn edge_type_id(&self, edge_type: &str) -> Option<u32> {
+        self.edge_types.read().get_id(edge_type)
+    }
+
+    /// The id of property key `key`, given the next id when it has none: a
+    /// checkpoint gives a key its id when it first writes the key's column.
+    pub(crate) fn property_key_id(&self, key: &str) -> u32 {
+        if let Some(id) = self.property_keys.read().get_id(key) {
+            return id;
+        }
+        self.property_keys.write().get_or_create(key)
+    }
+
+    /// This graph's label, edge type and property key dictionaries, as they
+    /// are now.
+    pub(crate) fn name_dictionaries(&self) -> [NameDictionary; 3] {
+        [
+            self.label_registry.read().clone(),
+            self.edge_types.read().clone(),
+            self.property_keys.read().clone(),
+        ]
+    }
+
+    /// Gives this graph `source`'s dictionaries, ids included, as a copy of
+    /// a store does before it creates any node or edge.
+    pub(crate) fn copy_name_dictionaries(&self, source: &LpgStore) {
+        let [labels, edge_types, keys] = source.name_dictionaries();
+        let types = edge_types.next_id() as usize;
+        *self.label_registry.write() = labels;
+        *self.edge_types.write() = edge_types;
+        *self.property_keys.write() = keys;
+        let mut counts = self.edge_type_live_counts.write();
+        if counts.len() < types {
+            counts.resize(types, 0);
+        }
+    }
+
+    /// Restores label `name` with the id `id`, as a load does before any
+    /// node has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns what is wrong when `id` or `name` is taken.
+    pub(crate) fn restore_label(&self, id: u32, name: &str) -> Result<(), String> {
+        self.label_registry.write().insert_at(id, name)
+    }
+
+    /// Drops label `name` from the label dictionary when no node has it, as
+    /// the fold of a 0.5.x compacted base does for a joined name it split
+    /// (see `compact::fold`): its id becomes a gap that is never given out
+    /// again, and the next checkpoint writes the dictionary without it.
+    /// Every other name keeps its id for good, also one whose nodes all
+    /// lost it.
+    ///
+    /// Returns whether `name` was dropped: false when it has no id, or when
+    /// the label index holds a node with it (a node of an open transaction
+    /// included).
+    pub(crate) fn drop_unused_label(&self, name: &str) -> bool {
+        let mut registry = self.label_registry.write();
+        let Some(id) = registry.get_id(name) else {
+            return false;
+        };
+        if self
+            .label_index
+            .read()
+            .get(id as usize)
+            .is_some_and(|nodes| !nodes.is_empty())
+        {
+            return false;
+        }
+        registry.remove(name).is_some()
+    }
+
+    /// Restores edge type `name` with the id `id`, as a load does before any
+    /// edge has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns what is wrong when `id` or `name` is taken.
+    pub(crate) fn restore_edge_type(&self, id: u32, name: &str) -> Result<(), String> {
+        self.edge_types.write().insert_at(id, name)?;
+        let mut counts = self.edge_type_live_counts.write();
+        if counts.len() <= id as usize {
+            counts.resize(id as usize + 1, 0);
+        }
+        Ok(())
+    }
+
+    /// Restores property key `name` with the id `id`, as a load does.
+    ///
+    /// # Errors
+    ///
+    /// Returns what is wrong when `id` or `name` is taken.
+    pub(crate) fn restore_property_key(&self, id: u32, name: &str) -> Result<(), String> {
+        self.property_keys.write().insert_at(id, name)
+    }
+
+    /// Makes the next ids of the label, edge type and property key
+    /// dictionaries at least `next`, as a load restores them: the ids below
+    /// are never given out again.
+    pub(crate) fn reserve_name_ids_below(&self, [labels, edge_types, keys]: [u32; 3]) {
+        self.label_registry.write().reserve_below(labels);
+        self.edge_types.write().reserve_below(edge_types);
+        self.property_keys.write().reserve_below(keys);
+    }
+
+    /// Returns the keys of the node property columns, in key order. A column
+    /// is listed once it was created, also when no node has a value for it
+    /// any more.
+    #[must_use]
+    pub fn node_property_keys(&self) -> Vec<PropertyKey> {
+        let mut keys = self.node_properties.keys();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// Returns the keys of the edge property columns, in key order, as
+    /// [`node_property_keys`](Self::node_property_keys) does for nodes.
+    #[must_use]
+    pub fn edge_property_keys(&self) -> Vec<PropertyKey> {
+        let mut keys = self.edge_properties.keys();
+        keys.sort_unstable();
+        keys
+    }
+
     /// Returns the next node ID that will be allocated.
     #[must_use]
     pub fn peek_next_node_id(&self) -> u64 {
@@ -267,8 +400,9 @@ impl LpgStore {
         self.next_edge_id.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Adds a label to a node within a transaction, recording the change
-    /// in the undo log so it can be reversed on rollback.
+    /// Adds a label to a node as `transaction_id`. Nothing records the
+    /// change (a transaction the engine runs writes through the store's
+    /// change target, see `ChangeTarget::apply`).
     ///
     /// Returns false if the transaction does not see the node (it sees the
     /// nodes it created itself) or the node already has the label.
@@ -279,24 +413,12 @@ impl LpgStore {
         label: &str,
         transaction_id: TransactionId,
     ) -> bool {
-        let added = self.is_node_visible_versioned(node_id, self.current_epoch(), transaction_id)
-            && self.add_label_to_existing(node_id, label);
-        if added {
-            self.property_undo_log
-                .write()
-                .entry(transaction_id)
-                .or_default()
-                .push(PropertyUndoEntry::LabelAdded {
-                    node_id,
-                    label: label.to_string(),
-                });
-        }
-        added
+        self.is_node_visible_versioned(node_id, self.current_epoch(), transaction_id)
+            && self.add_label_to_existing(node_id, label)
     }
 
-    /// Adds a label to a node within a transaction (temporal version).
-    ///
-    /// Uses `EpochId::PENDING` for the version log entry, finalized on commit.
+    /// Adds a label to a node as `transaction_id` (temporal version): a
+    /// PENDING label set, which nothing records.
     /// Returns false if the transaction does not see the node (it sees the
     /// nodes it created itself) or the node already has the label.
     #[cfg(feature = "temporal")]
@@ -333,22 +455,11 @@ impl LpgStore {
         index[label_id as usize].insert(node_id, ());
         drop(index);
         self.index_node_under_label(node_id, label);
-
-        // Record in undo log
-        self.property_undo_log
-            .write()
-            .entry(transaction_id)
-            .or_default()
-            .push(PropertyUndoEntry::LabelAdded {
-                node_id,
-                label: label.to_string(),
-            });
-
         true
     }
 
-    /// Removes a label from a node within a transaction, recording the change
-    /// in the undo log so it can be restored on rollback.
+    /// Removes a label from a node as `transaction_id`. Nothing records the
+    /// change.
     ///
     /// Returns false if the transaction does not see the node (it sees the
     /// nodes it created itself) or the node doesn't have the label.
@@ -359,22 +470,12 @@ impl LpgStore {
         label: &str,
         transaction_id: TransactionId,
     ) -> bool {
-        let removed = self.is_node_visible_versioned(node_id, self.current_epoch(), transaction_id)
-            && self.remove_label_from_existing(node_id, label);
-        if removed {
-            self.property_undo_log
-                .write()
-                .entry(transaction_id)
-                .or_default()
-                .push(PropertyUndoEntry::LabelRemoved {
-                    node_id,
-                    label: label.to_string(),
-                });
-        }
-        removed
+        self.is_node_visible_versioned(node_id, self.current_epoch(), transaction_id)
+            && self.remove_label_from_existing(node_id, label)
     }
 
-    /// Removes a label from a node within a transaction (temporal version).
+    /// Removes a label from a node as `transaction_id` (temporal version): a
+    /// PENDING label set, which nothing records.
     ///
     /// Returns false if the transaction does not see the node (it sees the
     /// nodes it created itself) or the node doesn't have the label.
@@ -417,17 +518,6 @@ impl LpgStore {
         }
         drop(index);
         self.unindex_node_under_label(node_id, label);
-
-        // Record in undo log
-        self.property_undo_log
-            .write()
-            .entry(transaction_id)
-            .or_default()
-            .push(PropertyUndoEntry::LabelRemoved {
-                node_id,
-                label: label.to_string(),
-            });
-
         true
     }
 }

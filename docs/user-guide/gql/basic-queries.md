@@ -90,10 +90,10 @@ ORDER BY p.age ASC NULLS FIRST
 
 MATCH (p:Person)
 RETURN p.name, p.age
-ORDER BY p.age DESC NULLS LAST
+ORDER BY p.age DESC NULLS FIRST
 ```
 
-Nulls sort last in ascending order and first in descending order, unless `NULLS FIRST` or `NULLS LAST` says otherwise, which holds in either direction.
+Nulls sort last in both directions, unless `NULLS FIRST` or `NULLS LAST` says otherwise. ISO GQL leaves this default to the implementation; Cypher queries keep openCypher's order, where nulls come last in ascending order and first in descending order.
 
 Values of different types in one sort key, such as a property that holds a number on some nodes and a string on others, follow one fixed order, the one openCypher defines: maps, lists, paths, temporal values (zoned datetimes, datetimes, dates, zoned times, times, durations), strings, booleans, numbers, then null. Integers and floats compare as numbers, with NaN after infinity. Lists compare element by element with a prefix first, and maps by size, then keys, then values. Grafeo's own types fit in as follows: vectors after paths, bytes before strings and counters before numbers.
 
@@ -163,7 +163,9 @@ RETURN p.name, p.age
 
 ## FINISH
 
-`FINISH` consumes all input rows and returns an empty result. Use it for mutation-only queries where you do not need output.
+`FINISH` runs the query to its end, its writes included, and returns no result: no rows and no columns. Use it for
+mutation-only queries where you do not need output. A query that writes after a `MATCH` or `FOR` and ends without
+`RETURN` has no result either.
 
 ```sql
 -- Insert data without returning anything
@@ -207,6 +209,38 @@ RETURN p.name, friend.name
 
 An expression in `WITH` needs a name (`WITH p.name AS name`), and a variable a `WITH` leaves out is not visible
 after it.
+
+## Statement Order
+
+A query is a sequence of statements (`MATCH`, `OPTIONAL MATCH`, `FILTER`, `LET`, `FOR`, `CALL`, `WITH`, an
+`ORDER BY` with `OFFSET` and `LIMIT`, and the writes `INSERT`, `SET`, `REMOVE` and `DELETE`) in any order, ending
+in `RETURN`, `SELECT` or `FINISH`, or in nothing when it writes. Each statement reads the rows the ones before it
+leave: a `WHERE` or `FILTER` filters the rows so far, and an `ORDER BY` and `LIMIT` before the end cut the rows the
+statements after them see. A `WHERE` right after an `OPTIONAL MATCH` belongs to it, so a row without a match keeps
+`null`; a `FILTER` there filters every row, those without a match included.
+
+A `WHERE` or `FILTER` right after `INSERT`, `CREATE`, `MERGE` or `DELETE` is an error, because before 0.6.0 it
+filtered the rows before the write: put the condition before the write, or filter the rows after it with
+`WITH ... WHERE ...`. After `SET` or `REMOVE`, `FILTER` filters the rows after the write.
+
+```sql
+-- The three oldest people, then where they live
+MATCH (p:Person)
+ORDER BY p.age DESC LIMIT 3
+MATCH (p)-[:LIVES_IN]->(c:City)
+RETURN p.name, c.name
+
+-- A WHERE between two MATCH statements
+MATCH (a:Person) WHERE a.age > 30
+MATCH (a)-[:KNOWS]->(b)
+RETURN a.name, b.name
+
+-- Write after WITH, then read what was written
+MATCH (p:Person)
+WITH p WHERE p.age > 65
+SET p.retired = true
+RETURN p.name, p.retired
+```
 
 ## LET (Variable Binding)
 
@@ -259,8 +293,11 @@ RETURN p.name, friend_count
 ```
 
 A variable scope clause limits what the subquery sees: `CALL (p) { ... }` sees only `p`, and `CALL () { ... }`
-sees no outer variable. A subquery returns new names only: returning an outer variable is an error, so rename it
-(`RETURN p AS person`). The body can order and cut its rows, for the top rows per input row, and combine queries
+sees no outer variable. What it sees stays visible in the whole body, also after a `WITH` that leaves it out:
+`CALL (p) { MATCH (p)-[:KNOWS]->(f) WITH count(f) AS n RETURN p.name AS name, n }` gives one row per person,
+`0` for one who knows nobody. A subquery returns new names only: returning an outer variable is an error, so rename it
+(`RETURN p AS person`). A subquery without a result (no `RETURN`, or `FINISH`) runs for its writes and passes
+each row on once, as it came in: nothing it binds is visible after it. The body can order and cut its rows, for the top rows per input row, and combine queries
 with `UNION`, `EXCEPT`, `INTERSECT` or `OTHERWISE`:
 
 ```sql

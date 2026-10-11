@@ -31,6 +31,21 @@ tests:
       rows:
         - [Alix]
 
+  # openCypher orders null as the largest value: last ascending, first
+  # descending (GQL puts it last both ways, #571)
+  - name: order_by_desc_puts_nulls_first
+    setup:
+      - "CREATE (:Item {name: 'A', rank: 1})"
+      - "CREATE (:Item {name: 'B'})"
+      - "CREATE (:Item {name: 'C', rank: 3})"
+    query: MATCH (n:Item) RETURN n.name, n.rank ORDER BY n.rank DESC
+    expect:
+      ordered: true
+      rows:
+        - [B, null]
+        - [C, 3]
+        - [A, 1]
+
   - name: return_distinct
     setup:
       - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"
@@ -200,3 +215,206 @@ tests:
       rows:
         - [1, Berlin]
         - [2, Amsterdam]
+
+  # ---------------------------------------------------------------------------
+  # ORDER BY reads the variables of the clause's input (openCypher 9 TCK
+  # WithOrderBy4 [8]): after a WITH or RETURN that neither aggregates nor is
+  # DISTINCT, a variable the projection drops can still be sorted on.
+  # After a WITH this used to fail with "Undefined variable".
+  # ---------------------------------------------------------------------------
+
+  - name: with_order_by_a_dropped_variable
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Gus', age: 3}), (:Person {name: 'Vincent', age: 19})"
+    query: "MATCH (a:Person) WITH a.name AS name ORDER BY a.age RETURN name"
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Vincent]
+        - [Alix]
+
+  - name: with_order_by_a_dropped_variable_then_skip_and_limit
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Gus', age: 3}), (:Person {name: 'Vincent', age: 19})"
+    query: "MATCH (a:Person) WITH a.name AS name ORDER BY a.age DESC SKIP 1 LIMIT 1 RETURN name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: with_order_by_a_dropped_and_a_projected_variable
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88, score: 19}), (:Person {name: 'Gus', age: 3, score: 3}), (:Person {name: 'Vincent', age: 19, score: 88})"
+    query: "MATCH (a:Person) WITH a.name AS name, a.age AS age ORDER BY a.score - age RETURN name, age"
+    expect:
+      ordered: true
+      columns: [name, age]
+      rows:
+        - [Alix, 88]
+        - [Gus, 3]
+        - [Vincent, 19]
+
+  - name: with_order_by_a_variable_dropped_by_an_earlier_with_fails
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88})"
+    query: "MATCH (a:Person) WITH a.age AS age WITH age AS years ORDER BY a.age RETURN years"
+    expect:
+      error: "Undefined variable 'a'"
+
+  - name: with_alias_shadowing_a_dropped_variable_sorts_by_the_alias
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Gus', age: 3}), (:Person {name: 'Vincent', age: 19})"
+    query: "MATCH (a:Person) WITH a.age AS a ORDER BY a DESC RETURN a"
+    expect:
+      ordered: true
+      rows:
+        - [88]
+        - [19]
+        - [3]
+
+  - name: return_order_by_a_dropped_variable_then_skip_and_limit
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Gus', age: 3}), (:Person {name: 'Vincent', age: 19})"
+    query: "MATCH (a:Person) RETURN a.name AS name ORDER BY a.age SKIP 1 LIMIT 1"
+    expect:
+      rows:
+        - [Vincent]
+
+  # After an aggregation or a DISTINCT WITH only what the projection returns
+  # is in scope (openCypher 9 TCK WithOrderBy4 [13]). An aggregating RETURN
+  # used to fail with an internal error.
+  - name: with_distinct_order_by_a_dropped_variable_fails
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88})"
+    query: "MATCH (a:Person) WITH DISTINCT a.name AS name ORDER BY a.age RETURN name"
+    expect:
+      error: "Undefined variable 'a'"
+
+  - name: with_distinct_order_by_a_repeated_expression
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Alix', age: 3}), (:Person {name: 'Gus', age: 19})"
+    query: "MATCH (a:Person) WITH DISTINCT a.name AS name ORDER BY a.name DESC RETURN name"
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Alix]
+
+  - name: with_aggregate_order_by_a_dropped_variable_fails
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88})"
+    query: "MATCH (a:Person) WITH count(*) AS c ORDER BY a.age RETURN c"
+    expect:
+      error: "Undefined variable 'a'"
+
+  - name: return_aggregate_order_by_a_dropped_variable_fails
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88})"
+    query: "MATCH (a:Person) RETURN count(*) AS c ORDER BY a.age"
+    expect:
+      error: "Undefined variable 'a'"
+
+  - name: return_distinct_order_by_a_returned_variable
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Alix', age: 3}), (:Person {name: 'Gus', age: 19})"
+    query: "MATCH (a:Person) RETURN DISTINCT a.name AS name ORDER BY name DESC"
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Alix]
+
+  - name: return_distinct_order_by_a_returned_expression
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Alix', age: 3}), (:Person {name: 'Gus', age: 19})"
+    query: "MATCH (a:Person) RETURN DISTINCT a.name ORDER BY a.name DESC"
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Alix]
+
+  - name: with_distinct_node_order_by_its_property
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Gus', age: 3}), (:Person {name: 'Vincent', age: 19})"
+    query: "MATCH (a:Person) WITH DISTINCT a ORDER BY a.age RETURN a.name"
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Vincent]
+        - [Alix]
+
+  # A key that repeats a returned expression sorts by its column (openCypher
+  # 9 TCK ReturnOrderBy2 [3], WithOrderBy4 [11]): `max(a.age)` used to sort
+  # as if it were not there, and an aliased `a.name` failed with "Variable
+  # 'a.name' not found for ORDER BY".
+  - name: return_grouped_order_by_a_returned_key_and_an_aggregate
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Alix', age: 3}), (:Person {name: 'Gus', age: 19})"
+    query: "MATCH (a:Person) RETURN a.name, max(a.age) ORDER BY max(a.age), a.name"
+    expect:
+      ordered: true
+      rows:
+        - [Gus, 19]
+        - [Alix, 88]
+
+  - name: return_grouped_order_by_the_expression_of_an_aliased_key
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Alix', age: 3}), (:Person {name: 'Gus', age: 19})"
+    query: "MATCH (a:Person) RETURN a.name AS name, count(*) AS c ORDER BY a.name DESC"
+    expect:
+      ordered: true
+      rows:
+        - [Gus, 1]
+        - [Alix, 2]
+
+  - name: with_grouped_order_by_an_aliased_aggregate_expression
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Alix', age: 3}), (:Person {name: 'Gus', age: 19})"
+    query: "MATCH (a:Person) WITH a.name AS name, max(a.age) AS oldest ORDER BY max(a.age) DESC LIMIT 1 RETURN name, oldest"
+    expect:
+      rows:
+        - [Alix, 88]
+
+  - name: with_grouped_order_by_an_aggregate_inside_an_expression
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Alix', age: 3}), (:Person {name: 'Gus', age: 19})"
+    query: "MATCH (a:Person) WITH a.name AS name, min(a.age) AS youngest ORDER BY 0 - min(a.age) RETURN name"
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Alix]
+
+  # An aggregate the projection does not return has no groups to sort
+  # (openCypher 9 TCK WithOrderBy4 [14]).
+  - name: return_grouped_order_by_an_aggregate_it_does_not_return_fails
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88})"
+    query: "MATCH (a:Person) RETURN a.name AS name, count(*) AS c ORDER BY max(a.age)"
+    expect:
+      error: "aggregating function in ORDER BY"
+
+  # ---------------------------------------------------------------------------
+  # An aggregate in the ORDER BY of a projection that does not aggregate is
+  # an error (openCypher 9 TCK ReturnOrderBy2 [14], WithOrderBy2 [25]). It
+  # used to fail with "Empty plan", or sort as if it were not there.
+  # ---------------------------------------------------------------------------
+
+  - name: return_order_by_an_aggregate_without_a_match_fails
+    query: "RETURN 3 AS x ORDER BY count(*)"
+    expect:
+      error: "aggregating function in ORDER BY"
+
+  - name: return_order_by_an_aggregate_fails
+    query: "UNWIND [3, 19] AS x RETURN x ORDER BY count(*)"
+    expect:
+      error: "aggregating function in ORDER BY"
+
+  - name: with_order_by_an_aggregate_fails
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88})"
+    query: "MATCH (n:Person) WITH n.name AS name ORDER BY n.name, max(n.age) RETURN name"
+    expect:
+      error: "aggregating function in ORDER BY"

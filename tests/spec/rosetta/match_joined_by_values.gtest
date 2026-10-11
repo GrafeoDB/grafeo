@@ -1,0 +1,81 @@
+# Rosetta: a MATCH joined to an earlier one by equal values
+#
+# A MATCH after another one, without a variable in common, whose WHERE
+# equates a property of each (`t.filePath = f.path`) runs as a hash join on
+# those values instead of a scan for each earlier row. The rows are those of
+# `=`: an integer equals the float of its value and a string that reads as
+# that integer, a float equals a string that reads as it, NULL (a missing
+# property) equals nothing, and every key of the WHERE must match.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: A MATCH joined to an earlier one by equal values
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: integer_keys_meet_float_keys
+    setup:
+      - "INSERT (:File {name: 'main', lines: 5}), (:File {name: 'lib', lines: 7.0}), (:File {name: 'mod', lines: 2.5})"
+      - "INSERT (:TypeDefinition {name: 'Alix', line: 5.0}), (:TypeDefinition {name: 'Gus', line: 7}), (:TypeDefinition {name: 'Vincent', line: 6}), (:TypeDefinition {name: 'Jules', line: 5})"
+    variants:
+      gql: "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.line = f.lines RETURN f.name AS file, t.name AS type"
+      cypher: "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.line = f.lines RETURN f.name AS file, t.name AS type"
+    expect:
+      rows:
+        - [main, Alix]
+        - [main, Jules]
+        - [lib, Gus]
+
+  - name: null_keys_meet_nothing
+    setup:
+      - "INSERT (:File {name: 'main', path: 'src'}), (:File {name: 'lib'})"
+      - "INSERT (:TypeDefinition {name: 'Alix', filePath: 'src'}), (:TypeDefinition {name: 'Gus'}), (:TypeDefinition {name: 'Vincent', filePath: 'docs'})"
+    variants:
+      gql: "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.filePath = f.path RETURN f.name AS file, t.name AS type"
+      cypher: "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.filePath = f.path RETURN f.name AS file, t.name AS type"
+    expect:
+      rows:
+        - [main, Alix]
+
+  - name: numeric_strings_meet_numbers
+    setup:
+      - "INSERT (:File {name: 'main', k: 5}), (:File {name: 'lib', k: 5.0})"
+      - "INSERT (:TypeDefinition {name: 'Alix', k: '5'}), (:TypeDefinition {name: 'Gus', k: '5.0'}), (:TypeDefinition {name: 'Vincent', k: '05'}), (:TypeDefinition {name: 'Jules', k: 'five'})"
+    variants:
+      gql: "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.k = f.k RETURN f.name AS file, t.name AS type"
+      cypher: "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.k = f.k RETURN f.name AS file, t.name AS type"
+    expect:
+      rows:
+        - [main, Alix]
+        - [main, Vincent]
+        - [lib, Alix]
+        - [lib, Gus]
+        - [lib, Vincent]
+
+  - name: two_keys_must_both_match
+    setup:
+      - "INSERT (:File {name: 'main', path: 'src', lines: 5}), (:File {name: 'lib', path: 'lib', lines: 7})"
+      - "INSERT (:TypeDefinition {name: 'Alix', filePath: 'src', line: 5.0}), (:TypeDefinition {name: 'Gus', filePath: 'src', line: 7}), (:TypeDefinition {name: 'Vincent', filePath: 'lib', line: 7})"
+    variants:
+      gql: "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.filePath = f.path AND t.line = f.lines RETURN f.name AS file, t.name AS type"
+      cypher: "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.filePath = f.path AND t.line = f.lines RETURN f.name AS file, t.name AS type"
+    expect:
+      rows:
+        - [main, Alix]
+        - [lib, Vincent]
+
+  - name: a_property_of_the_pattern_from_the_earlier_match
+    setup:
+      - "INSERT (:File {name: 'main', path: 'src'}), (:File {name: 'lib', path: 'lib'})"
+      - "INSERT (:TypeDefinition {name: 'Alix', filePath: 'src'}), (:TypeDefinition {name: 'Gus', filePath: 'lib'}), (:TypeDefinition {name: 'Vincent', filePath: 'src'})"
+    variants:
+      gql: "MATCH (f:File) MATCH (t:TypeDefinition {filePath: f.path}) RETURN f.name AS file, t.name AS type"
+      cypher: "MATCH (f:File) MATCH (t:TypeDefinition {filePath: f.path}) RETURN f.name AS file, t.name AS type"
+    expect:
+      rows:
+        - [main, Alix]
+        - [main, Vincent]
+        - [lib, Gus]

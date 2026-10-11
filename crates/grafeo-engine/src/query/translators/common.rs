@@ -3,13 +3,15 @@
 //! Functions here are used by multiple translator modules (GQL, Cypher, etc.)
 //! to avoid duplication of identical logic.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 #[cfg(any(feature = "graphql", feature = "gremlin", test))]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::query::plan::{
-    AggregateFunction, BinaryOp, CountExpr, DistinctOp, FilterOp, LeftJoinOp, LimitOp,
-    LogicalExpression, LogicalOperator, ReturnItem, ReturnOp, SkipOp, SortKey, SortOp,
+    AggregateFunction, BinaryOp, CountExpr, DistinctOp, FilterOp, JoinOp, JoinType, LeftJoinOp,
+    LimitOp, LogicalExpression, LogicalOperator, ParameterScanOp, Projection, ReturnItem, ReturnOp,
+    SetPropertyOp, SkipOp, SortKey, SortOp,
 };
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
@@ -66,6 +68,97 @@ fn final_return_mut(plan: &mut LogicalOperator) -> Option<&mut ReturnOp> {
     }
 }
 
+/// The variables a `CALL` subquery imports (see [`call_imports`]) while its
+/// body is translated: none outside one. They stay in scope for the whole
+/// body: a `WITH` in it that leaves one out passes it on all the same
+/// (openCypher: "a subsequent WITH within the subquery cannot descope an
+/// imported variable"; in GQL they are fields of the body's incoming working
+/// record, which a statement of the body does not drop). A `WITH` that binds
+/// an import's name to anything but the import itself (`WITH 3 AS a`) makes
+/// the name a variable of the body, and no longer an import.
+#[derive(Debug, Default)]
+pub(crate) struct CallImports(RefCell<Vec<String>>);
+
+impl CallImports {
+    /// Runs `translate` with `imports` as the imports of the body it
+    /// translates, and puts back the imports of the enclosing body
+    /// afterwards.
+    pub(crate) fn within<T>(&self, imports: Vec<String>, translate: impl FnOnce() -> T) -> T {
+        let enclosing = self.0.replace(imports);
+        let translated = translate();
+        self.0.replace(enclosing);
+        translated
+    }
+
+    /// The imports a `WITH` that passes on `projected` leaves out, which it
+    /// passes on as well. Each projected item is its name and whether it is
+    /// the variable of that name itself (`WITH a`, `WITH a AS a`). An import
+    /// the `WITH` binds to something else stops being one.
+    pub(crate) fn left_out(&self, projected: &[(String, bool)]) -> Vec<String> {
+        let mut imports = self.0.borrow_mut();
+        imports.retain(|import| {
+            projected
+                .iter()
+                .all(|(name, itself)| name != import || *itself)
+        });
+        imports
+            .iter()
+            .filter(|import| projected.iter().all(|(name, _)| name != *import))
+            .cloned()
+            .collect()
+    }
+}
+
+/// The variables of a `CALL` subquery's outer row that it imports:
+/// `shared_variables` (the `ApplyOp`'s), with `*` replaced by the variables of
+/// the outer row, `outer`, in name order (none when they are not known here).
+pub(crate) fn call_imports(
+    shared_variables: &[String],
+    outer: Option<&HashSet<String>>,
+) -> Vec<String> {
+    if shared_variables.iter().any(|name| name == "*") {
+        let mut names: Vec<String> = outer.into_iter().flatten().cloned().collect();
+        names.sort();
+        return names;
+    }
+    shared_variables.to_vec()
+}
+
+/// The rows of a `WITH` in a `CALL` body (`plan`, its projection, or its
+/// aggregation when `aggregates`), with the imports it leaves out, `missing`
+/// (see [`CallImports`]), beside its own columns. A projection passes them on
+/// as items. An aggregation cannot group by them, since a count over no rows
+/// would then be no row instead of one: its rows are joined with a scan of
+/// the imported values (one row, the outer row's).
+pub(crate) fn with_imports(
+    plan: LogicalOperator,
+    missing: Vec<String>,
+    aggregates: bool,
+) -> LogicalOperator {
+    if missing.is_empty() {
+        return plan;
+    }
+    match plan {
+        LogicalOperator::Project(mut project) if !aggregates && !project.pass_through_input => {
+            project
+                .projections
+                .extend(missing.into_iter().map(|name| Projection {
+                    expression: LogicalExpression::Variable(name),
+                    alias: None,
+                }));
+            LogicalOperator::Project(project)
+        }
+        plan => LogicalOperator::Join(JoinOp {
+            left: Box::new(plan),
+            right: Box::new(LogicalOperator::ParameterScan(ParameterScanOp {
+                columns: missing,
+            })),
+            join_type: JoinType::Cross,
+            conditions: Vec::new(),
+        }),
+    }
+}
+
 /// The error for a `WITH` item that is an expression without a name. As in
 /// openCypher, later clauses refer to what a `WITH` passes on by name, and a
 /// property read such as `n.name` does not keep `n`.
@@ -76,47 +169,9 @@ pub(crate) fn unaliased_with_expression() -> Error {
     ))
 }
 
-/// Returns true if the function name is a recognized aggregate function.
-pub(crate) fn is_aggregate_function(name: &str) -> bool {
-    matches!(
-        name.to_uppercase().as_str(),
-        "COUNT"
-            | "SUM"
-            | "AVG"
-            | "MIN"
-            | "MAX"
-            | "COLLECT"
-            | "STDEV"
-            | "STDDEV"
-            | "STDDEV_SAMP"
-            | "STDEVP"
-            | "STDDEVP"
-            | "STDDEV_POP"
-            | "VARIANCE"
-            | "VAR_SAMP"
-            | "VAR_POP"
-            | "PERCENTILE_DISC"
-            | "PERCENTILEDISC"
-            | "PERCENTILE_CONT"
-            | "PERCENTILECONT"
-            | "GROUP_CONCAT"
-            | "GROUPCONCAT"
-            | "LISTAGG"
-            | "SAMPLE"
-            | "COVAR_SAMP"
-            | "COVAR_POP"
-            | "CORR"
-            | "REGR_SLOPE"
-            | "REGR_INTERCEPT"
-            | "REGR_R2"
-            | "REGR_COUNT"
-            | "REGR_SXX"
-            | "REGR_SYY"
-            | "REGR_SXY"
-            | "REGR_AVGX"
-            | "REGR_AVGY"
-    )
-}
+// Whether a function name is an aggregate: one list with the planner's check
+// of function calls.
+pub(crate) use crate::query::functions::is_aggregate_function;
 
 /// Converts a function name to an `AggregateFunction` enum variant.
 pub(crate) fn to_aggregate_function(name: &str) -> Option<AggregateFunction> {
@@ -266,48 +321,397 @@ impl VarGen {
 /// Returns an error if the input is empty. Used by `build_property_predicate`
 /// in multiple translators.
 pub(crate) fn combine_with_and(predicates: Vec<LogicalExpression>) -> Result<LogicalExpression> {
-    predicates
-        .into_iter()
-        .reduce(|acc, pred| LogicalExpression::Binary {
-            left: Box::new(acc),
-            op: BinaryOp::And,
-            right: Box::new(pred),
-        })
-        .ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Empty property predicate",
-            ))
-        })
+    LogicalExpression::conjunction(predicates).ok_or_else(|| {
+        Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            "Empty property predicate",
+        ))
+    })
 }
 
 /// `hasLabel(variable, label)` for every label, combined with AND, or `None`
 /// when `labels` is empty. A node pattern with several labels requires all of
 /// them, wherever the node appears in a pattern.
 pub(crate) fn has_all_labels(variable: &str, labels: &[String]) -> Option<LogicalExpression> {
-    labels
+    LogicalExpression::conjunction(labels.iter().map(|label| LogicalExpression::FunctionCall {
+        name: "hasLabel".into(),
+        args: vec![
+            LogicalExpression::Variable(variable.to_string()),
+            LogicalExpression::Literal(Value::String(label.clone().into())),
+        ],
+        distinct: false,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Whole paths of path patterns
+// ---------------------------------------------------------------------------
+
+/// One hop of a path pattern as a translator binds it: the edge it takes and
+/// the node it reaches.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+#[derive(Debug, Clone)]
+pub(crate) struct PathHop {
+    /// The variable of the edge (of a single-hop edge pattern).
+    pub edge: String,
+    /// The variable of the node the hop ends at.
+    pub target: String,
+    /// For a variable-length edge pattern, the path alias of its expand: the
+    /// `_path_nodes_` and `_path_edges_` columns of that alias hold the
+    /// nodes and edges of the hop, and `edge` is not read.
+    pub segment: Option<String>,
+}
+
+/// `[id(variable)]`, or `[]` when `variable` is null: the hop of a
+/// questioned edge (`->?`) that matched nothing has a null edge and node, and
+/// the path leaves the hop out. (A list literal keeps a null item, so the
+/// null is tested here.)
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn id_list(variable: &str) -> LogicalExpression {
+    let id = LogicalExpression::Id(variable.to_string());
+    LogicalExpression::Case {
+        operand: None,
+        when_clauses: vec![(
+            LogicalExpression::Unary {
+                op: crate::query::plan::UnaryOp::IsNull,
+                operand: Box::new(id.clone()),
+            },
+            LogicalExpression::List(Vec::new()),
+        )],
+        else_clause: Some(Box::new(LogicalExpression::List(vec![id]))),
+    }
+}
+
+/// The ids of the nodes of the path that starts at `source` and takes `hops`,
+/// as one list. A hop that is missing (a questioned edge, `->?`, that
+/// matched nothing) is left out (see [`id_list`]).
+#[cfg(any(feature = "gql", feature = "cypher"))]
+fn path_node_ids(source: &str, hops: &[PathHop]) -> LogicalExpression {
+    let mut parts = vec![id_list(source)];
+    for hop in hops {
+        parts.push(match &hop.segment {
+            // The first node of a segment is the last node of the hop before
+            Some(segment) => LogicalExpression::FunctionCall {
+                name: "tail".into(),
+                args: vec![LogicalExpression::Variable(format!(
+                    "_path_nodes_{segment}"
+                ))],
+                distinct: false,
+            },
+            None => id_list(&hop.target),
+        });
+    }
+    concatenation(parts)
+}
+
+/// The ids of the edges of the path that takes `hops`, as one list (a
+/// missing hop left out, see [`path_node_ids`]).
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn path_edge_ids(hops: &[PathHop]) -> LogicalExpression {
+    concatenation(
+        hops.iter()
+            .map(|hop| match &hop.segment {
+                Some(segment) => LogicalExpression::Variable(format!("_path_edges_{segment}")),
+                None => id_list(&hop.edge),
+            })
+            .collect(),
+    )
+}
+
+/// The lists `parts` joined into one (`a + b + ...`).
+#[cfg(any(feature = "gql", feature = "cypher"))]
+fn concatenation(parts: Vec<LogicalExpression>) -> LogicalExpression {
+    parts
+        .into_iter()
+        .reduce(|left, right| LogicalExpression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::Add,
+            right: Box::new(right),
+        })
+        .unwrap_or(LogicalExpression::List(Vec::new()))
+}
+
+/// The path that starts at `source` and takes `hops`, as one path value.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn whole_path(source: &str, hops: &[PathHop]) -> LogicalExpression {
+    LogicalExpression::FunctionCall {
+        name: "path".into(),
+        args: vec![path_node_ids(source, hops), path_edge_ids(hops)],
+        distinct: false,
+    }
+}
+
+/// Binds the path variable `alias` to the whole path of a path pattern with
+/// more than one edge pattern, which starts at `source` and takes `hops`: the
+/// columns `length(p)`, `nodes(p)` and `edges(p)` read (`_path_length_p` and
+/// so on) and the path value itself. An expand binds a path for its own edge
+/// pattern only (ISO/IEC 39075:2024 16.7: a path variable binds the path of
+/// the whole path pattern).
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn bind_whole_path(
+    plan: LogicalOperator,
+    alias: &str,
+    source: &str,
+    hops: &[PathHop],
+) -> LogicalOperator {
+    let projection = |expression: LogicalExpression, name: String| crate::query::plan::Projection {
+        expression,
+        alias: Some(name),
+    };
+    LogicalOperator::Project(crate::query::plan::ProjectOp {
+        projections: vec![
+            projection(path_node_ids(source, hops), format!("_path_nodes_{alias}")),
+            projection(path_edge_ids(hops), format!("_path_edges_{alias}")),
+            projection(
+                LogicalExpression::FunctionCall {
+                    name: "size".into(),
+                    args: vec![path_edge_ids(hops)],
+                    distinct: false,
+                },
+                format!("_path_length_{alias}"),
+            ),
+            projection(whole_path(source, hops), alias.to_string()),
+        ],
+        input: Box::new(plan),
+        pass_through_input: true,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Generated names
+// ---------------------------------------------------------------------------
+
+/// The names a translator makes up for one statement: for its anonymous
+/// nodes and edges (`_anon_3`) and for helper columns. They are counted per
+/// statement, so a statement gets the same names each time it is
+/// translated, and none of them is a word the statement spells (see
+/// [`written_names`]): a user variable named `_anon_0` stays the user's.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) struct GeneratedNames {
+    /// The number the next name gets.
+    next: std::cell::Cell<u32>,
+    /// The words of the statement a generated name could be.
+    written: HashSet<String>,
+}
+
+#[cfg(any(feature = "gql", feature = "cypher"))]
+impl GeneratedNames {
+    /// The names for the statement `query`.
+    pub(crate) fn new(query: &str) -> Self {
+        Self {
+            next: std::cell::Cell::new(0),
+            written: written_names(query),
+        }
+    }
+
+    /// The next name that starts with `prefix`: `_anon_` gives `_anon_0`,
+    /// then `_anon_1`, skipping the ones the statement spells.
+    pub(crate) fn next(&self, prefix: &str) -> String {
+        loop {
+            let number = self.next.get();
+            self.next.set(number + 1);
+            let name = format!("{prefix}{number}");
+            if !self.written.contains(&name) {
+                return name;
+            }
+        }
+    }
+
+    /// Whether the statement spells `name`, so that a name made up another
+    /// way (Cypher's aggregate columns) must skip it.
+    #[cfg(feature = "cypher")]
+    pub(crate) fn is_written(&self, name: &str) -> bool {
+        self.written.contains(name)
+    }
+}
+
+/// The words of `query` that start with `_`, which is how every name a
+/// translator makes up starts (`_anon_3`): the statement's own variables and
+/// aliases among them, wherever they appear, backquoted or not. A word in a
+/// string literal or a comment is taken too, which only skips a name.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+fn written_names(query: &str) -> HashSet<String> {
+    query
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|word| word.starts_with('_'))
+        .map(str::to_string)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Edges a pattern binds once
+// ---------------------------------------------------------------------------
+
+/// An edge pattern of a graph pattern whose edges must all be different:
+/// GQL's DIFFERENT EDGES (ISO/IEC 39075:2024 16.4) and every Cypher MATCH
+/// (openCypher 9, relationship uniqueness). See [`different_edges`].
+#[cfg(any(feature = "gql", feature = "cypher"))]
+#[derive(Debug, Clone)]
+pub(crate) struct EdgeOccurrence {
+    /// The variable the edge pattern binds.
+    pub variable: String,
+    /// Whether `variable` is a group variable: a quantified (variable-length)
+    /// edge pattern binds it to the list of its edges.
+    pub group: bool,
+    /// The edge types the pattern allows, any type when empty.
+    pub types: Vec<String>,
+}
+
+#[cfg(any(feature = "gql", feature = "cypher"))]
+impl EdgeOccurrence {
+    /// Whether this edge pattern and `other` can bind one edge: an edge has
+    /// one type, so two patterns that allow no common type never do.
+    fn may_bind_the_edge_of(&self, other: &Self) -> bool {
+        self.types.is_empty()
+            || other.types.is_empty()
+            || self
+                .types
+                .iter()
+                .any(|edge_type| other.types.contains(edge_type))
+    }
+
+    /// The ids of the edges the pattern binds, as a list. An edge that
+    /// matched nothing (GQL's questioned edge, `->?`) is null and binds no
+    /// edge: an empty list (see [`id_list`]).
+    fn edge_ids(&self) -> LogicalExpression {
+        if self.group {
+            LogicalExpression::Variable(self.variable.clone())
+        } else {
+            id_list(&self.variable)
+        }
+    }
+}
+
+/// The edge patterns of `edges` (by index) that must be compared, in groups:
+/// patterns that may bind one edge (directly or through other patterns) are
+/// compared together, and a pattern no other one may share an edge with
+/// needs no check. With `lone_groups`, a group variable on its own is still
+/// checked, for an expand whose path may repeat an edge; without, its own
+/// edges are known to differ (its expand matches trails).
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn edges_to_compare(edges: &[EdgeOccurrence], lone_groups: bool) -> Vec<Vec<usize>> {
+    let mut grouped = vec![false; edges.len()];
+    let mut groups = Vec::new();
+    for start in 0..edges.len() {
+        if grouped[start] {
+            continue;
+        }
+        grouped[start] = true;
+        // Every pattern that may share an edge with a member joins
+        let mut members = vec![start];
+        let mut next = 0;
+        while let Some(&current) = members.get(next) {
+            next += 1;
+            for other in 0..edges.len() {
+                if !grouped[other] && edges[current].may_bind_the_edge_of(&edges[other]) {
+                    grouped[other] = true;
+                    members.push(other);
+                }
+            }
+        }
+        if members.len() > 1 || (lone_groups && edges[start].group) {
+            members.sort_unstable();
+            groups.push(members);
+        }
+    }
+    groups
+}
+
+/// The condition that the edges the patterns of each of `groups` (indices
+/// into `edges`, see [`edges_to_compare`]) bind are all different, an edge
+/// of a group variable included: `all_different` over their ids, one check
+/// per group. `None` when there is no group.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn different_edges(
+    edges: &[EdgeOccurrence],
+    groups: &[Vec<usize>],
+) -> Option<LogicalExpression> {
+    let checks = groups
         .iter()
-        .map(|label| LogicalExpression::FunctionCall {
-            name: "hasLabel".into(),
-            args: vec![
-                LogicalExpression::Variable(variable.to_string()),
-                LogicalExpression::Literal(Value::String(label.clone().into())),
-            ],
+        .map(|members| LogicalExpression::FunctionCall {
+            name: "all_different".into(),
+            args: vec![concatenation(
+                members
+                    .iter()
+                    .map(|&index| edges[index].edge_ids())
+                    .collect(),
+            )],
             distinct: false,
         })
-        .reduce(|acc, check| LogicalExpression::Binary {
-            left: Box::new(acc),
-            op: BinaryOp::And,
-            right: Box::new(check),
-        })
+        .collect();
+    join_and_conjuncts(checks)
+}
+
+// ---------------------------------------------------------------------------
+// MERGE
+// ---------------------------------------------------------------------------
+
+/// The variable of an end node of a MERGE relationship pattern, and `input`
+/// with a MERGE of that node after it when the pattern gives the node
+/// `labels` or `match_properties`, as in `MERGE (h)-[:R]->(:T {x: 3})`: a node
+/// without a `variable` gets the name `fresh` makes. One with neither a
+/// variable nor a label or property could be any node, which the
+/// relationship MERGE does not support: an error.
+///
+/// # Errors
+///
+/// Returns an error for an anonymous node without a label or property.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn merge_end_node(
+    variable: Option<&str>,
+    labels: &[String],
+    match_properties: Vec<(String, LogicalExpression)>,
+    input: LogicalOperator,
+    fresh: impl FnOnce() -> String,
+) -> Result<(String, LogicalOperator)> {
+    let defined = !labels.is_empty() || !match_properties.is_empty();
+    let variable = match variable {
+        Some(name) => name.to_string(),
+        None if defined => fresh(),
+        None => {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                "MERGE of a relationship with an anonymous node without a label or property is \
+                 not supported: MATCH or MERGE that node first and use its variable",
+            )));
+        }
+    };
+    if !defined {
+        return Ok((variable, input));
+    }
+    let merge = LogicalOperator::Merge(crate::query::plan::MergeOp {
+        variable: variable.clone(),
+        labels: labels.to_vec(),
+        match_properties,
+        on_create: Vec::new(),
+        on_match: Vec::new(),
+        on_create_labels: Vec::new(),
+        on_match_labels: Vec::new(),
+        input: Box::new(input),
+    });
+    Ok((variable, merge))
+}
+
+/// The error for a MERGE of a pattern with more than one relationship, which
+/// would have to match or create the whole pattern: only one relationship
+/// per MERGE is supported.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn merge_of_a_longer_path() -> Error {
+    Error::Query(QueryError::new(
+        QueryErrorKind::Semantic,
+        "MERGE of a pattern with more than one relationship is not supported: merge one \
+         relationship per MERGE clause",
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Variable extraction
 // ---------------------------------------------------------------------------
 
-/// `all(hop IN edges(path) WHERE predicate)`: a property map on a
-/// variable-length edge must hold for every edge of the path.
+/// `all(hop IN edges(path) WHERE predicate)`: a property map or an element
+/// pattern `WHERE` on a variable-length edge must hold for every edge of the
+/// path. `hop` may be the edge pattern's own variable: inside the predicate it
+/// is then the one edge, not the list of the path's edges.
 pub(crate) fn every_edge_matches(
     path: String,
     hop: String,
@@ -325,23 +729,35 @@ pub(crate) fn every_edge_matches(
     }
 }
 
-/// Collects all variable names referenced by a logical expression.
-/// Dotted access `base.key` into a map value (`n.meta.route`), for the GQL and
-/// Cypher translators.
+/// Dotted access `base.key` into a map value (`n.meta.route`), or into a node
+/// or edge that is not a pattern variable (`startNode(r).name`,
+/// `head(rs).w`, `x.msg.id` of `{msg: m}`), for the GQL and Cypher
+/// translators.
 ///
 /// # Errors
 ///
-/// Returns an error when `base` cannot be a map. A node or edge that a
-/// function returns (`startNode(r)`, `head(collect(n))`) is an entity ID at
-/// runtime, so reading a key from it would give null without saying why.
+/// Returns an error when `base` can be neither a map nor a node or edge (a
+/// number, a string), or reads an aggregate (`head(collect(n)).name`, whose
+/// aggregate the translators do not take out of a key read), so the read
+/// would give null without saying why.
 pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalExpression> {
+    if calls_an_aggregate(&base) {
+        let base = crate::query::planner::common::expression_to_string(&base);
+        return Err(Error::Query(QueryError::new(
+            QueryErrorKind::Semantic,
+            format!(
+                "{base} reads an aggregate, so .{key} cannot read from it in the same clause: \
+                 name it first (WITH {base} AS x) and read x.{key}"
+            ),
+        )));
+    }
     if !can_be_map(&base) {
         let base = crate::query::planner::common::expression_to_string(&base);
         return Err(Error::Query(QueryError::new(
             QueryErrorKind::Semantic,
             format!(
-                "{base} is not a map value, so .{key} cannot read from it: read .{key} of a node \
-                 or edge bound to a variable in the pattern, or of a map value"
+                "{base} is not a map value, a node or an edge, so .{key} cannot read from it: \
+                 read .{key} of a node, an edge or a map value"
             ),
         )));
     }
@@ -351,9 +767,11 @@ pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalEx
     })
 }
 
-/// Whether an expression can evaluate to a map: a variable, a parameter, a
-/// property, a map literal or projection, `properties(...)`, or a key or
-/// element of one of those (or of a list literal).
+/// Whether an expression can evaluate to a map, a node or an edge: a
+/// variable, a parameter, a property, a map literal or projection,
+/// `properties(...)`, `startNode(r)` and `endNode(r)`, the first or last item
+/// of a list (`head`, `last`), or a key or element of one of those (or of a
+/// list literal, or of a list of nodes or edges such as `nodes(p)`).
 fn can_be_map(expr: &LogicalExpression) -> bool {
     match expr {
         LogicalExpression::Variable(_)
@@ -363,9 +781,48 @@ fn can_be_map(expr: &LogicalExpression) -> bool {
         | LogicalExpression::MapProjection { .. }
         | LogicalExpression::MapAccess { .. } => true,
         LogicalExpression::IndexAccess { base, .. } => {
-            matches!(**base, LogicalExpression::List(_)) || can_be_map(base)
+            matches!(**base, LogicalExpression::List(_)) || can_be_list(base) || can_be_map(base)
         }
-        LogicalExpression::FunctionCall { name, .. } => name.eq_ignore_ascii_case("properties"),
+        LogicalExpression::FunctionCall { name, .. } => [
+            "properties",
+            "startnode",
+            "start_node",
+            "endnode",
+            "end_node",
+            "head",
+            "last",
+        ]
+        .iter()
+        .any(|function| name.eq_ignore_ascii_case(function)),
+        _ => false,
+    }
+}
+
+/// Whether an expression is a function that returns a list whose items can
+/// be maps, nodes or edges (`nodes(p)`, `relationships(p)`, and `tail` or
+/// `reverse` of a list).
+fn can_be_list(expr: &LogicalExpression) -> bool {
+    match expr {
+        LogicalExpression::FunctionCall { name, .. } => {
+            ["nodes", "relationships", "edges", "tail", "reverse"]
+                .iter()
+                .any(|function| name.eq_ignore_ascii_case(function))
+        }
+        _ => false,
+    }
+}
+
+/// Whether an expression calls an aggregate function in a function argument,
+/// an index or a key read (`head(collect(n))`, `collect(n)[0]`).
+fn calls_an_aggregate(expr: &LogicalExpression) -> bool {
+    match expr {
+        LogicalExpression::FunctionCall { name, args, .. } => {
+            is_aggregate_function(name) || args.iter().any(calls_an_aggregate)
+        }
+        LogicalExpression::IndexAccess { base, index } => {
+            calls_an_aggregate(base) || calls_an_aggregate(index)
+        }
+        LogicalExpression::MapAccess { base, .. } => calls_an_aggregate(base),
         _ => false,
     }
 }
@@ -523,30 +980,36 @@ fn split_conjuncts_recursive(expr: LogicalExpression, out: &mut Vec<LogicalExpre
 
 /// Result of classifying WHERE predicates for OPTIONAL MATCH.
 ///
-/// Predicates are split based on which side of the LeftJoin their variables
-/// belong to, ensuring correct NULL-preservation semantics.
+/// The WHERE of an OPTIONAL MATCH is part of its pattern (ISO GQL,
+/// openCypher): it decides which matches count and never removes a row of the
+/// clauses before it, so each conjunct goes into the optional side or into
+/// the join condition.
 pub(crate) struct ClassifiedPredicates {
-    /// Predicates referencing only left-side variables (or constants): placed
-    /// as a Filter above the LeftJoin (they filter the required side).
+    /// Conjuncts with an `EXISTS`, `COUNT` or value subquery or a pattern
+    /// comprehension that read no variable only the optional side binds (see
+    /// [`classify_optional_predicates`]): a Filter above the LeftJoin.
     pub post_filters: Vec<LogicalExpression>,
-    /// Predicates whose referenced variables all exist on the right side:
-    /// pushed as a pre-filter on the right input of the LeftJoin.
+    /// Conjuncts that read no variable only the left side binds (the optional
+    /// side's own variables, the variables both sides share, or none): a
+    /// filter on the right input of the LeftJoin.
     pub right_filters: Vec<LogicalExpression>,
-    /// Predicates referencing variables from both sides: stored as null-safe
-    /// join conditions. Applied as `(right_var IS NULL) OR predicate` so that
-    /// NULL-padded rows (unmatched optional side) are preserved.
+    /// Conjuncts that read a variable only the left side binds: conditions
+    /// of the LeftJoin, which reads the joined row (a left row none of whose
+    /// pairs pass them keeps nulls).
     pub cross_filters: Vec<LogicalExpression>,
 }
 
-/// Classifies WHERE predicates for correct OPTIONAL MATCH semantics.
+/// Classifies the conjuncts of the WHERE of an OPTIONAL MATCH by the
+/// variables they read: `left_vars` are those of the rows the OPTIONAL MATCH
+/// goes on from, `right_vars` those of its pattern (see
+/// [`ClassifiedPredicates`]).
 ///
-/// Given a predicate and the set of variables produced by the left (required)
-/// and right (optional) sides of a LeftJoin, splits the predicate into:
-///
-/// - **post_filters**: reference only left-side variables, safe to apply after the join
-/// - **right_filters**: reference only right-side variables, can be pushed as a
-///   pre-filter on the right input (semantically equivalent to a join condition)
-/// - **cross_filters**: reference both sides, must be applied as a join condition
+/// A conjunct with a subquery or pattern comprehension keeps the placement it
+/// had before: [`collect_expression_variables`] does not see what the
+/// subquery reads, so it cannot be placed by its variables, and the join
+/// condition cannot run a subquery. One that reads a variable only the
+/// optional side binds is a right filter, any other one stays a filter above
+/// the join.
 pub(crate) fn classify_optional_predicates(
     predicate: LogicalExpression,
     left_vars: &HashSet<String>,
@@ -561,33 +1024,31 @@ pub(crate) fn classify_optional_predicates(
         let mut referenced = HashSet::new();
         collect_expression_variables(&conjunct, &mut referenced);
 
-        // A predicate is a right-filter only if it references at least one
-        // right-ONLY variable (a variable produced exclusively by the optional
-        // side, not shared with the required side). Predicates on shared
-        // variables alone (e.g., `n.city = 'NYC'` where `n` is the join key)
-        // must remain as post-filters because they constrain the required side.
         let has_right_only_var = referenced
             .iter()
             .any(|v| right_vars.contains(v) && !left_vars.contains(v));
         let has_left_only_var = referenced
             .iter()
             .any(|v| left_vars.contains(v) && !right_vars.contains(v));
-        let all_in_right = referenced.iter().all(|v| right_vars.contains(v));
 
-        if referenced.is_empty() {
-            // Constant predicate: post-filter
-            post_filters.push(conjunct);
-        } else if has_right_only_var && all_in_right {
-            // References at least one right-only variable, and all referenced
-            // variables exist on the right side: push as pre-filter on right input.
-            right_filters.push(conjunct);
-        } else if has_left_only_var && has_right_only_var {
-            // True cross-side: references at least one left-only AND one right-only
-            // variable. Store for null-safe join condition wrapping.
+        if has_subquery(&conjunct) {
+            let all_in_right = referenced.iter().all(|v| right_vars.contains(v));
+            if has_right_only_var && all_in_right {
+                right_filters.push(conjunct);
+            } else if has_left_only_var && has_right_only_var {
+                cross_filters.push(conjunct);
+            } else {
+                post_filters.push(conjunct);
+            }
+        } else if has_left_only_var {
+            // `p.id IN xs`, `forum.id = x`, `x = 3`: the joined row has the
+            // left side's value
             cross_filters.push(conjunct);
         } else {
-            // Left-only or shared-only: post-filter above the join.
-            post_filters.push(conjunct);
+            // `p.name = 'Gus'`, a condition on a variable both sides share
+            // (`f.id = 3`, the optional side's `f` is the same node), or a
+            // constant (`3 = 19`): a filter on the optional side's matches
+            right_filters.push(conjunct);
         }
     }
 
@@ -595,6 +1056,76 @@ pub(crate) fn classify_optional_predicates(
         post_filters,
         right_filters,
         cross_filters,
+    }
+}
+
+/// Whether `expr` has an `EXISTS`, `COUNT` or value subquery or a pattern
+/// comprehension, whose plan may read variables of the row that
+/// [`collect_expression_variables`] does not list.
+fn has_subquery(expr: &LogicalExpression) -> bool {
+    match expr {
+        LogicalExpression::ExistsSubquery(_)
+        | LogicalExpression::CountSubquery(_)
+        | LogicalExpression::ValueSubquery(_)
+        | LogicalExpression::PatternComprehension { .. } => true,
+        LogicalExpression::Literal(_)
+        | LogicalExpression::Variable(_)
+        | LogicalExpression::Property { .. }
+        | LogicalExpression::Parameter(_)
+        | LogicalExpression::Labels(_)
+        | LogicalExpression::Type(_)
+        | LogicalExpression::Id(_) => false,
+        LogicalExpression::Binary { left, right, .. } => has_subquery(left) || has_subquery(right),
+        LogicalExpression::Unary { operand, .. } => has_subquery(operand),
+        LogicalExpression::FunctionCall { args: items, .. } | LogicalExpression::List(items) => {
+            items.iter().any(has_subquery)
+        }
+        LogicalExpression::Map(pairs) => pairs.iter().any(|(_, value)| has_subquery(value)),
+        LogicalExpression::IndexAccess { base, index } => has_subquery(base) || has_subquery(index),
+        LogicalExpression::MapAccess { base, .. } => has_subquery(base),
+        LogicalExpression::SliceAccess { base, start, end } => {
+            has_subquery(base)
+                || start.as_deref().is_some_and(has_subquery)
+                || end.as_deref().is_some_and(has_subquery)
+        }
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            operand.as_deref().is_some_and(has_subquery)
+                || when_clauses
+                    .iter()
+                    .any(|(condition, result)| has_subquery(condition) || has_subquery(result))
+                || else_clause.as_deref().is_some_and(has_subquery)
+        }
+        LogicalExpression::ListComprehension {
+            list_expr,
+            filter_expr,
+            map_expr,
+            ..
+        } => {
+            has_subquery(list_expr)
+                || filter_expr.as_deref().is_some_and(has_subquery)
+                || has_subquery(map_expr)
+        }
+        LogicalExpression::ListPredicate {
+            list_expr,
+            predicate,
+            ..
+        } => has_subquery(list_expr) || has_subquery(predicate),
+        LogicalExpression::MapProjection { entries, .. } => entries.iter().any(|entry| {
+            matches!(
+                entry,
+                crate::query::plan::MapProjectionEntry::LiteralEntry(_, value) if has_subquery(value)
+            )
+        }),
+        LogicalExpression::Reduce {
+            initial,
+            list,
+            expression,
+            ..
+        } => has_subquery(initial) || has_subquery(list) || has_subquery(expression),
     }
 }
 
@@ -622,12 +1153,50 @@ pub(crate) fn collect_operator_variables(op: &LogicalOperator, vars: &mut HashSe
         }
         LogicalOperator::Project(proj) => {
             for p in &proj.projections {
-                if let Some(alias) = &p.alias {
-                    vars.insert(alias.clone());
+                // A variable passed on as it is (`WITH i`) keeps its name.
+                match (&p.alias, &p.expression) {
+                    (Some(name), _) | (None, LogicalExpression::Variable(name)) => {
+                        vars.insert(name.clone());
+                    }
+                    (None, _) => {}
                 }
             }
             collect_operator_variables(&proj.input, vars);
         }
+        // A write passes its input's rows on, with the node or edge it
+        // creates or merges (`UNWIND ... AS i CREATE (n) WITH i OPTIONAL
+        // MATCH (t {k: i})` reads `i` through the write).
+        LogicalOperator::CreateNode(create) => {
+            vars.insert(create.variable.clone());
+            if let Some(input) = &create.input {
+                collect_operator_variables(input, vars);
+            }
+        }
+        LogicalOperator::CreateEdge(create) => {
+            if let Some(variable) = &create.variable {
+                vars.insert(variable.clone());
+            }
+            collect_operator_variables(&create.input, vars);
+        }
+        LogicalOperator::Create(create) => {
+            vars.extend(create.variables().map(str::to_string));
+            if let Some(input) = &create.input {
+                collect_operator_variables(input, vars);
+            }
+        }
+        LogicalOperator::Merge(merge) => {
+            vars.insert(merge.variable.clone());
+            collect_operator_variables(&merge.input, vars);
+        }
+        LogicalOperator::MergeRelationship(merge) => {
+            vars.insert(merge.variable.clone());
+            collect_operator_variables(&merge.input, vars);
+        }
+        LogicalOperator::SetProperty(set) => collect_operator_variables(&set.input, vars),
+        LogicalOperator::AddLabel(add) => collect_operator_variables(&add.input, vars),
+        LogicalOperator::RemoveLabel(remove) => collect_operator_variables(&remove.input, vars),
+        LogicalOperator::DeleteNode(delete) => collect_operator_variables(&delete.input, vars),
+        LogicalOperator::DeleteEdge(delete) => collect_operator_variables(&delete.input, vars),
         LogicalOperator::Join(join) => {
             collect_operator_variables(&join.left, vars);
             collect_operator_variables(&join.right, vars);
@@ -673,20 +1242,114 @@ pub(crate) fn collect_operator_variables(op: &LogicalOperator, vars: &mut HashSe
         _ => {
             // For other operators, do not recurse to avoid false positives.
             // The common cases (NodeScan, Expand, Filter, Join, LeftJoin,
-            // Unwind, Project, Aggregate, Return) are covered above.
+            // Unwind, Project, Aggregate, Return, the writes) are covered
+            // above.
         }
     }
 }
 
+/// The variables on which a comma-separated part of a MATCH (`part`, the
+/// variables it names, starting from the node variable `start`) is joined to
+/// the rows of the parts before it, in name order, or none when the part goes
+/// on from those rows instead. `clause` holds the variables of the earlier
+/// parts of the clause, `input` those of the rows the clause starts from (a
+/// MATCH, UNWIND or subquery import before it).
+///
+/// A part goes on from the rows when it shares no variable with the earlier
+/// parts, or when it starts from a variable of the input: its scan reuses the
+/// bound start and expands from it, and an expand to a node or edge that is
+/// bound already binds a fresh variable checked against it (`close_cycles`).
+/// Any other part is matched on its own and joined on every variable it
+/// shares with the earlier parts or with the input, so that a part like
+/// `(a)<-[:R]-(b)` after `(b:C)` still meets the `a` of the input, unless it
+/// reads a value of those rows (see [`comma_part_reads_earlier_rows`]).
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn comma_part_join_variables(
+    part: &HashSet<String>,
+    start: Option<&str>,
+    clause: &HashSet<String>,
+    input: &HashSet<String>,
+) -> Vec<String> {
+    if part.is_disjoint(clause) || start.is_some_and(|start| input.contains(start)) {
+        return Vec::new();
+    }
+    let mut shared: Vec<String> = part
+        .iter()
+        .filter(|name| clause.contains(*name) || input.contains(*name))
+        .cloned()
+        .collect();
+    shared.sort();
+    shared
+}
+
+/// Whether `part`, a comma-separated part of a MATCH translated on its own
+/// (as one joined to the parts before it is), reads in its filters (its
+/// property maps and inline WHERE clauses) a variable that the earlier parts
+/// (`clause`) or the input bind and the part itself (`part_vars`) does not:
+/// an unwound value, or a node of another part, as in `UNWIND [3, 19] AS w
+/// MATCH (b:City), (b)<-[:VISITED {w: w}]-(a)`. On its own the part has no
+/// such value and matches nothing, so it goes on from the rows before it
+/// instead, like a part that shares no variable with them.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn comma_part_reads_earlier_rows(
+    part: &LogicalOperator,
+    part_vars: &HashSet<String>,
+    clause: &HashSet<String>,
+    input: &HashSet<String>,
+) -> bool {
+    let mut read = HashSet::new();
+    collect_filter_reads(part, &mut read);
+    read.iter()
+        .any(|name| !part_vars.contains(name) && (clause.contains(name) || input.contains(name)))
+}
+
+/// Adds the variables the filters of `op`, and of every operator below it,
+/// read: the edge conditions of shortest-path searches included.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+fn collect_filter_reads(op: &LogicalOperator, read: &mut HashSet<String>) {
+    match op {
+        LogicalOperator::Filter(filter) => collect_expression_variables(&filter.predicate, read),
+        LogicalOperator::ShortestPath(path) => {
+            if let Some(condition) = &path.edge_condition {
+                collect_expression_variables(&condition.predicate, read);
+            }
+        }
+        _ => {}
+    }
+    for child in op.children() {
+        collect_filter_reads(child, read);
+    }
+}
+
+/// The variables the rows of `rows`, a side of the left join of an OPTIONAL
+/// MATCH, hold (see [`LogicalOperator::bound_variables`]): a `WITH` holds
+/// only what it projects, so a name it dropped that the OPTIONAL MATCH binds
+/// again is the optional part's own (LDBC IC5's `WITH forum, collect(friend)
+/// AS friends OPTIONAL MATCH (friend)<-...`), a subquery's import holds the
+/// variables it imports (`imports` for `WITH *`), and a shortest path holds
+/// its ends and its path. Where they are not known here, every variable bound
+/// below `rows`.
+fn row_variables(rows: &LogicalOperator, imports: Option<&HashSet<String>>) -> HashSet<String> {
+    rows.bound_variables(imports).unwrap_or_else(|| {
+        let mut vars = HashSet::new();
+        collect_operator_variables(rows, &mut vars);
+        vars
+    })
+}
+
 /// The left join of an OPTIONAL MATCH: `right` matched for each row of
 /// `left`, with nulls where it has no match. A filter in `right` that reads a
-/// variable only `left` binds (GQL's `(c WHERE c.age > a.age)`) is a condition
-/// of the join: it decides which matches count, so it moves there.
-pub(crate) fn optional_join(left: LogicalOperator, right: LogicalOperator) -> LogicalOperator {
-    let mut left_vars = HashSet::new();
-    collect_operator_variables(&left, &mut left_vars);
-    let mut right_vars = HashSet::new();
-    collect_operator_variables(&right, &mut right_vars);
+/// variable only `left` binds (GQL's `(c WHERE c.age > a.age)`, or a property
+/// map that reads an imported value) is a condition of the join: it decides
+/// which matches count, so it moves there. `imports` is what a subquery's
+/// `WITH *` imports (see [`row_variables`]).
+pub(crate) fn optional_join(
+    left: LogicalOperator,
+    right: LogicalOperator,
+    imports: Option<&HashSet<String>>,
+) -> LogicalOperator {
+    let left_vars = row_variables(&left, imports);
+    let right_vars = row_variables(&right, imports);
     let mut moved = Vec::new();
     let right = take_left_reading_filters(right, &left_vars, &right_vars, &mut moved);
     LogicalOperator::LeftJoin(LeftJoinOp {
@@ -747,6 +1410,18 @@ fn take_left_reading_filters(
             });
             LogicalOperator::NodeScan(scan)
         }
+        // A shortest path from a node whose property map reads an earlier
+        // value (`shortestPath((a {id: x})-[*]->(b))`) searches from every
+        // candidate; the condition keeps the paths of the row's own.
+        LogicalOperator::ShortestPath(mut path) => {
+            path.input = Box::new(take_left_reading_filters(
+                *path.input,
+                left_vars,
+                right_vars,
+                moved,
+            ));
+            LogicalOperator::ShortestPath(path)
+        }
         // The patterns of a comma list each have their filters.
         LogicalOperator::Join(mut join) => {
             join.left = Box::new(take_left_reading_filters(
@@ -782,28 +1457,26 @@ fn split_and(predicate: LogicalExpression) -> Vec<LogicalExpression> {
 
 /// The conjunction of `conjuncts`, `None` for none.
 fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
-    conjuncts
-        .into_iter()
-        .reduce(|acc, conjunct| LogicalExpression::Binary {
-            left: Box::new(acc),
-            op: BinaryOp::And,
-            right: Box::new(conjunct),
-        })
+    LogicalExpression::conjunction(conjuncts)
 }
 
 /// Builds a LeftJoin with properly classified WHERE predicates.
 ///
 /// Given a WHERE predicate that follows an OPTIONAL MATCH (whose join is
 /// `left_join`), this function:
-/// 1. Collects variables from both sides
-/// 2. Classifies predicates into left-only, right-only, and cross-side
-/// 3. Pushes right-only predicates as a Filter on the right input
-/// 4. Adds cross-side predicates to `LeftJoinOp.condition`, which decides
-///    which pairs of rows are matches (a left row without one keeps nulls)
+/// 1. Collects the variables the rows of each side hold (`imports` is what a
+///    subquery's `WITH *` imports, see [`row_variables`])
+/// 2. Classifies the conjuncts (see [`classify_optional_predicates`])
+/// 3. Pushes those that read no left-only variable as a Filter on the right
+///    input
+/// 4. Adds those that read a left-only variable to `LeftJoinOp.condition`,
+///    which decides which pairs of rows are matches (a left row without one
+///    keeps nulls)
 /// 5. Returns the LeftJoin and any remaining post-filters to apply above
 pub(crate) fn build_left_join_with_predicates(
     left_join: LeftJoinOp,
     predicate: Option<LogicalExpression>,
+    imports: Option<&HashSet<String>>,
 ) -> (LogicalOperator, Option<LogicalExpression>) {
     let LeftJoinOp {
         left,
@@ -821,10 +1494,8 @@ pub(crate) fn build_left_join_with_predicates(
     };
 
     // Collect variables from each side
-    let mut left_vars = HashSet::new();
-    collect_operator_variables(&left, &mut left_vars);
-    let mut right_vars = HashSet::new();
-    collect_operator_variables(&right, &mut right_vars);
+    let left_vars = row_variables(&left, imports);
+    let right_vars = row_variables(&right, imports);
 
     // Classify
     let classified = classify_optional_predicates(predicate, &left_vars, &right_vars);
@@ -833,14 +1504,7 @@ pub(crate) fn build_left_join_with_predicates(
     let filtered_right = if classified.right_filters.is_empty() {
         right
     } else {
-        let right_pred = classified
-            .right_filters
-            .into_iter()
-            .reduce(|acc, pred| LogicalExpression::Binary {
-                left: Box::new(acc),
-                op: BinaryOp::And,
-                right: Box::new(pred),
-            })
+        let right_pred = LogicalExpression::conjunction(classified.right_filters)
             .expect("non-empty right_filters");
         wrap_filter(right, right_pred)
     };
@@ -861,21 +1525,7 @@ pub(crate) fn build_left_join_with_predicates(
     });
 
     // Combine remaining post-filters
-    let post_filter = if classified.post_filters.is_empty() {
-        None
-    } else {
-        Some(
-            classified
-                .post_filters
-                .into_iter()
-                .reduce(|acc, pred| LogicalExpression::Binary {
-                    left: Box::new(acc),
-                    op: BinaryOp::And,
-                    right: Box::new(pred),
-                })
-                .expect("non-empty post_filters"),
-        )
-    };
+    let post_filter = LogicalExpression::conjunction(classified.post_filters);
 
     (join, post_filter)
 }
@@ -883,6 +1533,51 @@ pub(crate) fn build_left_join_with_predicates(
 // ---------------------------------------------------------------------------
 // Plan node builder helpers
 // ---------------------------------------------------------------------------
+
+/// Adds `SET variable.property = value` on top of `plan`.
+///
+/// A constant value (a literal or a parameter) joins the [`SetPropertyOp`]
+/// at the top when that one sets only constants on the same entity: the
+/// values read nothing the earlier assignments write, so setting them
+/// together is setting them one after the other, and a list of thousands of
+/// assignments (`SET n.p0 = 0, n.p1 = 1, ...`) is one operator, not a chain
+/// as long. Any other value gets an operator of its own.
+pub(crate) fn push_set_property(
+    plan: LogicalOperator,
+    variable: &str,
+    property: String,
+    value: LogicalExpression,
+    is_edge: bool,
+) -> LogicalOperator {
+    let constant = |value: &LogicalExpression| {
+        matches!(
+            value,
+            LogicalExpression::Literal(_) | LogicalExpression::Parameter(_)
+        )
+    };
+    match plan {
+        LogicalOperator::SetProperty(mut set)
+            if constant(&value)
+                && set.variable == variable
+                && set.is_edge == is_edge
+                && !set.replace
+                && set
+                    .properties
+                    .iter()
+                    .all(|(name, value)| name != "*" && constant(value)) =>
+        {
+            set.properties.push((property, value));
+            LogicalOperator::SetProperty(set)
+        }
+        plan => LogicalOperator::SetProperty(SetPropertyOp {
+            variable: variable.to_string(),
+            properties: vec![(property, value)],
+            replace: false,
+            is_edge,
+            input: Box::new(plan),
+        }),
+    }
+}
 
 /// Wraps an operator with a filter predicate.
 pub(crate) fn wrap_filter(input: LogicalOperator, predicate: LogicalExpression) -> LogicalOperator {
@@ -1145,13 +1840,7 @@ pub(crate) fn flatten_and_conjuncts(expr: &LogicalExpression) -> Vec<&LogicalExp
 
 /// Joins a list of expressions with AND. Returns `None` for an empty list.
 pub(crate) fn join_and_conjuncts(parts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
-    parts
-        .into_iter()
-        .reduce(|acc, part| LogicalExpression::Binary {
-            left: Box::new(acc),
-            op: BinaryOp::And,
-            right: Box::new(part),
-        })
+    LogicalExpression::conjunction(parts)
 }
 
 /// Wraps an operator with RETURN.
@@ -1167,10 +1856,88 @@ pub(crate) fn wrap_return(
     })
 }
 
+/// Ends a statement that has no result: one without a `RETURN` (openCypher,
+/// ISO GQL), or with GQL's `FINISH`. A `RETURN` of no items, which the
+/// planner runs to the end of its input for the writes and which returns no
+/// rows and no columns.
+pub(crate) fn no_result(input: LogicalOperator) -> LogicalOperator {
+    wrap_return(input, Vec::new(), false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use grafeo_common::types::Value;
+
+    // --- edges_to_compare and GeneratedNames ---
+
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    fn edge(variable: &str, group: bool, types: &[&str]) -> EdgeOccurrence {
+        EdgeOccurrence {
+            variable: variable.to_string(),
+            group,
+            types: types
+                .iter()
+                .map(|edge_type| (*edge_type).to_string())
+                .collect(),
+        }
+    }
+
+    /// Edge patterns of types that share none never bind one edge, while an
+    /// untyped one may bind the edge of any: it ties patterns of different
+    /// types into one check.
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    #[test]
+    fn edge_patterns_are_compared_when_they_may_bind_one_edge() {
+        let knows = edge("a", false, &["KNOWS"]);
+        let likes = edge("b", false, &["LIKES"]);
+        let any = edge("c", false, &[]);
+        let either = edge("d", false, &["LIKES", "KNOWS"]);
+        assert_eq!(
+            edges_to_compare(&[knows.clone(), likes.clone()], true),
+            Vec::<Vec<usize>>::new()
+        );
+        assert_eq!(
+            edges_to_compare(&[knows.clone(), either], true),
+            [vec![0, 1]]
+        );
+        assert_eq!(
+            edges_to_compare(&[knows.clone(), likes.clone(), any], true),
+            [vec![0, 1, 2]],
+            "the untyped pattern may share an edge with both"
+        );
+        assert_eq!(
+            edges_to_compare(&[knows.clone(), likes, knows.clone(), knows], true),
+            [vec![0, 2, 3]]
+        );
+    }
+
+    /// A group variable on its own is checked only where its expand may
+    /// repeat an edge.
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    #[test]
+    fn a_lone_group_is_checked_only_on_request() {
+        let group = edge("g", true, &["KNOWS"]);
+        let single = edge("s", false, &["LIKES"]);
+        assert_eq!(
+            edges_to_compare(&[group.clone(), single.clone()], true),
+            [vec![0]]
+        );
+        assert_eq!(
+            edges_to_compare(&[group, single], false),
+            Vec::<Vec<usize>>::new()
+        );
+    }
+
+    /// The names of a statement count from 0 and skip the words it spells.
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    #[test]
+    fn generated_names_skip_the_words_of_the_statement() {
+        let names = GeneratedNames::new("MATCH (_anon_0)-->(`_anon_2`) RETURN '_anon_3'");
+        let made: Vec<String> = (0..3).map(|_| names.next("_anon_")).collect();
+        assert_eq!(made, ["_anon_1", "_anon_4", "_anon_5"]);
+        assert_eq!(names.next("_path_"), "_path_6");
+    }
 
     // --- capitalize_first ---
 
@@ -1592,13 +2359,37 @@ mod tests {
             property: "age".into(),
         };
 
+        // A condition on the rows before the OPTIONAL MATCH decides which
+        // matches count: a join condition, never a filter of those rows
         let result = classify_optional_predicates(pred, &left_vars, &right_vars);
         assert_eq!(
-            result.post_filters.len(),
+            result.cross_filters.len(),
             1,
-            "left-only should be post-filter"
+            "left-only should be a join condition"
         );
+        assert!(result.post_filters.is_empty());
         assert!(result.right_filters.is_empty());
+    }
+
+    #[test]
+    fn classify_shared_only_and_constant_predicates_as_right() {
+        let left_vars: HashSet<String> = ["n".into()].into_iter().collect();
+        let right_vars: HashSet<String> = ["n".into(), "m".into()].into_iter().collect();
+        let shared = LogicalExpression::Property {
+            variable: "n".into(),
+            property: "active".into(),
+        };
+        let constant = LogicalExpression::Literal(Value::Bool(false));
+        let combined = LogicalExpression::Binary {
+            left: Box::new(shared),
+            op: BinaryOp::And,
+            right: Box::new(constant),
+        };
+
+        let result = classify_optional_predicates(combined, &left_vars, &right_vars);
+        assert_eq!(result.right_filters.len(), 2, "both filter the matches");
+        assert!(result.post_filters.is_empty());
+        assert!(result.cross_filters.is_empty());
     }
 
     #[test]

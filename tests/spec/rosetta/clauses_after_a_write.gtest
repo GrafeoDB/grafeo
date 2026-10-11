@@ -1,0 +1,144 @@
+# Rosetta: clauses after a write
+#
+# A clause after a write in the same statement reads the whole clause before
+# it, as ISO GQL and openCypher define a statement. The row i merges the one
+# hub and sets h.c = i, so after the write every row reads h.c = 4. A RETURN,
+# WITH, WHERE, ORDER BY or aggregate after the write used to read the hub as
+# the rows up to its own left it (1 to 4), a REMOVE or DELETE likewise, and a
+# LIMIT after a write cut the write short.
+#
+# GQL takes no DELETE after a FOR or a WITH yet: the DELETE case is Cypher
+# only (its UNWIND passes the two matched rows on one at a time).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Clauses after a write
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: a_return_after_a_set_reads_the_whole_write
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) SET h.c = i RETURN i, h.c AS c"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) SET h.c = i RETURN i, h.c AS c"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: a_return_after_a_with_after_a_set_reads_the_whole_write
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) SET h.c = i WITH h, i RETURN i, h.c AS c"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) SET h.c = i WITH h, i RETURN i, h.c AS c"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  # Every row passes, not only the last.
+  - name: a_where_after_a_set_reads_the_whole_write
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) SET h.c = i WITH h, i WHERE h.c = 4 RETURN i, h.c AS c"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) SET h.c = i WITH h, i WHERE h.c = 4 RETURN i, h.c AS c"
+    expect:
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  - name: an_aggregate_after_a_set_reads_the_whole_write
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) SET h.c = i RETURN sum(h.c) AS total"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) SET h.c = i RETURN sum(h.c) AS total"
+    expect:
+      rows:
+        - [16]
+
+  # Every row sorts on 4, so the rows keep the order of i, the second key.
+  - name: an_order_by_after_a_set_reads_the_whole_write
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (h:Hub) SET h.c = i RETURN i, h.c AS c ORDER BY h.c DESC, i"
+      cypher: "UNWIND range(1, 4) AS i MERGE (h:Hub) SET h.c = i RETURN i, h.c AS c ORDER BY h.c DESC, i"
+    expect:
+      ordered: true
+      rows:
+        - [1, 4]
+        - [2, 4]
+        - [3, 4]
+        - [4, 4]
+
+  # The row i removes the label of the hub k: i - 1, so the hub of each row
+  # but the last loses it to the row after its own.
+  - name: labels_after_a_remove_read_the_whole_write
+    setup:
+      - "FOR k IN range(0, 4) INSERT (:Hub:Seen {k: k})"
+    variants:
+      gql: "FOR i IN range(1, 4) MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) REMOVE b:Seen WITH a, i RETURN i, labels(a) AS l"
+      cypher: "UNWIND range(1, 4) AS i MERGE (a:Hub {k: i}) MERGE (b:Hub {k: i - 1}) REMOVE b:Seen WITH a, i RETURN i, labels(a) AS l"
+    expect:
+      rows:
+        - [1, "[Hub]"]
+        - [2, "[Hub]"]
+        - [3, "[Hub]"]
+        - [4, "[Hub, Seen]"]
+
+  # Each row deletes its own a and reads the name of b, the other row's a.
+  - name: a_return_after_a_delete_reads_the_whole_delete
+    setup:
+      - "INSERT (:P {k: 1, name: 'Alix'}), (:P {k: 2, name: 'Gus'})"
+    variants:
+      cypher: "MATCH (a:P), (b:P) WHERE a.k <> b.k UNWIND [1] AS x DELETE a RETURN count(b.name) AS named"
+    expect:
+      rows:
+        - [0]
+
+  # The LIMIT cuts the rows after the write, not the write. GQL takes no
+  # LIMIT after a WITH: its case counts in a second statement.
+  - name: a_limit_after_a_write_keeps_every_write
+    variants:
+      cypher: "UNWIND range(1, 10) AS i CREATE (n:L {i: i}) WITH n LIMIT 1 MATCH (m:L) RETURN count(m) AS nodes"
+    expect:
+      rows:
+        - [10]
+
+  - name: a_limit_after_an_insert_keeps_every_write
+    statements:
+      - "FOR i IN range(1, 10) INSERT (:L {i: i}) RETURN i LIMIT 1"
+      - "MATCH (n:L) RETURN count(n) AS nodes"
+    expect:
+      rows:
+        - [10]
+
+  # FINISH reads the write whole and returns no rows.
+  - name: finish_after_a_write_keeps_every_write
+    statements:
+      - "FOR i IN range(1, 10) INSERT (:L {i: i}) FINISH"
+      - "MATCH (n:L) RETURN count(n) AS nodes"
+    expect:
+      rows:
+        - [10]
+
+  # A LIMIT 0 or FINISH in a CALL body cuts the body's rows, not its write: it
+  # used to read none of its input there, so the body wrote nothing.
+  - name: finish_in_a_call_body_keeps_every_write
+    statements:
+      - "FOR i IN [1, 2] CALL (i) { FOR j IN [1, 2, 3] INSERT (:L {i: i, j: j}) FINISH } RETURN count(*) AS rows"
+      - "MATCH (n:L) RETURN count(n) AS nodes"
+    expect:
+      rows:
+        - [6]
+
+  - name: a_limit_zero_in_a_call_body_keeps_every_write
+    variants:
+      gql: "FOR i IN [1, 2] CALL { FOR j IN [1, 2, 3] INSERT (:L) RETURN j LIMIT 0 } WITH count(*) AS rows MATCH (n:L) RETURN rows, count(n) AS nodes"
+      cypher: "UNWIND [1, 2] AS i CALL { UNWIND [1, 2, 3] AS j CREATE (:L) RETURN j LIMIT 0 } WITH count(*) AS rows MATCH (n:L) RETURN rows, count(n) AS nodes"
+    expect:
+      rows:
+        - [0, 6]

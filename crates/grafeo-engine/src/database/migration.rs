@@ -661,8 +661,10 @@ fn with_migration_context(path: &Path, error: Error) -> Error {
         Error::Internal(message) => Error::Internal(context(&message)),
         Error::Serialization(message) => Error::Serialization(context(&message)),
         Error::InvalidValue(message) => Error::InvalidValue(context(&message)),
-        Error::Storage(StorageError::Corruption(message)) => {
-            Error::Storage(StorageError::Corruption(context(&message)))
+        // The damaged file is the one being migrated, which it names.
+        Error::Corruption(mut corruption) => {
+            corruption.what = format!("while migrating it to the 0.6 format: {}", corruption.what);
+            Error::Corruption(corruption).in_file(path)
         }
         Error::Storage(StorageError::InvalidWalEntry(message)) => {
             Error::Storage(StorageError::InvalidWalEntry(context(&message)))
@@ -1263,15 +1265,13 @@ mod tests {
             matches!(&internal, Error::Internal(message) if *message == format!("{context}CRC mismatch")),
             "{internal:?}"
         );
-        let corrupt = with_migration_context(
-            path,
-            Error::Storage(StorageError::Corruption("torn page".into())),
-        );
+        let corrupt = with_migration_context(path, Error::corruption("torn page"));
         assert!(
             matches!(
                 &corrupt,
-                Error::Storage(StorageError::Corruption(message))
-                    if *message == format!("{context}torn page")
+                Error::Corruption(corruption)
+                    if corruption.what == "while migrating it to the 0.6 format: torn page"
+                        && corruption.file.as_deref() == Some(path)
             ),
             "{corrupt:?}"
         );

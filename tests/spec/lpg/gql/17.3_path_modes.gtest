@@ -166,3 +166,175 @@ tests:
     query: "MATCH p = ANY SHORTEST (a:Node {name: 'a'})-[:STEP]->+(d:Node {name: 'd'}) RETURN length(p) AS len"
     expect:
       count: 1
+
+  # ---------------------------------------------------------------------------
+  # A path mode holds for the whole path, fixed edge patterns included
+  # (16.6 <path mode>; #591). Setup: Alix -> Gus -> Vincent -> Mia and
+  # Alix -> Vincent, walked in both directions: 18 two-hop walks, 8 of them
+  # back over the same edge.
+  # ---------------------------------------------------------------------------
+
+  - name: trail_mode_over_fixed_edge_patterns
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH TRAIL (a)-[:KNOWS]-(b)-[:KNOWS]-(c) RETURN count(*) AS cnt"
+    expect:
+      rows:
+        - [10]
+
+  - name: trail_mode_over_a_fixed_and_a_quantified_edge_pattern
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH TRAIL (a)-[:KNOWS]-(b)-[:KNOWS]-{1,2}(c) RETURN count(*) AS cnt"
+    expect:
+      rows:
+        - [20]
+
+  - name: acyclic_mode_over_fixed_edge_patterns
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH ACYCLIC (a)-[:KNOWS]-(b)-[:KNOWS]-(c)-[:KNOWS]-(d) RETURN count(*) AS cnt"
+    expect:
+      rows:
+        - [4]
+
+  - name: acyclic_mode_excludes_a_self_loop
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (alix)-[:KNOWS]->(alix), (alix)-[:KNOWS]->(gus)"
+    query: "MATCH ACYCLIC (a)-[:KNOWS]->(b) RETURN a.name, b.name"
+    expect:
+      rows:
+        - [Alix, Gus]
+
+  - name: simple_mode_over_fixed_edge_patterns
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH SIMPLE (a)-[:KNOWS]-(b)-[:KNOWS]-(c)-[:KNOWS]-(d) RETURN count(*) AS cnt"
+    expect:
+      rows:
+        - [10]
+
+  # ---------------------------------------------------------------------------
+  # Match modes (16.4 <graph pattern>; #591): DIFFERENT EDGES binds no edge
+  # twice in the whole graph pattern; REPEATABLE ELEMENTS, the default, lets
+  # an edge repeat. Independent of the path mode.
+  # ---------------------------------------------------------------------------
+
+  - name: different_edges_across_patterns
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH DIFFERENT EDGES (a)-[e1:KNOWS]->(b), (a)-[e2:KNOWS]->(c) RETURN count(*) AS cnt"
+    expect:
+      rows:
+        - [2]
+
+  - name: different_edges_with_anonymous_edges
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH DIFFERENT EDGES (a)-[:KNOWS]->(b), (a)-[:KNOWS]->(c) RETURN a.name, b.name, c.name"
+    expect:
+      rows:
+        - [Alix, Gus, Vincent]
+        - [Alix, Vincent, Gus]
+
+  - name: different_edges_with_a_quantified_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3}]->(gus), (gus)-[:KNOWS {w: 19}]->(vincent), (vincent)-[:KNOWS {w: 88}]->(mia), (alix)-[:KNOWS {w: 38}]->(vincent)"
+    query: "MATCH DIFFERENT EDGES (a:Person {name: 'Alix'})-[e:KNOWS]->{1,3}(b), (a)-[f:KNOWS]->(c) RETURN [x IN e | x.w] AS ws, f.w AS fw"
+    expect:
+      rows:
+        - ["[3, 19, 88]", 38]
+        - ["[3, 19]", 38]
+        - ["[3]", 38]
+        - ["[38, 88]", 3]
+        - ["[38]", 3]
+
+  - name: repeatable_elements_lets_an_edge_repeat
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH REPEATABLE ELEMENTS (a)-[e1:KNOWS]->(b), (a)-[e2:KNOWS]->(c) RETURN count(*) AS cnt"
+    expect:
+      rows:
+        - [6]
+
+  - name: no_match_mode_lets_an_edge_repeat
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH (a)-[e1:KNOWS]->(b), (a)-[e2:KNOWS]->(c) RETURN count(*) AS cnt"
+    expect:
+      rows:
+        - [6]
+
+  - name: repeatable_elements_keeps_the_path_mode
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH REPEATABLE ELEMENTS TRAIL (a)-[:KNOWS]-(b)-[:KNOWS]-(c) RETURN count(*) AS cnt"
+    expect:
+      rows:
+        - [10]
+
+  - name: different_edges_keeps_the_path_mode
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH DIFFERENT EDGES ACYCLIC (a)-[:KNOWS]-(b)-[:KNOWS]-(c)-[:KNOWS]-(d) RETURN count(*) AS cnt"
+    expect:
+      rows:
+        - [4]
+
+  - name: keep_different_edges_on_one_path_pattern
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH (a)-[:KNOWS]-(b)-[:KNOWS]-(c) KEEP DIFFERENT EDGES RETURN count(*) AS cnt"
+    expect:
+      rows:
+        - [10]
+
+  # ---------------------------------------------------------------------------
+  # A shortest-path search picks among the paths its pattern matches (16.6;
+  # #572): an element pattern WHERE on the quantified edge holds for every
+  # edge before the selection, and an edge bound before is the edge the path
+  # takes. Setup: Alix -> Gus -> Vincent -> Mia (w 3, 19, 88, kind 'road')
+  # and the shortcut Alix -> Vincent (w 38, kind 'air').
+  # ---------------------------------------------------------------------------
+
+  - name: any_shortest_edge_where_holds_during_the_search
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    query: "MATCH p = ANY SHORTEST (a:Person WHERE a.name = 'Alix')-[c:KNOWS WHERE c.kind = 'road']->{1,4}(b:Person WHERE b.name = 'Mia') RETURN length(p) AS len, [x IN c | x.w] AS ws"
+    expect:
+      rows:
+        - [3, "[3, 19, 88]"]
+
+  - name: filter_after_any_shortest_reads_the_edge_list
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    query: "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[e:KNOWS]->{1,4}(b:Person {name: 'Mia'}) FILTER ALL(c IN e WHERE c.kind = 'road') RETURN length(p) AS len"
+    expect:
+      empty: true
+
+  - name: any_shortest_through_a_bound_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS {w: 3, kind: 'road'}]->(gus), (gus)-[:KNOWS {w: 19, kind: 'road'}]->(vincent), (vincent)-[:KNOWS {w: 88, kind: 'road'}]->(mia), (alix)-[:KNOWS {w: 38, kind: 'air'}]->(vincent)"
+    query: "MATCH ()-[e:KNOWS]->() MATCH ANY SHORTEST (x)-[e]->(y) RETURN e.w AS w, x.name, y.name"
+    expect:
+      rows:
+        - [3, Alix, Gus]
+        - [19, Gus, Vincent]
+        - [38, Alix, Vincent]
+        - [88, Vincent, Mia]
+
+  # ---------------------------------------------------------------------------
+  # SIMPLE (16.6): a simple path may end where it started, but once back at
+  # its start it goes no further. Setup: x - y and x - w, walked both ways.
+  # ---------------------------------------------------------------------------
+
+  - name: simple_path_stops_once_back_at_its_start
+    setup:
+      - "INSERT (x:Spot {name: 'x'}), (y:Spot {name: 'y'}), (w:Spot {name: 'w'}), (x)-[:L]->(y), (x)-[:L]->(w)"
+    query: "MATCH p = SIMPLE (x:Spot {name: 'x'})-[:L]-{1,5}(z) RETURN [n IN nodes(p) | n.name] AS names"
+    expect:
+      rows:
+        - ["[x, w, x]"]
+        - ["[x, w]"]
+        - ["[x, y, x]"]
+        - ["[x, y]"]

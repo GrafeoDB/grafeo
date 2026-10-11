@@ -9,7 +9,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use grafeo_common::types::{LogicalType, TransactionId, Value};
+use grafeo_common::change::RdfGraphOp;
+use grafeo_common::storage::log_record::RdfGraphTarget;
+use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
@@ -28,6 +30,7 @@ use crate::query::plan::{
     TripleScanOp, TripleTemplate,
 };
 use crate::query::planner::{PhysicalPlan, convert_aggregate_function, convert_filter_expression};
+use crate::transaction::RdfWriter;
 
 #[cfg(feature = "regex")]
 use regex::Regex;
@@ -36,67 +39,6 @@ use regex_lite::Regex;
 
 /// Default chunk size for morsel-driven execution.
 const DEFAULT_CHUNK_SIZE: usize = 1024;
-
-/// Records an RDF WAL record in the session buffer, if there is one. The
-/// buffer writes it with the rest of the transaction's group.
-#[cfg(feature = "wal")]
-fn log_rdf_wal(wal: &Option<Arc<RdfWal>>, record: &grafeo_storage::wal::WalRecord) {
-    if let Some(wal) = wal {
-        wal.push(None, record.clone());
-    }
-}
-
-/// Converts a Term to its N-Triples string for WAL serialization.
-#[cfg(feature = "wal")]
-fn term_to_wal(term: &Term) -> String {
-    term.to_string()
-}
-
-/// Records a triple insertion to the CDC log if one is configured.
-#[cfg(feature = "cdc")]
-fn record_cdc_triple_insert(
-    cdc_log: &Option<Arc<crate::cdc::CdcLog>>,
-    subject: &Term,
-    predicate: &Term,
-    object: &Term,
-    graph: Option<&str>,
-    epoch: grafeo_common::types::EpochId,
-) {
-    if let Some(log) = cdc_log {
-        log.record_triple_insert(
-            &subject.to_string(),
-            &predicate.to_string(),
-            &object.to_string(),
-            graph,
-            epoch,
-        );
-    }
-}
-
-/// Records a triple deletion to the CDC log if one is configured.
-#[cfg(feature = "cdc")]
-fn record_cdc_triple_delete(
-    cdc_log: &Option<Arc<crate::cdc::CdcLog>>,
-    subject: &Term,
-    predicate: &Term,
-    object: &Term,
-    graph: Option<&str>,
-    epoch: grafeo_common::types::EpochId,
-) {
-    if let Some(log) = cdc_log {
-        log.record_triple_delete(
-            &subject.to_string(),
-            &predicate.to_string(),
-            &object.to_string(),
-            graph,
-            epoch,
-        );
-    }
-}
-
-/// Type alias for the WAL buffer used by the RDF planner.
-#[cfg(feature = "wal")]
-type RdfWal = crate::transaction::wal_buffer::WalBuffer;
 
 /// Groups the variable-substitution operands for pattern-based mutation operators.
 ///
@@ -109,69 +51,37 @@ struct TripleOperands {
     column_map: HashMap<String, usize>,
     /// Named graph to mutate (`None` = default graph).
     graph: Option<String>,
-    /// Open transaction: writes are buffered in it instead of applied.
-    transaction_id: Option<TransactionId>,
 }
 
-/// Inserts `triple` into `target`, buffered in the transaction when there is
-/// one (applied on commit, discarded on rollback). Returns whether the triple
-/// is new, as seen by the transaction.
-fn apply_triple_insert(
-    target: &RdfStore,
-    transaction_id: Option<TransactionId>,
-    triple: Triple,
-) -> bool {
-    match transaction_id {
-        Some(tx) => {
-            if target.contains_with_pending(&triple, tx) {
-                return false;
-            }
-            target.insert_in_transaction(tx, triple);
-            true
-        }
-        None => target.insert(triple),
-    }
-}
-
-/// Deletes `triple` from `target`, buffered in the transaction when there is
-/// one. Returns whether the triple was present, as seen by the transaction.
-fn apply_triple_delete(
-    target: &RdfStore,
-    transaction_id: Option<TransactionId>,
-    triple: &Triple,
-) -> bool {
-    match transaction_id {
-        Some(tx) => {
-            if !target.contains_with_pending(triple, tx) {
-                return false;
-            }
-            target.remove_in_transaction(tx, triple.clone());
-            true
-        }
-        None => target.remove(triple),
-    }
-}
-
-/// Resolves the store a graph mutation targets (`None` graph = default graph).
-///
-/// With `create` (inserts) a missing named graph is created; without it
-/// (deletes) a missing graph yields `None`, so a delete never creates an empty
-/// graph. A `?`-prefixed name is an unbound `GRAPH ?var` target, which is
-/// rejected instead of being written to the wrong graph.
-fn resolve_mutation_graph(
-    store: &Arc<RdfStore>,
-    graph_name: Option<&str>,
-    create: bool,
-) -> std::result::Result<Option<Arc<RdfStore>>, OperatorError> {
+/// Fails for a graph an update cannot target: a `?`-prefixed name is an
+/// unbound `GRAPH ?var` target, which is rejected instead of being written
+/// to the wrong graph.
+fn check_mutation_graph(graph_name: Option<&str>) -> std::result::Result<(), OperatorError> {
     match graph_name {
-        None => Ok(Some(Arc::clone(store))),
-        Some(name) if name.starts_with('?') => Err(OperatorError::Execution(format!(
-            "SPARQL Update cannot target a variable graph ({name}); \
-             use a concrete graph IRI or a WITH clause"
-        ))),
-        Some(name) if create => Ok(Some(store.graph_or_create(name))),
-        Some(name) => Ok(store.graph(name)),
+        Some(name) if name.starts_with('?') => Err(OperatorError::from(
+            grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    format!(
+                        "SPARQL Update cannot target a variable graph ({name}); use a concrete \
+                         graph IRI or a WITH clause"
+                    ),
+                ),
+            ),
+        )),
+        _ => Ok(()),
     }
+}
+
+/// The writer of the transaction an update runs in. A session runs every
+/// update in a transaction and plans it with that transaction's writer; a
+/// plan made without one (for `EXPLAIN`) does not run an update.
+fn update_writer(writer: &Option<RdfWriter>) -> std::result::Result<&RdfWriter, OperatorError> {
+    writer.as_ref().ok_or_else(|| {
+        OperatorError::Internal(
+            "an RDF update runs in a transaction, and this plan was made without one".to_string(),
+        )
+    })
 }
 
 /// Converts logical plans with RDF operators to physical operators.
@@ -183,21 +93,13 @@ pub struct RdfPlanner {
     store: Arc<RdfStore>,
     /// Chunk size for vectorized execution.
     chunk_size: usize,
-    /// Optional transaction ID for transactional operations.
-    transaction_id: Option<TransactionId>,
+    /// The writer of the transaction the plan runs in: updates record their
+    /// triples through it, and scans see them.
+    writer: Option<RdfWriter>,
     /// When true, each physical operator is wrapped in `ProfiledOperator`.
     profiling: std::cell::Cell<bool>,
     /// Profile entries collected during planning (post-order).
     profile_entries: std::cell::RefCell<Vec<crate::query::profile::ProfileEntry>>,
-    /// Optional WAL for logging RDF mutations.
-    #[cfg(feature = "wal")]
-    wal: Option<Arc<RdfWal>>,
-    /// Optional CDC log for recording RDF triple mutations.
-    #[cfg(feature = "cdc")]
-    cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-    /// Epoch to stamp CDC events with (snapshot at plan time).
-    #[cfg(feature = "cdc")]
-    cdc_epoch: grafeo_common::types::EpochId,
     /// Whether the query uses LANG()/LANGMATCHES()/DATATYPE() functions.
     /// When false, companion columns are not emitted, saving ~66% scan overhead.
     needs_companion_columns: std::cell::Cell<bool>,
@@ -219,19 +121,13 @@ impl RdfPlanner {
         Self {
             store,
             chunk_size: DEFAULT_CHUNK_SIZE,
-            transaction_id: None,
+            writer: None,
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
             needs_companion_columns: std::cell::Cell::new(false),
             dictionary: None,
             encoded_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             shuffle_unordered: false,
-            #[cfg(feature = "wal")]
-            wal: None,
-            #[cfg(feature = "cdc")]
-            cdc_log: None,
-            #[cfg(feature = "cdc")]
-            cdc_epoch: grafeo_common::types::EpochId(0),
         }
     }
 
@@ -250,32 +146,19 @@ impl RdfPlanner {
         self
     }
 
-    /// Sets the transaction ID for transactional operations.
+    /// Plans with the writer of the transaction the plan runs in: its
+    /// updates record their triples through it, and its scans see them.
     #[must_use]
-    pub fn with_transaction_id(mut self, transaction_id: Option<TransactionId>) -> Self {
-        self.transaction_id = transaction_id;
+    pub(crate) fn with_writer(mut self, writer: Option<RdfWriter>) -> Self {
+        self.writer = writer;
         self
     }
 
-    /// Sets the WAL buffer that records RDF mutations.
-    #[cfg(feature = "wal")]
-    #[must_use]
-    pub(crate) fn with_wal(mut self, wal: Option<Arc<RdfWal>>) -> Self {
-        self.wal = wal;
-        self
-    }
-
-    /// Sets the CDC log and epoch for recording RDF triple mutations.
-    #[cfg(feature = "cdc")]
-    #[must_use]
-    pub fn with_cdc_log(
-        mut self,
-        cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-        epoch: grafeo_common::types::EpochId,
-    ) -> Self {
-        self.cdc_log = cdc_log;
-        self.cdc_epoch = epoch;
-        self
+    /// Whether the plan's transaction wrote triples it has not committed:
+    /// its reads must then lay them over the store, which the counts from
+    /// the store's indexes and the ring join do not.
+    fn has_pending_writes(&self) -> bool {
+        self.writer.as_ref().is_some_and(RdfWriter::has_pending)
     }
 
     /// Plans a logical plan into a physical operator tree.
@@ -322,11 +205,7 @@ impl RdfPlanner {
             } else {
                 operator
             };
-        Ok(PhysicalPlan {
-            operator,
-            columns,
-            adaptive_context: None,
-        })
+        Ok(PhysicalPlan { operator, columns })
     }
 
     /// Plans a logical plan with profiling: each physical operator is wrapped
@@ -351,14 +230,7 @@ impl RdfPlanner {
         let (operator, columns) = strip_internal_columns(operator, columns);
         let entries = self.profile_entries.borrow_mut().drain(..).collect();
 
-        Ok((
-            PhysicalPlan {
-                operator,
-                columns,
-                adaptive_context: None,
-            },
-            entries,
-        ))
+        Ok((PhysicalPlan { operator, columns }, entries))
     }
 
     /// If profiling is enabled, wraps a planned result in `ProfiledOperator`
@@ -494,7 +366,7 @@ impl RdfPlanner {
             emit_companion_columns,
             emit_datatype_column,
         )
-        .with_transaction(self.transaction_id);
+        .with_writer(self.writer.clone());
 
         // Dictionary encoding is available but not yet automatically enabled for
         // all queries. The infrastructure (TermDictionary, DictResolveOperator) is
@@ -984,6 +856,9 @@ impl RdfPlanner {
                     alias: agg_expr.alias.clone(),
                     percentile: agg_expr.percentile,
                     separator: agg_expr.separator.clone(),
+                    // SPARQL rows hold RDF literals as text: MIN and MAX compare
+                    // those that read as numbers by their numbers.
+                    rdf_literals: true,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1093,6 +968,10 @@ impl RdfPlanner {
     /// Resolves the count for a simple triple scan pattern, or returns `None`
     /// if the pattern is too complex for a fast-path.
     fn count_for_scan(&self, scan: &TripleScanOp) -> Option<i64> {
+        // The store's counts miss the transaction's own writes.
+        if self.has_pending_writes() {
+            return None;
+        }
         let s_var = scan.subject.as_variable().is_some();
         let p_var = scan.predicate.as_variable().is_some();
         let o_var = scan.object.as_variable().is_some();
@@ -1213,7 +1092,7 @@ impl RdfPlanner {
             &right_columns,
             &left_types,
             &right_types,
-            None,
+            std::convert::identity,
         ))
     }
 
@@ -1306,6 +1185,10 @@ impl RdfPlanner {
     ) -> Option<Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)>> {
         use grafeo_core::index::ring::AnnotatedPattern;
 
+        // The ring misses the transaction's own writes.
+        if self.has_pending_writes() {
+            return None;
+        }
         let ring = self.store.ring()?;
 
         // All inputs must be simple TripleScans (no chained input, no graph context)
@@ -1424,7 +1307,7 @@ impl RdfPlanner {
                     .collect();
 
                 let operator = Box::new(RdfInsertPatternOperator::new(
-                    Arc::clone(&self.store),
+                    self.writer.clone(),
                     input_op,
                     TripleOperands {
                         subject: insert.subject.clone(),
@@ -1432,14 +1315,7 @@ impl RdfPlanner {
                         object: insert.object.clone(),
                         column_map,
                         graph: insert.graph.clone(),
-                        transaction_id: self.transaction_id,
                     },
-                    #[cfg(feature = "wal")]
-                    self.wal.clone(),
-                    #[cfg(feature = "cdc")]
-                    self.cdc_log.clone(),
-                    #[cfg(feature = "cdc")]
-                    self.cdc_epoch,
                 ));
 
                 return Ok((operator, Vec::new(), Vec::new()));
@@ -1453,16 +1329,9 @@ impl RdfPlanner {
 
         let triple = Triple::new(subject, predicate, object);
         let operator = Box::new(RdfInsertTripleOperator::new(
-            Arc::clone(&self.store),
+            self.writer.clone(),
             triple,
             insert.graph.clone(),
-            self.transaction_id,
-            #[cfg(feature = "wal")]
-            self.wal.clone(),
-            #[cfg(feature = "cdc")]
-            self.cdc_log.clone(),
-            #[cfg(feature = "cdc")]
-            self.cdc_epoch,
         ));
 
         // Insert operations don't output columns
@@ -1539,7 +1408,7 @@ impl RdfPlanner {
                     .collect();
 
                 let operator = Box::new(RdfDeletePatternOperator::new(
-                    Arc::clone(&self.store),
+                    self.writer.clone(),
                     input_op,
                     TripleOperands {
                         subject: delete.subject.clone(),
@@ -1547,14 +1416,7 @@ impl RdfPlanner {
                         object: delete.object.clone(),
                         column_map,
                         graph: delete.graph.clone(),
-                        transaction_id: self.transaction_id,
                     },
-                    #[cfg(feature = "wal")]
-                    self.wal.clone(),
-                    #[cfg(feature = "cdc")]
-                    self.cdc_log.clone(),
-                    #[cfg(feature = "cdc")]
-                    self.cdc_epoch,
                 ));
 
                 return Ok((operator, Vec::new(), Vec::new()));
@@ -1568,16 +1430,9 @@ impl RdfPlanner {
 
         let triple = Triple::new(subject, predicate, object);
         let operator = Box::new(RdfDeleteTripleOperator::new(
-            Arc::clone(&self.store),
+            self.writer.clone(),
             triple,
             delete.graph.clone(),
-            self.transaction_id,
-            #[cfg(feature = "wal")]
-            self.wal.clone(),
-            #[cfg(feature = "cdc")]
-            self.cdc_log.clone(),
-            #[cfg(feature = "cdc")]
-            self.cdc_epoch,
         ));
 
         Ok((operator, Vec::new(), Vec::new()))
@@ -1588,14 +1443,10 @@ impl RdfPlanner {
         &self,
         clear: &ClearGraphOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        let operator = Box::new(RdfClearGraphOperator::new(
-            Arc::clone(&self.store),
-            clear.graph.clone(),
-            clear.silent,
-            #[cfg(feature = "wal")]
-            self.wal.clone(),
-        ));
-        Ok((operator, Vec::new(), Vec::new()))
+        let op = RdfGraphOp::Clear {
+            target: clear.target.clone(),
+        };
+        Ok(self.graph_operator("RdfClearGraph", op, GraphCheck::None))
     }
 
     /// Plans a CREATE GRAPH operator.
@@ -1603,14 +1454,14 @@ impl RdfPlanner {
         &self,
         create: &CreateGraphOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        let operator = Box::new(RdfCreateGraphOperator::new(
-            Arc::clone(&self.store),
-            create.graph.clone(),
-            create.silent,
-            #[cfg(feature = "wal")]
-            self.wal.clone(),
-        ));
-        Ok((operator, Vec::new(), Vec::new()))
+        let op = RdfGraphOp::Create {
+            name: create.graph.clone(),
+        };
+        let check = GraphCheck::Absent {
+            graph: create.graph.clone(),
+            silent: create.silent,
+        };
+        Ok(self.graph_operator("RdfCreateGraph", op, check))
     }
 
     /// Plans a DROP GRAPH operator.
@@ -1618,14 +1469,16 @@ impl RdfPlanner {
         &self,
         drop_op: &DropGraphOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        let operator = Box::new(RdfDropGraphOperator::new(
-            Arc::clone(&self.store),
-            drop_op.graph.clone(),
-            drop_op.silent,
-            #[cfg(feature = "wal")]
-            self.wal.clone(),
-        ));
-        Ok((operator, Vec::new(), Vec::new()))
+        let target = drop_op.target.clone();
+        let check = match &target {
+            RdfGraphTarget::Named(name) => GraphCheck::Present {
+                graph: name.clone(),
+                silent: drop_op.silent,
+                what: "Graph",
+            },
+            _ => GraphCheck::None,
+        };
+        Ok(self.graph_operator("RdfDropGraph", RdfGraphOp::Drop { target }, check))
     }
 
     /// Plans a COPY graph operator.
@@ -1633,13 +1486,12 @@ impl RdfPlanner {
         &self,
         copy: &CopyGraphOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        let operator = Box::new(RdfCopyGraphOperator::new(
-            Arc::clone(&self.store),
-            copy.source.clone(),
-            copy.destination.clone(),
-            copy.silent,
-        ));
-        Ok((operator, Vec::new(), Vec::new()))
+        let op = RdfGraphOp::Copy {
+            source: copy.source.clone(),
+            target: copy.destination.clone(),
+        };
+        let check = GraphCheck::source(&copy.source, copy.silent);
+        Ok(self.graph_operator("RdfCopyGraph", op, check))
     }
 
     /// Plans a MOVE graph operator.
@@ -1647,13 +1499,12 @@ impl RdfPlanner {
         &self,
         move_op: &MoveGraphOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        let operator = Box::new(RdfMoveGraphOperator::new(
-            Arc::clone(&self.store),
-            move_op.source.clone(),
-            move_op.destination.clone(),
-            move_op.silent,
-        ));
-        Ok((operator, Vec::new(), Vec::new()))
+        let op = RdfGraphOp::Move {
+            source: move_op.source.clone(),
+            target: move_op.destination.clone(),
+        };
+        let check = GraphCheck::source(&move_op.source, move_op.silent);
+        Ok(self.graph_operator("RdfMoveGraph", op, check))
     }
 
     /// Plans an ADD graph operator.
@@ -1661,13 +1512,30 @@ impl RdfPlanner {
         &self,
         add: &AddGraphOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        let operator = Box::new(RdfAddGraphOperator::new(
-            Arc::clone(&self.store),
-            add.source.clone(),
-            add.destination.clone(),
-            add.silent,
-        ));
-        Ok((operator, Vec::new(), Vec::new()))
+        let op = RdfGraphOp::Add {
+            source: add.source.clone(),
+            target: add.destination.clone(),
+        };
+        let check = GraphCheck::source(&add.source, add.silent);
+        Ok(self.graph_operator("RdfAddGraph", op, check))
+    }
+
+    /// The operator of the whole-graph operation `op`, named `name`, which
+    /// `check` checks before it applies.
+    fn graph_operator(
+        &self,
+        name: &'static str,
+        op: RdfGraphOp,
+        check: GraphCheck,
+    ) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
+        let operator = Box::new(RdfGraphOperator {
+            writer: self.writer.clone(),
+            name,
+            op,
+            check,
+            done: false,
+        });
+        (operator, Vec::new(), Vec::new())
     }
 
     /// Plans a SPARQL MODIFY operator (DELETE/INSERT WHERE).
@@ -1690,24 +1558,15 @@ impl RdfPlanner {
             .map(|(i, name)| (name.clone(), i))
             .collect();
 
-        let operator = Box::new(
-            RdfModifyOperator::new(
-                Arc::clone(&self.store),
-                where_op,
-                ModifyTemplates {
-                    delete: modify.delete_templates.clone(),
-                    insert: modify.insert_templates.clone(),
-                },
-                column_map,
-                #[cfg(feature = "wal")]
-                self.wal.clone(),
-                #[cfg(feature = "cdc")]
-                self.cdc_log.clone(),
-                #[cfg(feature = "cdc")]
-                self.cdc_epoch,
-            )
-            .with_transaction(self.transaction_id),
-        );
+        let operator = Box::new(RdfModifyOperator::new(
+            self.writer.clone(),
+            where_op,
+            ModifyTemplates {
+                delete: modify.delete_templates.clone(),
+                insert: modify.insert_templates.clone(),
+            },
+            column_map,
+        ));
 
         Ok((operator, Vec::new(), Vec::new()))
     }
@@ -1717,43 +1576,22 @@ impl RdfPlanner {
 // RDF Insert Triple Operator
 // ============================================================================
 
-/// Operator that inserts a triple into the RDF store.
+/// Operator that inserts a triple: it records the insert in the
+/// transaction's change set, which applies it at the commit.
 struct RdfInsertTripleOperator {
-    store: Arc<RdfStore>,
+    writer: Option<RdfWriter>,
     triple: Triple,
     graph_name: Option<String>,
-    transaction_id: Option<TransactionId>,
     inserted: bool,
-    #[cfg(feature = "wal")]
-    wal: Option<Arc<RdfWal>>,
-    #[cfg(feature = "cdc")]
-    cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-    #[cfg(feature = "cdc")]
-    cdc_epoch: grafeo_common::types::EpochId,
 }
 
 impl RdfInsertTripleOperator {
-    fn new(
-        store: Arc<RdfStore>,
-        triple: Triple,
-        graph_name: Option<String>,
-        transaction_id: Option<TransactionId>,
-        #[cfg(feature = "wal")] wal: Option<Arc<RdfWal>>,
-        #[cfg(feature = "cdc")] cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-        #[cfg(feature = "cdc")] cdc_epoch: grafeo_common::types::EpochId,
-    ) -> Self {
+    fn new(writer: Option<RdfWriter>, triple: Triple, graph_name: Option<String>) -> Self {
         Self {
-            store,
+            writer,
             triple,
             graph_name,
-            transaction_id,
             inserted: false,
-            #[cfg(feature = "wal")]
-            wal,
-            #[cfg(feature = "cdc")]
-            cdc_log,
-            #[cfg(feature = "cdc")]
-            cdc_epoch,
         }
     }
 }
@@ -1763,41 +1601,8 @@ impl Operator for RdfInsertTripleOperator {
         if self.inserted {
             return Ok(None);
         }
-
-        // Resolve target store: named graph or default
-        let target = match &self.graph_name {
-            Some(name) => self.store.graph_or_create(name),
-            None => Arc::clone(&self.store),
-        };
-
-        // Insert the triple (buffered if in a transaction)
-        if let Some(transaction_id) = self.transaction_id {
-            target.insert_in_transaction(transaction_id, self.triple.clone());
-        } else {
-            target.insert(self.triple.clone());
-        }
-
-        #[cfg(feature = "wal")]
-        log_rdf_wal(
-            &self.wal,
-            &grafeo_storage::wal::WalRecord::InsertRdfTriple {
-                subject: term_to_wal(self.triple.subject()),
-                predicate: term_to_wal(self.triple.predicate()),
-                object: term_to_wal(self.triple.object()),
-                graph: self.graph_name.clone(),
-            },
-        );
-
-        #[cfg(feature = "cdc")]
-        record_cdc_triple_insert(
-            &self.cdc_log,
-            self.triple.subject(),
-            self.triple.predicate(),
-            self.triple.object(),
-            self.graph_name.as_deref(),
-            self.cdc_epoch,
-        );
-
+        check_mutation_graph(self.graph_name.as_deref())?;
+        update_writer(&self.writer)?.insert(self.graph_name.as_deref(), self.triple.clone())?;
         self.inserted = true;
 
         // Return an empty result (INSERT doesn't produce rows)
@@ -1824,7 +1629,7 @@ impl Operator for RdfInsertTripleOperator {
 /// Operator that inserts triples based on a pattern from the RDF store.
 /// Used for INSERT { } WHERE { } operations where the triple template contains variables.
 struct RdfInsertPatternOperator {
-    store: Arc<RdfStore>,
+    writer: Option<RdfWriter>,
     input: Box<dyn Operator>,
     subject: TripleComponent,
     predicate: TripleComponent,
@@ -1832,42 +1637,20 @@ struct RdfInsertPatternOperator {
     column_map: HashMap<String, usize>,
     /// Named graph to insert into (`None` = default graph).
     graph_name: Option<String>,
-    /// Open transaction the inserts are buffered in.
-    transaction_id: Option<TransactionId>,
     done: bool,
-    #[cfg(feature = "wal")]
-    wal: Option<Arc<RdfWal>>,
-    #[cfg(feature = "cdc")]
-    cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-    #[cfg(feature = "cdc")]
-    cdc_epoch: grafeo_common::types::EpochId,
 }
 
 impl RdfInsertPatternOperator {
-    fn new(
-        store: Arc<RdfStore>,
-        input: Box<dyn Operator>,
-        operands: TripleOperands,
-        #[cfg(feature = "wal")] wal: Option<Arc<RdfWal>>,
-        #[cfg(feature = "cdc")] cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-        #[cfg(feature = "cdc")] cdc_epoch: grafeo_common::types::EpochId,
-    ) -> Self {
+    fn new(writer: Option<RdfWriter>, input: Box<dyn Operator>, operands: TripleOperands) -> Self {
         Self {
-            store,
+            writer,
             input,
             subject: operands.subject,
             predicate: operands.predicate,
             object: operands.object,
             column_map: operands.column_map,
             graph_name: operands.graph,
-            transaction_id: operands.transaction_id,
             done: false,
-            #[cfg(feature = "wal")]
-            wal,
-            #[cfg(feature = "cdc")]
-            cdc_log,
-            #[cfg(feature = "cdc")]
-            cdc_epoch,
         }
     }
 
@@ -1940,9 +1723,9 @@ impl Operator for RdfInsertPatternOperator {
             return Ok(None);
         }
 
-        // Resolve the target first so a variable graph errors even with no rows.
-        let target = resolve_mutation_graph(&self.store, self.graph_name.as_deref(), true)?
-            .expect("insert target is always present when create=true");
+        // Check the target first so a variable graph errors even with no rows.
+        check_mutation_graph(self.graph_name.as_deref())?;
+        let writer = update_writer(&self.writer)?;
 
         // Collect all triples to insert
         let mut triples_to_insert = Vec::new();
@@ -1959,38 +1742,10 @@ impl Operator for RdfInsertPatternOperator {
             }
         }
 
-        // Insert into the resolved graph (buffered in an open transaction).
-        // Only triples that are actually new are logged.
-        let mut inserted = Vec::with_capacity(triples_to_insert.len());
+        // Only the triples that are new, as the transaction sees the graph,
+        // are recorded.
         for triple in triples_to_insert {
-            if apply_triple_insert(&target, self.transaction_id, triple.clone()) {
-                inserted.push(triple);
-            }
-        }
-
-        #[cfg(feature = "wal")]
-        for triple in &inserted {
-            log_rdf_wal(
-                &self.wal,
-                &grafeo_storage::wal::WalRecord::InsertRdfTriple {
-                    subject: term_to_wal(triple.subject()),
-                    predicate: term_to_wal(triple.predicate()),
-                    object: term_to_wal(triple.object()),
-                    graph: self.graph_name.clone(),
-                },
-            );
-        }
-
-        #[cfg(feature = "cdc")]
-        for triple in &inserted {
-            record_cdc_triple_insert(
-                &self.cdc_log,
-                triple.subject(),
-                triple.predicate(),
-                triple.object(),
-                self.graph_name.as_deref(),
-                self.cdc_epoch,
-            );
+            writer.insert(self.graph_name.as_deref(), triple)?;
         }
 
         self.done = true;
@@ -2015,43 +1770,22 @@ impl Operator for RdfInsertPatternOperator {
 // RDF Delete Triple Operator
 // ============================================================================
 
-/// Operator that deletes a triple from the RDF store.
+/// Operator that deletes a triple: it records the delete in the
+/// transaction's change set, which applies it at the commit.
 struct RdfDeleteTripleOperator {
-    store: Arc<RdfStore>,
+    writer: Option<RdfWriter>,
     triple: Triple,
     graph_name: Option<String>,
-    transaction_id: Option<TransactionId>,
     deleted: bool,
-    #[cfg(feature = "wal")]
-    wal: Option<Arc<RdfWal>>,
-    #[cfg(feature = "cdc")]
-    cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-    #[cfg(feature = "cdc")]
-    cdc_epoch: grafeo_common::types::EpochId,
 }
 
 impl RdfDeleteTripleOperator {
-    fn new(
-        store: Arc<RdfStore>,
-        triple: Triple,
-        graph_name: Option<String>,
-        transaction_id: Option<TransactionId>,
-        #[cfg(feature = "wal")] wal: Option<Arc<RdfWal>>,
-        #[cfg(feature = "cdc")] cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-        #[cfg(feature = "cdc")] cdc_epoch: grafeo_common::types::EpochId,
-    ) -> Self {
+    fn new(writer: Option<RdfWriter>, triple: Triple, graph_name: Option<String>) -> Self {
         Self {
-            store,
+            writer,
             triple,
             graph_name,
-            transaction_id,
             deleted: false,
-            #[cfg(feature = "wal")]
-            wal,
-            #[cfg(feature = "cdc")]
-            cdc_log,
-            #[cfg(feature = "cdc")]
-            cdc_epoch,
         }
     }
 }
@@ -2061,41 +1795,8 @@ impl Operator for RdfDeleteTripleOperator {
         if self.deleted {
             return Ok(None);
         }
-
-        // Resolve target store: named graph or default
-        let target = match &self.graph_name {
-            Some(name) => self.store.graph_or_create(name),
-            None => Arc::clone(&self.store),
-        };
-
-        // Delete the triple (buffered if in a transaction)
-        if let Some(transaction_id) = self.transaction_id {
-            target.remove_in_transaction(transaction_id, self.triple.clone());
-        } else {
-            target.remove(&self.triple);
-        }
-
-        #[cfg(feature = "wal")]
-        log_rdf_wal(
-            &self.wal,
-            &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
-                subject: term_to_wal(self.triple.subject()),
-                predicate: term_to_wal(self.triple.predicate()),
-                object: term_to_wal(self.triple.object()),
-                graph: self.graph_name.clone(),
-            },
-        );
-
-        #[cfg(feature = "cdc")]
-        record_cdc_triple_delete(
-            &self.cdc_log,
-            self.triple.subject(),
-            self.triple.predicate(),
-            self.triple.object(),
-            self.graph_name.as_deref(),
-            self.cdc_epoch,
-        );
-
+        check_mutation_graph(self.graph_name.as_deref())?;
+        update_writer(&self.writer)?.delete(self.graph_name.as_deref(), &self.triple)?;
         self.deleted = true;
 
         // Return an empty result (DELETE doesn't produce rows)
@@ -2122,7 +1823,7 @@ impl Operator for RdfDeleteTripleOperator {
 /// Operator that deletes triples matching a pattern from the RDF store.
 /// Used for DELETE WHERE operations where the triple template contains variables.
 struct RdfDeletePatternOperator {
-    store: Arc<RdfStore>,
+    writer: Option<RdfWriter>,
     input: Box<dyn Operator>,
     subject: TripleComponent,
     predicate: TripleComponent,
@@ -2130,42 +1831,20 @@ struct RdfDeletePatternOperator {
     column_map: HashMap<String, usize>,
     /// Named graph to delete from (`None` = default graph).
     graph_name: Option<String>,
-    /// Open transaction the deletes are buffered in.
-    transaction_id: Option<TransactionId>,
     done: bool,
-    #[cfg(feature = "wal")]
-    wal: Option<Arc<RdfWal>>,
-    #[cfg(feature = "cdc")]
-    cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-    #[cfg(feature = "cdc")]
-    cdc_epoch: grafeo_common::types::EpochId,
 }
 
 impl RdfDeletePatternOperator {
-    fn new(
-        store: Arc<RdfStore>,
-        input: Box<dyn Operator>,
-        operands: TripleOperands,
-        #[cfg(feature = "wal")] wal: Option<Arc<RdfWal>>,
-        #[cfg(feature = "cdc")] cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-        #[cfg(feature = "cdc")] cdc_epoch: grafeo_common::types::EpochId,
-    ) -> Self {
+    fn new(writer: Option<RdfWriter>, input: Box<dyn Operator>, operands: TripleOperands) -> Self {
         Self {
-            store,
+            writer,
             input,
             subject: operands.subject,
             predicate: operands.predicate,
             object: operands.object,
             column_map: operands.column_map,
             graph_name: operands.graph,
-            transaction_id: operands.transaction_id,
             done: false,
-            #[cfg(feature = "wal")]
-            wal,
-            #[cfg(feature = "cdc")]
-            cdc_log,
-            #[cfg(feature = "cdc")]
-            cdc_epoch,
         }
     }
 
@@ -2238,8 +1917,8 @@ impl Operator for RdfDeletePatternOperator {
             return Ok(None);
         }
 
-        // Resolve the target first; a missing named graph means nothing to delete.
-        let target = resolve_mutation_graph(&self.store, self.graph_name.as_deref(), false)?;
+        check_mutation_graph(self.graph_name.as_deref())?;
+        let writer = update_writer(&self.writer)?;
 
         // Collect all triples to delete
         let mut triples_to_delete = Vec::new();
@@ -2256,36 +1935,9 @@ impl Operator for RdfDeletePatternOperator {
             }
         }
 
-        // Delete from the resolved graph (buffered in an open transaction).
-        // Only triples that were actually present are logged.
-        if let Some(target) = target {
-            triples_to_delete
-                .retain(|triple| apply_triple_delete(&target, self.transaction_id, triple));
-
-            #[cfg(feature = "wal")]
-            for triple in &triples_to_delete {
-                log_rdf_wal(
-                    &self.wal,
-                    &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
-                        subject: term_to_wal(triple.subject()),
-                        predicate: term_to_wal(triple.predicate()),
-                        object: term_to_wal(triple.object()),
-                        graph: self.graph_name.clone(),
-                    },
-                );
-            }
-
-            #[cfg(feature = "cdc")]
-            for triple in &triples_to_delete {
-                record_cdc_triple_delete(
-                    &self.cdc_log,
-                    triple.subject(),
-                    triple.predicate(),
-                    triple.object(),
-                    self.graph_name.as_deref(),
-                    self.cdc_epoch,
-                );
-            }
+        // Only the triples the transaction sees in the graph are recorded.
+        for triple in &triples_to_delete {
+            writer.delete(self.graph_name.as_deref(), triple)?;
         }
 
         self.done = true;
@@ -2307,265 +1959,82 @@ impl Operator for RdfDeletePatternOperator {
 }
 
 // ============================================================================
-// RDF Clear Graph Operator
+// RDF Graph Operations (CREATE, DROP, CLEAR, COPY, MOVE, ADD)
 // ============================================================================
 
-/// Operator that clears triples from a graph in the RDF store.
-struct RdfClearGraphOperator {
-    store: Arc<RdfStore>,
-    graph: Option<String>,
-    cleared: bool,
-    #[cfg(feature = "wal")]
-    wal: Option<Arc<RdfWal>>,
-}
-
-impl RdfClearGraphOperator {
-    fn new(
-        store: Arc<RdfStore>,
-        graph: Option<String>,
-        _silent: bool,
-        #[cfg(feature = "wal")] wal: Option<Arc<RdfWal>>,
-    ) -> Self {
-        Self {
-            store,
-            graph,
-            cleared: false,
-            #[cfg(feature = "wal")]
-            wal,
-        }
-    }
-}
-
-impl Operator for RdfClearGraphOperator {
-    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
-        if self.cleared {
-            return Ok(None);
-        }
-
-        // Empty string is the sentinel for CLEAR ALL (both default and all named graphs)
-        if self.graph.as_deref() == Some("") {
-            self.store.clear();
-            self.store.clear_all_named();
-        } else {
-            self.store.clear_graph(self.graph.as_deref());
-        }
-
-        #[cfg(feature = "wal")]
-        log_rdf_wal(
-            &self.wal,
-            &grafeo_storage::wal::WalRecord::ClearRdfGraph {
-                graph: self.graph.clone(),
-            },
-        );
-
-        self.cleared = true;
-
-        Ok(None)
-    }
-
-    fn reset(&mut self) {
-        self.cleared = false;
-    }
-
-    fn name(&self) -> &'static str {
-        "RdfClearGraph"
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
-        self
-    }
-}
-
-// ============================================================================
-// RDF CREATE/DROP Graph Operators
-// ============================================================================
-
-/// Operator that creates a named graph.
-struct RdfCreateGraphOperator {
-    store: Arc<RdfStore>,
-    graph: String,
-    silent: bool,
-    done: bool,
-    #[cfg(feature = "wal")]
-    wal: Option<Arc<RdfWal>>,
-}
-
-impl RdfCreateGraphOperator {
-    fn new(
-        store: Arc<RdfStore>,
+/// What a whole-graph operation checks before it applies.
+enum GraphCheck {
+    /// Nothing: it always applies.
+    None,
+    /// The graph must not exist (`CREATE`); `SILENT` skips the operation
+    /// when it does.
+    Absent { graph: String, silent: bool },
+    /// The named graph must exist (`DROP`, the source of `COPY`, `MOVE` and
+    /// `ADD`, which `what` names in the error); `SILENT` skips a `DROP` of a
+    /// graph that does not exist, and lets the others read it as empty.
+    Present {
         graph: String,
         silent: bool,
-        #[cfg(feature = "wal")] wal: Option<Arc<RdfWal>>,
-    ) -> Self {
-        Self {
-            store,
-            graph,
-            silent,
-            done: false,
-            #[cfg(feature = "wal")]
-            wal,
-        }
-    }
+        what: &'static str,
+    },
 }
 
-impl Operator for RdfCreateGraphOperator {
-    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
-        if self.done {
-            return Ok(None);
-        }
-        self.done = true;
-        let created = self.store.create_graph(&self.graph);
-        if !created && !self.silent {
-            return Err(OperatorError::Execution(format!(
-                "Graph <{}> already exists",
-                self.graph
-            )));
-        }
-        #[cfg(feature = "wal")]
-        if created {
-            log_rdf_wal(
-                &self.wal,
-                &grafeo_storage::wal::WalRecord::CreateRdfGraph {
-                    name: self.graph.clone(),
-                },
-            );
-        }
-        Ok(None)
-    }
-
-    fn reset(&mut self) {
-        self.done = false;
-    }
-
-    fn name(&self) -> &'static str {
-        "RdfCreateGraph"
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
-        self
-    }
-}
-
-/// Operator that drops a named graph.
-struct RdfDropGraphOperator {
-    store: Arc<RdfStore>,
-    graph: Option<String>,
-    silent: bool,
-    done: bool,
-    #[cfg(feature = "wal")]
-    wal: Option<Arc<RdfWal>>,
-}
-
-impl RdfDropGraphOperator {
-    fn new(
-        store: Arc<RdfStore>,
-        graph: Option<String>,
-        silent: bool,
-        #[cfg(feature = "wal")] wal: Option<Arc<RdfWal>>,
-    ) -> Self {
-        Self {
-            store,
-            graph,
-            silent,
-            done: false,
-            #[cfg(feature = "wal")]
-            wal,
-        }
-    }
-}
-
-impl Operator for RdfDropGraphOperator {
-    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
-        if self.done {
-            return Ok(None);
-        }
-        self.done = true;
-        match &self.graph {
-            None => {
-                // DROP DEFAULT: clear the default graph
-                self.store.clear();
-            }
-            Some(name) => {
-                let dropped = self.store.drop_graph(name);
-                if !dropped && !self.silent {
-                    return Err(OperatorError::Execution(format!(
-                        "Graph <{name}> does not exist"
-                    )));
-                }
-            }
-        }
-        #[cfg(feature = "wal")]
-        log_rdf_wal(
-            &self.wal,
-            &grafeo_storage::wal::WalRecord::DropRdfGraph {
-                name: self.graph.clone(),
+impl GraphCheck {
+    /// The check of the source of a `COPY`, `MOVE` or `ADD`: none for the
+    /// default graph, which always exists.
+    fn source(source: &Option<String>, silent: bool) -> Self {
+        match source {
+            None => Self::None,
+            Some(graph) => Self::Present {
+                graph: graph.clone(),
+                silent,
+                what: "Source graph",
             },
-        );
-        Ok(None)
-    }
-
-    fn reset(&mut self) {
-        self.done = false;
-    }
-
-    fn name(&self) -> &'static str {
-        "RdfDropGraph"
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
-        self
-    }
-}
-
-// ============================================================================
-// RDF COPY/MOVE/ADD Graph Operators
-// ============================================================================
-
-/// Operator that copies all triples from one graph to another.
-struct RdfCopyGraphOperator {
-    store: Arc<RdfStore>,
-    source: Option<String>,
-    destination: Option<String>,
-    silent: bool,
-    done: bool,
-}
-
-impl RdfCopyGraphOperator {
-    fn new(
-        store: Arc<RdfStore>,
-        source: Option<String>,
-        destination: Option<String>,
-        silent: bool,
-    ) -> Self {
-        Self {
-            store,
-            source,
-            destination,
-            silent,
-            done: false,
         }
     }
 }
 
-impl Operator for RdfCopyGraphOperator {
+/// Operator that runs a whole-graph operation as a standalone change (see
+/// [`RdfWriter::graph_op`]): it takes effect at once, also inside a
+/// transaction, whose rollback keeps it.
+struct RdfGraphOperator {
+    writer: Option<RdfWriter>,
+    /// The operator's name in a plan.
+    name: &'static str,
+    op: RdfGraphOp,
+    check: GraphCheck,
+    done: bool,
+}
+
+impl Operator for RdfGraphOperator {
     fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
         if self.done {
             return Ok(None);
         }
         self.done = true;
-
-        // Check source exists (unless silent)
-        if !self.silent
-            && let Some(ref name) = self.source
-            && self.store.graph(name).is_none()
-        {
-            return Err(OperatorError::Execution(format!(
-                "Source graph <{name}> does not exist"
-            )));
-        }
-
-        self.store
-            .copy_graph(self.source.as_deref(), self.destination.as_deref());
+        let skips_missing = matches!(self.op, RdfGraphOp::Drop { .. });
+        let check = &self.check;
+        update_writer(&self.writer)?.graph_op(self.op.clone(), |store| match check {
+            GraphCheck::None => Ok(true),
+            GraphCheck::Absent { graph, silent } => match (store.graph(graph).is_some(), silent) {
+                (false, _) => Ok(true),
+                (true, true) => Ok(false),
+                (true, false) => Err(OperatorError::Execution(format!(
+                    "Graph <{graph}> already exists"
+                ))),
+            },
+            GraphCheck::Present {
+                graph,
+                silent,
+                what,
+            } => match (store.graph(graph).is_some(), silent) {
+                (true, _) => Ok(true),
+                (false, true) => Ok(!skips_missing),
+                (false, false) => Err(OperatorError::Execution(format!(
+                    "{what} <{graph}> does not exist"
+                ))),
+            },
+        })?;
         Ok(None)
     }
 
@@ -2574,129 +2043,7 @@ impl Operator for RdfCopyGraphOperator {
     }
 
     fn name(&self) -> &'static str {
-        "RdfCopyGraph"
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
-        self
-    }
-}
-
-/// Operator that moves all triples from one graph to another.
-struct RdfMoveGraphOperator {
-    store: Arc<RdfStore>,
-    source: Option<String>,
-    destination: Option<String>,
-    silent: bool,
-    done: bool,
-}
-
-impl RdfMoveGraphOperator {
-    fn new(
-        store: Arc<RdfStore>,
-        source: Option<String>,
-        destination: Option<String>,
-        silent: bool,
-    ) -> Self {
-        Self {
-            store,
-            source,
-            destination,
-            silent,
-            done: false,
-        }
-    }
-}
-
-impl Operator for RdfMoveGraphOperator {
-    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
-        if self.done {
-            return Ok(None);
-        }
-        self.done = true;
-
-        // Check source exists (unless silent)
-        if !self.silent
-            && let Some(ref name) = self.source
-            && self.store.graph(name).is_none()
-        {
-            return Err(OperatorError::Execution(format!(
-                "Source graph <{name}> does not exist"
-            )));
-        }
-
-        self.store
-            .move_graph(self.source.as_deref(), self.destination.as_deref());
-        Ok(None)
-    }
-
-    fn reset(&mut self) {
-        self.done = false;
-    }
-
-    fn name(&self) -> &'static str {
-        "RdfMoveGraph"
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
-        self
-    }
-}
-
-/// Operator that adds (merges) all triples from one graph into another.
-struct RdfAddGraphOperator {
-    store: Arc<RdfStore>,
-    source: Option<String>,
-    destination: Option<String>,
-    silent: bool,
-    done: bool,
-}
-
-impl RdfAddGraphOperator {
-    fn new(
-        store: Arc<RdfStore>,
-        source: Option<String>,
-        destination: Option<String>,
-        silent: bool,
-    ) -> Self {
-        Self {
-            store,
-            source,
-            destination,
-            silent,
-            done: false,
-        }
-    }
-}
-
-impl Operator for RdfAddGraphOperator {
-    fn next(&mut self) -> std::result::Result<Option<DataChunk>, OperatorError> {
-        if self.done {
-            return Ok(None);
-        }
-        self.done = true;
-
-        // Check source exists (unless silent)
-        if !self.silent
-            && let Some(ref name) = self.source
-            && self.store.graph(name).is_none()
-        {
-            return Err(OperatorError::Execution(format!(
-                "Source graph <{name}> does not exist"
-            )));
-        }
-
-        self.store
-            .add_graph(self.source.as_deref(), self.destination.as_deref());
-        Ok(None)
-    }
-
-    fn reset(&mut self) {
-        self.done = false;
-    }
-
-    fn name(&self) -> &'static str {
-        "RdfAddGraph"
+        self.name
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
@@ -2715,20 +2062,12 @@ impl Operator for RdfAddGraphOperator {
 /// 2. Apply DELETE templates to each binding
 /// 3. Apply INSERT templates to each binding (using SAME bindings)
 struct RdfModifyOperator {
-    store: Arc<RdfStore>,
+    writer: Option<RdfWriter>,
     input: Box<dyn Operator>,
     delete_templates: Vec<TripleTemplate>,
     insert_templates: Vec<TripleTemplate>,
     column_map: HashMap<String, usize>,
-    /// Open transaction the changes are buffered in.
-    transaction_id: Option<TransactionId>,
     done: bool,
-    #[cfg(feature = "wal")]
-    wal: Option<Arc<RdfWal>>,
-    #[cfg(feature = "cdc")]
-    cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-    #[cfg(feature = "cdc")]
-    cdc_epoch: grafeo_common::types::EpochId,
 }
 
 /// DELETE and INSERT templates of a SPARQL MODIFY.
@@ -2739,35 +2078,19 @@ struct ModifyTemplates {
 
 impl RdfModifyOperator {
     fn new(
-        store: Arc<RdfStore>,
+        writer: Option<RdfWriter>,
         input: Box<dyn Operator>,
         templates: ModifyTemplates,
         column_map: HashMap<String, usize>,
-        #[cfg(feature = "wal")] wal: Option<Arc<RdfWal>>,
-        #[cfg(feature = "cdc")] cdc_log: Option<Arc<crate::cdc::CdcLog>>,
-        #[cfg(feature = "cdc")] cdc_epoch: grafeo_common::types::EpochId,
     ) -> Self {
         Self {
-            store,
+            writer,
             input,
             delete_templates: templates.delete,
             insert_templates: templates.insert,
             column_map,
-            transaction_id: None,
             done: false,
-            #[cfg(feature = "wal")]
-            wal,
-            #[cfg(feature = "cdc")]
-            cdc_log,
-            #[cfg(feature = "cdc")]
-            cdc_epoch,
         }
-    }
-
-    /// Buffers the changes in `transaction_id` when a transaction is open.
-    fn with_transaction(mut self, transaction_id: Option<TransactionId>) -> Self {
-        self.transaction_id = transaction_id;
-        self
     }
 
     fn resolve_component(
@@ -2837,6 +2160,7 @@ impl Operator for RdfModifyOperator {
         if self.done {
             return Ok(None);
         }
+        let writer = update_writer(&self.writer)?;
 
         // Step 1: Collect all bindings from WHERE clause (before any modifications)
         let mut bindings: Vec<(DataChunk, usize)> = Vec::new();
@@ -2851,19 +2175,15 @@ impl Operator for RdfModifyOperator {
         // RDF typed literals (xsd:integer, xsd:boolean, ...) are stored with
         // their datatype, but the WHERE clause returns them as plain strings
         // (Value::String). Reconstructing the Term from the string loses the
-        // type, so a direct `store.remove(&triple)` would fail to match.
+        // type, so a delete of the exact triple would fail to match.
         //
-        // Fix: when the exact triple isn't found, query the store with the
+        // Fix: when the exact triple isn't found, query the graph with the
         // subject+predicate pattern and remove any triple whose literal value
         // matches the bound string. This handles the type mismatch without
         // changing the column type system.
         for template in &self.delete_templates {
-            // Resolve the target first; a missing named graph means nothing to delete.
-            let Some(target) =
-                resolve_mutation_graph(&self.store, template.graph.as_deref(), false)?
-            else {
-                continue;
-            };
+            let graph = template.graph.as_deref();
+            check_mutation_graph(graph)?;
             for (chunk, row) in &bindings {
                 let subject = self.resolve_component(&template.subject, chunk, *row);
                 let predicate = self.resolve_component(&template.predicate, chunk, *row);
@@ -2871,117 +2191,56 @@ impl Operator for RdfModifyOperator {
 
                 if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
                     let triple = Triple::new(s.clone(), p.clone(), o.clone());
-                    if !apply_triple_delete(&target, self.transaction_id, &triple) {
-                        // Exact match failed: the object may be a plain string
-                        // whose stored form is a typed literal (e.g. "1" vs
-                        // xsd:integer "1"). Query by subject+predicate and
-                        // match on the literal's lexical value.
-                        if let Term::Literal(target_lit) = &o {
-                            let pattern = TriplePattern {
-                                subject: Some(s.clone()),
-                                predicate: Some(p.clone()),
-                                object: None,
-                            };
-                            let matching: Vec<_> = target
-                                .find_with_pending(&pattern, self.transaction_id)
-                                .into_iter()
-                                .filter(|t| {
-                                    if let Term::Literal(lit) = t.object() {
-                                        // Only match typed literals whose lexical
-                                        // value equals the target. Plain strings
-                                        // (xsd:string) should have matched exactly.
-                                        lit.value() == target_lit.value()
-                                            && lit.datatype() != Literal::XSD_STRING
-                                    } else {
-                                        false
-                                    }
-                                })
-                                .collect();
-                            for matched in matching {
-                                if !apply_triple_delete(&target, self.transaction_id, &matched) {
-                                    continue;
-                                }
-                                #[cfg(feature = "wal")]
-                                log_rdf_wal(
-                                    &self.wal,
-                                    &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
-                                        subject: term_to_wal(matched.subject()),
-                                        predicate: term_to_wal(matched.predicate()),
-                                        object: term_to_wal(matched.object()),
-                                        graph: template.graph.clone(),
-                                    },
-                                );
-                                #[cfg(feature = "cdc")]
-                                record_cdc_triple_delete(
-                                    &self.cdc_log,
-                                    matched.subject(),
-                                    matched.predicate(),
-                                    matched.object(),
-                                    template.graph.as_deref(),
-                                    self.cdc_epoch,
-                                );
-                            }
-                        }
-                        // Nothing matched: nothing to log.
+                    if writer.delete(graph, &triple)? {
                         continue;
                     }
-                    #[cfg(feature = "wal")]
-                    log_rdf_wal(
-                        &self.wal,
-                        &grafeo_storage::wal::WalRecord::DeleteRdfTriple {
-                            subject: term_to_wal(triple.subject()),
-                            predicate: term_to_wal(triple.predicate()),
-                            object: term_to_wal(triple.object()),
-                            graph: template.graph.clone(),
-                        },
-                    );
-                    #[cfg(feature = "cdc")]
-                    record_cdc_triple_delete(
-                        &self.cdc_log,
-                        triple.subject(),
-                        triple.predicate(),
-                        triple.object(),
-                        template.graph.as_deref(),
-                        self.cdc_epoch,
-                    );
+                    // Exact match failed: the object may be a plain string
+                    // whose stored form is a typed literal (e.g. "1" vs
+                    // xsd:integer "1"). Query by subject+predicate and
+                    // match on the literal's lexical value.
+                    let Term::Literal(target_lit) = &o else {
+                        continue;
+                    };
+                    let pattern = TriplePattern {
+                        subject: Some(s),
+                        predicate: Some(p),
+                        object: None,
+                    };
+                    let scope = graph.map(|name| [name]);
+                    let matching: Vec<_> = writer
+                        .find(&pattern, scope.as_ref().map(|names| &names[..]))
+                        .into_iter()
+                        .map(|(_, triple)| triple)
+                        .filter(|t| {
+                            if let Term::Literal(lit) = t.object() {
+                                // Only match typed literals whose lexical
+                                // value equals the target. Plain strings
+                                // (xsd:string) should have matched exactly.
+                                lit.value() == target_lit.value()
+                                    && lit.datatype() != Literal::XSD_STRING
+                            } else {
+                                false
+                            }
+                        })
+                        .collect();
+                    for matched in matching {
+                        writer.delete(graph, &matched)?;
+                    }
                 }
             }
         }
 
         // Step 3: Apply INSERT templates using the SAME bindings
         for template in &self.insert_templates {
-            // Resolve the target first (created if missing).
-            let target = resolve_mutation_graph(&self.store, template.graph.as_deref(), true)?
-                .expect("insert target is always present when create=true");
+            let graph = template.graph.as_deref();
+            check_mutation_graph(graph)?;
             for (chunk, row) in &bindings {
                 let subject = self.resolve_component(&template.subject, chunk, *row);
                 let predicate = self.resolve_component(&template.predicate, chunk, *row);
                 let object = self.resolve_component(&template.object, chunk, *row);
 
                 if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
-                    let triple = Triple::new(s, p, o);
-                    if !apply_triple_insert(&target, self.transaction_id, triple.clone()) {
-                        continue;
-                    }
-                    #[cfg(feature = "wal")]
-                    log_rdf_wal(
-                        &self.wal,
-                        &grafeo_storage::wal::WalRecord::InsertRdfTriple {
-                            subject: term_to_wal(triple.subject()),
-                            predicate: term_to_wal(triple.predicate()),
-                            object: term_to_wal(triple.object()),
-                            graph: template.graph.clone(),
-                        },
-                    );
-                    #[cfg(feature = "cdc")]
-                    record_cdc_triple_insert(
-                        &self.cdc_log,
-                        triple.subject(),
-                        triple.predicate(),
-                        triple.object(),
-                        template.graph.as_deref(),
-                        self.cdc_epoch,
-                    );
+                    writer.insert(graph, Triple::new(s, p, o))?;
                 }
             }
         }
@@ -3689,8 +2948,8 @@ struct RdfTripleScanOperator {
     /// Optional term dictionary for dictionary-encoded output. When present,
     /// S/P/O variable columns emit Int64 term IDs instead of String values.
     dictionary: Option<Arc<grafeo_core::graph::rdf::TermDictionary>>,
-    /// Open transaction whose pending writes the scan must see.
-    transaction_id: Option<TransactionId>,
+    /// The writer of the scan's transaction, whose own writes it sees.
+    writer: Option<RdfWriter>,
 }
 
 impl RdfTripleScanOperator {
@@ -3714,15 +2973,25 @@ impl RdfTripleScanOperator {
             triples: None,
             position: 0,
             dictionary: None,
-            transaction_id: None,
+            writer: None,
         }
     }
 
-    /// Makes the scan see the pending writes of `transaction_id`
-    /// (read-your-writes inside an explicit transaction).
-    fn with_transaction(mut self, transaction_id: Option<TransactionId>) -> Self {
-        self.transaction_id = transaction_id;
+    /// Makes the scan see the writes of the transaction of `writer`
+    /// (read-your-writes).
+    fn with_writer(mut self, writer: Option<RdfWriter>) -> Self {
+        self.writer = writer;
         self
+    }
+
+    /// The triples matching the pattern in the graphs `graphs` names (as
+    /// `RdfStore::find_in_graphs` reads them), as the scan's transaction sees
+    /// them.
+    fn find_in(&self, graphs: Option<&[&str]>) -> Vec<(Option<String>, Arc<Triple>)> {
+        match &self.writer {
+            Some(writer) => writer.find(&self.pattern, graphs),
+            None => self.store.find_in_graphs(&self.pattern, graphs),
+        }
     }
 
     /// Enables dictionary-encoded output for S/P/O columns.
@@ -3743,7 +3012,6 @@ impl RdfTripleScanOperator {
     fn ensure_triples(&mut self) {
         if self.triples.is_none() {
             let ctx = &self.graph_context;
-            let tx = self.transaction_id;
             self.triples = Some(if ctx.scan_all_graphs {
                 // GRAPH ?var: scan named graphs (restricted by FROM NAMED if present)
                 if let Some(ref ds) = ctx.dataset {
@@ -3751,17 +3019,14 @@ impl RdfTripleScanOperator {
                         // FROM NAMED restricts which named graphs are visible
                         let graph_refs: Vec<&str> =
                             ds.named_graphs.iter().map(String::as_str).collect();
-                        self.store
-                            .find_in_graphs_with_pending(&self.pattern, Some(&graph_refs), tx)
+                        self.find_in(Some(&graph_refs))
                     } else {
                         // No FROM NAMED: all graphs visible
-                        self.store
-                            .find_in_graphs_with_pending(&self.pattern, Some(&[]), tx)
+                        self.find_in(Some(&[]))
                     }
                 } else {
                     // No dataset restriction: scan all graphs
-                    self.store
-                        .find_in_graphs_with_pending(&self.pattern, Some(&[]), tx)
+                    self.find_in(Some(&[]))
                 }
             } else if let Some(ref graph_iri) = ctx.graph {
                 // GRAPH <iri>: scan specific named graph (restricted by FROM NAMED if present)
@@ -3772,26 +3037,10 @@ impl RdfTripleScanOperator {
                         // The specified graph is not in the FROM NAMED list: empty result
                         Vec::new()
                     } else {
-                        self.store
-                            .graph(graph_iri)
-                            .map(|g| {
-                                g.find_with_pending(&self.pattern, tx)
-                                    .into_iter()
-                                    .map(|t| (Some(graph_iri.clone()), t))
-                                    .collect()
-                            })
-                            .unwrap_or_default()
+                        self.find_in(Some(&[graph_iri.as_str()]))
                     }
                 } else {
-                    self.store
-                        .graph(graph_iri)
-                        .map(|g| {
-                            g.find_with_pending(&self.pattern, tx)
-                                .into_iter()
-                                .map(|t| (Some(graph_iri.clone()), t))
-                                .collect()
-                        })
-                        .unwrap_or_default()
+                    self.find_in(Some(&[graph_iri.as_str()]))
                 }
             } else {
                 // No graph context (basic triple pattern).
@@ -3805,11 +3054,7 @@ impl RdfTripleScanOperator {
                             ds.default_graphs.iter().map(String::as_str).collect();
                         unique_graphs.sort_unstable();
                         unique_graphs.dedup();
-                        let mut results = self.store.find_in_graphs_with_pending(
-                            &self.pattern,
-                            Some(&unique_graphs),
-                            tx,
-                        );
+                        let mut results = self.find_in(Some(&unique_graphs));
                         // Clear graph names so results appear as default-graph triples
                         for item in &mut results {
                             item.0 = None;
@@ -3820,13 +3065,9 @@ impl RdfTripleScanOperator {
                         // per SPARQL spec sec 13.2
                         Vec::new()
                     }
-                } else if let Some(tx) = tx.filter(|&tx| self.store.has_pending_ops(tx)) {
-                    // Inside a transaction with pending writes: read them too.
-                    self.store
-                        .find_with_pending(&self.pattern, Some(tx))
-                        .into_iter()
-                        .map(|t| (None, t))
-                        .collect()
+                } else if self.writer.as_ref().is_some_and(RdfWriter::has_pending) {
+                    // The transaction wrote triples: read them too.
+                    self.find_in(None)
                 } else {
                     // No dataset restriction: use actual default graph.
                     // Prefer Ring Index when available (O(log sigma) access).
@@ -5832,10 +5073,7 @@ mod tests {
             destination: Some("http://example.org/dst".to_string()),
             silent: false,
         }));
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let physical = planner.plan(&plan).unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(&store, &plan).unwrap();
 
         // Source still has its data
         assert_eq!(store.graph("http://example.org/src").unwrap().len(), 1);
@@ -5861,10 +5099,7 @@ mod tests {
             destination: Some("http://example.org/dst".to_string()),
             silent: false,
         }));
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let physical = planner.plan(&plan).unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(&store, &plan).unwrap();
 
         // Source is gone (move drops it)
         assert!(store.graph("http://example.org/src").is_none());
@@ -5904,10 +5139,7 @@ mod tests {
             destination: Some("http://example.org/dst".to_string()),
             silent: false,
         }));
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let physical = planner.plan(&plan).unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(&store, &plan).unwrap();
 
         // Source unchanged
         assert_eq!(store.graph("http://example.org/src").unwrap().len(), 1);
@@ -5924,13 +5156,15 @@ mod tests {
             destination: Some("http://example.org/dst".to_string()),
             silent: false,
         }));
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let physical = planner.plan(&plan).unwrap();
-        let mut op = physical.operator;
-
         // Should error because source doesn't exist
-        let result = op.next();
-        assert!(result.is_err());
+        let error = execute_update(&store, &plan).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Source graph <http://example.org/nope> does not exist"),
+            "{error}"
+        );
+        assert!(store.graph("http://example.org/dst").is_none());
     }
 
     #[test]
@@ -5942,12 +5176,7 @@ mod tests {
             destination: Some("http://example.org/dst".to_string()),
             silent: true,
         }));
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let physical = planner.plan(&plan).unwrap();
-        let mut op = physical.operator;
-
-        // Should succeed silently
-        assert!(op.next().is_ok());
+        assert!(execute_update(&store, &plan).is_ok());
     }
 
     /// Triple scan propagates LogicalType::String for every output column.
@@ -6649,7 +5878,6 @@ mod tests {
     #[test]
     fn test_plan_insert_triple_concrete() {
         let store = Arc::new(RdfStore::new());
-        let planner = RdfPlanner::new(Arc::clone(&store));
         let insert = LogicalOperator::InsertTriple(InsertTripleOp {
             subject: TripleComponent::Iri("http://example.org/alix".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -6657,16 +5885,13 @@ mod tests {
             graph: None,
             input: None,
         });
-        let physical = planner.plan(&LogicalPlan::new(insert)).unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(&store, &LogicalPlan::new(insert)).unwrap();
         assert_eq!(store.len(), 1);
     }
 
     #[test]
     fn test_plan_insert_triple_into_named_graph() {
         let store = Arc::new(RdfStore::new());
-        let planner = RdfPlanner::new(Arc::clone(&store));
         let insert = LogicalOperator::InsertTriple(InsertTripleOp {
             subject: TripleComponent::Iri("http://example.org/alix".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -6674,9 +5899,7 @@ mod tests {
             graph: Some("http://example.org/g1".to_string()),
             input: None,
         });
-        let physical = planner.plan(&LogicalPlan::new(insert)).unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(&store, &LogicalPlan::new(insert)).unwrap();
         assert_eq!(store.graph("http://example.org/g1").unwrap().len(), 1);
     }
 
@@ -6688,7 +5911,6 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/name"),
             Term::literal("Alix"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
         let delete = LogicalOperator::DeleteTriple(DeleteTripleOp {
             subject: TripleComponent::Iri("http://example.org/alix".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -6696,9 +5918,7 @@ mod tests {
             graph: None,
             input: None,
         });
-        let physical = planner.plan(&LogicalPlan::new(delete)).unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(&store, &LogicalPlan::new(delete)).unwrap();
         assert_eq!(store.len(), 0);
     }
 
@@ -6710,7 +5930,6 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/name"),
             Term::literal("Alix"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
         let where_scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -6726,9 +5945,7 @@ mod tests {
             graph: None,
             input: Some(Box::new(where_scan)),
         });
-        let physical = planner.plan(&LogicalPlan::new(insert)).unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(&store, &LogicalPlan::new(insert)).unwrap();
         assert_eq!(store.len(), 2);
     }
 
@@ -6745,7 +5962,6 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/name"),
             Term::literal("Gus"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
         let where_scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Variable("p".to_string()),
@@ -6761,9 +5977,7 @@ mod tests {
             graph: None,
             input: Some(Box::new(where_scan)),
         });
-        let physical = planner.plan(&LogicalPlan::new(delete)).unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(&store, &LogicalPlan::new(delete)).unwrap();
         assert_eq!(store.len(), 0);
     }
 
@@ -6775,7 +5989,6 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/name"),
             Term::literal("Alix"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
         let where_scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -6800,9 +6013,7 @@ mod tests {
             where_clause: Box::new(where_scan),
             graph: None,
         });
-        let physical = planner.plan(&LogicalPlan::new(modify)).unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(&store, &LogicalPlan::new(modify)).unwrap();
         assert_eq!(store.len(), 1);
         let all = store.find(&TriplePattern {
             subject: None,
@@ -7065,17 +6276,14 @@ mod tests {
     #[test]
     fn test_plan_create_graph() {
         let store = Arc::new(RdfStore::new());
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let physical = planner
-            .plan(&LogicalPlan::new(LogicalOperator::CreateGraph(
-                CreateGraphOp {
-                    graph: "http://example.org/g1".to_string(),
-                    silent: false,
-                },
-            )))
-            .unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(
+            &store,
+            &LogicalPlan::new(LogicalOperator::CreateGraph(CreateGraphOp {
+                graph: "http://example.org/g1".to_string(),
+                silent: false,
+            })),
+        )
+        .unwrap();
         assert!(store.graph("http://example.org/g1").is_some());
     }
 
@@ -7083,61 +6291,68 @@ mod tests {
     fn test_plan_create_graph_already_exists_errors() {
         let store = Arc::new(RdfStore::new());
         store.create_graph("http://example.org/g1");
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let mut physical = planner
-            .plan(&LogicalPlan::new(LogicalOperator::CreateGraph(
-                CreateGraphOp {
-                    graph: "http://example.org/g1".to_string(),
-                    silent: false,
-                },
-            )))
-            .unwrap();
-        assert!(physical.operator.next().is_err());
+        let plan = LogicalPlan::new(LogicalOperator::CreateGraph(CreateGraphOp {
+            graph: "http://example.org/g1".to_string(),
+            silent: false,
+        }));
+        let error = execute_update(&store, &plan).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Graph <http://example.org/g1> already exists"),
+            "{error}"
+        );
     }
 
     #[test]
     fn test_plan_create_graph_silent() {
         let store = Arc::new(RdfStore::new());
         store.create_graph("http://example.org/g1");
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let mut physical = planner
-            .plan(&LogicalPlan::new(LogicalOperator::CreateGraph(
-                CreateGraphOp {
+        assert!(
+            execute_update(
+                &store,
+                &LogicalPlan::new(LogicalOperator::CreateGraph(CreateGraphOp {
                     graph: "http://example.org/g1".to_string(),
                     silent: true,
-                },
-            )))
-            .unwrap();
-        assert!(physical.operator.next().is_ok());
+                },))
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn test_plan_drop_graph() {
         let store = Arc::new(RdfStore::new());
         store.create_graph("http://example.org/g1");
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let physical = planner
-            .plan(&LogicalPlan::new(LogicalOperator::DropGraph(DropGraphOp {
-                graph: Some("http://example.org/g1".to_string()),
+        execute_update(
+            &store,
+            &LogicalPlan::new(LogicalOperator::DropGraph(DropGraphOp {
+                target: grafeo_common::storage::log_record::RdfGraphTarget::Named(
+                    "http://example.org/g1".to_string(),
+                ),
                 silent: false,
-            })))
-            .unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+            })),
+        )
+        .unwrap();
         assert!(store.graph("http://example.org/g1").is_none());
     }
 
     #[test]
     fn test_plan_drop_nonexistent_graph_errors() {
         let store = Arc::new(RdfStore::new());
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let mut physical = planner
-            .plan(&LogicalPlan::new(LogicalOperator::DropGraph(DropGraphOp {
-                graph: Some("http://example.org/nope".to_string()),
-                silent: false,
-            })))
-            .unwrap();
-        assert!(physical.operator.next().is_err());
+        let plan = LogicalPlan::new(LogicalOperator::DropGraph(DropGraphOp {
+            target: grafeo_common::storage::log_record::RdfGraphTarget::Named(
+                "http://example.org/nope".to_string(),
+            ),
+            silent: false,
+        }));
+        let error = execute_update(&store, &plan).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Graph <http://example.org/nope> does not exist"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -7148,15 +6363,14 @@ mod tests {
             Term::iri("http://example.org/b"),
             Term::literal("c"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let physical = planner
-            .plan(&LogicalPlan::new(LogicalOperator::DropGraph(DropGraphOp {
-                graph: None,
+        execute_update(
+            &store,
+            &LogicalPlan::new(LogicalOperator::DropGraph(DropGraphOp {
+                target: grafeo_common::storage::log_record::RdfGraphTarget::Default,
                 silent: false,
-            })))
-            .unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+            })),
+        )
+        .unwrap();
         assert_eq!(store.len(), 0);
     }
 
@@ -7168,17 +6382,14 @@ mod tests {
             Term::iri("http://example.org/b"),
             Term::literal("c"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let physical = planner
-            .plan(&LogicalPlan::new(LogicalOperator::ClearGraph(
-                ClearGraphOp {
-                    graph: None,
-                    silent: false,
-                },
-            )))
-            .unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(
+            &store,
+            &LogicalPlan::new(LogicalOperator::ClearGraph(ClearGraphOp {
+                target: grafeo_common::storage::log_record::RdfGraphTarget::Default,
+                silent: false,
+            })),
+        )
+        .unwrap();
         assert_eq!(store.len(), 0);
     }
 
@@ -7199,17 +6410,14 @@ mod tests {
                 Term::iri("http://example.org/y"),
                 Term::literal("z"),
             ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
-        let physical = planner
-            .plan(&LogicalPlan::new(LogicalOperator::ClearGraph(
-                ClearGraphOp {
-                    graph: Some(String::new()),
-                    silent: false,
-                },
-            )))
-            .unwrap();
-        let mut op = physical.operator;
-        while op.next().unwrap().is_some() {}
+        execute_update(
+            &store,
+            &LogicalPlan::new(LogicalOperator::ClearGraph(ClearGraphOp {
+                target: grafeo_common::storage::log_record::RdfGraphTarget::All,
+                silent: false,
+            })),
+        )
+        .unwrap();
         assert_eq!(store.len(), 0);
     }
 
@@ -7416,6 +6624,25 @@ mod tests {
         assert_eq!(chunk.column(0).unwrap().get_value(0), Some(Value::Int64(5)));
     }
 
+    /// Runs the update `plan` on `store` in a private transaction, as a
+    /// session runs one outside a transaction: its triples apply once it
+    /// ran.
+    fn execute_update(store: &Arc<RdfStore>, plan: &LogicalPlan) -> Result<()> {
+        let manager = Arc::new(crate::transaction::TransactionManager::new());
+        crate::transaction::update_privately(store, &manager, |writer| {
+            let mut physical = RdfPlanner::new(Arc::clone(store))
+                .with_writer(Some(writer))
+                .plan(plan)?;
+            while physical
+                .operator
+                .next()
+                .map_err(crate::query::executor::convert_operator_error)?
+                .is_some()
+            {}
+            Ok(())
+        })
+    }
+
     // ---- into_any() coverage tests ----
     //
     // Each RDF operator implements `into_any()` for downcasting support in the
@@ -7424,31 +6651,18 @@ mod tests {
 
     #[test]
     fn test_into_any_rdf_insert_triple_operator() {
-        let store = Arc::new(RdfStore::new());
         let triple = Triple::new(
             Term::iri("http://example.org/s"),
             Term::iri("http://example.org/p"),
             Term::literal("o"),
         );
-        let op: Box<dyn Operator> = Box::new(RdfInsertTripleOperator::new(
-            store,
-            triple,
-            None,
-            None,
-            #[cfg(feature = "wal")]
-            None,
-            #[cfg(feature = "cdc")]
-            None,
-            #[cfg(feature = "cdc")]
-            grafeo_common::types::EpochId(0),
-        ));
+        let op: Box<dyn Operator> = Box::new(RdfInsertTripleOperator::new(None, triple, None));
         let any = op.into_any();
         assert!(any.downcast::<RdfInsertTripleOperator>().is_ok());
     }
 
     #[test]
     fn test_into_any_rdf_insert_pattern_operator() {
-        let store = Arc::new(RdfStore::new());
         let child: Box<dyn Operator> = Box::new(SingleRowOperator::new());
         let operands = TripleOperands {
             subject: TripleComponent::Iri("http://example.org/s".to_string()),
@@ -7456,50 +6670,26 @@ mod tests {
             object: TripleComponent::Literal(Value::String("o".into())),
             column_map: HashMap::new(),
             graph: None,
-            transaction_id: None,
         };
-        let op: Box<dyn Operator> = Box::new(RdfInsertPatternOperator::new(
-            store,
-            child,
-            operands,
-            #[cfg(feature = "wal")]
-            None,
-            #[cfg(feature = "cdc")]
-            None,
-            #[cfg(feature = "cdc")]
-            grafeo_common::types::EpochId(0),
-        ));
+        let op: Box<dyn Operator> = Box::new(RdfInsertPatternOperator::new(None, child, operands));
         let any = op.into_any();
         assert!(any.downcast::<RdfInsertPatternOperator>().is_ok());
     }
 
     #[test]
     fn test_into_any_rdf_delete_triple_operator() {
-        let store = Arc::new(RdfStore::new());
         let triple = Triple::new(
             Term::iri("http://example.org/s"),
             Term::iri("http://example.org/p"),
             Term::literal("o"),
         );
-        let op: Box<dyn Operator> = Box::new(RdfDeleteTripleOperator::new(
-            store,
-            triple,
-            None,
-            None,
-            #[cfg(feature = "wal")]
-            None,
-            #[cfg(feature = "cdc")]
-            None,
-            #[cfg(feature = "cdc")]
-            grafeo_common::types::EpochId(0),
-        ));
+        let op: Box<dyn Operator> = Box::new(RdfDeleteTripleOperator::new(None, triple, None));
         let any = op.into_any();
         assert!(any.downcast::<RdfDeleteTripleOperator>().is_ok());
     }
 
     #[test]
     fn test_into_any_rdf_delete_pattern_operator() {
-        let store = Arc::new(RdfStore::new());
         let child: Box<dyn Operator> = Box::new(SingleRowOperator::new());
         let operands = TripleOperands {
             subject: TripleComponent::Iri("http://example.org/s".to_string()),
@@ -7507,122 +6697,39 @@ mod tests {
             object: TripleComponent::Literal(Value::String("o".into())),
             column_map: HashMap::new(),
             graph: None,
-            transaction_id: None,
         };
-        let op: Box<dyn Operator> = Box::new(RdfDeletePatternOperator::new(
-            store,
-            child,
-            operands,
-            #[cfg(feature = "wal")]
-            None,
-            #[cfg(feature = "cdc")]
-            None,
-            #[cfg(feature = "cdc")]
-            grafeo_common::types::EpochId(0),
-        ));
+        let op: Box<dyn Operator> = Box::new(RdfDeletePatternOperator::new(None, child, operands));
         let any = op.into_any();
         assert!(any.downcast::<RdfDeletePatternOperator>().is_ok());
     }
 
     #[test]
-    fn test_into_any_rdf_clear_graph_operator() {
-        let store = Arc::new(RdfStore::new());
-        let op: Box<dyn Operator> = Box::new(RdfClearGraphOperator::new(
-            store,
-            None,
-            false,
-            #[cfg(feature = "wal")]
-            None,
-        ));
+    fn test_into_any_rdf_graph_operator() {
+        let op: Box<dyn Operator> = Box::new(RdfGraphOperator {
+            writer: None,
+            name: "RdfClearGraph",
+            op: RdfGraphOp::Clear {
+                target: RdfGraphTarget::Default,
+            },
+            check: GraphCheck::None,
+            done: false,
+        });
+        assert_eq!(op.name(), "RdfClearGraph");
         let any = op.into_any();
-        assert!(any.downcast::<RdfClearGraphOperator>().is_ok());
-    }
-
-    #[test]
-    fn test_into_any_rdf_create_graph_operator() {
-        let store = Arc::new(RdfStore::new());
-        let op: Box<dyn Operator> = Box::new(RdfCreateGraphOperator::new(
-            store,
-            "http://example.org/g".to_string(),
-            true,
-            #[cfg(feature = "wal")]
-            None,
-        ));
-        let any = op.into_any();
-        assert!(any.downcast::<RdfCreateGraphOperator>().is_ok());
-    }
-
-    #[test]
-    fn test_into_any_rdf_drop_graph_operator() {
-        let store = Arc::new(RdfStore::new());
-        let op: Box<dyn Operator> = Box::new(RdfDropGraphOperator::new(
-            store,
-            Some("http://example.org/g".to_string()),
-            true,
-            #[cfg(feature = "wal")]
-            None,
-        ));
-        let any = op.into_any();
-        assert!(any.downcast::<RdfDropGraphOperator>().is_ok());
-    }
-
-    #[test]
-    fn test_into_any_rdf_copy_graph_operator() {
-        let store = Arc::new(RdfStore::new());
-        let op: Box<dyn Operator> = Box::new(RdfCopyGraphOperator::new(
-            store,
-            Some("http://example.org/src".to_string()),
-            Some("http://example.org/dst".to_string()),
-            true,
-        ));
-        let any = op.into_any();
-        assert!(any.downcast::<RdfCopyGraphOperator>().is_ok());
-    }
-
-    #[test]
-    fn test_into_any_rdf_move_graph_operator() {
-        let store = Arc::new(RdfStore::new());
-        let op: Box<dyn Operator> = Box::new(RdfMoveGraphOperator::new(
-            store,
-            Some("http://example.org/src".to_string()),
-            Some("http://example.org/dst".to_string()),
-            true,
-        ));
-        let any = op.into_any();
-        assert!(any.downcast::<RdfMoveGraphOperator>().is_ok());
-    }
-
-    #[test]
-    fn test_into_any_rdf_add_graph_operator() {
-        let store = Arc::new(RdfStore::new());
-        let op: Box<dyn Operator> = Box::new(RdfAddGraphOperator::new(
-            store,
-            Some("http://example.org/src".to_string()),
-            Some("http://example.org/dst".to_string()),
-            true,
-        ));
-        let any = op.into_any();
-        assert!(any.downcast::<RdfAddGraphOperator>().is_ok());
+        assert!(any.downcast::<RdfGraphOperator>().is_ok());
     }
 
     #[test]
     fn test_into_any_rdf_modify_operator() {
-        let store = Arc::new(RdfStore::new());
         let child: Box<dyn Operator> = Box::new(SingleRowOperator::new());
         let op: Box<dyn Operator> = Box::new(RdfModifyOperator::new(
-            store,
+            None,
             child,
             ModifyTemplates {
                 delete: vec![],
                 insert: vec![],
             },
             HashMap::new(),
-            #[cfg(feature = "wal")]
-            None,
-            #[cfg(feature = "cdc")]
-            None,
-            #[cfg(feature = "cdc")]
-            grafeo_common::types::EpochId(0),
         ));
         let any = op.into_any();
         assert!(any.downcast::<RdfModifyOperator>().is_ok());

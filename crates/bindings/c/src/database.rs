@@ -2093,18 +2093,17 @@ pub extern "C" fn grafeo_wal_checkpoint(db: *mut GrafeoDatabase) -> GrafeoStatus
 // CompactStore
 // =========================================================================
 
-/// Converts the database to a read-only CompactStore for faster queries.
-///
-/// Takes a snapshot of all nodes and edges, builds a columnar store with
-/// CSR adjacency, and switches to read-only mode. After this call, write
-/// operations will fail.
-#[cfg(feature = "compact-store")]
+/// Compacts the database: writes a checkpoint of a persistent database and
+/// drops the old versions no open transaction can see any more. The database
+/// keeps one store (`grafeo_compact` no longer builds a separate columnar
+/// one), and every write after it is logged as before. Fails (an error
+/// status) if the checkpoint fails, or after the database was closed.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_compact(db: *mut GrafeoDatabase) -> GrafeoStatus {
     let db = db_ref!(db);
     let mut guard = db.inner.write();
     match guard.compact() {
-        Ok(()) => GrafeoStatus::Ok,
+        Ok(_) => GrafeoStatus::Ok,
         Err(e) => set_error(&e),
     }
 }
@@ -2255,6 +2254,44 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    /// A damaged database file fails the open with the storage status, and
+    /// the last error starts with its code, `GRAFEO-S002`, and names the
+    /// file: the Go, C# and Dart wrappers read both.
+    #[test]
+    fn a_damaged_file_fails_the_open_with_the_storage_status_and_code() {
+        let dir = std::env::temp_dir().join(format!("grafeo-c-damaged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("prague.grafeo");
+        let path = CString::new(file.to_str().unwrap()).unwrap();
+        let db = grafeo_open(path.as_ptr());
+        assert!(!db.is_null());
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok);
+        grafeo_free_database(db);
+        // Inside the database id, which the file header checksum covers.
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes[20] ^= 0x5A;
+        std::fs::write(&file, &bytes).unwrap();
+
+        assert!(
+            grafeo_open(path.as_ptr()).is_null(),
+            "a damaged file does not open"
+        );
+        // SAFETY: the pointer is valid until the next call on this thread.
+        let message = unsafe { std::ffi::CStr::from_ptr(crate::error::grafeo_last_error()) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            message.starts_with("GRAFEO-S002") && message.contains("prague.grafeo"),
+            "{message}"
+        );
+        assert_eq!(
+            GrafeoStatus::from(&grafeo_common::utils::error::Error::corruption("Butch")),
+            GrafeoStatus::ErrorStorage
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// After `grafeo_close` the handle lives on until `grafeo_free_database`:
     /// the index calls on it fail, and a drop returns -1 (not 0, "nothing to
     /// drop"), which the Go, Dart and C# wrappers read as an error.
@@ -2291,6 +2328,37 @@ mod tests {
             );
             assert!(last_error().contains("GRAFEO-T007"), "{}", last_error());
         }
+        grafeo_free_database(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `grafeo_compact` keeps a database opened with `grafeo_open_read_only`
+    /// read-only: the compaction succeeds, a write after it still fails, and
+    /// the data stays as it was.
+    #[test]
+    fn compact_keeps_a_read_only_database_read_only() {
+        let dir =
+            std::env::temp_dir().join(format!("grafeo-c-read-only-compact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = CString::new(dir.join("people.grafeo").to_str().unwrap()).unwrap();
+        let db = grafeo_open(path.as_ptr());
+        assert!(!db.is_null());
+        let insert_alix = CString::new("INSERT (:Person {name: 'Alix'})").unwrap();
+        let result = grafeo_execute(db, insert_alix.as_ptr());
+        assert!(!result.is_null(), "the write before the read-only open");
+        grafeo_free_result(result);
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok);
+        grafeo_free_database(db);
+
+        let db = grafeo_open_read_only(path.as_ptr());
+        assert!(!db.is_null());
+        assert_eq!(grafeo_compact(db), GrafeoStatus::Ok);
+        let insert_gus = CString::new("INSERT (:Person {name: 'Gus'})").unwrap();
+        let result = grafeo_execute(db, insert_gus.as_ptr());
+        assert!(result.is_null(), "a write after grafeo_compact still fails");
+        assert_eq!(grafeo_node_count(db), 1, "Alix alone");
+        grafeo_close(db);
         grafeo_free_database(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2466,6 +2534,34 @@ mod tests {
         assert!(json_str.contains("Alix"));
 
         grafeo_free_result(result);
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
+
+    /// A GQL statement of one INSERT has no result (#580): no rows and no
+    /// nodes. It returned the node it created, which `grafeo_result_json` and
+    /// `grafeo_result_nodes_json` listed.
+    #[test]
+    fn a_lone_insert_has_no_result() {
+        let text = |ptr: *const c_char| {
+            assert!(!ptr.is_null());
+            // SAFETY: a non-null C string from our API, valid until the
+            // result is freed.
+            unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        let db = grafeo_open_memory();
+        let insert = CString::new("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person)").unwrap();
+        let result = grafeo_execute(db, insert.as_ptr());
+        assert!(!result.is_null());
+        assert_eq!(grafeo_result_row_count(result), 0);
+        assert_eq!(text(grafeo_result_json(result)), "[]");
+        assert_eq!(text(grafeo_result_nodes_json(result)), "[]");
+        assert_eq!(text(grafeo_result_edges_json(result)), "[]");
+        grafeo_free_result(result);
+        assert_eq!((grafeo_node_count(db), grafeo_edge_count(db)), (2, 1));
         grafeo_close(db);
         grafeo_free_database(db);
     }

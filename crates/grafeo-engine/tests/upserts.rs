@@ -20,13 +20,20 @@ fn rows(db: &GrafeoDB, query: &str) -> Vec<Vec<Value>> {
     db.execute(query).unwrap().rows().to_vec()
 }
 
-fn summary(created: usize, updated: usize, skipped_rows: &[usize]) -> UpsertSummary {
-    UpsertSummary {
-        created,
-        updated,
-        skipped: skipped_rows.len(),
-        skipped_rows: skipped_rows.to_vec(),
-    }
+/// The counts of a summary: created, updated, skipped and the skipped rows.
+type Counts = (usize, usize, usize, Vec<usize>);
+
+fn counts(summary: &UpsertSummary) -> Counts {
+    (
+        summary.created,
+        summary.updated,
+        summary.skipped,
+        summary.skipped_rows.clone(),
+    )
+}
+
+fn summary(created: usize, updated: usize, skipped_rows: &[usize]) -> Counts {
+    (created, updated, skipped_rows.len(), skipped_rows.to_vec())
 }
 
 fn files(db: &GrafeoDB) {
@@ -55,7 +62,7 @@ fn nodes_are_created_then_updated_by_key() {
         )
         .unwrap();
     assert_eq!(
-        result,
+        counts(&result),
         summary(2, 1, &[1]),
         "the row without the key is skipped"
     );
@@ -79,7 +86,7 @@ fn nodes_are_created_then_updated_by_key() {
             false,
         )
         .unwrap();
-    assert_eq!(again, summary(0, 1, &[]));
+    assert_eq!(counts(&again), summary(0, 1, &[]));
     assert_eq!(
         rows(&db, "MATCH (n {id: 'f1'}) RETURN n.size, n.lang"),
         [vec![Value::Int64(5), Value::from("rs")]]
@@ -113,7 +120,7 @@ fn a_node_matches_only_with_all_the_labels() {
             false,
         )
         .unwrap();
-    assert_eq!(result, summary(1, 0, &[]));
+    assert_eq!(counts(&result), summary(1, 0, &[]));
     assert_eq!(
         rows(&db, "MATCH (n {id: 'f1'}) RETURN count(n)"),
         [vec![Value::Int64(2)]]
@@ -147,7 +154,7 @@ fn edges_are_created_then_updated_between_existing_nodes() {
         )
         .unwrap();
     assert_eq!(
-        result,
+        counts(&result),
         summary(2, 1, &[1, 3]),
         "a missing endpoint or edge key skips the row"
     );
@@ -175,10 +182,7 @@ fn edges_are_created_then_updated_between_existing_nodes() {
     );
 
     // Replace mode: the edge's properties become the row's, endpoints aside.
-    let replace = EdgeUpsertOptions {
-        replace: true,
-        ..EdgeUpsertOptions::default()
-    };
+    let replace = EdgeUpsertOptions::new().with_replace(true);
     db.upsert_edges(
         "Graph:USES",
         vec![row(&[
@@ -225,7 +229,7 @@ fn duplicate_keyed_edges_are_all_updated() {
             &EdgeUpsertOptions::default(),
         )
         .unwrap();
-    assert_eq!(result, summary(0, 1, &[]));
+    assert_eq!(counts(&result), summary(0, 1, &[]));
     assert_eq!(
         rows(&db, "MATCH ()-[r:USES]->() RETURN r.w"),
         [vec![Value::Int64(2)], vec![Value::Int64(2)]]
@@ -235,6 +239,10 @@ fn duplicate_keyed_edges_are_all_updated() {
 /// An endpoint key that more than one node has names no single endpoint:
 /// the row is skipped and reported, and writes no edge at all.
 #[test]
+#[expect(
+    deprecated,
+    reason = "the deprecated setting no longer changes how writes run, which this checks"
+)]
 fn a_row_with_an_ambiguous_endpoint_is_skipped() {
     let db = GrafeoDB::new_in_memory();
     db.create_property_index("id").unwrap();
@@ -258,7 +266,7 @@ fn a_row_with_an_ambiguous_endpoint_is_skipped() {
             &EdgeUpsertOptions::default(),
         )
         .unwrap();
-    assert_eq!(result, summary(1, 0, &[0, 1]));
+    assert_eq!(counts(&result), summary(1, 0, &[0, 1]));
     assert_eq!(
         rows(&db, "MATCH (s)-[r:USES]->(d) RETURN s.id, d.id, r.id"),
         [vec![
@@ -279,7 +287,7 @@ fn a_row_with_an_ambiguous_endpoint_is_skipped() {
             &EdgeUpsertOptions::default(),
         )
         .unwrap();
-    assert_eq!(result, summary(1, 0, &[0]));
+    assert_eq!(counts(&result), summary(1, 0, &[0]));
     session.commit().unwrap();
     assert_eq!(
         rows(&db, "MATCH (l:Log) RETURN l.n"),
@@ -301,7 +309,7 @@ fn a_row_with_an_ambiguous_endpoint_is_skipped() {
             &EdgeUpsertOptions::default(),
         )
         .unwrap();
-    assert_eq!(result, summary(1, 0, &[0]));
+    assert_eq!(counts(&result), summary(1, 0, &[0]));
     assert_eq!(
         rows(&db, "MATCH (s)-[r:LINKS]->(d) RETURN s.id, d.id"),
         [vec![Value::from("f3"), Value::from("f1")]]
@@ -326,12 +334,10 @@ fn clashing_field_names_are_rejected() {
         ("dst", "src", "dst"),
         ("id", "src", "src"),
     ] {
-        let options = EdgeUpsertOptions {
-            key: key.to_string(),
-            src_field: src_field.to_string(),
-            dst_field: dst_field.to_string(),
-            ..EdgeUpsertOptions::default()
-        };
+        let options = EdgeUpsertOptions::new()
+            .with_key(key)
+            .with_src_field(src_field)
+            .with_dst_field(dst_field);
         let error = db.upsert_edges("USES", rows_of(), &options).unwrap_err();
         assert!(
             error.to_string().contains("different fields"),
@@ -346,13 +352,11 @@ fn endpoint_labels_and_field_names_are_configurable() {
     let db = GrafeoDB::new_in_memory();
     files(&db);
     db.execute("INSERT (:Other {id: 'f2'})").unwrap();
-    let options = EdgeUpsertOptions {
-        key: "rid".to_string(),
-        endpoint_labels: vec!["File".to_string()],
-        src_field: "from".to_string(),
-        dst_field: "to".to_string(),
-        ..EdgeUpsertOptions::default()
-    };
+    let options = EdgeUpsertOptions::new()
+        .with_key("rid")
+        .with_endpoint_labels(["File"])
+        .with_src_field("from")
+        .with_dst_field("to");
     let result = db
         .upsert_edges(
             "CALLS",
@@ -364,7 +368,7 @@ fn endpoint_labels_and_field_names_are_configurable() {
             &options,
         )
         .unwrap();
-    assert_eq!(result, summary(1, 0, &[]));
+    assert_eq!(counts(&result), summary(1, 0, &[]));
     assert_eq!(
         rows(&db, "MATCH (:File)-[r:CALLS]->(d) RETURN labels(d), r.rid"),
         [vec![
@@ -411,7 +415,7 @@ fn upserts_follow_the_graph_and_the_transaction() {
             false,
         )
         .unwrap();
-    assert_eq!(result, summary(1, 0, &[]));
+    assert_eq!(counts(&result), summary(1, 0, &[]));
     assert_eq!(
         model.execute("MATCH (n) RETURN count(n)").unwrap().rows()[0][0],
         Value::Int64(1)
@@ -450,4 +454,38 @@ fn empty_names_are_rejected_and_no_rows_do_nothing() {
         db.upsert_nodes(&["File"], "id", Vec::new(), false).unwrap(),
         UpsertSummary::default()
     );
+}
+
+/// Every edge upsert option has a `with_*` method, so a caller outside the
+/// crate builds the options without a struct literal; `new()` gives the
+/// defaults.
+#[test]
+fn every_edge_option_has_a_builder_method() {
+    let defaults = EdgeUpsertOptions::new();
+    assert_eq!(defaults, EdgeUpsertOptions::default());
+    assert_eq!(
+        (
+            defaults.key.as_str(),
+            defaults.endpoint_key.as_str(),
+            defaults.endpoint_labels.is_empty(),
+            defaults.src_field.as_str(),
+            defaults.dst_field.as_str(),
+            defaults.replace,
+        ),
+        ("id", "id", true, "src", "dst", false)
+    );
+
+    let options = EdgeUpsertOptions::new()
+        .with_key("rid")
+        .with_endpoint_key("path")
+        .with_endpoint_labels(["File", "Graph"])
+        .with_src_field("from")
+        .with_dst_field("to")
+        .with_replace(true);
+    assert_eq!(options.key, "rid");
+    assert_eq!(options.endpoint_key, "path");
+    assert_eq!(options.endpoint_labels, ["File", "Graph"]);
+    assert_eq!(options.src_field, "from");
+    assert_eq!(options.dst_field, "to");
+    assert!(options.replace);
 }

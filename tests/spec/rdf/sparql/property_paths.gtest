@@ -571,7 +571,9 @@ tests:
     query: |
       ASK { <http://ex.org/a> <http://ex.org/p>+ <http://ex.org/d> }
     expect:
-      count: 1
+      columns: [boolean]
+      rows:
+        - [true]
 
   - name: one_or_more_cycle_terminates_and_dedups
     # O5: cycle a <-> b. ?s :p+ ?o -> {(a,a),(a,b),(b,a),(b,b)}, each once;

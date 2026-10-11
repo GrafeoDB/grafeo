@@ -20,6 +20,8 @@
 //! forward region: n * 4 bytes (u32 LE)
 //! ```
 
+use std::io::Write;
+
 use bytes::Bytes;
 
 use crate::index::ring::SuccinctPermutation;
@@ -46,6 +48,14 @@ pub enum PackedPermutationError {
     },
     /// `n` field overflows the platform-native usize.
     SizeOverflow,
+    /// Bytes follow the forward array: a packed permutation is exactly
+    /// its encoding.
+    TrailingBytes {
+        /// The length the header declares.
+        expected: usize,
+        /// The length of the buffer.
+        actual: usize,
+    },
     /// A `forward\[i\]` entry references an index >= n (not a valid
     /// permutation).
     InvalidPermutation {
@@ -77,6 +87,10 @@ impl std::fmt::Display for PackedPermutationError {
                 "packed permutation forward truncated: expected {expected} bytes, got {actual}"
             ),
             Self::SizeOverflow => write!(f, "packed permutation size field overflows usize"),
+            Self::TrailingBytes { expected, actual } => write!(
+                f,
+                "packed permutation holds {actual} bytes, its encoding {expected}"
+            ),
             Self::InvalidPermutation { index, value } => write!(
                 f,
                 "packed permutation forward[{index}] = {value} is out of range"
@@ -95,24 +109,55 @@ impl std::error::Error for PackedPermutationError {}
 ///
 /// # Panics
 ///
-/// The internal `apply(i)` `expect` describes an invariant the
-/// `0..n` loop bounds already guarantee — `apply(i)` returns `None` only
-/// when `i >= n`. Does not panic in normal operation.
+/// Panics when the permutation has more than `u32::MAX` entries, which the
+/// packed format cannot hold (see [`write_permutation`]).
 #[must_use]
 pub fn serialize_permutation(perm: &SuccinctPermutation) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(HEADER_SIZE + perm.len() * 4);
+    write_permutation(perm, &mut buf)
+        .expect("writing into a Vec fails only for a permutation too long");
+    buf
+}
+
+/// Writes `perm` to `out` in the v2 packed format: the header, then the
+/// forward mapping one entry at a time, without a copy of it.
+///
+/// # Errors
+///
+/// Returns the first error of `out`, or [`std::io::ErrorKind::InvalidInput`]
+/// when the permutation has more than `u32::MAX` entries: the packed format
+/// stores each target as a `u32`, and [`deserialize_permutation`] refuses
+/// more.
+///
+/// # Panics
+///
+/// The internal `apply(i)` `expect` describes an invariant the `0..n` loop
+/// bounds already guarantee: `apply(i)` returns `None` only when `i >= n`.
+/// Does not panic in normal operation.
+pub fn write_permutation(perm: &SuccinctPermutation, out: &mut dyn Write) -> std::io::Result<()> {
     let n = perm.len();
-    let total = HEADER_SIZE + n * 4;
-    let mut buf = Vec::with_capacity(total);
-    buf.extend_from_slice(MAGIC); // 0..4
-    buf.push(VERSION); // 4
-    buf.extend_from_slice(&[0u8; 3]); // 5..8 reserved
-    buf.extend_from_slice(&(n as u64).to_le_bytes()); // 8..16
+    if u32::try_from(n).is_err() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("a packed permutation holds at most u32::MAX entries, this one has {n}"),
+        ));
+    }
+    out.write_all(MAGIC)?; // 0..4
+    out.write_all(&[VERSION, 0, 0, 0])?; // 4, then 5..8 reserved
+    out.write_all(&(n as u64).to_le_bytes())?; // 8..16
     for i in 0..n {
         // `apply` is O(1) on the heap representation; safe because i < n.
         let target = perm.apply(i).expect("i < n");
-        buf.extend_from_slice(&u32::try_from(target).unwrap_or(u32::MAX).to_le_bytes());
+        // Every target is below n, which fits a u32 (checked above).
+        let target = u32::try_from(target).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("permutation target {target} at {i} does not fit a u32"),
+            )
+        })?;
+        out.write_all(&target.to_le_bytes())?;
     }
-    buf
+    Ok(())
 }
 
 /// Parses a [`SuccinctPermutation`] from the v2 packed format. Rebuilds
@@ -120,9 +165,9 @@ pub fn serialize_permutation(perm: &SuccinctPermutation) -> Vec<u8> {
 ///
 /// # Errors
 ///
-/// Returns a [`PackedPermutationError`] on truncation, magic/version
-/// mismatch, out-of-range entries, or duplicate targets (the input is
-/// not a valid permutation).
+/// Returns a [`PackedPermutationError`] on truncation, bytes after the
+/// forward array, magic/version mismatch, out-of-range entries, or
+/// duplicate targets (the input is not a valid permutation).
 ///
 /// # Panics
 ///
@@ -153,6 +198,14 @@ pub fn deserialize_permutation(data: Bytes) -> Result<SuccinctPermutation, Packe
         return Err(PackedPermutationError::TruncatedForward {
             expected: forward_bytes,
             actual: data.len() - HEADER_SIZE,
+        });
+    }
+    // A part holds exactly its encoding (parts are laid out without
+    // padding, in the envelope as in the streams).
+    if total < data.len() {
+        return Err(PackedPermutationError::TrailingBytes {
+            expected: total,
+            actual: data.len(),
         });
     }
 
@@ -323,5 +376,23 @@ mod tests {
             v1_bytes.len(),
             v2_bytes.len()
         );
+    }
+    /// A packed permutation is exactly its encoding: bytes after the
+    /// forward array are refused.
+    #[test]
+    fn bytes_after_the_forward_array_are_refused() {
+        for forward in [&[][..], &[3usize, 0, 4, 1, 2][..]] {
+            let mut bytes = serialize_permutation(&build_perm(forward));
+            let expected = bytes.len();
+            bytes.extend_from_slice(b"Gus");
+            assert_eq!(
+                deserialize_permutation(Bytes::from(bytes)).unwrap_err(),
+                PackedPermutationError::TrailingBytes {
+                    expected,
+                    actual: expected + 3
+                },
+                "{forward:?}"
+            );
+        }
     }
 }

@@ -1,0 +1,69 @@
+# Rosetta: aggregates without MATCH
+#
+# A query that aggregates without a MATCH before it aggregates the one empty
+# row the query starts from: RETURN count(*) counts 1, sum(3) is 3. It used to
+# fail with "Internal error: Empty plan".
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Aggregates without MATCH
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: count_star_without_match
+    variants:
+      gql: "RETURN count(*) AS c"
+      cypher: "RETURN count(*) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: aggregates_of_a_constant_without_match
+    variants:
+      gql: "RETURN sum(3) AS s, min(19) AS m, collect(88) AS l, count(DISTINCT 3) AS d"
+      cypher: "RETURN sum(3) AS s, min(19) AS m, collect(88) AS l, count(DISTINCT 3) AS d"
+    expect:
+      rows:
+        - [3, 19, "[88]", 1]
+
+  - name: a_grouped_aggregate_without_match
+    variants:
+      gql: "RETURN 3 AS x, count(*) AS c"
+      cypher: "RETURN 3 AS x, count(*) AS c"
+    expect:
+      rows:
+        - [3, 1]
+
+  - name: an_expression_over_an_aggregate_without_match
+    variants:
+      gql: "RETURN count(*) + 1 AS c ORDER BY c"
+      cypher: "RETURN count(*) + 1 AS c ORDER BY c"
+    expect:
+      rows:
+        - [2]
+
+  - name: an_aggregate_in_a_call_without_match
+    variants:
+      gql: "CALL { RETURN count(*) AS c } RETURN c"
+      cypher: "CALL { RETURN count(*) AS c } RETURN c"
+    expect:
+      rows:
+        - [1]
+
+  - name: an_aggregate_in_a_first_with
+    variants:
+      cypher: "WITH count(*) AS c WHERE c > 0 RETURN c"
+    expect:
+      rows:
+        - [1]
+
+  - name: profile_of_an_aggregate_without_match
+    variants:
+      gql: "PROFILE RETURN count(*) AS c"
+      cypher: "PROFILE RETURN count(*) AS c"
+    expect:
+      columns: [profile]
+      count: 1

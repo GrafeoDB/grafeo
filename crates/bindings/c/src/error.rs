@@ -33,7 +33,8 @@ impl From<&grafeo_common::utils::error::Error> for GrafeoStatus {
             // no retry opens a closed database. No status of its own, so the
             // C ABI stays as it is; the message names it (GRAFEO-T007).
             ErrorCategory::DatabaseClosed | ErrorCategory::Database => GrafeoStatus::ErrorDatabase,
-            ErrorCategory::Storage => GrafeoStatus::ErrorStorage,
+            // The message starts with GRAFEO-S002.
+            ErrorCategory::Storage | ErrorCategory::Corruption => GrafeoStatus::ErrorStorage,
             ErrorCategory::Io => GrafeoStatus::ErrorIo,
             ErrorCategory::Serialization => GrafeoStatus::ErrorSerialization,
             ErrorCategory::Internal => GrafeoStatus::ErrorInternal,
@@ -109,6 +110,8 @@ mod tests {
         for error in [
             Error::Transaction(TransactionError::DatabaseClosed),
             Error::Transaction(TransactionError::IncompleteCommit),
+            Error::Transaction(TransactionError::CommitOutcomeUnknown("fsync".into())),
+            Error::Transaction(TransactionError::LogUnavailable("poisoned".into())),
         ] {
             assert_eq!(
                 GrafeoStatus::from(&error),
@@ -120,6 +123,13 @@ mod tests {
             GrafeoStatus::from(&Error::Transaction(TransactionError::Conflict)),
             GrafeoStatus::ErrorTransaction,
             "a conflict stays a transaction error"
+        );
+        assert_eq!(
+            GrafeoStatus::from(&Error::Transaction(TransactionError::LogWriteFailed(
+                "disk full".into()
+            ))),
+            GrafeoStatus::ErrorTransaction,
+            "a commit that was rolled back can be retried"
         );
     }
 }

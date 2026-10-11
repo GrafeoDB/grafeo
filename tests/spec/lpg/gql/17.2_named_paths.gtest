@@ -40,6 +40,27 @@ tests:
   # length(p) function
   # ---------------------------------------------------------------------------
 
+  # PATH_LENGTH(p) (ISO/IEC 39075:2024 20.21 <length expression>) is the number
+  # of edges of p, like length(p), also for ANY SHORTEST paths (it was null,
+  # #570).
+  - name: path_length_counts_the_edges_of_a_path
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(:Person {name: 'Vincent'})"
+    query: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->{1,4}(b:Person) RETURN b.name AS b, path_length(p) AS hops"
+    expect:
+      rows:
+        - [Gus, 1]
+        - [Vincent, 2]
+
+  - name: path_length_of_any_shortest_paths
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(:Person {name: 'Vincent'})"
+    query: "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[:KNOWS]->{1,4}(b:Person) RETURN b.name AS b, path_length(p) AS hops"
+    expect:
+      rows:
+        - [Gus, 1]
+        - [Vincent, 2]
+
   - name: path_length_single_hop
     setup:
       - "INSERT (:Person {name: 'Alix'})"
@@ -162,3 +183,28 @@ tests:
     query: "MATCH (p = (a:Person {name: 'Alix'})-[:KNOWS]->(b)){1,1} RETURN nodes(p) AS ns"
     expect:
       count: 1
+
+  # ---------------------------------------------------------------------------
+  # length, nodes and edges of a path value the pattern of the same clause
+  # did not bind: passed on by a WITH, or unwound from a list of paths.
+  # Setup: Alix -> Gus -> Vincent -> Mia and the shortcut Alix -> Vincent.
+  # ---------------------------------------------------------------------------
+
+  - name: length_of_a_path_after_with
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->{1,3}(b) WITH b, p WHERE length(p) >= 2 RETURN b.name AS name, length(p) AS len"
+    expect:
+      rows:
+        - [Mia, 2]
+        - [Mia, 3]
+        - [Vincent, 2]
+
+  - name: length_nodes_and_edges_of_an_unwound_path
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:KNOWS]->(vincent)"
+    query: "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS]->{1,2}(b) WHERE b.name <> 'Vincent' WITH collect(p) AS ps UNWIND ps AS u RETURN length(u) AS len, [n IN nodes(u) | n.name] AS names, size(edges(u)) AS hops"
+    expect:
+      rows:
+        - [1, "[Alix, Gus]", 1]
+        - [2, "[Alix, Vincent, Mia]", 2]

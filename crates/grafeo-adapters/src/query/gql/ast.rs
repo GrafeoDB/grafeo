@@ -259,6 +259,30 @@ pub enum QueryClause {
     CallProcedure(CallStatement),
     /// A LOAD DATA clause.
     LoadData(LoadDataClause),
+    /// A `FILTER` statement (ISO/IEC 39075:2024 14.6), or a `WHERE` after a
+    /// clause that reads (a `WITH` keeps its own): keeps the rows so far for
+    /// which the condition is true. A `WHERE` right after an `OPTIONAL MATCH`
+    /// belongs to it and keeps the rows without a match; a `FILTER` there
+    /// ([`WhereClause::filter`]) filters every row.
+    Filter(WhereClause),
+    /// An `<order by and page statement>` before the result statement: orders
+    /// and cuts the rows the clauses after it read.
+    OrderByAndPage(OrderByAndPage),
+}
+
+/// An ISO GQL `<order by and page statement>`: `ORDER BY ...`, `OFFSET n` (or
+/// `SKIP n`) and `LIMIT n`, each optional but at least one present, applied
+/// in that order.
+#[derive(Debug, Clone)]
+pub struct OrderByAndPage {
+    /// The ORDER BY clause.
+    pub order_by: Option<OrderByClause>,
+    /// The OFFSET (or SKIP) count.
+    pub offset: Option<Expression>,
+    /// The LIMIT count.
+    pub limit: Option<Expression>,
+    /// Source span.
+    pub span: Option<SourceSpan>,
 }
 
 /// A query statement.
@@ -266,7 +290,10 @@ pub enum QueryClause {
 pub struct QueryStatement {
     /// MATCH clauses (regular and optional).
     pub match_clauses: Vec<MatchClause>,
-    /// Optional WHERE clause.
+    /// The WHERE clause of a query without ordered clauses: an `EXISTS`,
+    /// `COUNT` or `VALUE` subquery, or `SELECT ... FROM ... MATCH`. A linear
+    /// query keeps each WHERE and FILTER among its `ordered_clauses`
+    /// ([`QueryClause::Filter`]).
     pub where_clause: Option<WhereClause>,
     /// SET clauses for property updates.
     pub set_clauses: Vec<SetClause>,
@@ -286,7 +313,9 @@ pub struct QueryStatement {
     pub return_clause: ReturnClause,
     /// Optional HAVING clause (filters aggregate results).
     pub having_clause: Option<HavingClause>,
-    /// Ordered clauses preserving source order (for UNWIND/FOR variable scoping).
+    /// Every clause before the result statement, in source order: each reads
+    /// the rows the ones before it leave (ISO GQL's linear statement). The
+    /// per-kind lists above hold the same clauses by kind.
     pub ordered_clauses: Vec<QueryClause>,
     /// Source span in the original query.
     pub span: Option<SourceSpan>,
@@ -391,9 +420,11 @@ pub enum MatchMode {
 pub struct MatchClause {
     /// Whether this is an OPTIONAL MATCH.
     pub optional: bool,
-    /// Path mode for traversal (WALK, TRAIL, SIMPLE, ACYCLIC).
+    /// Path mode for traversal (WALK, TRAIL, SIMPLE, ACYCLIC), for every
+    /// pattern without one of its own.
     pub path_mode: Option<PathMode>,
-    /// Path search prefix (ANY, ALL SHORTEST, SHORTEST k, etc.).
+    /// Path search prefix (ANY, ALL SHORTEST, SHORTEST k, etc.), for every
+    /// pattern without one of its own.
     pub search_prefix: Option<PathSearchPrefix>,
     /// Match mode (DIFFERENT EDGES, REPEATABLE ELEMENTS).
     pub match_mode: Option<MatchMode>,
@@ -412,6 +443,9 @@ pub struct AliasedPattern {
     pub path_function: Option<PathFunction>,
     /// Per-pattern path search prefix (e.g., `p = ANY SHORTEST (...)`).
     pub search_prefix: Option<PathSearchPrefix>,
+    /// Per-pattern path mode, alone (`p = TRAIL (...)`) or of the search
+    /// prefix (`p = ANY SHORTEST TRAIL (...)`).
+    pub path_mode: Option<PathMode>,
     /// Per-pattern KEEP clause (ISO GQL sec 16.5).
     pub keep: Option<MatchMode>,
     /// The underlying pattern.
@@ -586,6 +620,10 @@ pub enum EdgeDirection {
 pub struct WhereClause {
     /// The filter expression.
     pub expression: Expression,
+    /// Whether the clause is written `FILTER`, a statement of its own that
+    /// filters every row (ISO/IEC 39075:2024 14.6), also after an OPTIONAL
+    /// MATCH, whose `WHERE` is part of its graph pattern instead.
+    pub filter: bool,
     /// Source span.
     pub span: Option<SourceSpan>,
 }
@@ -960,6 +998,10 @@ pub enum BinaryOp {
     EndsWith,
     /// CONTAINS substring matching.
     Contains,
+    /// `=~` regular expression match, a Grafeo extension (ISO GQL has no
+    /// regular expressions): the pattern must match the whole string, as
+    /// Cypher's `=~` does.
+    RegexMatch,
 }
 
 /// A unary operator.

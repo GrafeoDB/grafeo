@@ -47,9 +47,10 @@ pub enum ProjectExpr {
         /// The column containing the edge ID.
         column: usize,
     },
-    /// Evaluates an expression whose value is a node, an edge or a list of
-    /// them (as ids, like `relationships(p)` and the variable of a
-    /// variable-length edge pattern) and returns node and edge maps, as
+    /// Evaluates an expression whose value is a node, an edge, a list of them
+    /// (as ids, like `relationships(p)` and the variable of a variable-length
+    /// edge pattern) or a value that holds them (a map, a list literal, a
+    /// path), and returns node and edge maps in their place, as
     /// [`NodeResolve`](Self::NodeResolve) and [`EdgeResolve`](Self::EdgeResolve)
     /// do for a column.
     Entities {
@@ -69,8 +70,15 @@ pub enum ProjectExpr {
     },
 }
 
-/// What a [`ProjectExpr::Entities`] value holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a [`ProjectExpr::Entities`] value holds: where in it nodes and edges
+/// sit, as ids.
+///
+/// A list, a map or a path holds a node or an edge as its id, so what the
+/// value holds is known from the query, not from the value: the planner
+/// tracks it per column, and a column's type says it to the operators that
+/// read the column (`LogicalType::Node`, `LogicalType::List(Node)`, a
+/// `LogicalType::Struct` for a map, see [`EntityValue::of_type`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EntityValue {
     /// One node id.
@@ -81,6 +89,246 @@ pub enum EntityValue {
     Nodes,
     /// A list of edge ids.
     Edges,
+    /// A value that holds nodes or edges deeper inside, where its type says:
+    /// a path (`LogicalType::Path`: node ids, then edge ids), a map
+    /// (`LogicalType::Struct`, by key), a list with one type per item
+    /// (`LogicalType::Tuple`, a list literal such as `[n, 1]`) or a list of
+    /// such values (`LogicalType::List`). Made by [`EntityValue::of_type`].
+    Nested(LogicalType),
+}
+
+impl EntityValue {
+    /// What a value of type `value_type` holds, or `None` when it holds no
+    /// node or edge.
+    #[must_use]
+    pub fn of_type(value_type: &LogicalType) -> Option<Self> {
+        match value_type {
+            LogicalType::Node => Some(Self::Node),
+            LogicalType::Edge => Some(Self::Edge),
+            LogicalType::List(item) if **item == LogicalType::Node => Some(Self::Nodes),
+            LogicalType::List(item) if **item == LogicalType::Edge => Some(Self::Edges),
+            other if holds_entities(other) => Some(Self::Nested(other.clone())),
+            _ => None,
+        }
+    }
+
+    /// The type of a column that holds this.
+    #[must_use]
+    pub fn logical_type(&self) -> LogicalType {
+        match self {
+            Self::Node => LogicalType::Node,
+            Self::Edge => LogicalType::Edge,
+            Self::Nodes => LogicalType::List(Box::new(LogicalType::Node)),
+            Self::Edges => LogicalType::List(Box::new(LogicalType::Edge)),
+            Self::Nested(value_type) => value_type.clone(),
+        }
+    }
+
+    /// What one item of a list that holds this holds (`head`, `last`, `[i]`
+    /// with an unknown `i`, UNWIND): the items' common kind, `None` when the
+    /// items of a list literal differ or hold no node or edge.
+    #[must_use]
+    pub fn item(&self) -> Option<Self> {
+        Self::of_type(&item_type(&self.logical_type()))
+    }
+
+    /// What item `index` of a list that holds this holds (a negative index
+    /// counts from the end).
+    #[must_use]
+    pub fn item_at(&self, index: i64) -> Option<Self> {
+        Self::of_type(&item_type_at(&self.logical_type(), index))
+    }
+
+    /// What the value under `key` of a map that holds this holds.
+    #[must_use]
+    pub fn field(&self, key: &str) -> Option<Self> {
+        Self::of_type(&field_type(&self.logical_type(), key))
+    }
+
+    /// What the items `start..end` of a list that holds this hold (a slice,
+    /// `tail`; `end` `None` is the end): a list holds the same, a list
+    /// literal what its items in that range hold. `None` for a value that is
+    /// not a list.
+    #[must_use]
+    pub fn slice(&self, start: usize, end: Option<usize>) -> Option<Self> {
+        Self::of_type(&slice_type(self.logical_type(), start, end))
+    }
+
+    /// What a list that holds this holds with its items in reverse order
+    /// (`reverse`). `None` for a value that is not a list.
+    #[must_use]
+    pub fn reversed(&self) -> Option<Self> {
+        Self::of_type(&reversed_type(self.logical_type()))
+    }
+
+    /// What a list of values that hold this holds (`collect`).
+    #[must_use]
+    pub fn list(&self) -> Self {
+        match self {
+            Self::Node => Self::Nodes,
+            Self::Edge => Self::Edges,
+            other => Self::Nested(LogicalType::List(Box::new(other.logical_type()))),
+        }
+    }
+
+    /// What a list literal holds whose items hold `items` (`None` for a
+    /// plain value), or `None` when no item holds a node or edge.
+    #[must_use]
+    pub fn list_of(items: &[Option<Self>]) -> Option<Self> {
+        Self::of_type(&list_type(items.iter().map(Self::type_of).collect()))
+    }
+
+    /// What a map literal holds whose keys hold `fields` (`None` for a plain
+    /// value), or `None` when no key holds a node or edge.
+    #[must_use]
+    pub fn map_of(fields: &[(String, Option<Self>)]) -> Option<Self> {
+        Self::of_type(&struct_type(
+            fields
+                .iter()
+                .map(|(key, kind)| (key.clone(), Self::type_of(kind)))
+                .collect(),
+        ))
+    }
+
+    /// The type of a value that holds `kind`: `Any` for a plain value.
+    fn type_of(kind: &Option<Self>) -> LogicalType {
+        kind.as_ref().map_or(LogicalType::Any, Self::logical_type)
+    }
+}
+
+/// Whether a value of type `value_type` holds a node or an edge: a node, an
+/// edge or a path, or a list, map or struct with one inside.
+pub(crate) fn holds_entities(value_type: &LogicalType) -> bool {
+    match value_type {
+        LogicalType::Node | LogicalType::Edge | LogicalType::Path => true,
+        LogicalType::List(item) => holds_entities(item),
+        LogicalType::Map { value, .. } => holds_entities(value),
+        LogicalType::Tuple(items) => items.iter().any(holds_entities),
+        LogicalType::Struct(fields) => fields.iter().any(|(_, field)| holds_entities(field)),
+        _ => false,
+    }
+}
+
+/// The type of one item of a list of type `list`, whatever its position:
+/// the item type of a list, the type all items of a tuple share, `Any`
+/// otherwise.
+pub(crate) fn item_type(list: &LogicalType) -> LogicalType {
+    match list {
+        LogicalType::List(item) => (**item).clone(),
+        LogicalType::Tuple(items) => match items.split_first() {
+            Some((first, rest)) if rest.iter().all(|item| item == first) => first.clone(),
+            _ => LogicalType::Any,
+        },
+        _ => LogicalType::Any,
+    }
+}
+
+/// The type of item `index` of a list of type `list` (a negative index
+/// counts from the end).
+pub(crate) fn item_type_at(list: &LogicalType, index: i64) -> LogicalType {
+    match list {
+        LogicalType::Tuple(items) => {
+            let position = if index < 0 {
+                i64::try_from(items.len())
+                    .ok()
+                    .and_then(|len| usize::try_from(len + index).ok())
+            } else {
+                usize::try_from(index).ok()
+            };
+            position
+                .and_then(|position| items.get(position))
+                .cloned()
+                .unwrap_or(LogicalType::Any)
+        }
+        other => item_type(other),
+    }
+}
+
+/// The type of the items `start..end` of a list of type `list` (a slice,
+/// `tail`; `end` `None` is the end): a list keeps its type, a tuple keeps
+/// the types of the items in that range. `Any` for a type that is not a
+/// list.
+pub(crate) fn slice_type(list: LogicalType, start: usize, end: Option<usize>) -> LogicalType {
+    match list {
+        LogicalType::Tuple(items) => {
+            let end = end.unwrap_or(items.len()).min(items.len());
+            let start = start.min(end);
+            list_type(items[start..end].to_vec())
+        }
+        list @ LogicalType::List(_) => list,
+        _ => LogicalType::Any,
+    }
+}
+
+/// The type of a list of type `list` with its items in reverse order
+/// (`reverse`). `Any` for a type that is not a list.
+pub(crate) fn reversed_type(list: LogicalType) -> LogicalType {
+    match list {
+        LogicalType::Tuple(mut items) => {
+            items.reverse();
+            LogicalType::Tuple(items)
+        }
+        list @ LogicalType::List(_) => list,
+        _ => LogicalType::Any,
+    }
+}
+
+/// The type of the value under `key` of a map of type `map`.
+pub(crate) fn field_type(map: &LogicalType, key: &str) -> LogicalType {
+    match map {
+        LogicalType::Struct(fields) => fields
+            .iter()
+            .find(|(name, _)| name == key)
+            .map_or(LogicalType::Any, |(_, field)| field.clone()),
+        LogicalType::Map { value, .. } => (**value).clone(),
+        _ => LogicalType::Any,
+    }
+}
+
+/// The type of a list literal whose items have the types `items`: a list of
+/// their type when they agree, a tuple when they differ, `Any` when none
+/// holds a node or edge.
+pub(crate) fn list_type(items: Vec<LogicalType>) -> LogicalType {
+    if !items.iter().any(holds_entities) {
+        return LogicalType::Any;
+    }
+    match items.split_first() {
+        Some((first, rest)) if rest.iter().all(|item| item == first) => {
+            LogicalType::List(Box::new(first.clone()))
+        }
+        _ => LogicalType::Tuple(
+            items
+                .into_iter()
+                .map(|item| {
+                    if holds_entities(&item) {
+                        item
+                    } else {
+                        LogicalType::Any
+                    }
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// The type of a map literal whose keys have the types `fields`: a struct
+/// of them, `Any` when none holds a node or edge.
+pub(crate) fn struct_type(fields: Vec<(String, LogicalType)>) -> LogicalType {
+    if !fields.iter().any(|(_, field)| holds_entities(field)) {
+        return LogicalType::Any;
+    }
+    LogicalType::Struct(
+        fields
+            .into_iter()
+            .map(|(key, field)| {
+                if holds_entities(&field) {
+                    (key, field)
+                } else {
+                    (key, LogicalType::Any)
+                }
+            })
+            .collect(),
+    )
 }
 
 /// A project operator that selects and transforms columns.
@@ -241,7 +489,7 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution("Store required for property access".to_string())
+                        OperatorError::Internal("Store required for property access".to_string())
                     })?;
 
                     // Extract property for each row.
@@ -290,10 +538,17 @@ impl Operator for ProjectOperator {
                             };
                             edge.and_then(|e| e.get_property(property).cloned())
                                 .unwrap_or(Value::Null)
-                        } else if let Some(Value::Map(map)) = input_col.get_value(row) {
-                            map.get(&prop_key).cloned().unwrap_or(Value::Null)
                         } else {
-                            Value::Null
+                            match input_col.get_value(row) {
+                                Some(Value::Map(map)) => {
+                                    map.get(&prop_key).cloned().unwrap_or(Value::Null)
+                                }
+                                // A component of a temporal value (`d.month`)
+                                Some(value) => {
+                                    value.temporal_component(property).unwrap_or(Value::Null)
+                                }
+                                None => Value::Null,
+                            }
                         };
                         output_col.push_value(value);
                     }
@@ -309,7 +564,7 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution("Store required for edge type access".to_string())
+                        OperatorError::Internal("Store required for edge type access".to_string())
                     })?;
 
                     let epoch = self.viewing_epoch;
@@ -337,7 +592,7 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution(
+                        OperatorError::Internal(
                             "Store required for expression evaluation".to_string(),
                         )
                     })?;
@@ -376,7 +631,7 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution("Store required for entity resolution".to_string())
+                        OperatorError::Internal("Store required for entity resolution".to_string())
                     })?;
 
                     // The planner says by name whether the column holds nodes
@@ -427,7 +682,7 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Execution(
+                        OperatorError::Internal(
                             "Store required for expression evaluation".to_string(),
                         )
                     })?;
@@ -442,9 +697,14 @@ impl Operator for ProjectOperator {
                         evaluator = evaluator.with_transaction_context(ep, tx_id);
                     }
 
+                    let shape = kind.logical_type();
                     for row in input.selected_indices() {
                         let value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
-                        output_col.push_value(self.resolve_entities(store.as_ref(), value, *kind));
+                        output_col.push_value(self.resolve_entities(
+                            store.as_ref(),
+                            &value,
+                            &shape,
+                        ));
                     }
                 }
                 ProjectExpr::Coalesce { first, second } => {
@@ -490,39 +750,71 @@ impl Operator for ProjectOperator {
 }
 
 impl ProjectOperator {
-    /// Replaces the entity ids in `value` with node or edge maps. Ids of
-    /// entities this read cannot see become null; values that are already
-    /// maps (or null) are kept.
+    /// Replaces the entity ids in `value` with node or edge maps, where its
+    /// type `shape` (an [`EntityValue`]'s type) says they are: the value
+    /// itself, the items of a list, the keys of a map, the nodes and edges
+    /// of a path. Ids of entities this read cannot see become null; values
+    /// that are already maps (or null) are kept.
     fn resolve_entities(
         &self,
         store: &dyn GraphStoreSearch,
-        value: Value,
-        kind: EntityValue,
+        value: &Value,
+        shape: &LogicalType,
     ) -> Value {
-        let node = |value: &Value| match value {
-            Value::Int64(id) => u64::try_from(*id).ok().map_or(Value::Null, |id| {
-                self.visible_node(store, NodeId::new(id))
-                    .map_or(Value::Null, |n| node_to_map(&n))
-            }),
-            other => other.clone(),
-        };
-        let edge = |value: &Value| match value {
-            Value::Int64(id) => u64::try_from(*id).ok().map_or(Value::Null, |id| {
-                self.visible_edge(store, EdgeId::new(id))
-                    .map_or(Value::Null, |e| edge_to_map(&e))
-            }),
-            other => other.clone(),
-        };
-        match (kind, &value) {
-            (EntityValue::Node, _) => node(&value),
-            (EntityValue::Edge, _) => edge(&value),
-            (EntityValue::Nodes, Value::List(items)) => {
-                Value::List(items.iter().map(node).collect::<Vec<_>>().into())
+        match (shape, value) {
+            (LogicalType::Node, Value::Int64(id)) => {
+                u64::try_from(*id).ok().map_or(Value::Null, |id| {
+                    self.visible_node(store, NodeId::new(id))
+                        .map_or(Value::Null, |n| node_to_map(&n))
+                })
             }
-            (EntityValue::Edges, Value::List(items)) => {
-                Value::List(items.iter().map(edge).collect::<Vec<_>>().into())
+            (LogicalType::Edge, Value::Int64(id)) => {
+                u64::try_from(*id).ok().map_or(Value::Null, |id| {
+                    self.visible_edge(store, EdgeId::new(id))
+                        .map_or(Value::Null, |e| edge_to_map(&e))
+                })
             }
-            _ => value,
+            (LogicalType::List(item), Value::List(items)) => Value::List(
+                items
+                    .iter()
+                    .map(|value| self.resolve_entities(store, value, item))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+            (LogicalType::Tuple(types), Value::List(items)) => Value::List(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| match types.get(i) {
+                        Some(item) => self.resolve_entities(store, value, item),
+                        None => value.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+            (LogicalType::Struct(_) | LogicalType::Map { .. }, Value::Map(map)) => {
+                Value::Map(Arc::new(
+                    map.iter()
+                        .map(|(key, value)| {
+                            let field = field_type(shape, key.as_str());
+                            (key.clone(), self.resolve_entities(store, value, &field))
+                        })
+                        .collect(),
+                ))
+            }
+            (LogicalType::Path, Value::Path { nodes, edges }) => Value::Path {
+                nodes: nodes
+                    .iter()
+                    .map(|node| self.resolve_entities(store, node, &LogicalType::Node))
+                    .collect::<Vec<_>>()
+                    .into(),
+                edges: edges
+                    .iter()
+                    .map(|edge| self.resolve_entities(store, edge, &LogicalType::Edge))
+                    .collect::<Vec<_>>()
+                    .into(),
+            },
+            _ => value.clone(),
         }
     }
 
@@ -712,7 +1004,7 @@ mod tests {
                 ProjectExpr::Column(1),
                 ProjectExpr::Column(1),
             ],
-            vec![LogicalType::Any, LogicalType::Any, LogicalType::Float64],
+            vec![LogicalType::Any, LogicalType::Any, LogicalType::Int32],
         );
 
         let result = project.next().unwrap().unwrap();
@@ -724,7 +1016,9 @@ mod tests {
         );
         assert_eq!(result.column(1).unwrap().data_type(), &LogicalType::Int64);
         assert_eq!(result.column(1).unwrap().get_int64(0), Some(10));
-        assert_eq!(result.column(2).unwrap().data_type(), &LogicalType::Float64);
+        // A copy declared with a type of its own keeps the declared type.
+        assert_eq!(result.column(2).unwrap().data_type(), &LogicalType::Int32);
+        assert_eq!(result.column(2).unwrap().get_int64(2), Some(30));
     }
 
     #[test]

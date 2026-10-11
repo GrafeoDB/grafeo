@@ -22,7 +22,8 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
     D4  no added #[ignore] on crash-injection tests (they must run in CI)
-    D5  no new GraphStore, GraphStoreMut or GraphStoreSearch wrapper in library code
+    D5  no new GraphStore, GraphStoreMut or GraphStoreSearch wrapper in library code (the
+        stores themselves, STORES, implement the traits)
     D6  no `let _ =` in WAL, replay and recovery code (errors must propagate)
     W1  warning: new feature cfg in grafeo-core or grafeo-engine (features add modules)
     P1  pull requests target release/*; main only receives release branches
@@ -72,8 +73,12 @@ IGNORE_ATTRIBUTE = re.compile(r"#\[\s*ignore\b")
 # An impl of a store trait itself (`impl<S> GraphStoreMut for X`), not an impl
 # that only mentions one (`impl From<Arc<dyn GraphStoreMut>> for X`).
 STORE_IMPL = re.compile(
-    r"^impl\b(?:\s*<[^{]*?>)?\s+(?:[\w:]+::)?(GraphStore|GraphStoreMut|GraphStoreSearch)\s+for\b"
+    r"^impl\b(?:\s*<[^{]*?>)?\s+(?:[\w:]+::)?(GraphStore|GraphStoreMut|GraphStoreSearch)\s+for\s+([\w:]+)"
 )
+# The stores themselves, which implement the store traits without being
+# wrappers; any other type that does is one. A new store is added here only
+# by a user decision (D5's message names them).
+STORES = {"LpgStore", "RowGroupStore"}
 LET_UNDERSCORE = re.compile(r"\blet\s+_\s*(:[^=]*)?=")
 REPLAY_PATH = re.compile(
     r"(^|/)(wal|recovery|replay)(/|[_.])|/(recovery|replay)[^/]*\.rs$"
@@ -129,7 +134,7 @@ HINTS = {
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
     "D4": "crash-injection tests must run in CI; make it fast enough instead of ignoring it",
-    "D5": "cross-cutting concerns derive from the transaction change set, not from store wrappers",
+    "D5": "cross-cutting concerns derive from the transaction change set, not from store wrappers (only the stores LpgStore and RowGroupStore implement the store traits)",
     "D6": "replay and recovery must propagate errors; handle or return the result",
     "W1": "features should add modules, not fork core types",
     "P1": "open the pull request against the current release/<milestone> branch",
@@ -513,7 +518,12 @@ def diff_findings(
                 continue
             if IGNORE_ATTRIBUTE.search(text) and is_crash_test(path, content):
                 findings.append(finding("D4", path, number))
-            if library and STORE_IMPL.match(text):
+            store_impl = STORE_IMPL.match(text)
+            if (
+                library
+                and store_impl
+                and store_impl.group(2).split("::")[-1] not in STORES
+            ):
                 findings.append(finding("D5", path, number))
             if library and REPLAY_PATH.search(path) and LET_UNDERSCORE.search(text):
                 findings.append(finding("D6", path, number))

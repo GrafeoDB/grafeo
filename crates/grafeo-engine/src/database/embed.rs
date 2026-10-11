@@ -85,9 +85,8 @@ impl super::GrafeoDB {
     pub fn embed_text(&self, model_name: &str, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let models = self.embedding_models.read();
         let model = models.get(model_name).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "Embedding model '{}' not registered",
-                model_name
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "no embedding model is registered as '{model_name}'"
             ))
         })?;
         model.embed(texts)

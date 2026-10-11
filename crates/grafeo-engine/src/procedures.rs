@@ -27,15 +27,13 @@ use grafeo_adapters::plugins::algorithms::{
     PageRankAlgorithm, PrimAlgorithm, SsspAlgorithm, StronglyConnectedComponentsAlgorithm,
     TopologicalSortAlgorithm,
 };
-use grafeo_adapters::plugins::{AlgorithmResult, ParameterDef, Parameters};
+use grafeo_adapters::plugins::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
 use grafeo_common::types::Value;
-use grafeo_common::utils::error::Result;
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphStoreSearch;
 #[cfg(feature = "lpg")]
 use grafeo_core::graph::lpg::LpgStore;
 use hashbrown::HashMap;
-
-use crate::query::plan::LogicalExpression;
 
 /// Unified interface for built-in procedures callable via `CALL`.
 ///
@@ -247,10 +245,11 @@ impl Procedure for PropertyKeysProcedure {
 #[cfg(all(feature = "lpg", feature = "vector-index"))]
 fn require_lpg_store<'a>(ctx: &ProcedureContext<'a>, proc_name: &str) -> Result<&'a LpgStore> {
     ctx.lpg_store.ok_or_else(|| {
-        grafeo_common::utils::error::Error::Internal(format!(
-            "{proc_name} requires an LPG store. Ensure the session is backed by an LPG database \
-             (not a pure RDF store or external custom store)."
-        ))
+        grafeo_common::utils::error::Error::Query(
+            grafeo_common::utils::error::QueryError::unsupported(format!(
+                "{proc_name} needs an LPG database"
+            )),
+        )
     })
 }
 
@@ -268,16 +267,17 @@ fn coerce_params_to_vector(params: &Parameters, key: &str) -> Result<Vec<f32>> {
                 Value::Float64(f) => out.push(*f as f32),
                 Value::Int64(i) => out.push(*i as f32),
                 other => {
-                    return Err(grafeo_common::utils::error::Error::Internal(format!(
-                        "Expected numeric list for vector parameter '{key}', found {other:?}"
+                    return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+                        "the vector parameter '{key}' must be a list of numbers, but holds \
+                         {other}"
                     )));
                 }
             }
         }
         return Ok(out);
     }
-    Err(grafeo_common::utils::error::Error::Internal(format!(
-        "Missing required vector parameter '{key}'"
+    Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+        "the vector parameter '{key}' is missing or is not a list of numbers"
     )))
 }
 
@@ -365,12 +365,12 @@ impl Procedure for SearchVectorProcedure {
 
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.vector")?;
         let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.vector: missing required parameter 'label'".into(),
             )
         })?;
         let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.vector: missing required parameter 'property'".into(),
             )
         })?;
@@ -378,10 +378,16 @@ impl Procedure for SearchVectorProcedure {
         let k = k_limit(params, 10);
 
         let index = lpg.get_vector_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "No vector index found for :{label}({property}). Call CREATE VECTOR INDEX first."
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no vector index on :{label}({property}); create one first"
             ))
         })?;
+        grafeo_core::index::vector::check_query_vector(
+            &query,
+            index.config().dimensions,
+            label,
+            property,
+        )?;
 
         let accessor = VectorAccessorKind::Property(PropertyVectorAccessor::new(
             ctx.store as &dyn grafeo_core::graph::GraphStore,
@@ -485,12 +491,12 @@ impl Procedure for SearchMmrProcedure {
 
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.mmr")?;
         let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.mmr: missing required parameter 'label'".into(),
             )
         })?;
         let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.mmr: missing required parameter 'property'".into(),
             )
         })?;
@@ -508,10 +514,16 @@ impl Procedure for SearchMmrProcedure {
         let lambda = params.get_float("lambda").unwrap_or(0.5) as f32;
 
         let index = lpg.get_vector_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "No vector index found for :{label}({property}). Call CREATE VECTOR INDEX first."
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no vector index on :{label}({property}); create one first"
             ))
         })?;
+        grafeo_core::index::vector::check_query_vector(
+            &query,
+            index.config().dimensions,
+            label,
+            property,
+        )?;
 
         let accessor = VectorAccessorKind::Property(PropertyVectorAccessor::new(
             ctx.store as &dyn grafeo_core::graph::GraphStore,
@@ -614,30 +626,32 @@ impl Procedure for SearchTextProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
         let lpg = ctx.lpg_store.ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
-                "CALL grafeo.search.text requires an LPG store".into(),
+            grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "CALL grafeo.search.text needs an LPG database",
+                ),
             )
         })?;
         let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.text: missing required parameter 'label'".into(),
             )
         })?;
         let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.text: missing required parameter 'property'".into(),
             )
         })?;
         let query = params.get_string("query").ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
+            grafeo_common::utils::error::Error::InvalidValue(
                 "CALL grafeo.search.text: missing required parameter 'query'".into(),
             )
         })?;
         let k = k_limit(params, 10);
 
         let index = lpg.get_text_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "No text index found for :{label}({property}). Call CREATE TEXT INDEX first."
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no text index on :{label}({property}); create one first"
             ))
         })?;
 
@@ -819,7 +833,13 @@ pub fn canonical_output_columns(algo: &dyn GraphAlgorithm) -> Vec<String> {
             "out_degree".into(),
             "total_degree".into(),
         ],
-        "bfs" | "dfs" => vec!["node_id".into(), "depth".into()],
+        "bfs" => vec!["node_id".into(), "depth".into()],
+        "dfs" => vec![
+            "node_id".into(),
+            "depth".into(),
+            "discovery".into(),
+            "finish".into(),
+        ],
         "connected_components" | "strongly_connected_components" => {
             vec!["node_id".into(), "component_id".into()]
         }
@@ -859,64 +879,113 @@ pub fn canonical_output_columns(algo: &dyn GraphAlgorithm) -> Vec<String> {
     }
 }
 
-/// Converts logical expression arguments into [`Parameters`].
-///
-/// Supports two patterns:
-/// 1. Map literal: `{damping: 0.85, iterations: 20}` → named parameters.
-/// 2. Positional args: `(42, 'weight')` → mapped by index to `ParameterDef` names.
-pub fn evaluate_arguments(args: &[LogicalExpression], param_defs: &[ParameterDef]) -> Parameters {
-    let mut params = Parameters::new();
-
-    if args.len() == 1
-        && let LogicalExpression::Map(entries) = &args[0]
-    {
-        for (key, value_expr) in entries {
-            set_param_from_expression(&mut params, key, value_expr);
-        }
-        return params;
-    }
-
-    for (i, arg) in args.iter().enumerate() {
-        if let Some(def) = param_defs.get(i) {
-            set_param_from_expression(&mut params, &def.name, arg);
-        }
-    }
-
-    params
+/// The name an error gives positional argument `index` of a call: its
+/// parameter's name, or its position past the last parameter.
+#[must_use]
+pub fn argument_name(param_defs: &[ParameterDef], index: usize) -> String {
+    param_defs
+        .get(index)
+        .map_or_else(|| format!("#{}", index + 1), |def| def.name.clone())
 }
 
-/// Sets a parameter from a `LogicalExpression` constant value.
-fn set_param_from_expression(params: &mut Parameters, name: &str, expr: &LogicalExpression) {
-    match expr {
-        LogicalExpression::Literal(Value::Int64(v)) => params.set_int(name, *v),
-        LogicalExpression::Literal(Value::Float64(v)) => params.set_float(name, *v),
-        LogicalExpression::Literal(Value::String(v)) => {
-            params.set_string(name, AsRef::<str>::as_ref(v));
+/// Converts the values of a procedure call's arguments into [`Parameters`].
+///
+/// Two forms:
+/// 1. One map, `{damping: 0.85, max_iterations: 20}` (a map literal or a map
+///    parameter), names the parameters.
+/// 2. Positional values, `(42, 'weight')`, fill the parameters in the order
+///    of `param_defs`; values past the last parameter are ignored.
+///
+/// Each value must suit its parameter's type: an integer passes for a float
+/// and a vector for a list. A null leaves the parameter out, so an optional
+/// one keeps its default and a required one fails as missing when the
+/// procedure runs. A map key that names no parameter (such as `projection`)
+/// passes through with the type of its value.
+///
+/// # Errors
+///
+/// Returns a semantic error naming the argument and `procedure` when a value
+/// does not suit its parameter: such a value never falls back to the
+/// parameter's default.
+pub fn evaluate_arguments(
+    procedure: &str,
+    args: &[Value],
+    param_defs: &[ParameterDef],
+) -> Result<Parameters> {
+    let mut params = Parameters::new();
+
+    if let [Value::Map(entries)] = args {
+        for (key, value) in entries.iter() {
+            let def = param_defs.iter().find(|def| def.name == key.as_str());
+            set_parameter(
+                &mut params,
+                procedure,
+                key.as_str(),
+                def.map(|def| def.param_type),
+                value,
+            )?;
         }
-        LogicalExpression::Literal(Value::Bool(v)) => params.set_bool(name, *v),
-        LogicalExpression::Literal(Value::List(items)) => {
-            params.set_list(name, items.iter().cloned().collect());
-        }
-        LogicalExpression::Literal(Value::Vector(items)) => {
-            params.set_list(
-                name,
-                items
-                    .iter()
-                    .map(|f| Value::Float64(f64::from(*f)))
-                    .collect(),
-            );
-        }
-        LogicalExpression::List(items) => {
-            let mut values = Vec::with_capacity(items.len());
-            for item in items {
-                if let LogicalExpression::Literal(v) = item {
-                    values.push(v.clone());
-                }
-            }
-            params.set_list(name, values);
-        }
-        _ => {}
+        return Ok(params);
     }
+
+    for (def, value) in param_defs.iter().zip(args) {
+        set_parameter(
+            &mut params,
+            procedure,
+            &def.name,
+            Some(def.param_type),
+            value,
+        )?;
+    }
+
+    Ok(params)
+}
+
+/// Sets parameter `name` to `value`, which must suit `expected` (any value a
+/// parameter can hold when `None`).
+fn set_parameter(
+    params: &mut Parameters,
+    procedure: &str,
+    name: &str,
+    expected: Option<ParameterType>,
+    value: &Value,
+) -> Result<()> {
+    use ParameterType as Type;
+    match (expected, value) {
+        (_, Value::Null) => {}
+        (Some(Type::Integer | Type::NodeId) | None, Value::Int64(v)) => params.set_int(name, *v),
+        (Some(Type::Float), Value::Int64(v)) => params.set_float(name, *v as f64),
+        (Some(Type::Float) | None, Value::Float64(v)) => params.set_float(name, *v),
+        (Some(Type::String) | None, Value::String(v)) => params.set_string(name, v.as_str()),
+        (Some(Type::Boolean) | None, Value::Bool(v)) => params.set_bool(name, *v),
+        (Some(Type::List) | None, Value::List(items)) => params.set_list(name, items.to_vec()),
+        (Some(Type::List) | None, Value::Vector(items)) => params.set_list(
+            name,
+            items
+                .iter()
+                .map(|f| Value::Float64(f64::from(*f)))
+                .collect(),
+        ),
+        (expected, value) => {
+            let wanted = match expected {
+                Some(Type::Integer) => "an integer",
+                Some(Type::NodeId) => "a node id (an integer)",
+                Some(Type::Float) => "a number",
+                Some(Type::String) => "a string",
+                Some(Type::Boolean) => "a boolean",
+                Some(Type::List) => "a list",
+                None => "a number, string, boolean or list",
+            };
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "Argument '{name}' of {procedure} must be {wanted}, got a {} value",
+                    value.type_name()
+                ),
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Builds a `grafeo.procedures()` result listing all registered procedures.
@@ -993,27 +1062,108 @@ mod tests {
         assert!(registry.get(&name).is_none());
     }
 
+    fn map(entries: &[(&str, Value)]) -> Value {
+        Value::Map(Arc::new(
+            entries
+                .iter()
+                .map(|(key, value)| ((*key).into(), value.clone()))
+                .collect(),
+        ))
+    }
+
+    fn def(name: &str, param_type: ParameterType, required: bool) -> ParameterDef {
+        ParameterDef {
+            name: name.into(),
+            param_type,
+            required,
+            default: None,
+            description: String::new(),
+        }
+    }
+
     #[test]
     fn test_evaluate_map_arguments() {
-        let args = vec![LogicalExpression::Map(vec![
-            (
-                "damping".to_string(),
-                LogicalExpression::Literal(Value::Float64(0.85)),
-            ),
-            (
-                "max_iterations".to_string(),
-                LogicalExpression::Literal(Value::Int64(20)),
-            ),
+        let args = vec![map(&[
+            ("damping", Value::Float64(0.85)),
+            ("max_iterations", Value::Int64(20)),
         ])];
-        let params = evaluate_arguments(&args, &[]);
+        let params = evaluate_arguments("pagerank", &args, &[]).unwrap();
         assert_eq!(params.get_float("damping"), Some(0.85));
         assert_eq!(params.get_int("max_iterations"), Some(20));
     }
 
     #[test]
     fn test_evaluate_empty_arguments() {
-        let params = evaluate_arguments(&[], &[]);
+        let params = evaluate_arguments("pagerank", &[], &[]).unwrap();
         assert_eq!(params.get_float("damping"), None);
+    }
+
+    #[test]
+    fn an_integer_argument_fills_a_float_parameter() {
+        let defs = [def("damping", ParameterType::Float, false)];
+        let positional = evaluate_arguments("pagerank", &[Value::Int64(1)], &defs).unwrap();
+        assert_eq!(positional.get_float("damping"), Some(1.0));
+        let named =
+            evaluate_arguments("pagerank", &[map(&[("damping", Value::Int64(1))])], &defs).unwrap();
+        assert_eq!(named.get_float("damping"), Some(1.0));
+    }
+
+    #[test]
+    fn an_argument_of_the_wrong_type_is_an_error_not_the_default() {
+        let defs = [
+            def("damping", ParameterType::Float, false),
+            def("max_iterations", ParameterType::Integer, false),
+            def("directed", ParameterType::Boolean, false),
+        ];
+        for (args, argument) in [
+            (vec![Value::from("high")], "damping"),
+            (
+                vec![Value::Float64(0.5), Value::Float64(2.5)],
+                "max_iterations",
+            ),
+            (
+                vec![Value::Float64(0.5), Value::Int64(3), Value::Int64(1)],
+                "directed",
+            ),
+            (vec![map(&[("damping", Value::Bool(true))])], "damping"),
+        ] {
+            let Err(error) = evaluate_arguments("grafeo.pagerank", &args, &defs) else {
+                panic!("a value of the wrong type for '{argument}' must fail");
+            };
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("Argument '{argument}' of grafeo.pagerank")),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_null_argument_leaves_the_parameter_out() {
+        let defs = [
+            def("k", ParameterType::Integer, false),
+            def("fetch_k", ParameterType::Integer, false),
+        ];
+        let params =
+            evaluate_arguments("search.mmr", &[Value::Int64(3), Value::Null], &defs).unwrap();
+        assert_eq!(params.get_int("k"), Some(3));
+        assert_eq!(params.get_int("fetch_k"), None);
+    }
+
+    #[test]
+    fn a_map_key_without_a_parameter_passes_through() {
+        let params = evaluate_arguments(
+            "pagerank",
+            &[map(&[("projection", Value::from("people"))])],
+            &[def("damping", ParameterType::Float, false)],
+        )
+        .unwrap();
+        assert_eq!(params.get_string("projection"), Some("people"));
+        let Err(error) = evaluate_arguments("pagerank", &[map(&[("projection", map(&[]))])], &[])
+        else {
+            panic!("no parameter holds a map");
+        };
+        assert!(error.to_string().contains("'projection'"), "{error}");
     }
 
     #[test]
@@ -1192,145 +1342,68 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // evaluate_arguments: positional and Vector-literal paths were
-    // previously exercised only via the Map case.
+    // evaluate_arguments: the positional form and each value type.
     // ---------------------------------------------------------------
 
     #[test]
     fn evaluate_positional_arguments_mapped_by_param_defs() {
-        let defs = vec![
-            ParameterDef {
-                name: "damping".into(),
-                param_type: grafeo_adapters::plugins::ParameterType::Float,
-                required: true,
-                default: None,
-                description: String::new(),
-            },
-            ParameterDef {
-                name: "iterations".into(),
-                param_type: grafeo_adapters::plugins::ParameterType::Integer,
-                required: true,
-                default: None,
-                description: String::new(),
-            },
+        let defs = [
+            def("damping", ParameterType::Float, true),
+            def("iterations", ParameterType::Integer, true),
         ];
-        let args = vec![
-            LogicalExpression::Literal(Value::Float64(0.9)),
-            LogicalExpression::Literal(Value::Int64(50)),
-        ];
-        let params = evaluate_arguments(&args, &defs);
+        let args = [Value::Float64(0.9), Value::Int64(50)];
+        let params = evaluate_arguments("pagerank", &args, &defs).unwrap();
         assert_eq!(params.get_float("damping"), Some(0.9));
         assert_eq!(params.get_int("iterations"), Some(50));
     }
 
     #[test]
     fn evaluate_arguments_drops_positional_past_last_param_def() {
-        // Defensive: an extra positional arg past the end of `param_defs`
-        // should be silently dropped (no panic), matching the existing
-        // "extra args ignored" contract of Cypher/GQL procedure calls.
-        let defs = vec![ParameterDef {
-            name: "only".into(),
-            param_type: grafeo_adapters::plugins::ParameterType::Integer,
-            required: true,
-            default: None,
-            description: String::new(),
-        }];
-        let args = vec![
-            LogicalExpression::Literal(Value::Int64(1)),
-            LogicalExpression::Literal(Value::Int64(2)), // extra
-        ];
-        let params = evaluate_arguments(&args, &defs);
+        // An extra positional value past the end of `param_defs` is ignored
+        // (no panic), the "extra args ignored" contract of procedure calls.
+        let defs = [def("only", ParameterType::Integer, true)];
+        let args = [Value::Int64(1), Value::Int64(2)];
+        let params = evaluate_arguments("only", &args, &defs).unwrap();
         assert_eq!(params.get_int("only"), Some(1));
     }
 
     #[test]
-    fn evaluate_arguments_bool_and_string_literals() {
-        let defs = vec![
-            ParameterDef {
-                name: "flag".into(),
-                param_type: grafeo_adapters::plugins::ParameterType::Boolean,
-                required: true,
-                default: None,
-                description: String::new(),
-            },
-            ParameterDef {
-                name: "label".into(),
-                param_type: grafeo_adapters::plugins::ParameterType::String,
-                required: true,
-                default: None,
-                description: String::new(),
-            },
+    fn evaluate_arguments_bool_and_string_values() {
+        let defs = [
+            def("flag", ParameterType::Boolean, true),
+            def("label", ParameterType::String, true),
         ];
-        let args = vec![
-            LogicalExpression::Literal(Value::Bool(true)),
-            LogicalExpression::Literal(Value::String("Person".into())),
-        ];
-        let params = evaluate_arguments(&args, &defs);
+        let args = [Value::Bool(true), Value::String("Person".into())];
+        let params = evaluate_arguments("flags", &args, &defs).unwrap();
         assert_eq!(params.get_bool("flag"), Some(true));
         assert_eq!(params.get_string("label"), Some("Person"));
     }
 
     #[test]
-    fn evaluate_arguments_vector_literal_becomes_list_of_floats() {
-        // Vector literals arrive from the parser as Value::Vector(Arc<[f32]>).
-        // The planner must reflect them as a List<Float64> so that
-        // `coerce_params_to_vector` can read them uniformly alongside
-        // user-typed `[0.1, 0.2, ...]` lists.
-        let defs = vec![ParameterDef {
-            name: "query".into(),
-            param_type: grafeo_adapters::plugins::ParameterType::List,
-            required: true,
-            default: None,
-            description: String::new(),
-        }];
-        let vec_literal: Arc<[f32]> = Arc::from(vec![0.25_f32, 0.5_f32, 0.75_f32]);
-        let args = vec![LogicalExpression::Literal(Value::Vector(vec_literal))];
-        let params = evaluate_arguments(&args, &defs);
+    fn evaluate_arguments_vector_becomes_list_of_floats() {
+        // A vector (a vector literal or a vector parameter) reaches a list
+        // parameter as a List of Float64, so `coerce_params_to_vector` reads
+        // it like a typed `[0.1, 0.2, ...]` list.
+        let defs = [def("query", ParameterType::List, true)];
+        let vector: Arc<[f32]> = Arc::from(vec![0.25_f32, 0.5_f32, 0.75_f32]);
+        let params = evaluate_arguments("search.vector", &[Value::Vector(vector)], &defs).unwrap();
 
         let list = params.get_list("query").expect("query must be a list");
-        assert_eq!(list.len(), 3);
-        // Each element widens from f32 to Float64.
-        assert_eq!(list[0], Value::Float64(0.25));
-        assert_eq!(list[1], Value::Float64(0.5));
-        assert_eq!(list[2], Value::Float64(0.75));
+        assert_eq!(
+            list,
+            &[
+                Value::Float64(0.25),
+                Value::Float64(0.5),
+                Value::Float64(0.75)
+            ]
+        );
     }
 
     #[test]
-    fn evaluate_arguments_logical_expression_list_flattens_literals() {
-        // The parser may produce `LogicalExpression::List(vec![Literal(..), ..])`
-        // rather than `Literal(Value::List(..))` depending on the call syntax.
-        // Both paths must reach the same set_list call.
-        let defs = vec![ParameterDef {
-            name: "weights".into(),
-            param_type: grafeo_adapters::plugins::ParameterType::List,
-            required: true,
-            default: None,
-            description: String::new(),
-        }];
-        let args = vec![LogicalExpression::List(vec![
-            LogicalExpression::Literal(Value::Int64(1)),
-            LogicalExpression::Literal(Value::Int64(2)),
-            LogicalExpression::Literal(Value::Int64(3)),
-        ])];
-        let params = evaluate_arguments(&args, &defs);
-        let list = params.get_list("weights").unwrap();
-        assert_eq!(list, &[Value::Int64(1), Value::Int64(2), Value::Int64(3)]);
-    }
-
-    #[test]
-    fn evaluate_arguments_literal_list_value() {
-        // Direct Value::List path (parser handed us a pre-wrapped list).
-        let defs = vec![ParameterDef {
-            name: "items".into(),
-            param_type: grafeo_adapters::plugins::ParameterType::List,
-            required: true,
-            default: None,
-            description: String::new(),
-        }];
-        let args = vec![LogicalExpression::Literal(Value::List(
-            vec![Value::Int64(7), Value::Int64(8)].into(),
-        ))];
-        let params = evaluate_arguments(&args, &defs);
+    fn evaluate_arguments_list_value() {
+        let defs = [def("items", ParameterType::List, true)];
+        let args = [Value::List(vec![Value::Int64(7), Value::Int64(8)].into())];
+        let params = evaluate_arguments("items", &args, &defs).unwrap();
         let list = params.get_list("items").unwrap();
         assert_eq!(list, &[Value::Int64(7), Value::Int64(8)]);
     }
@@ -1446,8 +1519,8 @@ mod tests {
         let params = Parameters::new();
         let err = coerce_params_to_vector(&params, "query").unwrap_err();
         assert!(
-            err.to_string()
-                .contains("Missing required vector parameter"),
+            matches!(err, grafeo_common::utils::error::Error::InvalidValue(_))
+                && err.to_string().contains("'query' is missing"),
             "error must name the parameter: {err}"
         );
     }
@@ -1462,9 +1535,89 @@ mod tests {
         );
         let err = coerce_params_to_vector(&params, "query").unwrap_err();
         assert!(
-            err.to_string().contains("Expected numeric list"),
+            matches!(err, grafeo_common::utils::error::Error::InvalidValue(_))
+                && err.to_string().contains("must be a list of numbers"),
             "error must describe expected type: {err}"
         );
+    }
+
+    /// #593: `grafeo.search.vector` and `grafeo.search.mmr` refuse a query
+    /// vector with a NaN or an infinite value (a query literal cannot hold
+    /// one, so the procedures are called directly), naming the value, as an
+    /// invalid value.
+    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    #[test]
+    fn search_procedures_refuse_nan_and_infinite_query_values() {
+        use grafeo_common::utils::error::ErrorCode;
+        use grafeo_core::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind};
+
+        let store = LpgStore::new().expect("store");
+        for vector in [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+            let node = store.create_node(&["Doc"]);
+            store.set_node_property(node, "emb", Value::Vector(vector.to_vec().into()));
+        }
+        let index = HnswIndex::with_seed(HnswConfig::new(3, DistanceMetric::Cosine), 3);
+        store.add_vector_index(
+            "Doc",
+            "emb",
+            std::sync::Arc::new(VectorIndexKind::Hnsw(index)),
+        );
+        // The index takes the vectors the store already holds when they are
+        // set again.
+        for node in store.nodes_by_label("Doc") {
+            let vector = store
+                .get_node_property(node, &grafeo_common::types::PropertyKey::new("emb"))
+                .expect("vector");
+            store.set_node_property(node, "emb", vector);
+        }
+        let ctx = ProcedureContext::with_lpg_store(&store, &store);
+        let procedures: [Box<dyn Procedure>; 2] = [
+            Box::new(SearchVectorProcedure::new()),
+            Box::new(SearchMmrProcedure::new()),
+        ];
+        for procedure in &procedures {
+            for (query, message) in [
+                (
+                    [0.9, f64::NAN, 0.0],
+                    "the query vector has NaN at position 1",
+                ),
+                (
+                    [0.9, 0.0, f64::INFINITY],
+                    "the query vector has inf at position 2",
+                ),
+            ] {
+                let mut params = Parameters::new();
+                params.set_string("label", "Doc");
+                params.set_string("property", "emb");
+                params.set_list("query", query.iter().map(|v| Value::Float64(*v)).collect());
+                params.set_int("k", 2);
+                let Err(err) = procedure.execute(&ctx, &params) else {
+                    panic!("{}: {message} was not refused", procedure.name());
+                };
+                assert_eq!(err.error_code(), ErrorCode::InvalidInput, "{err}");
+                assert!(
+                    err.to_string().contains(message),
+                    "{}: {err}",
+                    procedure.name()
+                );
+            }
+            let mut params = Parameters::new();
+            params.set_string("label", "Doc");
+            params.set_string("property", "emb");
+            params.set_list(
+                "query",
+                vec![
+                    Value::Float64(1.0),
+                    Value::Float64(0.0),
+                    Value::Float64(0.0),
+                ],
+            );
+            params.set_int("k", 1);
+            let result = procedure
+                .execute(&ctx, &params)
+                .expect("a query it can measure");
+            assert_eq!(result.rows.len(), 1, "{}", procedure.name());
+        }
     }
 
     #[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]

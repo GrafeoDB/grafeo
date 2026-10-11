@@ -1,0 +1,168 @@
+# Rosetta: a list as a grouping key keeps its value next to an aggregate
+#
+# A grouping key keeps its value, a list too (ISO/IEC 39075:2024 <group by
+# clause>; openCypher WITH grouping keys), wherever it stands among the items
+# and whatever the aggregate beside it. A list key used to come out as the
+# integer 0 next to collect, sum, avg, min and max (fixed before 0.6.0; these
+# cases keep it fixed).
+#
+# Setup (GQL): person 5 studies at UvA and works at Siemens.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: List-valued grouping keys next to aggregates
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: collected_list_key_after_collect
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, collect(1) AS a, unis RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, collect(1) AS a, unis RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], [1]]
+
+  - name: collected_list_key_before_collect
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, collect(1) AS a RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, collect(1) AS a RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], [1]]
+
+  - name: collected_list_key_after_sum
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, sum(1) AS a, unis RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, sum(1) AS a, unis RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], 1]
+
+  - name: collected_list_key_before_sum
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, sum(1) AS a RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, sum(1) AS a RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], 1]
+
+  - name: collected_list_key_after_avg
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, avg(1) AS a, unis RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, avg(1) AS a, unis RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], 1]
+
+  - name: collected_list_key_before_avg
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, avg(1) AS a RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, avg(1) AS a RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], 1]
+
+  - name: collected_list_key_after_min
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, min(1) AS a, unis RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, min(1) AS a, unis RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], 1]
+
+  - name: collected_list_key_before_min
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, min(1) AS a RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, min(1) AS a RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], 1]
+
+  - name: collected_list_key_after_max
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, max(1) AS a, unis RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, max(1) AS a, unis RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], 1]
+
+  - name: collected_list_key_before_max
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, max(1) AS a RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, max(1) AS a RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], 1]
+
+  - name: collected_list_key_after_count
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, count(1) AS a, unis RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH f, count(1) AS a, unis RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], 1]
+
+  - name: collected_list_key_before_count
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, count(1) AS a RETURN unis, a"
+      cypher: "MATCH (f:Person)-[:STUDY_AT]->(u) WITH f, collect(u.name) AS unis WITH unis, count(1) AS a RETURN unis, a"
+    expect:
+      rows:
+        - [[UvA], 1]
+
+  - name: literal_list_key_after_collect
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person) WITH f, [f.id, 1] AS l WITH f, collect(1) AS a, l RETURN l, a"
+      cypher: "MATCH (f:Person) WITH f, [f.id, 1] AS l WITH f, collect(1) AS a, l RETURN l, a"
+    expect:
+      rows:
+        - [[5, 1], [1]]
+
+  - name: literal_list_key_after_sum
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person) WITH f, [f.id, 1] AS l WITH f, sum(1) AS a, l RETURN l, a"
+      cypher: "MATCH (f:Person) WITH f, [f.id, 1] AS l WITH f, sum(1) AS a, l RETURN l, a"
+    expect:
+      rows:
+        - [[5, 1], 1]
+
+  - name: literal_list_key_after_count
+    setup:
+      - "INSERT (p:Person {id: 5})-[:STUDY_AT]->(:Uni {name: 'UvA'}), (p)-[:WORK_AT]->(:Company {name: 'Siemens'})"
+    variants:
+      gql: "MATCH (f:Person) WITH f, [f.id, 1] AS l WITH f, count(1) AS a, l RETURN l, a"
+      cypher: "MATCH (f:Person) WITH f, [f.id, 1] AS l WITH f, count(1) AS a, l RETURN l, a"
+    expect:
+      rows:
+        - [[5, 1], 1]

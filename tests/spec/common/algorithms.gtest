@@ -292,8 +292,24 @@ tests:
       - "MATCH (a:Person {name: 'Gus'}), (b:Person {name: 'Vincent'}) INSERT (a)-[:KNOWS]->(b)"
     query: "CALL grafeo.dfs(0)"
     expect:
-      columns: [node_id, depth]
+      columns: [node_id, depth, discovery, finish]
       count: 3
+
+  # depth is the depth in the DFS tree, not the finishing order: on
+  # Alix -> Gus -> Vincent -> Mia and Alix -> Jules, the start has depth 0
+  # and finishes last.
+  - name: dfs_depth_is_the_tree_depth
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(:Person {name: 'Mia'}), (a)-[:KNOWS]->(:Person {name: 'Jules'})"
+    query: "CALL grafeo.dfs(0) YIELD node_id, depth, finish RETURN node_id, depth, finish ORDER BY node_id"
+    expect:
+      ordered: true
+      rows:
+        - [0, 0, 4]
+        - [1, 1, 2]
+        - [2, 2, 1]
+        - [3, 3, 0]
+        - [4, 1, 3]
 
   # ---------------------------------------------------------------------------
   # Betweenness / Closeness Centrality
@@ -493,14 +509,14 @@ tests:
   - name: call_unknown_procedure
     query: "CALL grafeo.nonexistent()"
     expect:
-      error: "Unknown procedure"
+      error: "unknown procedure 'grafeo.nonexistent'"
 
   - name: call_yield_nonexistent_column
     setup:
       - "INSERT (:Person {name: 'Alix'})"
     query: "CALL grafeo.pagerank() YIELD fake_column"
     expect:
-      error: "not found"
+      error: "'fake_column' is no column of the procedure"
 
   # ---------------------------------------------------------------------------
   # Procedure Listing

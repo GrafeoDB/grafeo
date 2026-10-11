@@ -21,6 +21,10 @@ pub struct UnwindOperator {
     emit_ordinality: bool,
     /// Whether to emit a 0-based OFFSET column.
     emit_offset: bool,
+    /// Whether the rows pass on the list column: a variable that holds the
+    /// list stays in scope after the UNWIND (see
+    /// [`without_the_list`](Self::without_the_list)).
+    passes_on_the_list: bool,
     /// Current input chunk being processed.
     current_chunk: Option<DataChunk>,
     /// Current row index within the chunk.
@@ -56,11 +60,24 @@ impl UnwindOperator {
             output_schema,
             emit_ordinality,
             emit_offset,
+            passes_on_the_list: true,
             current_chunk: None,
             current_row: 0,
             current_list_idx: 0,
             current_list: None,
         }
+    }
+
+    /// Leaves the list column null in the rows: for a list the planner
+    /// computed for the UNWIND alone (a literal, a parameter, a property),
+    /// which no variable holds, so the rows do not carry the whole list along
+    /// with each of its items. A variable that holds the list stays in scope
+    /// (`WITH [1, 2] AS l UNWIND l AS x RETURN l, x`), so by default the rows
+    /// pass the list on.
+    #[must_use]
+    pub fn without_the_list(mut self) -> Self {
+        self.passes_on_the_list = false;
+        self
     }
 
     /// Returns the variable name for the unwound elements.
@@ -166,10 +183,14 @@ impl UnwindOperator {
         }
         let mut builder = DataChunkBuilder::new(&types);
 
-        // Copy existing columns (except the list column which we're replacing)
+        // Copy the input columns, the list too unless it is left out (a
+        // variable that holds the list stays in scope; it read null).
         for col_idx in 0..copied {
-            if col_idx == self.list_col_idx {
-                continue; // Skip the list column
+            if col_idx == self.list_col_idx && !self.passes_on_the_list {
+                if let Some(out_col) = builder.column_mut(col_idx) {
+                    out_col.push_value(Value::Null);
+                }
+                continue;
             }
             if let Some(col) = chunk.column(col_idx)
                 && let Some(value) = col.get_value(self.current_row)
@@ -426,6 +447,58 @@ mod tests {
             [
                 (Some(Value::Int64(7)), Some(Value::Int64(1))),
                 (Some(Value::Int64(7)), Some(Value::Int64(2)))
+            ]
+        );
+    }
+
+    /// The rows pass on the list column, which a variable holds and which
+    /// stays in scope (`WITH [3, 19] AS l UNWIND l AS x RETURN l, x`; it read
+    /// null), unless the list is left out for being the UNWIND's own.
+    #[test]
+    fn unwind_passes_on_its_list_unless_left_out() {
+        let list = Value::List(vec![Value::Int64(3), Value::Int64(19)].into());
+        let run = |left_out: bool| {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+            builder.column_mut(0).unwrap().push_value(list.clone());
+            builder.advance_row();
+            let child = MockOperator {
+                chunks: vec![builder.finish()],
+                position: 0,
+            };
+            let unwind = UnwindOperator::new(
+                Box::new(child),
+                0,
+                "x".to_string(),
+                vec![LogicalType::Any, LogicalType::Any],
+                false,
+                false,
+            );
+            let mut unwind = if left_out {
+                unwind.without_the_list()
+            } else {
+                unwind
+            };
+            let mut rows = Vec::new();
+            while let Some(chunk) = unwind.next().unwrap() {
+                rows.push((
+                    chunk.column(0).unwrap().get_value(0),
+                    chunk.column(1).unwrap().get_value(0),
+                ));
+            }
+            rows
+        };
+        assert_eq!(
+            run(false),
+            [
+                (Some(list.clone()), Some(Value::Int64(3))),
+                (Some(list.clone()), Some(Value::Int64(19))),
+            ]
+        );
+        assert_eq!(
+            run(true),
+            [
+                (Some(Value::Null), Some(Value::Int64(3))),
+                (Some(Value::Null), Some(Value::Int64(19))),
             ]
         );
     }

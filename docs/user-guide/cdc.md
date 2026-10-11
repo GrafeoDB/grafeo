@@ -88,10 +88,19 @@ Once CDC is enabled, every mutation records a `ChangeEvent` with:
 
 A field that does not apply is `None` (Rust, Python) or `null` (Node.js). Adding
 or removing a label is an `Update` event with `labels` and `before_labels`.
+Events gain fields only: a patch release can add a field (a key in Python and
+Node.js), never remove or rename one.
 
 A node or edge created in a transaction has one `Create` event that shows it as
 the transaction left it: property and label changes made later in the same
 transaction are part of that event rather than events of their own.
+
+A batch call (`batch_create_nodes`, `batch_create_nodes_with_props`,
+`batch_create_nodes_with_labels`, `batch_create_edges`) reports one `Create`
+event per node or edge it creates. The bulk loads report none: the imports
+(`import_tsv`, `import_tsv_str`, `import_mmio`, `import_tsv_rdf`) and
+`batch_insert_rdf` write their rows to the store and the WAL as they go,
+without events.
 
 Node and edge IDs repeat across named graphs, so an ID names an entity only
 together with its graph. `history` on the database reads the default graph, and

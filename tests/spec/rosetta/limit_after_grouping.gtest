@@ -1,0 +1,118 @@
+# Rosetta: LIMIT and OFFSET cut the rows after grouping and DISTINCT
+#
+# LIMIT and OFFSET apply to the result of the query: after GROUP BY, HAVING,
+# DISTINCT and ORDER BY (ISO/IEC 9075-2 <query expression> for SQL/PGQ; in
+# ISO/IEC 39075:2024 GQL the <order by and page statement> pages the rows the
+# RETURN gives). A cut before grouping splits groups (wrong counts) and a cut
+# before DISTINCT drops rows that LIMIT allows. SQL/PGQ used to cut the
+# GRAPH_TABLE rows first.
+#
+# Setup (GQL): four people, one in Amsterdam, two in Berlin, one in Paris.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: LIMIT and OFFSET after grouping and DISTINCT
+  dataset: empty
+  requires: [cypher, sql-pgq]
+
+tests:
+
+  - name: limit_after_group_by_counts_whole_groups
+    setup:
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'}), (:Person {name: 'Gus', city: 'Berlin'}), (:Person {name: 'Vincent', city: 'Berlin'}), (:Person {name: 'Mia', city: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) RETURN p.city AS city, count(*) AS n ORDER BY city LIMIT 3"
+      cypher: "MATCH (p:Person) RETURN p.city AS city, count(*) AS n ORDER BY city LIMIT 3"
+      sql-pgq: |
+        SELECT city, COUNT(*) AS n
+        FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.city AS city))
+        GROUP BY city
+        ORDER BY city
+        LIMIT 3
+    expect:
+      ordered: true
+      rows:
+        - [Amsterdam, 1]
+        - [Berlin, 2]
+        - [Paris, 1]
+
+  - name: offset_after_group_by_skips_whole_groups
+    setup:
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'}), (:Person {name: 'Gus', city: 'Berlin'}), (:Person {name: 'Vincent', city: 'Berlin'}), (:Person {name: 'Mia', city: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) RETURN p.city AS city, count(*) AS n ORDER BY city OFFSET 1 LIMIT 2"
+      cypher: "MATCH (p:Person) RETURN p.city AS city, count(*) AS n ORDER BY city SKIP 1 LIMIT 2"
+      sql-pgq: |
+        SELECT city, COUNT(*) AS n
+        FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.city AS city))
+        GROUP BY city
+        ORDER BY city
+        LIMIT 2 OFFSET 1
+    expect:
+      ordered: true
+      rows:
+        - [Berlin, 2]
+        - [Paris, 1]
+
+  - name: limit_after_an_aggregate_without_grouping_counts_every_row
+    setup:
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'}), (:Person {name: 'Gus', city: 'Berlin'}), (:Person {name: 'Vincent', city: 'Berlin'}), (:Person {name: 'Mia', city: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) RETURN count(*) AS n LIMIT 1"
+      cypher: "MATCH (p:Person) RETURN count(*) AS n LIMIT 1"
+      sql-pgq: "SELECT COUNT(*) AS n FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.city AS city)) LIMIT 1"
+    expect:
+      rows:
+        - [4]
+
+  - name: limit_after_having_keeps_the_groups_that_pass_it
+    setup:
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'}), (:Person {name: 'Gus', city: 'Berlin'}), (:Person {name: 'Vincent', city: 'Berlin'}), (:Person {name: 'Mia', city: 'Paris'})"
+    variants:
+      cypher: "MATCH (p:Person) WITH p.city AS city, count(*) AS n WHERE n > 1 RETURN city, n ORDER BY city LIMIT 1"
+      sql-pgq: |
+        SELECT city, COUNT(*) AS n
+        FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.city AS city))
+        GROUP BY city
+        HAVING COUNT(*) > 1
+        ORDER BY city
+        LIMIT 1
+    expect:
+      rows:
+        - [Berlin, 2]
+
+  - name: limit_after_distinct_counts_distinct_rows
+    setup:
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'}), (:Person {name: 'Gus', city: 'Berlin'}), (:Person {name: 'Vincent', city: 'Berlin'}), (:Person {name: 'Mia', city: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) RETURN DISTINCT p.city AS city ORDER BY city LIMIT 3"
+      cypher: "MATCH (p:Person) RETURN DISTINCT p.city AS city ORDER BY city LIMIT 3"
+      sql-pgq: |
+        SELECT DISTINCT city
+        FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.city AS city))
+        ORDER BY city
+        LIMIT 3
+    expect:
+      ordered: true
+      rows:
+        - [Amsterdam]
+        - [Berlin]
+        - [Paris]
+
+  - name: offset_after_distinct_skips_distinct_rows
+    setup:
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'}), (:Person {name: 'Gus', city: 'Berlin'}), (:Person {name: 'Vincent', city: 'Berlin'}), (:Person {name: 'Mia', city: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) RETURN DISTINCT p.city AS city ORDER BY city DESC OFFSET 1 LIMIT 2"
+      cypher: "MATCH (p:Person) RETURN DISTINCT p.city AS city ORDER BY city DESC SKIP 1 LIMIT 2"
+      sql-pgq: |
+        SELECT DISTINCT city
+        FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.city AS city))
+        ORDER BY city DESC
+        LIMIT 2 OFFSET 1
+    expect:
+      ordered: true
+      rows:
+        - [Berlin]
+        - [Amsterdam]

@@ -201,6 +201,64 @@ tests:
       rows:
         - [Alix]
 
+  # `*` followed by more items (openCypher 9 grammar, ProjectionItems): every
+  # variable in scope, then the items. It used to fail with "Expected end of
+  # query".
+  - name: with_star_and_more_items
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS {years: 3}]->(:Person {name: 'Gus'})"
+    query: "MATCH (a)-[r:KNOWS]->(c) WITH *, r.years AS y RETURN a.name, c.name, y"
+    expect:
+      rows:
+        - [Alix, Gus, 3]
+
+  - name: with_star_and_more_items_then_where
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Gus', age: 3})"
+    query: "MATCH (a:Person) WITH *, a.age * 2 AS twice WHERE twice > 19 RETURN a.name, twice"
+    expect:
+      rows:
+        - [Alix, 176]
+
+  - name: return_star_and_more_items
+    query: "UNWIND [3, 19] AS x RETURN *, x * 2 AS y"
+    expect:
+      columns: [x, y]
+      rows:
+        - [3, 6]
+        - [19, 38]
+
+  - name: return_star_and_more_items_on_a_match
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS {years: 3}]->(:Person {name: 'Gus'})"
+    query: "MATCH (a)-[r:KNOWS]->(c) RETURN *, r.years AS y, a.name"
+    expect:
+      columns: [a, r, c, y, a.name]
+      count: 1
+
+  - name: return_star_and_a_variable_it_returns_fails
+    query: "UNWIND [3, 19] AS x RETURN *, x"
+    expect:
+      error: "already"
+
+  # With an aggregate, `*` names the grouping keys.
+  - name: with_star_and_an_aggregate_groups_by_every_variable
+    query: "UNWIND [3, 19, 3] AS x WITH *, count(*) AS c RETURN x, c ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - [3, 2]
+        - [19, 1]
+
+  - name: return_star_and_an_aggregate_groups_by_every_variable
+    query: "UNWIND [3, 19, 3] AS x RETURN *, count(*) AS c ORDER BY x"
+    expect:
+      ordered: true
+      columns: [x, c]
+      rows:
+        - [3, 2]
+        - [19, 1]
+
   # ---------------------------------------------------------------------------
   # UNWIND
   # ---------------------------------------------------------------------------

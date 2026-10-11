@@ -187,13 +187,27 @@ tests:
       - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams)"
     variants:
       gql: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS*1..3]->(b) RETURN b.name AS b, size(rs) AS hops, EXISTS { MATCH (x)-[rs:KNOWS*1..2]->(y) } AS short, EXISTS { MATCH (x)-[rs:KNOWS*]->(a) } AS back_to_a, EXISTS { MATCH (x)<-[rs:KNOWS*]-(y) } AS reversed"
-      cypher: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS*1..3]->(b) RETURN b.name AS b, size(rs) AS hops, EXISTS { MATCH (x)-[rs:KNOWS*1..2]->(y) } AS short, EXISTS { MATCH (x)-[rs:KNOWS*]->(a) } AS back_to_a, EXISTS { MATCH (x)<-[rs:KNOWS*]-(y) } AS reversed"
     expect:
       rows:
         - [Gus, 1, true, false, true]
         - [Alix, 2, true, true, true]
         - [Vincent, 2, true, false, false]
         - [Gus, 3, false, false, true]
+        - [Mia, 3, false, false, false]
+
+  # The same in Cypher, whose variable-length relationship takes each
+  # relationship once (openCypher 9): Alix->Gus->Alix->Gus takes Alix->Gus
+  # twice, so that walk is no match.
+  - name: return_exists_through_a_bound_relationship_list_of_a_trail
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS]->(gus), (gus)-[:KNOWS]->(alix), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(mia), (alix)-[:LIVES_IN]->(ams), (mia)-[:LIVES_IN]->(ams)"
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'})-[rs:KNOWS*1..3]->(b) RETURN b.name AS b, size(rs) AS hops, EXISTS { MATCH (x)-[rs:KNOWS*1..2]->(y) } AS short, EXISTS { MATCH (x)-[rs:KNOWS*]->(a) } AS back_to_a, EXISTS { MATCH (x)<-[rs:KNOWS*]-(y) } AS reversed"
+    expect:
+      rows:
+        - [Gus, 1, true, false, true]
+        - [Alix, 2, true, true, true]
+        - [Vincent, 2, true, false, false]
         - [Mia, 3, false, false, false]
 
   - name: return_count_with_a_new_named_start

@@ -199,7 +199,8 @@ tests:
   # ---------------------------------------------------------------------------
   # GQL: a CALL subquery sees every variable of the outer row. In GQL and
   # Cypher, CALL (a, b) limits that to a and b and CALL () to none (Cypher's
-  # CALL (*) imports all). A WITH in it is an ordinary WITH.
+  # CALL (*) imports all). A WITH in it is an ordinary WITH, except that what
+  # the subquery imports stays visible after it (see the scope rules below).
   # ---------------------------------------------------------------------------
 
   - name: gql_call_sees_an_outer_node
@@ -456,7 +457,6 @@ tests:
       error: "already declared outside the CALL subquery"
 
   - name: an_imported_variable_stays_visible_after_a_with
-    skip: "#545: a WITH in the subquery still ends the scope of an import (Undefined variable 'a')"
     variants:
       gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.name AS n, x } RETURN n, x"
       cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.name AS n, x } RETURN n, x"
@@ -466,7 +466,6 @@ tests:
 
   # The count over no match is still one row, with the imported a.
   - name: an_imported_variable_stays_visible_after_an_aggregating_with
-    skip: "#545: a WITH in the subquery still ends the scope of an import (Undefined variable 'a')"
     variants:
       gql: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, k } RETURN n, k"
       cypher: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, k } RETURN n, k"
@@ -477,6 +476,158 @@ tests:
         - [Vincent, 1]
         - [Jules, 1]
         - [Mia, 0]
+
+  # The same for the variables an importing WITH names (Cypher) and for the
+  # whole outer row GQL imports without a scope clause.
+  - name: an_importing_with_keeps_its_imports_after_a_later_with
+    variants:
+      cypher: "MATCH (a:Person) CALL { WITH a MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, k } RETURN n, k"
+    expect:
+      rows:
+        - [Alix, 2]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Jules, 1]
+        - [Mia, 0]
+
+  - name: gql_an_implicit_import_stays_visible_after_a_with
+    variants:
+      gql: "MATCH (a:Person) CALL { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN a.name AS n, k } RETURN n, k"
+    expect:
+      rows:
+        - [Alix, 2]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Jules, 1]
+        - [Mia, 0]
+
+  # An imported node stays the node, not the edge with the same ID: w of a
+  # node is 100 and up, of an edge 1 to 8.
+  - name: an_imported_node_after_a_with_is_the_node
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.w AS w, EXISTS { MATCH (a)-[:LIVES_IN]->(:City) } AS housed } RETURN w, housed"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.w AS w, EXISTS { MATCH (a)-[:LIVES_IN]->(:City) } AS housed } RETURN w, housed"
+    expect:
+      rows:
+        - [100, true]
+
+  # Vincent lives nowhere: EXISTS reads the imported a, not any node.
+  - name: an_exists_after_a_with_reads_the_import
+    variants:
+      gql: "MATCH (a:Person {name: 'Vincent'}) CALL (a) { WITH 1 AS x RETURN EXISTS { MATCH (a)-[:LIVES_IN]->(:City) } AS housed } RETURN housed"
+      cypher: "MATCH (a:Person {name: 'Vincent'}) CALL (a) { WITH 1 AS x RETURN EXISTS { MATCH (a)-[:LIVES_IN]->(:City) } AS housed } RETURN housed"
+    expect:
+      rows:
+        - [false]
+
+  - name: an_imported_edge_after_an_aggregating_with_is_the_edge
+    variants:
+      gql: "MATCH (:Person {name: 'Alix'})-[r:KNOWS]->(:Person {name: 'Gus'}) CALL (r) { MATCH (c:City) WITH count(c) AS k RETURN type(r) AS t, r.w AS w, k } RETURN t, w, k"
+      cypher: "MATCH (:Person {name: 'Alix'})-[r:KNOWS]->(:Person {name: 'Gus'}) CALL (r) { MATCH (c:City) WITH count(c) AS k RETURN type(r) AS t, r.w AS w, k } RETURN t, w, k"
+    expect:
+      rows:
+        - [KNOWS, 1, 3]
+
+  # Who each person knows that is older than them.
+  - name: the_where_of_a_with_reads_an_import
+    variants:
+      gql: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH b WHERE b.age > a.age RETURN b.name AS older } RETURN a.name AS a, older"
+      cypher: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH b WHERE b.age > a.age RETURN b.name AS older } RETURN a.name AS a, older"
+    expect:
+      rows:
+        - [Alix, Jules]
+        - [Gus, Vincent]
+
+  # Mia knows nobody; Vincent is older than 35.
+  - name: the_where_of_an_aggregating_with_reads_an_import
+    variants:
+      gql: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k WHERE k = 0 OR a.age > 35 RETURN a.name AS n, k } RETURN n, k"
+      cypher: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k WHERE k = 0 OR a.age > 35 RETURN a.name AS n, k } RETURN n, k"
+    expect:
+      rows:
+        - [Mia, 0]
+        - [Vincent, 1]
+
+  - name: a_with_that_renames_an_import_keeps_the_import
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH a AS p RETURN p.name AS m, a.name AS n } RETURN m, n"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH a AS p RETURN p.name AS m, a.name AS n } RETURN m, n"
+    expect:
+      rows:
+        - [Alix, Alix]
+
+  # A WITH in the nested body, then one in the outer body: each keeps the
+  # imports of its own body.
+  - name: nested_calls_keep_their_imports_after_a_with
+    variants:
+      gql: "MATCH (a:Person) CALL (a) { CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN k } WITH k + 1 AS s RETURN a.name AS n, s } RETURN n, s"
+      cypher: "MATCH (a:Person) CALL (a) { CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH count(b) AS k RETURN k } WITH k + 1 AS s RETURN a.name AS n, s } RETURN n, s"
+    expect:
+      rows:
+        - [Alix, 3]
+        - [Gus, 2]
+        - [Vincent, 2]
+        - [Jules, 2]
+        - [Mia, 1]
+
+  # The nested call imports a, not c: c stays invisible in it.
+  - name: a_nested_call_sees_only_its_own_imports
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}), (c:City {name: 'Paris'}) CALL (a, c) { CALL (a) { WITH 2 AS y RETURN c.name AS m } RETURN m } RETURN m"
+      cypher: "MATCH (a:Person {name: 'Alix'}), (c:City {name: 'Paris'}) CALL (a, c) { WITH 1 AS x CALL (a) { WITH 2 AS y RETURN c.name AS m } RETURN m } RETURN m"
+    expect:
+      error: "Undefined variable 'c'"
+
+  # A CALL after a WITH in the body imports from the row the WITH passes
+  # on, which holds the import (a GQL WITH takes no CALL after it).
+  - name: a_call_after_a_with_imports_the_import
+    variants:
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x CALL (a, x) { WITH 2 AS y RETURN a.age + x + y AS s } RETURN s } RETURN s"
+    expect:
+      rows:
+        - [33]
+
+  - name: gql_optional_call_keeps_its_import_after_a_with
+    variants:
+      gql: "MATCH (a:Person) OPTIONAL CALL (a) { MATCH (a)-[:LIVES_IN]->(c) WITH c RETURN a.name || ' in ' || c.name AS s } RETURN a.name AS a, s"
+    expect:
+      rows:
+        - [Alix, Alix in Amsterdam]
+        - [Gus, Gus in Berlin]
+        - [Vincent, null]
+        - [Jules, null]
+        - [Mia, Mia in Paris]
+
+  - name: each_part_of_a_union_keeps_its_imports_after_a_with
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 1 AS x RETURN a.name AS n, x UNION ALL WITH 2 AS x RETURN a.name AS n, x } RETURN n, x"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL { WITH a WITH 1 AS x RETURN a.name AS n, x UNION ALL WITH a WITH 2 AS x RETURN a.name AS n, x } RETURN n, x"
+    expect:
+      rows:
+        - [Alix, 1]
+        - [Alix, 2]
+
+  # The oldest person each one knows, ordered and cut after a WITH (a GQL
+  # WITH takes no ORDER BY).
+  - name: an_import_after_a_with_that_orders_and_cuts
+    variants:
+      cypher: "MATCH (a:Person) CALL (a) { MATCH (a)-[:KNOWS]->(b) WITH b ORDER BY b.age DESC LIMIT 1 RETURN a.name AS n, b.name AS f } RETURN n, f"
+    expect:
+      rows:
+        - [Alix, Jules]
+        - [Gus, Vincent]
+        - [Vincent, Alix]
+        - [Jules, Mia]
+
+  # A WITH that binds the import's name to another value: the name is a
+  # variable of the body from there on.
+  - name: a_with_that_rebinds_an_import_name
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 3 AS a RETURN a AS v } RETURN v"
+      cypher: "MATCH (a:Person {name: 'Alix'}) CALL (a) { WITH 3 AS a RETURN a AS v } RETURN v"
+    expect:
+      rows:
+        - [3]
 
   # A variable of the subquery's own is out of scope after a WITH that leaves
   # it out, as anywhere else.
@@ -692,3 +843,71 @@ tests:
     expect:
       rows:
         - [Amsterdam, 1]
+
+  # ---------------------------------------------------------------------------
+  # A body without a final RETURN (a unit subquery) runs for its writes and
+  # passes each row on once, as it came in: however many rows the body makes,
+  # none included. Nothing it binds is a variable after it.
+  # ---------------------------------------------------------------------------
+
+  # The body makes two rows for each person: it writes twice per person, and
+  # each person goes on once.
+  - name: a_unit_subquery_keeps_each_row_once
+    variants:
+      gql: "MATCH (p:Person) CALL (p) { FOR x IN [1, 2] INSERT (:W {name: p.name}) } WITH count(*) AS people MATCH (w:W) RETURN people, count(w) AS written"
+      cypher: "MATCH (p:Person) CALL { WITH p UNWIND [1, 2] AS x CREATE (:W {name: p.name}) } WITH count(*) AS people MATCH (w:W) RETURN people, count(w) AS written"
+    expect:
+      rows:
+        - [5, 10]
+
+  # A body that makes no rows writes nothing and keeps every person.
+  - name: a_unit_subquery_without_rows_keeps_the_rows
+    variants:
+      gql: "MATCH (p:Person) CALL (p) { FOR x IN [] INSERT (:W) } RETURN count(*) AS people"
+      cypher: "MATCH (p:Person) CALL { WITH p UNWIND [] AS x CREATE (:W) } RETURN count(*) AS people"
+    expect:
+      rows:
+        - [5]
+
+  - name: a_unit_subquery_passes_only_the_outer_variables_on
+    variants:
+      gql: "MATCH (p:Person {name: 'Alix'}) CALL (p) { FOR x IN [1, 2] INSERT (w:W) } RETURN *"
+      cypher: "MATCH (p:Person {name: 'Alix'}) CALL { WITH p UNWIND [1, 2] AS x CREATE (w:W) } RETURN p.name AS name"
+    expect:
+      count: 1
+
+  - name: a_unit_subquery_binds_nothing_after_it
+    variants:
+      gql: "MATCH (p:Person) CALL (p) { FOR x IN [1, 2] INSERT (w:W) } RETURN w"
+      cypher: "MATCH (p:Person) CALL { WITH p UNWIND [1, 2] AS x CREATE (w:W) } RETURN x"
+    expect:
+      error: "Undefined variable"
+
+  # A unit subquery can start a query: it runs once, for the one row a query
+  # starts from, and passes that row on (the clauses after it used to see no
+  # row, so a RETURN returned nothing).
+  - name: a_unit_subquery_can_start_a_query
+    variants:
+      gql: "CALL { FOR x IN [3, 19] INSERT (:W {x: x}) } RETURN count(*) AS rows"
+      cypher: "CALL { UNWIND [3, 19] AS x CREATE (:W {x: x}) } RETURN count(*) AS rows"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_unit_subquery_that_starts_a_query_writes
+    statements:
+      - "CALL { INSERT (:W {x: 3}) } RETURN 1 AS one"
+      - "MATCH (w:W) RETURN w.x AS x"
+    expect:
+      rows:
+        - [3]
+
+  - name: a_unit_subquery_that_starts_a_query_passes_its_row_on
+    variants:
+      gql: "CALL { INSERT (:W) } FOR x IN [3, 19, 88] RETURN x"
+      cypher: "CALL { CREATE (:W) } UNWIND [3, 19, 88] AS x RETURN x"
+    expect:
+      rows:
+        - [3]
+        - [19]
+        - [88]

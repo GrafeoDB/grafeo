@@ -1,0 +1,450 @@
+# Reviewed differences between 0.5.44 and 0.6.0: case key, fingerprint of the reviewed result, why it changed.
+AM10|gql f3c6308779 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM11|cypher 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM11|gql 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM12|cypher 499c39eaf8 A later MATCH part that reuses a node bound before goes on from it; with an UNWIND value in its property map it found nothing.
+AM12|gql 499c39eaf8 A later MATCH part that reuses a node bound before goes on from it; with an UNWIND value in its property map it found nothing.
+AM1|cypher 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM1|gql 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM2|cypher 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM2|gql 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM4|cypher be07b7a80a A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM4|gql be07b7a80a A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM5|cypher f3c6308779 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM7|cypher b31ee6f0b5 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM7|gql b31ee6f0b5 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM8|cypher 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM8|gql 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM9|cypher e553f086fb A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AM9|gql e553f086fb A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
+AN1|cypher de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN1|gql de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN2|cypher cb16ccbd56 A vector search on a scan that runs per earlier row keeps those rows; it returned one row per document instead of one per file and document.
+AN2|gql cb16ccbd56 A vector search on a scan that runs per earlier row keeps those rows; it returned one row per document instead of one per file and document.
+AN3|cypher de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN3|gql de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN4|cypher de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN4|gql de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN5|cypher de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN5|gql de9a9e3bb7 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN6|cypher 4bdf75ef64 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN6|gql 4bdf75ef64 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN7|cypher 8be13af3a0 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN7|gql 8be13af3a0 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN8|cypher 20d3c58fc5 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AN8|gql 20d3c58fc5 A vector or text search on a scan that runs per earlier row keeps those rows; it failed with Variable not found in input.
+AK1|cypher 3a7ef06131 A compacted node keeps each of its labels.
+AK1|gql 3a7ef06131 A compacted node keeps each of its labels.
+AK2|cypher a3a187c5ba A compacted node keeps each of its labels.
+AK2|gql a3a187c5ba A compacted node keeps each of its labels.
+AK3|cypher a2469cdbe4 A compacted node keeps each of its labels.
+AK3|gql a2469cdbe4 A compacted node keeps each of its labels.
+AK4|cypher 532bea123e A compacted node keeps each of its labels.
+AK4|gql 532bea123e A compacted node keeps each of its labels.
+AK5|cypher a8066ca5ee A compacted node keeps each of its labels.
+AK5|gql a8066ca5ee A compacted node keeps each of its labels.
+AK6|cypher 848246582e A compacted node keeps each of its labels.
+AK6|gql 848246582e A compacted node keeps each of its labels.
+AK7|cypher 6135805667 A compacted node keeps each of its labels.
+AK7|gql 6135805667 A compacted node keeps each of its labels.
+AK9|cypher b8453dd2d3 A compacted node keeps each of its labels.
+AK9|gql b8453dd2d3 A compacted node keeps each of its labels.
+AP1|cypher 499c39eaf8 A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
+AP1|gql 499c39eaf8 A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
+AP2|cypher 499c39eaf8 A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
+AP2|gql 499c39eaf8 A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
+AP3|cypher 8adb268fc9 A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
+AP3|gql 8adb268fc9 A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
+AP4|cypher 063db839ae A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
+AP4|gql 063db839ae A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
+AP5|gql 499c39eaf8 A comma part that shares a node with an earlier part goes on from the rows before it when its property map or inline WHERE reads one of their values; on its own it had no such value and found nothing.
+J4|gql 191751d025 A grouped min or max skips a null first value of its group; it returned null.
+J5|gql 7b6b099948 A grouped sample skips a null first value of its group; it returned null.
+J6|gql 2ffa9663c9 A grouped collect skips nulls, as without a group key and in Cypher; it listed them.
+J7|cypher 24270a78b4 Values beside a computed group key keep their kind; strings, floats, booleans, lists, maps and paths were copied through as nodes and became 0.
+J7|gql 24270a78b4 Values beside a computed group key keep their kind; strings, floats, booleans, lists, maps and paths were copied through as nodes and became 0.
+J8|cypher 57e2bbf68a A string group key beside a computed operand keeps its groups; the names became 0 and every group merged into one.
+J8|gql 57e2bbf68a A string group key beside a computed operand keeps its groups; the names became 0 and every group merged into one.
+J9|cypher 52df54130a Floats, booleans, lists and maps beside a literal group key keep their values; they became 0.
+J9|gql 52df54130a Floats, booleans, lists and maps beside a literal group key keep their values; they became 0.
+J10|cypher d3f3f0f0d0 Values beside a computed aggregate operand keep their kind; count(DISTINCT name) counted one 0 and max(name) returned 0.
+J10|gql d3f3f0f0d0 Values beside a computed aggregate operand keep their kind; count(DISTINCT name) counted one 0 and max(name) returned 0.
+J11|cypher d6c3ec3163 Unwound floats beside a literal group key keep their values; collect and sum saw 0.
+J11|gql d6c3ec3163 Unwound floats beside a literal group key keep their values; collect and sum saw 0.
+J12|cypher 24270a78b4 Values beside a computed key in an aggregating WITH keep their kind; the names became 0.
+J12|gql 24270a78b4 Values beside a computed key in an aggregating WITH keep their kind; the names became 0.
+AR1|cypher 8f576002e2 A path variable over two edge patterns holds the whole path; it held the last hop only.
+AR1|gql 8f576002e2 A path variable over two edge patterns holds the whole path; it held the last hop only.
+AR2|cypher aabcd8291f A path variable over a chain without labels holds the whole path; it failed with Variable not found in input.
+AR2|gql aabcd8291f A path variable over a chain without labels holds the whole path; it failed with Variable not found in input.
+AR3|gql aeb54e0589 A path variable over a fixed and a variable-length edge pattern holds the whole path; it held the variable-length hop only.
+AR4|cypher aeb54e0589 A path variable over a fixed and a variable-length relationship holds the whole path; it held the variable-length hop only.
+AR5|gql 1ae7789d96 DIFFERENT EDGES binds no edge twice; it was ignored.
+AR6|gql e7defb7ad0 TRAIL holds for the whole path of fixed edge patterns; it was ignored.
+AR7|gql dbd50055e0 ACYCLIC holds for the whole path of fixed edge patterns; it was ignored.
+AR8|gql e7defb7ad0 A match mode before the path mode parses and keeps TRAIL; it was a syntax error.
+AR9|gql a4d2b9c8af ANY SHORTEST binds the edge variable to the path's edges and nodes(p) to its nodes; it failed with Undefined variable.
+AR10|cypher a4d2b9c8af shortestPath binds the relationship variable to the path's relationships and nodes(p) to its nodes; it failed with Undefined variable.
+AR11|gql a4507487cb An edge WHERE in ANY SHORTEST holds for every edge of the search, so no path avoids the excluded edge; it was ignored.
+AR12|gql cdfa8c1c39 ANY SHORTEST through an edge bound before takes that edge; every row paired with every one-hop path.
+AR13|gql 12f2b79396 ALL SHORTEST binds the path's nodes; nodes(p) was null.
+AX1|cypher 898e5e90ab A chain of comparisons is the conjunction of its comparisons; it compared a boolean with a number and was null, so the WHERE dropped every row.
+AX2|cypher 2f1c4cbed6 A chain of comparisons is the conjunction of its comparisons; it was null.
+AX3|cypher 8d32b23093 A chain of comparisons in a CASE is the conjunction of its comparisons; it was null, so no row counted.
+AX4|cypher 12b685faf4 A chain of comparisons on an edge property is the conjunction of its comparisons; it was null, so the WHERE dropped every row.
+AX6|cypher 9fc9e62560 datetime({epochMillis: n}) and datetime({epochSeconds: n}) are that instant after the Unix epoch; they were null.
+AX6|gql 9fc9e62560 datetime({epochMillis: n}) and datetime({epochSeconds: n}) are that instant after the Unix epoch; they were null.
+AX7|cypher 075a1d9a9d month() and day() read the components of datetime({epochMillis: n}); it was null.
+AX7|gql 075a1d9a9d month() and day() read the components of datetime({epochMillis: n}); it was null.
+AX8|cypher 2eb369ca5a A component of a date reads like a property (d.month, d.week, d.dayOfWeek); it was null.
+AX9|cypher ad04e8f760 A WHERE on the components of datetime({epochMillis: n}) keeps the matching rows; both were null, so it dropped every row.
+AX10|cypher c1cac88342 A component of a duration reads like a property (d.minutes, d.monthsOfYear); it was null.
+AY1|cypher f3288e5973 stDev and stDevP with DISTINCT see each value once; they counted every copy.
+AY1|gql f3288e5973 stDev and stDevP with DISTINCT see each value once; they counted every copy.
+AY2|cypher 9ca2353442 percentileDisc and percentileCont with DISTINCT see each value once; they counted every copy.
+AY2|gql 9ca2353442 percentileDisc and percentileCont with DISTINCT see each value once; they counted every copy.
+AY3|cypher a38689a4c4 A grouped variance with DISTINCT sees each value once; it counted every copy.
+AY3|gql a38689a4c4 A grouped variance with DISTINCT sees each value once; it counted every copy.
+AY4|gql 0329d7f5bf An aggregate written in HAVING is computed per group; there were no rows.
+AY5|gql b6adb2262c HAVING computes an aggregate the RETURN list does not, and GROUP BY groups without an aggregate; GROUP BY was ignored.
+AY6|gql ab9ceac9c0 GROUP BY without an aggregate gives one row per group; it was ignored.
+AY7|gql d6a9aa114b regr_count and covar_pop with DISTINCT see each (y, x) pair once; they counted every copy.
+AY8|gql dbc18bd83e HAVING reads a grouping key by its text or its alias; there were no rows.
+BB1|cypher 2af3483a9a An edge type's DEFAULT fills a property an insert leaves out, as a node type's does; the edge had no value.
+BB1|gql 2af3483a9a An edge type's DEFAULT fills a property an insert leaves out, as a node type's does; the edge had no value.
+BB2|gql 51a4369aaf A graph type written in braces declares its element types with their properties; it declared their names only.
+BB3|gql 7fda64bb16 A graph type written in braces declares its element types with their properties and endpoints; it declared their names only.
+AZ2|cypher 53dbd93681 An OPTIONAL MATCH in a CALL subquery reads the imported value in its property map; every row got nulls.
+AZ2|gql 53dbd93681 An OPTIONAL MATCH in a CALL subquery reads the imported value in its property map; every row got nulls.
+AZ3|gql 53dbd93681 An OPTIONAL MATCH in a subquery importing WITH * reads the imported value in its inline WHERE; every row got nulls.
+AZ4|cypher 53dbd93681 The WHERE of an OPTIONAL MATCH in a CALL subquery that reads the imported value keeps the row without a match; it was dropped.
+AZ5|cypher 086fe59fe1 An OPTIONAL MATCH WHERE on a list of the WITH before it, with a name that WITH dropped, keeps every row (LDBC IC5); rows without a match were dropped.
+AZ7|cypher 20443953d7 The WHERE of an OPTIONAL MATCH on a node both sides name is part of the optional pattern; it filtered the rows.
+AZ7|gql 20443953d7 The WHERE of an OPTIONAL MATCH on a node both sides name is part of the optional pattern; it filtered the rows.
+AZ8|cypher ce53a045cb The WHERE of an OPTIONAL MATCH on earlier values only keeps every row, with nulls where it fails; it filtered the rows.
+AZ8|gql ce53a045cb The WHERE of an OPTIONAL MATCH on earlier values only keeps every row, with nulls where it fails; it filtered the rows.
+AZ9|cypher c6be2c037e The WHERE of an OPTIONAL MATCH without variables keeps every row with nulls; it removed them all.
+AZ9|gql c6be2c037e The WHERE of an OPTIONAL MATCH without variables keeps every row with nulls; it removed them all.
+AZ11|gql e7cca924fd GQL FILTER after an OPTIONAL MATCH filters every row; on the optional part's variables it kept rows with nulls.
+AZ12|cypher cbcfa171be An optional shortest path whose start reads an unwound value finds its paths; every row got null.
+AZ13|gql cbcfa171be An optional shortest path whose start reads an unwound value finds its paths; every row got null.
+AZ14|gql 8ca0e77970 A WHERE after a MATCH with a questioned edge filters its rows; on the questioned part's variables it kept rows with nulls.
+AZ15|cypher 2988788a74 A later comma part reads a value of the WITH before it in its property map (LDBC IC6); it found nothing.
+AZ15|gql 2988788a74 A later comma part reads a value of the WITH before it in its property map (LDBC IC6); it found nothing.
+AZ16|cypher 9437d37475 A later comma part reads a value of the WITH before it in its edge property map; it found nothing.
+AZ16|gql 9437d37475 A later comma part reads a value of the WITH before it in its edge property map; it found nothing.
+AZ17|cypher 4cc5ea503b An OPTIONAL MATCH WHERE on a name an aggregating WITH dropped keeps every row; rows without a match were dropped.
+AV1|cypher 5e7601f6ff = on a label scan without an index finds what the filter's = finds: 42 also equals '42' and '042'; it compared with a stricter = of its own (#535).
+AV1|gql 5e7601f6ff = on a label scan without an index finds what the filter's = finds: 42 also equals '42' and '042'; it compared with a stricter = of its own (#535).
+AV2|cypher a6a438d8f0 = on a label scan without an index finds what the filter's = finds: 42 also equals '42' and '042'; it compared with a stricter = of its own (#535).
+AV2|gql a6a438d8f0 = on a label scan without an index finds what the filter's = finds: 42 also equals '42' and '042'; it compared with a stricter = of its own (#535).
+AV3|cypher 8473a132e5 = on a label scan without an index finds what the filter's = finds: 42 also equals '42' and '042'; it compared with a stricter = of its own (#535).
+AV3|gql 8473a132e5 = on a label scan without an index finds what the filter's = finds: 42 also equals '42' and '042'; it compared with a stricter = of its own (#535).
+AV9|cypher 5e7601f6ff With a property index, = finds the rows it finds without one; the lookup found the exact value only (#535).
+AV9|gql 5e7601f6ff With a property index, = finds the rows it finds without one; the lookup found the exact value only (#535).
+AV10|cypher a6a438d8f0 With a property index, = finds the rows it finds without one; the lookup found the exact value only (#535).
+AV10|gql a6a438d8f0 With a property index, = finds the rows it finds without one; the lookup found the exact value only (#535).
+AV11|cypher 8473a132e5 With a property index, = finds the rows it finds without one; the lookup found the exact value only (#535).
+AV11|gql 8473a132e5 With a property index, = finds the rows it finds without one; the lookup found the exact value only (#535).
+AV12|cypher 50685503bb With a property index, IN finds the rows it finds without one (#535).
+AV12|gql 50685503bb With a property index, IN finds the rows it finds without one (#535).
+AV13|cypher 3d229beed7 With a property index, a key from the row finds every value = finds equal: '042', '42.0' and 0.1 + 0.2 were missed (#535).
+AV13|gql 3d229beed7 With a property index, a key from the row finds every value = finds equal: '042', '42.0' and 0.1 + 0.2 were missed (#535).
+AV14|cypher 1faa763b50 With a property index, a constant key after a clause finds 0.1 + 0.2 for 0.3, as without one (#535).
+AV14|gql 1faa763b50 With a property index, a constant key after a clause finds 0.1 + 0.2 for 0.3, as without one (#535).
+AV15|cypher 5e7601f6ff With a property index, = finds the rows it finds without one; the lookup found the exact value only (#535).
+AV15|gql 5e7601f6ff With a property index, = finds the rows it finds without one; the lookup found the exact value only (#535).
+AW1|cypher 5d85cac1c2 A statement nested deeper than 64 levels fails with an error naming the limit; it overflowed a small stack (#573). The error starts with its code (#588).
+AW1|gql b3c92ad834 A statement nested deeper than 64 levels fails with an error naming the limit; it overflowed a small stack (#573). The error starts with its code (#588).
+BC1|gql e3189b4336 MATCH ANY keeps one path per pair of endpoints; it kept one row in total.
+BC2|gql 3aef3ed6c6 ANY k after the path variable keeps k paths per pair of endpoints; it was ignored, so every walk came back.
+BC3|gql 9ff5d8a045 MATCH ANY keeps one path per pair of endpoints for each input row; it kept one row in total.
+BC4|gql 48f20c5d9e ANY selects among the paths whose every edge meets the edge pattern's WHERE, one per pair; it kept one row in total, which the WHERE on the edge list then dropped.
+BC5|gql 8ef0c3a55c A path mode after the path variable (p = TRAIL (...)) holds for that pattern; it was a syntax error.
+BC6|gql 59ed18c5c6 SHORTEST k keeps the k shortest paths of each pair; it kept one.
+BC7|gql 62c78b2d84 SHORTEST k GROUPS keeps every path of the k shortest lengths of each pair; it kept one path.
+BC8|gql a4507487cb The path mode of a search prefix (ANY SHORTEST TRAIL) restricts the paths it selects among; it was a syntax error.
+BC10|gql 1f8b9f073f MATCH ANY over one edge keeps one edge per pair of endpoints; it kept one row in total.
+BD1|gql 6182179422 An ORDER BY and LIMIT between GQL statements cut the rows the next MATCH reads; it was a syntax error.
+BD2|gql 6182179422 An ORDER BY and LIMIT after a GQL WITH cut the rows the next MATCH reads; it was a syntax error.
+BD3|gql ee2e439430 A LIMIT after a GQL WITH cuts the rows; it was a syntax error.
+BD4|gql c5a6f8c151 An ORDER BY with OFFSET and LIMIT between GQL statements cuts the rows; it was a syntax error.
+BD5|gql 575171fba5 A WHERE between two GQL MATCH statements filters the rows so far; it was a syntax error.
+BD6|gql 3105131270 A FILTER before a GQL OPTIONAL MATCH filters the rows so far, which keep a row without a match; it was a syntax error.
+BD7|gql 9437d37475 A GQL CALL after a WHERE runs for the filtered rows; it was a syntax error.
+BD8|gql 8e128c8aee A GQL LET after a WHERE reads the filtered rows; it was a syntax error.
+BD9|gql 63bbda404b A GQL statement may start with LET and FILTER; it was a syntax error.
+BD10|gql c6ffb0e550 A GQL WITH may follow a FOR; FOR read it as WITH ORDINALITY and failed.
+BD11|gql 5a3d9824bd An ORDER BY and LIMIT between GQL statements cut the rows the next MATCH reads; it was a syntax error.
+BD12|gql 361fdb4c85 A WHERE, ORDER BY, SKIP and LIMIT between GQL statements apply in turn; it was a syntax error.
+K14|gql 5e1ee2f51b A WHERE on a GQL MATCH after WITH filters that MATCH's rows; it was a syntax error.
+K40|gql 743e52d091 A WHERE between two GQL MATCH statements filters the rows so far; it was a syntax error.
+K41|gql f7ea47854c A WHERE between two GQL MATCH statements filters the rows so far; it was a syntax error.
+K42|gql 6dfc226ed5 A WHERE between two GQL MATCH statements filters the rows so far; it was a syntax error.
+K43|gql a57749766d A WHERE between two GQL MATCH statements filters the rows so far; it was a syntax error.
+A9|cypher 6140489df2 A returned path holds its nodes and edges; it held their IDs.
+A9|gql 6140489df2 A returned path holds its nodes and edges; it held their IDs.
+B10|cypher 73f5d95bf4 startNode and endNode return nodes, so their properties can be read; it was an error.
+BE1|cypher 8563f898e1 A node and an edge in a list literal keep their kind; RETURN gave IDs and their properties were null.
+BE1|gql 8563f898e1 A node and an edge in a list literal keep their kind; RETURN gave IDs and their properties were null.
+BE2|cypher f619ed8ac4 A node and an edge in a map literal keep their kind; RETURN gave IDs and x.msg.name was null.
+BE2|gql f619ed8ac4 A node and an edge in a map literal keep their kind; RETURN gave IDs and x.msg.name was null.
+BE3|cypher 9cc81b68f1 The first of the collected maps keeps its node (LDBC SNB IC7); latest.msg.name was null.
+BE4|cypher fef68e1740 Grouping on a map keeps its node; RETURN gave the ID and x.p.w was null.
+BE4|gql fef68e1740 Grouping on a map keeps its node; RETURN gave the ID and x.p.w was null.
+BE5|cypher 248cea0d0f UNWIND of collected maps keeps their nodes and edges; RETURN gave IDs and their properties were null.
+BE5|gql 248cea0d0f UNWIND of collected maps keeps their nodes and edges; RETURN gave IDs and their properties were null.
+BE6|cypher 5e0ad7cdad startNode and endNode return nodes; RETURN gave the ID and a property read was an error.
+BE6|gql 5e0ad7cdad startNode and endNode return nodes; RETURN gave the ID and a property read was an error.
+BE7|cypher 9a53d0d5c9 A returned path holds its nodes and edges; it held their IDs.
+BE7|gql 9a53d0d5c9 A returned path holds its nodes and edges; it held their IDs.
+BE8|cypher 2cacdff6b4 A grouped path holds its nodes and edges; it came back as the text Path(2 nodes, 1 edges).
+BE8|gql 2cacdff6b4 A grouped path holds its nodes and edges; it held their IDs.
+BE9|cypher e3b33c4282 size() of a string counts characters; it counted UTF-8 bytes.
+BE9|gql e3b33c4282 size() of a string counts characters; it counted UTF-8 bytes.
+J14|cypher 2e8c5a3736 Paths beside a computed group key stay paths, with their nodes and edges; they became 0.
+J14|gql 2e8c5a3736 Paths beside a computed group key stay paths, with their nodes and edges; they became 0.
+BG1|cypher e99a6772e7 exists() of a pattern is true when the pattern has a match for the row; it was true for every row.
+BG2|cypher bc31c0ff28 NOT exists() of a pattern keeps the rows without a match; it kept none.
+BG3|cypher 79acd6d137 A pattern comprehension that starts from a node of its own matches it; it failed with Undefined variable imported into CALL.
+BG4|cypher 2b19346eb8 A pattern comprehension reads a value of the row in its property map; it failed with Undefined variable imported into CALL.
+BG5|cypher d4d6d8fa87 A node of the row at the end of a pattern comprehension is that node; it matched any node.
+BG6|cypher 2c0519a916 The ORDER BY of a WITH reads variables of its input that the WITH drops; it failed with Undefined variable.
+BG7|cypher 1dc500101d The ORDER BY of a WITH reads variables of its input that the WITH drops, before SKIP and LIMIT; it failed with Undefined variable.
+BG9|cypher 5227412226 A variable named _anon_0 is the user's; it took the place of the anonymous node, so only self-loops matched.
+BG10|cypher 27bed9c8d9 WITH * takes more items after it; it was a syntax error.
+BG11|cypher 4f4fad4eec RETURN * takes more items after it; it was a syntax error.
+BG12|cypher 662fd3d326 An aggregate in the ORDER BY of a RETURN that does not aggregate is an error, as in openCypher; it failed with Empty plan. The error starts with its code (#588).
+BG13|cypher 662fd3d326 An aggregate in the ORDER BY of a RETURN that does not aggregate is an error, as in openCypher; it sorted as if it were not there. The error starts with its code (#588).
+BG14|cypher f17b1e6cb7 After an aggregating RETURN, ORDER BY max(...) sorts by the returned aggregate; it sorted as if the key were not there.
+BG15|cypher 17b4de4b6b After an aggregating RETURN, a key that repeats a returned expression reads its column; it failed with an internal error.
+BH1|cypher b5c77d5148 A float grouping key keeps its value after a WITH; it came back as the integer of its bits.
+BH1|gql b5c77d5148 A float grouping key keeps its value after a WITH; it came back as the integer of its bits.
+BH2|cypher b5c77d5148 A float grouping key keeps its value; Cypher returned the integer of its bits.
+BH3|cypher 8d04bcd940 3 and 3.0 are one group, which keeps its first value; they were two groups.
+BH3|gql 8d04bcd940 3 and 3.0 are one group, which keeps its first value; they were two groups.
+BH5|cypher 31c65844d4 WITH DISTINCT keeps each path; it failed with Variable 'p' not found in input.
+BH5|gql 31c65844d4 WITH DISTINCT keeps each path; it failed with Variable 'p' not found in input.
+BH6|cypher 5943ce194c RETURN DISTINCT takes 3 and 3.0 once; they were two rows.
+BH6|gql 5943ce194c RETURN DISTINCT takes 3 and 3.0 once; they were two rows.
+BH7|cypher bb299ccff0 min and max order mixed values as ORDER BY does: 'a' and 3; both were 'a'.
+BH7|gql bb299ccff0 min and max order mixed values as ORDER BY does: 'a' and 3; both were 'a'.
+BH8|cypher f5f4e6b721 min and max compare lists item by item; both were the first list.
+BH8|gql f5f4e6b721 min and max compare lists item by item; both were the first list.
+BH9|cypher 30997ff80c The list variable keeps its value after UNWIND; it read null.
+BH9|gql 30997ff80c The list variable keeps its value after UNWIND; it read null.
+BH10|cypher 13be8a48f8 The list variable keeps its value after UNWIND; it read null.
+BH11|cypher 5fe6184e29 UNION takes 3 and 3.0 once; they were two rows.
+BH11|gql 5fe6184e29 UNION takes 3 and 3.0 once; they were two rows.
+BH12|gql 13be8a48f8 The list variable keeps its value after FOR; LET before FOR was a syntax error.
+G3|cypher e584bc43f4 DISTINCT takes 1 and 1.0 once (openCypher equivalence); they were two rows.
+G3|gql e584bc43f4 DISTINCT takes 1 and 1.0 once (openCypher equivalence); they were two rows.
+BI1|gql 751d45615d The element pattern WHERE of a quantified edge holds for each edge; it was checked against the edge list, so no path matched.
+BI2|gql ff3706f9da The element pattern WHERE of a quantified edge holds for each edge, also when it reads an earlier variable; no path matched.
+BI3|gql b8d46ee0ba An aggregate over a group variable is computed per path; beside other items it failed with Undefined variable 'b'.
+BI4|gql 2c76fcdbce An aggregate over a group variable is computed per path and returns its column only; it returned every internal column and a sum of 0.0.
+BI5|gql 7d69d71eca A horizontal aggregate beside a regular aggregate groups the rows; it failed with Undefined variable '_agg_0'.
+BI6|gql 204a33901b A SIMPLE path ends once it is back at its start; it went on from there (29 rows, now 11).
+BI7|cypher 8720e01513 length(p) reads a path a WITH passed on; it failed with Undefined variable '_path_length_p'.
+BI7|gql 8720e01513 length(p) reads a path a WITH passed on; it failed with Undefined variable '_path_length_p'.
+BI8|cypher f943654d80 length(u) reads an unwound path; it failed with Undefined variable '_path_length_u'.
+BI8|gql f943654d80 length(u) reads an unwound path; it failed with Undefined variable '_path_length_u'.
+BI9|cypher 0e635c662c length(s) of a string variable counts its characters; it failed with Undefined variable '_path_length_s'.
+BI9|gql 0e635c662c length(s) of a string variable counts its characters; it failed with Undefined variable '_path_length_s'.
+BI10|cypher f36b726364 An unaliased length(p) column is named length(p); it was _path_length_p.
+BI10|gql f36b726364 An unaliased length(p) column is named length(p); it was _path_length_p.
+AI1|cypher 96898fb923 A Cypher variable-length relationship takes each relationship once (openCypher); an undirected one no longer comes back to its source over the edge it left by.
+AI2|cypher c994311a04 A Cypher variable-length relationship takes each relationship once (openCypher); trails of two or three edges reach fewer nodes than walks.
+AI4|cypher 542971867a A Cypher variable-length relationship takes each relationship once (openCypher); Jules and Mia no longer reach themselves over the edge they left by.
+AI8|cypher ba55819931 A Cypher variable-length relationship takes each relationship once (openCypher); Jules no longer reaches himself over the edge he left by.
+AI10|cypher 7f5370dbb2 A Cypher variable-length relationship takes each relationship once (openCypher); a node reaches itself only round a cycle.
+M19|cypher 7ee0a4371d An EXISTS pattern in Cypher takes each relationship once; an undirected one no longer comes back to its start over the edge it took.
+BJ1|cypher 2e8112e309 A Cypher MATCH binds each relationship once; a two-hop pattern came back over the relationship it took.
+BJ2|cypher f7121d4a86 A Cypher MATCH binds each relationship once; two relationship patterns bound one relationship.
+BJ3|cypher 77d7e3110d A Cypher variable-length relationship takes each relationship once; it went round the triangle for a hundred hops.
+BJ4|cypher ee2e439430 An unbounded Cypher pattern ends on its own; it stopped after a hundred hops.
+BJ5|gql ee2e439430 An unbounded GQL TRAIL ends on its own; it stopped after a hundred hops.
+BJ6|cypher e7b154ee99 OPTIONAL MATCH in Cypher binds each relationship once; it came back to Mia over the edge it took.
+BJ7|cypher 210586286f A Cypher pattern comprehension binds each relationship once; it came back to Mia over the edge it took.
+BJ8|cypher 25abd605b9 An EXISTS subquery in Cypher binds each relationship once; every person went there and back over one KNOWS relationship.
+BJ10|cypher 7a07746230 An undefined variable named like a generated one is undefined; it failed with an internal error. The error starts with its code (#588).
+BJ10|gql 7a07746230 An undefined variable named like a generated one is undefined; it failed with an internal error. The error starts with its code (#588).
+BJ12|cypher 3ebfb1cfe2 A Cypher variable-length relationship takes each relationship once; Mia is no longer reached back over the edge to Jules.
+BK1|cypher 3451785866 A constant expression in a procedure argument runs like its value; pagerank ran with the default damping.
+BK1|gql 3451785866 A constant expression in a procedure argument runs like its value; pagerank ran with the default damping.
+BK2|cypher 04712c318b An integer runs where a procedure expects a number; damping 1 ran as the default 0.85.
+BK2|gql 04712c318b An integer runs where a procedure expects a number; damping 1 ran as the default 0.85.
+BK3|cypher 79f40f49e6 DFS depth is the depth in the DFS tree; it was the finish order.
+BK3|gql 79f40f49e6 DFS depth is the depth in the DFS tree; it was the finish order.
+BK4|cypher f137fd2ed7 DFS reports depth, discovery and finish; depth was the finish order.
+BK4|gql f137fd2ed7 DFS reports depth, discovery and finish; depth was the finish order.
+BK5|cypher 880f1ecd08 A procedure argument without a value is an error; it ran with the default. The error starts with its code (#588).
+BK5|gql 880f1ecd08 A procedure argument without a value is an error; it ran with the default. The error starts with its code (#588).
+BK6|cypher 92e11daab5 A procedure argument read from a row is an error that names it; it failed as a missing start parameter. The error starts with its code (#588).
+BK7|cypher ba288c8f3e A procedure argument of the wrong type is an error; it ran with the default. The error starts with its code (#588).
+BK7|gql ba288c8f3e A procedure argument of the wrong type is an error; it ran with the default. The error starts with its code (#588).
+BK9|cypher 79f40f49e6 A constant expression in a required procedure argument runs; it failed as a missing start parameter.
+BK9|gql 79f40f49e6 A constant expression in a required procedure argument runs; it failed as a missing start parameter.
+BM1|cypher 1737c2301d A list literal keeps a null item for a property of an unmatched OPTIONAL MATCH variable; it was [] (size 0).
+BM1|gql 1737c2301d A list literal keeps a null item for a property of an unmatched OPTIONAL MATCH variable; it was [] (size 0).
+BM2|cypher b8a12678ce A missing property is a null item: [null, 35], and [1] is 35; it was [35] and null.
+BM2|gql b8a12678ce A missing property is a null item: [null, 35], and [1] is 35; it was [35] and null.
+BM3|cypher 20233fc7fc [p.w] = [] matches no node; the nodes without w matched.
+BM3|gql 20233fc7fc [p.w] = [] matches no node; the nodes without w matched.
+BM4|cypher 358e46ebaf A map literal keeps a key whose value is missing ({age: 35, w: null}); it was {age: 35}.
+BM4|gql 358e46ebaf A map literal keeps a key whose value is missing ({age: 35, w: null}); it was {age: 35}.
+BM5|cypher 23e29c6f97 A node after a missing property keeps its list position; [1].name was null.
+BM5|gql 23e29c6f97 A node after a missing property keeps its list position; [1].name was null.
+BM6|cypher fc40feafb3 3 IN [p.w, 19] is null (unknown) with a missing item; it was false.
+BM6|gql fc40feafb3 3 IN [p.w, 19] is null (unknown) with a missing item; it was false.
+BM7|gql 09a6521ec0 A path over two edge patterns binds (#590), and a questioned edge without a match is left out of it; 0.5.44 failed with an internal error.
+BN1|cypher b098deabe2 A relationship has one type: a second colon is a syntax error naming :`A:B` and :A|B; it matched the KNOWS or LIVES_IN relationships. The error starts with its code (#588).
+BN1|gql 909c1f821b An edge has one type: a second colon is a syntax error naming :`A:B` and :A|B; it matched the KNOWS or LIVES_IN edges. The error starts with its code (#588).
+BN2|cypher b098deabe2 A relationship has one type, also in a variable-length pattern; it followed the KNOWS or LIVES_IN relationships. The error starts with its code (#588).
+BN2|gql 909c1f821b An edge has one type, also in a variable-length pattern; it followed the KNOWS or LIVES_IN edges. The error starts with its code (#588).
+BN3|cypher 1919420008 openCypher 9 writes alternative relationship types :A|:B; it failed with "Expected identifier".
+BN4|gql f09a7be2db An edge has one type, so :A&B is an error that says so and names :A|B; it was "Expected RBracket". The error starts with its code (#588).
+BO1|gql d2dbc8421e GQL has `=~`, Cypher's whole-string regular expression match; it was a syntax error.
+BO2|gql 708e0919bf GQL has `=~`, Cypher's whole-string regular expression match; it was a syntax error.
+BO3|gql fc887a4629 GQL has `=~`, Cypher's whole-string regular expression match; it was a syntax error.
+BO4|cypher 95cdc4955a A pattern that is not a regular expression is an error that names it; it matched nothing. The error starts with its code (#588).
+BO4|gql 95cdc4955a A pattern that is not a regular expression is an error that names it; GQL had no `=~`. The error starts with its code (#588).
+BO5|cypher 74a7afe6d8 A call to an unknown function is an error; it was null for every row. The error starts with its code (#588).
+BO5|gql 74a7afe6d8 A call to an unknown function is an error; it was null for every row. The error starts with its code (#588).
+BO6|cypher 6b15b61e68 A call to an unknown function is an error; it was null, so the WHERE kept no rows. The error starts with its code (#588).
+BO6|gql 6b15b61e68 A call to an unknown function is an error; it was null, so the WHERE kept no rows. The error starts with its code (#588).
+BO8|cypher 4cac404a30 A call to an unknown function is an error, also in a list comprehension; it was null. The error starts with its code (#588).
+BO8|gql 4cac404a30 A call to an unknown function is an error, also in a list comprehension; it was null. The error starts with its code (#588).
+BK8|cypher 125eb8ba01 A computed list element is part of the query vector, so three elements no longer fit the 2-dimensional index; 0.0 + 0.0 was dropped.
+BK8|gql 125eb8ba01 A computed list element is part of the query vector, so three elements no longer fit the 2-dimensional index; 0.0 + 0.0 was dropped.
+AS1|cypher 18908d5658 Zoned datetimes compare by their instant with every ordering operator; <, <=, > and >= gave null.
+AS1|gql 18908d5658 Zoned datetimes compare by their instant with every ordering operator; <, <=, > and >= gave null.
+AS2|cypher 7df1f205be A timestamp and a zoned datetime compare as instants; = was false and < gave null.
+AS2|gql 7df1f205be A timestamp and a zoned datetime compare as instants; = was false and < gave null.
+AS3|cypher b67e533bac min and max of zoned datetimes are the earliest and latest instant; they returned the first value.
+AS3|gql b67e533bac min and max of zoned datetimes are the earliest and latest instant; they returned the first value.
+AT1|gql 4291ff266c GQL sorts nulls last by default in both directions; descending put them first.
+AT2|gql 6afb8152e7 GQL sorts nulls last by default in both directions; a descending top-K kept the nulls.
+AU1|cypher c54374edf6 A call of an unknown function fails with its name; it returned null. The error starts with its code (#588).
+AU1|gql c54374edf6 A call of an unknown function fails with its name; it returned null. The error starts with its code (#588).
+AU2|cypher c1ef4f6385 toStringOrNull is not a Grafeo function: the call fails instead of returning null, which filtered out every row. The error starts with its code (#588).
+AU2|gql c1ef4f6385 toStringOrNull is not a Grafeo function: the call fails instead of returning null, which filtered out every row. The error starts with its code (#588).
+AU3|cypher 380f2c9d23 A call with a number of arguments the function does not take fails; it returned null. The error starts with its code (#588).
+AU3|gql 380f2c9d23 A call with a number of arguments the function does not take fails; it returned null. The error starts with its code (#588).
+AU4|cypher 7d3617d7d7 path_length(p) is the number of edges of p; it returned null.
+AU4|gql 7d3617d7d7 path_length(p) is the number of edges of p; it returned null.
+G2|gql 6dbd77cf15 GQL sorts nulls last by default in both directions; descending put them first.
+L2|gql d80e3904a1 GQL sorts nulls last by default in both directions; descending put them first.
+L4|gql 16a470385a GQL sorts nulls last by default in both directions; descending put them first.
+L13|gql 1d7265c1b1 GQL sorts nulls last by default in both directions; a descending top-K kept the nulls.
+L19|gql 71201aa33f GQL sorts nulls last by default in both directions; descending put them first.
+L20|gql 4d8a472ac3 GQL sorts nulls last by default in both directions; descending put them first.
+BP1|cypher 5edb4e9a23 An import of a CALL subquery stays in scope after a WITH in its body that leaves it out; it failed with "Undefined variable".
+BP1|gql 5edb4e9a23 An import of a CALL subquery stays in scope after a WITH in its body that leaves it out; it failed with "Undefined variable".
+BP2|cypher 39f11a96ea After an aggregating WITH in a CALL body the import stays in scope and a count over no match is one row; it failed with "Undefined variable".
+BP2|gql 39f11a96ea After an aggregating WITH in a CALL body the import stays in scope and a count over no match is one row; it failed with "Undefined variable".
+BP3|cypher e63736f06a The variables an importing WITH names stay in scope after a later WITH; it failed with "Undefined variable".
+BP4|gql e63736f06a The outer row GQL imports into a CALL body stays in scope after a WITH; it failed with "Undefined variable".
+BP5|cypher 831549b908 The WHERE of a WITH in a CALL body reads an import; it failed with "Undefined variable".
+BP5|gql 831549b908 The WHERE of a WITH in a CALL body reads an import; it failed with "Undefined variable".
+BP6|cypher d72f656474 The WHERE of an aggregating WITH in a CALL body reads an import; it failed with "Undefined variable".
+BP6|gql d72f656474 The WHERE of an aggregating WITH in a CALL body reads an import; it failed with "Undefined variable".
+BP7|cypher 21ece2149b An EXISTS after a WITH in a CALL body matches from the import; it matched from any node, so every row was true.
+BP7|gql 21ece2149b An EXISTS after a WITH in a CALL body matches from the import; it matched from any node, so every row was true.
+BP8|cypher 705ff6c759 An imported edge stays in scope, as an edge, after an aggregating WITH; it failed with "Undefined variable".
+BP8|gql 705ff6c759 An imported edge stays in scope, as an edge, after an aggregating WITH; it failed with "Undefined variable".
+BP9|cypher 02d73c1794 Nested CALL subqueries keep their imports after a WITH in each body; it failed with "Undefined variable".
+BP9|gql 02d73c1794 Nested CALL subqueries keep their imports after a WITH in each body; it failed with "Undefined variable".
+BP10|gql 5fb0589251 An OPTIONAL CALL keeps its import after a WITH in its body; it failed with "Undefined variable".
+BP11|cypher 11c3f9415f An import stays in scope after a WITH with ORDER BY and LIMIT in a CALL body; it failed with "Undefined variable".
+BP12|cypher 09285efc8f Each part of a UNION in a CALL body keeps its imports after a WITH; it failed with "Undefined variable".
+BP12|gql 09285efc8f Each part of a UNION in a CALL body keeps its imports after a WITH; it failed with "Undefined variable".
+BP13|cypher ccefc5eb01 An imported value stays in scope after an aggregating WITH; it failed with "Undefined variable".
+BP13|gql ccefc5eb01 An imported value stays in scope after an aggregating WITH; it failed with "Undefined variable".
+BQ1|gql 66cce5c5c8 Grouping keys beside an aggregate over a property come back as their values; they came back as 0 and the four groups merged into one.
+BQ2|gql a535c3e44d String grouping keys beside aggregates over properties keep their groups; the names became 0 and every group merged into one.
+BQ3|gql cb90edfb0c Grouping keys beside aggregates over properties come back as their values, in ORDER BY order; they came back as 0 and the four groups merged into one.
+BQ4|gql 6f86ec6c27 String grouping keys beside aggregates over an expression and a CASE keep their groups; the names became 0 and every group merged into one.
+BQ5|cypher 9588c5d565 Grouping keys named by a WITH beside aggregates over a property, an expression and a CASE come back as their values; they came back as 0 and the four groups merged into one.
+BQ5|gql 9588c5d565 Grouping keys named by a WITH beside aggregates over a property, an expression and a CASE come back as their values; they came back as 0 and the four groups merged into one.
+BQ6|cypher 4341952581 A string grouping key named by a WITH beside aggregates over properties and a CASE keeps its groups; the names became 0 and every group merged into one.
+BQ6|gql 4341952581 A string grouping key named by a WITH beside aggregates over properties and a CASE keeps its groups; the names became 0 and every group merged into one.
+BR1|cypher 0197c21812 A statement that ends with a write has no result; Cypher CREATE returned the created node's id in a column _anon_0.
+BR1|gql 0197c21812 A GQL statement of one INSERT or CREATE has no result (#580); it returned the node it created in a column _anon_0.
+BR2|gql 0197c21812 A GQL statement of one INSERT has no result (#580); it returned the last node it created.
+BR3|gql 0197c21812 A GQL statement of one INSERT has no result (#580); it returned the last node it created.
+BR4|gql 0197c21812 A lone INSERT after NEXT has no result (#580); it returned the last node of each INSERT.
+BR5|gql 0197c21812 A lone INSERT after NEXT reads the rows before it and has no result; it returned them with the id of a new node w it created.
+BR6|cypher d17a13422e BR5 links the matched W nodes; it created a new unlabeled node w for each row.
+BR6|gql d17a13422e BR5 links the matched W nodes; it created a new unlabeled node w for each row.
+BR7|gql 0197c21812 A lone INSERT after NEXT has no result, and after a statement without a result it reads one empty row; it returned the id of one new node per matched row.
+BR8|cypher 911b190a6e After a statement without a result, NEXT reads one empty row: BR7 writes one U; it wrote one per matched row.
+BR8|gql 911b190a6e After a statement without a result, NEXT reads one empty row: BR7 writes one U; it wrote one per matched row.
+BR9|gql ba702d7315 A DELETE of a variable nothing binds fails with "Undefined variable 'w'"; it deleted every node. The error starts with its code (#588).
+BR10|cypher 17b3858401 BR9 deletes nothing; every node was gone.
+BR10|gql 17b3858401 BR9 deletes nothing; every node was gone.
+BT1|gql b0edbf2af4 A GQL GROUP BY names an alias of the RETURN list and groups by its value; it failed with "Undefined variable 'odd'".
+BT2|gql 17313de595 A GQL GROUP BY of an alias and an expression at once, in the shape of Microsoft Fabric's example, groups by both; it failed with "Undefined variable 'cityW'".
+BT3|gql 876fb895ee A GQL GROUP BY alias after an aggregate item groups by that item's value, in ORDER BY order; it failed with "Undefined variable 'who'".
+BT4|gql 2275487d3a A GQL GROUP BY the alias of a node groups by the node; it failed with "Undefined variable 'friend'".
+BT5|gql 95474b5934 A RETURN item that reads a variable that is not a grouping key fails with an error that says so; it failed with "Undefined variable 'p.name'".
+BT6|gql 6b67097773 A property of a grouped node is returned per group; it failed with "Undefined variable 'c.name'".
+BT7|gql 183390e697 Expressions over a grouped node, also beside an aggregate, are returned per group; they failed with "Undefined variable 'upper(a.name)'".
+BT8|gql 0cf122eff4 An aggregate beside a variable that is not a grouping key fails with an error that says so; it returned null in every group.
+AB1|cypher 26653a6915 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AB1|gql 26653a6915 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AB2|cypher 26653a6915 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AB2|gql 26653a6915 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AB3|cypher 2e646e28b3 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AB3|gql 2e646e28b3 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AB5|cypher e93c3d667a The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AB5|gql e93c3d667a The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AC5|cypher d20a006c1c The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AC6|cypher 49b0ccf026 The error starts with its code, GRAFEO-Q001 (#588); the message is unchanged.
+AD1|cypher 2e646e28b3 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AD1|gql 2e646e28b3 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AD2|cypher 2e646e28b3 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AH1|cypher 1f8b9f073f A WHERE on length(p) is checked once the path is bound (#455); it returned nothing.
+AH1|gql 1f8b9f073f A WHERE on length(p) is checked once the path is bound (#455); it returned nothing.
+AH2|cypher b083059e1a A WHERE on length(p) is checked once the path is bound (#455); it returned nothing.
+AH2|gql b083059e1a A WHERE on length(p) is checked once the path is bound (#455); it returned nothing.
+AH4|cypher abf3a25467 A WHERE that reads an UNWIND variable is checked where every value it reads is bound (#455); it returned nothing.
+AH4|gql abf3a25467 A WHERE that reads an UNWIND variable is checked where every value it reads is bound (#455); it returned nothing.
+AH5|cypher ea48691a3e A WHERE that reads a value a CALL subquery returns is checked after the subquery (#455); it returned nothing.
+AH7|cypher 65519a9c1d A WHERE that reads a value a CALL subquery returns is checked after the subquery (#455); it returned nothing.
+AH8|cypher 1f3fd599f8 A WITH * WHERE on variables of an OPTIONAL MATCH is checked after it (#455); it returned nothing.
+AH14|cypher eb149d8bc8 A condition on a variable a WITH renamed no longer filters a later OPTIONAL MATCH variable of that name (#455); it came back with nulls.
+AH15|cypher ba3edbdb7b A condition on a variable a WITH renamed no longer filters a later OPTIONAL MATCH variable of that name (#455); it came back with nulls.
+AH17|cypher def6255edd A condition without variables filters the row; it failed with "Internal error: Empty plan".
+AJ6|cypher 2f8172869a A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); it timed out.
+AJ6|gql 2f8172869a A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); it timed out.
+AO1|cypher ee2e439430 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
+AO1|gql ee2e439430 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
+AO2|cypher 238fe1bd37 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
+AO2|gql 238fe1bd37 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
+AO3|cypher ee2e439430 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
+AO3|gql ee2e439430 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
+AO4|cypher ee2e439430 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
+AX5|gql adb6cdb8d7 The error starts with its code, GRAFEO-Q001 (#588); the message is unchanged.
+BH13|cypher 3ba4fa1c0a Cypher aggregates with two arguments read the second; covar_pop was null and regr_count 0.
+BH14|cypher 9f7b9830ce Cypher listagg and group_concat take their separator, and listagg joins with a comma as in GQL; both joined with a space.
+BP15|cypher 2ea289b2c7 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+BP15|gql 2ea289b2c7 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+BS1|cypher e7055daa61 An unknown procedure is a semantic error that names it (#588); it was GRAFEO-X001.
+BS1|gql e7055daa61 An unknown procedure is a semantic error that names it (#588); it was GRAFEO-X001.
+BS2|gql f8f0f8a302 An unknown YIELD column is a semantic error that names the procedure's columns (#588); it was GRAFEO-X001.
+BS3|cypher bd2e73aba0 A function called with too few arguments is a semantic error (#588); it was GRAFEO-X001.
+BS3|gql bd2e73aba0 A function called with too few arguments is a semantic error (#588); it was GRAFEO-X001.
+BS4|cypher 0a88e3eae7 A Cypher DELETE of a variable nothing binds names that variable (#588); it said only "DELETE requires input".
+P3|cypher 36c8f2cf63 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+P3|gql 36c8f2cf63 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+P4|cypher 4417410084 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+P4|gql 4417410084 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+P5|cypher b827a5827c The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+P5|gql b827a5827c The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+P6|cypher 0e1e8f1820 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+P7|cypher 4417410084 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+P7|gql 4417410084 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+U1|cypher 3656e82c97 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+U2|cypher df7c1f11d9 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+V8|cypher e67908eb16 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.

@@ -1,0 +1,294 @@
+# Rosetta: grouping keys and DISTINCT use equivalence
+#
+# Grouping and DISTINCT put two values together when they are the same value:
+# openCypher calls this equivalence (numbers by their value, so 3 and 3.0 are
+# one group and -0.0 is 0.0, NaN equivalent to NaN, lists element by element,
+# maps key by key, paths node by node and edge by edge), and ISO/IEC 39075:2024
+# makes two values "not distinct" the same way (<group by clause>, <set
+# quantifier>, UNION). A grouping key keeps its value: the first one of its
+# group.
+#
+# These used to fail: a float key came back as the integer of its bits (1.5
+# became 4609434218613702656) wherever a clause followed the aggregate, 3 and
+# 3.0 were two groups, two vectors with the same first item and length were
+# one group that came back as text, and DISTINCT took paths of the same length
+# for one path (count(DISTINCT p) over three paths gave 1).
+#
+# Setup (GQL) for the paths: Alix knows Gus, Vincent and Jules, who each know
+# Mia, so three paths of length 2 lead from Alix to Mia.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Grouping keys and DISTINCT use equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Grouping keys keep their value
+  # ---------------------------------------------------------------------------
+
+  - name: a_float_key_keeps_its_value
+    variants:
+      gql: "UNWIND [1.5, 1.5, 2.5] AS x RETURN x, count(*) AS c"
+      cypher: "UNWIND [1.5, 1.5, 2.5] AS x RETURN x, count(*) AS c"
+    expect:
+      rows:
+        - [1.5, 2]
+        - [2.5, 1]
+
+  - name: a_float_key_keeps_its_value_through_with
+    variants:
+      gql: "UNWIND [1.5, 1.5, 2.5] AS x WITH x, count(*) AS c RETURN x, c"
+      cypher: "UNWIND [1.5, 1.5, 2.5] AS x WITH x, count(*) AS c RETURN x, c"
+    expect:
+      rows:
+        - [1.5, 2]
+        - [2.5, 1]
+
+  - name: a_float_key_inside_a_list_keeps_its_value
+    variants:
+      gql: "UNWIND [1.5, 1.5, 2.5] AS x WITH [x] AS l, count(*) AS c RETURN l, c"
+      cypher: "UNWIND [1.5, 1.5, 2.5] AS x WITH [x] AS l, count(*) AS c RETURN l, c"
+    expect:
+      rows:
+        - ["[1.5]", 2]
+        - ["[2.5]", 1]
+
+  # ---------------------------------------------------------------------------
+  # Numbers group by their value
+  # ---------------------------------------------------------------------------
+
+  - name: an_integer_and_a_float_of_one_value_are_one_group
+    variants:
+      gql: "UNWIND [3, 3.0, 19] AS x RETURN x, count(*) AS c"
+      cypher: "UNWIND [3, 3.0, 19] AS x RETURN x, count(*) AS c"
+    expect:
+      rows:
+        - [3, 2]
+        - [19, 1]
+
+  - name: an_integer_and_a_float_of_one_value_are_one_group_through_with
+    variants:
+      gql: "UNWIND [3, 3.0, 19] AS x WITH x, count(*) AS c RETURN x, c"
+      cypher: "UNWIND [3, 3.0, 19] AS x WITH x, count(*) AS c RETURN x, c"
+    expect:
+      rows:
+        - [3, 2]
+        - [19, 1]
+
+  - name: negative_zero_and_zero_are_one_group
+    variants:
+      gql: "UNWIND [0.0, -0.0, 0.0] AS x WITH x, count(*) AS c RETURN c"
+      cypher: "UNWIND [0.0, -0.0, 0.0] AS x WITH x, count(*) AS c RETURN c"
+    expect:
+      rows:
+        - [3]
+
+  - name: nan_values_are_one_group
+    variants:
+      gql: "UNWIND [0.0 / 0.0, 3, 0.0 / 0.0] AS x WITH x, count(*) AS c RETURN x, c"
+      cypher: "UNWIND [0.0 / 0.0, 3, 0.0 / 0.0] AS x WITH x, count(*) AS c RETURN x, c"
+    expect:
+      rows:
+        - [NaN, 2]
+        - [3, 1]
+
+  - name: lists_of_equal_numbers_are_one_group
+    variants:
+      gql: "UNWIND [[3, 19], [3.0, 19], [88]] AS x WITH x, count(*) AS c RETURN x, c"
+      cypher: "UNWIND [[3, 19], [3.0, 19], [88]] AS x WITH x, count(*) AS c RETURN x, c"
+    expect:
+      rows:
+        - ["[3, 19]", 2]
+        - ["[88]", 1]
+
+  - name: maps_of_equal_numbers_are_one_group
+    variants:
+      gql: "UNWIND [{k: 3}, {k: 3.0}, {k: 1.5}] AS x WITH x, count(*) AS c RETURN x.k AS k, c"
+      cypher: "UNWIND [{k: 3}, {k: 3.0}, {k: 1.5}] AS x WITH x, count(*) AS c RETURN x.k AS k, c"
+    expect:
+      rows:
+        - [3, 2]
+        - [1.5, 1]
+
+  # ---------------------------------------------------------------------------
+  # Other kinds of keys
+  # ---------------------------------------------------------------------------
+
+  - name: vectors_group_by_their_items
+    variants:
+      gql: "UNWIND [vector([1.0, 2.0]), vector([1.0, 3.0]), vector([1.0, 2.0])] AS x WITH x, count(*) AS c RETURN c"
+      cypher: "UNWIND [vector([1.0, 2.0]), vector([1.0, 3.0]), vector([1.0, 2.0])] AS x WITH x, count(*) AS c RETURN c"
+    expect:
+      rows:
+        - [2]
+        - [1]
+
+  - name: dates_and_durations_group_by_their_value
+    variants:
+      gql: "UNWIND [date('2024-03-15'), date('2019-01-03'), date('2024-03-15'), duration('P3D'), duration('P3D')] AS x WITH x, count(*) AS c RETURN c"
+      cypher: "UNWIND [date('2024-03-15'), date('2019-01-03'), date('2024-03-15'), duration('P3D'), duration('P3D')] AS x WITH x, count(*) AS c RETURN c"
+    expect:
+      rows:
+        - [2]
+        - [1]
+        - [2]
+
+  - name: nodes_group_by_their_identity
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(m:Person {name: 'Mia'}), (a)-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(m), (a)-[:KNOWS]->(:Person {name: 'Jules'})-[:KNOWS]->(m)"
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->(b) WITH a, count(*) AS c RETURN a.name AS a, c"
+      cypher: "MATCH (a:Person)-[:KNOWS]->(b) WITH a, count(*) AS c RETURN a.name AS a, c"
+    expect:
+      rows:
+        - [Alix, 3]
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Jules, 1]
+
+  - name: edges_group_by_their_identity
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(m:Person {name: 'Mia'}), (a)-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(m), (a)-[:KNOWS]->(:Person {name: 'Jules'})-[:KNOWS]->(m)"
+    variants:
+      gql: "MATCH (:Person {name: 'Alix'})-[e:KNOWS]->()-[:KNOWS]->(m) WITH e, count(*) AS c RETURN c"
+      cypher: "MATCH (:Person {name: 'Alix'})-[e:KNOWS]->()-[:KNOWS]->(m) WITH e, count(*) AS c RETURN c"
+    expect:
+      rows:
+        - [1]
+        - [1]
+        - [1]
+
+  - name: paths_group_by_their_nodes_and_edges
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(m:Person {name: 'Mia'}), (a)-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(m), (a)-[:KNOWS]->(:Person {name: 'Jules'})-[:KNOWS]->(m)"
+    variants:
+      gql: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(:Person {name: 'Mia'}) WITH p, count(*) AS c RETURN [n IN nodes(p) | n.name] AS names, c"
+      cypher: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(:Person {name: 'Mia'}) WITH p, count(*) AS c RETURN [n IN nodes(p) | n.name] AS names, c"
+    expect:
+      rows:
+        - ["[Alix, Gus, Mia]", 1]
+        - ["[Alix, Vincent, Mia]", 1]
+        - ["[Alix, Jules, Mia]", 1]
+
+  # ---------------------------------------------------------------------------
+  # DISTINCT over paths
+  # ---------------------------------------------------------------------------
+
+  - name: count_distinct_counts_each_path
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(m:Person {name: 'Mia'}), (a)-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(m), (a)-[:KNOWS]->(:Person {name: 'Jules'})-[:KNOWS]->(m)"
+    variants:
+      gql: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(:Person {name: 'Mia'}) RETURN count(DISTINCT p) AS d, count(p) AS n"
+      cypher: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(:Person {name: 'Mia'}) RETURN count(DISTINCT p) AS d, count(p) AS n"
+    expect:
+      rows:
+        - [3, 3]
+
+  - name: collect_distinct_keeps_each_path
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(m:Person {name: 'Mia'}), (a)-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(m), (a)-[:KNOWS]->(:Person {name: 'Jules'})-[:KNOWS]->(m)"
+    variants:
+      gql: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(:Person {name: 'Mia'}) RETURN size(collect(DISTINCT p)) AS d"
+      cypher: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(:Person {name: 'Mia'}) RETURN size(collect(DISTINCT p)) AS d"
+    expect:
+      rows:
+        - [3]
+
+  - name: with_distinct_keeps_each_path
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(m:Person {name: 'Mia'}), (a)-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(m), (a)-[:KNOWS]->(:Person {name: 'Jules'})-[:KNOWS]->(m)"
+    variants:
+      gql: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(:Person {name: 'Mia'}) WITH DISTINCT p RETURN count(*) AS d"
+      cypher: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(:Person {name: 'Mia'}) WITH DISTINCT p RETURN count(*) AS d"
+    expect:
+      rows:
+        - [3]
+
+  - name: return_distinct_keeps_each_path
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(m:Person {name: 'Mia'}), (a)-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(m), (a)-[:KNOWS]->(:Person {name: 'Jules'})-[:KNOWS]->(m)"
+    variants:
+      gql: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(:Person {name: 'Mia'}) RETURN DISTINCT p"
+      cypher: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->()-[:KNOWS]->(:Person {name: 'Mia'}) RETURN DISTINCT p"
+    expect:
+      count: 3
+
+  # ---------------------------------------------------------------------------
+  # DISTINCT over numbers, lists and maps
+  # ---------------------------------------------------------------------------
+
+  - name: distinct_aggregates_take_an_integer_and_a_float_of_one_value_once
+    variants:
+      gql: "UNWIND [3, 3.0, 19] AS x RETURN count(DISTINCT x) AS d, size(collect(DISTINCT x)) AS s"
+      cypher: "UNWIND [3, 3.0, 19] AS x RETURN count(DISTINCT x) AS d, size(collect(DISTINCT x)) AS s"
+    expect:
+      rows:
+        - [2, 2]
+
+  - name: return_distinct_takes_an_integer_and_a_float_of_one_value_once
+    variants:
+      gql: "UNWIND [3, 3.0, 19] AS x RETURN DISTINCT x"
+      cypher: "UNWIND [3, 3.0, 19] AS x RETURN DISTINCT x"
+    expect:
+      rows:
+        - [3]
+        - [19]
+
+  - name: with_distinct_takes_an_integer_and_a_float_of_one_value_once
+    variants:
+      gql: "UNWIND [3, 3.0, 19] AS x WITH DISTINCT x RETURN count(*) AS d"
+      cypher: "UNWIND [3, 3.0, 19] AS x WITH DISTINCT x RETURN count(*) AS d"
+    expect:
+      rows:
+        - [2]
+
+  - name: distinct_takes_lists_of_equal_numbers_once
+    variants:
+      gql: "UNWIND [[3], [3.0], [19]] AS x RETURN count(DISTINCT x) AS d"
+      cypher: "UNWIND [[3], [3.0], [19]] AS x RETURN count(DISTINCT x) AS d"
+    expect:
+      rows:
+        - [2]
+
+  - name: distinct_takes_lists_and_maps_holding_one_node_once
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(m:Person {name: 'Mia'}), (a)-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(m), (a)-[:KNOWS]->(:Person {name: 'Jules'})-[:KNOWS]->(m)"
+    variants:
+      gql: "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(DISTINCT [a]) AS l, count(DISTINCT {p: a}) AS m, count(*) AS n"
+      cypher: "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(DISTINCT [a]) AS l, count(DISTINCT {p: a}) AS m, count(*) AS n"
+    expect:
+      rows:
+        - [4, 4, 6]
+
+  - name: distinct_takes_nan_once
+    variants:
+      gql: "UNWIND [0.0 / 0.0, 0.0 / 0.0, 3] AS x RETURN count(DISTINCT x) AS d"
+      cypher: "UNWIND [0.0 / 0.0, 0.0 / 0.0, 3] AS x RETURN count(DISTINCT x) AS d"
+    expect:
+      rows:
+        - [2]
+
+  - name: union_takes_an_integer_and_a_float_of_one_value_once
+    variants:
+      gql: "RETURN 3 AS x UNION RETURN 3.0 AS x"
+      cypher: "RETURN 3 AS x UNION RETURN 3.0 AS x"
+    expect:
+      rows:
+        - [3]
+
+  - name: intersect_matches_an_integer_and_a_float_of_one_value
+    variants:
+      gql: "RETURN 3 AS x INTERSECT RETURN 3.0 AS x"
+    expect:
+      rows:
+        - [3]
+
+  - name: except_removes_an_integer_with_a_float_of_one_value
+    variants:
+      gql: "RETURN 3 AS x EXCEPT RETURN 3.0 AS x"
+    expect:
+      empty: true

@@ -5,19 +5,17 @@
 #[allow(clippy::wildcard_imports)]
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
+use crate::query::limits::{Nesting, nesting_error_message};
 use grafeo_common::utils::error::{Error, Result};
-
-/// Maximum nesting depth for recursive parsing constructs (nested
-/// selection sets, i.e. deeply nested field selections).
-const MAX_NESTING_DEPTH: u32 = 128;
 
 /// GraphQL parser.
 pub struct Parser<'a> {
     tokens: Vec<Token>,
     position: usize,
     source: &'a str,
-    /// Current nesting depth for recursive parsing constructs.
-    nesting_depth: u32,
+    /// How deep the document parsed so far nests (see
+    /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)).
+    nesting: Nesting,
 }
 
 impl<'a> Parser<'a> {
@@ -29,7 +27,7 @@ impl<'a> Parser<'a> {
             tokens,
             position: 0,
             source,
-            nesting_depth: 0,
+            nesting: Nesting::default(),
         }
     }
 
@@ -359,15 +357,19 @@ impl<'a> Parser<'a> {
             TokenKind::False => Ok(InputValue::Boolean(false)),
             TokenKind::Null => Ok(InputValue::Null),
             TokenKind::Name(s) => Ok(InputValue::Enum(s)),
+            // A list or an object nests one level.
             TokenKind::LBracket => {
+                self.enter_nesting()?;
                 let mut items = Vec::new();
                 while !self.check(TokenKind::RBracket) && !self.is_eof() {
                     items.push(self.parse_input_value()?);
                 }
+                self.exit_nesting();
                 self.expect(TokenKind::RBracket)?;
                 Ok(InputValue::List(items))
             }
             TokenKind::LBrace => {
+                self.enter_nesting()?;
                 let mut fields = Vec::new();
                 while !self.check(TokenKind::RBrace) && !self.is_eof() {
                     let name = self.parse_name()?;
@@ -375,6 +377,7 @@ impl<'a> Parser<'a> {
                     let value = self.parse_input_value()?;
                     fields.push((name, value));
                 }
+                self.exit_nesting();
                 self.expect(TokenKind::RBrace)?;
                 Ok(InputValue::Object(fields))
             }
@@ -447,20 +450,18 @@ impl<'a> Parser<'a> {
             )
     }
 
-    /// Increments the nesting depth and returns an error if the limit is exceeded.
+    /// Enters one level of nesting, or fails past the nesting limit.
     fn enter_nesting(&mut self) -> Result<()> {
-        self.nesting_depth += 1;
-        if self.nesting_depth > MAX_NESTING_DEPTH {
-            return Err(self.error(&format!(
-                "Maximum nesting depth of {MAX_NESTING_DEPTH} exceeded"
-            )));
+        if self.nesting.enter() {
+            Ok(())
+        } else {
+            Err(self.error(&nesting_error_message()))
         }
-        Ok(())
     }
 
-    /// Decrements the nesting depth.
+    /// Leaves the level [`Self::enter_nesting`] entered.
     fn exit_nesting(&mut self) {
-        self.nesting_depth = self.nesting_depth.saturating_sub(1);
+        self.nesting.exit();
     }
 
     fn error(&self, message: &str) -> Error {

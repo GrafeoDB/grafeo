@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0-beta.1
+
+- Version bump to match workspace release
+
 ## 0.5.44
 
 - Version bump to match workspace release

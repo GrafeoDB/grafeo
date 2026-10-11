@@ -13,6 +13,8 @@
 
 mod check_eval;
 
+use check_eval::CheckExpression;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -20,6 +22,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use parking_lot::{Mutex, RwLock};
 
 use grafeo_common::collections::{GrafeoConcurrentMap, grafeo_concurrent_map};
+use grafeo_common::storage::catalog_record::MAX_LIST_LEVELS_PER_RECORD;
+use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
 use grafeo_common::types::{EdgeTypeId, IndexId, LabelId, PropertyKeyId, Value};
 
 /// The database's schema dictionary - maps names to compact internal IDs.
@@ -293,6 +297,7 @@ impl Catalog {
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeAlreadyExists` if a type with the same name exists.
+    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_node_type(&self, def: NodeTypeDefinition) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.register_node_type(def),
@@ -367,6 +372,7 @@ impl Catalog {
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeAlreadyExists` if an edge type with the same name exists.
+    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_edge_type_def(&self, def: EdgeTypeDefinition) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.register_edge_type(def),
@@ -493,7 +499,9 @@ impl Catalog {
     ///
     /// # Errors
     ///
-    /// Returns `CatalogError::SchemaNotEnabled` if schema is disabled.
+    /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
+    /// * `CatalogError::InvalidCheck` if the constraint is a CHECK whose
+    ///   expression does not parse.
     pub fn add_constraint_to_type(
         &self,
         label: &str,
@@ -502,6 +510,20 @@ impl Catalog {
         match &self.schema {
             Some(schema) => schema.add_constraint_to_type(label, constraint),
             None => Err(CatalogError::SchemaNotEnabled),
+        }
+    }
+
+    /// Whether `properties` (an entity's properties) satisfy the CHECK
+    /// expression `expression`, which is parsed on its first use and kept:
+    /// see [`CheckExpression::evaluate`].
+    fn evaluate_check(
+        &self,
+        expression: &str,
+        properties: &[(String, Value)],
+    ) -> Result<bool, String> {
+        match &self.schema {
+            Some(schema) => schema.check_expression(expression)?.evaluate(properties),
+            None => CheckExpression::parse(expression)?.evaluate(properties),
         }
     }
 
@@ -605,6 +627,8 @@ impl Catalog {
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeNotFound` if the node type does not exist.
     /// * `CatalogError::TypeAlreadyExists` if the property already exists on the type.
+    /// * `CatalogError::TooManyListLevels` if the type's property types would
+    ///   nest more `LIST<...>` levels in all than its catalog record holds.
     pub fn alter_node_type_add_property(
         &self,
         type_name: &str,
@@ -640,6 +664,8 @@ impl Catalog {
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeNotFound` if the edge type does not exist.
     /// * `CatalogError::TypeAlreadyExists` if the property already exists on the type.
+    /// * `CatalogError::TooManyListLevels` if the type's property types would
+    ///   nest more `LIST<...>` levels in all than its catalog record holds.
     pub fn alter_edge_type_add_property(
         &self,
         type_name: &str,
@@ -1058,7 +1084,10 @@ pub enum IndexType {
 }
 
 /// Index definition.
+///
+/// Read, not built, outside this crate: later releases may add fields.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct IndexDefinition {
     /// The index ID.
     pub id: IndexId,
@@ -1216,21 +1245,86 @@ pub enum PropertyDataType {
     Edge,
     /// Any type (no enforcement).
     Any,
+    // The 0.5.x catalog layouts (catalog section v1, snapshot v4) are bincode
+    // of this enum, which numbers the variants by position: new variants go
+    // here, after the existing ones.
+    /// Datetime with a fixed UTC offset (`ZONED DATETIME`), matching
+    /// [`Value::ZonedDatetime`].
+    ZonedDatetime,
+    /// Datetime without a time zone (`LOCAL DATETIME`), matching
+    /// [`Value::Timestamp`], which `local_datetime()` returns.
+    LocalDatetime,
 }
 
 impl PropertyDataType {
-    /// Parses a type name string (case-insensitive) into a `PropertyDataType`.
+    /// The most `LIST<...>` levels a property type nests: as deep as a
+    /// property value may be ([`MAX_PROPERTY_VALUE_DEPTH`], a list of scalars
+    /// being 1 deep), and as deep as the catalog records store.
+    pub const MAX_LIST_DEPTH: usize = MAX_PROPERTY_VALUE_DEPTH;
+
+    /// The most `LIST<...>` levels the property types of one node or edge
+    /// type nest in all: as many as its catalog record holds
+    /// ([`MAX_LIST_LEVELS_PER_RECORD`], 32,768, so 256 properties of the
+    /// deepest type).
+    pub const MAX_LIST_LEVELS_PER_TYPE: usize = MAX_LIST_LEVELS_PER_RECORD;
+
+    /// The `LIST<...>` levels around the type inside them, counted, not
+    /// recursed into.
     #[must_use]
-    pub fn from_type_name(name: &str) -> Self {
+    pub fn list_levels(&self) -> usize {
+        let mut levels = 0;
+        let mut current = self;
+        while let Self::ListTyped(inner) = current {
+            levels += 1;
+            current = inner;
+        }
+        levels
+    }
+
+    /// Parses a type name string (case-insensitive) into a `PropertyDataType`.
+    ///
+    /// Reads every spelling [`Display`](std::fmt::Display) writes, including
+    /// `ZONED DATETIME`, `LOCAL DATETIME` and nested `LIST<...>`, so the type
+    /// names of WAL records and `SHOW` output read back as the same type.
+    ///
+    /// Unknown names are [`Any`](Self::Any): type DDL refuses them (the
+    /// parsers check each name against
+    /// [`PROPERTY_TYPE_NAMES`](grafeo_adapters::query::schema::PROPERTY_TYPE_NAMES)),
+    /// so only a WAL record written by 0.5.x, which logged a type as it was
+    /// written, holds one, and 0.5.x read it as `ANY` too.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::PropertyTypeTooDeep`] when the name nests more than
+    /// [`MAX_LIST_DEPTH`](Self::MAX_LIST_DEPTH) `LIST<...>` levels. The levels
+    /// are counted, not recursed into, so a name of any depth is refused
+    /// without a stack overflow.
+    pub fn from_type_name(name: &str) -> Result<Self, CatalogError> {
         let upper = name.to_uppercase();
-        // Handle parameterized LIST<element_type>
-        if let Some(inner) = upper
+        let mut element = upper.as_str();
+        let mut levels = 0;
+        while let Some(inner) = element
             .strip_prefix("LIST<")
             .and_then(|s| s.strip_suffix('>'))
         {
-            return Self::ListTyped(Box::new(Self::from_type_name(inner)));
+            levels += 1;
+            if levels > Self::MAX_LIST_DEPTH {
+                return Err(CatalogError::PropertyTypeTooDeep {
+                    limit: Self::MAX_LIST_DEPTH,
+                });
+            }
+            element = inner;
         }
-        match upper.as_str() {
+        let mut data_type = Self::from_element_name(element);
+        for _ in 0..levels {
+            data_type = Self::ListTyped(Box::new(data_type));
+        }
+        Ok(data_type)
+    }
+
+    /// The type a name without `LIST<...>` around it names (in capitals).
+    fn from_element_name(upper: &str) -> Self {
+        match upper {
             "STRING" | "VARCHAR" | "TEXT" => Self::String,
             "INT" | "INT64" | "INTEGER" | "BIGINT" => Self::Int64,
             "FLOAT" | "FLOAT64" | "DOUBLE" | "REAL" => Self::Float64,
@@ -1238,12 +1332,15 @@ impl PropertyDataType {
             "DATE" => Self::Date,
             "TIME" => Self::Time,
             "TIMESTAMP" | "DATETIME" => Self::Timestamp,
+            "ZONED DATETIME" | "ZONED_DATETIME" | "ZONEDDATETIME" => Self::ZonedDatetime,
+            "LOCAL DATETIME" | "LOCAL_DATETIME" | "LOCALDATETIME" => Self::LocalDatetime,
             "DURATION" | "INTERVAL" => Self::Duration,
             "LIST" | "ARRAY" => Self::List,
             "MAP" | "RECORD" => Self::Map,
             "BYTES" | "BINARY" | "BLOB" => Self::Bytes,
             "NODE" => Self::Node,
             "EDGE" | "RELATIONSHIP" => Self::Edge,
+            // `ANY`, and a name only an older WAL holds (see `from_type_name`).
             _ => Self::Any,
         }
     }
@@ -1259,12 +1356,14 @@ impl PropertyDataType {
             (Self::Bool, Value::Bool(_)) => true,
             (Self::Date, Value::Date(_)) => true,
             (Self::Time, Value::Time(_)) => true,
-            (Self::Timestamp, Value::Timestamp(_)) => true,
+            (Self::Timestamp | Self::LocalDatetime, Value::Timestamp(_)) => true,
+            (Self::ZonedDatetime, Value::ZonedDatetime(_)) => true,
             (Self::Duration, Value::Duration(_)) => true,
             (Self::List, Value::List(_)) => true,
             (Self::ListTyped(elem_type), Value::List(items)) => {
                 items.iter().all(|item| elem_type.matches(item))
             }
+            (Self::Map, Value::Map(_)) => true,
             (Self::Bytes, Value::Bytes(_)) => true,
             // Node/Edge reference types match Map values (graph elements are
             // represented as maps with _id, _labels/_type, and properties)
@@ -1272,6 +1371,80 @@ impl PropertyDataType {
             _ => false,
         }
     }
+
+    /// The value a property of this type stores for `value` when `value` is
+    /// not of the type but converts to it on assignment without losing
+    /// anything, as ISO/IEC 39075 converts between numeric types and SQL's
+    /// store assignment does:
+    ///
+    /// - an `INT64` to `FLOAT64`, when the float is exactly the integer (every
+    ///   integer up to 2^53 in magnitude, and the larger ones a float holds);
+    /// - a zoned datetime to its instant, for `TIMESTAMP` (`DATETIME`), which
+    ///   compares with zoned values as an instant in UTC;
+    /// - the items of a `LIST<...>`, each by these rules.
+    ///
+    /// A `LOCAL DATETIME` and a `ZONED DATETIME` take no other datetime: a
+    /// local datetime has no offset to be an instant by.
+    ///
+    /// `None` when `value` is of the type already, or does not convert.
+    #[must_use]
+    pub fn convert(&self, value: &Value) -> Option<Value> {
+        match (self, value) {
+            (Self::Float64, Value::Int64(int)) => exact_float(*int).map(Value::Float64),
+            (Self::Timestamp, Value::ZonedDatetime(zoned)) => {
+                Some(Value::Timestamp(zoned.as_timestamp()))
+            }
+            (Self::ListTyped(item_type), Value::List(items)) if !self.matches(value) => items
+                .iter()
+                .map(|item| {
+                    if item_type.matches(item) {
+                        Some(item.clone())
+                    } else {
+                        item_type.convert(item)
+                    }
+                })
+                .collect::<Option<Vec<Value>>>()
+                .map(|items| Value::List(items.into())),
+            _ => None,
+        }
+    }
+}
+
+/// `int` as a float, when the float is exactly `int`.
+fn exact_float(int: i64) -> Option<f64> {
+    // 2^63: the one float an i64 rounds to that is out of the i64 range
+    // (i64::MAX rounds up to it).
+    const BEYOND_I64: f64 = 9_223_372_036_854_775_808.0;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the cast back below checks that the float is exact"
+    )]
+    let float = int as f64;
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "`float` came from an i64 and is below 2^63, checked first, and a whole \
+                  number (a float from an integer is), so the cast back is exact"
+    )]
+    let exact = float < BEYOND_I64 && float as i64 == int;
+    exact.then_some(float)
+}
+
+/// The error for a property value that is not of the property's type.
+fn type_mismatch(
+    key: &str,
+    owner: &str,
+    data_type: &PropertyDataType,
+    value: &Value,
+) -> OperatorError {
+    let detail = match (data_type, value) {
+        (PropertyDataType::Float64, Value::Int64(int)) if exact_float(*int).is_none() => {
+            ", which has no exact Float64 value (an integer beyond 2^53)"
+        }
+        _ => "",
+    };
+    OperatorError::ConstraintViolation(format!(
+        "property '{key}' on :{owner} expects {data_type:?}, got {value:?}{detail}"
+    ))
 }
 
 impl std::fmt::Display for PropertyDataType {
@@ -1292,6 +1465,8 @@ impl std::fmt::Display for PropertyDataType {
             Self::Node => write!(f, "NODE"),
             Self::Edge => write!(f, "EDGE"),
             Self::Any => write!(f, "ANY"),
+            Self::ZonedDatetime => write!(f, "ZONED DATETIME"),
+            Self::LocalDatetime => write!(f, "LOCAL DATETIME"),
         }
     }
 }
@@ -1307,6 +1482,32 @@ pub struct TypedProperty {
     pub nullable: bool,
     /// Default value (used when property is not explicitly set).
     pub default_value: Option<Value>,
+}
+
+impl TypedProperty {
+    /// Refuses the properties of one node or edge type when their types
+    /// nest more `LIST<...>` levels in all than
+    /// [`PropertyDataType::MAX_LIST_LEVELS_PER_TYPE`], more than the type's
+    /// catalog record holds.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError::TooManyListLevels`] with the levels they nest.
+    pub(crate) fn check_list_levels<'a>(
+        properties: impl IntoIterator<Item = &'a Self>,
+    ) -> Result<(), CatalogError> {
+        let levels = properties
+            .into_iter()
+            .map(|property| property.data_type.list_levels())
+            .fold(0usize, usize::saturating_add);
+        if levels > PropertyDataType::MAX_LIST_LEVELS_PER_TYPE {
+            return Err(CatalogError::TooManyListLevels {
+                levels,
+                limit: PropertyDataType::MAX_LIST_LEVELS_PER_TYPE,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// A constraint on a node or edge type.
@@ -1440,6 +1641,14 @@ pub struct NodeTypeDefinition {
     pub constraints: Vec<TypeConstraint>,
     /// Parent type names for inheritance (GQL `EXTENDS`).
     pub parent_types: Vec<String>,
+    /// The labels of the type's `KEY (...)` clause in a graph type. A node
+    /// type declared inline also gets them as parent types.
+    ///
+    /// Not serialized: the 0.5.x catalog layouts (catalog section version 1,
+    /// snapshot v4) are bincode of this struct and have no such field; the
+    /// catalog records of version 2 hold it.
+    #[serde(skip)]
+    pub key_labels: Vec<String>,
 }
 
 /// Definition of an edge type (relationship type schema).
@@ -1455,6 +1664,13 @@ pub struct EdgeTypeDefinition {
     pub source_node_types: Vec<String>,
     /// Allowed target node types (empty = any).
     pub target_node_types: Vec<String>,
+    /// The labels of the type's `KEY (...)` clause in a graph type.
+    ///
+    /// Not serialized: the 0.5.x catalog layouts (catalog section version 1,
+    /// snapshot v4) are bincode of this struct and have no such field; the
+    /// catalog records of version 2 hold it.
+    #[serde(skip)]
+    pub key_labels: Vec<String>,
 }
 
 /// Definition of a graph type (constrains which node/edge types a graph allows).
@@ -1485,6 +1701,66 @@ pub struct ProcedureDefinition {
 
 // === Schema Catalog ===
 
+/// Adds `property` to the properties of the node or edge type `type_name`,
+/// as `ALTER ... ADD PROPERTY` does: the statement checks it on a copy of
+/// the type before anything changes, and the catalog applies it.
+///
+/// # Errors
+///
+/// * `CatalogError::TypeAlreadyExists` if the type has a property of that name.
+/// * `CatalogError::TooManyListLevels` if the type's property types would
+///   nest more `LIST<...>` levels in all than its catalog record holds.
+///
+/// Nothing changes on an error.
+pub(crate) fn add_property(
+    type_name: &str,
+    properties: &mut Vec<TypedProperty>,
+    property: TypedProperty,
+) -> Result<(), CatalogError> {
+    if properties.iter().any(|p| p.name == property.name) {
+        return Err(CatalogError::TypeAlreadyExists(format!(
+            "property {} on {}",
+            property.name, type_name
+        )));
+    }
+    TypedProperty::check_list_levels(properties.iter().chain([&property]))?;
+    properties.push(property);
+    Ok(())
+}
+
+/// Drops the property `property_name` from the properties of the node or
+/// edge type `type_name`, as `ALTER ... DROP PROPERTY` does (see
+/// [`add_property`]).
+///
+/// # Errors
+///
+/// `CatalogError::TypeNotFound` if the type has no property of that name;
+/// nothing changes then.
+pub(crate) fn drop_property(
+    type_name: &str,
+    properties: &mut Vec<TypedProperty>,
+    property_name: &str,
+) -> Result<(), CatalogError> {
+    let len_before = properties.len();
+    properties.retain(|p| p.name != property_name);
+    if properties.len() == len_before {
+        return Err(CatalogError::TypeNotFound(format!(
+            "property {property_name} on {type_name}"
+        )));
+    }
+    Ok(())
+}
+
+/// The name the parent type `parent` of the node type `child` is registered
+/// under: a type created in a schema is named `schema/Type`, and names its
+/// parents (`EXTENDS Base`) in that schema.
+fn parent_type_key(child: &str, parent: &str) -> String {
+    match child.rsplit_once('/') {
+        Some((schema, _)) if !parent.contains('/') => format!("{schema}/{parent}"),
+        _ => parent.to_string(),
+    }
+}
+
 /// Schema constraints and type definitions.
 pub struct SchemaCatalog {
     /// Properties that must be unique for a given label.
@@ -1505,6 +1781,9 @@ pub struct SchemaCatalog {
     procedures: RwLock<HashMap<String, ProcedureDefinition>>,
     /// Named constraints (`CREATE CONSTRAINT`), by name.
     constraints: RwLock<HashMap<String, ConstraintDefinition>>,
+    /// The CHECK expressions parsed so far, by their text: each is parsed
+    /// once, not on every write it checks.
+    checks: RwLock<HashMap<String, Arc<CheckExpression>>>,
 }
 
 impl SchemaCatalog {
@@ -1519,7 +1798,39 @@ impl SchemaCatalog {
             graph_type_bindings: RwLock::new(HashMap::new()),
             procedures: RwLock::new(HashMap::new()),
             constraints: RwLock::new(HashMap::new()),
+            checks: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// The parsed CHECK expression `expression`, parsed on its first use.
+    fn check_expression(&self, expression: &str) -> Result<Arc<CheckExpression>, String> {
+        if let Some(parsed) = self.checks.read().get(expression) {
+            return Ok(Arc::clone(parsed));
+        }
+        let parsed = Arc::new(CheckExpression::parse(expression)?);
+        self.checks
+            .write()
+            .insert(expression.to_string(), Arc::clone(&parsed));
+        Ok(parsed)
+    }
+
+    /// Parses the CHECK expressions among `constraints`, so one that does
+    /// not parse is refused when it is declared, not by every write it
+    /// would check.
+    fn parse_checks<'a>(
+        &self,
+        constraints: impl IntoIterator<Item = &'a TypeConstraint>,
+    ) -> Result<(), CatalogError> {
+        for constraint in constraints {
+            if let TypeConstraint::Check { expression, .. } = constraint {
+                self.check_expression(expression)
+                    .map_err(|reason| CatalogError::InvalidCheck {
+                        expression: expression.clone(),
+                        reason,
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     // --- Node type operations ---
@@ -1528,8 +1839,10 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Returns `CatalogError::TypeAlreadyExists` if a type with the same name exists.
+    /// * `CatalogError::TypeAlreadyExists` if a type with the same name exists.
+    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_node_type(&self, def: NodeTypeDefinition) -> Result<(), CatalogError> {
+        self.parse_checks(&def.constraints)?;
         let mut types = self.node_types.write();
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
@@ -1596,6 +1909,7 @@ impl SchemaCatalog {
             properties: all_properties,
             constraints: all_constraints,
             parent_types: base.parent_types.clone(),
+            key_labels: base.key_labels.clone(),
         })
     }
 
@@ -1610,8 +1924,9 @@ impl SchemaCatalog {
         let Some(def) = types.get(name) else { return };
         // Walk parents first (depth-first) so child properties override
         for parent in &def.parent_types {
+            let parent = parent_type_key(name, parent);
             if visited.insert(parent.clone()) {
-                Self::collect_inherited(types, parent, visited, properties, constraints);
+                Self::collect_inherited(types, &parent, visited, properties, constraints);
             }
         }
         // Add own properties, overriding parent ones with same name
@@ -1644,8 +1959,10 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Returns `CatalogError::TypeAlreadyExists` if an edge type with the same name exists.
+    /// * `CatalogError::TypeAlreadyExists` if an edge type with the same name exists.
+    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_edge_type(&self, def: EdgeTypeDefinition) -> Result<(), CatalogError> {
+        self.parse_checks(&def.constraints)?;
         let mut types = self.edge_types.write();
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
@@ -1694,6 +2011,12 @@ impl SchemaCatalog {
 
     /// Registers a new graph type definition.
     ///
+    /// The graph type types only the graphs bound to it from here on: a
+    /// binding to its name already there is to a graph type of that name
+    /// that was dropped (`DROP GRAPH TYPE` leaves it, binding nothing), and
+    /// goes. It used to come back to life and type its graph by the new
+    /// graph type.
+    ///
     /// # Errors
     ///
     /// Returns `CatalogError::TypeAlreadyExists` if a graph type with the same name exists.
@@ -1702,6 +2025,9 @@ impl SchemaCatalog {
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
         }
+        self.graph_type_bindings
+            .write()
+            .retain(|_, graph_type| *graph_type != def.name);
         types.insert(def.name.clone(), def);
         Ok(())
     }
@@ -1794,12 +2120,14 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Currently infallible, but returns `Result` for forward compatibility.
+    /// `CatalogError::InvalidCheck` if the constraint is a CHECK whose
+    /// expression does not parse; nothing changes then.
     pub fn add_constraint_to_type(
         &self,
         label: &str,
         constraint: TypeConstraint,
     ) -> Result<(), CatalogError> {
+        self.parse_checks([&constraint])?;
         let mut types = self.node_types.write();
         if let Some(def) = types.get_mut(label) {
             def.constraints.push(constraint);
@@ -1812,6 +2140,7 @@ impl SchemaCatalog {
                     properties: Vec::new(),
                     constraints: vec![constraint],
                     parent_types: Vec::new(),
+                    key_labels: Vec::new(),
                 },
             );
         }
@@ -1824,6 +2153,8 @@ impl SchemaCatalog {
     ///
     /// * `CatalogError::TypeNotFound` if the node type does not exist.
     /// * `CatalogError::TypeAlreadyExists` if the property already exists on the type.
+    /// * `CatalogError::TooManyListLevels` if the type's property types would
+    ///   nest more `LIST<...>` levels in all than its catalog record holds.
     pub fn alter_node_type_add_property(
         &self,
         type_name: &str,
@@ -1833,14 +2164,7 @@ impl SchemaCatalog {
         let def = types
             .get_mut(type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(type_name.to_string()))?;
-        if def.properties.iter().any(|p| p.name == property.name) {
-            return Err(CatalogError::TypeAlreadyExists(format!(
-                "property {} on {}",
-                property.name, type_name
-            )));
-        }
-        def.properties.push(property);
-        Ok(())
+        add_property(type_name, &mut def.properties, property)
     }
 
     /// Drops a property from an existing node type.
@@ -1857,15 +2181,7 @@ impl SchemaCatalog {
         let def = types
             .get_mut(type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(type_name.to_string()))?;
-        let len_before = def.properties.len();
-        def.properties.retain(|p| p.name != property_name);
-        if def.properties.len() == len_before {
-            return Err(CatalogError::TypeNotFound(format!(
-                "property {} on {}",
-                property_name, type_name
-            )));
-        }
-        Ok(())
+        drop_property(type_name, &mut def.properties, property_name)
     }
 
     /// Adds a property to an existing edge type.
@@ -1874,6 +2190,8 @@ impl SchemaCatalog {
     ///
     /// * `CatalogError::TypeNotFound` if the edge type does not exist.
     /// * `CatalogError::TypeAlreadyExists` if the property already exists on the type.
+    /// * `CatalogError::TooManyListLevels` if the type's property types would
+    ///   nest more `LIST<...>` levels in all than its catalog record holds.
     pub fn alter_edge_type_add_property(
         &self,
         type_name: &str,
@@ -1883,14 +2201,7 @@ impl SchemaCatalog {
         let def = types
             .get_mut(type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(type_name.to_string()))?;
-        if def.properties.iter().any(|p| p.name == property.name) {
-            return Err(CatalogError::TypeAlreadyExists(format!(
-                "property {} on {}",
-                property.name, type_name
-            )));
-        }
-        def.properties.push(property);
-        Ok(())
+        add_property(type_name, &mut def.properties, property)
     }
 
     /// Drops a property from an existing edge type.
@@ -1907,15 +2218,7 @@ impl SchemaCatalog {
         let def = types
             .get_mut(type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(type_name.to_string()))?;
-        let len_before = def.properties.len();
-        def.properties.retain(|p| p.name != property_name);
-        if def.properties.len() == len_before {
-            return Err(CatalogError::TypeNotFound(format!(
-                "property {} on {}",
-                property_name, type_name
-            )));
-        }
-        Ok(())
+        drop_property(type_name, &mut def.properties, property_name)
     }
 
     /// Adds a node type to a graph type.
@@ -2161,6 +2464,28 @@ pub enum CatalogError {
     SchemaAlreadyExists(String),
     /// No schema with this name exists.
     SchemaNotFound(String),
+    /// A property type nests more `LIST<...>` levels than `limit`
+    /// ([`PropertyDataType::MAX_LIST_DEPTH`]).
+    PropertyTypeTooDeep {
+        /// The most levels a property type nests.
+        limit: usize,
+    },
+    /// The property types of a node or edge type nest more `LIST<...>`
+    /// levels in all than `limit`
+    /// ([`PropertyDataType::MAX_LIST_LEVELS_PER_TYPE`]).
+    TooManyListLevels {
+        /// The levels they nest.
+        levels: usize,
+        /// The most levels they may nest.
+        limit: usize,
+    },
+    /// The expression of a CHECK constraint does not parse.
+    InvalidCheck {
+        /// The expression.
+        expression: String,
+        /// What is wrong with it.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for CatalogError {
@@ -2177,6 +2502,17 @@ impl std::fmt::Display for CatalogError {
             Self::TypeNotFound(name) => write!(f, "Type not found: {name}"),
             Self::SchemaAlreadyExists(name) => write!(f, "Schema already exists: {name}"),
             Self::SchemaNotFound(name) => write!(f, "Schema not found: {name}"),
+            Self::PropertyTypeTooDeep { limit } => {
+                write!(f, "A property type nests at most {limit} LIST<...> levels")
+            }
+            Self::TooManyListLevels { levels, limit } => write!(
+                f,
+                "The property types of a node or edge type nest at most {limit} LIST<...> \
+                 levels in all, not {levels}"
+            ),
+            Self::InvalidCheck { expression, reason } => {
+                write!(f, "Invalid CHECK constraint ({expression}): {reason}")
+            }
         }
     }
 }
@@ -2194,8 +2530,8 @@ use grafeo_core::execution::operators::OperatorError;
 /// against registered node/edge type definitions.
 pub struct CatalogConstraintValidator {
     catalog: Arc<Catalog>,
-    /// Optional graph name for graph-type-bound validation.
-    graph_name: Option<String>,
+    /// The closed graph type of the graph written to, if it has one.
+    closed_type: Option<ClosedGraphType>,
     /// Optional graph store for UNIQUE constraint enforcement via index lookup
     /// and the dimensions of vector indexes.
     store: Option<Arc<dyn grafeo_core::graph::GraphStoreSearch>>,
@@ -2206,6 +2542,9 @@ pub struct CatalogConstraintValidator {
         grafeo_common::types::EpochId,
         grafeo_common::types::TransactionId,
     )>,
+    /// The schema written in, whose node and edge types check the writes
+    /// (`None`: no schema).
+    schema: Option<String>,
 }
 
 impl CatalogConstraintValidator {
@@ -2213,10 +2552,45 @@ impl CatalogConstraintValidator {
     pub fn new(catalog: Arc<Catalog>) -> Self {
         Self {
             catalog,
-            graph_name: None,
+            closed_type: None,
             store: None,
             max_property_size: None,
             transaction: None,
+            schema: None,
+        }
+    }
+
+    /// Checks the writes with the node and edge types of `schema`, the schema
+    /// of the graph written to (`None`: no schema). A type created while a
+    /// session works in a schema is registered under `schema/Type` and
+    /// checks the nodes with the label `Type` (or the edges of that type) in
+    /// that schema only, as `SHOW NODE TYPES` lists the types of the current
+    /// schema only.
+    #[must_use]
+    pub fn with_schema(mut self, schema: Option<&str>) -> Self {
+        self.schema = schema.map(ToString::to_string);
+        self
+    }
+
+    /// The node type, with what it inherits, that checks nodes with `label`
+    /// in the schema written in.
+    fn node_type(&self, label: &str) -> Option<NodeTypeDefinition> {
+        match &self.schema {
+            Some(schema) => self
+                .catalog
+                .resolved_node_type(&format!("{schema}/{label}")),
+            None => self.catalog.resolved_node_type(label),
+        }
+    }
+
+    /// The edge type that checks edges of `edge_type` in the schema written
+    /// in.
+    fn edge_type(&self, edge_type: &str) -> Option<EdgeTypeDefinition> {
+        match &self.schema {
+            Some(schema) => self
+                .catalog
+                .get_edge_type_def(&format!("{schema}/{edge_type}")),
+            None => self.catalog.get_edge_type_def(edge_type),
         }
     }
 
@@ -2267,9 +2641,12 @@ impl CatalogConstraintValidator {
             .collect()
     }
 
-    /// Sets the graph name for graph-type-bound validation.
-    pub fn with_graph_name(mut self, name: String) -> Self {
-        self.graph_name = Some(name);
+    /// Checks writes to the graph with storage key `name` (`schema/graph` in
+    /// a schema) against the closed graph type it is bound to, if any: the
+    /// labels, edge types and properties it declares.
+    #[must_use]
+    pub fn with_graph_name(mut self, name: &str) -> Self {
+        self.closed_type = ClosedGraphType::of_graph(&self.catalog, name);
         self
     }
 
@@ -2294,17 +2671,27 @@ impl ConstraintValidator for CatalogConstraintValidator {
         key: &str,
         value: &Value,
     ) -> Result<(), OperatorError> {
-        // A vector index on the property fixes the vector's size.
+        // A vector index on the property fixes the vector's size, and takes
+        // only values it can measure a distance to (#593).
         #[cfg(feature = "vector-index")]
         if let (Value::Vector(vector), Some(store)) = (value, &self.store) {
             for label in labels {
-                if let Some(config) = store.vector_index_config(label, key)
-                    && vector.len() != config.dimensions
-                {
+                let Some(config) = store.vector_index_config(label, key) else {
+                    continue;
+                };
+                if vector.len() != config.dimensions {
                     return Err(OperatorError::ConstraintViolation(format!(
                         "property '{key}' on :{label} has a vector index of {} dimensions, got a vector of {}",
                         config.dimensions,
                         vector.len()
+                    )));
+                }
+                if let Some((position, value)) =
+                    grafeo_core::index::vector::first_non_finite(vector)
+                {
+                    return Err(OperatorError::ConstraintViolation(format!(
+                        "property '{key}' on :{label} has a vector index, which cannot measure \
+                         {value} (at position {position})"
                     )));
                 }
             }
@@ -2316,7 +2703,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             }
         }
         for label in labels {
-            let Some(type_def) = self.catalog.resolved_node_type(label) else {
+            let Some(type_def) = self.node_type(label) else {
                 continue;
             };
             if let Some(typed_prop) = type_def.properties.iter().find(|p| p.name == key) {
@@ -2328,10 +2715,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 }
                 // Check type compatibility
                 if *value != Value::Null && !typed_prop.data_type.matches(value) {
-                    return Err(OperatorError::ConstraintViolation(format!(
-                        "property '{key}' on :{label} expects {:?}, got {:?}",
-                        typed_prop.data_type, value
-                    )));
+                    return Err(type_mismatch(key, label, &typed_prop.data_type, value));
                 }
             }
             // A null removes the property (`SET n.p = NULL`, `REMOVE n.p`),
@@ -2363,7 +2747,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             properties.iter().map(|(n, _)| n.as_str()).collect();
 
         for label in labels {
-            if let Some(type_def) = self.catalog.resolved_node_type(label) {
+            if let Some(type_def) = self.node_type(label) {
                 // Check that all NOT NULL properties are present
                 for typed_prop in &type_def.properties {
                     if !typed_prop.nullable
@@ -2396,17 +2780,18 @@ impl ConstraintValidator for CatalogConstraintValidator {
                             }
                         }
                         TypeConstraint::Check { name, expression } => {
-                            match check_eval::evaluate_check(expression, properties) {
+                            let constraint_name = name.as_deref().unwrap_or("unnamed");
+                            match self.catalog.evaluate_check(expression, properties) {
                                 Ok(true) => {}
                                 Ok(false) => {
-                                    let constraint_name = name.as_deref().unwrap_or("unnamed");
                                     return Err(OperatorError::ConstraintViolation(format!(
                                         "CHECK constraint '{constraint_name}' violated on :{label}"
                                     )));
                                 }
                                 Err(err) => {
                                     return Err(OperatorError::ConstraintViolation(format!(
-                                        "CHECK constraint evaluation error: {err}"
+                                        "CHECK constraint '{constraint_name}' on :{label} \
+                                         cannot be evaluated: {err}"
                                     )));
                                 }
                             }
@@ -2430,7 +2815,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             return Ok(());
         }
         for label in labels {
-            if let Some(type_def) = self.catalog.resolved_node_type(label) {
+            if let Some(type_def) = self.node_type(label) {
                 for constraint in &type_def.constraints {
                     // A constraint on several properties holds for the
                     // combination of values: see `check_unique_node`.
@@ -2474,7 +2859,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 .filter(|value| !value.is_null())
         };
         for label in labels {
-            let Some(type_def) = self.catalog.resolved_node_type(label) else {
+            let Some(type_def) = self.node_type(label) else {
                 continue;
             };
             for constraint in &type_def.constraints {
@@ -2530,7 +2915,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 return Err(property_size_error(key, size, limit));
             }
         }
-        if let Some(type_def) = self.catalog.get_edge_type_def(edge_type)
+        if let Some(type_def) = self.edge_type(edge_type)
             && let Some(typed_prop) = type_def.properties.iter().find(|p| p.name == key)
         {
             // Check NOT NULL
@@ -2541,10 +2926,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             }
             // Check type compatibility
             if *value != Value::Null && !typed_prop.data_type.matches(value) {
-                return Err(OperatorError::ConstraintViolation(format!(
-                    "property '{key}' on :{edge_type} expects {:?}, got {:?}",
-                    typed_prop.data_type, value
-                )));
+                return Err(type_mismatch(key, edge_type, &typed_prop.data_type, value));
             }
         }
         Ok(())
@@ -2555,7 +2937,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         edge_type: &str,
         properties: &[(String, Value)],
     ) -> Result<(), OperatorError> {
-        if let Some(type_def) = self.catalog.get_edge_type_def(edge_type) {
+        if let Some(type_def) = self.edge_type(edge_type) {
             let prop_names: std::collections::HashSet<&str> =
                 properties.iter().map(|(n, _)| n.as_str()).collect();
 
@@ -2573,17 +2955,18 @@ impl ConstraintValidator for CatalogConstraintValidator {
 
             for constraint in &type_def.constraints {
                 if let TypeConstraint::Check { name, expression } = constraint {
-                    match check_eval::evaluate_check(expression, properties) {
+                    let constraint_name = name.as_deref().unwrap_or("unnamed");
+                    match self.catalog.evaluate_check(expression, properties) {
                         Ok(true) => {}
                         Ok(false) => {
-                            let constraint_name = name.as_deref().unwrap_or("unnamed");
                             return Err(OperatorError::ConstraintViolation(format!(
                                 "CHECK constraint '{constraint_name}' violated on :{edge_type}"
                             )));
                         }
                         Err(err) => {
                             return Err(OperatorError::ConstraintViolation(format!(
-                                "CHECK constraint evaluation error: {err}"
+                                "CHECK constraint '{constraint_name}' on :{edge_type} \
+                                 cannot be evaluated: {err}"
                             )));
                         }
                     }
@@ -2594,57 +2977,113 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn validate_node_labels_allowed(&self, labels: &[String]) -> Result<(), OperatorError> {
-        let Some(ref graph_name) = self.graph_name else {
+        let Some(closed) = &self.closed_type else {
             return Ok(());
         };
-        let Some(type_name) = self.catalog.get_graph_type_binding(graph_name) else {
+        let Some(node_types) = &closed.node_types else {
             return Ok(());
         };
-        let Some(gt) = self
-            .catalog
-            .schema()
-            .and_then(|s| s.get_graph_type(&type_name))
-        else {
-            return Ok(());
-        };
-        if !gt.open && !gt.allowed_node_types.is_empty() {
-            let allowed = labels
-                .iter()
-                .any(|l| gt.allowed_node_types.iter().any(|a| a == l));
-            if !allowed {
-                return Err(OperatorError::ConstraintViolation(format!(
-                    "node labels {labels:?} are not allowed by graph type '{}'",
-                    gt.name
-                )));
-            }
+        if labels.is_empty() {
+            return Err(OperatorError::ConstraintViolation(format!(
+                "a node without a label is not allowed by closed graph type '{}': \
+                 give it the label of one of its node types",
+                closed.name
+            )));
         }
-        Ok(())
+        match labels.iter().find(|label| !node_types.contains_key(*label)) {
+            Some(label) => Err(OperatorError::ConstraintViolation(format!(
+                "label '{label}' is not a node type of closed graph type '{}'",
+                closed.name
+            ))),
+            None => Ok(()),
+        }
     }
 
     fn validate_edge_type_allowed(&self, edge_type: &str) -> Result<(), OperatorError> {
-        let Some(ref graph_name) = self.graph_name else {
+        let Some(closed) = &self.closed_type else {
             return Ok(());
         };
-        let Some(type_name) = self.catalog.get_graph_type_binding(graph_name) else {
+        match &closed.edge_types {
+            Some(edge_types) if !edge_types.contains_key(edge_type) => {
+                Err(OperatorError::ConstraintViolation(format!(
+                    "edge type '{edge_type}' is not an edge type of closed graph type '{}'",
+                    closed.name
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_node_properties_declared(
+        &self,
+        labels: &[String],
+        properties: &[(String, Value)],
+    ) -> Result<(), OperatorError> {
+        let Some(closed) = &self.closed_type else {
             return Ok(());
         };
-        let Some(gt) = self
-            .catalog
-            .schema()
-            .and_then(|s| s.get_graph_type(&type_name))
+        let Some(node_types) = &closed.node_types else {
+            return Ok(());
+        };
+        // The properties the node's node types declare; `None` when one of
+        // them has no definition to check against.
+        let mut declared: Vec<&HashSet<String>> = Vec::new();
+        for label in labels {
+            match node_types.get(label) {
+                Some(Some(properties)) => declared.push(properties),
+                Some(None) => return Ok(()),
+                // A label the graph type does not declare is refused by
+                // `validate_node_labels_allowed`.
+                None => {}
+            }
+        }
+        if declared.is_empty() {
+            return Ok(());
+        }
+        let undeclared = properties
+            .iter()
+            .find(|(key, value)| !value.is_null() && !declared.iter().any(|d| d.contains(key)));
+        match undeclared {
+            Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+                "property '{key}' is not declared by node type {} of closed graph type '{}'",
+                labels
+                    .iter()
+                    .filter(|label| node_types.contains_key(*label))
+                    .map(|label| format!("'{label}'"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                closed.name
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn validate_edge_properties_declared(
+        &self,
+        edge_type: &str,
+        properties: &[(String, Value)],
+    ) -> Result<(), OperatorError> {
+        let Some(closed) = &self.closed_type else {
+            return Ok(());
+        };
+        let Some(Some(Some(declared))) = closed
+            .edge_types
+            .as_ref()
+            .map(|edge_types| edge_types.get(edge_type))
         else {
             return Ok(());
         };
-        if !gt.open && !gt.allowed_edge_types.is_empty() {
-            let allowed = gt.allowed_edge_types.iter().any(|a| a == edge_type);
-            if !allowed {
-                return Err(OperatorError::ConstraintViolation(format!(
-                    "edge type '{edge_type}' is not allowed by graph type '{}'",
-                    gt.name
-                )));
-            }
+        let undeclared = properties
+            .iter()
+            .find(|(key, value)| !value.is_null() && !declared.contains(key));
+        match undeclared {
+            Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+                "property '{key}' is not declared by edge type '{edge_type}' of closed graph \
+                 type '{}'",
+                closed.name
+            ))),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn validate_edge_endpoints(
@@ -2653,7 +3092,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         source_labels: &[String],
         target_labels: &[String],
     ) -> Result<(), OperatorError> {
-        let Some(type_def) = self.catalog.get_edge_type_def(edge_type) else {
+        let Some(type_def) = self.edge_type(edge_type) else {
             return Ok(());
         };
         if !type_def.source_node_types.is_empty() {
@@ -2684,22 +3123,45 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn constrains_edge_endpoints(&self, edge_type: &str) -> bool {
-        self.catalog
-            .get_edge_type_def(edge_type)
-            .is_some_and(|def| {
-                !def.source_node_types.is_empty() || !def.target_node_types.is_empty()
-            })
+        self.edge_type(edge_type).is_some_and(|def| {
+            !def.source_node_types.is_empty() || !def.target_node_types.is_empty()
+        })
     }
 
     fn constrains_node_property(&self, _key: &str, value: &Value) -> bool {
         // A vector index on (label, key) fixes a vector's size; the node
-        // types hold every other constraint.
-        matches!(value, Value::Vector(_)) || self.catalog.has_node_types()
+        // types and a closed graph type hold every other constraint.
+        matches!(value, Value::Vector(_))
+            || self.catalog.has_node_types()
+            || self
+                .closed_type
+                .as_ref()
+                .is_some_and(|closed| closed.node_types.is_some())
+    }
+
+    fn convert_node_property(&self, labels: &[String], key: &str, value: &Value) -> Option<Value> {
+        if value.is_null() || !self.catalog.has_node_types() {
+            return None;
+        }
+        labels.iter().find_map(|label| {
+            let type_def = self.node_type(label)?;
+            let typed = type_def.properties.iter().find(|p| p.name == key)?;
+            typed.data_type.convert(value)
+        })
+    }
+
+    fn convert_edge_property(&self, edge_type: &str, key: &str, value: &Value) -> Option<Value> {
+        if value.is_null() {
+            return None;
+        }
+        let type_def = self.edge_type(edge_type)?;
+        let typed = type_def.properties.iter().find(|p| p.name == key)?;
+        typed.data_type.convert(value)
     }
 
     fn inject_defaults(&self, labels: &[String], properties: &mut Vec<(String, Value)>) {
         for label in labels {
-            if let Some(type_def) = self.catalog.resolved_node_type(label) {
+            if let Some(type_def) = self.node_type(label) {
                 for typed_prop in &type_def.properties {
                     if let Some(ref default) = typed_prop.default_value {
                         let already_set = properties.iter().any(|(n, _)| n == &typed_prop.name);
@@ -2711,6 +3173,90 @@ impl ConstraintValidator for CatalogConstraintValidator {
             }
         }
     }
+
+    fn inject_edge_defaults(&self, edge_type: &str, properties: &mut Vec<(String, Value)>) {
+        let Some(type_def) = self.edge_type(edge_type) else {
+            return;
+        };
+        for typed_prop in &type_def.properties {
+            if let Some(default) = &typed_prop.default_value
+                && !properties.iter().any(|(name, _)| name == &typed_prop.name)
+            {
+                properties.push((typed_prop.name.clone(), default.clone()));
+            }
+        }
+    }
+}
+
+/// What a closed graph type lets a graph hold (ISO/IEC 39075:2024 4.13): the
+/// labels of its node types, its edge types, and the properties each of them
+/// declares.
+struct ClosedGraphType {
+    /// The graph type's name, for messages.
+    name: String,
+    /// The labels a node may have, each with the properties its node type
+    /// declares (`None` when the node type has no definition to check
+    /// against). `None` when the graph type lists no node types: it does not
+    /// restrict them.
+    node_types: Option<HashMap<String, Option<HashSet<String>>>>,
+    /// The edge types an edge may have, with their properties like
+    /// `node_types`.
+    edge_types: Option<HashMap<String, Option<HashSet<String>>>>,
+}
+
+impl ClosedGraphType {
+    /// The closed graph type the graph with storage key `graph` is bound to;
+    /// `None` for a graph without one, or bound to an open graph type.
+    fn of_graph(catalog: &Catalog, graph: &str) -> Option<Self> {
+        let type_name = catalog.get_graph_type_binding(graph)?;
+        let def = catalog.schema()?.get_graph_type(&type_name)?;
+        if def.open {
+            return None;
+        }
+        let declared = |properties: &[TypedProperty]| -> HashSet<String> {
+            properties.iter().map(|p| p.name.clone()).collect()
+        };
+        let node_types = (!def.allowed_node_types.is_empty()).then(|| {
+            let mut labels = HashMap::new();
+            for name in &def.allowed_node_types {
+                // A node type of a graph type in a schema is named
+                // `schema/Type`; its nodes carry the label `Type`.
+                let resolved = catalog.resolved_node_type(name);
+                let properties = resolved.as_ref().map(|t| declared(&t.properties));
+                if let Some(node_type) = &resolved {
+                    for key_label in &node_type.key_labels {
+                        labels
+                            .entry(key_label.clone())
+                            .or_insert_with(|| properties.clone());
+                    }
+                }
+                labels.insert(unqualified(name).to_string(), properties);
+            }
+            labels
+        });
+        let edge_types = (!def.allowed_edge_types.is_empty()).then(|| {
+            def.allowed_edge_types
+                .iter()
+                .map(|name| {
+                    let properties = catalog
+                        .get_edge_type_def(name)
+                        .map(|t| declared(&t.properties));
+                    (unqualified(name).to_string(), properties)
+                })
+                .collect()
+        });
+        Some(Self {
+            name: def.name,
+            node_types,
+            edge_types,
+        })
+    }
+}
+
+/// A type name without the schema a graph type in a schema prefixes it with
+/// (`schema/Type`).
+fn unqualified(name: &str) -> &str {
+    name.rsplit_once('/').map_or(name, |(_, name)| name)
 }
 
 /// The error for a property value over the size limit.
@@ -2733,6 +3279,44 @@ fn property_size_error(key: &str, size: usize, limit: usize) -> OperatorError {
 mod tests {
     use super::*;
     use std::thread;
+
+    /// A graph type created under the name of a dropped one types no graph:
+    /// the binding the drop left goes, while the other bindings stay.
+    #[test]
+    fn a_new_graph_type_takes_over_no_binding() {
+        let catalog = Catalog::new();
+        let graph_type = |name: &str| GraphTypeDefinition {
+            name: name.to_string(),
+            allowed_node_types: vec!["City".to_string()],
+            allowed_edge_types: Vec::new(),
+            open: false,
+        };
+        catalog.register_graph_type(graph_type("atlas")).unwrap();
+        catalog.register_graph_type(graph_type("globe")).unwrap();
+        catalog
+            .bind_graph_type("europe", "atlas".to_string())
+            .unwrap();
+        catalog
+            .bind_graph_type("world", "globe".to_string())
+            .unwrap();
+
+        catalog.drop_graph_type("atlas").unwrap();
+        catalog.register_graph_type(graph_type("atlas")).unwrap();
+        assert_eq!(catalog.get_graph_type_binding("europe"), None);
+        assert_eq!(
+            catalog.all_graph_type_bindings(),
+            [("world".to_string(), "globe".to_string())]
+        );
+        // A graph type that already exists is not registered again, and
+        // keeps its graphs.
+        catalog
+            .register_graph_type(graph_type("globe"))
+            .unwrap_err();
+        assert_eq!(
+            catalog.get_graph_type_binding("world").as_deref(),
+            Some("globe")
+        );
+    }
 
     /// Dropping one of two named constraints on a property removes only its
     /// own type constraint, and keeps the unique and required markers that
@@ -3328,5 +3912,212 @@ mod tests {
             CatalogError::LabelNotFound("X".to_string()),
             CatalogError::LabelNotFound("Y".to_string())
         );
+    }
+
+    /// `SHOW` prints a property type with `Display` and WAL replay reads the
+    /// statement's spelling with `from_type_name`: every type, nested in
+    /// lists too, reads back as itself (#569).
+    #[test]
+    fn every_property_type_reads_back_from_its_name() {
+        use PropertyDataType as T;
+
+        let list = |element: T| T::ListTyped(Box::new(element));
+        let types = [
+            T::String,
+            T::Int64,
+            T::Float64,
+            T::Bool,
+            T::Date,
+            T::Time,
+            T::Timestamp,
+            T::Duration,
+            T::List,
+            list(T::Int64),
+            T::Map,
+            T::Bytes,
+            T::Node,
+            T::Edge,
+            T::Any,
+            T::ZonedDatetime,
+            T::LocalDatetime,
+            list(T::ZonedDatetime),
+            list(list(T::LocalDatetime)),
+        ];
+        for data_type in types {
+            let name = data_type.to_string();
+            assert_eq!(T::from_type_name(&name), Ok(data_type.clone()), "{name}");
+            assert_eq!(
+                T::from_type_name(&name.to_lowercase()),
+                Ok(data_type),
+                "{name} in lowercase"
+            );
+        }
+        assert_eq!(T::ZonedDatetime.to_string(), "ZONED DATETIME");
+        assert_eq!(T::LocalDatetime.to_string(), "LOCAL DATETIME");
+        for spelling in ["zoned_datetime", "ZonedDateTime"] {
+            assert_eq!(
+                T::from_type_name(spelling),
+                Ok(T::ZonedDatetime),
+                "{spelling}"
+            );
+        }
+        for spelling in ["local_datetime", "LocalDateTime"] {
+            assert_eq!(
+                T::from_type_name(spelling),
+                Ok(T::LocalDatetime),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            T::from_type_name("DATETIME"),
+            Ok(T::Timestamp),
+            "a plain DATETIME stays a TIMESTAMP"
+        );
+    }
+
+    /// Type DDL takes the names of `PROPERTY_TYPE_NAMES` (grafeo-adapters)
+    /// and refuses every other one. The catalog reads each of them as a type
+    /// of the kind the parsers give it, so a `DEFAULT` a parser lets through
+    /// is a value of the type, and `ANY` only where the parsers say `ANY`
+    /// (an unknown name reads as `ANY` too); every name `SHOW` lists is one
+    /// of them.
+    #[test]
+    fn type_ddl_names_are_the_catalog_types() {
+        use PropertyDataType as T;
+        use grafeo_adapters::query::schema::{
+            PROPERTY_TYPE_NAMES, PropertyTypeKind as K, property_type_kind,
+        };
+
+        for (name, kind) in PROPERTY_TYPE_NAMES {
+            let data_type = T::from_type_name(name).unwrap();
+            let read_kind = match data_type {
+                T::String => K::String,
+                T::Int64 => K::Integer,
+                T::Float64 => K::Float,
+                T::Bool => K::Boolean,
+                T::Any => K::Any,
+                _ => K::Other,
+            };
+            assert_eq!(*kind, read_kind, "{name} reads as {data_type}");
+        }
+        let listed = [
+            T::String,
+            T::Int64,
+            T::Float64,
+            T::Bool,
+            T::Date,
+            T::Time,
+            T::Timestamp,
+            T::Duration,
+            T::List,
+            T::Map,
+            T::Bytes,
+            T::Node,
+            T::Edge,
+            T::Any,
+            T::ZonedDatetime,
+            T::LocalDatetime,
+        ];
+        for data_type in listed {
+            assert!(
+                property_type_kind(&data_type.to_string()).is_some(),
+                "type DDL refuses {data_type}, which SHOW lists"
+            );
+        }
+    }
+
+    /// A type name nests at most 128 `LIST<...>` levels; a deeper one, however
+    /// deep, is refused with the limit named, without a stack overflow (the
+    /// levels are counted, not recursed into).
+    #[test]
+    fn property_type_names_nest_at_most_128_lists() {
+        let nested = |levels: usize| {
+            format!(
+                "{}local datetime{}",
+                "list<".repeat(levels),
+                ">".repeat(levels)
+            )
+        };
+        let mut expected = PropertyDataType::LocalDatetime;
+        for _ in 0..128 {
+            expected = PropertyDataType::ListTyped(Box::new(expected));
+        }
+        assert_eq!(PropertyDataType::MAX_LIST_DEPTH, 128);
+        assert_eq!(PropertyDataType::from_type_name(&nested(128)), Ok(expected));
+
+        for levels in [129, 100_000] {
+            let error = PropertyDataType::from_type_name(&nested(levels)).unwrap_err();
+            assert_eq!(
+                error,
+                CatalogError::PropertyTypeTooDeep { limit: 128 },
+                "{levels} levels"
+            );
+            assert_eq!(
+                error.to_string(),
+                "A property type nests at most 128 LIST<...> levels"
+            );
+        }
+    }
+
+    /// `ZONED DATETIME` holds only zoned datetimes and `LOCAL DATETIME` only
+    /// local ones (`Value::Timestamp`); both take a null, as every type does.
+    #[test]
+    fn zoned_and_local_datetimes_match_only_their_own_values() {
+        use grafeo_common::types::{Timestamp, ZonedDatetime};
+
+        let zoned =
+            Value::ZonedDatetime(ZonedDatetime::parse("2026-10-05T10:30:00+02:00").unwrap());
+        let local = Value::Timestamp(Timestamp::from_secs(1_791_000_000));
+        let zoned_type = PropertyDataType::ZonedDatetime;
+        let local_type = PropertyDataType::LocalDatetime;
+
+        assert!(zoned_type.matches(&zoned));
+        assert!(!zoned_type.matches(&local), "a local datetime is not zoned");
+        assert!(!zoned_type.matches(&Value::from("2026-10-05T10:30:00+02:00")));
+        assert!(local_type.matches(&local));
+        assert!(!local_type.matches(&zoned), "a zoned datetime is not local");
+        assert!(!local_type.matches(&Value::Int64(88)));
+        assert!(zoned_type.matches(&Value::Null) && local_type.matches(&Value::Null));
+
+        let zoned_list = PropertyDataType::ListTyped(Box::new(zoned_type));
+        assert!(zoned_list.matches(&Value::List(vec![zoned.clone(), Value::Null].into())));
+        assert!(!zoned_list.matches(&Value::List(vec![zoned, local].into())));
+    }
+
+    /// `MAP` (and its spelling `RECORD`) holds every map, the empty one and
+    /// nested ones included, and nothing else; a `LIST<MAP>` holds lists of
+    /// maps.
+    #[test]
+    fn a_map_type_matches_maps_only() {
+        use grafeo_common::types::PropertyKey;
+        use std::collections::BTreeMap;
+
+        let map = |entries: &[(&str, Value)]| {
+            Value::Map(std::sync::Arc::new(
+                entries
+                    .iter()
+                    .map(|(key, value)| (PropertyKey::from(*key), value.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+            ))
+        };
+        let settings = map(&[("mode", Value::from("fast")), ("level", Value::Int64(3))]);
+        let nested = map(&[("inner", settings.clone())]);
+        for name in ["MAP", "map", "RECORD"] {
+            let map_type = PropertyDataType::from_type_name(name).unwrap();
+            assert_eq!(map_type, PropertyDataType::Map, "{name}");
+            for value in [&settings, &nested, &map(&[]), &Value::Null] {
+                assert!(map_type.matches(value), "{name} takes {value:?}");
+            }
+            for value in [
+                Value::from("fast"),
+                Value::Int64(19),
+                Value::List(vec![settings.clone()].into()),
+            ] {
+                assert!(!map_type.matches(&value), "{name} refuses {value:?}");
+            }
+        }
+        let maps = PropertyDataType::from_type_name("LIST<MAP>").unwrap();
+        assert!(maps.matches(&Value::List(vec![settings.clone(), nested].into())));
+        assert!(!maps.matches(&Value::List(vec![settings, Value::Int64(88)].into())));
     }
 }

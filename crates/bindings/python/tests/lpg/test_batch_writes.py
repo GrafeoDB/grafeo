@@ -37,7 +37,7 @@ def test_batch_edges_carry_their_type_and_properties():
 def test_a_failing_batch_of_edges_creates_none():
     db = GrafeoDB()
     alix, gus, _ = people(db)
-    with pytest.raises(Exception, match="does not exist"):
+    with pytest.raises(Exception, match="Node not found: 999"):
         db.batch_create_edges([(alix, gus, "KNOWS"), (alix, 999, "KNOWS")])
     assert values(db, "MATCH ()-[r]->() RETURN count(r)") == [[0]]
     with pytest.raises(TypeError):

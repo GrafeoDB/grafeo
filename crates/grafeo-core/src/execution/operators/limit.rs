@@ -10,7 +10,9 @@ use super::{Operator, OperatorResult};
 /// Limit operator.
 ///
 /// Returns at most `limit` rows from the input. A chunk it cuts short keeps
-/// its columns and values as they are.
+/// its columns and values as they are. Once the limit is reached it reads no
+/// more of its input, unless the input writes
+/// ([`running_its_input_to_the_end`](Self::running_its_input_to_the_end)).
 pub struct LimitOperator {
     /// Child operator.
     child: Box<dyn Operator>,
@@ -18,6 +20,10 @@ pub struct LimitOperator {
     limit: usize,
     /// Number of rows returned so far.
     returned: usize,
+    /// Whether the child runs to its end whatever rows the limit lets through.
+    runs_input_to_the_end: bool,
+    /// Whether the child has returned its last chunk.
+    input_done: bool,
 }
 
 impl LimitOperator {
@@ -27,18 +33,49 @@ impl LimitOperator {
             child,
             limit,
             returned: 0,
+            runs_input_to_the_end: false,
+            input_done: false,
         }
+    }
+
+    /// Runs the input to its end however many rows the limit lets through,
+    /// for an input that writes: the limit cuts the rows, not the write. A
+    /// `LIMIT 0` (or a statement without a result) then still runs the write,
+    /// as soon as its first row is asked for, and a limit reached reads the
+    /// rest of the input before its last row comes out.
+    #[must_use]
+    pub fn running_its_input_to_the_end(mut self) -> Self {
+        self.runs_input_to_the_end = true;
+        self
+    }
+
+    /// Whether this limit runs its input to its end (see
+    /// [`running_its_input_to_the_end`](Self::running_its_input_to_the_end)).
+    #[must_use]
+    pub fn runs_input_to_the_end(&self) -> bool {
+        self.runs_input_to_the_end
     }
 
     /// Decomposes this operator for push-based conversion.
     pub fn into_parts(self) -> (Box<dyn Operator>, usize) {
         (self.child, self.limit)
     }
+
+    /// Reads the rest of the input once the limit is reached, when it runs
+    /// to its end.
+    fn finish_input(&mut self) -> Result<(), super::OperatorError> {
+        if self.runs_input_to_the_end && !self.input_done {
+            while self.child.next()?.is_some() {}
+            self.input_done = true;
+        }
+        Ok(())
+    }
 }
 
 impl Operator for LimitOperator {
     fn next(&mut self) -> OperatorResult {
         if self.returned >= self.limit {
+            self.finish_input()?;
             return Ok(None);
         }
 
@@ -46,6 +83,7 @@ impl Operator for LimitOperator {
 
         loop {
             let Some(chunk) = self.child.next()? else {
+                self.input_done = true;
                 return Ok(None);
             };
 
@@ -54,23 +92,29 @@ impl Operator for LimitOperator {
                 continue;
             }
 
-            if row_count <= remaining {
+            if row_count < remaining {
                 // Return entire chunk
                 self.returned += row_count;
                 return Ok(Some(chunk));
             }
 
-            // The first rows of the chunk, copied as they are (a column
-            // rebuilt by a declared type would turn values of another type
-            // into that type's default).
+            // The limit is reached: the chunk, or its first rows copied as
+            // they are (a column rebuilt by a declared type would turn values
+            // of another type into that type's default).
             self.returned += remaining;
-            return Ok(Some(chunk.slice(0, remaining)));
+            self.finish_input()?;
+            return Ok(Some(if row_count == remaining {
+                chunk
+            } else {
+                chunk.slice(0, remaining)
+            }));
         }
     }
 
     fn reset(&mut self) {
         self.child.reset();
         self.returned = 0;
+        self.input_done = false;
     }
 
     fn name(&self) -> &'static str {
@@ -509,5 +553,94 @@ mod tests {
         let (values, types) = output_of(LimitSkipOperator::new(child(), 1, 2));
         assert_eq!(values, [Value::Int64(2), Value::Int64(3)]);
         assert_eq!(types, [LogicalType::Node]);
+    }
+
+    /// Three chunks of one row each (1, 2 and 3), built again after a reset:
+    /// an input that writes one row per chunk it returns.
+    struct ThreeRows {
+        position: i64,
+    }
+
+    impl Operator for ThreeRows {
+        fn next(&mut self) -> OperatorResult {
+            if self.position == 3 {
+                return Ok(None);
+            }
+            self.position += 1;
+            Ok(Some(create_numbered_chunk(&[self.position])))
+        }
+
+        fn reset(&mut self) {
+            self.position = 0;
+        }
+
+        fn name(&self) -> &'static str {
+            "ThreeRows"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// The values `operator` returns until it ends.
+    fn values_of(operator: &mut LimitOperator) -> Vec<i64> {
+        let mut values = Vec::new();
+        while let Some(chunk) = operator.next().unwrap() {
+            for row in chunk.selected_indices() {
+                values.push(chunk.column(0).unwrap().get_int64(row).unwrap());
+            }
+        }
+        values
+    }
+
+    /// How many rows of its input `operator` read.
+    fn rows_read(operator: LimitOperator) -> i64 {
+        let (child, _) = operator.into_parts();
+        child
+            .into_any()
+            .downcast::<ThreeRows>()
+            .expect("the child is ThreeRows")
+            .position
+    }
+
+    /// The values a limit returns, and how many rows of its input it read.
+    fn limited(limit: usize, runs_to_the_end: bool) -> (Vec<i64>, i64) {
+        let mut operator = LimitOperator::new(Box::new(ThreeRows { position: 0 }), limit);
+        if runs_to_the_end {
+            operator = operator.running_its_input_to_the_end();
+        }
+        let values = values_of(&mut operator);
+        (values, rows_read(operator))
+    }
+
+    /// A limit that runs its input to the end reads all of it, a `LIMIT 0`
+    /// included, and returns the same rows as one that does not.
+    #[test]
+    fn a_limit_running_its_input_to_the_end_reads_all_of_it() {
+        assert_eq!(limited(0, false), (vec![], 0), "a LIMIT 0 reads nothing");
+        assert_eq!(limited(0, true), (vec![], 3));
+        assert_eq!(limited(1, false), (vec![1], 1));
+        assert_eq!(limited(1, true), (vec![1], 3));
+        assert_eq!(limited(3, true), (vec![1, 2, 3], 3));
+        assert_eq!(limited(19, true), (vec![1, 2, 3], 3));
+    }
+
+    /// The input is read to its end before the last row comes out, so a
+    /// reader that stops at the limit leaves no write undone; after a reset
+    /// it is read to its end again.
+    #[test]
+    fn a_limit_running_its_input_to_the_end_finishes_it_with_its_last_row() {
+        let mut operator = LimitOperator::new(Box::new(ThreeRows { position: 0 }), 1)
+            .running_its_input_to_the_end();
+        assert!(operator.runs_input_to_the_end());
+        assert_eq!(operator.next().unwrap().map(|c| c.row_count()), Some(1));
+        operator.reset();
+        assert_eq!(values_of(&mut operator), [1]);
+        assert_eq!(
+            rows_read(operator),
+            3,
+            "read to the end again after the reset"
+        );
     }
 }

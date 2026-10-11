@@ -76,6 +76,55 @@ fn tier_to_str(tier: grafeo_common::memory::buffer::StorageTier) -> &'static str
     }
 }
 
+/// Converts the PyArrow `table` of `nodes_df()` or `edges_df()` to a pandas
+/// DataFrame (with `pd`, the pandas module) whose nested columns hold the
+/// Python values the fallback without pyarrow builds: lists (the `_labels`
+/// of nodes, list and vector properties) and dicts (map and duration
+/// properties). pyarrow's `to_pandas()` makes a list a numpy array, so the
+/// type of a value depended on whether pyarrow is installed.
+#[cfg(feature = "arrow-export")]
+fn arrow_table_to_pandas<'py>(
+    py: Python<'py>,
+    pd: &Bound<'py, PyAny>,
+    table: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let types = py.import("pyarrow")?.getattr("types")?;
+    let df = table.call_method0("to_pandas")?;
+    let index = df.getattr("index")?;
+    // The new columns replace the old ones through `assign`: a `df[name] =`
+    // from here looks like a chained assignment to pandas 3, which warns.
+    let nested = pyo3::types::PyDict::new(py);
+    for field in table.getattr("schema")?.try_iter()? {
+        let field = field?;
+        let data_type = field.getattr("type")?;
+        let mut is_nested = false;
+        for check in [
+            "is_list",
+            "is_large_list",
+            "is_fixed_size_list",
+            "is_struct",
+            "is_map",
+        ] {
+            is_nested |= types.call_method1(check, (&data_type,))?.is_truthy()?;
+        }
+        if is_nested {
+            let name = field.getattr("name")?;
+            let values = table
+                .call_method1("column", (&name,))?
+                .call_method0("to_pylist")?;
+            let options = pyo3::types::PyDict::new(py);
+            options.set_item("dtype", "object")?;
+            options.set_item("index", &index)?;
+            nested.set_item(name, pd.call_method("Series", (values,), Some(&options))?)?;
+        }
+    }
+    if nested.is_empty() {
+        Ok(df)
+    } else {
+        df.call_method("assign", (), Some(&nested))
+    }
+}
+
 #[cfg(feature = "algos")]
 use crate::bridges::{PyAlgorithms, PyNetworkXAdapter, PySolvORAdapter};
 use crate::error::PyGrafeoError;
@@ -1315,7 +1364,7 @@ impl PyGrafeoDB {
             ef_construction,
             quantization,
         )
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        .map_err(|e| PyGrafeoError::from(e).into())
     }
 
     /// Drop a vector index for the given label and property.
@@ -1358,7 +1407,7 @@ impl PyGrafeoDB {
     fn rebuild_vector_index(&self, label: &str, property: &str) -> PyResult<()> {
         let db = self.inner.read();
         db.rebuild_vector_index(label, property)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| PyGrafeoError::from(e).into())
     }
 
     /// Search for the k nearest neighbors of a query vector.
@@ -1399,7 +1448,7 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let results = db
             .vector_search(label, property, &query, k, ef, filter_map.as_ref())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|(id, dist)| (id.as_u64(), dist))
@@ -1509,14 +1558,13 @@ impl PyGrafeoDB {
         dst_field: &str,
         replace: bool,
     ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let options = grafeo_engine::database::EdgeUpsertOptions {
-            key: key.to_string(),
-            endpoint_key: endpoint_key.to_string(),
-            endpoint_labels: endpoint_labels.unwrap_or_default(),
-            src_field: src_field.to_string(),
-            dst_field: dst_field.to_string(),
-            replace,
-        };
+        let options = grafeo_engine::database::EdgeUpsertOptions::new()
+            .with_key(key)
+            .with_endpoint_key(endpoint_key)
+            .with_endpoint_labels(endpoint_labels.unwrap_or_default())
+            .with_src_field(src_field)
+            .with_dst_field(dst_field)
+            .with_replace(replace);
         let db = self.inner.read();
         crate::direct::upsert_edges(py, &*db, edge_type, rows, &options)
     }
@@ -1615,7 +1663,7 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let results = db
             .batch_vector_search(label, property, &queries, k, ef, filter_map.as_ref())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|inner| {
@@ -1678,7 +1726,7 @@ impl PyGrafeoDB {
                 ef,
                 filter_map.as_ref(),
             )
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|(id, dist)| (id.as_u64(), dist))
@@ -1692,20 +1740,51 @@ impl PyGrafeoDB {
     /// Indexes all existing nodes with the given label and text property.
     /// The index is automatically kept in sync as nodes are created,
     /// updated, or deleted. You do NOT need to call rebuild_text_index()
-    /// after normal write operations.
+    /// after normal write operations. The database keeps the options with
+    /// the index: reopening and rebuilding it keep them.
     ///
     /// Args:
     ///     label: Node label to index
     ///     property: Text property to index
+    ///     k1: BM25 term frequency saturation, a number of at least 0
+    ///         (default: 1.2)
+    ///     b: BM25 length normalization, from 0 to 1 (default: 0.75)
+    ///     tokenizer: "simple" (default: terms of at least 2 bytes without
+    ///         common English words), "standard" (every word, for languages
+    ///         that separate words) or "cjk_bigram" (also pairs of Chinese,
+    ///         Japanese and Korean characters)
+    ///     stop_words: Words to leave out of documents and queries, in place
+    ///         of the tokenizer's own (an empty list leaves none out)
+    ///
+    /// Raises:
+    ///     grafeo.GrafeoError: For an unknown tokenizer, or k1 or b out of
+    ///         range.
     ///
     /// Example:
     ///     db.create_node(['Article'], {'title': 'Graph Databases'})
     ///     db.create_text_index("Article", "title")
+    ///     db.create_text_index("Note", "body", tokenizer="cjk_bigram", k1=1.5)
     #[cfg(feature = "text-index")]
-    fn create_text_index(&self, label: &str, property: &str) -> PyResult<()> {
+    #[pyo3(signature = (label, property, k1=None, b=None, tokenizer=None, stop_words=None))]
+    fn create_text_index(
+        &self,
+        label: &str,
+        property: &str,
+        k1: Option<f64>,
+        b: Option<f64>,
+        tokenizer: Option<&str>,
+        stop_words: Option<Vec<String>>,
+    ) -> PyResult<()> {
+        let options = grafeo_core::index::text::TextIndexOptions::from_parts(
+            k1,
+            b,
+            tokenizer,
+            stop_words.as_deref(),
+        )
+        .map_err(PyGrafeoError::from)?;
         let db = self.inner.read();
-        db.create_text_index(label, property)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        db.create_text_index_with(label, property, options)
+            .map_err(|e| PyGrafeoError::from(e).into())
     }
 
     /// Drop a text index for the given label and property.
@@ -1736,7 +1815,7 @@ impl PyGrafeoDB {
     fn rebuild_text_index(&self, label: &str, property: &str) -> PyResult<()> {
         let db = self.inner.read();
         db.rebuild_text_index(label, property)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| PyGrafeoError::from(e).into())
     }
 
     /// Search a text index using BM25 scoring.
@@ -1751,6 +1830,10 @@ impl PyGrafeoDB {
     ///     property: Property that was indexed
     ///     query: Text query string
     ///     k: Number of results to return
+    ///     filters: Property filters, as for vector_search(): equality
+    ///         ({"city": "Berlin"}) and operators ({"rank": {"$gt": 19}}).
+    ///         Only matching nodes are searched, so up to k of them come
+    ///         back, scored as without the filters.
     ///
     /// Returns:
     ///     List of (node_id, score) tuples sorted by score descending.
@@ -1760,17 +1843,20 @@ impl PyGrafeoDB {
     ///     for node_id, score in results:
     ///         print(f"Node {node_id}: score={score:.4f}")
     #[cfg(feature = "text-index")]
+    #[pyo3(signature = (label, property, query, k, filters=None))]
     fn text_search(
         &self,
         label: &str,
         property: &str,
         query: &str,
         k: usize,
+        filters: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Vec<(u64, f64)>> {
+        let filter_map = Self::convert_filters(filters)?;
         let db = self.inner.read();
         let results = db
-            .text_search(label, property, query, k)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .text_search(label, property, query, k, filter_map.as_ref())
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|(id, score)| (id.as_u64(), score))
@@ -1793,6 +1879,11 @@ impl PyGrafeoDB {
     ///     query_vector: Vector query for similarity search (optional)
     ///     fusion: Fusion method - "rrf" (default) or "weighted"
     ///     weights: Weights for weighted fusion [text_weight, vector_weight]
+    ///     rrf_k: Smoothing constant for RRF (default: 60)
+    ///     filters: Property filters, as for vector_search(): equality
+    ///         ({"city": "Berlin"}) and operators ({"rank": {"$gt": 19}}).
+    ///         Both the text and the vector search keep only matching
+    ///         nodes before fusion, so up to k matching nodes come back.
     ///
     /// Returns:
     ///     List of (node_id, score) tuples sorted by fused score
@@ -1803,9 +1894,10 @@ impl PyGrafeoDB {
     /// Example:
     ///     results = db.hybrid_search("Article", "title", "embedding",
     ///                                "graph databases", k=10,
-    ///                                query_vector=[1.0, 0.0, 0.0])
+    ///                                query_vector=[1.0, 0.0, 0.0],
+    ///                                filters={"city": "Berlin"})
     #[cfg(feature = "hybrid-search")]
-    #[pyo3(signature = (label, text_property, vector_property, query_text, k, query_vector=None, fusion=None, weights=None, rrf_k=None))]
+    #[pyo3(signature = (label, text_property, vector_property, query_text, k, query_vector=None, fusion=None, weights=None, rrf_k=None, filters=None))]
     #[allow(clippy::too_many_arguments)]
     fn hybrid_search(
         &self,
@@ -1818,7 +1910,9 @@ impl PyGrafeoDB {
         fusion: Option<&str>,
         weights: Option<Vec<f64>>,
         rrf_k: Option<usize>,
+        filters: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Vec<(u64, f64)>> {
+        let filter_map = Self::convert_filters(filters)?;
         let fusion_method = match fusion {
             Some("weighted") => {
                 let w = weights.unwrap_or_else(|| vec![0.5, 0.5]);
@@ -1840,8 +1934,9 @@ impl PyGrafeoDB {
                 query_vector.as_deref(),
                 k,
                 fusion_method,
+                filter_map.as_ref(),
             )
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|(id, score)| (id.as_u64(), score))
@@ -1937,7 +2032,7 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let results = db
             .vector_search_text(label, property, model_name, query_text, k, ef)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(PyGrafeoError::from)?;
         Ok(results
             .into_iter()
             .map(|(id, dist)| (id.as_u64(), dist))
@@ -2572,25 +2667,34 @@ impl PyGrafeoDB {
         self.inner.read().clear_plan_cache();
     }
 
-    /// Converts the database to a read-only CompactStore for faster queries.
+    /// Compacts the database: writes a checkpoint of a persistent database
+    /// and drops the old versions no open transaction can see any more. The
+    /// database keeps one store (``compact()`` no longer builds a separate
+    /// columnar one), and every write after it is logged as before.
     ///
-    /// Takes a snapshot of all nodes and edges, builds a columnar store with
-    /// CSR adjacency, and switches to read-only mode. The original store is
-    /// dropped to free memory, giving ~60x memory reduction and 100x+
-    /// traversal speedup for read-only workloads.
+    /// Returns:
+    ///     dict: What it did: ``checkpointed`` (bool), ``versions_collected``
+    ///     (int) and ``duration_ms`` (int).
     ///
-    /// After calling this, write queries will fail.
+    /// Raises:
+    ///     GrafeoError: If the checkpoint fails, or after ``close()``.
     ///
     /// Example:
     ///     db = GrafeoDB()
     ///     db.execute("INSERT (:Person {name: 'Alix', age: 30})")
     ///     db.compact()
+    ///     db.execute("INSERT (:Person {name: 'Gus', age: 25})")
     ///     result = db.execute("MATCH (p:Person) RETURN p.name")
-    #[cfg(feature = "compact-store")]
-    fn compact(&self) -> PyResult<()> {
-        let mut db = self.inner.write();
-        db.compact().map_err(PyGrafeoError::from)?;
-        Ok(())
+    fn compact(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let report = {
+            let mut db = self.inner.write();
+            db.compact().map_err(PyGrafeoError::from)?
+        };
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("checkpointed", report.checkpointed)?;
+        dict.set_item("versions_collected", report.versions_collected)?;
+        dict.set_item("duration_ms", report.duration_ms)?;
+        Ok(dict.into())
     }
 
     /// Close the database.
@@ -2705,7 +2809,7 @@ impl PyGrafeoDB {
     /// Example:
     /// ```python
     /// df = db.nodes_to_polars()
-    /// print(df.filter(pl.col("labels").list.contains("Person")))
+    /// print(df.filter(pl.col("_labels").list.contains("Person")))
     /// ```
     #[cfg(feature = "arrow-export")]
     #[pyo3(signature = ())]
@@ -2719,7 +2823,7 @@ impl PyGrafeoDB {
         let ipc_bytes = self.nodes_ipc_bytes()?;
         let py_bytes = pyo3::types::PyBytes::new(py, &ipc_bytes);
         let buf = io.call_method1("BytesIO", (py_bytes,))?;
-        let df = pl.call_method1("read_ipc", (buf,))?;
+        let df = pl.call_method1("read_ipc_stream", (buf,))?;
         Ok(df.unbind())
     }
 
@@ -2745,30 +2849,35 @@ impl PyGrafeoDB {
 
     /// Export all nodes as a pandas DataFrame.
     ///
-    /// Columns: `id` (int), `labels` (list[str]), plus one column per unique
+    /// Columns: `_id` (int), `_labels` (list[str]), plus one column per unique
     /// property key found across all nodes. Missing properties are `None`.
+    /// Lists (the labels, list and vector properties) are Python lists, maps
+    /// and durations dicts, with or without pyarrow installed; with pyarrow a
+    /// key a map lacks is `None`.
     ///
     /// Requires pandas (`uv add pandas`).
     ///
     /// Example:
     /// ```python
     /// df = db.nodes_df()
-    /// print(df[df["labels"].apply(lambda l: "Person" in l)])
+    /// print(df[df["_labels"].apply(lambda l: "Person" in l)])
     /// ```
     #[pyo3(signature = ())]
     fn nodes_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // Fast path: use Arrow IPC when pyarrow is available
-        #[cfg(feature = "arrow-export")]
-        if py.import("pyarrow").is_ok() {
-            return self.nodes_to_pandas(py);
-        }
-
-        // Slow fallback: element-by-element via PyO3
         let pd = py.import("pandas").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "pandas is required for nodes_df(). Install it with: uv add pandas",
             )
         })?;
+
+        // Fast path: use Arrow IPC when pyarrow is available
+        #[cfg(feature = "arrow-export")]
+        if py.import("pyarrow").is_ok() {
+            let table = self.nodes_to_arrow(py)?;
+            return Ok(arrow_table_to_pandas(py, &pd, table.bind(py))?.unbind());
+        }
+
+        // Slow fallback: element-by-element via PyO3
 
         let db = self.inner.read();
         let store = db.store();
@@ -2879,7 +2988,7 @@ impl PyGrafeoDB {
         let ipc_bytes = self.edges_ipc_bytes()?;
         let py_bytes = pyo3::types::PyBytes::new(py, &ipc_bytes);
         let buf = io.call_method1("BytesIO", (py_bytes,))?;
-        let df = pl.call_method1("read_ipc", (buf,))?;
+        let df = pl.call_method1("read_ipc_stream", (buf,))?;
         Ok(df.unbind())
     }
 
@@ -2898,6 +3007,9 @@ impl PyGrafeoDB {
     ///
     /// Columns: `_id` (int), `_source` (int), `_target` (int), `_type` (str),
     /// plus one column per unique property key. Missing properties are `None`.
+    /// Lists (list and vector properties) are Python lists, maps and
+    /// durations dicts, with or without pyarrow installed; with pyarrow a key
+    /// a map lacks is `None`.
     ///
     /// Requires pandas (`uv add pandas`).
     ///
@@ -2908,18 +3020,20 @@ impl PyGrafeoDB {
     /// ```
     #[pyo3(signature = ())]
     fn edges_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // Fast path: use Arrow IPC when pyarrow is available
-        #[cfg(feature = "arrow-export")]
-        if py.import("pyarrow").is_ok() {
-            return self.edges_to_pandas(py);
-        }
-
-        // Slow fallback: element-by-element via PyO3
         let pd = py.import("pandas").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "pandas is required for edges_df(). Install it with: uv add pandas",
             )
         })?;
+
+        // Fast path: use Arrow IPC when pyarrow is available
+        #[cfg(feature = "arrow-export")]
+        if py.import("pyarrow").is_ok() {
+            let table = self.edges_to_arrow(py)?;
+            return Ok(arrow_table_to_pandas(py, &pd, table.bind(py))?.unbind());
+        }
+
+        // Slow fallback: element-by-element via PyO3
 
         let db = self.inner.read();
         let store = db.store();

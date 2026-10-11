@@ -22,8 +22,10 @@ pub enum ErrorCategory {
     Storage,
     /// I/O error (file, network).
     Io,
-    /// Serialization/deserialization failure.
+    /// Serialization/deserialization failure of outside input.
     Serialization,
+    /// A file Grafeo wrote is damaged (error code `GRAFEO-S002`).
+    Corruption,
     /// Internal error (should not happen in normal operation).
     Internal,
     /// Catch-all for other database errors (not found, type mismatch, a
@@ -38,11 +40,16 @@ pub fn classify_error(err: &Error) -> ErrorCategory {
         Error::Query(_) => ErrorCategory::Query,
         Error::Transaction(TransactionError::DatabaseClosed) => ErrorCategory::DatabaseClosed,
         // Only a reopen helps, never a retry of the transaction.
-        Error::Transaction(TransactionError::IncompleteCommit) => ErrorCategory::Database,
+        Error::Transaction(
+            TransactionError::IncompleteCommit
+            | TransactionError::CommitOutcomeUnknown(_)
+            | TransactionError::LogUnavailable(_),
+        ) => ErrorCategory::Database,
         Error::Transaction(_) => ErrorCategory::Transaction,
         Error::Storage(_) => ErrorCategory::Storage,
         Error::Io(_) => ErrorCategory::Io,
         Error::Serialization(_) => ErrorCategory::Serialization,
+        Error::Corruption(_) => ErrorCategory::Corruption,
         Error::Internal(_) => ErrorCategory::Internal,
         _ => ErrorCategory::Database,
     }
@@ -91,6 +98,30 @@ mod tests {
         assert_eq!(err.error_code().as_str(), "GRAFEO-T008");
     }
 
+    /// A commit whose log write failed was rolled back: a transaction error,
+    /// which a retry can fix. An unknown outcome and a log that takes no more
+    /// writes need a reopen: database errors.
+    #[test]
+    fn classifies_the_commit_log_errors_by_what_helps() {
+        let err = Error::Transaction(TransactionError::LogWriteFailed("disk full".into()));
+        assert_eq!(classify_error(&err), ErrorCategory::Transaction);
+        assert_eq!(err.error_code().as_str(), "GRAFEO-T009");
+        for (err, code) in [
+            (
+                TransactionError::CommitOutcomeUnknown("fsync".into()),
+                "GRAFEO-T010",
+            ),
+            (
+                TransactionError::LogUnavailable("poisoned".into()),
+                "GRAFEO-T011",
+            ),
+        ] {
+            let err = Error::Transaction(err);
+            assert_eq!(classify_error(&err), ErrorCategory::Database, "{err}");
+            assert_eq!(err.error_code().as_str(), code);
+        }
+    }
+
     #[test]
     fn classifies_internal() {
         let err = Error::Internal("oops".into());
@@ -122,6 +153,8 @@ mod tests {
     fn classifies_serialization_error() {
         let err = Error::Serialization("bad bytes".into());
         assert_eq!(classify_error(&err), ErrorCategory::Serialization);
+        let err = Error::corruption("chunk checksum mismatch");
+        assert_eq!(classify_error(&err), ErrorCategory::Corruption);
     }
 
     #[test]

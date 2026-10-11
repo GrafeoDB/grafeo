@@ -2,25 +2,22 @@
 //!
 //! Generates arbitrary small LPG graphs, applies them to two fresh in-memory
 //! databases, compacts one, then asserts that a battery of GQL queries returns
-//! equivalent cardinalities and row shapes on both. Catches regressions in the
-//! live → [`LayeredStore`] (CompactStore base + LpgStore overlay) conversion
-//! path introduced in 0.5.31–0.5.32.
+//! equivalent cardinalities and row shapes on both. Catches regressions
+//! whenever `compact()` stores the data a different way than writes do.
 //!
 //! Content-equality (`sum(n.num)` etc.) and post-`compact()` write visibility
 //! are exercised by the sibling fix PRs for GrafeoDB/grafeo#301 and #302,
 //! which ship deterministic tests alongside the fix.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features "compact-store lpg gql" \
+//! cargo test -p grafeo-engine --features "lpg gql" \
 //!     --test compact_roundtrip_proptest
 //!
 //! # bump coverage locally:
 //! PROPTEST_CASES=1024 cargo test -p grafeo-engine ...
 //! ```
-//!
-//! [`LayeredStore`]: grafeo_core::graph::compact::layered::LayeredStore
 
-#![cfg(all(feature = "compact-store", feature = "lpg", feature = "gql"))]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::GrafeoDB;
@@ -187,7 +184,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
     /// Cardinality and row-shape queries agree between a freshly built live
-    /// database and the same spec compacted to `LayeredStore`.
+    /// database and the same spec compacted.
     #[test]
     fn compact_preserves_cardinality_and_shape(spec in graph_spec_strategy()) {
         let live = GrafeoDB::new_in_memory();

@@ -113,7 +113,7 @@ graph TB
 
 ## Design Principles
 
-1. **Performance First** - Batch-at-a-time vectorized execution, columnar storage, morsel-driven parallelism
+1. **Performance First** - Batch-at-a-time vectorized execution, columnar storage
 2. **Embeddable** - No required C dependencies, single library
 3. **Safe** - Written in safe Rust, memory-safe by design
 4. **Modular** - Clear crate boundaries, strict layering

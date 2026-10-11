@@ -1,0 +1,146 @@
+# Rosetta: grouping keys beside an aggregate over a non-key
+#
+# A grouping gives one row per group with the group's keys, whatever the
+# aggregates beside them compute: an aggregate over a property, an expression
+# or a CASE leaves the keys and the groups as count(*) alone gives them
+# (ISO/IEC 39075:2024 <group by clause>; ISO/IEC 9075-2 <group by clause> for
+# SQL/PGQ; openCypher's implicit grouping keys).
+#
+# These used to fail (#589): with such an aggregate the keys came back as 0
+# and the groups merged, so Microsoft Fabric's documented multi-column
+# grouping example gave two rows for five groups, and SQL/PGQ's SUM(CASE ...)
+# one row for two.
+#
+# Fabric's example is quoted from
+# https://learn.microsoft.com/en-us/fabric/graph/gql-language-guide
+# (MIT, Copyright (c) Microsoft Corporation).
+#
+# Setup (GQL): six people. Alix (female, Chrome), Gus (male, Firefox),
+# Vincent (male, Chrome), Mia (female, Firefox), Jules (male, Chrome) and
+# Butch (male, no browser): five (gender, browser) groups, one with a null key.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Grouping keys beside an aggregate over a non-key
+  dataset: empty
+  requires: [cypher, sql-pgq]
+
+tests:
+
+  - name: an_average_over_a_property_keeps_the_group_keys
+    setup:
+      - "INSERT (:Person {name: 'Alix', gender: 'female', browserUsed: 'Chrome', birthday: 1988, creationDate: 2019, id: 3}), (:Person {name: 'Gus', gender: 'male', browserUsed: 'Firefox', birthday: 1919, creationDate: 2003, id: 19}), (:Person {name: 'Vincent', gender: 'male', browserUsed: 'Chrome', birthday: 1983, creationDate: 2088, id: 88}), (:Person {name: 'Mia', gender: 'female', browserUsed: 'Firefox', birthday: 1993, creationDate: 2033, id: 33}), (:Person {name: 'Jules', gender: 'male', browserUsed: 'Chrome', birthday: 1988, creationDate: 2038, id: 38}), (:Person {name: 'Butch', gender: 'male', birthday: 1938, creationDate: 2008, id: 8})"
+    variants:
+      gql: "MATCH (p:Person) LET gender = p.gender LET browser = p.browserUsed RETURN gender, browser, count(*) AS n, avg(p.birthday) AS a GROUP BY gender, browser"
+      cypher: "MATCH (p:Person) RETURN p.gender AS gender, p.browserUsed AS browser, count(*) AS n, avg(p.birthday) AS a"
+      sql-pgq: "SELECT gender, browser, COUNT(*) AS n, AVG(birthday) AS a FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.gender AS gender, p.browserUsed AS browser, p.birthday AS birthday)) GROUP BY gender, browser"
+    expect:
+      rows:
+        - [female, Chrome, 1, 1988]
+        - [female, Firefox, 1, 1993]
+        - [male, Chrome, 2, 1985.5]
+        - [male, Firefox, 1, 1919]
+        - [male, null, 1, 1938]
+
+  - name: min_and_max_over_properties_keep_the_group_keys
+    setup:
+      - "INSERT (:Person {name: 'Alix', gender: 'female', browserUsed: 'Chrome', birthday: 1988, creationDate: 2019, id: 3}), (:Person {name: 'Gus', gender: 'male', browserUsed: 'Firefox', birthday: 1919, creationDate: 2003, id: 19}), (:Person {name: 'Vincent', gender: 'male', browserUsed: 'Chrome', birthday: 1983, creationDate: 2088, id: 88}), (:Person {name: 'Mia', gender: 'female', browserUsed: 'Firefox', birthday: 1993, creationDate: 2033, id: 33}), (:Person {name: 'Jules', gender: 'male', browserUsed: 'Chrome', birthday: 1988, creationDate: 2038, id: 38}), (:Person {name: 'Butch', gender: 'male', birthday: 1938, creationDate: 2008, id: 8})"
+    variants:
+      gql: "MATCH (p:Person) LET gender = p.gender LET browser = p.browserUsed RETURN gender, browser, min(p.creationDate) AS f, max(p.id) AS h GROUP BY gender, browser"
+      cypher: "MATCH (p:Person) WITH p, p.gender AS gender, p.browserUsed AS browser RETURN gender, browser, min(p.creationDate) AS f, max(p.id) AS h"
+      sql-pgq: "SELECT gender, browser, MIN(created) AS f, MAX(id) AS h FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.gender AS gender, p.browserUsed AS browser, p.creationDate AS created, p.id AS id)) GROUP BY gender, browser"
+    expect:
+      rows:
+        - [female, Chrome, 2019, 3]
+        - [female, Firefox, 2033, 33]
+        - [male, Chrome, 2038, 88]
+        - [male, Firefox, 2003, 19]
+        - [male, null, 2008, 8]
+
+  # Microsoft Fabric's "multi-column grouping" example (GQL language guide),
+  # word for word in GQL
+  - name: multi_column_grouping_gives_every_group_in_order
+    setup:
+      - "INSERT (:Person {name: 'Alix', gender: 'female', browserUsed: 'Chrome', birthday: 1988, creationDate: 2019, id: 3}), (:Person {name: 'Gus', gender: 'male', browserUsed: 'Firefox', birthday: 1919, creationDate: 2003, id: 19}), (:Person {name: 'Vincent', gender: 'male', browserUsed: 'Chrome', birthday: 1983, creationDate: 2088, id: 88}), (:Person {name: 'Mia', gender: 'female', browserUsed: 'Firefox', birthday: 1993, creationDate: 2033, id: 33}), (:Person {name: 'Jules', gender: 'male', browserUsed: 'Chrome', birthday: 1988, creationDate: 2038, id: 38}), (:Person {name: 'Butch', gender: 'male', birthday: 1938, creationDate: 2008, id: 8})"
+    variants:
+      gql: |
+        MATCH (p:Person)
+        LET gender = p.gender
+        LET browser = p.browserUsed
+        RETURN gender,
+               browser,
+               count(*) AS person_count,
+               avg(p.birthday) AS avg_birth_year,
+               min(p.creationDate) AS first_joined,
+               max(p.id) AS highest_id
+        GROUP BY gender, browser
+        ORDER BY avg_birth_year DESC
+        LIMIT 10
+      cypher: |
+        MATCH (p:Person)
+        RETURN p.gender AS gender,
+               p.browserUsed AS browser,
+               count(*) AS person_count,
+               avg(p.birthday) AS avg_birth_year,
+               min(p.creationDate) AS first_joined,
+               max(p.id) AS highest_id
+        ORDER BY avg_birth_year DESC
+        LIMIT 10
+      sql-pgq: |
+        SELECT gender, browser, COUNT(*) AS person_count, AVG(birthday) AS avg_birth_year,
+               MIN(created) AS first_joined, MAX(id) AS highest_id
+        FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.gender AS gender, p.browserUsed AS browser,
+             p.birthday AS birthday, p.creationDate AS created, p.id AS id))
+        GROUP BY gender, browser
+        ORDER BY avg_birth_year DESC
+        LIMIT 10
+    expect:
+      ordered: true
+      rows:
+        - [female, Firefox, 1, 1993, 2033, 33]
+        - [female, Chrome, 1, 1988, 2019, 3]
+        - [male, Chrome, 2, 1985.5, 2038, 88]
+        - [male, null, 1, 1938, 2008, 8]
+        - [male, Firefox, 1, 1919, 2003, 19]
+
+  - name: an_aggregate_over_an_expression_keeps_the_group_keys
+    setup:
+      - "INSERT (:Person {name: 'Alix', gender: 'female', browserUsed: 'Chrome', birthday: 1988, creationDate: 2019, id: 3}), (:Person {name: 'Gus', gender: 'male', browserUsed: 'Firefox', birthday: 1919, creationDate: 2003, id: 19}), (:Person {name: 'Vincent', gender: 'male', browserUsed: 'Chrome', birthday: 1983, creationDate: 2088, id: 88}), (:Person {name: 'Mia', gender: 'female', browserUsed: 'Firefox', birthday: 1993, creationDate: 2033, id: 33}), (:Person {name: 'Jules', gender: 'male', browserUsed: 'Chrome', birthday: 1988, creationDate: 2038, id: 38}), (:Person {name: 'Butch', gender: 'male', birthday: 1938, creationDate: 2008, id: 8})"
+    variants:
+      gql: "MATCH (p:Person) LET gender = p.gender LET browser = p.browserUsed RETURN gender, browser, sum(p.id + 1) AS s GROUP BY gender, browser"
+      cypher: "MATCH (p:Person) WITH p, p.gender AS gender, p.browserUsed AS browser RETURN gender, browser, sum(p.id + 1) AS s"
+      sql-pgq: "SELECT gender, browser, SUM(id + 1) AS s FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.gender AS gender, p.browserUsed AS browser, p.id AS id)) GROUP BY gender, browser"
+    expect:
+      rows:
+        - [female, Chrome, 4]
+        - [female, Firefox, 34]
+        - [male, Chrome, 128]
+        - [male, Firefox, 20]
+        - [male, null, 9]
+
+  # The women use Chrome once and two browsers since 1950; the men Chrome
+  # twice and one browser since 1950
+  - name: aggregates_over_a_case_keep_the_group_keys
+    setup:
+      - "INSERT (:Person {name: 'Alix', gender: 'female', browserUsed: 'Chrome', birthday: 1988, creationDate: 2019, id: 3}), (:Person {name: 'Gus', gender: 'male', browserUsed: 'Firefox', birthday: 1919, creationDate: 2003, id: 19}), (:Person {name: 'Vincent', gender: 'male', browserUsed: 'Chrome', birthday: 1983, creationDate: 2088, id: 88}), (:Person {name: 'Mia', gender: 'female', browserUsed: 'Firefox', birthday: 1993, creationDate: 2033, id: 33}), (:Person {name: 'Jules', gender: 'male', browserUsed: 'Chrome', birthday: 1988, creationDate: 2038, id: 38}), (:Person {name: 'Butch', gender: 'male', birthday: 1938, creationDate: 2008, id: 8})"
+    variants:
+      gql: "MATCH (p:Person) LET gender = p.gender RETURN gender, count(*) AS n, sum(CASE WHEN p.browserUsed = 'Chrome' THEN 1 ELSE 0 END) AS chrome, count(DISTINCT CASE WHEN p.birthday > 1950 THEN p.browserUsed END) AS recent GROUP BY gender"
+      cypher: "MATCH (p:Person) WITH p, p.gender AS gender RETURN gender, count(*) AS n, sum(CASE WHEN p.browserUsed = 'Chrome' THEN 1 ELSE 0 END) AS chrome, count(DISTINCT CASE WHEN p.birthday > 1950 THEN p.browserUsed END) AS recent"
+      sql-pgq: "SELECT gender, COUNT(*) AS n, SUM(CASE WHEN browser = 'Chrome' THEN 1 ELSE 0 END) AS chrome, COUNT(DISTINCT CASE WHEN birthday > 1950 THEN browser END) AS recent FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.gender AS gender, p.browserUsed AS browser, p.birthday AS birthday)) GROUP BY gender"
+    expect:
+      rows:
+        - [female, 2, 1, 2]
+        - [male, 4, 2, 1]
+
+  - name: a_boolean_key_beside_an_average
+    setup:
+      - "INSERT (:Person {name: 'Alix', gender: 'female', browserUsed: 'Chrome', birthday: 1988, creationDate: 2019, id: 3}), (:Person {name: 'Gus', gender: 'male', browserUsed: 'Firefox', birthday: 1919, creationDate: 2003, id: 19}), (:Person {name: 'Vincent', gender: 'male', browserUsed: 'Chrome', birthday: 1983, creationDate: 2088, id: 88}), (:Person {name: 'Mia', gender: 'female', browserUsed: 'Firefox', birthday: 1993, creationDate: 2033, id: 33}), (:Person {name: 'Jules', gender: 'male', browserUsed: 'Chrome', birthday: 1988, creationDate: 2038, id: 38}), (:Person {name: 'Butch', gender: 'male', birthday: 1938, creationDate: 2008, id: 8})"
+    variants:
+      gql: "MATCH (p:Person) LET born_late = p.birthday > 1950 RETURN born_late, count(*) AS n, avg(p.id * 2) AS a GROUP BY born_late"
+      cypher: "MATCH (p:Person) WITH p, p.birthday > 1950 AS born_late RETURN born_late, count(*) AS n, avg(p.id * 2) AS a"
+      sql-pgq: "SELECT born_late, COUNT(*) AS n, AVG(id * 2) AS a FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.birthday > 1950 AS born_late, p.id AS id)) GROUP BY born_late"
+    expect:
+      rows:
+        - [false, 2, 27]
+        - [true, 4, 81]

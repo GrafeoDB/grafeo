@@ -34,6 +34,12 @@ pub enum AllocError {
     InsufficientSpace,
     /// Alignment must be a non-zero power of two.
     InvalidAlignment(usize),
+    /// Every `u32` id of the kind `what` (a named graph's, say) was given
+    /// out: ids are never reused, so no more can be created.
+    IdsExhausted {
+        /// What the ids number, for the message.
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for AllocError {
@@ -46,6 +52,12 @@ impl fmt::Display for AllocError {
             }
             Self::InvalidAlignment(align) => {
                 write!(f, "alignment must be a non-zero power of two, got {align}")
+            }
+            Self::IdsExhausted { what } => {
+                write!(
+                    f,
+                    "every {what} id was given out, so no {what} can be created"
+                )
             }
         }
     }
@@ -65,6 +77,7 @@ impl From<AllocError> for crate::Error {
             AllocError::InvalidAlignment(align) => crate::Error::Internal(format!(
                 "alignment must be a non-zero power of two, got {align}"
             )),
+            AllocError::IdsExhausted { .. } => crate::Error::InvalidValue(e.to_string()),
         }
     }
 }
@@ -283,15 +296,40 @@ impl Arena {
         })
     }
 
-    /// Allocates a value and returns its offset within the primary chunk.
+    /// How many chunks of `chunk_size` bytes a 32-bit record offset addresses.
+    #[cfg(feature = "tiered-storage")]
+    fn offset_chunk_limit(chunk_size: usize) -> usize {
+        let offsets = u64::from(u32::MAX) + 1;
+        u64::try_from(chunk_size)
+            .ok()
+            .and_then(|size| offsets.checked_div(size))
+            .map_or(0, |chunks| usize::try_from(chunks).unwrap_or(usize::MAX))
+    }
+
+    /// The chunk and the place in it that `offset` names (see
+    /// [`alloc_value_with_offset`](Self::alloc_value_with_offset)).
+    #[cfg(feature = "tiered-storage")]
+    fn locate(&self, offset: u32) -> (usize, usize) {
+        let offset = offset as usize;
+        // An arena of empty chunks holds no record to locate.
+        let chunk_size = self.chunk_size.max(1);
+        (offset / chunk_size, offset % chunk_size)
+    }
+
+    /// Allocates a value and returns its offset in the arena: the number of
+    /// the chunk it is in times the chunk size, plus its place in that chunk.
     ///
     /// This is used by tiered storage to store values in the arena and track
-    /// their locations via compact u32 offsets in `HotVersionRef`.
+    /// their locations via compact u32 offsets in `HotVersionRef`. A record
+    /// goes into the arena's last chunk, or into a new one when that is full
+    /// (or was sized for a larger allocation), so one epoch holds as many
+    /// records as 32-bit offsets address: 4 GiB of them.
     ///
     /// # Errors
     ///
-    /// Returns `AllocError::InsufficientSpace` if the primary chunk does not
-    /// have enough room. Increase the chunk size for your use case.
+    /// Returns `AllocError::InsufficientSpace` if the value is larger than a
+    /// chunk, or the arena's offsets are used up, and
+    /// `AllocError::OutOfMemory` if a new chunk cannot be allocated.
     ///
     /// # Panics
     ///
@@ -301,17 +339,49 @@ impl Arena {
         let size = std::mem::size_of::<T>();
         let align = std::mem::align_of::<T>();
 
-        // Try to allocate in the first chunk to get a stable offset
-        let chunks = self.chunks.read();
-        let chunk = chunks
-            .first()
-            .expect("Arena should have at least one chunk");
-
-        let (offset, ptr) = chunk
-            .try_alloc_with_offset(size, align)
+        // The last chunk, when it is one of the arena's own size: an offset
+        // names a chunk by its number, so every chunk before it counts as
+        // `chunk_size` bytes, and a larger one (see `alloc_new_chunk`) holds
+        // no records.
+        let in_last = |chunks: &[Chunk]| {
+            let index = chunks.len() - 1;
+            let chunk = &chunks[index];
+            if chunk.capacity != self.chunk_size {
+                return None;
+            }
+            let (within, ptr) = chunk.try_alloc_with_offset(size, align)?;
+            Some((index, within, ptr))
+        };
+        let found = in_last(&self.chunks.read());
+        let (index, within, ptr) = match found {
+            Some(found) => found,
+            None => {
+                let mut chunks = self.chunks.write();
+                // Another writer may have added a chunk meanwhile.
+                match in_last(&chunks) {
+                    Some(found) => found,
+                    None => {
+                        if size > self.chunk_size
+                            || chunks.len() >= Self::offset_chunk_limit(self.chunk_size)
+                        {
+                            return Err(AllocError::InsufficientSpace);
+                        }
+                        chunks.push(Chunk::new(self.chunk_size)?);
+                        self.total_allocated
+                            .fetch_add(self.chunk_size, Ordering::Relaxed);
+                        in_last(&chunks).ok_or(AllocError::InsufficientSpace)?
+                    }
+                }
+            }
+        };
+        let offset = index
+            .checked_mul(self.chunk_size)
+            .and_then(|base| base.checked_add(within as usize))
+            .and_then(|offset| u32::try_from(offset).ok())
             .ok_or(AllocError::InsufficientSpace)?;
 
-        // SAFETY: We've allocated the correct size and alignment
+        // SAFETY: We've allocated the correct size and alignment, and a chunk
+        // stays where it is until the arena is dropped
         Ok(unsafe {
             let typed_ptr = ptr.as_ptr().cast::<T>();
             typed_ptr.write(value);
@@ -319,7 +389,7 @@ impl Arena {
         })
     }
 
-    /// Reads a value at the given offset in the primary chunk.
+    /// Reads a value at the given offset in the arena.
     ///
     /// # Safety
     ///
@@ -329,24 +399,25 @@ impl Arena {
     ///
     /// # Panics
     ///
-    /// Panics if the arena has no chunks (should never happen in normal use).
+    /// Panics if the offset names no record of this arena.
     #[cfg(feature = "tiered-storage")]
     pub unsafe fn read_at<T>(&self, offset: u32) -> &T {
+        let (index, offset) = self.locate(offset);
         let chunks = self.chunks.read();
         let chunk = chunks
-            .first()
-            .expect("Arena should have at least one chunk");
+            .get(index)
+            .expect("read_at: the offset names a chunk of the arena");
 
         assert!(
-            (offset as usize) + std::mem::size_of::<T>() <= chunk.used(),
+            offset + std::mem::size_of::<T>() <= chunk.used(),
             "read_at: offset {} + size_of::<{}>() = {} exceeds chunk used bytes {}",
             offset,
             std::any::type_name::<T>(),
-            (offset as usize) + std::mem::size_of::<T>(),
+            offset + std::mem::size_of::<T>(),
             chunk.used()
         );
         assert!(
-            (offset as usize).is_multiple_of(std::mem::align_of::<T>()),
+            offset.is_multiple_of(std::mem::align_of::<T>()),
             "read_at: offset {} is not aligned for {} (alignment {})",
             offset,
             std::any::type_name::<T>(),
@@ -355,12 +426,12 @@ impl Arena {
 
         // SAFETY: Caller guarantees offset is valid and T matches stored type
         unsafe {
-            let ptr = chunk.ptr.as_ptr().add(offset as usize).cast::<T>();
+            let ptr = chunk.ptr.as_ptr().add(offset).cast::<T>();
             &*ptr
         }
     }
 
-    /// Reads a value mutably at the given offset in the primary chunk.
+    /// Reads a value mutably at the given offset in the arena.
     ///
     /// # Safety
     ///
@@ -371,24 +442,25 @@ impl Arena {
     ///
     /// # Panics
     ///
-    /// Panics if the arena has no chunks (should never happen in normal use).
+    /// Panics if the offset names no record of this arena.
     #[cfg(feature = "tiered-storage")]
     pub unsafe fn read_at_mut<T>(&self, offset: u32) -> &mut T {
+        let (index, offset) = self.locate(offset);
         let chunks = self.chunks.read();
         let chunk = chunks
-            .first()
-            .expect("Arena should have at least one chunk");
+            .get(index)
+            .expect("read_at_mut: the offset names a chunk of the arena");
 
         assert!(
-            (offset as usize) + std::mem::size_of::<T>() <= chunk.capacity,
+            offset + std::mem::size_of::<T>() <= chunk.capacity,
             "read_at_mut: offset {} + size_of::<{}>() = {} exceeds chunk capacity {}",
             offset,
             std::any::type_name::<T>(),
-            (offset as usize) + std::mem::size_of::<T>(),
+            offset + std::mem::size_of::<T>(),
             chunk.capacity
         );
         assert!(
-            (offset as usize).is_multiple_of(std::mem::align_of::<T>()),
+            offset.is_multiple_of(std::mem::align_of::<T>()),
             "read_at_mut: offset {} is not aligned for {} (alignment {})",
             offset,
             std::any::type_name::<T>(),
@@ -397,7 +469,7 @@ impl Arena {
 
         // SAFETY: Caller guarantees offset is valid, T matches, and no aliasing
         unsafe {
-            let ptr = chunk.ptr.as_ptr().add(offset as usize).cast::<T>();
+            let ptr = chunk.ptr.as_ptr().add(offset).cast::<T>();
             &mut *ptr
         }
     }
@@ -963,17 +1035,53 @@ mod tiered_storage_tests {
         }
     }
 
+    /// A value that fits no chunk is refused with an error, not a panic.
     #[test]
     fn test_alloc_value_with_offset_insufficient_space() {
-        // Create a tiny arena where a large allocation will fail
         let arena = Arena::with_chunk_size(EpochId::INITIAL, 64).unwrap();
+        let result = arena.alloc_value_with_offset([0u8; 128]);
+        assert!(matches!(result, Err(AllocError::InsufficientSpace)));
+    }
 
-        // Fill up the chunk
-        let _ = arena.alloc_value_with_offset([0u8; 48]).unwrap();
+    /// An epoch's records go on into further chunks when one is full, and
+    /// each offset reads its own value back: an epoch held at most one chunk
+    /// of records (32,768 nodes), so a larger write at one epoch was refused.
+    #[test]
+    fn test_offsets_continue_in_the_next_chunk() {
+        // 64-byte chunks hold four 16-byte records each.
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 64).unwrap();
+        let offsets: Vec<u32> = (0..19u64)
+            .map(|n| {
+                let (offset, stored) = arena.alloc_value_with_offset([n, n * 3]).unwrap();
+                assert_eq!(*stored, [n, n * 3]);
+                offset
+            })
+            .collect();
+        for (n, &offset) in (0..19u64).zip(&offsets) {
+            // SAFETY: the offset was returned for a `[u64; 2]` just above.
+            assert_eq!(unsafe { *arena.read_at::<[u64; 2]>(offset) }, [n, n * 3]);
+        }
+        let mut distinct = offsets.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), offsets.len(), "offsets {offsets:?}");
+        assert_eq!(offsets[4], 64, "the fifth record starts the second chunk");
+        // SAFETY: the offset was returned for a `[u64; 2]`, and nothing else
+        // refers to it.
+        unsafe { arena.read_at_mut::<[u64; 2]>(offsets[18])[1] = 88 };
+        // SAFETY: as above.
+        assert_eq!(unsafe { *arena.read_at::<[u64; 2]>(offsets[18]) }, [18, 88]);
+        assert_eq!(arena.total_allocated(), 5 * 64);
+    }
 
-        // This should return InsufficientSpace, not panic
-        let result = arena.alloc_value_with_offset([0u8; 32]);
-        assert!(result.is_err());
+    /// Offsets are 32 bits: an arena takes as many chunks of records as they
+    /// address.
+    #[test]
+    fn test_offsets_stop_at_32_bits() {
+        assert_eq!(Arena::offset_chunk_limit(1 << 30), 4);
+        assert_eq!(Arena::offset_chunk_limit(1 << 20), 4096);
+        assert_eq!(Arena::offset_chunk_limit(3 << 30), 1);
+        assert_eq!(Arena::offset_chunk_limit(0), 0);
     }
 
     #[test]

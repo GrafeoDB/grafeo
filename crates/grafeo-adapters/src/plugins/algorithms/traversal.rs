@@ -15,7 +15,7 @@ use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
 use super::traits::{
-    Control, NodeValueResultBuilder, TraversalEvent, impl_algorithm, node_id_from_param,
+    Control, TraversalEvent, impl_algorithm, node_id_from_param, visible_edges_from,
 };
 
 // ============================================================================
@@ -87,7 +87,7 @@ where
 
     while let Some(node) = queue.pop_front() {
         // Iterate over outgoing edges
-        for (neighbor, edge_id) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
             if discovered.insert(neighbor) {
                 // Tree edge - neighbor not yet discovered
                 match visitor(TraversalEvent::TreeEdge {
@@ -157,7 +157,7 @@ pub fn bfs_layers(store: &dyn GraphStore, start: NodeId) -> Vec<Vec<NodeId>> {
         layers.push(current_layer.clone());
 
         for &node in &current_layer {
-            for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+            for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
                 if discovered.insert(neighbor) {
                     next_layer.push(neighbor);
                 }
@@ -249,8 +249,7 @@ where
         Control::Continue => {}
     }
 
-    let neighbors: Vec<_> = store
-        .edges_from(start, Direction::Outgoing)
+    let neighbors: Vec<_> = visible_edges_from(store, start, Direction::Outgoing)
         .into_iter()
         .collect();
     stack.push((start, neighbors, 0));
@@ -298,10 +297,10 @@ where
                     Control::Continue => {}
                 }
 
-                let neighbor_neighbors: Vec<_> = store
-                    .edges_from(neighbor, Direction::Outgoing)
-                    .into_iter()
-                    .collect();
+                let neighbor_neighbors: Vec<_> =
+                    visible_edges_from(store, neighbor, Direction::Outgoing)
+                        .into_iter()
+                        .collect();
                 stack.push((neighbor, neighbor_neighbors, 0));
             }
             NodeColor::Gray => {
@@ -429,6 +428,12 @@ fn dfs_params() -> &'static [ParameterDef] {
 }
 
 /// DFS algorithm wrapper for the plugin registry.
+///
+/// One row per node DFS reaches from `start`, in discovery order: `depth`,
+/// the node's depth in the DFS tree (0 for the start; not the shortest
+/// distance, which BFS gives), `discovery`, its position in the order DFS
+/// reaches the nodes (pre-order), and `finish`, its position in the order
+/// DFS finishes them (post-order).
 pub struct DfsAlgorithm;
 
 impl_algorithm! {
@@ -442,16 +447,45 @@ impl_algorithm! {
         })?;
 
         let start = node_id_from_param(start_id, "start")?;
-        let finished = dfs(store, start);
+        // Each node in discovery order, with its depth; and its finish position.
+        let mut discovered: Vec<(NodeId, usize)> = Vec::new();
+        let mut depth: FxHashMap<NodeId, usize> = FxHashMap::default();
+        let mut finish: FxHashMap<NodeId, usize> = FxHashMap::default();
+        dfs_with_visitor(store, start, |event| -> Control<()> {
+            match event {
+                TraversalEvent::TreeEdge { source, target, .. } => {
+                    let below = depth.get(&source).map_or(0, |d| d + 1);
+                    depth.insert(target, below);
+                }
+                TraversalEvent::Discover(node) => {
+                    discovered.push((node, *depth.entry(node).or_insert(0)));
+                }
+                TraversalEvent::Finish(node) => {
+                    let position = finish.len();
+                    finish.insert(node, position);
+                }
+                _ => {}
+            }
+            Control::Continue
+        });
 
-        let mut builder = NodeValueResultBuilder::with_capacity("finish_order", finished.len());
-        for (order, node) in finished.iter().enumerate() {
-            // reason: DFS finish order is bounded by node count, well within i64::MAX
-            #[allow(clippy::cast_possible_wrap)]
-            builder.push(*node, Value::Int64(order as i64));
+        let count = |n: usize| Value::Int64(i64::try_from(n).unwrap_or(i64::MAX));
+        let mut result = AlgorithmResult::new(vec![
+            "node_id".to_string(),
+            "depth".to_string(),
+            "discovery".to_string(),
+            "finish".to_string(),
+        ]);
+        for (position, (node, node_depth)) in discovered.into_iter().enumerate() {
+            result.add_row(vec![
+                Value::Int64(node.as_u64().cast_signed()),
+                count(node_depth),
+                count(position),
+                count(finish[&node]),
+            ]);
         }
 
-        Ok(builder.build())
+        Ok(result)
     }
 }
 
@@ -809,5 +843,72 @@ mod tests {
         assert_eq!(finished.len(), 2);
         assert!(finished.contains(&n0));
         assert!(finished.contains(&n1));
+    }
+
+    /// The rows of `DfsAlgorithm` from `start`, by node: (depth, discovery,
+    /// finish).
+    fn dfs_rows(store: &LpgStore, start: NodeId) -> FxHashMap<NodeId, (i64, i64, i64)> {
+        use crate::plugins::Parameters;
+        use crate::plugins::algorithms::GraphAlgorithm;
+
+        let mut params = Parameters::new();
+        params.set_int("start", i64::try_from(start.as_u64()).unwrap());
+        let result = DfsAlgorithm.execute(store, &params).unwrap();
+        assert_eq!(result.columns, ["node_id", "depth", "discovery", "finish"]);
+        result
+            .rows
+            .iter()
+            .map(|row| match row.as_slice() {
+                [
+                    Value::Int64(node),
+                    Value::Int64(depth),
+                    Value::Int64(discovery),
+                    Value::Int64(finish),
+                ] => (
+                    NodeId::new(u64::try_from(*node).unwrap()),
+                    (*depth, *discovery, *finish),
+                ),
+                other => panic!("unexpected row {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dfs_algorithm_depth_is_the_tree_depth() {
+        // 0 -> 1 -> 2 -> 3, and 0 -> 4 (the graph of the report).
+        let store = LpgStore::new().unwrap();
+        let n: Vec<NodeId> = (0..5).map(|_| store.create_node(&["Node"])).collect();
+        store.create_edge(n[0], n[1], "E");
+        store.create_edge(n[1], n[2], "E");
+        store.create_edge(n[2], n[3], "E");
+        store.create_edge(n[0], n[4], "E");
+
+        let rows = dfs_rows(&store, n[0]);
+        let depths: Vec<i64> = n.iter().map(|node| rows[node].0).collect();
+        assert_eq!(
+            depths,
+            [0, 1, 2, 3, 1],
+            "depth from the start, not finish order"
+        );
+        let discovery: Vec<i64> = n.iter().map(|node| rows[node].1).collect();
+        assert_eq!(discovery, [0, 1, 2, 3, 4]);
+        let finish: Vec<i64> = n.iter().map(|node| rows[node].2).collect();
+        assert_eq!(finish, [4, 2, 1, 0, 3]);
+    }
+
+    #[test]
+    fn dfs_algorithm_depth_follows_the_tree_not_the_shortest_path() {
+        // 0 -> 1 -> 2 and 0 -> 2: DFS reaches 2 through 1 (depth 2) while
+        // BFS reaches it directly (distance 1).
+        let store = LpgStore::new().unwrap();
+        let n: Vec<NodeId> = (0..3).map(|_| store.create_node(&["Node"])).collect();
+        store.create_edge(n[0], n[1], "E");
+        store.create_edge(n[1], n[2], "E");
+        store.create_edge(n[0], n[2], "E");
+
+        let rows = dfs_rows(&store, n[0]);
+        assert_eq!(rows[&n[2]], (2, 2, 0));
+        assert_eq!(rows[&n[0]], (0, 0, 2));
+        assert_eq!(bfs_layers(&store, n[0])[1], vec![n[1], n[2]]);
     }
 }

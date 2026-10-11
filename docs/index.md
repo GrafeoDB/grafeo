@@ -247,7 +247,7 @@ Choose the query language that fits the project:
 
 ### Architecture Highlights
 
-- **Push-based execution engine** with morsel-driven parallelism
+- **Push-based vectorized execution engine**, one thread per query
 - **Columnar storage** with type-specific compression
 - **Cost-based query optimizer** with cardinality estimation
 - **MVCC transactions** with snapshot isolation
@@ -292,7 +292,7 @@ Choose the query language that fits the project:
     ```yaml
     # pubspec.yaml
     dependencies:
-      grafeo: ^0.5.44
+      grafeo: ^0.6.0-beta.1
     ```
 
 === "WASM"

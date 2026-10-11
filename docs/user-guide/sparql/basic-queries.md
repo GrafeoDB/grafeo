@@ -124,7 +124,7 @@ OFFSET 20 LIMIT 10
 
 ## ASK Queries
 
-Check if a pattern exists (returns true/false):
+Check if a pattern exists. The result is one row holding one Boolean, `true` when the pattern has a solution and `false` when it has none, in the column `boolean` (the name the SPARQL 1.1 Query Results JSON Format gives an ASK result):
 
 ```sparql
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>

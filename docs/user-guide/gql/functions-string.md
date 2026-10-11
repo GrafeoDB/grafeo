@@ -151,5 +151,5 @@ WHERE p.name STARTS WITH 'Al'
 WHERE p.name ENDS WITH 'son'
 WHERE p.name CONTAINS 'li'
 WHERE p.name LIKE 'Al%'           -- SQL-style wildcards
-WHERE p.email =~ '.*@gmail\\.com' -- Regular expression
+WHERE p.email =~ '.*@gmail\\.com' -- Regular expression (whole string; a Grafeo extension)
 ```

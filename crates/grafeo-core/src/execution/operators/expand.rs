@@ -145,64 +145,79 @@ impl ExpandOperator {
 
         let source_id = col
             .get_node_id(self.current_row)
-            .ok_or_else(|| OperatorError::Execution("Expected node ID in source column".into()))?;
+            .ok_or_else(|| OperatorError::Internal("Expected node ID in source column".into()))?;
 
-        // Get visibility context.  When `read_only` is true we can skip the
-        // more expensive versioned lookups because the transaction has no
-        // pending writes: epoch-only visibility is sufficient and avoids
-        // walking MVCC version chains.
-        let epoch = self.viewing_epoch;
-        let transaction_id = self.transaction_id;
-        let use_versioned = !self.read_only;
-
-        // Get edges from this node
-        let edges: Vec<(NodeId, EdgeId)> = self
-            .store
-            .edges_from(source_id, self.direction)
-            .into_iter()
-            .filter(|(target_id, edge_id)| {
-                // Filter by edge type if specified
-                let type_matches = if self.edge_types.is_empty() {
-                    true
-                } else {
-                    // Use versioned type lookup only when we need to see
-                    // PENDING (uncommitted) edges created by this transaction.
-                    let actual_type =
-                        if use_versioned && let (Some(ep), Some(tx)) = (epoch, transaction_id) {
-                            self.store.edge_type_versioned(*edge_id, ep, tx)
-                        } else {
-                            self.store.edge_type(*edge_id)
-                        };
-                    actual_type.is_some_and(|t| {
-                        self.edge_types
-                            .iter()
-                            .any(|et| t.as_str().eq_ignore_ascii_case(et.as_str()))
-                    })
-                };
-
-                if !type_matches {
-                    return false;
-                }
-
-                // Filter by visibility if we have epoch context
-                if let Some(epoch) = epoch {
-                    if use_versioned && let Some(tx) = transaction_id {
-                        self.store.is_edge_visible_versioned(*edge_id, epoch, tx)
-                            && self.store.is_node_visible_versioned(*target_id, epoch, tx)
-                    } else {
-                        self.store.is_edge_visible_at_epoch(*edge_id, epoch)
-                            && self.store.is_node_visible_at_epoch(*target_id, epoch)
-                    }
-                } else {
-                    true
-                }
-            })
-            .collect();
-
-        self.current_edges = edges;
+        self.current_edges = visible_edges_from(
+            self.store.as_ref(),
+            source_id,
+            self.direction,
+            &self.edge_types,
+            self.viewing_epoch,
+            self.transaction_id,
+            self.read_only,
+        );
         self.current_edge_idx = 0;
         Ok(true)
     }
+}
+
+/// The edges from `node` in `direction` that a query sees, each with the node
+/// at its other end: those of one of `edge_types` (any type when empty) whose
+/// edge and other end are visible at `epoch` (every edge without one). The
+/// expand operators, variable-length expands, factorized chains and shortest
+/// paths all walk edges with it.
+///
+/// A query that may have written (`read_only` false) in a transaction reads
+/// the type and the visibility as of its transaction: they see the edges it
+/// created and has not committed (the committed type, `edge_type`, has none
+/// for them), and not those it deleted. A read-only query outside a
+/// transaction has no writes pending, so the committed state at its epoch
+/// answers both, without walking version chains.
+pub(super) fn visible_edges_from(
+    store: &dyn GraphStoreSearch,
+    node: NodeId,
+    direction: Direction,
+    edge_types: &[String],
+    epoch: Option<EpochId>,
+    transaction_id: Option<TransactionId>,
+    read_only: bool,
+) -> Vec<(NodeId, EdgeId)> {
+    let versioned = if read_only {
+        None
+    } else {
+        epoch.zip(transaction_id)
+    };
+    let mut edges = store.edges_from(node, direction);
+    edges.retain(|&(other, edge)| {
+        if !edge_types.is_empty() {
+            let actual = match versioned {
+                Some((epoch, transaction_id)) => {
+                    store.edge_type_versioned(edge, epoch, transaction_id)
+                }
+                None => store.edge_type(edge),
+            };
+            let type_matches = actual.is_some_and(|actual| {
+                edge_types
+                    .iter()
+                    .any(|wanted| actual.as_str().eq_ignore_ascii_case(wanted))
+            });
+            if !type_matches {
+                return false;
+            }
+        }
+        match (versioned, epoch) {
+            (Some((epoch, transaction_id)), _) => {
+                store.is_edge_visible_versioned(edge, epoch, transaction_id)
+                    && store.is_node_visible_versioned(other, epoch, transaction_id)
+            }
+            (None, Some(epoch)) => {
+                store.is_edge_visible_at_epoch(edge, epoch)
+                    && store.is_node_visible_at_epoch(other, epoch)
+            }
+            (None, None) => true,
+        }
+    });
+    edges
 }
 
 impl Operator for ExpandOperator {

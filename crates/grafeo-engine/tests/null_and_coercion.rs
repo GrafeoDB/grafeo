@@ -591,3 +591,110 @@ fn test_group_by_null_key() {
     // Should have 2 groups: NULL (50+75=125), North (100+200=300)
     assert_eq!(r.rows().len(), 2, "NULL keys should form their own group");
 }
+
+// ===========================================================================
+// NULL operands of a grouped aggregate, the first of a group too
+// ===========================================================================
+
+/// The operands, a null first, as in a group whose first row has no value.
+const OPERANDS: &str = "UNWIND [null, 19, 3, null, 88, 3] AS x";
+
+/// The aggregates of `x` that read an operand.
+const AGGREGATES_OF_X: &str = "min(x) AS lo, max(x) AS hi, sample(x) AS s, count(x) AS n, \
+     count(DISTINCT x) AS d, sum(x) AS total, avg(x) AS mean, stdev(x) AS sd, \
+     percentileCont(x, 0.5) AS p, collect(x) AS xs, collect(DISTINCT x) AS ds";
+
+/// Operands keyed by group: group 1 and 2 start with a null, group 3 has only one.
+const KEYED_OPERANDS: &str =
+    "UNWIND [[1, null], [1, 19], [2, null], [2, 3], [2, 88], [3, null]] AS r";
+
+fn list(values: &[i64]) -> Value {
+    Value::List(
+        values
+            .iter()
+            .map(|&value| Value::Int64(value))
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+/// Every aggregate skips the null operands of a group, the first one too, and
+/// a group key does not change what an aggregate returns.
+fn assert_grouped_aggregates_skip_nulls(execute: impl Fn(&str) -> Vec<Vec<Value>>) {
+    let grouped = execute(&format!("{OPERANDS} RETURN 0 AS g, {AGGREGATES_OF_X}"));
+    assert_eq!(grouped.len(), 1);
+    let row = &grouped[0];
+    assert_eq!(
+        row[..8],
+        [
+            Value::Int64(0),
+            Value::Int64(3),
+            Value::Int64(88),
+            Value::Int64(19),
+            Value::Int64(4),
+            Value::Int64(3),
+            Value::Int64(113),
+            Value::Float64(28.25),
+        ]
+    );
+    assert!(matches!(row[8], Value::Float64(_)), "stdev: {:?}", row[8]);
+    assert_eq!(
+        row[9..],
+        [
+            Value::Float64(11.0),
+            list(&[19, 3, 88, 3]),
+            list(&[19, 3, 88])
+        ]
+    );
+    let ungrouped = execute(&format!("{OPERANDS} RETURN {AGGREGATES_OF_X}"));
+    assert_eq!(ungrouped.len(), 1);
+    assert_eq!(row[1..], ungrouped[0][..]);
+
+    let keyed = execute(&format!(
+        "{KEYED_OPERANDS} RETURN r[0] AS g, min(r[1]) AS lo, max(r[1]) AS hi, \
+         sample(r[1]) AS s, collect(r[1]) AS xs ORDER BY g"
+    ));
+    assert_eq!(
+        keyed,
+        [
+            vec![
+                Value::Int64(1),
+                Value::Int64(19),
+                Value::Int64(19),
+                Value::Int64(19),
+                list(&[19]),
+            ],
+            vec![
+                Value::Int64(2),
+                Value::Int64(3),
+                Value::Int64(88),
+                Value::Int64(3),
+                list(&[3, 88]),
+            ],
+            vec![
+                Value::Int64(3),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                list(&[]),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn grouped_aggregates_skip_a_leading_null_in_gql() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    assert_grouped_aggregates_skip_nulls(|query| session.execute(query).unwrap().rows().to_vec());
+}
+
+#[cfg(feature = "cypher")]
+#[test]
+fn grouped_aggregates_skip_a_leading_null_in_cypher() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    assert_grouped_aggregates_skip_nulls(|query| {
+        session.execute_cypher(query).unwrap().rows().to_vec()
+    });
+}

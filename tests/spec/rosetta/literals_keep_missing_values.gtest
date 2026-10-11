@@ -1,0 +1,108 @@
+# Rosetta: list and map literals keep the items that have no value
+#
+# A list literal has one item per expression and a map literal one entry per
+# key, also when an expression has no value: a property of a null entity (an
+# OPTIONAL MATCH without a match) or a property the entity does not have is a
+# null item. Such items used to be left out, so `[c.name, r.years]` was `[]`,
+# `size()` and positional reads changed with the data, `[n.w] = []` matched
+# nodes without `w`, and `{w: n.w}` was `{}`.
+#
+# Dataset `entity_kinds` (tests/spec/datasets/entity_kinds.setup): Vincent
+# lives nowhere, Jules and Mia have no `w`.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: List and map literals keep missing values
+  dataset: entity_kinds
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Properties of an unmatched OPTIONAL MATCH
+  # ---------------------------------------------------------------------------
+
+  - name: a_list_of_properties_of_unmatched_variables_has_a_null_per_item
+    variants:
+      gql: "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (p)-[r:LIVES_IN]->(c:City) RETURN [c.name, r.years] AS l, size([c.name, r.years]) AS s"
+      cypher: "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (p)-[r:LIVES_IN]->(c:City) RETURN [c.name, r.years] AS l, size([c.name, r.years]) AS s"
+    expect:
+      rows:
+        - ["[null, null]", 2]
+
+  - name: a_one_item_list_of_an_unmatched_property_is_one_null
+    variants:
+      gql: "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (p)-[:LIVES_IN]->(c:City) RETURN [c.name] AS l"
+      cypher: "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (p)-[:LIVES_IN]->(c:City) RETURN [c.name] AS l"
+    expect:
+      rows:
+        - ["[null]"]
+
+  - name: an_entity_after_an_unmatched_property_keeps_its_position
+    variants:
+      gql: "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (p)-[:LIVES_IN]->(c:City) RETURN [c.name, p][1].name AS n"
+      cypher: "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (p)-[:LIVES_IN]->(c:City) RETURN [c.name, p][1].name AS n"
+    expect:
+      rows:
+        - [Vincent]
+
+  # ---------------------------------------------------------------------------
+  # A property the entity does not have
+  # ---------------------------------------------------------------------------
+
+  - name: a_missing_property_is_a_null_item
+    variants:
+      gql: "MATCH (p:Person {name: 'Jules'}) RETURN [p.w, p.age] AS l, [p.w, p.age][1] AS second"
+      cypher: "MATCH (p:Person {name: 'Jules'}) RETURN [p.w, p.age] AS l, [p.w, p.age][1] AS second"
+    expect:
+      rows:
+        - ["[null, 35]", 35]
+
+  - name: a_list_of_a_missing_property_is_not_the_empty_list
+    variants:
+      gql: "MATCH (p:Person) WHERE [p.w] = [] RETURN p.name AS n"
+      cypher: "MATCH (p:Person) WHERE [p.w] = [] RETURN p.name AS n"
+    expect:
+      empty: true
+
+  - name: in_a_list_with_a_missing_value_is_unknown_without_a_match
+    variants:
+      gql: "MATCH (p:Person {name: 'Jules'}) RETURN 3 IN [p.w, 19] AS i, 19 IN [p.w, 19] AS j"
+      cypher: "MATCH (p:Person {name: 'Jules'}) RETURN 3 IN [p.w, 19] AS i, 19 IN [p.w, 19] AS j"
+    expect:
+      rows:
+        - [null, true]
+
+  - name: every_list_has_its_size_whatever_the_data
+    variants:
+      gql: "MATCH (p:Person) RETURN p.name AS n, size([p.w]) AS s ORDER BY n"
+      cypher: "MATCH (p:Person) RETURN p.name AS n, size([p.w]) AS s ORDER BY n"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, 1]
+        - [Gus, 1]
+        - [Jules, 1]
+        - [Mia, 1]
+        - [Vincent, 1]
+
+  # ---------------------------------------------------------------------------
+  # Map literals
+  # ---------------------------------------------------------------------------
+
+  - name: a_map_keeps_a_key_whose_value_is_missing
+    variants:
+      gql: "MATCH (p:Person {name: 'Jules'}) RETURN {w: p.w, age: p.age} AS m"
+      cypher: "MATCH (p:Person {name: 'Jules'}) RETURN {w: p.w, age: p.age} AS m"
+    expect:
+      rows:
+        - ["{age: 35, w: null}"]
+
+  - name: a_map_of_unmatched_properties_keeps_its_keys
+    variants:
+      gql: "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (p)-[r:LIVES_IN]->(c:City) RETURN {city: c.name, years: r.years} AS m"
+      cypher: "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (p)-[r:LIVES_IN]->(c:City) RETURN {city: c.name, years: r.years} AS m"
+    expect:
+      rows:
+        - ["{city: null, years: null}"]

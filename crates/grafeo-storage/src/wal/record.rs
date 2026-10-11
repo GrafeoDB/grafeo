@@ -369,6 +369,19 @@ pub enum WalRecord {
         /// The epoch after the commit.
         epoch: EpochId,
     },
+
+    // === Standalone changes ===
+    /// A change applied on its own (a named graph created or dropped, a
+    /// catalog record put or dropped, an RDF graph operation), as the WAL v2
+    /// log record that holds it: the framed bytes of a `LogRecord::Standalone`
+    /// of grafeo-common's `storage::log_record`. This log carries the record
+    /// until the WAL writes v2 groups; replay decodes it and applies it as
+    /// the live statement did. Appended last, so every record before it
+    /// keeps its encoding.
+    Standalone {
+        /// The framed log record.
+        record: Vec<u8>,
+    },
 }
 
 impl WalEntry for WalRecord {

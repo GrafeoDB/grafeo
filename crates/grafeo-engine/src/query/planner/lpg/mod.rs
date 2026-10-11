@@ -71,7 +71,9 @@
 //! 2. **Zone-map short-circuit**: if the column's zone summary proves the
 //!    predicate cannot match any row group, plan an `EmptyOperator`.
 //! 3. **Property index seek**: equality on an indexed property becomes an
-//!    index scan (O(1) per lookup) instead of a filtered full scan.
+//!    index scan (O(1) per lookup) instead of a filtered full scan. A scan
+//!    for each input row looks its key up per row (`seek`), or, without an
+//!    index, is joined to the input by hash on equal values (`value_join`).
 //! 4. **Range index lookup**: `>`, `<`, `>=`, `<=` on an indexed
 //!    property becomes a range scan.
 //! 5. **Hybrid vector+text pushdown** (feature-gated): compound
@@ -93,17 +95,20 @@
 //! at every hop: see [`crate::transaction`] for the epoch/visibility
 //! rules.
 
+pub(crate) mod after_write;
 mod aggregate;
 mod expand;
 mod expression;
-mod filter;
+pub(crate) mod filter;
 mod filter_hybrid;
 mod join;
 mod mutation;
 mod project;
+pub(crate) mod reachability;
 pub(crate) mod scan;
 pub(crate) mod seek;
 mod subquery;
+pub(crate) mod value_join;
 
 #[cfg(feature = "algos")]
 use crate::query::plan::CallProcedureOp;
@@ -111,8 +116,8 @@ use crate::query::plan::CallProcedureOp;
 use crate::query::plan::TextScanOp;
 use crate::query::plan::{
     AddLabelOp, AggregateFunction as LogicalAggregateFunction, AggregateOp, AntiJoinOp, ApplyOp,
-    BinaryOp, CreateEdgeOp, CreateNodeOp, DeleteEdgeOp, DeleteNodeOp, DistinctOp,
-    EntityKind as LogicalEntityKind, ExceptOp, ExpandDirection, ExpandOp, FilterOp,
+    BinaryOp, CreateEdgeOp, CreateElement, CreateNodeOp, CreateOp, DeleteEdgeOp, DeleteNodeOp,
+    DistinctOp, EntityKind as LogicalEntityKind, ExceptOp, ExpandDirection, ExpandOp, FilterOp,
     HorizontalAggregateOp, IntersectOp, JoinOp, JoinType, LeftJoinOp, LimitOp, LogicalExpression,
     LogicalOperator, LogicalPlan, MapCollectOp, MergeOp, MergeRelationshipOp, MultiWayJoinOp,
     NodeScanOp, OtherwiseOp, PathMode, RemoveLabelOp, ReturnOp, SetPropertyOp, ShortestPathOp,
@@ -124,13 +129,12 @@ use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{EpochId, TransactionId};
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::execution::AdaptiveContext;
 use grafeo_core::execution::operators::{
     AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, ConstraintValidator,
-    CreateEdgeOperator, CreateNodeOperator, DeleteEdgeOperator, DeleteNodeOperator, EmptyOperator,
-    EntityKind, EntityValue, ExecutionPathMode, ExpandOperator, ExpandStep, ExpressionPredicate,
-    FactorizedAggregate, FactorizedAggregateOperator, FilterExpression, FilterOperator,
-    HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
+    CreateOperator, CreateStep, DeleteEdgeOperator, DeleteNodeOperator, EagerOperator,
+    EmptyOperator, EntityKind, EntityValue, ExecutionPathMode, ExpandOperator, ExpandStep,
+    ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
+    FilterOperator, HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
     JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LeapfrogJoinOperator,
     LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator, MergeRelationshipConfig,
     MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator, Operator,
@@ -219,9 +223,11 @@ pub struct Planner {
     /// Variables that hold edge IDs (from MATCH edge patterns).
     /// Used by plan_return to emit `EdgeResolve` instead of `NodeResolve`.
     pub(super) edge_columns: std::cell::RefCell<std::collections::HashSet<String>>,
-    /// Columns that hold a list of node or edge ids: the variable of a
-    /// variable-length edge pattern, and WITH aliases of such lists. RETURN
-    /// returns their items as node and edge maps.
+    /// Columns that hold a list of node or edge ids (the variable of a
+    /// variable-length edge pattern, a collected list) or a value with node
+    /// or edge ids inside (a map or list literal, a path, see
+    /// [`EntityValue::Nested`]), and WITH aliases of them. RETURN returns
+    /// the nodes and edges in them as node and edge maps.
     pub(super) entity_list_columns: std::cell::RefCell<
         std::collections::HashMap<String, grafeo_core::execution::operators::EntityValue>,
     >,
@@ -245,12 +251,25 @@ pub struct Planner {
     /// Variables from variable-length expand patterns (group-list variables).
     /// Used by the aggregate planner to detect horizontal aggregation (GE09).
     pub(super) group_list_variables: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Whether the statement being planned writes, known while its root is
+    /// planned (see [`value_join::StatementScope`]).
+    pub(super) statement_writes: std::cell::Cell<Option<bool>>,
+    /// Whether the operator being planned runs after a write of its
+    /// statement that does not come to it through its input (the right side
+    /// of a join whose left side writes, a subquery, see
+    /// [`after_write::right_side_runs_after_a_write`] and
+    /// [`after_write::subquery_runs_after_a_write`]): it reads the store as
+    /// that write left it, not as it is while planning.
+    pub(super) after_a_write: std::cell::Cell<bool>,
     /// When true, each physical operator is wrapped in `ProfiledOperator`.
     profiling: std::cell::Cell<bool>,
     /// Profile entries collected during planning (post-order).
     profile_entries: std::cell::RefCell<Vec<crate::query::profile::ProfileEntry>>,
-    /// Optional write tracker for recording writes during mutations.
-    write_tracker: Option<grafeo_core::execution::operators::SharedWriteTracker>,
+    /// Where the plan's writers write and record their writes: the active
+    /// graph's store and the transaction's changes in it. `None` outside a
+    /// transaction, where writers write through the write store; a plan in
+    /// a transaction without one cannot write (see `graph_writer`).
+    recording: Option<grafeo_core::execution::operators::Recording>,
     /// Counts the writes of the plan's writers.
     write_counter: Arc<grafeo_core::execution::operators::WriteCounter>,
     /// Session context for introspection functions (info, schema, current_schema, etc.).
@@ -270,6 +289,14 @@ pub struct Planner {
     /// `Cell::replace`, recurse, then restore. This handles nested
     /// LIMITs (e.g. subqueries) without state leaking across scopes.
     pub(super) limit_hint: std::cell::Cell<Option<usize>>,
+    /// The addresses of the expands of the plan being planned that run as a
+    /// reachability search (see [`reachability`]), with their mode, found when
+    /// planning starts; `None` with the search turned off, which only tests do.
+    reachability_expands: std::cell::RefCell<Option<Vec<(usize, reachability::ReachabilityMode)>>>,
+    /// The bytes one path search may hold: a variable-length expand from
+    /// one input row, or a shortest-path search for one (see
+    /// [`Self::with_path_search_budget`]).
+    path_search_budget: usize,
 }
 
 impl Planner {
@@ -302,30 +329,29 @@ impl Planner {
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
+            statement_writes: std::cell::Cell::new(None),
+            after_a_write: std::cell::Cell::new(false),
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
-            write_tracker: None,
+            recording: None,
             write_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
+            reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
+            path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
         }
     }
 
-    /// Records the plan's writes, for conflict detection, as writes to the
-    /// graph with storage key `graph` (`None`: the default graph). Named
-    /// graphs number their entities on their own, so without this node 0 of
-    /// one graph would conflict with node 0 of another.
+    /// Writes the plan's writes through `recording`'s store and records
+    /// them in the transaction's changes, with their claims: what a
+    /// transaction's plan does.
     #[must_use]
-    pub fn with_write_graph(mut self, graph: Option<&str>) -> Self {
-        if self.write_tracker.is_some()
-            && let Some(manager) = &self.transaction_manager
-        {
-            self.write_tracker = Some(Arc::new(
-                crate::transaction::TransactionWriteTracker::new(Arc::clone(manager))
-                    .in_graph(graph),
-            ));
-        }
+    pub(crate) fn with_recording(
+        mut self,
+        recording: Option<grafeo_core::execution::operators::Recording>,
+    ) -> Self {
+        self.recording = recording;
         self
     }
 
@@ -338,18 +364,6 @@ impl Planner {
         transaction_id: Option<TransactionId>,
         viewing_epoch: EpochId,
     ) -> Self {
-        use crate::transaction::TransactionWriteTracker;
-
-        // Create write tracker when there's an active transaction
-        let write_tracker: Option<grafeo_core::execution::operators::SharedWriteTracker> =
-            if transaction_id.is_some() {
-                Some(Arc::new(TransactionWriteTracker::new(Arc::clone(
-                    &transaction_manager,
-                ))))
-            } else {
-                None
-            };
-
         Self {
             store,
             write_store,
@@ -372,13 +386,17 @@ impl Planner {
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
+            statement_writes: std::cell::Cell::new(None),
+            after_a_write: std::cell::Cell::new(false),
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
-            write_tracker,
+            recording: None,
             write_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
+            reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
+            path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
         }
     }
 
@@ -387,6 +405,18 @@ impl Planner {
     #[must_use]
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Sets the bytes one path search of the plan may hold: the paths a
+    /// variable-length expand has found from one input row and not yet
+    /// emitted or extended, and the paths a shortest-path search follows and
+    /// keeps for one. A search that would hold more fails with an error
+    /// that names the ways to need fewer paths. The default is
+    /// [`DEFAULT_PATH_SEARCH_BUDGET`](grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET).
+    #[must_use]
+    pub fn with_path_search_budget(mut self, bytes: usize) -> Self {
+        self.path_search_budget = bytes;
         self
     }
 
@@ -401,12 +431,29 @@ impl Planner {
     }
 
     /// A writer for this statement's mutations: the writable store with the
-    /// transaction context, the write tracker and the constraint validator.
+    /// transaction context, the transaction's recording and the constraint
+    /// validator.
+    ///
+    /// # Errors
+    ///
+    /// Fails without a writable store, and in a transaction without its
+    /// recording (the transaction is no longer open): a write there would
+    /// be neither claimed nor recorded, so no commit could publish it and no
+    /// rollback undo it.
     fn graph_writer(&self) -> Result<grafeo_core::execution::operators::GraphWriter> {
         let mut writer = grafeo_core::execution::operators::GraphWriter::new(self.write_store()?)
             .with_transaction_context(self.viewing_epoch, self.transaction_id);
-        if let Some(ref tracker) = self.write_tracker {
-            writer = writer.with_write_tracker(Arc::clone(tracker));
+        match (&self.recording, self.transaction_id) {
+            (Some(recording), _) => writer = writer.with_recording(recording.clone()),
+            (None, Some(transaction)) => {
+                return Err(Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::InvalidState(format!(
+                        "transaction {} is not open: it cannot write",
+                        transaction.as_u64()
+                    )),
+                ));
+            }
+            (None, None) => {}
         }
         if let Some(ref validator) = self.validator {
             writer = writer.with_validator(Arc::clone(validator));
@@ -455,6 +502,15 @@ impl Planner {
     #[must_use]
     pub fn with_factorized_execution(mut self, enabled: bool) -> Self {
         self.factorized_execution = enabled;
+        self
+    }
+
+    /// Lets variable-length expands run as a reachability search where
+    /// [`reachability`] allows it (the default); off, every walk is
+    /// enumerated, which tests compare with.
+    #[must_use]
+    pub(crate) fn with_reachability(mut self, enabled: bool) -> Self {
+        self.reachability_expands = std::cell::RefCell::new(enabled.then(Vec::new));
         self
     }
 
@@ -549,7 +605,7 @@ impl Planner {
     /// for a scalar, a path detail or a group list, an edge for an edge column
     /// and otherwise a node.
     pub(super) fn column_entity(&self, name: &str) -> Option<EntityValue> {
-        if let Some(kind) = self.entity_list_columns.borrow().get(name).copied() {
+        if let Some(kind) = self.entity_list_columns.borrow().get(name).cloned() {
             return Some(kind);
         }
         if name.starts_with("_path_")
@@ -566,7 +622,8 @@ impl Planner {
     }
 
     /// Records that the named column holds `kind`: a node (the default), an
-    /// edge, a node or edge list, or a scalar value (`None`).
+    /// edge, a node or edge list, a value with nodes or edges inside, or a
+    /// scalar value (`None`).
     pub(super) fn set_column_entity(&self, name: &str, kind: Option<EntityValue>) {
         let name = name.to_string();
         self.scalar_columns.borrow_mut().remove(&name);
@@ -577,10 +634,10 @@ impl Planner {
             Some(EntityValue::Edge) => {
                 self.edge_columns.borrow_mut().insert(name);
             }
-            Some(list @ (EntityValue::Nodes | EntityValue::Edges)) => {
-                self.entity_list_columns.borrow_mut().insert(name, list);
+            Some(nested) => {
+                self.entity_list_columns.borrow_mut().insert(name, nested);
             }
-            _ => {
+            None => {
                 self.scalar_columns.borrow_mut().insert(name);
             }
         }
@@ -634,37 +691,38 @@ impl Planner {
         name
     }
 
-    /// Counts consecutive single-hop expand operations.
+    /// Counts the expands of the chain at the top of `op` (see
+    /// [`Self::collect_expand_chain`]).
     ///
-    /// Returns the count and the deepest non-expand operator (the base of the chain).
+    /// Returns the count and the operator below the chain (the base of the
+    /// chain).
     fn count_expand_chain(op: &LogicalOperator) -> (usize, &LogicalOperator) {
-        match op {
-            LogicalOperator::Expand(expand) => {
-                let is_single_hop =
-                    !expand.quantified && expand.min_hops == 1 && expand.max_hops == Some(1);
-
-                if is_single_hop {
-                    let (inner_count, base) = Self::count_expand_chain(&expand.input);
-                    (inner_count + 1, base)
-                } else {
-                    (0, op)
-                }
-            }
-            _ => (0, op),
+        let chain = Self::collect_expand_chain(op);
+        match chain.first() {
+            Some(first) => (chain.len(), &first.input),
+            None => (0, op),
         }
     }
 
-    /// Collects expand operations from the outermost down to the base.
+    /// Collects the consecutive single-hop expands at the top of `op`, each
+    /// going on from the target of the one below it: a factorized chain reads
+    /// the source of each level from the target of the level before. The
+    /// chain ends below an expand from another variable, such as a second
+    /// expand from the target an expand started at (see the optimizer's
+    /// `start_at_the_sought_end`).
     ///
     /// Returns expands in order from innermost (base) to outermost.
     fn collect_expand_chain(op: &LogicalOperator) -> Vec<&ExpandOp> {
-        let mut chain = Vec::new();
+        let mut chain: Vec<&ExpandOp> = Vec::new();
         let mut current = op;
 
         while let LogicalOperator::Expand(expand) = current {
             let is_single_hop =
                 !expand.quantified && expand.min_hops == 1 && expand.max_hops == Some(1);
-            if !is_single_hop {
+            let goes_on = chain
+                .last()
+                .is_none_or(|outer| outer.from_variable == expand.to_variable);
+            if !is_single_hop || !goes_on {
                 break;
             }
             chain.push(expand);
@@ -683,13 +741,10 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
+        self.find_reachability_expands(&logical_plan.root);
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
         let operator = self.shuffled_root(logical_plan, operator);
-        Ok(PhysicalPlan {
-            operator,
-            columns,
-            adaptive_context: None,
-        })
+        Ok(PhysicalPlan { operator, columns })
     }
 
     /// Plans a logical plan with profiling: each physical operator is wrapped
@@ -708,6 +763,7 @@ impl Planner {
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
+        self.find_reachability_expands(&logical_plan.root);
 
         let result = self.plan_operator(&logical_plan.root);
 
@@ -715,221 +771,31 @@ impl Planner {
         let (operator, columns) = result?;
         let entries = self.profile_entries.borrow_mut().drain(..).collect();
 
-        Ok((
-            PhysicalPlan {
-                operator,
-                columns,
-                adaptive_context: None,
-            },
-            entries,
-        ))
+        Ok((PhysicalPlan { operator, columns }, entries))
     }
 
-    /// Plans a logical plan with adaptive execution support.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the logical plan contains unsupported operators
-    /// or invalid expressions.
-    pub fn plan_adaptive(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
-        let (operator, columns) = self.plan_operator(&logical_plan.root)?;
-        let operator = self.shuffled_root(logical_plan, operator);
-
-        let mut adaptive_context = AdaptiveContext::new();
-        self.collect_cardinality_estimates(&logical_plan.root, &mut adaptive_context, 0);
-
-        Ok(PhysicalPlan {
-            operator,
-            columns,
-            adaptive_context: Some(adaptive_context),
-        })
-    }
-
-    /// Collects cardinality estimates from the logical plan into an adaptive context.
-    fn collect_cardinality_estimates(
-        &self,
-        op: &LogicalOperator,
-        ctx: &mut AdaptiveContext,
-        depth: usize,
-    ) {
-        match op {
-            LogicalOperator::NodeScan(scan) => {
-                let estimate = if let Some(label) = &scan.label {
-                    self.store.nodes_by_label_count(label) as f64
-                } else {
-                    self.store.node_count() as f64
-                };
-                let id = format!("scan_{}", scan.variable);
-                ctx.set_estimate(&id, estimate);
-
-                if let Some(input) = &scan.input {
-                    self.collect_cardinality_estimates(input, ctx, depth + 1);
-                }
-            }
-            LogicalOperator::Filter(filter) => {
-                let input_estimate = self.estimate_cardinality(&filter.input);
-                let estimate = input_estimate * 0.3;
-                let id = format!("filter_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&filter.input, ctx, depth + 1);
-            }
-            LogicalOperator::Expand(expand) => {
-                let input_estimate = self.estimate_cardinality(&expand.input);
-                let stats = self.store.statistics();
-                let avg_degree = self.estimate_expand_degree(&stats, expand);
-                let estimate = input_estimate * avg_degree;
-                let id = format!("expand_{}", expand.to_variable);
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&expand.input, ctx, depth + 1);
-            }
-            LogicalOperator::Join(join) => {
-                let left_est = self.estimate_cardinality(&join.left);
-                let right_est = self.estimate_cardinality(&join.right);
-                let estimate = (left_est * right_est).sqrt();
-                let id = format!("join_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&join.left, ctx, depth + 1);
-                self.collect_cardinality_estimates(&join.right, ctx, depth + 1);
-            }
-            LogicalOperator::Aggregate(agg) => {
-                let input_estimate = self.estimate_cardinality(&agg.input);
-                let estimate = if agg.group_by.is_empty() {
-                    1.0
-                } else {
-                    (input_estimate * 0.1).max(1.0)
-                };
-                let id = format!("aggregate_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&agg.input, ctx, depth + 1);
-            }
-            LogicalOperator::Distinct(distinct) => {
-                let input_estimate = self.estimate_cardinality(&distinct.input);
-                let estimate = (input_estimate * 0.5).max(1.0);
-                let id = format!("distinct_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&distinct.input, ctx, depth + 1);
-            }
-            LogicalOperator::Return(ret) => {
-                self.collect_cardinality_estimates(&ret.input, ctx, depth + 1);
-            }
-            LogicalOperator::Limit(limit) => {
-                let input_estimate = self.estimate_cardinality(&limit.input);
-                let estimate = (input_estimate).min(limit.count.estimate());
-                let id = format!("limit_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&limit.input, ctx, depth + 1);
-            }
-            LogicalOperator::Skip(skip) => {
-                let input_estimate = self.estimate_cardinality(&skip.input);
-                let estimate = (input_estimate - skip.count.estimate()).max(0.0);
-                let id = format!("skip_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                self.collect_cardinality_estimates(&skip.input, ctx, depth + 1);
-            }
-            LogicalOperator::Sort(sort) => {
-                self.collect_cardinality_estimates(&sort.input, ctx, depth + 1);
-            }
-            LogicalOperator::Union(union) => {
-                let estimate: f64 = union
-                    .inputs
-                    .iter()
-                    .map(|input| self.estimate_cardinality(input))
-                    .sum();
-                let id = format!("union_{depth}");
-                ctx.set_estimate(&id, estimate);
-
-                for input in &union.inputs {
-                    self.collect_cardinality_estimates(input, ctx, depth + 1);
-                }
-            }
-            _ => {
-                // For other operators, try to recurse into known input patterns
-            }
+    /// Finds the variable-length expands of `root` that run as a
+    /// reachability search, for [`Self::reachability_mode`].
+    fn find_reachability_expands(&self, root: &LogicalOperator) {
+        if let Some(found) = self.reachability_expands.borrow_mut().as_mut() {
+            *found = reachability::reachability_expands(root)
+                .into_iter()
+                .map(|(expand, mode)| (std::ptr::from_ref(expand).addr(), mode))
+                .collect();
         }
     }
 
-    /// Estimates cardinality for a logical operator subtree.
-    fn estimate_cardinality(&self, op: &LogicalOperator) -> f64 {
-        match op {
-            LogicalOperator::NodeScan(scan) => {
-                if let Some(label) = &scan.label {
-                    self.store.nodes_by_label_count(label) as f64
-                } else {
-                    self.store.node_count() as f64
-                }
-            }
-            LogicalOperator::Filter(filter) => self.estimate_cardinality(&filter.input) * 0.3,
-            LogicalOperator::Expand(expand) => {
-                let stats = self.store.statistics();
-                let avg_degree = self.estimate_expand_degree(&stats, expand);
-                self.estimate_cardinality(&expand.input) * avg_degree
-            }
-            LogicalOperator::Join(join) => {
-                let left = self.estimate_cardinality(&join.left);
-                let right = self.estimate_cardinality(&join.right);
-                (left * right).sqrt()
-            }
-            LogicalOperator::Aggregate(agg) => {
-                if agg.group_by.is_empty() {
-                    1.0
-                } else {
-                    (self.estimate_cardinality(&agg.input) * 0.1).max(1.0)
-                }
-            }
-            LogicalOperator::Distinct(distinct) => {
-                (self.estimate_cardinality(&distinct.input) * 0.5).max(1.0)
-            }
-            LogicalOperator::Return(ret) => self.estimate_cardinality(&ret.input),
-            LogicalOperator::Limit(limit) => self
-                .estimate_cardinality(&limit.input)
-                .min(limit.count.estimate()),
-            LogicalOperator::Skip(skip) => {
-                (self.estimate_cardinality(&skip.input) - skip.count.estimate()).max(0.0)
-            }
-            LogicalOperator::Sort(sort) => self.estimate_cardinality(&sort.input),
-            LogicalOperator::Union(union) => union
-                .inputs
-                .iter()
-                .map(|input| self.estimate_cardinality(input))
-                .sum(),
-            LogicalOperator::Except(except) => {
-                let left = self.estimate_cardinality(&except.left);
-                let right = self.estimate_cardinality(&except.right);
-                (left - right).max(0.0)
-            }
-            LogicalOperator::Intersect(intersect) => {
-                let left = self.estimate_cardinality(&intersect.left);
-                let right = self.estimate_cardinality(&intersect.right);
-                left.min(right)
-            }
-            LogicalOperator::Otherwise(otherwise) => self
-                .estimate_cardinality(&otherwise.left)
-                .max(self.estimate_cardinality(&otherwise.right)),
-            _ => 1000.0,
-        }
-    }
-
-    /// Estimates the average edge degree for an expand operation using store statistics.
-    fn estimate_expand_degree(
-        &self,
-        stats: &grafeo_core::statistics::Statistics,
-        expand: &ExpandOp,
-    ) -> f64 {
-        let outgoing = !matches!(expand.direction, ExpandDirection::Incoming);
-        if expand.edge_types.len() == 1 {
-            stats.estimate_avg_degree(&expand.edge_types[0], outgoing)
-        } else if stats.total_nodes > 0 {
-            (stats.total_edges as f64 / stats.total_nodes as f64).max(1.0)
-        } else {
-            10.0
-        }
+    /// How `expand` runs as a reachability search, if it does. A copy of the
+    /// plan made while planning has other addresses, so its expands enumerate
+    /// their walks: slower, never wrong.
+    fn reachability_mode(&self, expand: &ExpandOp) -> Option<reachability::ReachabilityMode> {
+        let address = std::ptr::from_ref(expand).addr();
+        self.reachability_expands
+            .borrow()
+            .as_ref()?
+            .iter()
+            .find(|(found, _)| *found == address)
+            .map(|(_, mode)| *mode)
     }
 
     /// If profiling is enabled, wraps a planned result in `ProfiledOperator`
@@ -941,8 +807,14 @@ impl Planner {
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         if self.profiling.get() {
             let (physical, columns) = result?;
-            let (entry, stats) =
-                crate::query::profile::ProfileEntry::new(physical.name(), op.display_label());
+            let mut label = op.display_label();
+            if let LogicalOperator::Expand(expand) = op
+                && let Some(mode) = self.reachability_mode(expand)
+            {
+                label.push(' ');
+                label.push_str(mode.marker());
+            }
+            let (entry, stats) = crate::query::profile::ProfileEntry::new(physical.name(), label);
             let profiled = grafeo_core::execution::ProfiledOperator::new(physical, stats);
             self.profile_entries.borrow_mut().push(entry);
             Ok((Box::new(profiled), columns))
@@ -951,17 +823,35 @@ impl Planner {
         }
     }
 
+    /// Plans the input of an operator that can start a query. `Empty`, the
+    /// one empty row a query starts from (`RETURN 1`, a first `WITH`, `UNWIND`,
+    /// `OPTIONAL MATCH` or `CALL`, a filter moved down to it), is a single row
+    /// without columns; any other input is planned as usual. `plan_operator`
+    /// refuses `Empty`, so the row is profiled here: PROFILE walks the logical
+    /// tree, `Empty` included, and needs an entry for each of its operators.
+    fn plan_input(&self, input: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        if !matches!(input, LogicalOperator::Empty) {
+            return self.plan_operator(input);
+        }
+        let row: Box<dyn Operator> =
+            Box::new(grafeo_core::execution::operators::single_row::SingleRowOperator::new());
+        self.maybe_profile(Ok((row, Vec::new())), input)
+    }
+
     /// Plans a single logical operator.
     fn plan_operator(&self, op: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let _statement = value_join::StatementScope::enter(&self.statement_writes, op);
         // A chain of filters over a node scan reads the label with the fewest
         // nodes (see `scan.rs`); PROFILE then shows the plan that runs.
+        // Boxed: this frame is on the stack once per level of the plan (see
+        // `crate::query::limits`), an operator in it would make it larger.
         let reordered = match op {
             LogicalOperator::Filter(filter) => self
                 .scan_smallest_label(filter)
-                .map(LogicalOperator::Filter),
+                .map(|filter| Box::new(LogicalOperator::Filter(filter))),
             _ => None,
         };
-        let op = reordered.as_ref().unwrap_or(op);
+        let op = reordered.as_deref().unwrap_or(op);
         let result = match op {
             LogicalOperator::NodeScan(scan) => self.plan_node_scan(scan),
             LogicalOperator::Expand(expand) => {
@@ -1006,6 +896,7 @@ impl Planner {
             LogicalOperator::Distinct(distinct) => self.plan_distinct(distinct),
             LogicalOperator::CreateNode(create) => self.plan_create_node(create),
             LogicalOperator::CreateEdge(create) => self.plan_create_edge(create),
+            LogicalOperator::Create(create) => self.plan_create(create),
             LogicalOperator::DeleteNode(delete) => self.plan_delete_node(delete),
             LogicalOperator::DeleteEdge(delete) => self.plan_delete_edge(delete),
             LogicalOperator::LeftJoin(left_join) => self.plan_left_join(left_join),
@@ -1023,39 +914,36 @@ impl Planner {
             #[cfg(feature = "algos")]
             LogicalOperator::CallProcedure(call) => self.plan_call_procedure(call),
             #[cfg(not(feature = "algos"))]
-            LogicalOperator::CallProcedure(_) => Err(Error::Internal(
-                "CALL procedures require the 'algos' feature".to_string(),
+            LogicalOperator::CallProcedure(_) => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no procedures (the `algos` feature)",
+                ),
             )),
             LogicalOperator::ParameterScan(param_scan) => self.plan_parameter_scan(param_scan),
             LogicalOperator::MultiWayJoin(mwj) => self.plan_multi_way_join(mwj),
             LogicalOperator::HorizontalAggregate(ha) => self.plan_horizontal_aggregate(ha),
-            LogicalOperator::LoadData(load) => {
-                let operator: Box<dyn Operator> = Box::new(LoadDataOperator::new(
-                    load.path.clone(),
-                    load.format,
-                    load.with_headers,
-                    load.field_terminator,
-                    load.variable.clone(),
-                ));
-                // A loaded row is a value (a map or a list), not a node.
-                self.set_column_entity(&load.variable, None);
-                Ok((operator, vec![load.variable.clone()]))
-            }
+            LogicalOperator::LoadData(load) => self.plan_load_data(load),
             LogicalOperator::Empty => Err(Error::Internal("Empty plan".to_string())),
             #[cfg(feature = "vector-index")]
             LogicalOperator::VectorScan(scan) => self.plan_vector_scan(scan),
             #[cfg(not(feature = "vector-index"))]
-            LogicalOperator::VectorScan(_) => Err(Error::Internal(
-                "VectorScan requires vector-index feature".to_string(),
+            LogicalOperator::VectorScan(_) => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no vector indexes (the `vector-index` feature)",
+                ),
             )),
-            LogicalOperator::VectorJoin(_) => Err(Error::Internal(
-                "VectorJoin requires vector-index feature".to_string(),
+            LogicalOperator::VectorJoin(_) => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no vector indexes (the `vector-index` feature)",
+                ),
             )),
             #[cfg(feature = "text-index")]
             LogicalOperator::TextScan(scan) => self.plan_text_scan(scan),
             #[cfg(not(feature = "text-index"))]
-            LogicalOperator::TextScan(_) => Err(Error::Internal(
-                "TextScan requires text-index feature".to_string(),
+            LogicalOperator::TextScan(_) => Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this build has no text indexes (the `text-index` feature)",
+                ),
             )),
             _ => Err(Error::Internal(format!(
                 "Unsupported operator: {:?}",
@@ -1063,6 +951,24 @@ impl Planner {
             ))),
         };
         self.maybe_profile(result, op)
+    }
+
+    /// Plans a `LOAD DATA` source: a loaded row is a value (a map or a
+    /// list), not a node.
+    #[inline(never)]
+    fn plan_load_data(
+        &self,
+        load: &crate::query::plan::LoadDataOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let operator: Box<dyn Operator> = Box::new(LoadDataOperator::new(
+            load.path.clone(),
+            load.format,
+            load.with_headers,
+            load.field_terminator,
+            load.variable.clone(),
+        ));
+        self.set_column_entity(&load.variable, None);
+        Ok((operator, vec![load.variable.clone()]))
     }
 
     /// Plans a horizontal aggregate operator (per-row aggregation over a list column).
@@ -1090,15 +996,19 @@ impl Planner {
         let function = convert_aggregate_function(ha.function);
         let input_column_count = child_columns.len();
 
-        let operator: Box<dyn Operator> = Box::new(HorizontalAggregateOperator::new(
-            child_op,
-            list_col_idx,
-            entity_kind,
-            function,
-            ha.property.clone(),
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            input_column_count,
-        ));
+        let operator: Box<dyn Operator> = Box::new(
+            HorizontalAggregateOperator::new(
+                child_op,
+                list_col_idx,
+                entity_kind,
+                function,
+                ha.property.clone(),
+                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                input_column_count,
+            )
+            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone())
+            .with_transaction_context(self.viewing_epoch, self.transaction_id),
+        );
 
         let mut columns = child_columns;
         columns.push(ha.alias.clone());
@@ -1148,8 +1058,10 @@ impl Planner {
                 )));
             }
             _ => {
-                return Err(Error::Internal(
-                    "TextScan query must be a string literal or parameter".to_string(),
+                return Err(grafeo_common::utils::error::Error::Query(
+                    grafeo_common::utils::error::QueryError::semantic(
+                        "a text search query must be a string literal or a parameter",
+                    ),
                 ));
             }
         };
@@ -1227,15 +1139,30 @@ impl Planner {
             )
         });
 
+        // A query vector the index cannot measure is an error that names the
+        // index (#593), whichever metric the predicate asks for: a search of
+        // the index, or a scan of its vectors, would find nothing (or measure
+        // NaN), where the predicate evaluated per node gives NULL.
+        let index = scan.label.as_ref().and_then(|label| {
+            self.store
+                .vector_index_config(label, &scan.property)
+                .map(|config| (label, config))
+        });
+        match &index {
+            Some((label, config)) => grafeo_core::index::vector::check_query_vector(
+                &query_vec,
+                config.dimensions,
+                label,
+                &scan.property,
+            )?,
+            None => grafeo_core::index::vector::check_query_values(&query_vec)?,
+        }
+
         // Pick the metric we'll execute under. When the user asked for a
         // specific one, honor it. Otherwise inherit the index's metric (so a
         // cosine-built index drives cosine scoring) or default to Cosine for
         // the unindexed brute-force path.
-        let index_metric = scan
-            .label
-            .as_ref()
-            .and_then(|label| self.store.vector_index_config(label, &scan.property))
-            .map(|config| config.metric);
+        let index_metric = index.map(|(_, config)| config.metric);
         let metric = requested_metric
             .or(index_metric)
             .unwrap_or(DistanceMetric::Cosine);
@@ -2639,309 +2566,6 @@ mod tests {
         let _ = physical.into_operator();
     }
 
-    // ==================== Adaptive Planning Tests ====================
-
-    #[test]
-    fn test_plan_adaptive_with_scan() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        // MATCH (n:Person) RETURN n
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                variable: "n".to_string(),
-                label: Some("Person".to_string()),
-                input: None,
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert_eq!(physical.columns(), &["n"]);
-        // Should have adaptive context with estimates
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_filter() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        // MATCH (n) WHERE n.age > 30 RETURN n
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Filter(FilterOp {
-                predicate: LogicalExpression::Binary {
-                    left: Box::new(LogicalExpression::Property {
-                        variable: "n".to_string(),
-                        property: "age".to_string(),
-                    }),
-                    op: BinaryOp::Gt,
-                    right: Box::new(LogicalExpression::Literal(Value::Int64(30))),
-                },
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "n".to_string(),
-                    label: None,
-                    input: None,
-                })),
-                pushdown_hint: None,
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_expand() {
-        let store = create_test_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>)
-            .with_factorized_execution(false);
-
-        // MATCH (a)-[:KNOWS]->(b) RETURN a, b
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![
-                ReturnItem {
-                    expression: LogicalExpression::Variable("a".to_string()),
-                    alias: None,
-                },
-                ReturnItem {
-                    expression: LogicalExpression::Variable("b".to_string()),
-                    alias: None,
-                },
-            ],
-            distinct: false,
-            input: Box::new(LogicalOperator::Expand(ExpandOp {
-                quantified: false,
-                from_variable: "a".to_string(),
-                to_variable: "b".to_string(),
-                edge_variable: None,
-                direction: ExpandDirection::Outgoing,
-                edge_types: vec!["KNOWS".to_string()],
-                min_hops: 1,
-                max_hops: Some(1),
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "a".to_string(),
-                    label: None,
-                    input: None,
-                })),
-                path_alias: None,
-                path_mode: PathMode::Walk,
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_join() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![
-                ReturnItem {
-                    expression: LogicalExpression::Variable("a".to_string()),
-                    alias: None,
-                },
-                ReturnItem {
-                    expression: LogicalExpression::Variable("b".to_string()),
-                    alias: None,
-                },
-            ],
-            distinct: false,
-            input: Box::new(LogicalOperator::Join(JoinOp {
-                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "a".to_string(),
-                    label: None,
-                    input: None,
-                })),
-                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "b".to_string(),
-                    label: None,
-                    input: None,
-                })),
-                join_type: JoinType::Cross,
-                conditions: vec![],
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_aggregate() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Aggregate(AggregateOp {
-            group_by: vec![],
-            aggregates: vec![LogicalAggregateExpr {
-                function: LogicalAggregateFunction::Count,
-                expression: Some(LogicalExpression::Variable("n".to_string())),
-                expression2: None,
-                distinct: false,
-                alias: Some("cnt".to_string()),
-                percentile: None,
-                separator: None,
-            }],
-            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                variable: "n".to_string(),
-                label: None,
-                input: None,
-            })),
-            having: None,
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_distinct() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Distinct(LogicalDistinctOp {
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "n".to_string(),
-                    label: None,
-                    input: None,
-                })),
-                columns: None,
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_limit() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Limit(LogicalLimitOp {
-                count: 10.into(),
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "n".to_string(),
-                    label: None,
-                    input: None,
-                })),
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_skip() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Skip(LogicalSkipOp {
-                count: 5.into(),
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "n".to_string(),
-                    label: None,
-                    input: None,
-                })),
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_sort() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Sort(SortOp {
-                keys: vec![SortKey {
-                    expression: LogicalExpression::Variable("n".to_string()),
-                    order: SortOrder::Ascending,
-                    nulls: None,
-                }],
-                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
-                    variable: "n".to_string(),
-                    label: None,
-                    input: None,
-                })),
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_union() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-
-        let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
-            items: vec![ReturnItem {
-                expression: LogicalExpression::Variable("n".to_string()),
-                alias: None,
-            }],
-            distinct: false,
-            input: Box::new(LogicalOperator::Union(UnionOp {
-                inputs: vec![
-                    LogicalOperator::NodeScan(NodeScanOp {
-                        variable: "n".to_string(),
-                        label: Some("Person".to_string()),
-                        input: None,
-                    }),
-                    LogicalOperator::NodeScan(NodeScanOp {
-                        variable: "n".to_string(),
-                        label: Some("Company".to_string()),
-                        input: None,
-                    }),
-                ],
-            })),
-        }));
-
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
     // ==================== Variable Length Path Tests ====================
 
     #[test]
@@ -3277,8 +2901,9 @@ mod tests {
     use crate::query::plan::{
         AddLabelOp, AntiJoinOp, ApplyOp, BindOp, DeleteEdgeOp, EdgeScanOp, ExceptOp,
         HorizontalAggregateOp, IntersectOp, LeftJoinOp, LoadDataFormat, LoadDataOp, MapCollectOp,
-        MergeOp, MergeRelationshipOp, MultiWayJoinOp, OtherwiseOp, ParameterScanOp, RemoveLabelOp,
-        SetPropertyOp, ShortestPathOp, TripleComponent, TripleScanOp, UnionOp, UnwindOp,
+        MergeOp, MergeRelationshipOp, MultiWayJoinOp, OtherwiseOp, ParameterScanOp, PathSelection,
+        RemoveLabelOp, SetPropertyOp, ShortestPathOp, TripleComponent, TripleScanOp, UnionOp,
+        UnwindOp,
     };
     use grafeo_core::execution::operators::SessionContext;
 
@@ -3574,6 +3199,7 @@ mod tests {
             subplan: Box::new(scan_any("b")),
             shared_variables: vec![],
             optional: false,
+            unit: false,
         }));
         let physical = planner.plan(&logical).unwrap();
         assert!(physical.columns().contains(&"a".to_string()));
@@ -3613,6 +3239,8 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            on_create_labels: Vec::new(),
+            on_match_labels: Vec::new(),
             input: Box::new(LogicalOperator::Empty),
         }));
         let physical = planner.plan(&logical).unwrap();
@@ -3633,6 +3261,7 @@ mod tests {
             match_properties: vec![],
             on_create: vec![],
             on_match: vec![],
+            undirected: false,
             input: Box::new(LogicalOperator::Join(JoinOp {
                 left: Box::new(scan_person("a")),
                 right: Box::new(scan_person("b")),
@@ -3733,16 +3362,21 @@ mod tests {
             edge_types: vec!["KNOWS".to_string()],
             direction: ExpandDirection::Outgoing,
             path_alias: "p".to_string(),
-            all_paths: false,
+            selection: PathSelection::Shortest(1),
+            path_mode: PathMode::Walk,
+            binds_target: false,
             min_hops: 1,
             max_hops: None,
+            edge_variable: Some("r".to_string()),
+            quantified: true,
+            edge_condition: None,
         }));
         let physical = planner.plan(&logical).unwrap();
-        assert!(
-            physical
-                .columns()
-                .iter()
-                .any(|c| c.contains("_path_length_p"))
+        // The length, the edge variable, then the path's nodes, edges and
+        // value, as a variable-length expand names them
+        assert_eq!(
+            &physical.columns()[2..],
+            ["_path_length_p", "r", "_path_nodes_p", "_path_edges_p", "p"]
         );
     }
 
@@ -3757,9 +3391,14 @@ mod tests {
             edge_types: vec![],
             direction: ExpandDirection::Both,
             path_alias: "p".to_string(),
-            all_paths: false,
+            selection: PathSelection::Shortest(1),
+            path_mode: PathMode::Walk,
+            binds_target: false,
             min_hops: 1,
             max_hops: None,
+            edge_variable: None,
+            quantified: true,
+            edge_condition: None,
         }));
         let err = planner.plan(&logical).err().expect("plan should fail");
         assert!(format!("{err}").contains("Source variable"));
@@ -3834,6 +3473,9 @@ mod tests {
                 list_column: "not_a_column".to_string(),
                 entity_kind: crate::query::plan::EntityKind::Edge,
                 function: LogicalAggregateFunction::Count,
+                distinct: false,
+                percentile: None,
+                separator: None,
                 property: "age".to_string(),
                 alias: "total".to_string(),
                 input: Box::new(scan_any("n")),
@@ -3937,6 +3579,9 @@ mod tests {
                 list_column: "_path_edges_p".to_string(),
                 entity_kind: crate::query::plan::EntityKind::Edge,
                 function: LogicalAggregateFunction::Count,
+                distinct: false,
+                percentile: None,
+                separator: None,
                 property: "weight".to_string(),
                 alias: "edge_count".to_string(),
                 input: Box::new(path),
@@ -3944,46 +3589,6 @@ mod tests {
         ));
         let physical = planner.plan(&logical).unwrap();
         assert!(physical.columns().contains(&"edge_count".to_string()));
-    }
-
-    // ==================== Cardinality estimation branches ====================
-
-    #[test]
-    fn test_plan_adaptive_with_except() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-        let logical = LogicalPlan::new(LogicalOperator::Except(ExceptOp {
-            left: Box::new(scan_person("n")),
-            right: Box::new(scan_person("n")),
-            all: false,
-        }));
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_intersect() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-        let logical = LogicalPlan::new(LogicalOperator::Intersect(IntersectOp {
-            left: Box::new(scan_person("n")),
-            right: Box::new(scan_any("n")),
-            all: false,
-        }));
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
-    }
-
-    #[test]
-    fn test_plan_adaptive_with_otherwise() {
-        let store = create_test_store();
-        let planner = Planner::new(store);
-        let logical = LogicalPlan::new(LogicalOperator::Otherwise(OtherwiseOp {
-            left: Box::new(scan_person("n")),
-            right: Box::new(scan_any("n")),
-        }));
-        let physical = planner.plan_adaptive(&logical).unwrap();
-        assert!(physical.adaptive_context.is_some());
     }
 
     // ==================== count_expand_chain edge case ====================
@@ -4006,6 +3611,36 @@ mod tests {
         });
         let (count, _) = Planner::count_expand_chain(&var_expand);
         assert_eq!(count, 0);
+    }
+
+    /// Two expands from the same node (`(c)<-[:LIVES_IN]-(a)-[:KNOWS]->(b)`
+    /// started at `a`) are no chain: the second goes on from `a`, not from
+    /// the target of the first, which a factorized chain would read.
+    #[test]
+    fn test_count_expand_chain_ends_at_an_expand_from_another_variable() {
+        let hop = |from: &str, to: &str, input: LogicalOperator| {
+            LogicalOperator::Expand(ExpandOp {
+                quantified: false,
+                from_variable: from.to_string(),
+                to_variable: to.to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_types: vec!["KNOWS".to_string()],
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(input),
+                path_alias: None,
+                path_mode: PathMode::Walk,
+            })
+        };
+        let star = hop("a", "c", hop("a", "b", scan_person("a")));
+        let (count, base) = Planner::count_expand_chain(&star);
+        assert_eq!(count, 1, "the outer expand alone");
+        assert!(matches!(base, LogicalOperator::Expand(inner) if inner.to_variable == "b"));
+        let chain = hop("b", "c", hop("a", "b", scan_person("a")));
+        let (count, base) = Planner::count_expand_chain(&chain);
+        assert_eq!(count, 2, "a path goes on from each target");
+        assert!(matches!(base, LogicalOperator::NodeScan(_)));
     }
 
     // ==================== StaticResultOperator ====================

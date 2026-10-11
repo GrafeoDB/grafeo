@@ -1,0 +1,57 @@
+# Rosetta: grouped aggregates skip null operands
+#
+# Every aggregate but count(*) skips a null operand, also the first one of a
+# group. A grouped min, max or sample in GQL kept a group's first null and
+# returned null, and a grouped collect listed the nulls; Cypher and the
+# ungrouped forms were right.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Grouped aggregates skip null operands
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: min_and_max_skip_a_leading_null
+    variants:
+      gql: "UNWIND [null, 3, 1] AS x RETURN 0 AS g, min(x) AS a, max(x) AS b"
+      cypher: "UNWIND [null, 3, 1] AS x RETURN 0 AS g, min(x) AS a, max(x) AS b"
+    expect:
+      rows:
+        - [0, 1, 3]
+
+  - name: sample_skips_a_leading_null
+    variants:
+      gql: "UNWIND [null, 3] AS x RETURN 0 AS g, sample(x) AS s"
+      cypher: "UNWIND [null, 3] AS x RETURN 0 AS g, sample(x) AS s"
+    expect:
+      rows:
+        - [0, 3]
+
+  - name: collect_and_count_skip_nulls
+    variants:
+      gql: "UNWIND [null, 19, 3, null, 88, 3] AS x RETURN 0 AS g, collect(x) AS xs, collect(DISTINCT x) AS ds, count(x) AS n, count(DISTINCT x) AS d, count(*) AS rows"
+      cypher: "UNWIND [null, 19, 3, null, 88, 3] AS x RETURN 0 AS g, collect(x) AS xs, collect(DISTINCT x) AS ds, count(x) AS n, count(DISTINCT x) AS d, count(*) AS rows"
+    expect:
+      rows:
+        - [0, "[19, 3, 88, 3]", "[19, 3, 88]", 4, 3, 6]
+
+  - name: sum_and_avg_skip_nulls
+    variants:
+      gql: "UNWIND [null, 19, 3, null, 88, 3] AS x RETURN 0 AS g, sum(x) AS s, avg(x) AS m"
+      cypher: "UNWIND [null, 19, 3, null, 88, 3] AS x RETURN 0 AS g, sum(x) AS s, avg(x) AS m"
+    expect:
+      rows:
+        - [0, 113, 28.25]
+
+  - name: groups_that_start_with_a_null
+    variants:
+      gql: "UNWIND [[1, null], [1, 19], [2, null], [2, 3], [2, 88], [3, null]] AS r RETURN r[0] AS g, min(r[1]) AS lo, max(r[1]) AS hi, sample(r[1]) AS s"
+      cypher: "UNWIND [[1, null], [1, 19], [2, null], [2, 3], [2, 88], [3, null]] AS r RETURN r[0] AS g, min(r[1]) AS lo, max(r[1]) AS hi, sample(r[1]) AS s"
+    expect:
+      rows:
+        - [1, 19, 19, 19]
+        - [2, 3, 88, 3]
+        - [3, null, null, null]

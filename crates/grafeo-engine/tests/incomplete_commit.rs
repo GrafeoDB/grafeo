@@ -247,6 +247,48 @@ fn after_a_commit_that_does_not_complete_no_commit_publishes_part_of_it() {
     assert_eq!(db.current_epoch(), before);
 }
 
+/// After a commit that did not complete, SPARQL updates and graph operations
+/// fail with the incomplete-commit error (`GRAFEO-T008`), through a session
+/// and through `GrafeoDB::execute_sparql`, and change nothing (#414).
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+#[test]
+fn after_a_commit_that_does_not_complete_sparql_updates_fail_with_its_code() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute_sparql("CREATE GRAPH <http://ex.org/paris>")
+        .unwrap();
+    let alix = db
+        .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+        .unwrap();
+    fail_a_commit(&db, alix);
+
+    let session = db.session();
+    for update in [
+        "INSERT DATA { <http://ex.org/gus> <http://ex.org/city> \"Berlin\" }",
+        "CREATE GRAPH <http://ex.org/berlin>",
+        "CLEAR ALL",
+        "DROP GRAPH <http://ex.org/paris>",
+        "COPY DEFAULT TO <http://ex.org/prague>",
+    ] {
+        for (through, outcome) in [
+            ("a session", session.execute_sparql(update)),
+            ("execute_sparql", db.execute_sparql(update)),
+        ] {
+            let error = outcome.expect_err(update);
+            assert_eq!(
+                error.error_code().as_str(),
+                "GRAFEO-T008",
+                "{update} through {through}: {error}"
+            );
+        }
+    }
+    assert!(db.rdf_store().is_empty(), "no triple was added");
+    assert_eq!(
+        db.rdf_store().graph_names(),
+        ["http://ex.org/paris".to_string()],
+        "no graph was created or dropped"
+    );
+}
+
 /// After a commit that did not complete, an RDF batch insert refuses before
 /// it pulls the caller's iterator (which may parse or compute the triples),
 /// and an import before it opens its file or parses its data: a refused call
@@ -311,7 +353,8 @@ fn after_a_commit_that_does_not_complete_imports_refuse_before_reading_their_inp
     assert_eq!(people(&db), [Value::from("Alix")], "nothing was imported");
 }
 
-/// A bulk import or an RDF batch insert, which write no WAL record, by name.
+/// A bulk import or an RDF batch insert, which hold commits off while they
+/// write, by name.
 type Import = (
     &'static str,
     fn(&GrafeoDB) -> grafeo_common::utils::error::Result<()>,
@@ -346,9 +389,10 @@ fn imports() -> Vec<Import> {
 
 /// An import that starts while a commit is in progress waits for it, and
 /// when that commit then fails, the import refuses with the failed commit's
-/// error and adds nothing: it writes no WAL record, and after a commit that
-/// did not complete no checkpoint could persist what it added (before, it
-/// returned `Ok` for data that was lost on reopen).
+/// error and adds nothing: after a commit that did not complete no commit
+/// may follow, and its own would publish the failed commit's stamped
+/// versions with its epoch (before, it returned `Ok` for data that was lost
+/// on reopen).
 #[test]
 fn an_import_waiting_for_a_commit_that_fails_refuses() {
     let mut failures = Vec::new();
@@ -521,7 +565,6 @@ fn a_commit_failing_after_its_wal_records_is_replayed_whole_on_reopen() {
 /// Under memory pressure a compacted database merges its overlay into the
 /// base, which has no versions: after a failed commit the merge would make
 /// the commit's stamped part visible, so it does not run.
-#[cfg(feature = "compact-store")]
 #[test]
 fn a_memory_pressure_merge_never_folds_a_failed_commit_into_the_base() {
     let mut db = GrafeoDB::new_in_memory();
@@ -659,10 +702,9 @@ fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
     assert_refused(&db, "to_memory", db.to_memory().map(drop));
     assert_refused(&db, "export_snapshot", db.export_snapshot().map(drop));
     assert_refused(&db, "backup_full", db.backup_full(&backups).map(drop));
-    #[cfg(feature = "compact-store")]
     let db = {
         let mut db = db;
-        let outcome = db.compact();
+        let outcome = db.compact().map(drop);
         assert_refused(&db, "compact", outcome);
         db
     };

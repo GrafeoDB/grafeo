@@ -61,6 +61,8 @@ For durable storage:
     Advanced configuration options (`memory_limit`, `threads`, `read_only`, etc.)
     are only available in the Rust API via the `Config` builder.
 
+In Rust, start from `Config::in_memory()`, `Config::persistent(path)` or `Config::read_only(path)` and change settings with the `with_*` and `without_*` methods. Later releases add settings, so a `Config` cannot be built as a struct literal.
+
 ### Memory Limit (Rust only)
 
 Control the maximum memory usage:
@@ -68,9 +70,8 @@ Control the maximum memory usage:
 ```rust
 use grafeo::{GrafeoDB, Config};
 
-let config = Config::builder()
-    .memory_limit(4 * 1024 * 1024 * 1024)  // 4 GB
-    .build()?;
+let config = Config::in_memory()
+    .with_memory_limit(4 * 1024 * 1024 * 1024);  // 4 GB
 
 let db = GrafeoDB::with_config(config)?;
 ```
@@ -82,9 +83,7 @@ Configure parallelism:
 ```rust
 use grafeo::{GrafeoDB, Config};
 
-let config = Config::builder()
-    .threads(8)
-    .build()?;
+let config = Config::in_memory().with_threads(8);
 
 let db = GrafeoDB::with_config(config)?;
 ```
@@ -122,11 +121,9 @@ users get sensible defaults automatically.
 ```rust
 use grafeo::{GrafeoDB, Config};
 
-let config = Config::builder()
-    .path("high_throughput.db")
-    .memory_limit(8 * 1024 * 1024 * 1024)  // 8 GB
-    .threads(16)
-    .build()?;
+let config = Config::persistent("high_throughput.db")
+    .with_memory_limit(8 * 1024 * 1024 * 1024)  // 8 GB
+    .with_threads(16);
 
 let db = GrafeoDB::with_config(config)?;
 ```
@@ -136,11 +133,9 @@ let db = GrafeoDB::with_config(config)?;
 ```rust
 use grafeo::{GrafeoDB, Config};
 
-let config = Config::builder()
-    .path("embedded.db")
-    .memory_limit(256 * 1024 * 1024)  // 256 MB
-    .threads(2)
-    .build()?;
+let config = Config::persistent("embedded.db")
+    .with_memory_limit(256 * 1024 * 1024)  // 256 MB
+    .with_threads(2);
 
 let db = GrafeoDB::with_config(config)?;
 ```
@@ -150,11 +145,8 @@ let db = GrafeoDB::with_config(config)?;
 ```rust
 use grafeo::{GrafeoDB, Config};
 
-// Multiple read replicas can be opened read-only
-let config = Config::builder()
-    .path("replica.db")
-    .read_only(true)
-    .build()?;
+// Several processes can open the same file read-only
+let config = Config::read_only("replica.db");
 
 let db = GrafeoDB::with_config(config)?;
 ```

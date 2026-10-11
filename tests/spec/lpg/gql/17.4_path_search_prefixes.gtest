@@ -1,0 +1,239 @@
+# GQL Path search prefixes: ISO/IEC 39075:2024 sec 16.6
+#
+# A path pattern with a search prefix other than ALL is selective: its
+# matches are partitioned by their two endpoints, for each row the pattern
+# starts from, and each partition keeps its own selection. ANY k keeps k
+# paths of each partition, SHORTEST k the k shortest, SHORTEST k GROUPS
+# every path of the k shortest lengths. The prefix goes after the path
+# variable (16.4 <path pattern>), and its path mode restricts the paths the
+# search selects among.
+#
+# Setup: Alix, Gus, Vincent, Mia and Jules with KNOWS edges named by their w:
+# Alix->Gus 3, Alix->Vincent 19, Gus->Mia 88, Vincent->Mia 38,
+# Gus->Vincent 33, Mia->Jules 83. Directed paths from Alix: Gus [3];
+# Vincent [19], [3, 33]; Mia [3, 88], [19, 38], [3, 33, 38]; Jules
+# [3, 88, 83], [19, 38, 83], [3, 33, 38, 83]. Undirected, Jules hangs off Mia.
+
+meta:
+  language: gql
+  model: lpg
+  section: "17.4"
+  title: Path search prefixes
+  dataset: empty
+  iso: [G005, G014, G015, G016, G017, G018, G019, G020]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # ANY: one path per pair of endpoints (it was one row in total)
+  # ---------------------------------------------------------------------------
+
+  - name: any_keeps_one_path_for_each_pair_of_endpoints
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH ANY (a:Person)-[:KNOWS]->{1,3}(b) RETURN a.name, b.name"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Alix, Vincent]
+        - [Alix, Mia]
+        - [Alix, Jules]
+        - [Gus, Vincent]
+        - [Gus, Mia]
+        - [Gus, Jules]
+        - [Vincent, Mia]
+        - [Vincent, Jules]
+        - [Mia, Jules]
+
+  - name: any_k_keeps_k_paths_for_each_pair
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = ANY 2 (a:Person {name: 'Alix'})-[:KNOWS]->{1,3}(b) RETURN b.name AS b, count(*) AS paths"
+    expect:
+      rows:
+        - [Gus, 1]
+        - [Vincent, 2]
+        - [Mia, 2]
+        - [Jules, 2]
+
+  - name: each_input_row_has_its_own_partitions
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "UNWIND [3, 3] AS x MATCH ANY (a:Person {name: 'Alix'})-[:KNOWS]->{1,3}(b) RETURN b.name AS b, count(*) AS paths"
+    expect:
+      rows:
+        - [Gus, 2]
+        - [Vincent, 2]
+        - [Mia, 2]
+        - [Jules, 2]
+
+  - name: an_edge_where_holds_before_any_selects
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = ANY (a:Person {name: 'Alix'})-[e:KNOWS WHERE e.w > 10]->{1,3}(b) RETURN b.name, [x IN e | x.w] AS ws"
+    expect:
+      rows:
+        - [Vincent, "[19]"]
+        - [Mia, "[19, 38]"]
+        - [Jules, "[19, 38, 83]"]
+
+  - name: any_over_one_edge_keeps_one_of_parallel_edges
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(gus), (gus)-[:KNOWS {w: 88}]->(alix)"
+    query: "MATCH ANY (a)-[e:KNOWS]->(b) RETURN a.name, b.name"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Gus, Alix]
+
+  - name: any_over_two_edge_patterns_is_an_error
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (alix)-[:KNOWS {w: 3}]->(gus)"
+    query: "MATCH ANY (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.name, c.name"
+    expect:
+      error: "more than one edge pattern"
+
+  - name: any_zero_is_an_error
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (alix)-[:KNOWS {w: 3}]->(gus)"
+    query: "MATCH ANY 0 (a:Person)-[:KNOWS]->{1,3}(b) RETURN b.name"
+    expect:
+      error: "at least 1"
+
+  # ---------------------------------------------------------------------------
+  # The path mode of a path pattern and of a search prefix (16.6)
+  # ---------------------------------------------------------------------------
+
+  - name: path_mode_after_the_path_variable
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = TRAIL (a:Person {name: 'Jules'})-[:KNOWS]-{1,4}(b:Person {name: 'Mia'}) RETURN length(p) AS len"
+    expect:
+      rows:
+        - [1]
+        - [4]
+        - [4]
+
+  - name: path_or_paths_keywords
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = ALL TRAIL PATHS (a:Person {name: 'Jules'})-[:KNOWS]-{1,4}(b:Person {name: 'Mia'}) RETURN length(p) AS len"
+    expect:
+      rows:
+        - [1]
+        - [4]
+        - [4]
+
+  - name: any_acyclic_reaches_no_node_twice
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = ANY ACYCLIC (a:Person {name: 'Jules'})-[:KNOWS]-{2,4}(b) RETURN b.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: any_trail_repeats_no_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH ANY TRAIL (a:Person {name: 'Jules'})-[:KNOWS]-{2,4}(b) RETURN b.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Mia]
+        - [Vincent]
+
+  - name: any_shortest_trail_goes_round_the_loop
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = ANY SHORTEST TRAIL (a:Person {name: 'Jules'})-[:KNOWS]-{2,}(b:Person {name: 'Mia'}) RETURN length(p) AS len"
+    expect:
+      rows:
+        - [4]
+
+  - name: any_shortest_walk_goes_back_over_an_edge
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = ANY SHORTEST (a:Person {name: 'Jules'})-[:KNOWS]-{2,}(b:Person {name: 'Mia'}) RETURN length(p) AS len"
+    expect:
+      rows:
+        - [3]
+
+  - name: all_shortest_trail_keeps_both_ways_round
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = ALL SHORTEST TRAIL (a:Person {name: 'Jules'})-[e:KNOWS]-{2,}(b:Person {name: 'Mia'}) RETURN [x IN e | x.w] AS ws"
+    expect:
+      rows:
+        - ["[83, 38, 33, 88]"]
+        - ["[83, 88, 33, 38]"]
+
+  - name: any_shortest_acyclic_has_no_path_back
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = ANY SHORTEST ACYCLIC (a:Person {name: 'Jules'})-[:KNOWS]-{2,}(b:Person {name: 'Mia'}) RETURN length(p) AS len"
+    expect:
+      empty: true
+
+  - name: two_path_modes_are_an_error
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (alix)-[:KNOWS {w: 3}]->(gus)"
+    query: "MATCH TRAIL ANY SHORTEST ACYCLIC (a:Person)-[:KNOWS]->+(b) RETURN b.name"
+    expect:
+      error: "path mode"
+
+  # ---------------------------------------------------------------------------
+  # SHORTEST k and SHORTEST k GROUPS (they returned one path)
+  # ---------------------------------------------------------------------------
+
+  - name: shortest_k_keeps_the_k_shortest_paths_of_each_pair
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = SHORTEST 2 (a:Person {name: 'Alix'})-[:KNOWS]->{1,4}(b) RETURN b.name, length(p) AS len"
+    expect:
+      rows:
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Vincent, 2]
+        - [Mia, 2]
+        - [Mia, 2]
+        - [Jules, 3]
+        - [Jules, 3]
+
+  - name: shortest_k_picks_the_shortest_paths
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = SHORTEST 2 (a:Person {name: 'Alix'})-[e:KNOWS]->{1,4}(b:Person {name: 'Mia'}) RETURN [x IN e | x.w] AS ws"
+    expect:
+      rows:
+        - ["[3, 88]"]
+        - ["[19, 38]"]
+
+  - name: shortest_k_groups_keeps_the_paths_of_the_k_shortest_lengths
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = SHORTEST 2 GROUPS (a:Person {name: 'Alix'})-[:KNOWS]->{1,4}(b) RETURN b.name, length(p) AS len"
+    expect:
+      rows:
+        - [Gus, 1]
+        - [Vincent, 1]
+        - [Vincent, 2]
+        - [Mia, 2]
+        - [Mia, 2]
+        - [Mia, 3]
+        - [Jules, 3]
+        - [Jules, 3]
+        - [Jules, 4]
+
+  - name: shortest_k_trail_groups
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = SHORTEST 2 TRAIL GROUPS (a:Person {name: 'Jules'})-[:KNOWS]-{2,}(b:Person {name: 'Mia'}) RETURN length(p) AS len"
+    expect:
+      rows:
+        - [4]
+        - [4]
+        - [5]
+        - [5]

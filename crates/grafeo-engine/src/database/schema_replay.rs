@@ -1,5 +1,9 @@
 //! Replays schema records from the WAL into the catalog (#422).
 //!
+//! These records are only read: 0.5.x logs hold them. A schema statement of
+//! this release logs its catalog records as a standalone change, which
+//! [`standalone`](super::standalone) replays.
+//!
 //! Replay makes the same catalog calls as the statements that wrote the
 //! records. Kinds are parsed through the WAL's kind enums, so a kind this
 //! version does not know fails the open instead of being skipped or guessed.
@@ -31,9 +35,10 @@ pub(super) fn apply_schema_record(catalog: &Catalog, record: &WalRecord) -> Resu
         } => {
             let def = NodeTypeDefinition {
                 name: name.clone(),
-                properties: typed_properties(properties),
+                properties: typed_properties(record, properties)?,
                 constraints: type_constraints(record, constraints)?,
                 parent_types: Vec::new(),
+                key_labels: Vec::new(),
             };
             tolerate_repeat(record, catalog.register_node_type(def))
         }
@@ -45,10 +50,11 @@ pub(super) fn apply_schema_record(catalog: &Catalog, record: &WalRecord) -> Resu
         } => {
             let def = EdgeTypeDefinition {
                 name: name.clone(),
-                properties: typed_properties(properties),
+                properties: typed_properties(record, properties)?,
                 constraints: type_constraints(record, constraints)?,
                 source_node_types: Vec::new(),
                 target_node_types: Vec::new(),
+                key_labels: Vec::new(),
             };
             tolerate_repeat(record, catalog.register_edge_type_def(def))
         }
@@ -82,7 +88,7 @@ pub(super) fn apply_schema_record(catalog: &Catalog, record: &WalRecord) -> Resu
             for (action, property, type_name, nullable) in alterations {
                 let result = match parse_kind(record, action, PropertyAlterationKind::parse)? {
                     PropertyAlterationKind::Add => {
-                        let property = typed_property(property, type_name, *nullable);
+                        let property = typed_property(record, property, type_name, *nullable)?;
                         if is_node_type {
                             catalog.alter_node_type_add_property(name, property)
                         } else {
@@ -198,19 +204,31 @@ fn parse_kind<K>(record: &WalRecord, text: &str, parse: fn(&str) -> Option<K>) -
     parse(text).ok_or_else(|| replay_failed(record, &format!("unknown kind '{text}'")))
 }
 
-fn typed_property(name: &str, type_name: &str, nullable: bool) -> TypedProperty {
-    TypedProperty {
+/// Fails the open for a type name the catalog refuses (one that nests too
+/// many `LIST<...>` levels).
+fn typed_property(
+    record: &WalRecord,
+    name: &str,
+    type_name: &str,
+    nullable: bool,
+) -> Result<TypedProperty> {
+    let data_type = PropertyDataType::from_type_name(type_name)
+        .map_err(|error| replay_failed(record, &error.to_string()))?;
+    Ok(TypedProperty {
         name: name.to_string(),
-        data_type: PropertyDataType::from_type_name(type_name),
+        data_type,
         nullable,
         default_value: None,
-    }
+    })
 }
 
-fn typed_properties(properties: &[(String, String, bool)]) -> Vec<TypedProperty> {
+fn typed_properties(
+    record: &WalRecord,
+    properties: &[(String, String, bool)],
+) -> Result<Vec<TypedProperty>> {
     properties
         .iter()
-        .map(|(name, type_name, nullable)| typed_property(name, type_name, *nullable))
+        .map(|(name, type_name, nullable)| typed_property(record, name, type_name, *nullable))
         .collect()
 }
 
@@ -236,4 +254,74 @@ fn type_constraints(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nested(levels: usize) -> String {
+        format!("{}STRING{}", "LIST<".repeat(levels), ">".repeat(levels))
+    }
+
+    /// A record whose property type nests more `LIST<...>` levels than the
+    /// catalog takes fails the open, naming the limit, whatever its depth;
+    /// one at the limit replays.
+    #[test]
+    fn a_property_type_nested_too_deep_fails_the_replay() {
+        let catalog = Catalog::new();
+        apply_schema_record(
+            &catalog,
+            &WalRecord::CreateNodeType {
+                name: "Event".to_string(),
+                properties: vec![("tags".to_string(), nested(128), true)],
+                constraints: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            catalog.get_node_type("Event").unwrap().properties[0]
+                .data_type
+                .to_string(),
+            nested(128)
+        );
+
+        for levels in [129, 100_000] {
+            let records = [
+                WalRecord::CreateNodeType {
+                    name: "Trip".to_string(),
+                    properties: vec![("tags".to_string(), nested(levels), true)],
+                    constraints: Vec::new(),
+                },
+                WalRecord::CreateEdgeType {
+                    name: "BOOKED".to_string(),
+                    properties: vec![("tags".to_string(), nested(levels), true)],
+                    constraints: Vec::new(),
+                },
+                WalRecord::AlterNodeType {
+                    name: "Event".to_string(),
+                    alterations: vec![(
+                        PropertyAlterationKind::Add.as_str().to_string(),
+                        "stops".to_string(),
+                        nested(levels),
+                        true,
+                    )],
+                },
+            ];
+            for record in &records {
+                let error = apply_schema_record(&catalog, record)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("cannot replay WAL record")
+                        && error.contains("A property type nests at most 128 LIST<...> levels"),
+                    "{levels} levels: {}",
+                    &error[..error.len().min(200)]
+                );
+            }
+        }
+        assert!(catalog.get_node_type("Trip").is_none());
+        assert!(catalog.get_edge_type_def("BOOKED").is_none());
+        assert_eq!(catalog.get_node_type("Event").unwrap().properties.len(), 1);
+    }
 }

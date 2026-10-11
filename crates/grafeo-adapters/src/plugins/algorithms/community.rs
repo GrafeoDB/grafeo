@@ -13,7 +13,7 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
-use super::traits::{ComponentResultBuilder, impl_algorithm};
+use super::traits::{ComponentResultBuilder, impl_algorithm, visible_edges_from};
 
 // ============================================================================
 // Label Propagation
@@ -100,7 +100,7 @@ pub fn label_propagation_in_order(
 
             // Consider both outgoing and incoming edges (undirected community detection)
             // Outgoing edges: node -> neighbor
-            for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+            for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
                 if let Some(&label) = labels.get(&neighbor) {
                     *label_counts.entry(label).or_insert(0) += 1;
                 }
@@ -108,7 +108,7 @@ pub fn label_propagation_in_order(
 
             // Incoming edges: neighbor -> node
             // Uses backward adjacency index for O(degree) instead of O(V*E)
-            for (incoming_neighbor, _) in store.edges_from(node, Direction::Incoming) {
+            for (incoming_neighbor, _) in visible_edges_from(store, node, Direction::Incoming) {
                 if let Some(&label) = labels.get(&incoming_neighbor) {
                     *label_counts.entry(label).or_insert(0) += 1;
                 }
@@ -251,7 +251,7 @@ pub fn louvain_in_order(
     let mut adjacency: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); n];
     let mut total_weight = 0.0;
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, _edge_id) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 *adjacency[i].entry(j).or_insert(0.0) += 1.0;
                 *adjacency[j].entry(i).or_insert(0.0) += 1.0;
@@ -584,7 +584,9 @@ fn stochastic_block_partition_inner(
     max_iterations: usize,
     warm_start: Option<&FxHashMap<NodeId, usize>>,
 ) -> StochasticBlockPartitionResult {
-    let nodes = store.node_ids();
+    // In id order: the order blocks are tried and numbered in.
+    let mut nodes = store.node_ids();
+    nodes.sort_unstable();
     let n = nodes.len();
 
     if n == 0 {
@@ -607,7 +609,7 @@ fn stochastic_block_partition_inner(
     let mut adj: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
     for &node in &nodes {
         let i = node_to_idx[&node];
-        for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 adj[i].insert(j);
                 adj[j].insert(i);
@@ -682,7 +684,10 @@ fn stochastic_block_partition_inner(
         let mut best_dl = current_dl;
         let mut best_pair: Option<(usize, usize)> = None;
 
-        let block_list: Vec<usize> = active_blocks.iter().copied().collect();
+        // In block order, so that of two merges with the same description
+        // length the same one is taken on every call.
+        let mut block_list: Vec<usize> = active_blocks.iter().copied().collect();
+        block_list.sort_unstable();
         for i in 0..block_list.len() {
             for j in (i + 1)..block_list.len() {
                 let bi = block_list[i];
@@ -792,11 +797,12 @@ fn stochastic_block_partition_inner(
         current_dl = best_dl;
     }
 
-    // Normalize block IDs to 0..num_blocks-1.
-    let unique_blocks: FxHashSet<usize> = block.iter().copied().collect();
+    // Normalize block IDs to 0..num_blocks-1, in the order of each block's
+    // first node.
     let mut block_map: FxHashMap<usize, usize> = FxHashMap::default();
-    for (idx, &b) in unique_blocks.iter().enumerate() {
-        block_map.insert(b, idx);
+    for &b in &block {
+        let next = block_map.len();
+        block_map.entry(b).or_insert(next);
     }
 
     let partition = idx_to_node
@@ -807,7 +813,7 @@ fn stochastic_block_partition_inner(
 
     StochasticBlockPartitionResult {
         partition,
-        num_blocks: unique_blocks.len(),
+        num_blocks: block_map.len(),
         description_length: current_dl,
     }
 }
@@ -831,8 +837,21 @@ fn compute_description_length(
     let m = total_edges as f64;
     let mut dl = 0.0f64;
 
+    // Both sums run in key order: a float sum depends on the order of its
+    // terms, and a map's order changes from one map to the next.
+    let mut edge_counts: Vec<((usize, usize), usize)> = block_edge_counts
+        .iter()
+        .map(|(&pair, &count)| (pair, count))
+        .collect();
+    edge_counts.sort_unstable();
+    let mut degrees: Vec<(usize, usize)> = block_degrees
+        .iter()
+        .map(|(&block, &degree)| (block, degree))
+        .collect();
+    degrees.sort_unstable();
+
     // Edge term: sum over block pairs.
-    for (&(bi, bj), &e_rs) in block_edge_counts {
+    for ((bi, bj), e_rs) in edge_counts {
         if e_rs == 0 {
             continue;
         }
@@ -847,7 +866,7 @@ fn compute_description_length(
     }
 
     // Degree term: sum over blocks.
-    for &d_r in block_degrees.values() {
+    for (_, d_r) in degrees {
         if d_r > 0 {
             let d = d_r as f64;
             dl += d * d.ln();
@@ -1709,6 +1728,52 @@ mod tests {
         );
         // Description length should be finite.
         assert!(result.description_length.is_finite());
+    }
+
+    /// The partition of a graph is the same on every call: its blocks (numbered
+    /// in the order of their first node) and its description length to the
+    /// last bit, with and without a target. Equal merges were taken in hash
+    /// order, so the blocks, and at times the description length, changed
+    /// from call to call.
+    #[test]
+    fn test_sbp_is_the_same_on_every_call() {
+        let store = create_two_cliques_graph();
+        for target in [None, Some(2), Some(3)] {
+            let blocks_of = |result: &StochasticBlockPartitionResult| {
+                let mut blocks: Vec<(NodeId, usize)> = result
+                    .partition
+                    .iter()
+                    .map(|(&node, &b)| (node, b))
+                    .collect();
+                blocks.sort_unstable();
+                blocks
+            };
+            let first = stochastic_block_partition(&store, target, 100);
+            let expected = blocks_of(&first);
+            // Blocks are numbered in the order of their first node.
+            let mut seen = 0;
+            for &(_, block) in &expected {
+                assert!(block <= seen, "target {target:?}: blocks {expected:?}");
+                if block == seen {
+                    seen += 1;
+                }
+            }
+            for call in 1..40 {
+                let next = stochastic_block_partition(&store, target, 100);
+                assert_eq!(
+                    blocks_of(&next),
+                    expected,
+                    "target {target:?}, call {call}: the blocks changed"
+                );
+                assert_eq!(
+                    next.description_length.to_bits(),
+                    first.description_length.to_bits(),
+                    "target {target:?}, call {call}: {} against {}",
+                    next.description_length,
+                    first.description_length
+                );
+            }
+        }
     }
 
     #[test]

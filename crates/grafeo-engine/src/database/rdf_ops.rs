@@ -39,9 +39,7 @@ impl GrafeoDB {
     /// ```
     #[cfg(feature = "sparql")]
     pub fn execute_sparql(&self, query: &str) -> Result<super::QueryResult> {
-        use crate::query::{
-            Executor, optimizer::Optimizer, planner::rdf::RdfPlanner, translators::sparql,
-        };
+        use crate::query::{optimizer::Optimizer, planner::rdf::RdfPlanner, translators::sparql};
 
         // Parse and translate the SPARQL query to a logical plan
         let logical_plan = sparql::translate(query)?;
@@ -52,8 +50,7 @@ impl GrafeoDB {
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // An update on a read-only database fails, as in a session.
-        let mutates = optimized_plan.root.has_mutations();
-        if mutates && self.read_only {
+        if optimized_plan.root.has_mutations() && self.read_only {
             return Err(grafeo_common::utils::error::Error::Transaction(
                 grafeo_common::utils::error::TransactionError::ReadOnly,
             ));
@@ -68,74 +65,10 @@ impl GrafeoDB {
             return Ok(physical_explain_result(&optimized_plan, entries));
         }
 
-        // No transaction here: an update changes the store at once and its
-        // WAL records are written as one implicit group once it has run, so
-        // it holds commits off meanwhile (a checkpoint or `close()` sees all
-        // of it or none), and fails once the database is closed.
-        let held = if mutates {
-            Some(self.transaction_manager.hold_commits_for_change()?)
-        } else {
-            None
-        };
-        // Tests start a checkpoint or `close()` here, which must wait.
-        #[cfg(feature = "testing-statement-injection")]
-        if held.is_some() {
-            grafeo_common::testing::commit_hook::run_during_held_change();
-        }
-        #[cfg(feature = "wal")]
-        let wal_buffer = self.wal.as_ref().map(|wal| {
-            Arc::new(crate::transaction::wal_buffer::WalBuffer::new(Arc::clone(
-                wal,
-            )))
-        });
-        #[cfg(feature = "wal")]
-        let flush_wal = || {
-            if let Some(ref buffer) = wal_buffer
-                && let Err(e) = buffer.flush_implicit()
-            {
-                grafeo_common::grafeo_warn!("Failed to write SPARQL update to WAL: {}", e);
-            }
-        };
-
-        // EXPLAIN ANALYZE: execute with profiling, report actual stats
-        if optimized_plan.profile {
-            let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
-                .with_shuffle_unordered(self.config.shuffle_unordered);
-            #[cfg(feature = "wal")]
-            let planner = planner.with_wal(wal_buffer.clone());
-            let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
-
-            let start = std::time::Instant::now();
-            let executor = Executor::with_columns(physical_plan.columns.clone());
-            let result = executor.execute(physical_plan.operator.as_mut());
-            #[cfg(feature = "wal")]
-            flush_wal();
-            drop(held);
-            let _result = result?;
-            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-            let tree = crate::query::profile::build_profile_tree(
-                &optimized_plan.root,
-                &mut entries.into_iter(),
-            );
-            return Ok(crate::query::profile::profile_result(&tree, elapsed_ms));
-        }
-
-        // Convert to physical plan using RDF planner
-        let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
-            .with_shuffle_unordered(self.config.shuffle_unordered);
-        #[cfg(feature = "wal")]
-        let planner = planner.with_wal(wal_buffer.clone());
-        let mut physical_plan = planner.plan(&optimized_plan)?;
-
-        // Execute the plan
-        let executor = Executor::with_columns(physical_plan.columns.clone());
-        let result = executor.execute(physical_plan.operator.as_mut());
-        #[cfg(feature = "wal")]
-        flush_wal();
-        // The update and its WAL group are written: commits may go on.
-        drop(held);
-        result
+        // Everything else runs as in a session: an update in a transaction
+        // of its own, which logs it and reports it to change data capture
+        // when it commits.
+        self.session().run_rdf_plan(&optimized_plan, "sparql")
     }
 
     /// Returns the RDF store.
@@ -159,6 +92,12 @@ impl GrafeoDB {
     ///
     /// Returns the number of triples that were newly inserted.
     ///
+    /// The insert is one bulk write: its triples are written to the WAL as it
+    /// goes, closed by one commit marker, and inserted once the marker is
+    /// written, so after a crash the database holds all of them or none, and
+    /// once the call returns they survive a crash. It reports no change data
+    /// capture events.
+    ///
     /// While it changes the store, commits, new transactions and checkpoints
     /// wait for it; `triples` is collected before, without blocking anything,
     /// and only once the database takes the insert: a refused call never
@@ -179,7 +118,44 @@ impl GrafeoDB {
         self.check_import_allowed()?;
         // Collected before commits are held off, for the same reason.
         let triples: Vec<_> = triples.into_iter().collect();
-        let _held = self.hold_commits_for_import()?;
+        let held = self.hold_commits_for_import()?;
+        self.insert_triples_streamed(&held, triples)
+    }
+
+    /// Inserts `triples` into the default RDF graph as one bulk write, while
+    /// the caller holds commits off (`held`): their WAL records are written
+    /// as a group that one commit marker closes, then the triples are
+    /// inserted. Returns how many were new.
+    ///
+    /// # Errors
+    ///
+    /// Fails, inserting nothing, when the WAL write of a run of records
+    /// fails.
+    pub(super) fn insert_triples_streamed(
+        &self,
+        held: &crate::transaction::CommitsHeld<'_>,
+        triples: Vec<grafeo_core::graph::rdf::Triple>,
+    ) -> Result<usize> {
+        if triples.is_empty() {
+            return Ok(0);
+        }
+        let changes = self.streaming_changes(held);
+        #[cfg(feature = "wal")]
+        let changes = {
+            let mut changes = changes;
+            for triple in &triples {
+                changes.log(grafeo_storage::wal::WalRecord::InsertRdfTriple {
+                    subject: triple.subject().to_string(),
+                    predicate: triple.predicate().to_string(),
+                    object: triple.object().to_string(),
+                    graph: None,
+                })?;
+            }
+            changes
+        };
+        // No epoch: the RDF store has none, and the triples apply after the
+        // marker.
+        changes.commit(None)?;
         Ok(self.rdf_store.batch_insert(triples))
     }
 }
@@ -242,15 +218,20 @@ impl GrafeoDB {
 // WAL replay helper
 // =========================================================================
 
-/// Replays a single RDF WAL record into the RDF store.
+/// Replays a single RDF WAL record into the RDF store; other records change
+/// nothing.
 ///
-/// Returns `true` if the record was handled, `false` if it was not an RDF record.
+/// # Errors
+///
+/// Returns [`Error::Corruption`](grafeo_common::utils::error::Error::Corruption)
+/// naming the record, its graph and the term when a triple's term is not an
+/// N-Triples term: replay never drops a triple.
 #[cfg(feature = "wal")]
 pub(super) fn replay_rdf_wal_record(
     rdf_store: &Arc<RdfStore>,
     record: &grafeo_storage::wal::WalRecord,
-) {
-    use grafeo_core::graph::rdf::Term;
+) -> Result<()> {
+    use grafeo_common::change::RdfGraphOp;
     use grafeo_storage::wal::WalRecord;
 
     match record {
@@ -260,18 +241,14 @@ pub(super) fn replay_rdf_wal_record(
             object,
             graph,
         } => {
-            if let (Some(s), Some(p), Some(o)) = (
-                Term::from_ntriples(subject),
-                Term::from_ntriples(predicate),
-                Term::from_ntriples(object),
-            ) {
-                let triple = grafeo_core::graph::rdf::Triple::new(s, p, o);
-                let target = match graph {
-                    Some(name) => rdf_store.graph_or_create(name),
-                    None => Arc::clone(rdf_store),
-                };
-                target.insert(triple);
-            }
+            let triple = wal_triple(
+                "InsertRdfTriple",
+                graph.as_deref(),
+                subject,
+                predicate,
+                object,
+            )?;
+            rdf_store.insert_into(graph.as_deref(), triple);
         }
         WalRecord::DeleteRdfTriple {
             subject,
@@ -279,31 +256,165 @@ pub(super) fn replay_rdf_wal_record(
             object,
             graph,
         } => {
-            if let (Some(s), Some(p), Some(o)) = (
-                Term::from_ntriples(subject),
-                Term::from_ntriples(predicate),
-                Term::from_ntriples(object),
-            ) {
-                let triple = grafeo_core::graph::rdf::Triple::new(s, p, o);
-                let target = match graph {
-                    Some(name) => rdf_store.graph_or_create(name),
-                    None => Arc::clone(rdf_store),
-                };
-                target.remove(&triple);
-            }
+            let triple = wal_triple(
+                "DeleteRdfTriple",
+                graph.as_deref(),
+                subject,
+                predicate,
+                object,
+            )?;
+            rdf_store.remove_from(graph.as_deref(), &triple);
         }
+        // The graph operations an earlier release logged as these records
+        // (this one logs them as standalone changes): applied as the live
+        // operation applies them, an empty name standing for `ALL`, as the
+        // statement meant it.
         WalRecord::ClearRdfGraph { graph } => {
-            rdf_store.clear_graph(graph.as_deref());
+            rdf_store.apply_graph_op(&RdfGraphOp::Clear {
+                target: logged_target(graph.as_deref()),
+            });
         }
         WalRecord::CreateRdfGraph { name } => {
-            let _ = rdf_store.create_graph(name);
+            rdf_store.apply_graph_op(&RdfGraphOp::Create { name: name.clone() });
         }
-        WalRecord::DropRdfGraph { name } => match name {
-            None => rdf_store.clear(),
-            Some(graph_name) => {
-                rdf_store.drop_graph(graph_name);
-            }
-        },
+        WalRecord::DropRdfGraph { name } => {
+            rdf_store.apply_graph_op(&RdfGraphOp::Drop {
+                target: logged_target(name.as_deref()),
+            });
+        }
         _ => {}
+    }
+    Ok(())
+}
+
+/// The graphs a logged `CLEAR` or `DROP` names: `None` for the default
+/// graph, the empty name for `ALL`.
+#[cfg(feature = "wal")]
+fn logged_target(graph: Option<&str>) -> grafeo_common::storage::log_record::RdfGraphTarget {
+    use grafeo_common::storage::log_record::RdfGraphTarget;
+
+    match graph {
+        None => RdfGraphTarget::Default,
+        Some("") => RdfGraphTarget::All,
+        Some(name) => RdfGraphTarget::Named(name.to_string()),
+    }
+}
+
+/// The triple of an RDF WAL record of kind `record` in `graph`, its terms
+/// read from their N-Triples strings as the live statement wrote them.
+#[cfg(feature = "wal")]
+fn wal_triple(
+    record: &str,
+    graph: Option<&str>,
+    subject: &str,
+    predicate: &str,
+    object: &str,
+) -> Result<grafeo_core::graph::rdf::Triple> {
+    use grafeo_common::utils::error::Error;
+    use grafeo_core::graph::rdf::{Term, Triple};
+
+    let term = |text: &str, role: &str| {
+        Term::from_ntriples(text).map_err(|error| {
+            let graph = graph.map_or_else(
+                || "the default graph".to_string(),
+                |name| format!("graph {name:?}"),
+            );
+            Error::corruption(format!("WAL record {record} in {graph}, {role}: {error}"))
+        })
+    };
+    // Unchecked: the store holds what the statement gave it, as it was
+    // written.
+    Ok(Triple::new_unchecked(
+        term(subject, "subject")?,
+        term(predicate, "predicate")?,
+        term(object, "object")?,
+    ))
+}
+
+#[cfg(all(test, feature = "wal"))]
+mod tests {
+    use std::sync::Arc;
+
+    use grafeo_core::graph::rdf::{RdfStore, Term, Triple};
+    use grafeo_storage::wal::WalRecord;
+
+    use super::replay_rdf_wal_record;
+
+    fn insert(subject: &str, object: &str, graph: Option<&str>) -> WalRecord {
+        WalRecord::InsertRdfTriple {
+            subject: subject.to_string(),
+            predicate: "<http://example.org/name>".to_string(),
+            object: object.to_string(),
+            graph: graph.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn replay_keeps_non_ascii_terms_and_whitespace() {
+        let store = Arc::new(RdfStore::new());
+        let terms = [
+            Term::literal("Kraków"),
+            Term::lang_literal("阿姆斯特丹", "zh"),
+            Term::literal("🚲 naar Amsterdam"),
+            Term::typed_literal("Ámsterdam", "http://example.org/stad"),
+            Term::blank("b0 "),
+        ];
+        for term in &terms {
+            for graph in [None, Some("http://example.org/Kraków")] {
+                let record = insert("_:gus ", &term.to_string(), graph);
+                replay_rdf_wal_record(&store, &record).unwrap();
+            }
+        }
+        let named = store.graph("http://example.org/Kraków").unwrap();
+        for term in terms {
+            let triple = Triple::new(
+                Term::blank("gus "),
+                Term::iri("http://example.org/name"),
+                term,
+            );
+            assert!(store.contains(&triple), "{triple}");
+            assert!(named.contains(&triple), "{triple}");
+        }
+        assert_eq!(store.len(), 5);
+
+        let delete = WalRecord::DeleteRdfTriple {
+            subject: "_:gus ".to_string(),
+            predicate: "<http://example.org/name>".to_string(),
+            object: Term::literal("Kraków").to_string(),
+            graph: None,
+        };
+        replay_rdf_wal_record(&store, &delete).unwrap();
+        assert_eq!(store.len(), 4, "the delete found the non-ASCII literal");
+    }
+
+    #[test]
+    fn a_record_whose_term_does_not_parse_fails_the_replay() {
+        let store = Arc::new(RdfStore::new());
+        let record = insert(
+            "<http://example.org/alix>",
+            "<<not a term",
+            Some("http://example.org/g"),
+        );
+        let error = replay_rdf_wal_record(&store, &record)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("WAL record InsertRdfTriple in graph \"http://example.org/g\", object")
+                && error.contains("<<not a term"),
+            "{error}"
+        );
+        let delete = WalRecord::DeleteRdfTriple {
+            subject: "Alix".to_string(),
+            predicate: "<http://example.org/name>".to_string(),
+            object: "\"Alix\"".to_string(),
+            graph: None,
+        };
+        let error = replay_rdf_wal_record(&store, &delete)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("WAL record DeleteRdfTriple in the default graph, subject"),
+            "{error}"
+        );
     }
 }

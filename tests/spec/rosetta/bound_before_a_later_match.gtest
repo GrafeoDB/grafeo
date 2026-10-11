@@ -147,9 +147,8 @@ tests:
         - [1, Alix, Gus]
         - [2, Gus, Vincent]
 
-  # GQL only: openCypher matches each relationship at most once per pattern,
-  # so in Cypher this pattern has no match (Grafeo's Cypher does not apply that
-  # rule yet).
+  # GQL matches edges homomorphically by default, so the same edge twice is
+  # Mia's loop, twice.
   - name: same_edge_twice_in_a_path_is_a_loop
     setup:
       - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
@@ -157,6 +156,29 @@ tests:
     expect:
       rows:
         - [Mia, Mia, Mia]
+
+  # openCypher matches each relationship at most once per MATCH (openCypher 9,
+  # relationship uniqueness), so in Cypher this pattern has no match.
+  - name: same_edge_twice_in_a_path_never_matches_in_cypher
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      cypher: "MATCH (a)-[r]->(b)-[r]->(c) RETURN a.name AS a, b.name AS b, c.name AS c"
+    expect:
+      empty: true
+
+  # The same rule in both languages: GQL asks for it with DIFFERENT EDGES. Two
+  # KNOWS edges lead into Gus (w 1 and 4), so only they pair up.
+  - name: two_edge_patterns_bind_different_edges
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (ams:City {name: 'Amsterdam'}), (alix)-[:KNOWS {w: 1}]->(gus), (gus)-[:KNOWS {w: 2}]->(vincent), (vincent)-[:KNOWS {w: 3}]->(alix), (alix)-[:KNOWS {w: 4}]->(gus), (alix)-[:LIVES_IN {w: 5}]->(ams), (mia)-[:LIKES {w: 6}]->(mia)"
+    variants:
+      gql: "MATCH DIFFERENT EDGES (a)-[r1:KNOWS]->(b)<-[r2:KNOWS]-(c) RETURN r1.w AS r1, r2.w AS r2"
+      cypher: "MATCH (a)-[r1:KNOWS]->(b)<-[r2:KNOWS]-(c) RETURN r1.w AS r1, r2.w AS r2"
+    expect:
+      rows:
+        - [1, 4]
+        - [4, 1]
 
   - name: optional_match_through_a_bound_edge
     setup:

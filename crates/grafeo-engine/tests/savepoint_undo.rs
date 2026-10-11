@@ -1,4 +1,4 @@
-//! Tests for savepoint interaction with the property undo log.
+//! Tests for savepoint interaction with the transaction's change set.
 //!
 //! Verifies that rollback_to_savepoint correctly undoes property and label
 //! mutations made after the savepoint, while preserving earlier changes.
@@ -209,7 +209,7 @@ fn test_full_rollback_after_savepoint_undoes_everything() {
 }
 
 // ============================================================================
-// Savepoint rollback with labels: covers property_ops.rs rollback_transaction_properties_to
+// Savepoint rollback with labels
 // ============================================================================
 
 #[test]

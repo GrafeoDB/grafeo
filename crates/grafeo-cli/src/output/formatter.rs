@@ -209,10 +209,7 @@ pub fn format_duration_ms(ms: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafeo_engine::memory_usage::{
-        BufferManagerMemory, CacheMemory, CdcMemory, IndexMemory, MvccMemory, NamedMemory,
-        RdfMemory, StoreMemory, StringPoolMemory,
-    };
+    use grafeo_engine::memory_usage::NamedMemory;
 
     #[test]
     fn test_format_bytes_bytes() {
@@ -280,16 +277,11 @@ mod tests {
 
     #[test]
     fn total_is_always_the_first_line() {
-        let usage = MemoryUsage {
-            total_bytes: 4096,
-            rdf: RdfMemory {
-                total_bytes: 4096,
-                triple_count: 10,
-                triples_and_indexes_bytes: 4096,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut usage = MemoryUsage::default();
+        usage.total_bytes = 4096;
+        usage.rdf.total_bytes = 4096;
+        usage.rdf.triple_count = 10;
+        usage.rdf.triples_and_indexes_bytes = 4096;
         let out = render(&usage);
         let first = out.lines().next().unwrap();
         assert!(
@@ -301,15 +293,10 @@ mod tests {
     #[test]
     fn store_section_only_emits_populated_subfields() {
         // nodes_bytes and edges_bytes set; property bytes zero: only those two sub-lines.
-        let usage = MemoryUsage {
-            store: StoreMemory {
-                total_bytes: 3072,
-                nodes_bytes: 2048,
-                edges_bytes: 1024,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut usage = MemoryUsage::default();
+        usage.store.total_bytes = 3072;
+        usage.store.nodes_bytes = 2048;
+        usage.store.edges_bytes = 1024;
         let out = render(&usage);
         assert!(out.contains("Store:           3.00 KB"));
         assert!(out.contains("  nodes:         2.00 KB"));
@@ -326,15 +313,7 @@ mod tests {
 
     #[test]
     fn rdf_section_hidden_when_empty() {
-        let usage = MemoryUsage {
-            total_bytes: 1024,
-            store: StoreMemory {
-                total_bytes: 1024,
-                nodes_bytes: 1024,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let usage = store_of_one_kilobyte();
         let out = render(&usage);
         assert!(
             !out.contains("RDF:"),
@@ -344,16 +323,11 @@ mod tests {
 
     #[test]
     fn rdf_section_reports_triple_and_graph_counts() {
-        let usage = MemoryUsage {
-            rdf: RdfMemory {
-                total_bytes: 5000,
-                triple_count: 42,
-                triples_and_indexes_bytes: 5000,
-                named_graph_count: 3,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut usage = MemoryUsage::default();
+        usage.rdf.total_bytes = 5000;
+        usage.rdf.triple_count = 42;
+        usage.rdf.triples_and_indexes_bytes = 5000;
+        usage.rdf.named_graph_count = 3;
         let out = render(&usage);
         // Specific shape: "RDF:             <bytes> (N triples, M named graphs)"
         assert!(
@@ -368,15 +342,10 @@ mod tests {
 
     #[test]
     fn rdf_sub_lines_gate_on_nonzero_values() {
-        let mut usage = MemoryUsage {
-            rdf: RdfMemory {
-                total_bytes: 100,
-                triple_count: 1,
-                triples_and_indexes_bytes: 100,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut usage = MemoryUsage::default();
+        usage.rdf.total_bytes = 100;
+        usage.rdf.triple_count = 1;
+        usage.rdf.triples_and_indexes_bytes = 100;
         let without_sub = render(&usage);
         assert!(!without_sub.contains("term dict"));
         assert!(!without_sub.contains("ring index"));
@@ -390,29 +359,17 @@ mod tests {
 
     #[test]
     fn cdc_section_hidden_when_empty() {
-        let usage = MemoryUsage {
-            total_bytes: 1024,
-            store: StoreMemory {
-                total_bytes: 1024,
-                nodes_bytes: 1024,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let usage = store_of_one_kilobyte();
         let out = render(&usage);
         assert!(!out.contains("CDC:"));
     }
 
     #[test]
     fn cdc_section_reports_event_and_entity_counts() {
-        let usage = MemoryUsage {
-            cdc: CdcMemory {
-                total_bytes: 2048,
-                event_count: 7,
-                entity_count: 4,
-            },
-            ..Default::default()
-        };
+        let mut usage = MemoryUsage::default();
+        usage.cdc.total_bytes = 2048;
+        usage.cdc.event_count = 7;
+        usage.cdc.entity_count = 4;
         let out = render(&usage);
         assert!(out.contains("7 events"));
         assert!(out.contains("4 entities"));
@@ -420,23 +377,18 @@ mod tests {
 
     #[test]
     fn index_entries_include_name_and_item_count() {
-        let usage = MemoryUsage {
-            indexes: IndexMemory {
-                total_bytes: 4096,
-                vector_indexes: vec![NamedMemory {
-                    name: "person.embedding".to_string(),
-                    bytes: 3072,
-                    item_count: 150,
-                }],
-                text_indexes: vec![NamedMemory {
-                    name: "person.bio".to_string(),
-                    bytes: 1024,
-                    item_count: 50,
-                }],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut usage = MemoryUsage::default();
+        usage.indexes.total_bytes = 4096;
+        usage.indexes.vector_indexes = vec![NamedMemory {
+            name: "person.embedding".to_string(),
+            bytes: 3072,
+            item_count: 150,
+        }];
+        usage.indexes.text_indexes = vec![NamedMemory {
+            name: "person.bio".to_string(),
+            bytes: 1024,
+            item_count: 50,
+        }];
         let out = render(&usage);
         assert!(
             out.contains("vector[person.embedding]"),
@@ -457,14 +409,9 @@ mod tests {
     fn caches_line_appears_with_plan_count_even_when_bytes_zero() {
         // A registry may report cached_plan_count > 0 before any bytes are
         // accounted for (e.g., Arc-shared entries). The line must still appear.
-        let usage = MemoryUsage {
-            caches: CacheMemory {
-                total_bytes: 0,
-                cached_plan_count: 12,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let mut usage = MemoryUsage::default();
+        usage.caches.total_bytes = 0;
+        usage.caches.cached_plan_count = 12;
         let out = render(&usage);
         assert!(
             out.contains("Caches:"),
@@ -478,38 +425,24 @@ mod tests {
         let hidden = render(&MemoryUsage::default());
         assert!(!hidden.contains("Buffer manager"));
 
-        let with_budget = render(&MemoryUsage {
-            buffer_manager: BufferManagerMemory {
-                budget_bytes: 1024,
-                ..Default::default()
-            },
-            ..Default::default()
-        });
+        let mut usage = MemoryUsage::default();
+        usage.buffer_manager.budget_bytes = 1024;
+        let with_budget = render(&usage);
         assert!(with_budget.contains("Buffer manager:"));
         assert!(with_budget.contains("0 bytes / 1.00 KB budget"));
     }
 
     #[test]
     fn mvcc_avg_chain_line_gates_on_nonzero() {
-        let zero_chain = render(&MemoryUsage {
-            mvcc: MvccMemory {
-                total_bytes: 512,
-                average_chain_depth: 0.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        });
+        let mut usage = MemoryUsage::default();
+        usage.mvcc.total_bytes = 512;
+        usage.mvcc.average_chain_depth = 0.0;
+        let zero_chain = render(&usage);
         assert!(zero_chain.contains("MVCC:"));
         assert!(!zero_chain.contains("avg chain"));
 
-        let with_chain = render(&MemoryUsage {
-            mvcc: MvccMemory {
-                total_bytes: 512,
-                average_chain_depth: 2.75,
-                ..Default::default()
-            },
-            ..Default::default()
-        });
+        usage.mvcc.average_chain_depth = 2.75;
+        let with_chain = render(&usage);
         assert!(with_chain.contains("  avg chain:     2.75"));
     }
 
@@ -518,13 +451,18 @@ mod tests {
         let hidden = render(&MemoryUsage::default());
         assert!(!hidden.contains("String pool"));
 
-        let shown = render(&MemoryUsage {
-            string_pool: StringPoolMemory {
-                total_bytes: 2048,
-                ..Default::default()
-            },
-            ..Default::default()
-        });
+        let mut usage = MemoryUsage::default();
+        usage.string_pool.total_bytes = 2048;
+        let shown = render(&usage);
         assert!(shown.contains("String pool:     2.00 KB"));
+    }
+
+    /// A store of 1 KB of nodes, and nothing else.
+    fn store_of_one_kilobyte() -> MemoryUsage {
+        let mut usage = MemoryUsage::default();
+        usage.total_bytes = 1024;
+        usage.store.total_bytes = 1024;
+        usage.store.nodes_bytes = 1024;
+        usage
     }
 }

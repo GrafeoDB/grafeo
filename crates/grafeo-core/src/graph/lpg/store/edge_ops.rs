@@ -10,12 +10,22 @@ use grafeo_common::mvcc::VersionChain;
 #[cfg(feature = "tiered-storage")]
 use grafeo_common::mvcc::{HotVersionRef, VersionIndex, VersionRef};
 
+/// The error of an edge whose record cannot be read (a cold one that does not
+/// decode).
+#[cfg(feature = "tiered-storage")]
+fn unreadable_edge_record(id: EdgeId) -> grafeo_common::utils::error::Error {
+    grafeo_common::utils::error::Error::Internal(format!(
+        "the record of edge {} cannot be read",
+        id.as_u64()
+    ))
+}
+
 impl LpgStore {
     /// Builds an `Edge` from a record, resolving the type name and loading properties.
     fn build_edge(&self, id: EdgeId, record: &EdgeRecord) -> Option<Edge> {
         let edge_type = {
-            let id_to_type = self.id_to_edge_type.read();
-            id_to_type.get(record.type_id as usize)?.clone()
+            let edge_types = self.edge_types.read();
+            edge_types.get_name(record.type_id)?.clone()
         };
         let mut edge = Edge::new(id, record.src, record.dst, edge_type);
         edge.properties = self.edge_properties.get_all(id).into_iter().collect();
@@ -26,8 +36,8 @@ impl LpgStore {
     #[cfg(feature = "temporal")]
     fn build_edge_at(&self, id: EdgeId, record: &EdgeRecord, epoch: EpochId) -> Option<Edge> {
         let edge_type = {
-            let id_to_type = self.id_to_edge_type.read();
-            id_to_type.get(record.type_id as usize)?.clone()
+            let edge_types = self.edge_types.read();
+            edge_types.get_name(record.type_id)?.clone()
         };
         let mut edge = Edge::new(id, record.src, record.dst, edge_type);
         edge.properties = self
@@ -83,10 +93,6 @@ impl LpgStore {
 
         self.live_edge_count.fetch_add(1, Ordering::Relaxed);
         self.increment_edge_type_count(type_id);
-        self.record_change(
-            transaction_id,
-            super::PropertyUndoEntry::EdgeCreated { edge_id: id },
-        );
         id
     }
 
@@ -146,10 +152,6 @@ impl LpgStore {
 
         self.live_edge_count.fetch_add(1, Ordering::Relaxed);
         self.increment_edge_type_count(type_id);
-        self.record_change(
-            transaction_id,
-            super::PropertyUndoEntry::EdgeCreated { edge_id: id },
-        );
         id
     }
 
@@ -314,7 +316,7 @@ impl LpgStore {
             return Vec::new();
         };
 
-        let id_to_type = self.id_to_edge_type.read();
+        let edge_types = self.edge_types.read();
 
         #[cfg(not(feature = "temporal"))]
         {
@@ -323,7 +325,7 @@ impl LpgStore {
             chain
                 .history()
                 .filter_map(|(info, record)| {
-                    let edge_type = id_to_type.get(record.type_id as usize)?.clone();
+                    let edge_type = edge_types.get_name(record.type_id)?.clone();
                     let mut edge = Edge::new(id, record.src, record.dst, edge_type);
                     edge.properties.clone_from(&properties);
                     Some((info.created_epoch, info.deleted_epoch, edge))
@@ -336,7 +338,7 @@ impl LpgStore {
             chain
                 .history()
                 .filter_map(|(info, record)| {
-                    let edge_type = id_to_type.get(record.type_id as usize)?.clone();
+                    let edge_type = edge_types.get_name(record.type_id)?.clone();
                     let mut edge = Edge::new(id, record.src, record.dst, edge_type);
                     edge.properties = self
                         .edge_properties
@@ -359,7 +361,7 @@ impl LpgStore {
             return Vec::new();
         };
 
-        let id_to_type = self.id_to_edge_type.read();
+        let edge_types = self.edge_types.read();
         let properties: grafeo_common::types::PropertyMap =
             self.edge_properties.get_all(id).into_iter().collect();
 
@@ -368,7 +370,7 @@ impl LpgStore {
             .into_iter()
             .filter_map(|(created, deleted, vref)| {
                 let record = self.read_edge_record(&vref)?;
-                let edge_type = id_to_type.get(record.type_id as usize)?.clone();
+                let edge_type = edge_types.get_name(record.type_id)?.clone();
                 let mut edge = Edge::new(id, record.src, record.dst, edge_type);
                 edge.properties.clone_from(&properties);
                 Some((created, deleted, edge))
@@ -474,7 +476,8 @@ impl LpgStore {
         }
     }
 
-    /// Deletes an edge within a transaction, capturing undo information for rollback.
+    /// Deletes an edge as `transaction_id`: marks its version deleted by the
+    /// transaction. Nothing records what it deleted.
     #[cfg(not(feature = "tiered-storage"))]
     pub(crate) fn delete_edge_transactional(
         &self,
@@ -500,19 +503,6 @@ impl LpgStore {
             chain.mark_deleted(epoch, transaction_id);
             drop(edges);
 
-            // Get edge type name for undo log
-            let edge_type_name = {
-                let id_to_type = self.id_to_edge_type.read();
-                id_to_type
-                    .get(type_id as usize)
-                    .map(|s| s.to_string())
-                    .unwrap_or_default()
-            };
-
-            // Capture properties for undo log
-            let properties: Vec<(PropertyKey, Value)> =
-                self.edge_properties.get_all(id).into_iter().collect();
-
             // Mark as deleted in adjacency (soft delete)
             self.forward_adj.mark_deleted(src, id);
             if let Some(ref backward) = self.backward_adj {
@@ -530,27 +520,14 @@ impl LpgStore {
             self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
             self.decrement_edge_type_count(type_id);
 
-            // Record undo entry for rollback
-            self.property_undo_log
-                .write()
-                .entry(transaction_id)
-                .or_default()
-                .push(super::PropertyUndoEntry::EdgeDeleted {
-                    edge_id: id,
-                    src,
-                    dst,
-                    edge_type: edge_type_name,
-                    properties,
-                });
-
             true
         } else {
             false
         }
     }
 
-    /// Deletes an edge within a transaction, capturing undo information for rollback.
-    /// (Tiered storage version)
+    /// Deletes an edge as `transaction_id` (tiered storage version), as the
+    /// other build does; nothing records what it deleted.
     #[cfg(feature = "tiered-storage")]
     pub(crate) fn delete_edge_transactional(
         &self,
@@ -580,19 +557,6 @@ impl LpgStore {
             index.mark_deleted(epoch, transaction_id);
             drop(versions);
 
-            // Get edge type name for undo log
-            let edge_type_name = {
-                let id_to_type = self.id_to_edge_type.read();
-                id_to_type
-                    .get(type_id as usize)
-                    .map(|s| s.to_string())
-                    .unwrap_or_default()
-            };
-
-            // Capture properties for undo log
-            let properties: Vec<(PropertyKey, Value)> =
-                self.edge_properties.get_all(id).into_iter().collect();
-
             // Mark as deleted in adjacency
             self.forward_adj.mark_deleted(src, id);
             if let Some(ref backward) = self.backward_adj {
@@ -609,19 +573,6 @@ impl LpgStore {
 
             self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
             self.decrement_edge_type_count(type_id);
-
-            // Record undo entry for rollback
-            self.property_undo_log
-                .write()
-                .entry(transaction_id)
-                .or_default()
-                .push(super::PropertyUndoEntry::EdgeDeleted {
-                    edge_id: id,
-                    src,
-                    dst,
-                    edge_type: edge_type_name,
-                    properties,
-                });
 
             true
         } else {
@@ -658,6 +609,136 @@ impl LpgStore {
                 })
             })
             .count()
+    }
+
+    /// The ids of the edges visible now, in id order, for the readers that
+    /// must not lose an edge (checkpoints). Every record of this build is in
+    /// memory, so it never fails.
+    ///
+    /// # Errors
+    ///
+    /// None in this build; see the tiered storage version.
+    #[cfg(not(feature = "tiered-storage"))]
+    pub fn try_edge_ids(&self) -> grafeo_common::utils::error::Result<Vec<EdgeId>> {
+        let epoch = self.current_epoch();
+        let mut ids: Vec<EdgeId> = self
+            .edges
+            .read()
+            .iter()
+            .filter(|(_, chain)| chain.visible_at(epoch).is_some_and(|r| !r.is_deleted()))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// The ids of the edges visible now, in id order, for the readers that
+    /// must not lose an edge (checkpoints): a record that cannot be read (a
+    /// cold one that does not decode) is an error, never left out.
+    /// (Tiered storage version)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the first edge whose record cannot be read.
+    #[cfg(feature = "tiered-storage")]
+    pub fn try_edge_ids(&self) -> grafeo_common::utils::error::Result<Vec<EdgeId>> {
+        let epoch = self.current_epoch();
+        let versions = self.edge_versions.read();
+        let mut ids = Vec::with_capacity(versions.len());
+        for (id, index) in versions.iter() {
+            let Some(version_ref) = index.visible_at(epoch) else {
+                continue;
+            };
+            let record = self
+                .read_edge_record(&version_ref)
+                .ok_or_else(|| unreadable_edge_record(*id))?;
+            if !record.is_deleted() {
+                ids.push(*id);
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    /// The ids of the edges with a version visible now, in id order, found
+    /// without reading a record (a tiered store's cold records are decoded
+    /// only where they are read). For a checkpoint, which reads each edge's
+    /// record once, in
+    /// [`try_edge_without_properties`](Self::try_edge_without_properties):
+    /// that leaves out a record marked deleted and refuses one it cannot
+    /// read, so the rows are those of [`try_edge_ids`](Self::try_edge_ids),
+    /// which reads every record to filter the ids.
+    pub(crate) fn edge_ids_with_a_visible_version(&self) -> Vec<EdgeId> {
+        let epoch = self.current_epoch();
+        #[cfg(not(feature = "tiered-storage"))]
+        let mut ids: Vec<EdgeId> = self
+            .edges
+            .read()
+            .iter()
+            .filter(|(_, chain)| chain.visible_at(epoch).is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        #[cfg(feature = "tiered-storage")]
+        let mut ids: Vec<EdgeId> = self
+            .edge_versions
+            .read()
+            .iter()
+            .filter(|(_, index)| index.visible_at(epoch).is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The edge `id` as it is now, with its endpoints and type and without
+    /// its property values (a checkpoint reads those column by column), or
+    /// `None` when no version of it is visible now or the visible one is
+    /// deleted. Reads the edge's record once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the edge's record cannot be read (tiered
+    /// storage: a cold one that does not decode) or names a type the type
+    /// registry lacks.
+    pub(crate) fn try_edge_without_properties(
+        &self,
+        id: EdgeId,
+    ) -> grafeo_common::utils::error::Result<Option<Edge>> {
+        let epoch = self.current_epoch();
+        #[cfg(not(feature = "tiered-storage"))]
+        let record = {
+            let edges = self.edges.read();
+            match edges.get(&id).and_then(|chain| chain.visible_at(epoch)) {
+                Some(record) => *record,
+                None => return Ok(None),
+            }
+        };
+        #[cfg(feature = "tiered-storage")]
+        let record = {
+            let versions = self.edge_versions.read();
+            let Some(version_ref) = versions.get(&id).and_then(|index| index.visible_at(epoch))
+            else {
+                return Ok(None);
+            };
+            self.read_edge_record(&version_ref)
+                .ok_or_else(|| unreadable_edge_record(id))?
+        };
+        if record.is_deleted() {
+            return Ok(None);
+        }
+        let edge_type = self
+            .edge_types
+            .read()
+            .get_name(record.type_id)
+            .cloned()
+            .ok_or_else(|| {
+                grafeo_common::utils::error::Error::Internal(format!(
+                    "edge {} has type id {}, which the edge type registry lacks",
+                    id.as_u64(),
+                    record.type_id
+                ))
+            })?;
+        Ok(Some(Edge::new(id, record.src, record.dst, edge_type)))
     }
 
     /// Creates multiple edges in batch, significantly faster than calling
@@ -825,8 +906,8 @@ impl LpgStore {
         let chain = edges.get(&id)?;
         let epoch = self.current_epoch();
         let record = chain.visible_at(epoch)?;
-        let id_to_type = self.id_to_edge_type.read();
-        id_to_type.get(record.type_id as usize).cloned()
+        let edge_types = self.edge_types.read();
+        edge_types.get_name(record.type_id).cloned()
     }
 
     /// Gets the type of an edge by ID.
@@ -839,8 +920,8 @@ impl LpgStore {
         let epoch = self.current_epoch();
         let vref = index.visible_at(epoch)?;
         let record = self.read_edge_record(&vref)?;
-        let id_to_type = self.id_to_edge_type.read();
-        id_to_type.get(record.type_id as usize).cloned()
+        let edge_types = self.edge_types.read();
+        edge_types.get_name(record.type_id).cloned()
     }
 
     /// Gets the type of an edge visible to a specific transaction.
@@ -857,8 +938,8 @@ impl LpgStore {
         let edges = self.edges.read();
         let chain = edges.get(&id)?;
         let record = chain.visible_to(epoch, transaction_id)?;
-        let id_to_type = self.id_to_edge_type.read();
-        id_to_type.get(record.type_id as usize).cloned()
+        let edge_types = self.edge_types.read();
+        edge_types.get_name(record.type_id).cloned()
     }
 
     /// Gets the type of an edge visible to a specific transaction.
@@ -875,8 +956,8 @@ impl LpgStore {
         let index = versions.get(&id)?;
         let vref = index.visible_to(epoch, transaction_id)?;
         let record = self.read_edge_record(&vref)?;
-        let id_to_type = self.id_to_edge_type.read();
-        id_to_type.get(record.type_id as usize).cloned()
+        let edge_types = self.edge_types.read();
+        edge_types.get_name(record.type_id).cloned()
     }
 
     // --- Visibility checks (no type resolution or property loading) ---

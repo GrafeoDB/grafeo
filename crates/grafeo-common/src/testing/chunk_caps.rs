@@ -34,8 +34,9 @@ impl Drop for Restore {
 /// Runs `f` with `caps` as this thread's chunk caps, restoring the previous
 /// caps afterwards, also when `f` panics.
 ///
-/// The caps are not validated here: writers refuse caps of zero (see
-/// [`ChunkCaps::validate`]).
+/// The caps are not validated here: writers refuse the caps
+/// [`ChunkCaps::validate`] refuses (zero, or more rows than the format's
+/// row cap).
 pub fn with_chunk_caps<T>(caps: ChunkCaps, f: impl FnOnce() -> T) -> T {
     let _restore = Restore(CAPS.with(|current| current.replace(Some(caps))));
     f()

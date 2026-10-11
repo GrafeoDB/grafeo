@@ -80,6 +80,8 @@ The two-phase search keeps the quantized codes plus the rotation matrix and norm
 - [DuckDB filter pushdown into zone maps (PR #14313)](https://github.com/duckdb/duckdb/pull/14313)
 - [LSM Design Space Read Optimizations (Sarkar, ICDE 2023 tutorial)](https://cs-people.bu.edu/mathan/publications/icde23-tutorial.pdf)
 
+**Implementation (0.6.0).** The LPG section's version 3 stores every column in chunks of at most 65,536 rows and 1 MiB instead of 4 KiB blocks, and each chunk of `Int64`, `Float64`, `Bool` or short `String` values carries its minimum and maximum (see [Column Chunks](container-format.md#column-chunks)). A chunk stores only the rows that have a value, so its presence bitmap and value count stand in for the null count; there is no bloom filter. An open decodes every chunk into memory, so nothing skips chunks on disk yet: that comes with the compact-core store ([#432](https://github.com/GrafeoDB/grafeo/issues/432)), whose cold chunks are these chunks. The 0.5.x reader stays in 0.6 only: a read-write open migrates a 0.5.x file to the new layout, and a read-only open reads it in place (see [Files Written by 0.5.x](container-format.md#files-written-by-05x)).
+
 ## D5. Property column sort order stays insertion-order
 
 **Decision.** Property columns remain stored in insertion order. Iterator bounds rely on per-block zone-map skip, not on a sorted physical layout.
@@ -97,5 +99,5 @@ The two-phase search keeps the quantized codes plus the rotation matrix and norm
 | D1 PageFetcher trait | Implemented | 0.5.42 |
 | D2 Packed Ring format | Planned | 0.6.0 |
 | D3 Paged HNSW | Planned | 0.6.0 |
-| D4 Per-block zone maps | Planned | not scheduled |
+| D4 Per-chunk zone maps | On disk; used for skipping with the compact-core store ([#432](https://github.com/GrafeoDB/grafeo/issues/432)) | 0.6.0 |
 | D5 Insertion-order columns | Active default | (no change) |

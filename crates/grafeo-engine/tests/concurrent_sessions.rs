@@ -317,6 +317,7 @@ fn test_session_transaction_state_independence() {
 }
 
 #[test]
+#[expect(deprecated, reason = "the deprecated setting is what this tests")]
 fn test_session_auto_commit_independence() {
     // Auto-commit setting should be independent per session
     let db = GrafeoDB::new_in_memory();
@@ -1304,13 +1305,10 @@ fn test_edge_create_rollback() {
     );
 }
 
-/// Documents that DELETE edge followed by rollback does NOT restore the edge.
-///
-/// The `discard_uncommitted_versions` method correctly removes versions created
 /// DELETE edge followed by rollback restores the edge.
 ///
-/// The transactional delete captures undo information (edge type, endpoints, properties)
-/// and marks the version with `deleted_by`. Rollback replays the undo log to restore.
+/// The delete records the edge as it was (type, endpoints, properties) in the
+/// transaction's change set, and the rollback restores it from there.
 #[test]
 fn test_edge_delete_rollback() {
     let db = GrafeoDB::new_in_memory();

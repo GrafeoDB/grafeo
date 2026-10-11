@@ -118,6 +118,50 @@ tests:
       rows:
         - [10]
 
+  # A chain of comparisons is the conjunction of its comparisons (openCypher 9,
+  # comparison operators): a < b <= c is a < b AND b <= c. It used to read as
+  # (a < b) <= c, which is null.
+  - name: chained_comparisons
+    query: "RETURN 1 <= 2 < 3 AS a, 3 > 2 >= 1 AS b, 1 <= 5 < 3 AS c, 3 <> 19 <> 3 AS d, 1 < 2 < 3 < 4 AS e"
+    expect:
+      rows:
+        - [true, true, false, true, true]
+
+  - name: chained_comparisons_with_null
+    query: "RETURN 1 < null < 3 AS a, 19 < 3 < null AS b"
+    expect:
+      rows:
+        - [null, false]
+
+  - name: chained_comparison_in_where
+    setup:
+      - "CREATE (:N {v: 3}), (:N {v: 19}), (:N {v: 88}), (:N {w: 19})"
+    query: MATCH (n:N) WHERE 3 < n.v <= 88 RETURN n.v
+    expect:
+      rows:
+        - [19]
+        - [88]
+
+  - name: chained_comparison_with_parameters
+    setup:
+      - "CREATE (:N {v: 3}), (:N {v: 19}), (:N {v: 88})"
+    params:
+      low: 3
+      high: 88
+    query: MATCH (n:N) WHERE $high > n.v >= $low RETURN n.v
+    expect:
+      rows:
+        - [3]
+        - [19]
+
+  - name: chained_comparison_in_case
+    setup:
+      - "CREATE (:N {v: 3}), (:N {v: 19}), (:N {v: 88})"
+    query: MATCH (n:N) RETURN sum(CASE WHEN 3 <= n.v < 88 THEN 1 ELSE 0 END) AS inside
+    expect:
+      rows:
+        - [2]
+
   # ---------------------------------------------------------------------------
   # String Predicates
   # ---------------------------------------------------------------------------

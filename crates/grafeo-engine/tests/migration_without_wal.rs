@@ -3,7 +3,8 @@
 //! bindings.
 //!
 //! A file 0.5.x closed cleanly has no sidecar WAL: a read-write open migrates
-//! it as in any build. A file whose sidecar WAL holds changes is refused, by a
+//! it as in any build (when it holds nothing else this build refuses, see
+//! [`closed_0_5_file`]). A file whose sidecar WAL holds changes is refused, by a
 //! read-write and a read-only open alike: this build cannot replay the WAL, and
 //! the file alone would lack its changes. For the same reason a read-write and
 //! a read-only open refuse a 0.6 file whose sidecar WAL holds commits. These
@@ -24,6 +25,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+#[path = "common/legacy_file.rs"]
+mod legacy_file;
+
+use grafeo_common::storage::section::SectionType;
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB};
 use grafeo_storage::file::detect::{OnDisk, detect};
@@ -127,6 +132,25 @@ fn contents(db: &GrafeoDB) -> Contents {
     }
 }
 
+/// Writes at `path` the released file `version/closed.grafeo` (closed
+/// cleanly) without what a build of these tests may refuse (see
+/// `rdf_file_without_triple_store` and `search_indexes_without_their_features`):
+/// its triples (the `RdfStore` section), the index sections, and the catalog
+/// of 0.5.44, which defines a vector and a text index (0.5.43 kept no index
+/// definitions). What is left is the LPG data, and the schema of 0.5.43.
+fn closed_0_5_file(version: &str, path: &Path) {
+    legacy_file::write_0_5_file(
+        path,
+        version,
+        |section_type| match section_type {
+            SectionType::RdfStore | SectionType::VectorStore | SectionType::TextIndex => false,
+            SectionType::Catalog => version == "0.5.43",
+            _ => true,
+        },
+        &[],
+    );
+}
+
 /// A read-write open migrates a 0.5.x file 0.5.x closed cleanly: the data is
 /// there, the old file is kept as `<path>.pre-0.6` byte for byte, the new file
 /// is in the 0.6 format, nothing of the migration is left, and a reopen finds
@@ -134,8 +158,9 @@ fn contents(db: &GrafeoDB) -> Contents {
 #[test]
 fn a_closed_0_5_file_migrates_without_the_wal_feature() {
     for version in VERSIONS {
-        let original = fixture(version, "closed.grafeo");
         let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original.grafeo");
+        closed_0_5_file(version, &original);
         let expected = {
             let reference = dir.path().join("reference.grafeo");
             copy(&original, &reference);

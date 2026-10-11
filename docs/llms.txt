@@ -215,8 +215,9 @@ Methods:
 - `mmr_search(label, property, query, k, fetch_k, lambda_mult, ef, filters) -> list`: MMR search
 - `batch_vector_search(label, property, queries, k, ef, filters) -> list`: Batch search
 - `create_text_index(label, property)`: Create a BM25 text index
-- `text_search(label, property, query, k) -> list`: Full-text search
-- `hybrid_search(label, property, query_text, query_vector, k, fusion) -> list`: Combined text + vector search
+- `text_search(label, property, query, k, filters) -> list`: Full-text search
+- `create_text_index(label, property, k1, b, tokenizer, stop_words)`: BM25 text index; tokenizer `simple` (default), `standard` or `cjk_bigram`
+- `hybrid_search(label, text_property, vector_property, query_text, k, query_vector, fusion, weights, rrf_k, filters) -> list`: Combined text + vector search, filters applied to both before fusion
 - `history(entity_id) -> list`: Get change history for a node or edge
 
 ### Transaction

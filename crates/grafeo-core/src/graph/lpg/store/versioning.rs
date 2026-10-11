@@ -1,4 +1,4 @@
-use super::{LpgStore, PropertyUndoEntry};
+use super::LpgStore;
 use crate::graph::lpg::{EdgeRecord, NodeRecord};
 use grafeo_common::memory::AllocError;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
@@ -8,9 +8,6 @@ use grafeo_common::utils::hash::FxHashMap;
 use grafeo_common::{temporal::VersionLog, utils::hash::FxHashSet};
 use std::sync::atomic::Ordering;
 
-#[cfg(feature = "temporal")]
-use grafeo_common::types::PropertyKey;
-
 #[cfg(not(feature = "tiered-storage"))]
 use grafeo_common::mvcc::VersionChain;
 
@@ -18,180 +15,19 @@ use grafeo_common::mvcc::VersionChain;
 use grafeo_common::mvcc::{ColdVersionRef, HotVersionRef, VersionIndex};
 
 impl LpgStore {
-    /// Records a change of `transaction_id`, for its commit and rollback.
-    ///
-    /// Writes outside a transaction (`TransactionId::SYSTEM`) are final when
-    /// they happen and record nothing.
-    pub(super) fn record_change(&self, transaction_id: TransactionId, entry: PropertyUndoEntry) {
-        if transaction_id == TransactionId::SYSTEM {
-            return;
-        }
-        self.property_undo_log
-            .write()
-            .entry(transaction_id)
-            .or_default()
-            .push(entry);
-    }
-
-    /// Discards everything a transaction changed in this store (rollback).
-    ///
-    /// Replays the transaction's changes in reverse, so the cost is
-    /// O(changes), and leaves the counters and statistics as they were.
-    #[doc(hidden)]
-    pub fn discard_uncommitted_versions(&self, transaction_id: TransactionId) {
-        self.rollback_transaction_properties(transaction_id);
-    }
-
-    /// Nodes and edges that have a version of `transaction_id`: the ones it
-    /// created or deleted.
-    fn versioned_by(&self, transaction_id: TransactionId) -> (Vec<NodeId>, Vec<EdgeId>) {
-        let mut node_ids = Vec::new();
-        let mut edge_ids = Vec::new();
-        if let Some(entries) = self.property_undo_log.read().get(&transaction_id) {
-            for entry in entries {
-                match entry {
-                    PropertyUndoEntry::NodeCreated { node_id }
-                    | PropertyUndoEntry::NodeDeleted { node_id, .. } => node_ids.push(*node_id),
-                    PropertyUndoEntry::EdgeCreated { edge_id }
-                    | PropertyUndoEntry::EdgeDeleted { edge_id, .. } => edge_ids.push(*edge_id),
-                    PropertyUndoEntry::NodeProperty { .. }
-                    | PropertyUndoEntry::EdgeProperty { .. }
-                    | PropertyUndoEntry::LabelAdded { .. }
-                    | PropertyUndoEntry::LabelRemoved { .. } => {}
-                }
-            }
-        }
-        (node_ids, edge_ids)
-    }
-
-    /// Makes a transaction's versions visible at `commit_epoch` (commit).
-    ///
-    /// Walks the transaction's changes, so the cost is O(changes). Also
-    /// advances the store's epoch so non-transactional reads can see the
-    /// newly committed versions.
-    #[doc(hidden)]
-    pub fn finalize_version_epochs(&self, transaction_id: TransactionId, commit_epoch: EpochId) {
-        let (node_ids, edge_ids) = self.versioned_by(transaction_id);
-
-        #[cfg(not(feature = "tiered-storage"))]
-        {
-            let mut nodes = self.nodes.write();
-            for id in &node_ids {
-                if let Some(chain) = nodes.get_mut(id) {
-                    chain.finalize_epochs(transaction_id, commit_epoch);
-                }
-            }
-            drop(nodes);
-            let mut edges = self.edges.write();
-            for id in &edge_ids {
-                if let Some(chain) = edges.get_mut(id) {
-                    chain.finalize_epochs(transaction_id, commit_epoch);
-                }
-            }
-        }
-        #[cfg(feature = "tiered-storage")]
-        {
-            let mut versions = self.node_versions.write();
-            for id in &node_ids {
-                if let Some(index) = versions.get_mut(id) {
-                    index.finalize_epochs(transaction_id, commit_epoch);
-                }
-            }
-            drop(versions);
-            let mut versions = self.edge_versions.write();
-            for id in &edge_ids {
-                if let Some(index) = versions.get_mut(id) {
-                    index.finalize_epochs(transaction_id, commit_epoch);
-                }
-            }
-        }
-
-        #[cfg(feature = "temporal")]
-        self.finalize_pending_values(transaction_id, commit_epoch);
-
-        self.sync_epoch(commit_epoch);
-    }
-
-    /// Replaces the PENDING epochs of the property and label versions a
-    /// transaction wrote with its commit epoch. Only its own entities are
-    /// touched, so other open transactions' writes stay pending.
-    #[cfg(feature = "temporal")]
-    fn finalize_pending_values(&self, transaction_id: TransactionId, commit_epoch: EpochId) {
-        let mut node_values: Vec<(NodeId, PropertyKey)> = Vec::new();
-        let mut edge_values: Vec<(EdgeId, PropertyKey)> = Vec::new();
-        let mut label_nodes: Vec<NodeId> = Vec::new();
-        if let Some(entries) = self.property_undo_log.read().get(&transaction_id) {
-            for entry in entries {
-                match entry {
-                    PropertyUndoEntry::NodeProperty { node_id, key, .. } => {
-                        node_values.push((*node_id, key.clone()));
-                    }
-                    PropertyUndoEntry::EdgeProperty { edge_id, key, .. } => {
-                        edge_values.push((*edge_id, key.clone()));
-                    }
-                    PropertyUndoEntry::NodeCreated { node_id }
-                    | PropertyUndoEntry::LabelAdded { node_id, .. }
-                    | PropertyUndoEntry::LabelRemoved { node_id, .. } => label_nodes.push(*node_id),
-                    // A delete writes a PENDING tombstone for each value it removed.
-                    PropertyUndoEntry::NodeDeleted {
-                        node_id,
-                        properties,
-                        ..
-                    } => {
-                        node_values
-                            .extend(properties.iter().map(|(key, _)| (*node_id, key.clone())));
-                    }
-                    PropertyUndoEntry::EdgeDeleted {
-                        edge_id,
-                        properties,
-                        ..
-                    } => {
-                        edge_values
-                            .extend(properties.iter().map(|(key, _)| (*edge_id, key.clone())));
-                    }
-                    PropertyUndoEntry::EdgeCreated { .. } => {}
-                }
-            }
-        }
-        if !node_values.is_empty() {
-            let mut columns = self.node_properties.columns_write();
-            for (id, key) in &node_values {
-                if let Some(column) = columns.get_mut(key) {
-                    column.finalize_pending_for(*id, commit_epoch);
-                }
-            }
-        }
-        if !edge_values.is_empty() {
-            let mut columns = self.edge_properties.columns_write();
-            for (id, key) in &edge_values {
-                if let Some(column) = columns.get_mut(key) {
-                    column.finalize_pending_for(*id, commit_epoch);
-                }
-            }
-        }
-        if !label_nodes.is_empty() {
-            let mut labels = self.node_labels.write();
-            for id in &label_nodes {
-                if let Some(log) = labels.get_mut(id) {
-                    log.finalize_pending(commit_epoch);
-                }
-            }
-        }
-    }
-
-    /// Removes a node that `transaction_id` created, when the transaction
-    /// rolls back: its version, labels, properties, index entries and count.
-    /// Nothing of it was ever visible to others.
-    pub(super) fn discard_created_node(&self, id: NodeId, transaction_id: TransactionId) {
+    /// Removes a node that `transaction_id` created: its version, labels,
+    /// properties and index entries, not the counters (a change set's create
+    /// counts at commit). Returns whether the node was there and is gone.
+    pub(super) fn remove_created_node(&self, id: NodeId, transaction_id: TransactionId) -> bool {
         #[cfg(not(feature = "tiered-storage"))]
         {
             let mut nodes = self.nodes.write();
             let Some(chain) = nodes.get_mut(&id) else {
-                return;
+                return false;
             };
             chain.remove_versions_by(transaction_id);
             if !chain.is_empty() {
-                return;
+                return false;
             }
             nodes.remove(&id);
         }
@@ -199,11 +35,11 @@ impl LpgStore {
         {
             let mut versions = self.node_versions.write();
             let Some(index) = versions.get_mut(&id) else {
-                return;
+                return false;
             };
             index.remove_versions_by(transaction_id);
             if !index.is_empty() {
-                return;
+                return false;
             }
             versions.remove(&id);
         }
@@ -222,23 +58,26 @@ impl LpgStore {
         }
         drop(label_index);
         self.node_labels.write().remove(&id);
-
-        self.live_node_count.fetch_sub(1, Ordering::Relaxed);
+        true
     }
 
-    /// Removes an edge that `transaction_id` created, when the transaction
-    /// rolls back: its version, adjacency entries, properties and counts.
-    pub(super) fn discard_created_edge(&self, id: EdgeId, transaction_id: TransactionId) {
+    /// Removes an edge that `transaction_id` created: its version, adjacency
+    /// entries and properties, not the counters (a change set's create counts
+    /// at commit). Returns the edge's type id when the edge was there and is
+    /// gone.
+    pub(super) fn remove_created_edge(
+        &self,
+        id: EdgeId,
+        transaction_id: TransactionId,
+    ) -> Option<u32> {
         #[cfg(not(feature = "tiered-storage"))]
         let record = {
             let mut edges = self.edges.write();
-            let Some(chain) = edges.get_mut(&id) else {
-                return;
-            };
+            let chain = edges.get_mut(&id)?;
             let record = chain.latest().copied();
             chain.remove_versions_by(transaction_id);
             if !chain.is_empty() {
-                return;
+                return None;
             }
             edges.remove(&id);
             record
@@ -246,30 +85,25 @@ impl LpgStore {
         #[cfg(feature = "tiered-storage")]
         let record = {
             let mut versions = self.edge_versions.write();
-            let Some(index) = versions.get_mut(&id) else {
-                return;
-            };
+            let index = versions.get_mut(&id)?;
             let record = index
-                .visible_to(self.current_epoch(), transaction_id)
+                .latest()
                 .and_then(|version| self.read_edge_record(&version));
             index.remove_versions_by(transaction_id);
             if !index.is_empty() {
-                return;
+                return None;
             }
             versions.remove(&id);
             record
         };
-        let Some(record) = record else {
-            return;
-        };
+        let record = record?;
 
         self.forward_adj.mark_deleted(record.src, id);
         if let Some(ref backward) = self.backward_adj {
             backward.mark_deleted(record.dst, id);
         }
         self.edge_properties.purge(id);
-        self.live_edge_count.fetch_sub(1, Ordering::Relaxed);
-        self.decrement_edge_type_count(record.type_id);
+        Some(record.type_id)
     }
 
     /// Garbage collects the versions no reader at `min_epoch` or later can
@@ -281,8 +115,19 @@ impl LpgStore {
     /// of re-created entities. Any other node or edge has a single version
     /// (created, perhaps marked deleted), so there is nothing to collect and
     /// the cost does not grow with the store.
+    ///
+    /// Returns how many versions it dropped: node and edge versions, property
+    /// values and label sets.
     #[doc(hidden)]
-    pub fn gc_versions(&self, min_epoch: EpochId) {
+    pub fn gc_versions(&self, min_epoch: EpochId) -> usize {
+        #[cfg_attr(
+            not(any(feature = "temporal", feature = "tiered-storage")),
+            expect(
+                unused_mut,
+                reason = "only the temporal and tiered-storage builds keep versions to collect"
+            )
+        )]
+        let mut dropped = 0;
         #[cfg(feature = "tiered-storage")]
         {
             let (nodes, edges) = {
@@ -297,7 +142,7 @@ impl LpgStore {
                 let mut versions = self.node_versions.write();
                 for id in nodes {
                     if let Some(index) = versions.get_mut(&id) {
-                        index.gc(min_epoch);
+                        dropped += index.gc(min_epoch);
                         if index.is_empty() {
                             versions.remove(&id);
                         } else if index.version_count() > 1 {
@@ -311,7 +156,7 @@ impl LpgStore {
                 let mut versions = self.edge_versions.write();
                 for id in edges {
                     if let Some(index) = versions.get_mut(&id) {
-                        index.gc(min_epoch);
+                        dropped += index.gc(min_epoch);
                         if index.is_empty() {
                             versions.remove(&id);
                         } else if index.version_count() > 1 {
@@ -327,15 +172,15 @@ impl LpgStore {
 
         #[cfg(feature = "temporal")]
         {
-            self.node_properties.gc(min_epoch);
-            self.edge_properties.gc(min_epoch);
+            dropped += self.node_properties.gc(min_epoch);
+            dropped += self.edge_properties.gc(min_epoch);
             let nodes = std::mem::take(&mut self.gc_candidates.lock().labels);
             let mut still = Vec::new();
             {
                 let mut labels = self.node_labels.write();
                 for id in nodes {
                     if let Some(log) = labels.get_mut(&id) {
-                        log.gc(min_epoch);
+                        dropped += log.gc(min_epoch);
                         if log.is_empty() {
                             labels.remove(&id);
                         } else if log.len() > 1 {
@@ -349,6 +194,7 @@ impl LpgStore {
 
         #[cfg(not(any(feature = "temporal", feature = "tiered-storage")))]
         let _ = min_epoch;
+        dropped
     }
 
     /// Appends a node's new label set to its label log, noting the node for

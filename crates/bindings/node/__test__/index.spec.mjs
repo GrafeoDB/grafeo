@@ -69,6 +69,37 @@ describe('database lifecycle', () => {
     expect(() => db.close()).not.toThrow()
   })
 
+  it('should report a damaged database file as GRAFEO-S002, naming the file', async () => {
+    const fs = await import('fs')
+    const os = await import('os')
+    const path = await import('path')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grafeo-test-'))
+    const dbPath = path.join(dir, 'paris.grafeo')
+
+    const db = GrafeoDB.create(dbPath)
+    db.createNode(['Person'], { name: 'Shosanna' })
+    db.close()
+    // Inside the database id, which the file header checksum covers.
+    const bytes = fs.readFileSync(dbPath)
+    bytes[20] ^= 0x5a
+    fs.writeFileSync(dbPath, bytes)
+
+    expect(() => GrafeoDB.open(dbPath)).toThrow(/GRAFEO-S002: the file .*paris\.grafeo is damaged at byte 0/)
+
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
+  })
+
+  it('should report a vector search without a vector index as GRAFEO-V001', async () => {
+    const db = GrafeoDB.create()
+    db.createNode(['Paper'], { title: 'Graphs in Amsterdam' })
+    const error = await db.vectorSearch('Paper', 'embedding', [0.3, 0.19, 0.88], 3).catch((e) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toMatch(/GRAFEO-V001: .*no vector index on :Paper\(embedding\)/)
+    // It names no Rust method, as JavaScript spells them otherwise.
+    expect(error.message).not.toMatch(/create_vector_index|\(\)/)
+    db.close()
+  })
+
   it('should refuse writes after close of a persistent database', async () => {
     const fs = await import('fs')
     const os = await import('os')
@@ -1291,6 +1322,54 @@ describe('text search', () => {
     expect(results.length).toBeGreaterThanOrEqual(2)
     db.close()
   })
+
+  // Notes in Chinese and Russian, with a city and a rank.
+  function notes() {
+    const db = GrafeoDB.create()
+    for (const [owner, city, rank, body] of [
+      ['Alix', 'Berlin', 3, '阿利克斯住在柏林'],
+      ['Gus', 'Amsterdam', 19, '古斯住在阿姆斯特丹'],
+      ['Vincent', 'Berlin', 88, 'Винсент живёт в Берлине'],
+      ['Mia', 'Prague', 19, 'Мия и Жюль в Праге'],
+    ]) {
+      db.createNode(['Note'], { owner, city, rank, body })
+    }
+    return db
+  }
+
+  const noteOwners = (db, results) =>
+    results.map(([id]) => db.getNode(id).get('owner')).sort()
+
+  it('should take BM25, tokenizer and stop word options', async () => {
+    const db = notes()
+    await db.createTextIndex('Note', 'body', {
+      k1: 0.3,
+      b: 0.19,
+      tokenizer: 'cjk_bigram',
+      stopWords: ['住在', 'и'],
+    })
+    expect(noteOwners(db, await db.textSearch('Note', 'body', '柏林', 10))).toEqual(['Alix'])
+    expect(await db.textSearch('Note', 'body', '住在', 10)).toEqual([])
+    expect(noteOwners(db, await db.textSearch('Note', 'body', 'БЕРЛИНЕ', 10))).toEqual(['Vincent'])
+    await expect(db.createTextIndex('Note', 'body', { k1: -0.3 })).rejects.toThrow('GRAFEO-V001')
+    await expect(db.createTextIndex('Note', 'body', { tokenizer: 'jieba' })).rejects.toThrow(
+      "Unknown tokenizer 'jieba'"
+    )
+    db.close()
+  })
+
+  it('should search only the nodes its filters match', async () => {
+    const db = notes()
+    await db.createTextIndex('Note', 'body', { tokenizer: 'cjk_bigram' })
+    expect(noteOwners(db, await db.textSearch('Note', 'body', '住在', 10))).toEqual(['Alix', 'Gus'])
+    expect(
+      noteOwners(db, await db.textSearch('Note', 'body', '住在', 10, { city: 'Berlin' }))
+    ).toEqual(['Alix'])
+    expect(
+      noteOwners(db, await db.textSearch('Note', 'body', '住在', 1, { rank: { $gt: 3 } }))
+    ).toEqual(['Gus'])
+    db.close()
+  })
 })
 
 // ── Hybrid search ────────────────────────────────────────────────────
@@ -1339,6 +1418,63 @@ describe('hybrid search', () => {
       'Doc', 'content', 'emb', 'Rust', 4
     )
     expect(results.length).toBeGreaterThan(0)
+    db.close()
+  })
+
+  // For "canals" the text index ranks Alix, Vincent, Jules; for [1, 0] the
+  // vector index ranks Gus, Mia, Vincent, Jules. Alix (a text match only) and
+  // Gus (a vector match only) live in Amsterdam.
+  async function cityNotes() {
+    const db = GrafeoDB.create()
+    const notes = [
+      ['Alix', 'Amsterdam', 3, 'Alix rides along canals, canals and canals', [0, 1]],
+      ['Gus', 'Amsterdam', 19, 'Gus buys museum tickets', [1, 0]],
+      ['Vincent', 'Berlin', 88, 'Vincent paints canals', [0.8, 0.6]],
+      ['Mia', 'Berlin', 3, 'Mia dances in Berlin clubs', [0.95, 0.31]],
+      ['Jules', 'Berlin', 19, 'Jules swims past the old canals of Berlin at dawn', [0.6, 0.8]],
+    ]
+    // batchCreateNodes stores the embeddings as vectors.
+    const ids = await db.batchCreateNodes('Doc', 'emb', notes.map((note) => note[4]))
+    notes.forEach(([owner, city, rank, text], i) => {
+      db.setNodeProperty(ids[i], 'owner', owner)
+      db.setNodeProperty(ids[i], 'city', city)
+      db.setNodeProperty(ids[i], 'rank', rank)
+      db.setNodeProperty(ids[i], 'text', text)
+    })
+    await db.createTextIndex('Doc', 'text')
+    await db.createVectorIndex('Doc', 'emb', 2, 'cosine')
+    return db
+  }
+
+  const owners = (db, results) => results.map(([id]) => db.getNode(id).get('owner'))
+
+  it('should narrow the text and the vector search with filters', async () => {
+    const db = await cityNotes()
+    const unfiltered = owners(db, await db.hybridSearch('Doc', 'text', 'emb', 'canals', 10, [1, 0]))
+    expect(unfiltered).toContain('Alix')
+    expect(unfiltered).toContain('Gus')
+
+    const berlin = await db.hybridSearch(
+      'Doc', 'text', 'emb', 'canals', 10, [1, 0], null, null, { city: 'Berlin' }
+    )
+    expect(owners(db, berlin).sort()).toEqual(['Jules', 'Mia', 'Vincent'])
+    db.close()
+  })
+
+  it('should return k matching nodes with filters', async () => {
+    const db = await cityNotes()
+    const topTwo = await db.hybridSearch('Doc', 'text', 'emb', 'canals', 2, [1, 0])
+    expect(owners(db, topTwo)).toEqual(['Vincent', 'Jules'])
+
+    const amsterdam = await db.hybridSearch(
+      'Doc', 'text', 'emb', 'canals', 2, [1, 0], null, null, { city: 'Amsterdam' }
+    )
+    expect(owners(db, amsterdam)).toEqual(['Alix', 'Gus'])
+
+    const ranked = await db.hybridSearch(
+      'Doc', 'text', 'emb', 'canals', 10, [1, 0], 'weighted', null, { rank: { $gt: 3 } }
+    )
+    expect(owners(db, ranked)).toEqual(['Vincent', 'Gus', 'Jules'])
     db.close()
   })
 })
@@ -1756,7 +1892,7 @@ describe('batch writes', () => {
         { src: alix, dst: gus, type: 'KNOWS' },
         { src: alix, dst: 999, type: 'KNOWS' },
       ])
-    ).rejects.toThrow(/does not exist/)
+    ).rejects.toThrow(/GRAFEO-V002: Node not found: 999/)
     expect(db.edgeCount()).toBe(0)
   })
 })
@@ -1784,6 +1920,129 @@ describe('row order', () => {
     const db = GrafeoDB.create()
     await db.execute('UNWIND range(0, 49) AS v INSERT (:A {v: v})')
     expect((await orders(db, 'MATCH (n:A) RETURN n.v AS v')).size).toBe(1)
+    db.close()
+  })
+})
+
+// ── Nodes and edges inside lists, maps and paths ─────────────────────
+
+// A node or edge in a list or map literal, a whole path and what startNode
+// and endNode return come back as node and edge objects (`_id`, `_labels` or
+// `_type`, the properties), as `RETURN n` gives them; they used to come back
+// as bare IDs. A path keeps its object shape, `{ nodes, edges }`.
+describe('values that hold nodes and edges', () => {
+  const props = (value) =>
+    Object.fromEntries(Object.entries(value).filter(([key]) => !key.startsWith('_')))
+  const node = (value) => [value._labels, props(value)]
+  const edge = (value) => [value._type, props(value)]
+  const ALIX = [['Person'], { name: 'Alix', age: 19 }]
+  const GUS = [['Person'], { name: 'Gus', age: 88 }]
+  const KNOWS = ['KNOWS', { w: 3 }]
+  let db
+
+  beforeEach(async () => {
+    db = GrafeoDB.create()
+    await db.execute(
+      "INSERT (:Person {name: 'Alix', age: 19})-[:KNOWS {w: 3}]->(:Person {name: 'Gus', age: 88})"
+    )
+  })
+
+  afterEach(() => db.close())
+
+  it('should return the node and edge in a list literal', async () => {
+    const [row] = (
+      await db.execute("MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN [a, r, 3] AS l")
+    ).toArray()
+    expect(node(row.l[0])).toEqual(ALIX)
+    expect(edge(row.l[1])).toEqual(KNOWS)
+    expect(row.l[2]).toBe(3)
+  })
+
+  it('should return the node in a map literal and read its property', async () => {
+    const [row] = (
+      await db.execute(
+        "MATCH (a:Person {name: 'Gus'}) WITH {msg: a, t: 19} AS x RETURN x, x.msg.name AS n"
+      )
+    ).toArray()
+    expect(node(row.x.msg)).toEqual(GUS)
+    expect(row.x.t).toBe(19)
+    expect(row.n).toBe('Gus')
+  })
+
+  it('should return a path with its nodes and edges', async () => {
+    const [row] = (
+      await db.execute(
+        "MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->() RETURN p, nodes(p) AS ns, relationships(p) AS rs"
+      )
+    ).toArray()
+    expect(Object.keys(row.p).sort()).toEqual(['edges', 'nodes'])
+    expect(row.p.nodes.map(node)).toEqual([ALIX, GUS])
+    expect(row.p.edges.map(edge)).toEqual([KNOWS])
+    expect(row.p.nodes).toEqual(row.ns)
+    expect(row.p.edges).toEqual(row.rs)
+  })
+
+  it('should return nodes from startNode and endNode', async () => {
+    const [row] = (
+      await db.executeCypher('MATCH ()-[r:KNOWS]->() RETURN startNode(r) AS s, endNode(r) AS e')
+    ).toArray()
+    expect(node(row.s)).toEqual(ALIX)
+    expect(node(row.e)).toEqual(GUS)
+  })
+
+  it('should list the nodes and edges inside returned values', async () => {
+    const result = await db.execute("MATCH p = (:Person {name: 'Alix'})-[:KNOWS]->() RETURN p")
+    expect(result.nodes().map((n) => n.get('name')).sort()).toEqual(['Alix', 'Gus'])
+    expect(result.edges().map((e) => e.edgeType)).toEqual(['KNOWS'])
+  })
+})
+
+// ── Procedure arguments from parameters ─────────────────────────────
+
+describe('procedure arguments from parameters', () => {
+  const CHAIN =
+    "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})" +
+    "-[:KNOWS]->(:Person {name: 'Vincent'})-[:KNOWS]->(:Person {name: 'Mia'}), " +
+    "(a)-[:KNOWS]->(:Person {name: 'Jules'})"
+  const PAGERANK = (args) =>
+    `CALL grafeo.pagerank(${args}) YIELD node_id, score RETURN node_id, score ORDER BY node_id`
+  const scores = (result) => result.toArray().map((row) => [row.node_id, row.score])
+
+  it('should run positional parameters like the same literals', async () => {
+    const db = GrafeoDB.create()
+    await db.execute(CHAIN)
+    const literal = scores(await db.execute(PAGERANK('0.5, 1, 0.0001')))
+    const params = scores(await db.execute(PAGERANK('$d, $m, $t'), { d: 0.5, m: 1, t: 0.0001 }))
+    expect(params).toEqual(literal)
+    expect(scores(await db.execute(PAGERANK('')))).not.toEqual(literal)
+    const cypher = scores(
+      await db.executeCypher(PAGERANK('$d, $m, $t'), { d: 0.5, m: 1, t: 0.0001 })
+    )
+    expect(cypher).toEqual(literal)
+    db.close()
+  })
+
+  it('should run a required argument from a parameter', async () => {
+    const db = GrafeoDB.create()
+    await db.execute(CHAIN)
+    const alix = (await db.execute("MATCH (p:Person {name: 'Alix'}) RETURN id(p)")).scalar()
+    const result = await db.execute(
+      'CALL grafeo.bfs($s) YIELD node_id, depth RETURN node_id, depth ORDER BY node_id',
+      { s: alix }
+    )
+    expect(result.toArray().map((row) => row.depth)).toEqual([0, 1, 2, 3, 1])
+    db.close()
+  })
+
+  it('should refuse a missing parameter and a value of the wrong type', async () => {
+    const db = GrafeoDB.create()
+    await db.execute(CHAIN)
+    await expect(db.execute('CALL grafeo.pagerank($d) YIELD score RETURN score')).rejects.toThrow(
+      /Missing parameter: \$d/
+    )
+    await expect(
+      db.execute('CALL grafeo.pagerank($d) YIELD score RETURN score', { d: 'high' })
+    ).rejects.toThrow(/Argument 'damping' of grafeo.pagerank/)
     db.close()
   })
 })

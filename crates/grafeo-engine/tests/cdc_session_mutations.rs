@@ -1,13 +1,13 @@
 //! Integration tests verifying that CDC records session-driven mutations.
 //!
-//! Before the `CdcGraphStore` decorator, only direct CRUD API calls
-//! (`db.create_node()`, `db.set_node_property()`) generated CDC events.
-//! Session mutations via `session.execute("INSERT ...")` bypassed CDC entirely.
+//! Session mutations via `session.execute("INSERT ...")` once bypassed CDC
+//! entirely; only direct CRUD API calls (`db.create_node()`,
+//! `db.set_node_property()`) generated events.
 // Test IDs originate as u64 counters stored in i64; roundtrip is lossless
 #![allow(clippy::cast_sign_loss)]
 //!
-//! These tests verify the decorator correctly buffers events during mutations,
-//! flushes them on commit, and discards them on rollback.
+//! These tests verify that a commit reports its transaction's changes, and
+//! that a rollback reports nothing.
 //!
 //! ```bash
 //! cargo test --features "full" -p grafeo-engine --test cdc_session_mutations

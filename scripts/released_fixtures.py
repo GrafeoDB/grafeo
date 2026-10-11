@@ -15,6 +15,12 @@ Each layout gets the same changes in two sessions: `first_half`, a reopen, then
 
 The files go to `crates/grafeo-engine/tests/fixtures/released/<version>/`. Regenerate a
 version only to add content; the tests describe what each file holds.
+
+`compacted.grafeo` (0.5.44) holds a compacted base under writes made after `compact()`. It is
+added on its own, without touching the other files:
+
+    uv run --no-project --python 3.13 --with grafeo==0.5.44 python scripts/released_fixtures.py \\
+        --compacted crates/grafeo-engine/tests/fixtures/released/0.5.44
 """
 
 from __future__ import annotations
@@ -150,18 +156,44 @@ def write(path: Path, *, close_at_end: bool) -> None:
         os._exit(0)
 
 
-USAGE = "usage: released_fixtures.py [--unflushed <path>]"
+def write_compacted(path: Path) -> None:
+    """The first half, `compact()`, then the second half in the same session.
+
+    The second half updates, relabels and detach-deletes nodes of the compacted
+    base, so the file holds a base, its overlay and the overlay's deletion log.
+    """
+    db = grafeo.GrafeoDB(str(path))
+    first_half(db)
+    db.compact()
+    second_half(db)
+    db.close()
+
+
+USAGE = "usage: released_fixtures.py [--unflushed <path> | --compacted <dir>]"
 
 
 def main() -> None:
     arguments = sys.argv[1:]
     if arguments:
-        # Anything but the child mode exits before a file is touched: a
+        # Anything but these modes exits before a file is touched: a
         # regeneration first deletes the committed fixtures of the version.
-        if len(arguments) != 2 or arguments[0] != "--unflushed":
+        if len(arguments) != 2 or arguments[0] not in ("--unflushed", "--compacted"):
             print(USAGE, file=sys.stderr)
             sys.exit(2)
-        write(Path(arguments[1]), close_at_end=False)
+        if arguments[0] == "--unflushed":
+            write(Path(arguments[1]), close_at_end=False)
+            return
+        # Adds `compacted.grafeo` to a version's fixtures, leaving the others
+        # as they are (released versions up to 0.5.44 have `compact()`).
+        out = Path(arguments[1])
+        target = out / "compacted.grafeo"
+        if target.exists():
+            print(f"{target} exists; remove it first to regenerate it", file=sys.stderr)
+            sys.exit(2)
+        write_compacted(target)
+        for spill in out.glob("compacted.grafeo.spill"):
+            shutil.rmtree(spill)
+        print(target, target.stat().st_size)
         return
     out = OUT / grafeo.__version__
     if out.exists():

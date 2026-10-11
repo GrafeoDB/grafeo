@@ -6,6 +6,8 @@
 use super::sink::TripleSink;
 use super::term::Term;
 use super::triple::{Triple, TriplePattern};
+use grafeo_common::change::RdfGraphOp;
+use grafeo_common::storage::log_record::RdfGraphTarget;
 use grafeo_common::types::TransactionId;
 use grafeo_common::utils::hash::FxHashSet;
 use hashbrown::HashMap;
@@ -53,9 +55,10 @@ impl Default for RdfStoreConfig {
 /// - POS (Predicate, Object, Subject): for predicate-based queries
 /// - OSP (Object, Subject, Predicate): for object-based queries (optional)
 ///
-/// The store also supports transactional operations through buffering.
-/// When operations are performed within a transaction context, they are
-/// buffered until commit (applied) or rollback (discarded).
+/// The store holds committed triples only: a database transaction records
+/// its RDF writes in its change set and applies them when it commits. The
+/// deprecated per-transaction buffer (`insert_in_transaction` and the
+/// methods around it) is no part of a database transaction.
 pub struct RdfStore {
     /// Configuration.
     config: RdfStoreConfig,
@@ -78,7 +81,7 @@ pub struct RdfStore {
     /// Object+Subject composite index: (object, subject) -> triples.
     os_index:
         RwLock<hashbrown::HashMap<(Term, Term), Vec<Arc<Triple>>, foldhash::fast::RandomState>>,
-    /// Transaction buffers for pending operations.
+    /// The deprecated per-transaction buffers (removed in 0.7.0).
     tx_buffer: RwLock<TransactionBuffer>,
     /// Named graphs, each a separate `RdfStore` partition.
     named_graphs: RwLock<HashMap<String, Arc<RdfStore>>>,
@@ -540,6 +543,61 @@ impl RdfStore {
         self.triples.read().iter().cloned().collect()
     }
 
+    /// The bytes the triple set and index maps of this graph (not its named
+    /// graphs) have allocated.
+    #[cfg(test)]
+    pub(crate) fn index_allocation_bytes(&self) -> usize {
+        self.triples.read().allocation_size()
+            + self.subject_index.read().allocation_size()
+            + self.predicate_index.read().allocation_size()
+            + self
+                .object_index
+                .read()
+                .as_ref()
+                .map_or(0, hashbrown::HashMap::allocation_size)
+            + self.sp_index.read().allocation_size()
+            + self.po_index.read().allocation_size()
+            + self.os_index.read().allocation_size()
+    }
+
+    /// Calls `visit` for every triple of this graph (not its named graphs),
+    /// in the order of [`sorted_triples`](Self::sorted_triples), which it
+    /// takes first: writers wait only while its references are taken, not
+    /// while `visit` runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error of `visit`, which ends the walk.
+    pub fn for_each_triple(
+        &self,
+        visit: &mut dyn FnMut(&Triple) -> grafeo_common::utils::error::Result<()>,
+    ) -> grafeo_common::utils::error::Result<()> {
+        for triple in &self.sorted_triples() {
+            visit(triple)?;
+        }
+        Ok(())
+    }
+
+    /// The triples of this graph (not its named graphs) present now, in a
+    /// defined order: by subject, then predicate, then object, a term
+    /// ordered by its kind (IRIs, blank nodes, literals) and then by its
+    /// strings (a literal by value, datatype and language). Stores that hold
+    /// the same triples give them in the same order, whatever order the
+    /// triples came in.
+    ///
+    /// Takes one reference per triple under one read lock, then sorts them
+    /// after releasing it.
+    #[must_use]
+    pub fn sorted_triples(&self) -> Vec<Arc<Triple>> {
+        let mut triples = self.triples();
+        triples.sort_unstable_by(|a, b| {
+            term_order(a.subject(), b.subject())
+                .then_with(|| term_order(a.predicate(), b.predicate()))
+                .then_with(|| term_order(a.object(), b.object()))
+        });
+        triples
+    }
+
     /// Returns triples matching the given pattern.
     ///
     /// Uses composite indexes for 2-bound and 3-bound queries (O(1) lookup),
@@ -949,9 +1007,9 @@ impl RdfStore {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let triple = parse_ntriples_line(trimmed).ok_or_else(|| NTriplesError::Parse {
+            let triple = parse_ntriples_line(trimmed).map_err(|reason| NTriplesError::Parse {
                 line: line_no + 1,
-                content: line.clone(),
+                content: format!("{reason}: {line}"),
             })?;
             triples.push(triple);
         }
@@ -1031,9 +1089,9 @@ impl RdfStore {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let triple = parse_ntriples_line(trimmed).ok_or_else(|| NTriplesError::Parse {
+            let triple = parse_ntriples_line(trimmed).map_err(|reason| NTriplesError::Parse {
                 line: line_no + 1,
-                content: line.clone(),
+                content: format!("{reason}: {line}"),
             })?;
             sink.emit(triple).map_err(|e| NTriplesError::Parse {
                 line: line_no + 1,
@@ -1069,6 +1127,16 @@ impl RdfStore {
     // Named graph support
     // =========================================================================
 
+    /// The configuration of a new named graph: this store's, with indexes
+    /// that start empty and grow as triples arrive (a store can hold many
+    /// named graphs, most of them small or empty).
+    fn named_graph_config(&self) -> RdfStoreConfig {
+        RdfStoreConfig {
+            initial_capacity: 0,
+            ..self.config.clone()
+        }
+    }
+
     /// Returns a named graph by IRI, or `None` if it doesn't exist.
     #[must_use]
     pub fn graph(&self, name: &str) -> Option<Arc<RdfStore>> {
@@ -1087,7 +1155,7 @@ impl RdfStore {
         Arc::clone(
             graphs
                 .entry(name.to_string())
-                .or_insert_with(|| Arc::new(RdfStore::with_config(self.config.clone()))),
+                .or_insert_with(|| Arc::new(RdfStore::with_config(self.named_graph_config()))),
         )
     }
 
@@ -1099,7 +1167,7 @@ impl RdfStore {
         }
         graphs.insert(
             name.to_string(),
-            Arc::new(RdfStore::with_config(self.config.clone())),
+            Arc::new(RdfStore::with_config(self.named_graph_config())),
         );
         true
     }
@@ -1138,10 +1206,14 @@ impl RdfStore {
         self.named_graphs.write().clear();
     }
 
-    /// Copies all triples from source graph to destination graph.
+    /// Copies all triples from source graph to destination graph. A copy of
+    /// a graph onto itself does nothing (SPARQL 1.1 Update, section 3.2.3).
     ///
     /// `None` = default graph, `Some(iri)` = named graph.
     pub fn copy_graph(&self, source: Option<&str>, dest: Option<&str>) {
+        if source == dest {
+            return;
+        }
         let triples = match source {
             None => self.triples(),
             Some(n) => self.graph(n).map(|g| g.triples()).unwrap_or_default(),
@@ -1164,10 +1236,15 @@ impl RdfStore {
         }
     }
 
-    /// Moves all triples from source graph to destination graph.
+    /// Moves all triples from source graph to destination graph. A move of
+    /// a graph onto itself does nothing (SPARQL 1.1 Update, section 3.2.4):
+    /// it used to drop the graph.
     ///
     /// `None` = default graph, `Some(iri)` = named graph.
     pub fn move_graph(&self, source: Option<&str>, dest: Option<&str>) {
+        if source == dest {
+            return;
+        }
         self.copy_graph(source, dest);
         match source {
             None => self.clear(),
@@ -1177,10 +1254,14 @@ impl RdfStore {
         }
     }
 
-    /// Adds all triples from source graph into destination graph (union).
+    /// Adds all triples from source graph into destination graph (union). An
+    /// add of a graph onto itself does nothing.
     ///
     /// `None` = default graph, `Some(iri)` = named graph.
     pub fn add_graph(&self, source: Option<&str>, dest: Option<&str>) {
+        if source == dest {
+            return;
+        }
         let triples = match source {
             None => self.triples(),
             Some(n) => self.graph(n).map(|g| g.triples()).unwrap_or_default(),
@@ -1197,6 +1278,68 @@ impl RdfStore {
                     dest_store.insert((*t).clone());
                 }
             }
+        }
+    }
+
+    /// Applies a whole-graph operation: what a SPARQL `CREATE`, `DROP`,
+    /// `CLEAR`, `COPY`, `MOVE` or `ADD` changes, and what the replay of its
+    /// logged operation changes. `DROP` and `CLEAR` of the default graph
+    /// empty it (it always exists); of `ALL`, they empty the default graph
+    /// and remove every named graph; of `NAMED`, they remove every named
+    /// graph. `CLEAR` of one named graph empties it and keeps it.
+    ///
+    /// Returns `false` when the operation found nothing to change that it
+    /// names: a graph to create that exists, or a named graph to drop that
+    /// does not.
+    pub fn apply_graph_op(&self, op: &RdfGraphOp) -> bool {
+        match op {
+            RdfGraphOp::Create { name } => self.create_graph(name),
+            RdfGraphOp::Drop {
+                target: RdfGraphTarget::Named(name),
+            } => self.drop_graph(name),
+            RdfGraphOp::Drop { target } | RdfGraphOp::Clear { target } => {
+                match target {
+                    RdfGraphTarget::Default => self.clear(),
+                    RdfGraphTarget::Named(name) => self.clear_graph(Some(name)),
+                    RdfGraphTarget::AllNamed => self.clear_all_named(),
+                    RdfGraphTarget::All => {
+                        self.clear();
+                        self.clear_all_named();
+                    }
+                }
+                true
+            }
+            RdfGraphOp::Copy { source, target } => {
+                self.copy_graph(source.as_deref(), target.as_deref());
+                true
+            }
+            RdfGraphOp::Move { source, target } => {
+                self.move_graph(source.as_deref(), target.as_deref());
+                true
+            }
+            RdfGraphOp::Add { source, target } => {
+                self.add_graph(source.as_deref(), target.as_deref());
+                true
+            }
+        }
+    }
+
+    /// Inserts `triple` into `graph` (`None` for the default graph), creating
+    /// a named graph that does not exist. Returns whether the triple is new.
+    pub fn insert_into(&self, graph: Option<&str>, triple: Triple) -> bool {
+        match graph {
+            None => self.insert(triple),
+            Some(name) => self.graph_or_create(name).insert(triple),
+        }
+    }
+
+    /// Removes `triple` from `graph` (`None` for the default graph). Returns
+    /// whether the graph held it; a named graph that does not exist holds
+    /// nothing and is not created.
+    pub fn remove_from(&self, graph: Option<&str>, triple: &Triple) -> bool {
+        match graph {
+            None => self.remove(triple),
+            Some(name) => self.graph(name).is_some_and(|store| store.remove(triple)),
         }
     }
 
@@ -1244,6 +1387,10 @@ impl RdfStore {
     /// Like [`find_in_graphs`](Self::find_in_graphs), but as seen by
     /// `transaction_id`: each graph's pending changes from that transaction
     /// are applied (see [`find_with_pending`](Self::find_with_pending)).
+    #[deprecated(
+        since = "0.6.0",
+        note = "a database transaction records its RDF writes in its change set; this buffer is no part of it (removed in 0.7.0)"
+    )]
     pub fn find_in_graphs_with_pending(
         &self,
         pattern: &TriplePattern,
@@ -1256,14 +1403,14 @@ impl RdfStore {
         let tx = Some(transaction_id);
         match graphs {
             None => self
-                .find_with_pending(pattern, tx)
+                .buffered_find(pattern, tx)
                 .into_iter()
                 .map(|t| (None, t))
                 .collect(),
             Some([]) => {
                 let mut results = Vec::new();
                 for (name, store) in self.named_graphs.read().iter() {
-                    for t in store.find_with_pending(pattern, tx) {
+                    for t in store.buffered_find(pattern, tx) {
                         results.push((Some(name.clone()), t));
                     }
                 }
@@ -1274,7 +1421,7 @@ impl RdfStore {
                 let graphs = self.named_graphs.read();
                 for name in names {
                     if let Some(store) = graphs.get(*name) {
-                        for t in store.find_with_pending(pattern, tx) {
+                        for t in store.buffered_find(pattern, tx) {
                             results.push((Some((*name).to_string()), t));
                         }
                     }
@@ -1292,6 +1439,10 @@ impl RdfStore {
     ///
     /// The insert is buffered until the transaction is committed.
     /// If the transaction is rolled back, the insert is discarded.
+    #[deprecated(
+        since = "0.6.0",
+        note = "a database transaction records its RDF writes in its change set; this buffer is no part of it (removed in 0.7.0)"
+    )]
     pub fn insert_in_transaction(&self, transaction_id: TransactionId, triple: Triple) {
         let mut buffer = self.tx_buffer.write();
         buffer
@@ -1305,6 +1456,10 @@ impl RdfStore {
     ///
     /// The removal is buffered until the transaction is committed.
     /// If the transaction is rolled back, the removal is discarded.
+    #[deprecated(
+        since = "0.6.0",
+        note = "a database transaction records its RDF writes in its change set; this buffer is no part of it (removed in 0.7.0)"
+    )]
     pub fn remove_in_transaction(&self, transaction_id: TransactionId, triple: Triple) {
         let mut buffer = self.tx_buffer.write();
         buffer
@@ -1318,6 +1473,10 @@ impl RdfStore {
     /// this graph and in every named graph.
     ///
     /// Returns the number of operations applied.
+    #[deprecated(
+        since = "0.6.0",
+        note = "a database transaction records its RDF writes in its change set; this buffer is no part of it (removed in 0.7.0)"
+    )]
     pub fn commit_transaction(&self, transaction_id: TransactionId) -> usize {
         let ops = {
             let mut buffer = self.tx_buffer.write();
@@ -1345,6 +1504,10 @@ impl RdfStore {
     /// graph and in every named graph.
     ///
     /// Returns the number of operations discarded.
+    #[deprecated(
+        since = "0.6.0",
+        note = "a database transaction records its RDF writes in its change set; this buffer is no part of it (removed in 0.7.0)"
+    )]
     pub fn rollback_transaction(&self, transaction_id: TransactionId) -> usize {
         let mut count = self
             .tx_buffer
@@ -1365,6 +1528,10 @@ impl RdfStore {
     }
 
     /// Checks if a transaction has pending operations.
+    #[deprecated(
+        since = "0.6.0",
+        note = "a database transaction records its RDF writes in its change set; this buffer is no part of it (removed in 0.7.0)"
+    )]
     #[must_use]
     pub fn has_pending_ops(&self, transaction_id: TransactionId) -> bool {
         let buffer = self.tx_buffer.read();
@@ -1380,7 +1547,20 @@ impl RdfStore {
     /// the result is exactly what the store will hold once the transaction
     /// commits: a triple inserted and then deleted is absent, one deleted and
     /// then re-inserted is present, and a triple is never returned twice.
+    #[deprecated(
+        since = "0.6.0",
+        note = "a database transaction records its RDF writes in its change set; this buffer is no part of it (removed in 0.7.0)"
+    )]
     pub fn find_with_pending(
+        &self,
+        pattern: &TriplePattern,
+        transaction_id: Option<TransactionId>,
+    ) -> Vec<Arc<Triple>> {
+        self.buffered_find(pattern, transaction_id)
+    }
+
+    /// What [`find_with_pending`](Self::find_with_pending) returns.
+    fn buffered_find(
         &self,
         pattern: &TriplePattern,
         transaction_id: Option<TransactionId>,
@@ -1429,6 +1609,10 @@ impl RdfStore {
 
     /// Whether `triple` is present as seen by `transaction_id` (committed
     /// state plus that transaction's pending changes).
+    #[deprecated(
+        since = "0.6.0",
+        note = "a database transaction records its RDF writes in its change set; this buffer is no part of it (removed in 0.7.0)"
+    )]
     #[must_use]
     pub fn contains_with_pending(&self, triple: &Triple, transaction_id: TransactionId) -> bool {
         let pattern = TriplePattern {
@@ -1437,7 +1621,7 @@ impl RdfStore {
             object: Some(triple.object().clone()),
         };
         !self
-            .find_with_pending(&pattern, Some(transaction_id))
+            .buffered_find(&pattern, Some(transaction_id))
             .is_empty()
     }
 }
@@ -1482,7 +1666,9 @@ pub enum NTriplesError {
     Parse {
         /// 1-based line number.
         line: usize,
-        /// The raw line content.
+        /// What is wrong: for a line that is not an N-Triples triple, the
+        /// reason followed by the line; otherwise the parser's or the sink's
+        /// message.
         content: String,
     },
 }
@@ -1507,6 +1693,29 @@ impl std::error::Error for NTriplesError {
     }
 }
 
+/// The order of [`RdfStore::for_each_triple`]: IRIs, then blank nodes, then
+/// literals; within a kind by the IRI, the id, or a literal's value,
+/// datatype and language. Only equal terms compare equal.
+fn term_order(a: &Term, b: &Term) -> std::cmp::Ordering {
+    fn rank(term: &Term) -> u8 {
+        match term {
+            Term::Iri(_) => 0,
+            Term::BlankNode(_) => 1,
+            Term::Literal(_) => 2,
+        }
+    }
+    match (a, b) {
+        (Term::Iri(a), Term::Iri(b)) => a.as_str().cmp(b.as_str()),
+        (Term::BlankNode(a), Term::BlankNode(b)) => a.id().cmp(b.id()),
+        (Term::Literal(a), Term::Literal(b)) => a
+            .value()
+            .cmp(b.value())
+            .then_with(|| a.datatype().cmp(b.datatype()))
+            .then_with(|| a.language().cmp(&b.language())),
+        _ => rank(a).cmp(&rank(b)),
+    }
+}
+
 /// Extracts the next N-Triples term from a string, returning `(term_str, rest)`.
 fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
     let s = s.trim_start();
@@ -1524,7 +1733,9 @@ fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
         let mut pos = 1;
         while pos < bytes.len() {
             if bytes[pos] == b'\\' {
-                pos += 2; // skip escape sequence
+                // Skip the escape sequence; an escape at the end of the
+                // line ends the term, which then has no closing quote.
+                pos = (pos + 2).min(bytes.len());
             } else if bytes[pos] == b'"' {
                 pos += 1;
                 // Check for datatype or language suffix
@@ -1552,21 +1763,29 @@ fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
 /// Parses a single N-Triples line into a `Triple`.
 ///
 /// Expected format: `<subject> <predicate> <object> .`
-fn parse_ntriples_line(line: &str) -> Option<Triple> {
-    let (subj_str, rest) = next_ntriples_term(line)?;
-    let (pred_str, rest) = next_ntriples_term(rest)?;
-    let (obj_str, rest) = next_ntriples_term(rest)?;
+///
+/// # Errors
+///
+/// Returns what is wrong: a line that is not three terms followed by `.`,
+/// or the term that does not parse, with its [`TermParseError`](super::TermParseError).
+fn parse_ntriples_line(line: &str) -> Result<Triple, String> {
+    let shape = || "expected three terms followed by '.'".to_string();
+    let (subj_str, rest) = next_ntriples_term(line).ok_or_else(shape)?;
+    let (pred_str, rest) = next_ntriples_term(rest).ok_or_else(shape)?;
+    let (obj_str, rest) = next_ntriples_term(rest).ok_or_else(shape)?;
+
+    let term = |text: &str, role: &str| {
+        Term::from_ntriples(text).map_err(|error| format!("{role}: {error}"))
+    };
+    let subject = term(subj_str, "subject")?;
+    let predicate = term(pred_str, "predicate")?;
+    let object = term(obj_str, "object")?;
 
     // Expect trailing ` .`
-    let rest = rest.trim();
-    if !rest.starts_with('.') {
-        return None;
+    if !rest.trim().starts_with('.') {
+        return Err(shape());
     }
-
-    let subject = Term::from_ntriples(subj_str)?;
-    let predicate = Term::from_ntriples(pred_str)?;
-    let object = Term::from_ntriples(obj_str)?;
-    Some(Triple::new(subject, predicate, object))
+    Ok(Triple::new(subject, predicate, object))
 }
 
 #[cfg(test)]
@@ -1596,6 +1815,188 @@ mod tests {
                 Term::literal("Gus"),
             ),
         ]
+    }
+
+    #[test]
+    fn for_each_triple_visits_this_graph_in_term_order() {
+        let iri = |local: &str| Term::iri(format!("http://example.org/{local}"));
+        let expected = vec![
+            Triple::new(iri("alix"), iri("knows"), iri("gus")),
+            Triple::new(iri("alix"), iri("knows"), Term::blank("b0")),
+            Triple::new(
+                iri("alix"),
+                iri("knows"),
+                Term::typed_literal("Gus", "http://example.org/name"),
+            ),
+            Triple::new(iri("alix"), iri("knows"), Term::literal("Gus")),
+            Triple::new(iri("alix"), iri("knows"), Term::literal("Gus ")),
+            Triple::new(iri("alix"), iri("likes"), iri("amsterdam")),
+            Triple::new(iri("gus"), iri("knows"), iri("alix")),
+            Triple::new(Term::blank("b0"), iri("knows"), iri("alix")),
+        ];
+        let store = RdfStore::new();
+        for triple in expected.iter().rev() {
+            store.insert(triple.clone());
+        }
+        store
+            .graph_or_create("http://example.org/trips")
+            .insert(Triple::new(iri("mia"), iri("visits"), iri("paris")));
+        let mut visited = Vec::new();
+        store
+            .for_each_triple(&mut |triple| {
+                visited.push(triple.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(visited, expected, "in term order, without the named graph");
+
+        // The first error ends the walk.
+        let mut seen = 0;
+        let error = store
+            .for_each_triple(&mut |_| {
+                seen += 1;
+                if seen == 2 {
+                    Err(grafeo_common::utils::error::Error::Internal(
+                        "Mia stops here".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert_eq!(seen, 2);
+        assert!(error.to_string().contains("Mia stops here"), "{error}");
+    }
+
+    #[test]
+    fn ntriples_lines_decode_non_ascii_text_and_refuse_bad_escapes() {
+        // `~` stands for a backslash.
+        let input = concat!(
+            "<http://example.org/Kraków> <http://example.org/name> \"Krak~u00F3w\"@pl .\n",
+            "_:b0 <http://example.org/name> \"Kraków 🚲\" .\n",
+        )
+        .replace('~', "\\");
+        let store = RdfStore::new();
+        store.load_ntriples(input.as_bytes()).unwrap();
+        assert!(store.contains(&Triple::new(
+            Term::iri("http://example.org/Kraków"),
+            Term::iri("http://example.org/name"),
+            Term::lang_literal("Kraków", "pl"),
+        )));
+        assert!(store.contains(&Triple::new(
+            Term::blank("b0"),
+            Term::iri("http://example.org/name"),
+            Term::literal("Kraków 🚲"),
+        )));
+        let bad = "<http://example.org/a> <http://example.org/b> \"~x\" .\n".replace('~', "\\");
+        assert!(matches!(
+            RdfStore::new().load_ntriples(bad.as_bytes()),
+            Err(NTriplesError::Parse { line: 1, .. })
+        ));
+    }
+
+    /// A literal that ends in a backslash ran the N-Triples term scanner past
+    /// the end of the line, which panicked; it is a parse error naming why.
+    #[test]
+    fn a_literal_ending_in_a_backslash_is_a_parse_error() {
+        // `~` stands for a backslash.
+        for line in [
+            "<http://example.org/a> <http://example.org/b> \"abc~",
+            "<http://example.org/a> <http://example.org/b> \"~",
+            "<http://example.org/a> <http://example.org/b> \"Kraków~",
+        ] {
+            let line = line.replace('~', "\\");
+            match RdfStore::new().load_ntriples(line.as_bytes()) {
+                Err(NTriplesError::Parse { line: 1, content }) => assert!(
+                    content.contains("an escape without its character"),
+                    "{line}: {content}"
+                ),
+                other => panic!("{line}: {other:?}"),
+            }
+            match RdfStore::new().load_ntriples_streaming(line.as_bytes(), 3) {
+                Err(NTriplesError::Parse { line: 1, content }) => assert!(
+                    content.contains("an escape without its character"),
+                    "{line}: {content}"
+                ),
+                other => panic!("{line}: {other:?}"),
+            }
+        }
+    }
+
+    /// A parse error says what is wrong with the line, not only which line.
+    #[test]
+    fn an_ntriples_parse_error_keeps_its_reason() {
+        let bad = "<http://example.org/a> <http://example.org/b> \"~x\" .\n".replace('~', "\\");
+        match RdfStore::new().load_ntriples(bad.as_bytes()) {
+            Err(NTriplesError::Parse { line: 1, content }) => assert!(
+                content.contains("object: not an N-Triples term (an unknown escape")
+                    && content.contains("<http://example.org/a>"),
+                "{content}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        let short = "<http://example.org/a> <http://example.org/b> .\n";
+        match RdfStore::new().load_ntriples(short.as_bytes()) {
+            Err(NTriplesError::Parse { line: 1, content }) => {
+                assert!(content.contains("three terms"), "{content}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Named graphs start with empty indexes, which grow as triples arrive;
+    /// the default graph keeps the capacity of its configuration. Each named
+    /// graph used to preallocate about 1.3 MB.
+    #[test]
+    fn named_graphs_start_without_preallocated_indexes() {
+        let store = RdfStore::new();
+        assert!(
+            store.index_allocation_bytes() > 0,
+            "the default graph keeps its capacity"
+        );
+        for index in 0..300 {
+            store.create_graph(&format!("http://example.org/trips/{index}"));
+            store.graph_or_create(&format!("http://example.org/visits/{index}"));
+        }
+        assert_eq!(store.graph_count(), 600);
+        for name in store.graph_names() {
+            let graph = store.graph(&name).unwrap();
+            assert_eq!(graph.index_allocation_bytes(), 0, "{name}");
+        }
+        let trips = store.graph("http://example.org/trips/3").unwrap();
+        let visit = Triple::new(
+            Term::iri("http://example.org/mia"),
+            Term::iri("http://example.org/visits"),
+            Term::iri("http://example.org/prague"),
+        );
+        trips.insert(visit.clone());
+        assert!(trips.contains(&visit));
+        assert_eq!(trips.triples_with_subject(visit.subject()).len(), 1);
+    }
+
+    /// `term_order` calls two terms equal exactly when they are equal, so the
+    /// order of `for_each_triple` never depends on the hash set's order.
+    #[test]
+    fn term_order_is_equal_exactly_for_equal_terms() {
+        let mut terms = crate::graph::rdf::term::unusual_terms();
+        terms.extend([
+            Term::lang_literal("Praha", "cs"),
+            Term::lang_literal("Praha", "sk"),
+            Term::lang_literal("Praha", "CS"),
+            Term::typed_literal("19", crate::graph::rdf::Literal::XSD_INTEGER),
+            Term::typed_literal("19", crate::graph::rdf::Literal::XSD_DECIMAL),
+            Term::literal("19"),
+            Term::typed_literal("19", crate::graph::rdf::Literal::XSD_STRING),
+            Term::iri("19"),
+            Term::blank("19"),
+        ]);
+        for a in &terms {
+            for b in &terms {
+                let order = term_order(a, b);
+                assert_eq!(order == std::cmp::Ordering::Equal, a == b, "{a} and {b}");
+                assert_eq!(order, term_order(b, a).reverse(), "{a} and {b}");
+            }
+        }
     }
 
     #[test]
@@ -1727,6 +2128,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "tests the deprecated per-transaction buffer until 0.7.0 removes it"
+    )]
     fn test_find_with_pending_filters_deletes() {
         let store = RdfStore::new();
         let triples = sample_triples();
@@ -1779,6 +2184,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "tests the deprecated per-transaction buffer until 0.7.0 removes it"
+    )]
     fn test_find_with_pending_applies_ops_in_order() {
         let store = RdfStore::new();
         let committed = Triple::new(
@@ -1832,6 +2241,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "tests the deprecated per-transaction buffer until 0.7.0 removes it"
+    )]
     fn test_transaction_commit_and_rollback_reach_named_graphs() {
         let store = RdfStore::new();
         let triple = Triple::new(
@@ -1972,6 +2385,166 @@ mod tests {
         assert_eq!(results[0].0.as_deref(), Some("http://example.org/g1"));
     }
 
+    /// Each whole-graph operation changes the graphs it names, and only
+    /// them; `ALL` and `NAMED` reach every named graph, `ALL` the default
+    /// graph too. An operation that finds nothing to change says so.
+    #[test]
+    fn a_graph_operation_changes_the_graphs_it_names() {
+        let knows = |subject: &str| {
+            Triple::new(
+                Term::iri(format!("http://example.org/{subject}")),
+                Term::iri("http://example.org/knows"),
+                Term::iri("http://example.org/gus"),
+            )
+        };
+        let paris = "http://example.org/paris";
+        let berlin = "http://example.org/berlin";
+        let filled = || {
+            let store = RdfStore::new();
+            store.insert_into(None, knows("alix"));
+            store.insert_into(Some(paris), knows("vincent"));
+            store.insert_into(Some(berlin), knows("mia"));
+            store
+        };
+        // (graph, triple count) of the default graph, then of each named graph.
+        let shape = |store: &RdfStore| {
+            let mut named: Vec<(String, usize)> = store
+                .graph_names()
+                .into_iter()
+                .map(|name| {
+                    let len = store.graph(&name).unwrap().len();
+                    (name, len)
+                })
+                .collect();
+            named.sort();
+            (store.len(), named)
+        };
+        let named = |graphs: &[(&str, usize)]| -> Vec<(String, usize)> {
+            graphs
+                .iter()
+                .map(|(name, len)| ((*name).to_string(), *len))
+                .collect()
+        };
+        let target = |name: &str| RdfGraphTarget::Named(name.to_string());
+
+        let cases: Vec<(RdfGraphOp, (usize, Vec<(String, usize)>))> = vec![
+            (
+                RdfGraphOp::Clear {
+                    target: target(paris),
+                },
+                (1, named(&[(berlin, 1), (paris, 0)])),
+            ),
+            (
+                RdfGraphOp::Drop {
+                    target: target(paris),
+                },
+                (1, named(&[(berlin, 1)])),
+            ),
+            (
+                RdfGraphOp::Clear {
+                    target: RdfGraphTarget::Default,
+                },
+                (0, named(&[(berlin, 1), (paris, 1)])),
+            ),
+            (
+                RdfGraphOp::Drop {
+                    target: RdfGraphTarget::AllNamed,
+                },
+                (1, Vec::new()),
+            ),
+            (
+                RdfGraphOp::Clear {
+                    target: RdfGraphTarget::All,
+                },
+                (0, Vec::new()),
+            ),
+            (
+                RdfGraphOp::Copy {
+                    source: Some(paris.to_string()),
+                    target: None,
+                },
+                (1, named(&[(berlin, 1), (paris, 1)])),
+            ),
+            (
+                RdfGraphOp::Move {
+                    source: Some(paris.to_string()),
+                    target: Some(berlin.to_string()),
+                },
+                (1, named(&[(berlin, 1)])),
+            ),
+            (
+                RdfGraphOp::Add {
+                    source: None,
+                    target: Some(berlin.to_string()),
+                },
+                (1, named(&[(berlin, 2), (paris, 1)])),
+            ),
+        ];
+        for (op, expected) in cases {
+            let store = filled();
+            assert!(store.apply_graph_op(&op), "{op:?}");
+            assert_eq!(shape(&store), expected, "{op:?}");
+        }
+
+        let store = filled();
+        assert!(!store.apply_graph_op(&RdfGraphOp::Create {
+            name: paris.to_string()
+        }));
+        assert!(!store.apply_graph_op(&RdfGraphOp::Drop {
+            target: target("http://example.org/prague"),
+        }));
+        assert_eq!(shape(&store), (1, named(&[(berlin, 1), (paris, 1)])));
+    }
+
+    /// A copy, move or add of a graph onto itself keeps the graph as it was:
+    /// a move used to drop it (or clear the default graph).
+    #[test]
+    fn a_graph_onto_itself_is_kept() {
+        let paris = "http://example.org/paris";
+        let store = RdfStore::new();
+        let triple = Triple::new(
+            Term::iri("http://example.org/vincent"),
+            Term::iri("http://example.org/knows"),
+            Term::iri("http://example.org/mia"),
+        );
+        store.insert_into(None, triple.clone());
+        store.insert_into(Some(paris), triple);
+        for graph in [None, Some(paris)] {
+            store.copy_graph(graph, graph);
+            store.move_graph(graph, graph);
+            store.add_graph(graph, graph);
+        }
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.graph(paris).map(|graph| graph.len()), Some(1));
+        let prague = Some("http://example.org/prague");
+        store.move_graph(prague, prague);
+        assert!(store.graph("http://example.org/prague").is_none());
+    }
+
+    /// A triple applied to a named graph that does not exist creates it on
+    /// insert and changes nothing on remove.
+    #[test]
+    fn a_triple_applies_to_its_graph() {
+        let store = RdfStore::new();
+        let triple = Triple::new(
+            Term::iri("http://example.org/jules"),
+            Term::iri("http://example.org/knows"),
+            Term::iri("http://example.org/butch"),
+        );
+        let prague = Some("http://example.org/prague");
+        assert!(!store.remove_from(prague, &triple));
+        assert_eq!(
+            store.graph_names(),
+            Vec::<String>::new(),
+            "a remove creates no graph"
+        );
+        assert!(store.insert_into(prague, triple.clone()));
+        assert!(!store.insert_into(prague, triple.clone()));
+        assert!(store.is_empty(), "the default graph holds nothing");
+        assert!(store.remove_from(prague, &triple));
+        assert!(!store.remove_from(prague, &triple));
+    }
+
     #[test]
     fn test_copy_move_add_graph() {
         let store = RdfStore::new();
@@ -2011,6 +2584,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "tests the deprecated per-transaction buffer until 0.7.0 removes it"
+    )]
     fn test_transaction_commit_and_rollback() {
         let store = RdfStore::new();
         let triples = sample_triples();
@@ -2282,7 +2859,7 @@ mod tests {
         let triple = parse_ntriples_line(
             r#"<http://example.org/alix> <http://xmlns.com/foaf/0.1/name> "Alix" ."#,
         );
-        assert!(triple.is_some());
+        assert!(triple.is_ok());
         let triple = triple.unwrap();
         assert_eq!(triple.subject(), &Term::iri("http://example.org/alix"));
         assert_eq!(
@@ -2295,7 +2872,7 @@ mod tests {
         let triple = parse_ntriples_line(
             r#"<http://example.org/alix> <http://xmlns.com/foaf/0.1/age> "30"^^<http://www.w3.org/2001/XMLSchema#integer> ."#,
         );
-        assert!(triple.is_some());
+        assert!(triple.is_ok());
         let triple = triple.unwrap();
         assert_eq!(
             triple.object(),
@@ -2306,19 +2883,19 @@ mod tests {
         let triple = parse_ntriples_line(
             r#"<http://example.org/alix> <http://xmlns.com/foaf/0.1/name> "Alix"@en ."#,
         );
-        assert!(triple.is_some());
+        assert!(triple.is_ok());
         assert_eq!(triple.unwrap().object(), &Term::lang_literal("Alix", "en"));
 
         // Blank node subject
         let triple = parse_ntriples_line(r#"_:b0 <http://xmlns.com/foaf/0.1/name> "Gus" ."#);
-        assert!(triple.is_some());
+        assert!(triple.is_ok());
         assert_eq!(triple.unwrap().subject(), &Term::blank("b0"));
 
         // IRI object
         let triple = parse_ntriples_line(
             r#"<http://example.org/alix> <http://xmlns.com/foaf/0.1/knows> <http://example.org/gus> ."#,
         );
-        assert!(triple.is_some());
+        assert!(triple.is_ok());
         assert_eq!(
             triple.unwrap().object(),
             &Term::iri("http://example.org/gus")
@@ -2326,7 +2903,7 @@ mod tests {
 
         // Invalid line (no dot)
         assert!(
-            parse_ntriples_line(r#"<http://example.org/s> <http://example.org/p> "v""#,).is_none()
+            parse_ntriples_line(r#"<http://example.org/s> <http://example.org/p> "v""#,).is_err()
         );
     }
 

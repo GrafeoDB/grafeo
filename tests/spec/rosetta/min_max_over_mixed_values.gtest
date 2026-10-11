@@ -1,0 +1,94 @@
+# Rosetta: min() and max() over values of different types
+#
+# min and max order their values as ORDER BY does (openCypher orderability):
+# across types maps, lists, paths, temporal values, strings, booleans, then
+# numbers; numbers by their value with NaN after every other number; lists
+# item by item, a prefix first. Nulls are skipped. So min of [3, 'a', 1] is
+# 'a' and max is 3, whatever the order of the input.
+#
+# These used to depend on the input order: a value never replaced one of
+# another type, so [3, 'a', 1] gave 1 and 3 but ['a', 3, 1] gave 'a' and 'a';
+# lists were not compared, NaN was skipped, and two strings that read as
+# numbers compared as numbers ('9' before '10').
+
+meta:
+  model: lpg
+  section: rosetta
+  title: min and max over values of different types
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: a_string_before_numbers
+    variants:
+      gql: "UNWIND [3, 'a', 1] AS x RETURN min(x) AS lo, max(x) AS hi"
+      cypher: "UNWIND [3, 'a', 1] AS x RETURN min(x) AS lo, max(x) AS hi"
+    expect:
+      rows:
+        - [a, 3]
+
+  - name: the_result_does_not_depend_on_the_input_order
+    variants:
+      gql: "UNWIND ['a', 3, 1] AS x RETURN min(x) AS lo, max(x) AS hi"
+      cypher: "UNWIND ['a', 3, 1] AS x RETURN min(x) AS lo, max(x) AS hi"
+    expect:
+      rows:
+        - [a, 3]
+
+  - name: the_result_does_not_depend_on_the_input_order_through_with
+    variants:
+      gql: "UNWIND ['a', 3, 1] AS x WITH min(x) AS lo, max(x) AS hi RETURN lo, hi"
+      cypher: "UNWIND ['a', 3, 1] AS x WITH min(x) AS lo, max(x) AS hi RETURN lo, hi"
+    expect:
+      rows:
+        - [a, 3]
+
+  - name: per_group_over_mixed_values
+    variants:
+      gql: "UNWIND [['g', 3], ['g', 'a'], ['g', 1], ['h', true], ['h', 19]] AS r WITH r[0] AS g, r[1] AS x RETURN g, min(x) AS lo, max(x) AS hi"
+      cypher: "UNWIND [['g', 3], ['g', 'a'], ['g', 1], ['h', true], ['h', 19]] AS r WITH r[0] AS g, r[1] AS x RETURN g, min(x) AS lo, max(x) AS hi"
+    expect:
+      rows:
+        - [g, a, 3]
+        - [h, true, 19]
+
+  - name: lists_item_by_item_with_a_prefix_first
+    variants:
+      gql: "UNWIND [[1, 2], [1], [0, 88]] AS x RETURN min(x) AS lo, max(x) AS hi"
+      cypher: "UNWIND [[1, 2], [1], [0, 88]] AS x RETURN min(x) AS lo, max(x) AS hi"
+    expect:
+      rows:
+        - ["[0, 88]", "[1, 2]"]
+
+  - name: nan_after_every_other_number
+    variants:
+      gql: "UNWIND [3, 0.0 / 0.0, 19] AS x RETURN min(x) AS lo, max(x) AS hi"
+      cypher: "UNWIND [3, 0.0 / 0.0, 19] AS x RETURN min(x) AS lo, max(x) AS hi"
+    expect:
+      rows:
+        - [3, NaN]
+
+  - name: integers_and_floats_by_their_value
+    variants:
+      gql: "UNWIND [2.5, 19, 3] AS x RETURN min(x) AS lo, max(x) AS hi"
+      cypher: "UNWIND [2.5, 19, 3] AS x RETURN min(x) AS lo, max(x) AS hi"
+    expect:
+      rows:
+        - [2.5, 19]
+
+  - name: strings_that_read_as_numbers_compare_as_strings
+    variants:
+      gql: "UNWIND ['19', '3', '88'] AS x RETURN min(x) AS lo, max(x) AS hi"
+      cypher: "UNWIND ['19', '3', '88'] AS x RETURN min(x) AS lo, max(x) AS hi"
+    expect:
+      rows:
+        - ["19", "88"]
+
+  - name: nulls_are_skipped
+    variants:
+      gql: "UNWIND [null, 3, null, 'a'] AS x RETURN min(x) AS lo, max(x) AS hi"
+      cypher: "UNWIND [null, 3, null, 'a'] AS x RETURN min(x) AS lo, max(x) AS hi"
+    expect:
+      rows:
+        - [a, 3]

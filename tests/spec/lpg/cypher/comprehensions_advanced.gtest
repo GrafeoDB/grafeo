@@ -271,8 +271,9 @@ tests:
     expect:
       count: 1
 
+  # FOREACH used to repeat its row once per item, so the RETURN had a row per
+  # leaf.
   - name: foreach_create_relationships
-    skip: "FOREACH with pattern comprehension"
     setup:
       - "CREATE (:Hub {name: 'center'})"
       - "CREATE (:Leaf {name: 'L1'})"

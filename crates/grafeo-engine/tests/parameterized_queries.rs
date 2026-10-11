@@ -341,17 +341,31 @@ fn list_and_map_parameters_are_returned_as_given() {
     }
 }
 
-/// Dotted access on a node that a function returns is an error that says
-/// what to do, never a silent null.
+/// Dotted access on a node that a function returns reads the node's
+/// property; on a value that is neither a map, a node nor an edge it is an
+/// error that says what to do, never a silent null.
 #[test]
-fn dotted_access_on_a_node_expression_explains_itself() {
+fn dotted_access_on_a_node_expression_reads_the_node() {
     let db = GrafeoDB::new_in_memory();
     db.execute("INSERT (:City {name: 'Amsterdam'})-[:ROAD]->(:City {name: 'Berlin'})")
         .unwrap();
+    let result = db
+        .execute("MATCH (:City)-[r:ROAD]->(:City) RETURN startNode(r).name, endNode(r).name")
+        .unwrap();
+    assert_eq!(
+        result.rows(),
+        [vec![Value::from("Amsterdam"), Value::from("Berlin")]]
+    );
     let err = db
-        .execute("MATCH (:City)-[r:ROAD]->(:City) RETURN startNode(r).name")
+        .execute("MATCH (c:City) RETURN toUpper(c.name).name")
         .unwrap_err()
         .to_string();
-    assert!(err.contains("startNode(r) is not a map value"), "{err}");
-    assert!(err.contains("bound to a variable in the pattern"), "{err}");
+    assert!(
+        err.contains("is not a map value, a node or an edge"),
+        "{err}"
+    );
+    assert!(
+        err.contains("read .name of a node, an edge or a map value"),
+        "{err}"
+    );
 }

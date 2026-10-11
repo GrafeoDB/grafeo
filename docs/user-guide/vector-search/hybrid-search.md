@@ -124,6 +124,20 @@ results = db.hybrid_search(
 )
 ```
 
+## Filters
+
+`filters` restricts both sources to the nodes whose properties match, with the same filters as `vector_search()`: equality on a value and the `$`-operators (`$gt`, `$gte`, `$lt`, `$lte`, `$ne`, `$in`, `$nin`, `$contains`). Both the text and the vector search apply them before fusion, so the search still returns up to `k` matching nodes, where filtering the fused results afterwards would return fewer. BM25 scores keep the statistics of the whole index, so a filter narrows the results without changing how a node scores.
+
+```python
+# Per-tenant retrieval: only documents of tenant 19 written after 2024
+results = db.hybrid_search(
+    "Doc", "content", "embedding",
+    "graph databases", k=10,
+    query_vector=query_vec,
+    filters={"tenant": 19, "year": {"$gt": 2024}},
+)
+```
+
 ## Graceful Degradation
 
 If either index is missing, `hybrid_search()` silently omits that source from fusion rather than raising an error:

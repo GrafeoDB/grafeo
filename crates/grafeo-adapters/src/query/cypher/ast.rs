@@ -278,9 +278,10 @@ pub struct WhereClause {
 pub struct WithClause {
     /// Whether DISTINCT is specified.
     pub distinct: bool,
-    /// Projection items (empty when `is_wildcard` is true).
+    /// Projection items: the ones after `*, ` when `is_wildcard` is true
+    /// (`WITH *, a.name AS name`), often none.
     pub items: Vec<ProjectionItem>,
-    /// Whether this is `WITH *` (pass all variables through).
+    /// Whether this is `WITH *` (pass all variables through, then `items`).
     pub is_wildcard: bool,
     /// Optional WHERE filter.
     pub where_clause: Option<Box<WhereClause>>,
@@ -304,6 +305,8 @@ pub struct ReturnClause {
 pub enum ReturnItems {
     /// RETURN *
     All,
+    /// `RETURN *, items`: every variable in scope, then these items.
+    AllAnd(Vec<ProjectionItem>),
     /// Explicit list of items.
     Explicit(Vec<ProjectionItem>),
 }

@@ -244,3 +244,38 @@ tests:
     expect:
       rows:
         - [Alix, 0]
+
+  # ---------------------------------------------------------------------------
+  # An edge points the way its arrow does: MERGE (a)<-[:T]-(b) matches and
+  # creates an edge from b to a (it used to match and create one from a to b).
+  # Without a direction, an edge either way round matches, and one is created
+  # from left to right.
+  # ---------------------------------------------------------------------------
+
+  - name: merge_left_arrow_creates_from_the_right_node
+    statements:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)<-[:KNOWS]-(b)"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)<-[:KNOWS]-(b)"
+      - "MATCH (s)-[:KNOWS]->(t) RETURN s.name, t.name"
+    expect:
+      rows:
+        - [Gus, Alix]
+
+  - name: merge_undirected_matches_either_direction
+    statements:
+      - "INSERT (:Person {name: 'Alix'})<-[:KNOWS {w: 3}]-(:Person {name: 'Gus'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[r:KNOWS]-(b) ON MATCH SET r.w = 88"
+      - "MATCH (s)-[r:KNOWS]->(t) RETURN s.name, t.name, r.w"
+    expect:
+      rows:
+        - [Gus, Alix, 88]
+
+  # ON CREATE and ON MATCH write the element the MERGE binds: an assignment to
+  # another variable is an error (it used to be written to the merged edge).
+  - name: merge_on_create_set_on_another_variable_is_an_error
+    statements:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[r:KNOWS]->(b) ON CREATE SET a.since = 3"
+    expect:
+      error: "MERGE"

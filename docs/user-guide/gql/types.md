@@ -8,7 +8,7 @@ tags:
 
 # Type System
 
-GQL supports a rich type system with scalar, temporal, collection and graph element types.
+GQL supports a rich type system with scalar, temporal, collection and graph element types. The types a node or edge type declares for its properties are listed under [Property Types](schema.md#property-types).
 
 ## Scalar Types
 

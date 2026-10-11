@@ -1,0 +1,70 @@
+# Rosetta: PROFILE of a query that starts without MATCH
+#
+# A query that starts with RETURN, a first WITH, UNWIND or FOR, OPTIONAL
+# MATCH, CALL or MERGE starts from one empty row. PROFILE runs it and returns
+# its plan with the row counts, one row in a column named profile. It used to
+# crash on RETURN, WITH, OPTIONAL MATCH, CALL and MERGE.
+#
+# GQL starts a query with FOR, not WITH.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: PROFILE without MATCH
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: profile_of_a_standalone_return
+    variants:
+      gql: "PROFILE RETURN 1 AS x"
+      cypher: "PROFILE RETURN 1 AS x"
+    expect:
+      columns: [profile]
+      count: 1
+
+  - name: profile_of_a_first_optional_match
+    setup:
+      - "INSERT (:A {name: 'Alix'})"
+    variants:
+      gql: "PROFILE OPTIONAL MATCH (a:A) RETURN a.name"
+      cypher: "PROFILE OPTIONAL MATCH (a:A) RETURN a.name"
+    expect:
+      columns: [profile]
+      count: 1
+
+  - name: profile_of_a_first_with_before_a_match
+    setup:
+      - "INSERT (:B {name: 'Gus'})"
+    variants:
+      cypher: "PROFILE WITH 1 AS x MATCH (b:B) RETURN x, b.name"
+    expect:
+      columns: [profile]
+      count: 1
+
+  - name: profile_of_a_first_call
+    variants:
+      gql: "PROFILE CALL { RETURN 1 AS x } RETURN x"
+      cypher: "PROFILE CALL { RETURN 1 AS x } RETURN x"
+    expect:
+      columns: [profile]
+      count: 1
+
+  - name: profile_of_a_first_unwind
+    variants:
+      gql: "PROFILE FOR x IN [3, 19, 88] RETURN x"
+      cypher: "PROFILE UNWIND [3, 19, 88] AS x RETURN x"
+    expect:
+      columns: [profile]
+      count: 1
+
+  - name: profile_of_a_first_merge
+    setup:
+      - "INSERT (:A {name: 'Alix'})"
+    variants:
+      gql: "PROFILE MERGE (m:A {name: 'Alix'}) RETURN m.name"
+      cypher: "PROFILE MERGE (m:A {name: 'Alix'}) RETURN m.name"
+    expect:
+      columns: [profile]
+      count: 1

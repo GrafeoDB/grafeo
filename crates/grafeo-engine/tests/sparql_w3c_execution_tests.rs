@@ -10,6 +10,7 @@
 
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 mod tests {
+    use grafeo_common::types::Value;
     use grafeo_engine::GrafeoDB;
 
     fn rdf_db() -> GrafeoDB {
@@ -603,7 +604,10 @@ mod tests {
                 }"#,
             )
             .unwrap();
-        assert_eq!(r.row_count(), 1, "ASK true returns 1 row");
+        // One row with one Boolean, in the column the SPARQL 1.1 Query
+        // Results JSON Format names an ASK result (section 4.2).
+        assert_eq!(r.columns, ["boolean"]);
+        assert_eq!(r.rows(), [[Value::Bool(true)]]);
     }
 
     #[test]
@@ -618,9 +622,8 @@ mod tests {
                 }"#,
             )
             .unwrap();
-        // ASK false: returns 1 row with boolean false, or 0 rows
-        // (implementation-dependent, but the result should indicate false)
-        assert!(r.row_count() <= 1, "ASK false returns 0 or 1 row");
+        assert_eq!(r.columns, ["boolean"]);
+        assert_eq!(r.rows(), [[Value::Bool(false)]]);
     }
 
     #[test]

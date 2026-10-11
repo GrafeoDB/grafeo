@@ -64,6 +64,18 @@ for (const [nodeId, score] of results) {
 
 `text_search()` returns a list of `(node_id, score)` tuples sorted by **descending** relevance (higher score = more relevant). BM25 scores are unbounded positive floats whose magnitude depends on corpus statistics, so compare them only within a single query's results.
 
+### Filters
+
+`filters` restricts the search to the nodes whose properties match, with the same filters as `vector_search()`: equality on a value and the `$`-operators (`$gt`, `$gte`, `$lt`, `$lte`, `$ne`, `$in`, `$nin`, `$contains`). The search returns up to `k` matching nodes, scored as without the filters (the BM25 statistics count the whole index):
+
+```python
+results = db.text_search("Article", "title", "graph", k=10, filters={"tenant": 19})
+```
+
+```typescript
+const results = await db.textSearch("Article", "title", "graph", 10, { tenant: 19 });
+```
+
 ## In-Query Text Scoring (0.5.40+)
 
 BM25 is also callable from GQL/Cypher as `text_score()` and `text_match()`,
@@ -125,6 +137,38 @@ You only need `rebuild_text_index()` in rare cases:
 db.rebuild_text_index("Article", "title")
 ```
 
-## BM25 Configuration
+## BM25 Parameters, Tokenizers and Stop Words
 
-Text indexes use the default BM25 configuration (k1=1.2, b=0.75) with Unicode-aware tokenization and English stop word removal. Custom BM25 parameters are not currently configurable through the API.
+A text index takes options when it is created; the database keeps them with the index, so reopening the database, recovering after a crash and `rebuild_text_index()` use them again.
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `k1` | `1.2` | Term frequency saturation, at least 0: higher values give repeated terms more weight, 0 ignores how often a term occurs |
+| `b` | `0.75` | Length normalization, from 0 (none) to 1 (full): how much longer documents are penalized |
+| `tokenizer` | `"simple"` | How text is split into terms (below) |
+| `stop_words` | the tokenizer's own | Terms left out of documents and queries; an empty list leaves none out |
+
+Every tokenizer splits on the characters that are not Unicode letters or digits and lowercases the terms; queries are split the same way.
+
+| Tokenizer | Terms | For |
+|-----------|-------|-----|
+| `simple` | Words of at least 2 bytes, without about 70 common English words | English text (the default) |
+| `standard` | Every word, without stop words | Languages that separate words with spaces or punctuation: Russian, Greek, Arabic, ... |
+| `cjk_bigram` | As `standard`, and every run of Chinese, Japanese or Korean characters as its overlapping pairs of characters (`柏林市` gives `柏林` and `林市`) | Text without spaces between words |
+
+```python
+db.create_text_index("Note", "body", tokenizer="cjk_bigram", k1=1.5, b=0.3)
+db.create_text_index("Article", "body", tokenizer="standard", stop_words=["и", "в", "на"])
+```
+
+```typescript
+await db.createTextIndex("Note", "body", { tokenizer: "cjk_bigram", k1: 1.5, b: 0.3 });
+await db.createTextIndex("Article", "body", { tokenizer: "standard", stopWords: ["и", "в", "на"] });
+```
+
+```gql
+CREATE INDEX notes FOR (n:Note) ON (n.body)
+  USING TEXT {k1: 1.5, b: 0.3, tokenizer: 'cjk_bigram', stop_words: ['住在']}
+```
+
+In Rust, `GrafeoDB::create_text_index_with` takes a `TextIndexOptions`, and `text_index_options` reads them back. A `k1` or `b` out of range and an unknown tokenizer fail with `GRAFEO-V001`.

@@ -28,7 +28,9 @@ tests:
     query: |
       ASK { <http://ex.org/alix> <http://ex.org/name> "Alix" }
     expect:
-      count: 1
+      columns: [boolean]
+      rows:
+        - [true]
 
   - name: ask_returns_false_when_no_match
     setup:
@@ -39,7 +41,9 @@ tests:
     query: |
       ASK { <http://ex.org/alix> <http://ex.org/name> "Vincent" }
     expect:
-      count: 0
+      columns: [boolean]
+      rows:
+        - [false]
 
   - name: ask_with_filter
     setup:
@@ -54,7 +58,9 @@ tests:
         FILTER (?age > "25")
       }
     expect:
-      count: 1
+      columns: [boolean]
+      rows:
+        - [true]
 
   - name: ask_with_optional_always_true_when_base_matches
     setup:
@@ -68,7 +74,9 @@ tests:
         OPTIONAL { <http://ex.org/vincent> <http://ex.org/city> ?city }
       }
     expect:
-      count: 1
+      columns: [boolean]
+      rows:
+        - [true]
 
   # ---------------------------------------------------------------------------
   # CONSTRUCT (Section 16.2)

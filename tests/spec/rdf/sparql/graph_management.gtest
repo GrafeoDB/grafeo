@@ -335,6 +335,84 @@ tests:
         - [http://ex.org/mia, dancing]
 
   # ---------------------------------------------------------------------------
+  # Onto the same graph, and the NAMED target (SPARQL 1.1 Update 3.2.3, 3.2.4,
+  # 3.1.5, 3.2.2)
+  # ---------------------------------------------------------------------------
+
+  - name: move_graph_onto_itself_keeps_it
+    # A MOVE of a graph onto itself does nothing; it used to drop the graph.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/graph/paris> {
+            <http://ex.org/mia> <http://ex.org/name> "Mia" .
+          }
+        }
+      - "MOVE <http://ex.org/graph/paris> TO <http://ex.org/graph/paris>"
+    query: |
+      SELECT ?name WHERE {
+        GRAPH <http://ex.org/graph/paris> { ?s <http://ex.org/name> ?name }
+      }
+    expect:
+      rows:
+        - [Mia]
+
+  - name: move_default_onto_itself_keeps_it
+    # MOVE DEFAULT TO DEFAULT does nothing; it used to clear the default graph.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+      - "MOVE DEFAULT TO DEFAULT"
+    query: "SELECT ?name WHERE { ?s <http://ex.org/name> ?name }"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: clear_named_keeps_the_default_graph
+    # CLEAR NAMED empties every named graph and leaves the default graph.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          GRAPH <http://ex.org/graph/berlin> {
+            <http://ex.org/jules> <http://ex.org/name> "Jules" .
+          }
+        }
+      - "CLEAR NAMED"
+    query: |
+      SELECT ?name WHERE {
+        { ?s <http://ex.org/name> ?name }
+        UNION
+        { GRAPH ?g { ?s <http://ex.org/name> ?name } }
+      }
+    expect:
+      rows:
+        - [Alix]
+
+  - name: drop_named_keeps_the_default_graph
+    # DROP NAMED removes every named graph and leaves the default graph.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          GRAPH <http://ex.org/graph/berlin> {
+            <http://ex.org/jules> <http://ex.org/name> "Jules" .
+          }
+        }
+      - "DROP NAMED"
+    query: |
+      SELECT ?name WHERE {
+        { ?s <http://ex.org/name> ?name }
+        UNION
+        { GRAPH ?g { ?s <http://ex.org/name> ?name } }
+      }
+    expect:
+      rows:
+        - [Alix]
+
+  # ---------------------------------------------------------------------------
   # LOAD
   # ---------------------------------------------------------------------------
 

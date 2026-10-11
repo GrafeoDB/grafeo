@@ -4,11 +4,27 @@
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
+use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result, SourceSpan};
 
-/// Maximum nesting depth for recursive parsing constructs (parenthesized
-/// expressions, CASE, EXISTS subqueries, list literals, function calls).
-const MAX_NESTING_DEPTH: u32 = 128;
+/// A graph type body: the names of its node types and of its edge types, the
+/// element types it declares, and whether it is open.
+type GraphTypeBody = (Vec<String>, Vec<String>, Vec<InlineElementType>, bool);
+
+/// The names of the node types and of the edge types among `elements`, in
+/// order.
+fn element_type_names(elements: &[InlineElementType]) -> (Vec<String>, Vec<String>) {
+    let mut node_types = Vec::new();
+    let mut edge_types = Vec::new();
+    for element in elements {
+        match element {
+            InlineElementType::Node { name, .. } => node_types.push(name.clone()),
+            InlineElementType::Edge { name, .. } => edge_types.push(name.clone()),
+        }
+    }
+    (node_types, edge_types)
+}
 
 /// GQL Parser.
 pub struct Parser<'a> {
@@ -17,8 +33,9 @@ pub struct Parser<'a> {
     peeked: Option<Token>,
     peeked_second: Option<Token>,
     source: &'a str,
-    /// Current nesting depth for recursive parsing constructs.
-    nesting_depth: u32,
+    /// How deep the statement parsed so far nests (see
+    /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)).
+    nesting: Nesting,
 }
 
 impl<'a> Parser<'a> {
@@ -32,24 +49,54 @@ impl<'a> Parser<'a> {
             peeked: None,
             peeked_second: None,
             source: input,
-            nesting_depth: 0,
+            nesting: Nesting::default(),
         }
     }
 
-    /// Increments the nesting depth and returns an error if the limit is exceeded.
+    /// Enters one level of nesting, or fails past the nesting limit.
     fn enter_nesting(&mut self) -> Result<()> {
-        self.nesting_depth += 1;
-        if self.nesting_depth > MAX_NESTING_DEPTH {
-            return Err(self.error(&format!(
-                "Maximum nesting depth of {MAX_NESTING_DEPTH} exceeded"
-            )));
+        if self.nesting.enter() {
+            Ok(())
+        } else {
+            Err(self.error(&nesting_error_message()))
         }
-        Ok(())
     }
 
-    /// Decrements the nesting depth.
+    /// Leaves the level [`Self::enter_nesting`] entered.
     fn exit_nesting(&mut self) {
-        self.nesting_depth = self.nesting_depth.saturating_sub(1);
+        self.nesting.exit();
+    }
+
+    /// Enters a subquery, which nests two levels: translating and planning
+    /// one takes more stack than an expression in parentheses.
+    fn enter_subquery(&mut self) -> Result<()> {
+        self.enter_nesting()?;
+        self.enter_nesting()
+    }
+
+    /// Leaves the levels [`Self::enter_subquery`] entered.
+    fn exit_subquery(&mut self) {
+        self.exit_nesting();
+        self.exit_nesting();
+    }
+
+    /// Begins a chain of binary operators (see [`Nesting::begin_chain`]).
+    fn begin_chain(&mut self) -> Chain {
+        self.nesting.begin_chain()
+    }
+
+    /// Counts one operator of a chain, or fails past the nesting limit.
+    fn link_chain(&mut self) -> Result<()> {
+        if self.nesting.link() {
+            Ok(())
+        } else {
+            Err(self.error(&nesting_error_message()))
+        }
+    }
+
+    /// Ends a chain of binary operators.
+    fn end_chain(&mut self, chain: Chain) {
+        self.nesting.end_chain(chain);
     }
 
     /// Checks if the current token can be used as a label, type name, or property name.
@@ -286,12 +333,15 @@ impl<'a> Parser<'a> {
             return Ok(Statement::Profile(Box::new(inner)));
         }
 
+        // NEXT and the set operators chain statements: each nests one level.
+        let chain = self.begin_chain();
         let mut left = self.parse_single_statement()?;
 
         // Handle NEXT (linear composition): output of left becomes input of right
         while self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("NEXT") {
             self.advance(); // consume NEXT
             let right = self.parse_single_statement()?;
+            self.link_chain()?;
             // NEXT semantics: chain right after left (like WITH pipe).
             // Represent as CompositeQuery with a dedicated op.
             left = Statement::CompositeQuery {
@@ -301,15 +351,41 @@ impl<'a> Parser<'a> {
             };
         }
 
-        // Check for composite query operators (UNION, EXCEPT, INTERSECT, OTHERWISE)
-        while let Some(op) = self.parse_composite_op() {
-            let right = self.parse_single_statement()?;
-            left = Statement::CompositeQuery {
-                left: Box::new(left),
-                op,
-                right: Box::new(right),
-            };
+        // Check for composite query operators (UNION, EXCEPT, INTERSECT,
+        // OTHERWISE). A run of one associative operator is a balanced tree:
+        // a UNION of any number of queries stays shallow.
+        let mut pending = self.parse_composite_op();
+        while let Some(op) = pending {
+            if !is_associative(op) {
+                let right = self.parse_single_statement()?;
+                self.link_chain()?;
+                left = Statement::CompositeQuery {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                };
+                pending = self.parse_composite_op();
+                continue;
+            }
+            let mut operands = vec![(left, self.nesting.take_operand())];
+            loop {
+                let right = self.parse_single_statement()?;
+                operands.push((right, self.nesting.take_operand()));
+                pending = self.parse_composite_op();
+                if pending != Some(op) {
+                    break;
+                }
+            }
+            left = self
+                .nesting
+                .join_balanced(operands, |left, right| Statement::CompositeQuery {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                })
+                .ok_or_else(|| self.error(&nesting_error_message()))?;
         }
+        self.end_chain(chain);
 
         Ok(left)
     }
@@ -342,11 +418,19 @@ impl<'a> Parser<'a> {
 
     fn parse_single_statement(&mut self) -> Result<Statement> {
         match self.current.kind {
+            // A linear statement may start with any simple query statement:
+            // a FILTER or an order by and page statement too (LET below).
             TokenKind::Match
             | TokenKind::Optional
             | TokenKind::Unwind
             | TokenKind::Merge
             | TokenKind::For
+            | TokenKind::Filter
+            | TokenKind::Order
+            | TokenKind::Offset
+            | TokenKind::Skip
+            | TokenKind::Limit
+            | TokenKind::Fetch
             | TokenKind::Return => self.parse_query().map(Statement::Query),
             // A statement starting with INSERT is parsed as a query so that it
             // can continue with more INSERT clauses or a RETURN (#380).
@@ -442,20 +526,20 @@ impl<'a> Parser<'a> {
                             self.parse_show().map(Statement::Schema)
                         }
                     }
-                    "LOAD" => self.parse_query().map(Statement::Query),
+                    "LOAD" | "LET" => self.parse_query().map(Statement::Query),
                     "SELECT" => {
                         self.advance(); // consume SELECT
                         self.parse_select_from_statement()
                     }
                     _ => Err(self.error(
-                        "Expected MATCH, INSERT, DELETE, MERGE, UNWIND, FOR, CREATE, CALL, \
-                         DROP, ALTER, SHOW, LOAD, USE, SESSION, START, COMMIT, ROLLBACK, \
+                        "Expected MATCH, LET, FILTER, INSERT, DELETE, MERGE, UNWIND, FOR, CREATE, \
+                         CALL, DROP, ALTER, SHOW, LOAD, USE, SESSION, START, COMMIT, ROLLBACK, \
                          SELECT, or SAVEPOINT",
                     )),
                 }
             }
             _ => Err(self.error(
-                "Expected MATCH, INSERT, DELETE, MERGE, UNWIND, FOR, CREATE, CALL, \
+                "Expected MATCH, LET, FILTER, INSERT, DELETE, MERGE, UNWIND, FOR, CREATE, CALL, \
                  DROP, SHOW, LOAD, USE, SESSION, START, COMMIT, or ROLLBACK",
             )),
         }
@@ -563,11 +647,13 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::LBrace)?;
 
         // Parse the inner query body (MATCH ... RETURN ...)
+        self.enter_subquery()?;
         let subquery = self.parse_query()?;
         let mut combined = Vec::new();
         while let Some(op) = self.parse_composite_op() {
             combined.push((op, self.parse_query()?));
         }
+        self.exit_subquery();
 
         self.expect(TokenKind::RBrace)?;
         Ok(QueryClause::InlineCall {
@@ -614,9 +700,68 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Checks that a WHERE (`is_where`) or FILTER may follow `previous`, the
+    /// clause before it. Both filter the rows so far, so a second WHERE is an
+    /// AND of the first. Right after INSERT, CREATE, MERGE or DELETE either
+    /// would filter the rows after the write, while it used to filter the
+    /// rows before it (and so limit what the write touched): an error rather
+    /// than a silent change, until a WITH or another clause between makes
+    /// the order plain. Right after SET or REMOVE (never accepted before) a
+    /// FILTER filters the rows after the write, as ISO GQL's filter statement
+    /// does; WHERE belongs to a MATCH, so it does not stand there.
+    fn check_filter_follows(
+        is_where: bool,
+        previous: Option<&QueryClause>,
+    ) -> std::result::Result<(), &'static str> {
+        match previous {
+            Some(QueryClause::Filter(_)) if is_where => Err(
+                "a WHERE cannot follow another WHERE or FILTER: combine the conditions with AND",
+            ),
+            Some(QueryClause::Create(_) | QueryClause::Delete(_) | QueryClause::Merge(_)) => Err(
+                "a WHERE or FILTER cannot follow INSERT, CREATE, MERGE or DELETE: it used to \
+                 filter the rows before the write; put the condition before the write, or \
+                 after a WITH (`WITH ... WHERE ...`) to filter the rows after it",
+            ),
+            Some(QueryClause::Set(_) | QueryClause::Remove(_)) if is_where => Err(
+                "a WHERE cannot follow SET or REMOVE: put the condition before the write, \
+                 or use FILTER to filter the rows after it",
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether `clause` is an inline procedure call whose body modifies data
+    /// (ISO GQL's call data-modifying procedure statement), which a statement
+    /// may end with, as with any other data-modifying statement.
+    fn calls_a_data_modifying_procedure(clause: &QueryClause) -> bool {
+        match clause {
+            QueryClause::InlineCall {
+                subquery, combined, ..
+            } => {
+                Self::modifies_data(subquery)
+                    || combined.iter().any(|(_, part)| Self::modifies_data(part))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `query` modifies data: it has a data-modifying clause, or an
+    /// inline procedure call whose body does.
+    fn modifies_data(query: &QueryStatement) -> bool {
+        !query.set_clauses.is_empty()
+            || !query.remove_clauses.is_empty()
+            || !query.merge_clauses.is_empty()
+            || !query.create_clauses.is_empty()
+            || !query.delete_clauses.is_empty()
+            || query
+                .ordered_clauses
+                .iter()
+                .any(Self::calls_a_data_modifying_procedure)
+    }
+
     /// A query made of a single INSERT (or `CREATE (...)`) clause and nothing
-    /// else is kept as a standalone INSERT statement, whose result returns the
-    /// created entity as before; anything longer stays a query.
+    /// else is kept as a standalone INSERT statement; anything longer stays a
+    /// query. Neither has a result without a RETURN.
     fn lone_insert_as_statement(mut query: QueryStatement) -> Statement {
         let lone_insert = matches!(query.ordered_clauses.as_slice(), [QueryClause::Create(_)])
             && query.where_clause.is_none()
@@ -636,6 +781,18 @@ impl<'a> Parser<'a> {
         Statement::Query(query)
     }
 
+    /// Parses a linear query or data-modifying statement: its clauses in
+    /// source order, then its result statement.
+    ///
+    /// ISO/IEC 39075:2024 composes a `<simple linear query statement>` of
+    /// `<simple query statement>`s (MATCH, LET, FOR, FILTER, an `<order by and
+    /// page statement>`, CALL) in any order, and a `<linear data-modifying
+    /// statement>` of those and `<simple data-modifying statement>`s (INSERT,
+    /// SET, REMOVE, DELETE, a CALL that modifies data), also in any order.
+    /// Grafeo adds WITH, UNWIND, MERGE, CREATE and LOAD DATA, and a WHERE
+    /// between clauses (a filter of the rows so far). Each clause reads the
+    /// rows the ones before it leave; the result statement (RETURN, FINISH or
+    /// SELECT) may be left out when the statement modifies data.
     fn parse_query(&mut self) -> Result<QueryStatement> {
         let span_start = self.current.span.start;
 
@@ -644,11 +801,11 @@ impl<'a> Parser<'a> {
         let mut merge_clauses = Vec::new();
         let mut create_clauses = Vec::new();
         let mut delete_clauses = Vec::new();
+        let mut set_clauses = Vec::new();
+        let mut remove_clauses = Vec::new();
+        let mut with_clauses = Vec::new();
         let mut ordered_clauses = Vec::new();
 
-        // Parse clauses in source order, preserving sequence for variable scoping.
-        // MATCH, OPTIONAL MATCH, UNWIND, FOR, MERGE, CREATE/INSERT, DELETE can appear
-        // in any order before RETURN.
         loop {
             match self.current.kind {
                 TokenKind::Match => {
@@ -727,93 +884,45 @@ impl<'a> Parser<'a> {
                     let clause = self.parse_load_data_clause()?;
                     ordered_clauses.push(QueryClause::LoadData(clause));
                 }
+                // A FILTER statement, or a WHERE after a clause: a WHERE right
+                // after a MATCH is that MATCH's graph pattern WHERE clause.
+                TokenKind::Where | TokenKind::Filter => {
+                    let is_where = self.current.kind == TokenKind::Where;
+                    Self::check_filter_follows(is_where, ordered_clauses.last())
+                        .map_err(|message| self.error(message))?;
+                    let clause = self.parse_where_or_filter_clause()?;
+                    ordered_clauses.push(QueryClause::Filter(clause));
+                }
+                TokenKind::Set => {
+                    let clause = self.parse_set_clause()?;
+                    ordered_clauses.push(QueryClause::Set(clause.clone()));
+                    set_clauses.push(clause);
+                }
+                TokenKind::Remove => {
+                    let clause = self.parse_remove_clause()?;
+                    ordered_clauses.push(QueryClause::Remove(clause.clone()));
+                    remove_clauses.push(clause);
+                }
+                TokenKind::With => {
+                    let mut clause = self.parse_with_clause()?;
+                    // LET bindings right after a WITH belong to it.
+                    if self.is_identifier()
+                        && self.get_identifier_name().eq_ignore_ascii_case("LET")
+                    {
+                        clause.let_bindings = self.parse_let_clause()?;
+                    }
+                    ordered_clauses.push(QueryClause::With(clause.clone()));
+                    with_clauses.push(clause);
+                }
+                TokenKind::Order
+                | TokenKind::Offset
+                | TokenKind::Skip
+                | TokenKind::Limit
+                | TokenKind::Fetch => {
+                    let page = self.parse_order_by_and_page()?;
+                    ordered_clauses.push(QueryClause::OrderByAndPage(page));
+                }
                 _ => break,
-            }
-        }
-
-        // Parse WHERE or FILTER clause (after all MATCH clauses)
-        let where_clause = if matches!(self.current.kind, TokenKind::Where | TokenKind::Filter) {
-            Some(self.parse_where_or_filter_clause()?)
-        } else {
-            None
-        };
-
-        // After WHERE, allow CREATE/INSERT/DELETE/DETACH clauses
-        loop {
-            match self.current.kind {
-                TokenKind::Create => {
-                    let clause = self.parse_create_clause_in_query()?;
-                    ordered_clauses.push(QueryClause::Create(clause.clone()));
-                    create_clauses.push(clause);
-                }
-                TokenKind::Insert => {
-                    let clause = self.parse_insert()?;
-                    ordered_clauses.push(QueryClause::Create(clause.clone()));
-                    create_clauses.push(clause);
-                }
-                TokenKind::Delete | TokenKind::Detach | TokenKind::Nodetach => {
-                    let clause = self.parse_delete_clause_in_query()?;
-                    ordered_clauses.push(QueryClause::Delete(clause.clone()));
-                    delete_clauses.push(clause);
-                }
-                _ => break,
-            }
-        }
-
-        // Parse SET clauses
-        let mut set_clauses = Vec::new();
-        while self.current.kind == TokenKind::Set {
-            let clause = self.parse_set_clause()?;
-            ordered_clauses.push(QueryClause::Set(clause.clone()));
-            set_clauses.push(clause);
-        }
-
-        // Parse REMOVE clauses
-        let mut remove_clauses = Vec::new();
-        while self.current.kind == TokenKind::Remove {
-            let clause = self.parse_remove_clause()?;
-            ordered_clauses.push(QueryClause::Remove(clause.clone()));
-            remove_clauses.push(clause);
-        }
-
-        // Parse WITH clauses
-        let mut with_clauses = Vec::new();
-        while self.current.kind == TokenKind::With {
-            let mut wc = self.parse_with_clause()?;
-
-            // Attach LET bindings that immediately follow the WITH clause
-            if self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("LET") {
-                wc.let_bindings = self.parse_let_clause()?;
-            }
-
-            ordered_clauses.push(QueryClause::With(wc.clone()));
-            with_clauses.push(wc);
-
-            // After WITH (+ optional LET), we can have more clauses
-            loop {
-                match self.current.kind {
-                    TokenKind::Match | TokenKind::Optional => {
-                        let clause = self.parse_match_clause()?;
-                        ordered_clauses.push(QueryClause::Match(clause.clone()));
-                        match_clauses.push(clause);
-                    }
-                    TokenKind::Unwind => {
-                        let clause = self.parse_unwind_clause()?;
-                        ordered_clauses.push(QueryClause::Unwind(clause.clone()));
-                        unwind_clauses.push(clause);
-                    }
-                    TokenKind::For => {
-                        let clause = self.parse_for_clause()?;
-                        ordered_clauses.push(QueryClause::For(clause.clone()));
-                        unwind_clauses.push(clause);
-                    }
-                    TokenKind::Merge => {
-                        let clause = self.parse_merge_clause()?;
-                        ordered_clauses.push(QueryClause::Merge(clause.clone()));
-                        merge_clauses.push(clause);
-                    }
-                    _ => break,
-                }
             }
         }
 
@@ -845,8 +954,12 @@ impl<'a> Parser<'a> {
             || !merge_clauses.is_empty()
             || !create_clauses.is_empty()
             || !delete_clauses.is_empty()
+            || ordered_clauses
+                .iter()
+                .any(Self::calls_a_data_modifying_procedure)
         {
-            // For mutation-only queries, return empty clause
+            // A statement that modifies data needs no result statement (ISO
+            // GQL's linear data-modifying statement): it has no result
             ReturnClause {
                 distinct: false,
                 items: Vec::new(),
@@ -871,7 +984,7 @@ impl<'a> Parser<'a> {
 
         Ok(QueryStatement {
             match_clauses,
-            where_clause,
+            where_clause: None,
             set_clauses,
             remove_clauses,
             with_clauses,
@@ -883,6 +996,41 @@ impl<'a> Parser<'a> {
             having_clause,
             ordered_clauses,
             span: Some(SourceSpan::new(span_start, self.current.span.end, 1, 1)),
+        })
+    }
+
+    /// Parses an `<order by and page statement>` (ISO/IEC 39075:2024):
+    /// `[ORDER BY ...] [OFFSET n | SKIP n] [LIMIT n | FETCH FIRST n ROWS ONLY]`
+    /// with at least one part, as a statement of its own or after RETURN.
+    fn parse_order_by_and_page(&mut self) -> Result<OrderByAndPage> {
+        let span_start = self.current.span.start;
+        let order_by = if self.current.kind == TokenKind::Order {
+            Some(self.parse_order_by()?)
+        } else {
+            None
+        };
+        let offset = if matches!(self.current.kind, TokenKind::Skip | TokenKind::Offset) {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+        let limit = if self.current.kind == TokenKind::Limit {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else if self.current.kind == TokenKind::Fetch {
+            Some(self.parse_fetch_first()?)
+        } else {
+            None
+        };
+        if order_by.is_none() && offset.is_none() && limit.is_none() {
+            return Err(self.error("Expected ORDER BY, OFFSET, SKIP, LIMIT or FETCH"));
+        }
+        Ok(OrderByAndPage {
+            order_by,
+            offset,
+            limit,
+            span: Some(SourceSpan::new(span_start, self.current.span.start, 1, 1)),
         })
     }
 
@@ -905,8 +1053,11 @@ impl<'a> Parser<'a> {
         // Parse expression (the list to iterate)
         let expression = self.parse_expression()?;
 
-        // Parse optional WITH ORDINALITY/OFFSET
-        let (ordinality_var, offset_var) = if self.current.kind == TokenKind::With {
+        // Parse optional WITH ORDINALITY/OFFSET; any other WITH is a WITH
+        // clause after the FOR.
+        let (ordinality_var, offset_var) = if self.current.kind == TokenKind::With
+            && matches!(self.peek_kind(), TokenKind::Ordinality | TokenKind::Offset)
+        {
             self.advance(); // consume WITH
             if self.current.kind == TokenKind::Ordinality {
                 self.advance(); // consume ORDINALITY
@@ -1290,6 +1441,7 @@ impl<'a> Parser<'a> {
 
         // Parse the pattern to merge
         let pattern = self.parse_pattern()?;
+        self.check_one_type_each("MERGE", &pattern)?;
 
         // Parse optional ON CREATE and ON MATCH clauses
         let mut on_create = None;
@@ -1370,26 +1522,12 @@ impl<'a> Parser<'a> {
 
         self.expect(TokenKind::Match)?;
 
-        // Check for path mode (WALK, TRAIL, SIMPLE, ACYCLIC)
-        let path_mode = match self.current.kind {
-            TokenKind::Walk => {
-                self.advance();
-                Some(PathMode::Walk)
-            }
-            TokenKind::Trail => {
-                self.advance();
-                Some(PathMode::Trail)
-            }
-            TokenKind::Simple => {
-                self.advance();
-                Some(PathMode::Simple)
-            }
-            TokenKind::Acyclic => {
-                self.advance();
-                Some(PathMode::Acyclic)
-            }
-            _ => None,
-        };
+        // Check for path mode (WALK, TRAIL, SIMPLE, ACYCLIC), which may also
+        // come before the match mode here
+        let path_mode = self.parse_path_mode();
+        if path_mode.is_some() {
+            self.skip_path_or_paths();
+        }
 
         // Check for match mode (DIFFERENT EDGES, REPEATABLE ELEMENTS)
         let match_mode = if self.is_identifier()
@@ -1416,11 +1554,28 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // Check for path search prefix (ANY, ALL SHORTEST, ANY SHORTEST, SHORTEST k)
-        let search_prefix = self.parse_path_search_prefix()?;
+        // The path pattern prefix: a path mode (the standard puts the match
+        // mode first, `MATCH DIFFERENT EDGES TRAIL`), or a path search prefix
+        // with its own path mode (`MATCH ANY SHORTEST TRAIL`). They apply to
+        // every path pattern of the clause without a prefix of its own.
+        let (search_prefix, prefix_mode) = self.parse_path_pattern_prefix()?;
+        let path_mode = match (path_mode, prefix_mode) {
+            (Some(_), Some(_)) => {
+                return Err(self.error("A path pattern has one path mode, but two are given"));
+            }
+            (mode, None) | (None, mode) => mode,
+        };
 
         let mut patterns = Vec::new();
-        patterns.push(self.parse_aliased_pattern()?);
+        let first = self.parse_aliased_pattern()?;
+        // The prefix after MATCH is the first pattern's (`MATCH ANY p = ...`)
+        if search_prefix.is_some() && first.search_prefix.is_some() {
+            return Err(self.error("A path pattern has one path search prefix, but two are given"));
+        }
+        if path_mode.is_some() && first.path_mode.is_some() {
+            return Err(self.error("A path pattern has one path mode, but two are given"));
+        }
+        patterns.push(first);
 
         // Path alternation at MATCH level: pattern | pattern or pattern |+| pattern
         // (ISO GQL G032/G030). Mixing | and |+| in the same alternation is rejected.
@@ -1439,7 +1594,14 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 self.advance();
-                alt_patterns.push(self.parse_aliased_pattern()?.pattern);
+                let alternative = self.parse_aliased_pattern()?;
+                if alternative.search_prefix.is_some() || alternative.path_mode.is_some() {
+                    return Err(self.error(
+                        "A path pattern prefix goes before the whole alternation, not before \
+                         one of its operands",
+                    ));
+                }
+                alt_patterns.push(alternative.pattern);
             }
             let union_pattern = if is_multiset {
                 Pattern::MultisetUnion(alt_patterns)
@@ -1450,6 +1612,7 @@ impl<'a> Parser<'a> {
                 alias: first.alias,
                 path_function: first.path_function,
                 search_prefix: first.search_prefix,
+                path_mode: first.path_mode,
                 keep: first.keep,
                 pattern: union_pattern,
             });
@@ -1470,73 +1633,156 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parses an optional path search prefix before patterns.
+    /// Parses an optional path mode keyword: WALK, TRAIL, SIMPLE or ACYCLIC.
+    fn parse_path_mode(&mut self) -> Option<PathMode> {
+        let mode = match self.current.kind {
+            TokenKind::Walk => PathMode::Walk,
+            TokenKind::Trail => PathMode::Trail,
+            TokenKind::Simple => PathMode::Simple,
+            TokenKind::Acyclic => PathMode::Acyclic,
+            _ => return None,
+        };
+        self.advance();
+        Some(mode)
+    }
+
+    /// Skips the optional `PATH` or `PATHS` of a path pattern prefix (ISO/IEC
+    /// 39075:2024 16.6 `<path or paths>`), which changes nothing. A variable
+    /// named so (`path = (a)-->(b)`) is followed by `=`.
+    fn skip_path_or_paths(&mut self) {
+        if self.current.kind == TokenKind::Identifier
+            && (self.current.text.eq_ignore_ascii_case("PATH")
+                || self.current.text.eq_ignore_ascii_case("PATHS"))
+            && self.peek_kind() != TokenKind::Eq
+        {
+            self.advance();
+        }
+    }
+
+    /// The number of paths or groups (`what`) of a path search prefix, from
+    /// the text of its integer: at least 1.
+    fn number_of_paths(&self, text: &str, what: &str) -> Result<usize> {
+        let count: usize = text
+            .parse()
+            .map_err(|_| self.error(&format!("The number of {what} {text} is too large")))?;
+        if count == 0 {
+            return Err(self.error(&format!(
+                "The number of {what} of a path search prefix must be at least 1"
+            )));
+        }
+        Ok(count)
+    }
+
+    /// The text of the integer at the current token, which it consumes.
+    fn take_integer_text(&mut self) -> String {
+        let text = self.current.text.clone();
+        self.advance();
+        text
+    }
+
+    /// Parses an optional path pattern prefix (ISO/IEC 39075:2024 16.6
+    /// `<path pattern prefix>`): a path mode, or a path search prefix with an
+    /// optional path mode of its own. Returns the search prefix and the path
+    /// mode.
     ///
     /// ```text
-    /// ANY [k]
-    /// ALL SHORTEST
-    /// ANY SHORTEST
-    /// SHORTEST k [GROUPS]
+    /// WALK | TRAIL | SIMPLE | ACYCLIC [PATH | PATHS]
+    /// ALL [mode] [PATH | PATHS]
+    /// ANY [k] [mode] [PATH | PATHS]
+    /// ALL SHORTEST [mode] [PATH | PATHS]
+    /// ANY SHORTEST [mode] [PATH | PATHS]
+    /// SHORTEST k [mode] [PATH | PATHS]
+    /// SHORTEST [k] [mode] [PATH | PATHS] GROUP | GROUPS
     /// ```
-    fn parse_path_search_prefix(&mut self) -> Result<Option<PathSearchPrefix>> {
-        if self.current.kind == TokenKind::All {
-            let next = self.peek_kind();
-            if next == TokenKind::Shortest {
-                // ALL SHORTEST
-                self.advance(); // consume ALL
-                self.advance(); // consume SHORTEST
-                return Ok(Some(PathSearchPrefix::AllShortest));
-            }
-            if next == TokenKind::LParen {
-                // ALL (pattern...) - enumerate all matching paths
-                self.advance(); // consume ALL
-                return Ok(Some(PathSearchPrefix::All));
-            }
+    ///
+    /// `SHORTEST` alone is taken as `SHORTEST 1`.
+    fn parse_path_pattern_prefix(
+        &mut self,
+    ) -> Result<(Option<PathSearchPrefix>, Option<PathMode>)> {
+        if let Some(mode) = self.parse_path_mode() {
+            self.skip_path_or_paths();
+            return Ok((None, Some(mode)));
         }
-        if self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("ANY") {
-            let next = self.peek_kind();
-            if next == TokenKind::Shortest {
-                // ANY SHORTEST
-                self.advance(); // consume ANY
-                self.advance(); // consume SHORTEST
-                return Ok(Some(PathSearchPrefix::AnyShortest));
-            }
-            if next == TokenKind::Integer {
-                // ANY k
-                self.advance(); // consume ANY
-                let k: usize = self.current.text.parse().unwrap_or(1);
-                self.advance(); // consume k
-                return Ok(Some(PathSearchPrefix::AnyK(k)));
-            }
-            // ANY followed by ( or an identifier (path variable: ANY p = ...)
-            if next == TokenKind::LParen || next == TokenKind::Identifier {
-                self.advance(); // consume ANY
-                return Ok(Some(PathSearchPrefix::Any));
-            }
-        }
-        if self.current.kind == TokenKind::Shortest {
-            self.advance(); // consume SHORTEST
-            if self.current.kind == TokenKind::Integer {
-                let k: usize = self.current.text.parse().unwrap_or(1);
-                self.advance(); // consume k
-                if self.current.kind == TokenKind::Groups {
-                    self.advance(); // consume GROUPS
-                    return Ok(Some(PathSearchPrefix::ShortestKGroups(k)));
+        // What may follow ALL or ANY when it starts a prefix: a path
+        // pattern, its mode, `PATH`, `PATHS`, or the path variable of the
+        // legacy `MATCH ANY p = ...`
+        let starts_prefix = |kind: TokenKind| {
+            matches!(
+                kind,
+                TokenKind::LParen
+                    | TokenKind::Identifier
+                    | TokenKind::QuotedIdentifier
+                    | TokenKind::Walk
+                    | TokenKind::Trail
+                    | TokenKind::Simple
+                    | TokenKind::Acyclic
+            )
+        };
+        let prefix = if self.current.kind == TokenKind::All {
+            match self.peek_kind() {
+                TokenKind::Shortest => {
+                    self.advance(); // consume ALL
+                    self.advance(); // consume SHORTEST
+                    PathSearchPrefix::AllShortest
                 }
-                return Ok(Some(PathSearchPrefix::ShortestK(k)));
+                next if starts_prefix(next) => {
+                    self.advance(); // consume ALL
+                    PathSearchPrefix::All
+                }
+                _ => return Ok((None, None)),
             }
-            // SHORTEST without k: treat as SHORTEST 1
-            return Ok(Some(PathSearchPrefix::ShortestK(1)));
-        }
-        Ok(None)
+        } else if self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("ANY") {
+            match self.peek_kind() {
+                TokenKind::Shortest => {
+                    self.advance(); // consume ANY
+                    self.advance(); // consume SHORTEST
+                    PathSearchPrefix::AnyShortest
+                }
+                TokenKind::Integer => {
+                    self.advance(); // consume ANY
+                    let text = self.take_integer_text();
+                    PathSearchPrefix::AnyK(self.number_of_paths(&text, "paths")?)
+                }
+                next if starts_prefix(next) => {
+                    self.advance(); // consume ANY
+                    PathSearchPrefix::Any
+                }
+                _ => return Ok((None, None)),
+            }
+        } else if self.current.kind == TokenKind::Shortest {
+            self.advance(); // consume SHORTEST
+            let count = (self.current.kind == TokenKind::Integer).then(|| self.take_integer_text());
+            let mode = self.parse_path_mode();
+            self.skip_path_or_paths();
+            let groups = matches!(self.current.kind, TokenKind::Group | TokenKind::Groups);
+            let what = if groups { "groups" } else { "paths" };
+            let count = match count {
+                Some(text) => self.number_of_paths(&text, what)?,
+                None => 1,
+            };
+            if groups {
+                self.advance(); // consume GROUP or GROUPS
+                return Ok((Some(PathSearchPrefix::ShortestKGroups(count)), mode));
+            }
+            return Ok((Some(PathSearchPrefix::ShortestK(count)), mode));
+        } else {
+            return Ok((None, None));
+        };
+        let mode = self.parse_path_mode();
+        self.skip_path_or_paths();
+        Ok((Some(prefix), mode))
     }
 
     /// Parses a pattern with optional alias and path function.
-    /// Supports: `p = shortestPath((a)-[*]-(b))` and `p = (a)-[*]-(b)` and `(a)-[*]-(b)`
+    /// Supports: `p = shortestPath((a)-[*]-(b))` and `p = (a)-[*]-(b)` and `(a)-[*]-(b)`,
+    /// and a path pattern prefix after the alias, or before a pattern
+    /// without one (ISO/IEC 39075:2024 16.4 `<path pattern>`:
+    /// `p = ANY SHORTEST TRAIL (a)-[*]-(b)`).
     fn parse_aliased_pattern(&mut self) -> Result<AliasedPattern> {
         let mut alias = None;
         let mut path_function = None;
         let mut search_prefix = None;
+        let mut path_mode = None;
 
         // Check for pattern alias: identifier = ...
         if self.is_identifier() && self.peek_kind() == TokenKind::Eq {
@@ -1557,11 +1803,11 @@ impl<'a> Parser<'a> {
                     self.expect(TokenKind::LParen)?;
                 }
             }
+        }
 
-            // Per-pattern path search prefix: p = ANY SHORTEST (...) (ISO GQL)
-            if path_function.is_none() {
-                search_prefix = self.parse_path_search_prefix()?;
-            }
+        // Per-pattern path pattern prefix: p = ANY SHORTEST TRAIL (...)
+        if path_function.is_none() {
+            (search_prefix, path_mode) = self.parse_path_pattern_prefix()?;
         }
 
         let pattern = self.parse_pattern()?;
@@ -1610,6 +1856,7 @@ impl<'a> Parser<'a> {
             alias,
             path_function,
             search_prefix,
+            path_mode,
             keep,
             pattern,
         })
@@ -1861,7 +2108,9 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // Parse the inner pattern(s), potentially with union via | or multiset union via |+|
+        // Parse the inner pattern(s), potentially with union via | or multiset union via |+|.
+        // A pattern in parentheses nests as a subquery: it plans as one.
+        self.enter_subquery()?;
         let mut patterns = vec![self.parse_pattern()?];
         let mut is_multiset = false;
         while self.current.kind == TokenKind::Pipe || self.current.kind == TokenKind::PipePlusPipe {
@@ -1879,6 +2128,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        self.exit_subquery();
 
         self.expect(TokenKind::RParen)?;
 
@@ -2021,7 +2271,9 @@ impl<'a> Parser<'a> {
         }
         if self.current.kind == TokenKind::LParen {
             self.advance();
+            self.enter_nesting()?;
             let expr = self.parse_label_expression()?;
+            self.exit_nesting();
             self.expect(TokenKind::RParen)?;
             return Ok(expr);
         }
@@ -2031,6 +2283,66 @@ impl<'a> Parser<'a> {
             return Ok(LabelExpression::Label(name));
         }
         Err(self.error("Expected label name, %, or ("))
+    }
+
+    /// Parses the types of an edge pattern, after its variable: none, one
+    /// (`:KNOWS`), or alternatives (`:KNOWS|LIKES`), the disjunction of a
+    /// label expression (ISO/IEC 39075:2024, 16.8 `<label expression>`).
+    ///
+    /// An edge has exactly one type, so a conjunction (`:A&B`, an edge with
+    /// both labels) would match no edge, and `:A:B` is no label expression:
+    /// both are errors that name what to write, the alternatives or the
+    /// quoted name of one type.
+    fn parse_edge_types(&mut self) -> Result<Vec<String>> {
+        let mut types = Vec::new();
+        if self.current.kind != TokenKind::Colon {
+            return Ok(types);
+        }
+        self.advance();
+        loop {
+            if !self.is_label_or_type_name() {
+                return Err(self.error(if types.is_empty() {
+                    "Expected edge type"
+                } else {
+                    "Expected edge type after |"
+                }));
+            }
+            types.push(self.get_identifier_name());
+            self.advance();
+            if self.current.kind != TokenKind::Pipe {
+                break;
+            }
+            self.advance();
+        }
+        let joint = match self.current.kind {
+            TokenKind::Colon => ":",
+            TokenKind::Ampersand => "&",
+            _ => return Ok(types),
+        };
+        let at = self.current.span;
+        self.advance();
+        let first = types.last().map_or("A", String::as_str);
+        let second = if self.is_label_or_type_name() {
+            self.get_identifier_name()
+        } else {
+            "B".to_string()
+        };
+        let what = if joint == "&" {
+            format!("An edge has one type, so :{first}&{second}, an edge of both, matches no edge")
+        } else {
+            "An edge has one type".to_string()
+        };
+        Err(Error::Query(
+            QueryError::new(
+                QueryErrorKind::Syntax,
+                format!(
+                    "[GQL] {what}: write :`{first}{joint}{second}` for the type named \
+                     {first}{joint}{second}, or :{first}|{second} to match either type"
+                ),
+            )
+            .with_span(at)
+            .with_source(self.source.to_string()),
+        ))
     }
 
     fn parse_edge_pattern(&mut self) -> Result<EdgePattern> {
@@ -2077,24 +2389,7 @@ impl<'a> Parser<'a> {
                             None
                         };
 
-                        let mut tps = Vec::new();
-                        while self.current.kind == TokenKind::Colon {
-                            self.advance();
-                            if !self.is_label_or_type_name() {
-                                return Err(self.error("Expected edge type"));
-                            }
-                            tps.push(self.get_identifier_name());
-                            self.advance();
-                            // Support pipe-separated alternatives: :T1|T2|T3
-                            while self.current.kind == TokenKind::Pipe {
-                                self.advance();
-                                if !self.is_label_or_type_name() {
-                                    return Err(self.error("Expected edge type after |"));
-                                }
-                                tps.push(self.get_identifier_name());
-                                self.advance();
-                            }
-                        }
+                        let tps = self.parse_edge_types()?;
 
                         // Parse variable-length path quantifier: *min..max
                         let (min_h, max_h) = self.parse_path_quantifier()?;
@@ -2166,24 +2461,7 @@ impl<'a> Parser<'a> {
                             None
                         };
 
-                        let mut tps = Vec::new();
-                        while self.current.kind == TokenKind::Colon {
-                            self.advance();
-                            if !self.is_label_or_type_name() {
-                                return Err(self.error("Expected edge type"));
-                            }
-                            tps.push(self.get_identifier_name());
-                            self.advance();
-                            // Support pipe-separated alternatives: :T1|T2|T3
-                            while self.current.kind == TokenKind::Pipe {
-                                self.advance();
-                                if !self.is_label_or_type_name() {
-                                    return Err(self.error("Expected edge type after |"));
-                                }
-                                tps.push(self.get_identifier_name());
-                                self.advance();
-                            }
-                        }
+                        let tps = self.parse_edge_types()?;
 
                         // Parse variable-length path quantifier
                         let (min_h, max_h) = self.parse_path_quantifier()?;
@@ -2288,23 +2566,7 @@ impl<'a> Parser<'a> {
                             None
                         };
 
-                        let mut tps = Vec::new();
-                        while self.current.kind == TokenKind::Colon {
-                            self.advance();
-                            if !self.is_label_or_type_name() {
-                                return Err(self.error("Expected edge type"));
-                            }
-                            tps.push(self.get_identifier_name());
-                            self.advance();
-                            while self.current.kind == TokenKind::Pipe {
-                                self.advance();
-                                if !self.is_label_or_type_name() {
-                                    return Err(self.error("Expected edge type after |"));
-                                }
-                                tps.push(self.get_identifier_name());
-                                self.advance();
-                            }
-                        }
+                        let tps = self.parse_edge_types()?;
 
                         let (min_h, max_h) = self.parse_path_quantifier()?;
 
@@ -2604,14 +2866,16 @@ impl<'a> Parser<'a> {
 
         Ok(WhereClause {
             expression,
+            filter: false,
             span: None,
         })
     }
 
-    /// Parses either WHERE or FILTER clause (FILTER is a GQL alias for WHERE).
+    /// Parses either a WHERE or a FILTER clause (see [`WhereClause::filter`]).
     fn parse_where_or_filter_clause(&mut self) -> Result<WhereClause> {
         // Accept both WHERE and FILTER
-        if self.current.kind == TokenKind::Filter {
+        let filter = self.current.kind == TokenKind::Filter;
+        if filter {
             self.advance();
             // ISO GQL: FILTER WHERE expr (WHERE is optional after FILTER)
             if self.current.kind == TokenKind::Where {
@@ -2624,6 +2888,7 @@ impl<'a> Parser<'a> {
 
         Ok(WhereClause {
             expression,
+            filter,
             span: None,
         })
     }
@@ -3111,56 +3376,58 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parses an expression, which nests one level in the expression,
+    /// list, call or clause it is part of.
     fn parse_expression(&mut self) -> Result<Expression> {
-        self.parse_or_expression()
+        self.enter_nesting()?;
+        let expression = self.parse_or_expression()?;
+        self.exit_nesting();
+        Ok(expression)
     }
 
     fn parse_or_expression(&mut self) -> Result<Expression> {
-        let mut left = self.parse_xor_expression()?;
-
-        while self.current.kind == TokenKind::Or {
-            self.advance();
-            let right = self.parse_xor_expression()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::Or,
-                right: Box::new(right),
-            };
-        }
-
-        Ok(left)
+        self.parse_balanced_chain(TokenKind::Or, BinaryOp::Or, Self::parse_xor_expression)
     }
 
     fn parse_xor_expression(&mut self) -> Result<Expression> {
-        let mut left = self.parse_and_expression()?;
-
-        while self.current.kind == TokenKind::Xor {
-            self.advance();
-            let right = self.parse_and_expression()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::Xor,
-                right: Box::new(right),
-            };
-        }
-
-        Ok(left)
+        self.parse_balanced_chain(TokenKind::Xor, BinaryOp::Xor, Self::parse_and_expression)
     }
 
     fn parse_and_expression(&mut self) -> Result<Expression> {
-        let mut left = self.parse_not_expression()?;
+        self.parse_balanced_chain(TokenKind::And, BinaryOp::And, Self::parse_not_expression)
+    }
 
-        while self.current.kind == TokenKind::And {
-            self.advance();
-            let right = self.parse_not_expression()?;
-            left = Expression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::And,
-                right: Box::new(right),
-            };
+    /// Parses `operand` joined by `token`, an associative operator, into a
+    /// balanced tree of `op` (see [`Nesting::join_balanced`]): a chain of any
+    /// length stays shallow.
+    fn parse_balanced_chain(
+        &mut self,
+        token: TokenKind,
+        op: BinaryOp,
+        operand: fn(&mut Self) -> Result<Expression>,
+    ) -> Result<Expression> {
+        let chain = self.begin_chain();
+        let first = operand(self)?;
+        if self.current.kind != token {
+            self.end_chain(chain);
+            return Ok(first);
         }
-
-        Ok(left)
+        let mut operands = vec![(first, self.nesting.take_operand())];
+        while self.current.kind == token {
+            self.advance();
+            let next = operand(self)?;
+            operands.push((next, self.nesting.take_operand()));
+        }
+        let tree = self
+            .nesting
+            .join_balanced(operands, |left, right| Expression::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            })
+            .ok_or_else(|| self.error(&nesting_error_message()));
+        self.end_chain(chain);
+        tree
     }
 
     fn parse_not_expression(&mut self) -> Result<Expression> {
@@ -3179,7 +3446,30 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_comparison_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
+        let expression = self.parse_comparison_operands()?;
+        self.end_chain(chain);
+        Ok(expression)
+    }
+
+    /// The operands of a comparison and its operator, which nests one level
+    /// above them (see [`Self::parse_comparison_expression`]).
+    fn parse_comparison_operands(&mut self) -> Result<Expression> {
         let left = self.parse_additive_expression()?;
+
+        // `=~`, a regular expression match: a Grafeo extension with the
+        // precedence and meaning of Cypher's `=~`.
+        if self.at_regex_match() {
+            self.advance(); // consume =
+            self.advance(); // consume ~
+            let right = self.parse_additive_expression()?;
+            self.link_chain()?;
+            return Ok(Expression::Binary {
+                left: Box::new(left),
+                op: BinaryOp::RegexMatch,
+                right: Box::new(right),
+            });
+        }
 
         // Check for regular comparison operators
         let op = match self.current.kind {
@@ -3195,6 +3485,7 @@ impl<'a> Parser<'a> {
         if let Some(op) = op {
             self.advance();
             let right = self.parse_additive_expression()?;
+            self.link_chain()?;
             return Ok(Expression::Binary {
                 left: Box::new(left),
                 op,
@@ -3207,6 +3498,7 @@ impl<'a> Parser<'a> {
             TokenKind::In => {
                 self.advance(); // consume IN
                 let right = self.parse_primary_expression()?;
+                self.link_chain()?;
                 return Ok(Expression::Binary {
                     left: Box::new(left),
                     op: BinaryOp::In,
@@ -3217,6 +3509,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume STARTS
                 self.expect(TokenKind::With)?; // expect WITH
                 let right = self.parse_additive_expression()?;
+                self.link_chain()?;
                 return Ok(Expression::Binary {
                     left: Box::new(left),
                     op: BinaryOp::StartsWith,
@@ -3227,6 +3520,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume ENDS
                 self.expect(TokenKind::With)?; // expect WITH
                 let right = self.parse_additive_expression()?;
+                self.link_chain()?;
                 return Ok(Expression::Binary {
                     left: Box::new(left),
                     op: BinaryOp::EndsWith,
@@ -3236,6 +3530,7 @@ impl<'a> Parser<'a> {
             TokenKind::Contains => {
                 self.advance(); // consume CONTAINS
                 let right = self.parse_additive_expression()?;
+                self.link_chain()?;
                 return Ok(Expression::Binary {
                     left: Box::new(left),
                     op: BinaryOp::Contains,
@@ -3245,6 +3540,7 @@ impl<'a> Parser<'a> {
             TokenKind::Like => {
                 self.advance(); // consume LIKE
                 let right = self.parse_additive_expression()?;
+                self.link_chain()?;
                 return Ok(Expression::Binary {
                     left: Box::new(left),
                     op: BinaryOp::Like,
@@ -3256,7 +3552,10 @@ impl<'a> Parser<'a> {
                 let negated = self.current.kind == TokenKind::Not;
                 if negated {
                     self.advance(); // consume NOT
+                    // `IS NOT ...` may wrap the predicate in a NOT.
+                    self.link_chain()?;
                 }
+                self.link_chain()?;
 
                 let predicate = if self.current.kind == TokenKind::Null {
                     // IS [NOT] NULL
@@ -3477,6 +3776,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_additive_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_multiplicative_expression()?;
 
         loop {
@@ -3488,17 +3788,20 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let right = self.parse_multiplicative_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
 
         Ok(left)
     }
 
     fn parse_multiplicative_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
         let mut left = self.parse_power_expression()?;
 
         loop {
@@ -3510,12 +3813,14 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let right = self.parse_power_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
             };
         }
+        self.end_chain(chain);
 
         Ok(left)
     }
@@ -3586,12 +3891,34 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_postfix_expression(&mut self) -> Result<Expression> {
-        let mut expr = self.parse_primary_expression()?;
+        // Each subscript, key access and label check nests one level.
+        let chain = self.begin_chain();
+        // Parentheses, lists and maps go around the primary expression's
+        // parser: its frame is large, and each level of a deeply nested
+        // expression would keep one on the stack.
+        // A call (a function, CAST, or a form such as TRIM, reduce or a list
+        // predicate) nests one level more than its arguments: it is parsed in
+        // that large frame.
+        let call = (self.is_identifier() || self.current.kind == TokenKind::Cast)
+            && self.peek_kind() == TokenKind::LParen;
+        let mut expr = match self.current.kind {
+            TokenKind::LParen => self.parse_parenthesized_expression()?,
+            TokenKind::LBracket => self.parse_list_expression()?,
+            TokenKind::LBrace => Expression::Map(self.parse_property_map()?),
+            _ if call => {
+                self.enter_nesting()?;
+                let call = self.parse_primary_expression();
+                self.exit_nesting();
+                call?
+            }
+            _ => self.parse_primary_expression()?,
+        };
 
         loop {
             match self.current.kind {
                 TokenKind::LBracket => {
                     self.advance();
+                    self.link_chain()?;
 
                     // Check for slice patterns: [..end], [start..], [start..end]
                     if self.current.kind == TokenKind::DotDot {
@@ -3643,6 +3970,7 @@ impl<'a> Parser<'a> {
                     }
                     let key = self.get_identifier_name();
                     self.advance();
+                    self.link_chain()?;
                     expr = Expression::MapAccess {
                         base: Box::new(expr),
                         key,
@@ -3660,6 +3988,7 @@ impl<'a> Parser<'a> {
                         }
                         let label = self.get_identifier_name();
                         self.advance();
+                        self.link_chain()?;
                         let check = Expression::FunctionCall {
                             name: "hasLabel".to_string(),
                             args: vec![base.clone(), Expression::Literal(Literal::String(label))],
@@ -3680,8 +4009,107 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
+        self.end_chain(chain);
 
         Ok(expr)
+    }
+
+    /// Parses `( expression )`: the expression nests one level deeper.
+    fn parse_parenthesized_expression(&mut self) -> Result<Expression> {
+        self.expect(TokenKind::LParen)?;
+        let expr = self.parse_expression()?;
+        self.expect(TokenKind::RParen)?;
+        Ok(expr)
+    }
+
+    /// Parses the bindings and the body of `LET ... IN ... END`, after `LET`.
+    fn parse_let_in_expression(&mut self) -> Result<Expression> {
+        let mut bindings = Vec::new();
+        loop {
+            if !self.is_identifier() {
+                return Err(self.error("Expected variable name in LET expression"));
+            }
+            let var = self.get_identifier_name();
+            self.advance();
+            self.expect(TokenKind::Eq)?;
+            // Use additive_expression to stop before IN (which is a
+            // comparison-level operator) so the LET's own IN keyword
+            // is not consumed by the binding expression.
+            let expr = self.parse_additive_expression()?;
+            bindings.push((var, expr));
+            if self.current.kind != TokenKind::Comma {
+                break;
+            }
+            self.advance(); // consume comma
+        }
+        // Expect IN keyword
+        if self.current.kind != TokenKind::In {
+            return Err(self.error("Expected IN after LET bindings"));
+        }
+        self.advance(); // consume IN
+        let body = self.parse_expression()?;
+        self.expect(TokenKind::End)?;
+        Ok(Expression::LetIn {
+            bindings,
+            body: Box::new(body),
+        })
+    }
+
+    /// Parses the arguments of a call of the function `name`, from its `(`.
+    fn parse_function_call(&mut self, name: String) -> Result<Expression> {
+        self.expect(TokenKind::LParen)?;
+        // COUNT(*) per ISO/IEC 39075 sec 20.9
+        if name.eq_ignore_ascii_case("count") && self.current.kind == TokenKind::Star {
+            self.advance(); // consume *
+            self.expect(TokenKind::RParen)?;
+            return Ok(Expression::FunctionCall {
+                name,
+                args: Vec::new(),
+                distinct: false,
+            });
+        }
+        // Check for DISTINCT keyword in aggregate functions
+        let distinct = if self.current.kind == TokenKind::Distinct {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        let mut args = Vec::new();
+        if self.current.kind != TokenKind::RParen {
+            args.push(self.parse_expression()?);
+            while self.current.kind == TokenKind::Comma {
+                self.advance();
+                args.push(self.parse_expression()?);
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        Ok(Expression::FunctionCall {
+            name,
+            args,
+            distinct,
+        })
+    }
+
+    /// Parses a list literal or a list comprehension, from its `[`: each
+    /// element nests one level deeper.
+    fn parse_list_expression(&mut self) -> Result<Expression> {
+        self.expect(TokenKind::LBracket)?;
+        // Disambiguate: [x IN list WHERE ... | expr] vs [elem, ...]
+        // List comprehension if: identifier followed by IN keyword
+        if self.is_identifier() && self.peek_kind() == TokenKind::In {
+            return self.parse_list_comprehension_inner();
+        }
+        let mut elements = Vec::new();
+        if self.current.kind != TokenKind::RBracket {
+            elements.push(self.parse_expression()?);
+            while self.current.kind == TokenKind::Comma {
+                self.advance();
+                elements.push(self.parse_expression()?);
+            }
+        }
+        self.expect(TokenKind::RBracket)?;
+        Ok(Expression::List(elements))
     }
 
     fn parse_primary_expression(&mut self) -> Result<Expression> {
@@ -4016,38 +4444,14 @@ impl<'a> Parser<'a> {
                     }
                 }
 
-                // LET ... IN ... END expression
+                // LET ... IN ... END expression: it nests one level, as its
+                // bindings are parsed below the expression level.
                 if name.eq_ignore_ascii_case("LET") {
                     self.advance(); // consume LET
-                    let mut bindings = Vec::new();
-                    loop {
-                        if !self.is_identifier() {
-                            return Err(self.error("Expected variable name in LET expression"));
-                        }
-                        let var = self.get_identifier_name();
-                        self.advance();
-                        self.expect(TokenKind::Eq)?;
-                        // Use additive_expression to stop before IN (which is a
-                        // comparison-level operator) so the LET's own IN keyword
-                        // is not consumed by the binding expression.
-                        let expr = self.parse_additive_expression()?;
-                        bindings.push((var, expr));
-                        if self.current.kind != TokenKind::Comma {
-                            break;
-                        }
-                        self.advance(); // consume comma
-                    }
-                    // Expect IN keyword
-                    if self.current.kind != TokenKind::In {
-                        return Err(self.error("Expected IN after LET bindings"));
-                    }
-                    self.advance(); // consume IN
-                    let body = self.parse_expression()?;
-                    self.expect(TokenKind::End)?;
-                    return Ok(Expression::LetIn {
-                        bindings,
-                        body: Box::new(body),
-                    });
+                    self.enter_nesting()?;
+                    let let_in = self.parse_let_in_expression();
+                    self.exit_nesting();
+                    return let_in;
                 }
 
                 self.advance();
@@ -4108,7 +4512,9 @@ impl<'a> Parser<'a> {
                 {
                     // COUNT { MATCH ... } subquery expression
                     self.advance(); // consume {
+                    self.enter_subquery()?;
                     let inner_query = self.parse_exists_inner_query()?;
+                    self.exit_subquery();
                     self.expect(TokenKind::RBrace)?;
                     Ok(Expression::CountSubquery {
                         query: Box::new(inner_query),
@@ -4118,79 +4524,23 @@ impl<'a> Parser<'a> {
                 {
                     // VALUE { subquery } expression
                     self.advance(); // consume {
+                    self.enter_subquery()?;
                     let inner_query = self.parse_value_subquery_inner()?;
+                    self.exit_subquery();
                     self.expect(TokenKind::RBrace)?;
                     Ok(Expression::ValueSubquery {
                         query: Box::new(inner_query),
                     })
                 } else if self.current.kind == TokenKind::LParen {
-                    // Function call
-                    self.advance();
-                    // COUNT(*) per ISO/IEC 39075 sec 20.9
-                    if name.eq_ignore_ascii_case("count") && self.current.kind == TokenKind::Star {
-                        self.advance(); // consume *
-                        self.expect(TokenKind::RParen)?;
-                        return Ok(Expression::FunctionCall {
-                            name,
-                            args: Vec::new(),
-                            distinct: false,
-                        });
-                    }
-                    // Check for DISTINCT keyword in aggregate functions
-                    let distinct = if self.current.kind == TokenKind::Distinct {
-                        self.advance();
-                        true
-                    } else {
-                        false
-                    };
-                    let mut args = Vec::new();
-                    if self.current.kind != TokenKind::RParen {
-                        args.push(self.parse_expression()?);
-                        while self.current.kind == TokenKind::Comma {
-                            self.advance();
-                            args.push(self.parse_expression()?);
-                        }
-                    }
-                    self.expect(TokenKind::RParen)?;
-                    Ok(Expression::FunctionCall {
-                        name,
-                        args,
-                        distinct,
-                    })
+                    // Function call (its extra level of nesting is counted
+                    // where the postfix expression starts).
+                    self.parse_function_call(name)
                 } else {
                     Ok(Expression::Variable(name))
                 }
             }
-            TokenKind::LParen => {
-                self.enter_nesting()?;
-                self.advance();
-                let expr = self.parse_expression()?;
-                self.expect(TokenKind::RParen)?;
-                self.exit_nesting();
-                Ok(expr)
-            }
-            TokenKind::LBracket => {
-                self.enter_nesting()?;
-                self.advance(); // consume [
-                // Disambiguate: [x IN list WHERE ... | expr] vs [elem, ...]
-                // List comprehension if: identifier followed by IN keyword
-                if self.is_identifier() && self.peek_kind() == TokenKind::In {
-                    let result = self.parse_list_comprehension_inner();
-                    self.exit_nesting();
-                    return result;
-                }
-                let mut elements = Vec::new();
-                if self.current.kind != TokenKind::RBracket {
-                    elements.push(self.parse_expression()?);
-                    while self.current.kind == TokenKind::Comma {
-                        self.advance();
-                        elements.push(self.parse_expression()?);
-                    }
-                }
-                self.expect(TokenKind::RBracket)?;
-                self.exit_nesting();
-                Ok(Expression::List(elements))
-            }
+            TokenKind::LParen => self.parse_parenthesized_expression(),
+            TokenKind::LBracket => self.parse_list_expression(),
             TokenKind::Parameter => {
                 // Parameter token includes the $ prefix, so we extract just the name
                 let full_text = &self.current.text;
@@ -4199,23 +4549,24 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Parameter(name))
             }
             TokenKind::Exists => {
-                self.enter_nesting()?;
                 self.advance();
                 if self.current.kind == TokenKind::LBrace {
                     // EXISTS { MATCH ... } subquery form
                     self.advance(); // consume {
+                    self.enter_subquery()?;
                     let inner_query = self.parse_exists_inner_query()?;
+                    self.exit_subquery();
                     self.expect(TokenKind::RBrace)?;
-                    self.exit_nesting();
                     Ok(Expression::ExistsSubquery {
                         query: Box::new(inner_query),
                     })
                 } else {
-                    // exists(expr) function form
+                    // exists(expr) function form, which nests as a call
                     self.expect(TokenKind::LParen)?;
+                    self.enter_nesting()?;
                     let arg = self.parse_expression()?;
-                    self.expect(TokenKind::RParen)?;
                     self.exit_nesting();
+                    self.expect(TokenKind::RParen)?;
                     Ok(Expression::FunctionCall {
                         name: "exists".to_string(),
                         args: vec![arg],
@@ -4296,8 +4647,19 @@ impl<'a> Parser<'a> {
 
     /// Parses a CASE expression.
     /// CASE [input] WHEN condition THEN result [WHEN ...] [ELSE default] END
+    ///
+    /// Each operand is an expression, which nests one level deeper, and the
+    /// `CASE` itself counts one more: its parser keeps a larger frame on the
+    /// stack.
     fn parse_case_expression(&mut self) -> Result<Expression> {
         self.enter_nesting()?;
+        let case = self.parse_case_operands();
+        self.exit_nesting();
+        case
+    }
+
+    /// The operands of a `CASE`, from the `CASE` keyword to `END`.
+    fn parse_case_operands(&mut self) -> Result<Expression> {
         self.expect(TokenKind::Case)?;
 
         // Check for simple CASE (CASE expr WHEN value THEN ...)
@@ -4319,7 +4681,6 @@ impl<'a> Parser<'a> {
         }
 
         if whens.is_empty() {
-            self.exit_nesting();
             return Err(self.error("CASE requires at least one WHEN clause"));
         }
 
@@ -4332,7 +4693,6 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(TokenKind::End)?;
-        self.exit_nesting();
 
         Ok(Expression::Case {
             input,
@@ -4494,6 +4854,9 @@ impl<'a> Parser<'a> {
             self.advance();
             patterns.push(self.parse_pattern()?);
         }
+        for pattern in &patterns {
+            self.check_one_type_each("INSERT", pattern)?;
+        }
 
         Ok(InsertStatement {
             patterns,
@@ -4512,11 +4875,36 @@ impl<'a> Parser<'a> {
             self.advance();
             patterns.push(self.parse_pattern()?);
         }
+        for pattern in &patterns {
+            self.check_one_type_each("CREATE", pattern)?;
+        }
 
         Ok(InsertStatement {
             patterns,
             span: None,
         })
+    }
+
+    /// Refuses an edge with alternative types (`:A|B`) in `pattern` of
+    /// `clause`, which creates edges: each gets one type (the label set of
+    /// an inserted edge has no disjunction, ISO/IEC 39075:2024 16.5
+    /// `<insert graph pattern>`).
+    fn check_one_type_each(&self, clause: &str, pattern: &Pattern) -> Result<()> {
+        match pattern {
+            Pattern::Node(_) => Ok(()),
+            Pattern::Path(path) => match path.edges.iter().find(|edge| edge.types.len() > 1) {
+                Some(edge) => Err(self.error(&format!(
+                    "{clause} gives an edge one type: :{} names alternatives, which only a \
+                     pattern to match can have",
+                    edge.types.join("|")
+                ))),
+                None => Ok(()),
+            },
+            Pattern::Quantified { pattern, .. } => self.check_one_type_each(clause, pattern),
+            Pattern::Union(patterns) | Pattern::MultisetUnion(patterns) => patterns
+                .iter()
+                .try_for_each(|pattern| self.check_one_type_each(clause, pattern)),
+        }
     }
 
     /// Parses a DELETE target: either a plain variable or a general expression (GD04).
@@ -4863,24 +5251,10 @@ impl<'a> Parser<'a> {
                 // Parse optional body: ISO syntax or JSON-like syntax
                 let (node_types, edge_types, inline_types, open) =
                     if self.current.kind == TokenKind::LBrace {
-                        let (nt, et, open) = self.parse_graph_type_body()?;
-                        (nt, et, Vec::new(), open)
+                        self.parse_graph_type_body()?
                     } else if self.current.kind == TokenKind::LParen {
                         let inline = self.parse_graph_type_iso_body()?;
-                        let nt: Vec<String> = inline
-                            .iter()
-                            .filter_map(|t| match t {
-                                InlineElementType::Node { name, .. } => Some(name.clone()),
-                                InlineElementType::Edge { .. } => None,
-                            })
-                            .collect();
-                        let et: Vec<String> = inline
-                            .iter()
-                            .filter_map(|t| match t {
-                                InlineElementType::Edge { name, .. } => Some(name.clone()),
-                                InlineElementType::Node { .. } => None,
-                            })
-                            .collect();
+                        let (nt, et) = element_type_names(&inline);
                         (nt, et, inline, false)
                     } else {
                         (Vec::new(), Vec::new(), Vec::new(), true)
@@ -4926,6 +5300,89 @@ impl<'a> Parser<'a> {
                 "Expected NODE, EDGE, VECTOR, INDEX, CONSTRAINT, GRAPH, SCHEMA, or PROCEDURE after CREATE",
             )),
         }
+    }
+
+    /// Parses the options of a text index, `{k1: 1.2, b: 0.75, tokenizer:
+    /// 'standard', stop_words: ['and', 'or']}` (each optional, names in any
+    /// case), into `options`.
+    fn parse_text_index_options(&mut self, options: &mut IndexOptions) -> Result<()> {
+        self.expect(TokenKind::LBrace)?;
+        while self.current.kind != TokenKind::RBrace {
+            if !self.is_identifier() {
+                return Err(self.error("Expected option name"));
+            }
+            let opt_name = self.get_identifier_name();
+            self.advance();
+            self.expect(TokenKind::Colon)?;
+            match opt_name.to_uppercase().as_str() {
+                "K1" => options.k1 = Some(self.parse_index_option_number("k1")?),
+                "B" => options.b = Some(self.parse_index_option_number("b")?),
+                "TOKENIZER" => {
+                    if self.current.kind != TokenKind::String {
+                        return Err(self.error("Expected string for tokenizer"));
+                    }
+                    options.tokenizer = Some(self.index_option_string());
+                    self.advance();
+                }
+                "STOP_WORDS" => {
+                    self.expect(TokenKind::LBracket)?;
+                    let mut words = Vec::new();
+                    while self.current.kind != TokenKind::RBracket {
+                        if self.current.kind != TokenKind::String {
+                            return Err(self.error("Expected string in stop_words"));
+                        }
+                        words.push(self.index_option_string());
+                        self.advance();
+                        if self.current.kind == TokenKind::Comma {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::RBracket)?;
+                    options.stop_words = Some(words);
+                }
+                _ => {
+                    return Err(self.error(&format!(
+                        "Unknown text index option '{opt_name}'. Use: k1, b, tokenizer, stop_words"
+                    )));
+                }
+            }
+            if self.current.kind == TokenKind::Comma {
+                self.advance();
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(())
+    }
+
+    /// Parses the number of the index option `name`: an integer or a float,
+    /// with an optional leading minus (which the engine then refuses as out
+    /// of range, naming the option).
+    fn parse_index_option_number(&mut self, name: &str) -> Result<f64> {
+        let negative = self.current.kind == TokenKind::Minus;
+        if negative {
+            self.advance();
+        }
+        if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Float) {
+            return Err(self.error(&format!("Expected a number for {name}")));
+        }
+        let value: f64 = self
+            .current
+            .text
+            .parse()
+            .map_err(|_| self.error(&format!("Invalid number for {name}")))?;
+        self.advance();
+        Ok(if negative { -value } else { value })
+    }
+
+    /// The text of the current string literal, without its quotes.
+    fn index_option_string(&self) -> String {
+        self.current
+            .text
+            .trim_matches('\'')
+            .trim_matches('"')
+            .to_string()
     }
 
     /// Parses the body of CREATE INDEX after name: `FOR (n:Label) ON (n.prop) [USING kind] [options]`.
@@ -5002,7 +5459,13 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             match kind_text.to_uppercase().as_str() {
-                "TEXT" => index_kind = IndexKind::Text,
+                "TEXT" => {
+                    index_kind = IndexKind::Text;
+                    // Parse optional {k1: 1.2, b: 0.75, tokenizer: 'name', stop_words: [...]}
+                    if self.current.kind == TokenKind::LBrace {
+                        self.parse_text_index_options(&mut options)?;
+                    }
+                }
                 "VECTOR" => {
                     index_kind = IndexKind::Vector;
                     // Parse optional {dimensions: N, metric: 'name'}
@@ -5236,30 +5699,22 @@ impl<'a> Parser<'a> {
         self.parse_create_schema().map(Statement::Schema)
     }
 
-    /// Parses the body of CREATE GRAPH TYPE: `{ node_types: [A, B], edge_types: [E1] }`.
+    /// Parses the body of CREATE GRAPH TYPE in braces, in one of two forms:
     ///
-    /// Returns (node_types, edge_types, open). If no body, returns open=true.
-    fn parse_graph_type_body(&mut self) -> Result<(Vec<String>, Vec<String>, bool)> {
+    /// - The element patterns of ISO/IEC 39075:2024 (`<nested graph type
+    ///   specification>`): `{ (:Person {name STRING})-[:KNOWS]->(:Person) }`,
+    ///   which declare their node and edge types as the paren form does.
+    /// - Lists of type names: `{ node_types: [A, B], edge_types: [E1], open: true }`,
+    ///   which declare no types.
+    ///
+    /// Returns (node_types, edge_types, inline_types, open).
+    fn parse_graph_type_body(&mut self) -> Result<GraphTypeBody> {
         self.expect(TokenKind::LBrace)?;
 
-        // Brace-delimited pattern form: { (n: Person {name STRING})-[:KNOWS]->(:Person) }
         if self.current.kind == TokenKind::LParen {
-            let inline = self.parse_graph_type_brace_pattern_body()?;
-            let nt: Vec<String> = inline
-                .iter()
-                .filter_map(|t| match t {
-                    InlineElementType::Node { name, .. } => Some(name.clone()),
-                    InlineElementType::Edge { .. } => None,
-                })
-                .collect();
-            let et: Vec<String> = inline
-                .iter()
-                .filter_map(|t| match t {
-                    InlineElementType::Edge { name, .. } => Some(name.clone()),
-                    InlineElementType::Node { .. } => None,
-                })
-                .collect();
-            return Ok((nt, et, false));
+            let inline = self.parse_graph_type_pattern_elements(TokenKind::RBrace)?;
+            let (node_types, edge_types) = element_type_names(&inline);
+            return Ok((node_types, edge_types, inline, false));
         }
 
         let mut node_types = Vec::new();
@@ -5303,10 +5758,10 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(TokenKind::RBrace)?;
-        Ok((node_types, edge_types, open))
+        Ok((node_types, edge_types, Vec::new(), open))
     }
 
-    /// Parses the ISO-syntax body of CREATE GRAPH TYPE.
+    /// Parses the paren body of CREATE GRAPH TYPE.
     ///
     /// Supports two forms:
     /// - Verbose: `(NODE TYPE Name (props), EDGE TYPE Name (props), ...)`
@@ -5319,7 +5774,7 @@ impl<'a> Parser<'a> {
         // Detect which form: pattern form starts with `(` (nested paren for node pattern),
         // verbose form starts with NODE or EDGE.
         if self.current.kind == TokenKind::LParen {
-            self.parse_graph_type_pattern_body()
+            self.parse_graph_type_pattern_elements(TokenKind::RParen)
         } else {
             self.parse_graph_type_verbose_body()
         }
@@ -5415,15 +5870,18 @@ impl<'a> Parser<'a> {
         Ok(types)
     }
 
-    /// Parses the pattern form of a graph type body:
-    /// `(:Person {name STRING})-[:KNOWS {since INT64}]->(:Person), ...)`
-    /// (closing `)` included).
-    fn parse_graph_type_pattern_body(&mut self) -> Result<Vec<InlineElementType>> {
+    /// Parses the element patterns of a graph type body up to and including
+    /// `close`, the `)` of the paren form or the `}` of the brace form:
+    /// `(:Person {name STRING})-[:KNOWS {since INT64}]->(:Person), ...`.
+    fn parse_graph_type_pattern_elements(
+        &mut self,
+        close: TokenKind,
+    ) -> Result<Vec<InlineElementType>> {
         let mut types = Vec::new();
         // Track which node type names we've already emitted so we don't duplicate them.
         let mut seen_node_types = std::collections::HashSet::new();
 
-        while self.current.kind != TokenKind::RParen && self.current.kind != TokenKind::Eof {
+        while self.current.kind != close && self.current.kind != TokenKind::Eof {
             // Parse the first node pattern: (:Label {props})
             let (src_label, src_props) = self.parse_graph_type_node_pattern()?;
 
@@ -5538,117 +5996,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.expect(TokenKind::RParen)?;
-        Ok(types)
-    }
-
-    /// Parses the brace-delimited pattern form of a graph type body:
-    /// `{ (:Person {name STRING})-[:KNOWS]->(:Person), ... }`
-    /// (closing `}` included). Same logic as `parse_graph_type_pattern_body` but
-    /// terminated by `}` instead of `)`.
-    fn parse_graph_type_brace_pattern_body(&mut self) -> Result<Vec<InlineElementType>> {
-        let mut types = Vec::new();
-        let mut seen_node_types = std::collections::HashSet::new();
-
-        while self.current.kind != TokenKind::RBrace && self.current.kind != TokenKind::Eof {
-            let (src_label, src_props) = self.parse_graph_type_node_pattern()?;
-
-            if self.current.kind == TokenKind::Minus || self.current.kind == TokenKind::LeftArrow {
-                let backward = self.current.kind == TokenKind::LeftArrow;
-                self.advance(); // consume `-` or `<-`
-
-                self.expect(TokenKind::LBracket)?;
-
-                // Optional edge variable name: [r: KNOWS] vs [:KNOWS]
-                if self.is_identifier() && self.peek_kind() == TokenKind::Colon {
-                    self.advance(); // skip variable name
-                }
-
-                self.expect(TokenKind::Colon)?;
-                if !self.is_identifier() && !self.is_label_or_type_name() {
-                    return Err(self.error("Expected edge type name after `:` in pattern"));
-                }
-                let edge_label = self.get_identifier_name();
-                self.advance();
-
-                let edge_props = if self.current.kind == TokenKind::LBrace {
-                    self.parse_property_definitions_braces()?
-                } else {
-                    Vec::new()
-                };
-
-                self.expect(TokenKind::RBracket)?;
-
-                let forward = if self.current.kind == TokenKind::Arrow {
-                    self.advance();
-                    true
-                } else if self.current.kind == TokenKind::Minus {
-                    self.advance();
-                    false
-                } else {
-                    return Err(self.error("Expected `->` or `-` after edge pattern `]`"));
-                };
-
-                let (tgt_label, tgt_props) = self.parse_graph_type_node_pattern()?;
-
-                let (effective_src, effective_tgt) = if backward {
-                    (tgt_label.clone(), src_label.clone())
-                } else {
-                    (src_label.clone(), tgt_label.clone())
-                };
-
-                let (src_types, tgt_types) = if !forward && !backward {
-                    (
-                        vec![src_label.clone(), tgt_label.clone()],
-                        vec![src_label.clone(), tgt_label.clone()],
-                    )
-                } else {
-                    (vec![effective_src], vec![effective_tgt])
-                };
-
-                if seen_node_types.insert(src_label.clone()) {
-                    types.push(InlineElementType::Node {
-                        name: src_label,
-                        properties: src_props,
-                        key_labels: Vec::new(),
-                        is_reference: false,
-                    });
-                }
-                if seen_node_types.insert(tgt_label.clone()) {
-                    types.push(InlineElementType::Node {
-                        name: tgt_label,
-                        properties: tgt_props,
-                        key_labels: Vec::new(),
-                        is_reference: false,
-                    });
-                }
-
-                types.push(InlineElementType::Edge {
-                    name: edge_label,
-                    properties: edge_props,
-                    key_labels: Vec::new(),
-                    source_node_types: src_types,
-                    target_node_types: tgt_types,
-                    is_reference: false,
-                });
-            } else {
-                // Standalone node pattern
-                if seen_node_types.insert(src_label.clone()) {
-                    types.push(InlineElementType::Node {
-                        name: src_label,
-                        properties: src_props,
-                        key_labels: Vec::new(),
-                        is_reference: false,
-                    });
-                }
-            }
-
-            if self.current.kind == TokenKind::Comma {
-                self.advance();
-            }
-        }
-
-        self.expect(TokenKind::RBrace)?;
+        self.expect(close)?;
         Ok(types)
     }
 
@@ -5887,19 +6235,30 @@ impl<'a> Parser<'a> {
 
     /// Parses ALTER NODE TYPE name / ALTER EDGE TYPE name alterations.
     /// Consumes an optional `PROPERTY` keyword in `ADD PROPERTY name ...` /
-    /// `DROP PROPERTY name`. It is a keyword only when a name follows, so a
-    /// property that is itself called `property` still works as a backtick-quoted
-    /// identifier.
+    /// `DROP PROPERTY name`. It is a keyword only when a property name
+    /// follows (see [`Self::next_names_property`]), so a property that is
+    /// itself called `property` still works as a backtick-quoted identifier.
     fn skip_property_keyword(&mut self) {
         if self.current.kind == TokenKind::Identifier
             && self.current.text.eq_ignore_ascii_case("PROPERTY")
-            && matches!(
-                self.peek_kind(),
-                TokenKind::Identifier | TokenKind::QuotedIdentifier
-            )
+            && self.next_names_property()
         {
             self.advance();
         }
+    }
+
+    /// Whether the token after the current one can name a property, as a
+    /// key of a property map can (see [`Self::is_label_or_type_name`]):
+    /// keywords such as `starts` or `match` included.
+    fn next_names_property(&mut self) -> bool {
+        let _ = self.peek_kind();
+        let Some(next) = self.peeked.take() else {
+            return false;
+        };
+        let current = std::mem::replace(&mut self.current, next);
+        let names_property = self.is_label_or_type_name();
+        self.peeked = Some(std::mem::replace(&mut self.current, current));
+        names_property
     }
 
     fn parse_alter_type(&mut self, is_node: bool, span_start: usize) -> Result<Statement> {
@@ -5918,59 +6277,17 @@ impl<'a> Parser<'a> {
             match action.as_str() {
                 "ADD" => {
                     self.advance();
-                    // ADD [PROPERTY] property_name type [NOT NULL]
+                    // ADD [PROPERTY] property_name type [NOT NULL] [DEFAULT literal]
                     self.skip_property_keyword();
-                    if !self.is_identifier() {
-                        return Err(self.error("Expected property name after ADD"));
-                    }
-                    let prop_name = self.get_identifier_name();
-                    self.advance();
-                    if !self.is_identifier() {
-                        return Err(self.error("Expected type name"));
-                    }
-                    let data_type = self.get_identifier_name();
-                    self.advance();
-                    let nullable = if self.current.kind == TokenKind::Not {
-                        self.advance();
-                        if self.current.kind != TokenKind::Null {
-                            return Err(self.error("Expected NULL after NOT"));
-                        }
-                        self.advance();
-                        false
-                    } else {
-                        true
-                    };
-                    // Optional DEFAULT <literal>
-                    let default_value = if self.is_identifier()
-                        && self.get_identifier_name().eq_ignore_ascii_case("DEFAULT")
-                    {
-                        self.advance();
-                        let lit = match self.current.kind {
-                            TokenKind::String
-                            | TokenKind::Integer
-                            | TokenKind::Float
-                            | TokenKind::True
-                            | TokenKind::False
-                            | TokenKind::Null => self.current.text.clone(),
-                            _ => return Err(self.error("Expected literal value after DEFAULT")),
-                        };
-                        self.advance();
-                        Some(lit)
-                    } else {
-                        None
-                    };
-                    alterations.push(TypeAlteration::AddProperty(PropertyDefinition {
-                        name: prop_name,
-                        data_type,
-                        nullable,
-                        default_value,
-                    }));
+                    alterations.push(TypeAlteration::AddProperty(
+                        self.parse_property_definition()?,
+                    ));
                 }
                 "DROP" => {
                     self.advance();
                     // DROP [PROPERTY] property_name
                     self.skip_property_keyword();
-                    if !self.is_identifier() {
+                    if !self.is_label_or_type_name() {
                         return Err(self.error("Expected property name after DROP"));
                     }
                     let prop_name = self.get_identifier_name();
@@ -6086,134 +6403,241 @@ impl<'a> Parser<'a> {
         )))
     }
 
-    fn parse_property_definitions(&mut self) -> Result<Vec<PropertyDefinition>> {
-        self.expect(TokenKind::LParen)?;
+    /// Reads a property type: a name, `ZONED DATETIME`, `LOCAL DATETIME`, or
+    /// `LIST<type>` (nested), returned in the canonical spelling
+    /// `PropertyDataType::from_type_name` reads: a single name as written (the
+    /// catalog ignores its case), the two-word types in capitals with one
+    /// space, and `LIST<...>` around its element type. The same string goes
+    /// into the WAL record of the statement, so replay reads the same type
+    /// (#569).
+    ///
+    /// The `LIST<` levels are counted, not recursed into, and at most
+    /// [`MAX_PROPERTY_VALUE_DEPTH`] are accepted, as deep as a property value
+    /// may be: a type of any depth is refused without a stack overflow.
+    ///
+    /// A name that is not a property type Grafeo supports is refused
+    /// (ISO/IEC 39075:2024 18.7 `<property value type>`, Syntax Rule 4); it
+    /// used to declare an `ANY` property. Returns the type's spelling and
+    /// what it takes as a `DEFAULT`.
+    fn parse_property_type_name(&mut self) -> Result<(String, PropertyTypeKind)> {
+        use crate::query::schema::{property_type_kind, unknown_property_type};
 
-        let mut defs = Vec::new();
-
-        if self.current.kind != TokenKind::RParen {
-            loop {
-                if !self.is_identifier() {
-                    return Err(self.error("Expected property name"));
-                }
-                let name = self.get_identifier_name();
-                self.advance();
-
-                if !self.is_identifier() {
-                    return Err(self.error("Expected type name"));
-                }
-                let data_type = self.get_identifier_name();
-                self.advance();
-
-                let nullable = if self.current.kind == TokenKind::Not {
-                    self.advance();
-                    if self.current.kind != TokenKind::Null {
-                        return Err(self.error("Expected NULL after NOT"));
-                    }
-                    self.advance();
-                    false
-                } else {
-                    true
-                };
-
-                // Optional DEFAULT <literal>
-                let default_value = if self.is_identifier()
-                    && self.get_identifier_name().eq_ignore_ascii_case("DEFAULT")
-                {
-                    self.advance();
-                    let lit = match self.current.kind {
-                        TokenKind::String
-                        | TokenKind::Integer
-                        | TokenKind::Float
-                        | TokenKind::True
-                        | TokenKind::False
-                        | TokenKind::Null => self.current.text.clone(),
-                        _ => return Err(self.error("Expected literal value after DEFAULT")),
-                    };
-                    self.advance();
-                    Some(lit)
-                } else {
-                    None
-                };
-
-                defs.push(PropertyDefinition {
-                    name,
-                    data_type,
-                    nullable,
-                    default_value,
-                });
-
-                if self.current.kind != TokenKind::Comma {
-                    break;
-                }
-                self.advance();
+        let mut levels = 0;
+        let (mut element, kind) = loop {
+            if !self.is_identifier() {
+                return Err(self.error("Expected type name"));
             }
-        }
+            let name = self.get_identifier_name();
 
-        self.expect(TokenKind::RParen)?;
-        Ok(defs)
+            if name.eq_ignore_ascii_case("LIST") && self.peek_kind() == TokenKind::Lt {
+                levels += 1;
+                if levels > MAX_PROPERTY_VALUE_DEPTH {
+                    return Err(self.error(&format!(
+                        "A property type nests at most {MAX_PROPERTY_VALUE_DEPTH} LIST<...> levels"
+                    )));
+                }
+                self.advance(); // LIST
+                self.advance(); // <
+                continue;
+            }
+            if name.eq_ignore_ascii_case("ZONED") || name.eq_ignore_ascii_case("LOCAL") {
+                self.advance();
+                let prefix = name.to_ascii_uppercase();
+                if !self.try_accept_identifier_keyword("DATETIME") {
+                    return Err(self.error(&format!("Expected DATETIME after {prefix}")));
+                }
+                break (format!("{prefix} DATETIME"), PropertyTypeKind::Other);
+            }
+            let Some(kind) = property_type_kind(&name) else {
+                return Err(self.error(&unknown_property_type(&name)));
+            };
+            self.advance();
+            break (name, kind);
+        };
+
+        for _ in 0..levels {
+            if self.current.kind != TokenKind::Gt {
+                return Err(self.error(&format!("Expected '>' to close LIST<{element}")));
+            }
+            self.advance();
+            element = format!("LIST<{element}>");
+        }
+        let kind = if levels == 0 {
+            kind
+        } else {
+            PropertyTypeKind::Other
+        };
+        Ok((element, kind))
+    }
+
+    /// Reads one property of type DDL (ISO/IEC 39075:2024 18.6
+    /// `<property type>`, and Grafeo's `DEFAULT`):
+    /// `name TYPE [NOT NULL] [DEFAULT literal]`.
+    ///
+    /// The name may be any name a property map takes as a key, keywords such
+    /// as `starts` or `match` included: an INSERT can write such a property,
+    /// so its type can declare it.
+    fn parse_property_definition(&mut self) -> Result<PropertyDefinition> {
+        if !self.is_label_or_type_name() {
+            return Err(self.error("Expected property name"));
+        }
+        let name = self.get_identifier_name();
+        self.advance();
+
+        let (data_type, kind) = self.parse_property_type_name()?;
+
+        let nullable = if self.current.kind == TokenKind::Not {
+            self.advance();
+            if self.current.kind != TokenKind::Null {
+                return Err(self.error("Expected NULL after NOT"));
+            }
+            self.advance();
+            false
+        } else {
+            true
+        };
+
+        let default_value = if self.try_accept_identifier_keyword("DEFAULT") {
+            Some(self.parse_default_literal(&data_type, kind, nullable)?)
+        } else {
+            None
+        };
+
+        Ok(PropertyDefinition {
+            name,
+            data_type,
+            nullable,
+            default_value,
+        })
+    }
+
+    /// Reads the literal after `DEFAULT` for a property of type `data_type`
+    /// (taking literals of `kind`): a string, a signed number (ISO/IEC
+    /// 39075:2024 21.2 `<signed numeric literal>`), `TRUE`, `FALSE` or
+    /// `NULL`. Returns it as [`PropertyDefinition::default_value`] spells it:
+    /// an integer default of a `FLOAT64` property as the float.
+    ///
+    /// A literal that is not a value of the type is refused, and so is `NULL`
+    /// for a `NOT NULL` property: they used to be accepted, and then every
+    /// insert that relied on the default failed.
+    fn parse_default_literal(
+        &mut self,
+        data_type: &str,
+        kind: PropertyTypeKind,
+        nullable: bool,
+    ) -> Result<String> {
+        let start = self.current.span.start;
+        let negative = match self.current.kind {
+            TokenKind::Minus | TokenKind::Plus => {
+                let negative = self.current.kind == TokenKind::Minus;
+                self.advance();
+                if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Float) {
+                    return Err(self.error("Expected a number after the sign of a DEFAULT"));
+                }
+                Some(negative)
+            }
+            _ => None,
+        };
+        let written = self
+            .source
+            .get(start..self.current.span.end)
+            .unwrap_or(&self.current.text)
+            .to_string();
+        let not_of_type = |parser: &Self| {
+            parser.error(&format!(
+                "DEFAULT {written} is not a value of type {data_type}"
+            ))
+        };
+
+        let spelled = match self.current.kind {
+            TokenKind::Null if nullable => "NULL".to_string(),
+            TokenKind::Null => {
+                return Err(self.error("DEFAULT NULL is not a value of a NOT NULL property"));
+            }
+            TokenKind::True | TokenKind::False => match kind {
+                PropertyTypeKind::Boolean | PropertyTypeKind::Any => {
+                    self.current.text.to_ascii_uppercase()
+                }
+                _ => return Err(not_of_type(self)),
+            },
+            TokenKind::String => match kind {
+                PropertyTypeKind::String | PropertyTypeKind::Any => {
+                    let text = &self.current.text;
+                    format!("'{}'", unescape_string(&text[1..text.len() - 1]))
+                }
+                _ => return Err(not_of_type(self)),
+            },
+            TokenKind::Integer => {
+                let Some(value) = integer_literal(&self.current.text, negative == Some(true))
+                else {
+                    return Err(self.error(&format!(
+                        "DEFAULT {written} is out of the INT64 range ({} to {})",
+                        i64::MIN,
+                        i64::MAX
+                    )));
+                };
+                match kind {
+                    PropertyTypeKind::Integer | PropertyTypeKind::Any => value.to_string(),
+                    PropertyTypeKind::Float => match exact_float(value) {
+                        Some(float) => format!("{float:?}"),
+                        None => {
+                            return Err(self.error(&format!(
+                                "DEFAULT {written} has no exact {data_type} value"
+                            )));
+                        }
+                    },
+                    _ => return Err(not_of_type(self)),
+                }
+            }
+            TokenKind::Float => match kind {
+                PropertyTypeKind::Float | PropertyTypeKind::Any => {
+                    let value: f64 = self
+                        .current
+                        .text
+                        .parse()
+                        .map_err(|_| self.error("Invalid float"))?;
+                    let value = if negative == Some(true) {
+                        -value
+                    } else {
+                        value
+                    };
+                    format!("{value:?}")
+                }
+                _ => return Err(not_of_type(self)),
+            },
+            _ => return Err(self.error("Expected literal value after DEFAULT")),
+        };
+        self.advance();
+        Ok(spelled)
+    }
+
+    /// Parses the property definitions of a type in parentheses:
+    /// `( name TYPE [NOT NULL] [DEFAULT literal], ... )`.
+    fn parse_property_definitions(&mut self) -> Result<Vec<PropertyDefinition>> {
+        self.parse_property_definition_list(TokenKind::LParen, TokenKind::RParen)
     }
 
     /// Parses property definitions inside braces: `{ name TYPE [NOT NULL], ... }`.
     ///
     /// Used by pattern-form graph type syntax where properties use `{}` instead of `()`.
     fn parse_property_definitions_braces(&mut self) -> Result<Vec<PropertyDefinition>> {
-        self.expect(TokenKind::LBrace)?;
+        self.parse_property_definition_list(TokenKind::LBrace, TokenKind::RBrace)
+    }
+
+    /// Parses property definitions separated by commas between `open` and
+    /// `close` (see [`Self::parse_property_definition`]).
+    fn parse_property_definition_list(
+        &mut self,
+        open: TokenKind,
+        close: TokenKind,
+    ) -> Result<Vec<PropertyDefinition>> {
+        self.expect(open)?;
 
         let mut defs = Vec::new();
 
-        if self.current.kind != TokenKind::RBrace {
+        if self.current.kind != close {
             loop {
-                if !self.is_identifier() {
-                    return Err(self.error("Expected property name"));
-                }
-                let name = self.get_identifier_name();
-                self.advance();
-
-                if !self.is_identifier() {
-                    return Err(self.error("Expected type name"));
-                }
-                let data_type = self.get_identifier_name();
-                self.advance();
-
-                let nullable = if self.current.kind == TokenKind::Not {
-                    self.advance();
-                    if self.current.kind != TokenKind::Null {
-                        return Err(self.error("Expected NULL after NOT"));
-                    }
-                    self.advance();
-                    false
-                } else {
-                    true
-                };
-
-                // Optional DEFAULT <literal>
-                let default_value = if self.is_identifier()
-                    && self.get_identifier_name().eq_ignore_ascii_case("DEFAULT")
-                {
-                    self.advance();
-                    let lit = match self.current.kind {
-                        TokenKind::String
-                        | TokenKind::Integer
-                        | TokenKind::Float
-                        | TokenKind::True
-                        | TokenKind::False
-                        | TokenKind::Null => self.current.text.clone(),
-                        _ => return Err(self.error("Expected literal value after DEFAULT")),
-                    };
-                    self.advance();
-                    Some(lit)
-                } else {
-                    None
-                };
-
-                defs.push(PropertyDefinition {
-                    name,
-                    data_type,
-                    nullable,
-                    default_value,
-                });
-
+                defs.push(self.parse_property_definition()?);
                 if self.current.kind != TokenKind::Comma {
                     break;
                 }
@@ -6221,7 +6645,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        self.expect(TokenKind::RBrace)?;
+        self.expect(close)?;
         Ok(defs)
     }
 
@@ -6356,6 +6780,21 @@ impl<'a> Parser<'a> {
             .as_ref()
             .expect("peeked token was just populated")
             .kind
+    }
+
+    /// Whether the current token starts `=~`: a `=` with a `~` right after
+    /// it. An expression never starts with `~`, so after an operand this is
+    /// the regular expression match; with a space between (`= ~`) it is
+    /// not, as in Cypher, where `=~` is one token. A path variable before
+    /// an undirected edge (`p=~[e]~(b)`) is not read as an expression.
+    fn at_regex_match(&mut self) -> bool {
+        if self.current.kind != TokenKind::Eq || self.peek_kind() != TokenKind::Tilde {
+            return false;
+        }
+        let equals_end = self.current.span.end;
+        self.peeked
+            .as_ref()
+            .is_some_and(|tilde| tilde.span.start == equals_end)
     }
 
     /// Peeks at the token after the next token (two-token lookahead).
@@ -7058,9 +7497,63 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Whether `a op b op c` means the same however it is grouped, so a chain of
+/// `op` can be a balanced tree: the unions, the intersections and
+/// `OTHERWISE`, not `EXCEPT` or `NEXT`.
+fn is_associative(op: CompositeOp) -> bool {
+    match op {
+        CompositeOp::Union
+        | CompositeOp::UnionAll
+        | CompositeOp::Intersect
+        | CompositeOp::IntersectAll
+        | CompositeOp::Otherwise => true,
+        CompositeOp::Except | CompositeOp::ExceptAll | CompositeOp::Next => false,
+    }
+}
+
+/// What a property type of type DDL takes as a `DEFAULT`.
+type PropertyTypeKind = crate::query::schema::PropertyTypeKind;
+
+/// The value of the integer literal `text` (decimal, or `0x`, `0o`, `0b`
+/// digits), negated when `negative`; `None` when it is out of the INT64
+/// range. The sign counts before the range check, so the smallest INT64,
+/// `-9223372036854775808`, is a literal.
+fn integer_literal(text: &str, negative: bool) -> Option<i64> {
+    let (digits, radix) = match text.get(..2) {
+        Some("0x" | "0X") => (&text[2..], 16),
+        Some("0o" | "0O") => (&text[2..], 8),
+        Some("0b" | "0B") => (&text[2..], 2),
+        _ => (text, 10),
+    };
+    let magnitude = i128::from(u64::from_str_radix(digits, radix).ok()?);
+    i64::try_from(if negative { -magnitude } else { magnitude }).ok()
+}
+
+/// `value` as a float, when the float is exactly `value`: every integer up to
+/// 2^53 in magnitude, and the larger ones a float holds.
+fn exact_float(value: i64) -> Option<f64> {
+    let decimal = value.to_string();
+    let float: f64 = decimal.parse().ok()?;
+    // A float that holds an integer prints as that integer without
+    // fractional digits; the nearest float to another integer prints as a
+    // different one.
+    (format!("{float:.0}") == decimal).then_some(float)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first WHERE or FILTER among the clauses of `query`.
+    fn filter_of(query: &QueryStatement) -> Option<WhereClause> {
+        query
+            .ordered_clauses
+            .iter()
+            .find_map(|clause| match clause {
+                QueryClause::Filter(filter) => Some(filter.clone()),
+                _ => None,
+            })
+    }
 
     #[test]
     fn test_parse_simple_match() {
@@ -7094,11 +7587,8 @@ mod tests {
         let mut parser = Parser::new("MATCH (n:Person) WHERE n.age > 30 RETURN n");
         let result = parser.parse().unwrap();
         if let Statement::Query(query) = result {
-            assert!(
-                query.where_clause.is_some(),
-                "WHERE clause should be parsed"
-            );
-            let where_clause = query.where_clause.as_ref().unwrap();
+            assert!(filter_of(&query).is_some(), "WHERE clause should be parsed");
+            let where_clause = filter_of(&query).unwrap();
             if let Expression::Binary { op, .. } = &where_clause.expression {
                 assert_eq!(*op, BinaryOp::Gt);
             } else {
@@ -7107,6 +7597,109 @@ mod tests {
         } else {
             panic!("Expected Query statement");
         }
+    }
+
+    /// The WHERE expression of `query`, a GQL query statement.
+    fn where_expression(query: &str) -> Expression {
+        let Statement::Query(statement) = Parser::new(query).parse().unwrap() else {
+            panic!("{query} is not a query statement");
+        };
+        filter_of(&statement)
+            .unwrap_or_else(|| panic!("{query} has no WHERE"))
+            .expression
+    }
+
+    /// Whether `expression` is `left =~ right` with a string literal `right`.
+    fn is_regex_match(expression: &Expression, pattern: &str) -> bool {
+        matches!(
+            expression,
+            Expression::Binary { op: BinaryOp::RegexMatch, right, .. }
+                if matches!(right.as_ref(), Expression::Literal(Literal::String(p)) if p == pattern)
+        )
+    }
+
+    #[test]
+    fn regex_match_parses_as_a_comparison() {
+        let expression =
+            where_expression("MATCH (n) WHERE n.path =~ '.*(test|spec).*' RETURN n.path");
+        assert!(
+            is_regex_match(&expression, ".*(test|spec).*"),
+            "{expression:?}"
+        );
+        let Expression::Binary { left, .. } = &expression else {
+            unreachable!()
+        };
+        assert!(
+            matches!(left.as_ref(), Expression::PropertyAccess { variable, property }
+                if variable == "n" && property == "path"),
+            "{left:?}"
+        );
+    }
+
+    #[test]
+    fn regex_match_binds_like_the_other_comparisons() {
+        // Looser than `||`, tighter than AND and NOT, as `=~` in Cypher.
+        let expression =
+            where_expression("MATCH (n) WHERE n.a || 'x' =~ 'ax' AND n.b = 3 RETURN n");
+        let Expression::Binary {
+            left,
+            op: BinaryOp::And,
+            ..
+        } = &expression
+        else {
+            panic!("AND is not the top operator: {expression:?}");
+        };
+        assert!(is_regex_match(left, "ax"), "{left:?}");
+        let Expression::Binary { left: operand, .. } = left.as_ref() else {
+            unreachable!()
+        };
+        assert!(
+            matches!(
+                operand.as_ref(),
+                Expression::Binary {
+                    op: BinaryOp::Concat,
+                    ..
+                }
+            ),
+            "the left operand is not `n.a || 'x'`: {operand:?}"
+        );
+
+        let negated = where_expression("MATCH (n) WHERE NOT n.a =~ 'x.*' RETURN n");
+        assert!(
+            matches!(&negated, Expression::Unary { op: UnaryOp::Not, operand }
+                if is_regex_match(operand, "x.*")),
+            "{negated:?}"
+        );
+    }
+
+    #[test]
+    fn regex_match_parses_in_return_and_set() {
+        let Statement::Query(query) = Parser::new("MATCH (n) RETURN n.path =~ 'src/.*' AS in_src")
+            .parse()
+            .unwrap()
+        else {
+            panic!("not a query");
+        };
+        let item = &query.return_clause.items[0];
+        assert!(is_regex_match(&item.expression, "src/.*"), "{item:?}");
+
+        let set = Parser::new("MATCH (n) SET n.in_src = n.path =~ 'src/.*'").parse();
+        assert!(set.is_ok(), "{set:?}");
+    }
+
+    #[test]
+    fn equals_then_a_tilde_with_a_space_is_not_a_regex_match() {
+        // `=~` is one operator, as in Cypher: `= ~` is an equality with no
+        // right operand.
+        let result = Parser::new("MATCH (n) WHERE n.a = ~'x' RETURN n").parse();
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    #[test]
+    fn a_path_variable_before_an_undirected_edge_still_parses() {
+        // `p=~[e]~(b)` is a path variable and an undirected edge, not `=~`.
+        let result = Parser::new("MATCH p=~[e]~(b) RETURN p").parse();
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
@@ -7238,7 +7831,7 @@ mod tests {
 
         if let Statement::Query(query) = result.unwrap() {
             // Check that the WHERE clause contains a parameter
-            let where_clause = query.where_clause.as_ref().expect("Expected WHERE clause");
+            let where_clause = filter_of(&query).expect("Expected WHERE clause");
             if let Expression::Binary { right, .. } = &where_clause.expression {
                 if let Expression::Parameter(name) = right.as_ref() {
                     assert_eq!(name, "min_age");
@@ -7543,7 +8136,7 @@ mod tests {
         assert!(result.is_ok(), "Parse error: {:?}", result.err());
 
         if let Statement::Query(query) = result.unwrap() {
-            let where_clause = query.where_clause.as_ref().expect("Expected WHERE clause");
+            let where_clause = filter_of(&query).expect("Expected WHERE clause");
             if let Expression::Binary { left, .. } = &where_clause.expression {
                 if let Expression::FunctionCall { name, args, .. } = left.as_ref() {
                     assert_eq!(name, "cosine_similarity");
@@ -7625,7 +8218,7 @@ mod tests {
         assert!(result.is_ok(), "Parse error: {:?}", result.err());
 
         if let Statement::Query(q) = result.unwrap() {
-            let where_clause = q.where_clause.expect("Expected WHERE clause");
+            let where_clause = filter_of(&q).expect("Expected WHERE clause");
             if let WhereClause {
                 expression: Expression::Binary { op, right, .. },
                 ..
@@ -7655,7 +8248,7 @@ mod tests {
         assert!(result.is_ok(), "Parse error: {:?}", result.err());
 
         if let Statement::Query(q) = result.unwrap() {
-            let where_clause = q.where_clause.expect("Expected WHERE clause");
+            let where_clause = filter_of(&q).expect("Expected WHERE clause");
             if let WhereClause {
                 expression: Expression::Binary { right, .. },
                 ..
@@ -7677,7 +8270,7 @@ mod tests {
         assert!(result.is_ok(), "Parse error: {:?}", result.err());
 
         if let Statement::Query(q) = result.unwrap() {
-            let where_clause = q.where_clause.expect("Expected WHERE clause");
+            let where_clause = filter_of(&q).expect("Expected WHERE clause");
             if let WhereClause {
                 expression: Expression::Binary { right, .. },
                 ..
@@ -7737,6 +8330,8 @@ mod tests {
         let mut parser = Parser::new("MATCH (n) WHERE n.a = 1 WHERE n.b = 2 RETURN n");
         let result = parser.parse();
         assert!(result.is_err(), "Double WHERE should fail");
+        let err = parse_err("MATCH (n) FILTER n.a = 1 WHERE n.b = 2 RETURN n");
+        assert!(err.contains("combine the conditions with AND"), "{err}");
     }
 
     #[test]
@@ -7798,6 +8393,70 @@ mod tests {
         );
     }
 
+    /// The types of the first edge of `query`'s first MATCH.
+    fn first_edge_types(query: &str) -> Vec<String> {
+        let Ok(Statement::Query(query)) = Parser::new(query).parse() else {
+            panic!("{query}: expected a query");
+        };
+        let Pattern::Path(path) = &query.match_clauses[0].patterns[0].pattern else {
+            panic!("expected a path");
+        };
+        path.edges[0].types.clone()
+    }
+
+    #[test]
+    fn an_edge_has_one_type_or_alternatives() {
+        // A disjunction of label names (ISO/IEC 39075:2024, 16.8)
+        assert_eq!(first_edge_types("MATCH (a)-[:A]->(b) RETURN b"), ["A"]);
+        assert_eq!(
+            first_edge_types("MATCH (a)<-[e:A|`Graph:CONTAINS`*1..3]-(b) RETURN b"),
+            ["A", "Graph:CONTAINS"]
+        );
+        assert_eq!(
+            first_edge_types("MATCH (a)~[:A|B]~(b) RETURN b"),
+            ["A", "B"]
+        );
+        // A second `:` is no label expression, and an edge with two labels
+        // (`&`) would match none: in every bracket form, MATCH and INSERT
+        for (query, joint) in [
+            ("MATCH (a)-[:Graph:CONTAINS]->(b) RETURN b", ':'),
+            ("MATCH (a)<-[:Graph:CONTAINS*]-(b) RETURN b", ':'),
+            ("MATCH (a)~[:Graph:CONTAINS]~(b) RETURN b", ':'),
+            ("MATCH (a)-[:A|Graph:CONTAINS]->{1,3}(b) RETURN b", ':'),
+            ("INSERT (a)-[:Graph:CONTAINS]->(b)", ':'),
+            ("MATCH (a)-[:Graph&CONTAINS]->(b) RETURN b", '&'),
+            ("INSERT (a)-[:Graph&CONTAINS]->(b)", '&'),
+        ] {
+            let err = parse_err(query);
+            for advice in [
+                format!(":`Graph{joint}CONTAINS`"),
+                ":Graph|CONTAINS".to_string(),
+            ] {
+                assert!(err.contains(&advice), "{query}: names {advice}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_inserted_edge_has_one_type() {
+        for query in [
+            "INSERT (a)-[:A|B]->(b)",
+            "MATCH (a), (b) INSERT (a)-[:A]->(b), (b)-[:A|B]->(a)",
+            "MATCH (a), (b) CREATE (a)-[:A|B]->(b)",
+            "MATCH (a) MERGE (a)-[:A|B]->(b:N)",
+        ] {
+            let err = parse_err(query);
+            assert!(
+                err.contains("one type") && err.contains(":A|B"),
+                "{query}: {err}"
+            );
+        }
+        assert_eq!(
+            first_edge_types("MATCH (a)-[:A|B]->(b) INSERT (a)-[:A]->(b)"),
+            ["A", "B"]
+        );
+    }
+
     #[test]
     fn test_trailing_input_is_rejected() {
         let err = parse_err("MATCH (n) RETURN n garbage");
@@ -7806,9 +8465,9 @@ mod tests {
             "{err}"
         );
 
-        // Clause orders the parser does not support fail loudly instead of
+        // A clause after the result statement fails loudly instead of
         // silently dropping the rest of the statement.
-        let err = parse_err("MATCH (n) SET n.x = 1 DELETE n");
+        let err = parse_err("MATCH (n) RETURN n DELETE n");
         assert!(err.contains("unexpected 'DELETE'"), "{err}");
         assert!(err.contains("not supported at this position"), "{err}");
     }
@@ -7912,6 +8571,105 @@ mod tests {
             properties("ALTER NODE TYPE Sensor ADD `property` STRING"),
             vec![pair("property", "STRING")]
         );
+        assert_eq!(
+            properties("ALTER NODE TYPE Sensor ADD seen local datetime NOT NULL"),
+            vec![pair("seen", "LOCAL DATETIME")]
+        );
+    }
+
+    /// The property types of #569: `ZONED DATETIME`, `LOCAL DATETIME` and
+    /// `LIST<type>`, nested, in the spelling the catalog reads back.
+    #[test]
+    fn test_property_types_with_two_words_and_typed_lists() {
+        let types = |query: &str| -> Vec<(String, String, bool)> {
+            let Statement::Schema(SchemaStatement::CreateNodeType(stmt)) =
+                Parser::new(query).parse().unwrap()
+            else {
+                panic!("{query}: expected CREATE NODE TYPE");
+            };
+            stmt.properties
+                .into_iter()
+                .map(|def| (def.name, def.data_type, def.nullable))
+                .collect()
+        };
+        let property = |name: &str, data_type: &str, nullable: bool| {
+            (name.to_string(), data_type.to_string(), nullable)
+        };
+
+        assert_eq!(
+            types("CREATE NODE TYPE T (a ZONED DATETIME, b LIST<LIST<STRING>> NOT NULL)"),
+            vec![
+                property("a", "ZONED DATETIME", true),
+                property("b", "LIST<LIST<STRING>>", false),
+            ]
+        );
+        assert_eq!(
+            types(
+                "CREATE NODE TYPE T (a local datetime DEFAULT NULL, \
+                 b list<zoned datetime>, c LIST, d STRING)"
+            ),
+            vec![
+                property("a", "LOCAL DATETIME", true),
+                property("b", "LIST<ZONED DATETIME>", true),
+                property("c", "LIST", true),
+                property("d", "STRING", true),
+            ]
+        );
+
+        let Statement::Schema(SchemaStatement::CreateGraphType(stmt)) = Parser::new(
+            "CREATE GRAPH TYPE g ((:Stop {at ZONED DATETIME})-[:LEG {at LIST<LOCAL DATETIME>}]->(:Stop))",
+        )
+        .parse()
+        .unwrap() else {
+            panic!("expected CREATE GRAPH TYPE");
+        };
+        let inline_types: Vec<String> = stmt
+            .inline_types
+            .iter()
+            .flat_map(|inline| match inline {
+                InlineElementType::Node { properties, .. }
+                | InlineElementType::Edge { properties, .. } => properties,
+            })
+            .map(|def| def.data_type.clone())
+            .collect();
+        assert_eq!(inline_types, ["ZONED DATETIME", "LIST<LOCAL DATETIME>"]);
+
+        for (query, expected) in [
+            ("CREATE NODE TYPE T (a ZONED TIME)", "Expected DATETIME"),
+            ("CREATE NODE TYPE T (a LOCAL)", "Expected DATETIME"),
+            ("CREATE NODE TYPE T (a LIST<STRING)", "Expected '>'"),
+            ("CREATE NODE TYPE T (a LIST<)", "Expected type name"),
+            ("CREATE NODE TYPE T (a LIST<LIST<STRING>)", "Expected '>'"),
+        ] {
+            let error = Parser::new(query).parse().unwrap_err().to_string();
+            assert!(error.contains(expected), "{query}: {error}");
+        }
+    }
+
+    /// A property type nests at most 128 `LIST<...>` levels, as deep as a
+    /// property value may be; a deeper one, however deep, is refused with the
+    /// limit named, without a stack overflow.
+    #[test]
+    fn test_property_types_nest_at_most_128_lists() {
+        let nested =
+            |levels: usize| format!("{}STRING{}", "LIST<".repeat(levels), ">".repeat(levels));
+        let query = |levels: usize| format!("CREATE NODE TYPE T (a {} NOT NULL)", nested(levels));
+
+        let Statement::Schema(SchemaStatement::CreateNodeType(stmt)) =
+            Parser::new(&query(128)).parse().unwrap()
+        else {
+            panic!("expected CREATE NODE TYPE");
+        };
+        assert_eq!(stmt.properties[0].data_type, nested(128));
+        assert!(!stmt.properties[0].nullable);
+
+        for levels in [129, 100_000] {
+            let error = Parser::new(&query(levels)).parse().unwrap_err().to_string();
+            assert!(
+                error.contains("at most 128 LIST<...> levels"),
+                "{levels} levels: {error}"
+            );
+        }
     }
 
     #[test]
@@ -7956,7 +8714,7 @@ mod tests {
         assert!(result.is_ok(), "XOR should parse: {:?}", result.err());
 
         if let Statement::Query(q) = result.unwrap() {
-            let where_clause = q.where_clause.expect("Expected WHERE clause");
+            let where_clause = filter_of(&q).expect("Expected WHERE clause");
             if let Expression::Binary { op, .. } = &where_clause.expression {
                 assert_eq!(*op, BinaryOp::Xor);
             } else {
@@ -8422,6 +9180,146 @@ mod tests {
         }
     }
 
+    /// ISO/IEC 39075:2024 puts the match mode before the path pattern prefix:
+    /// `MATCH DIFFERENT EDGES TRAIL (...)`. The path mode first still parses.
+    #[test]
+    fn a_match_mode_and_a_path_mode_parse_in_either_order() {
+        for (query, mode) in [
+            (
+                "MATCH DIFFERENT EDGES TRAIL (a)-[]->(b) RETURN a",
+                MatchMode::DifferentEdges,
+            ),
+            (
+                "MATCH TRAIL DIFFERENT EDGES (a)-[]->(b) RETURN a",
+                MatchMode::DifferentEdges,
+            ),
+            (
+                "MATCH REPEATABLE ELEMENTS TRAIL (a)-[]->(b) RETURN a",
+                MatchMode::RepeatableElements,
+            ),
+        ] {
+            let Statement::Query(q) = Parser::new(query).parse().unwrap() else {
+                panic!("expected a query: {query}");
+            };
+            assert_eq!(
+                q.match_clauses[0].path_mode,
+                Some(PathMode::Trail),
+                "{query}"
+            );
+            assert_eq!(q.match_clauses[0].match_mode, Some(mode), "{query}");
+        }
+    }
+
+    /// The path pattern prefixes of ISO/IEC 39075:2024 16.6: each search
+    /// prefix with its optional path mode and `PATH` or `PATHS`, after the
+    /// path variable or after MATCH, where they are the clause's.
+    #[test]
+    fn path_pattern_prefixes_parse_with_their_path_modes() {
+        use PathSearchPrefix as Prefix;
+        for (prefix, search, mode) in [
+            ("TRAIL", None, Some(PathMode::Trail)),
+            ("ACYCLIC PATHS", None, Some(PathMode::Acyclic)),
+            ("ALL", Some(Prefix::All), None),
+            ("ALL SIMPLE PATH", Some(Prefix::All), Some(PathMode::Simple)),
+            ("ANY", Some(Prefix::Any), None),
+            ("ANY TRAIL", Some(Prefix::Any), Some(PathMode::Trail)),
+            (
+                "ANY 3 ACYCLIC PATHS",
+                Some(Prefix::AnyK(3)),
+                Some(PathMode::Acyclic),
+            ),
+            (
+                "ANY SHORTEST WALK",
+                Some(Prefix::AnyShortest),
+                Some(PathMode::Walk),
+            ),
+            (
+                "ALL SHORTEST TRAIL PATHS",
+                Some(Prefix::AllShortest),
+                Some(PathMode::Trail),
+            ),
+            ("SHORTEST 19", Some(Prefix::ShortestK(19)), None),
+            (
+                "SHORTEST 3 SIMPLE PATHS",
+                Some(Prefix::ShortestK(3)),
+                Some(PathMode::Simple),
+            ),
+            ("SHORTEST GROUPS", Some(Prefix::ShortestKGroups(1)), None),
+            (
+                "SHORTEST 2 TRAIL PATH GROUP",
+                Some(Prefix::ShortestKGroups(2)),
+                Some(PathMode::Trail),
+            ),
+        ] {
+            let query = format!("MATCH p = {prefix} (a)-[:KNOWS]->+(b) RETURN p");
+            let Statement::Query(q) = Parser::new(&query).parse().unwrap() else {
+                panic!("expected a query: {query}");
+            };
+            let pattern = &q.match_clauses[0].patterns[0];
+            assert_eq!(pattern.alias.as_deref(), Some("p"), "{query}");
+            assert_eq!(pattern.search_prefix, search, "{query}");
+            assert_eq!(pattern.path_mode, mode, "{query}");
+
+            let query = format!("MATCH {prefix} (a)-[:KNOWS]->+(b) RETURN a");
+            let Statement::Query(q) = Parser::new(&query).parse().unwrap() else {
+                panic!("expected a query: {query}");
+            };
+            assert_eq!(q.match_clauses[0].search_prefix, search, "{query}");
+            assert_eq!(q.match_clauses[0].path_mode, mode, "{query}");
+        }
+    }
+
+    /// A path variable may be named `path`, and a later pattern of a MATCH
+    /// takes a prefix of its own.
+    #[test]
+    fn a_prefix_keyword_is_not_a_path_variable() {
+        let query = "MATCH ANY path = (a)-[:KNOWS]->+(b), ANY SHORTEST TRAIL (b)-[:KNOWS]->+(c) \
+                     RETURN path";
+        let Statement::Query(q) = Parser::new(query).parse().unwrap() else {
+            panic!("expected a query");
+        };
+        let clause = &q.match_clauses[0];
+        assert_eq!(clause.search_prefix, Some(PathSearchPrefix::Any));
+        assert_eq!(clause.patterns[0].alias.as_deref(), Some("path"));
+        assert_eq!(clause.patterns[0].search_prefix, None);
+        assert_eq!(
+            clause.patterns[1].search_prefix,
+            Some(PathSearchPrefix::AnyShortest)
+        );
+        assert_eq!(clause.patterns[1].path_mode, Some(PathMode::Trail));
+    }
+
+    #[test]
+    fn a_wrong_path_pattern_prefix_is_a_syntax_error() {
+        for (query, message) in [
+            ("MATCH ANY 0 (a)-->(b) RETURN a", "at least 1"),
+            (
+                "MATCH SHORTEST 0 GROUPS (a)-->(b) RETURN a",
+                "number of groups",
+            ),
+            (
+                "MATCH ANY 99999999999999999999999 (a)-->(b) RETURN a",
+                "too large",
+            ),
+            (
+                "MATCH TRAIL ANY SHORTEST ACYCLIC (a)-->(b) RETURN a",
+                "path mode",
+            ),
+            ("MATCH TRAIL p = ACYCLIC (a)-->(b) RETURN a", "path mode"),
+            (
+                "MATCH ANY p = ANY SHORTEST (a)-->(b) RETURN a",
+                "search prefix",
+            ),
+            (
+                "MATCH (a)-->(b) | ANY (a)-->(c) RETURN a",
+                "whole alternation",
+            ),
+        ] {
+            let error = Parser::new(query).parse().unwrap_err().to_string();
+            assert!(error.contains(message), "{query}: {error}");
+        }
+    }
+
     #[test]
     fn test_parse_no_path_mode_default() {
         let mut parser = Parser::new("MATCH (a)-[:KNOWS*]->(b) RETURN a, b");
@@ -8521,7 +9419,7 @@ mod tests {
         );
 
         if let Statement::Query(q) = result.unwrap() {
-            assert!(q.where_clause.is_some());
+            assert!(filter_of(&q).is_some());
         } else {
             panic!("Expected Query statement");
         }
@@ -10307,6 +11205,80 @@ mod tests {
         }
     }
 
+    /// ISO/IEC 39075:2024 writes a graph type's elements in braces
+    /// (`<nested graph type specification>`): the brace form declares the
+    /// same element types, with their properties and endpoints, as Grafeo's
+    /// paren form. It used to keep the type names only.
+    #[test]
+    fn test_parse_graph_type_brace_form_declares_what_the_paren_form_declares() {
+        let elements = "(:City {name STRING NOT NULL, country STRING DEFAULT 'NL'})\
+             -[:ROUTE {km INT64}]->(:City), \
+             (:Country {code STRING}), (:City)<-[:CAPITAL]-(:Country)";
+        let parse = |query: String| match Parser::new(&query).parse() {
+            Ok(Statement::Schema(SchemaStatement::CreateGraphType(stmt))) => stmt,
+            other => panic!("{query}: expected CreateGraphType, got {other:?}"),
+        };
+        let brace = parse(format!("CREATE GRAPH TYPE routes {{ {elements} }}"));
+        let paren = parse(format!("CREATE GRAPH TYPE routes ( {elements} )"));
+
+        assert_eq!(format!("{brace:?}"), format!("{paren:?}"));
+        assert_eq!(brace.node_types, ["City", "Country"]);
+        assert_eq!(brace.edge_types, ["ROUTE", "CAPITAL"]);
+        assert!(!brace.open, "an element list closes the graph type");
+        let declared: Vec<String> = brace
+            .inline_types
+            .iter()
+            .map(|element| match element {
+                InlineElementType::Node {
+                    name, properties, ..
+                } => format!("{name} {properties:?}"),
+                InlineElementType::Edge {
+                    name,
+                    properties,
+                    source_node_types,
+                    target_node_types,
+                    ..
+                } => format!("{source_node_types:?}-{name}->{target_node_types:?} {properties:?}"),
+            })
+            .collect();
+        assert_eq!(declared.len(), 4, "{declared:#?}");
+        assert!(
+            declared[0].starts_with("City ")
+                && declared[0].contains("name: \"name\"")
+                && declared[0].contains("default_value: Some(\"'NL'\")"),
+            "{declared:#?}"
+        );
+        assert!(
+            declared[1].starts_with("[\"City\"]-ROUTE->[\"City\"]")
+                && declared[1].contains("name: \"km\""),
+            "{declared:#?}"
+        );
+        assert!(
+            declared[2].starts_with("Country ") && declared[2].contains("name: \"code\""),
+            "{declared:#?}"
+        );
+        assert!(
+            declared[3].starts_with("[\"Country\"]-CAPITAL->[\"City\"]"),
+            "{declared:#?}"
+        );
+    }
+
+    /// The brace form with the keys `node_types`, `edge_types` and `open`
+    /// still lists type names without declaring them.
+    #[test]
+    fn test_parse_graph_type_brace_form_with_type_lists_declares_nothing() {
+        let query = "CREATE GRAPH TYPE g { node_types: [City], edge_types: [ROUTE], open: true }";
+        match Parser::new(query).parse() {
+            Ok(Statement::Schema(SchemaStatement::CreateGraphType(stmt))) => {
+                assert_eq!(stmt.node_types, ["City"]);
+                assert_eq!(stmt.edge_types, ["ROUTE"]);
+                assert!(stmt.open);
+                assert!(stmt.inline_types.is_empty(), "{:?}", stmt.inline_types);
+            }
+            other => panic!("{query}: expected CreateGraphType, got {other:?}"),
+        }
+    }
+
     // ==================== SHOW commands ====================
 
     #[test]
@@ -10574,8 +11546,8 @@ mod tests {
             panic!("Expected Query statements");
         };
         assert_eq!(q_upper.match_clauses.len(), q_lower.match_clauses.len());
-        assert!(q_upper.where_clause.is_some());
-        assert!(q_lower.where_clause.is_some());
+        assert!(filter_of(q_upper).is_some());
+        assert!(filter_of(q_lower).is_some());
         assert_eq!(
             q_upper.return_clause.items.len(),
             q_lower.return_clause.items.len()
@@ -10783,14 +11755,106 @@ mod tests {
 
     #[test]
     fn test_nesting_at_exact_limit_succeeds() {
-        // 128 levels should succeed (limit is > 128, not >=)
-        let depth = 128;
-        let deep = "(".repeat(depth) + "1" + &")".repeat(depth);
-        let query = format!("RETURN {deep}");
-        let mut parser = Parser::new(&query);
-        // At the limit: this may succeed or fail depending on how many nesting
-        // points accumulate. The important thing is no stack overflow.
-        let _ = parser.parse();
+        use crate::query::limits::MAX_NESTING_DEPTH;
+        // The RETURN item is an expression (one level), each pair of
+        // parentheses one more: the limit itself is accepted, one more not.
+        let at_limit = MAX_NESTING_DEPTH as usize - 1;
+        let parse = |depth: usize| {
+            let deep = "(".repeat(depth) + "1" + &")".repeat(depth);
+            Parser::new(&format!("RETURN {deep}")).parse()
+        };
+        assert!(parse(at_limit).is_ok(), "the limit is inclusive");
+        let error = parse(at_limit + 1).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("nesting depth of {MAX_NESTING_DEPTH}")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_chains_of_operators_count_toward_the_nesting_limit() {
+        use crate::query::limits::MAX_NESTING_DEPTH;
+        // `1 + 1 + ... + 1` with n operators nests n levels in the expression
+        // of the RETURN item, which nests one: a chain is parsed in a loop,
+        // but every later stage recurses into the tree it builds.
+        let operators = MAX_NESTING_DEPTH as usize - 1;
+        let sum = |operators: usize| {
+            let terms = vec!["1"; operators + 1].join(" + ");
+            Parser::new(&format!("RETURN {terms}")).parse()
+        };
+        assert!(sum(operators).is_ok());
+        assert!(sum(operators + 1).is_err());
+        // A chain over parenthesized operands counts the deeper side once:
+        // (1 + 1) + (1 + 1) + ... nests one level per operator plus two.
+        let pairs = |count: usize| {
+            let terms = vec!["(1 + 1)"; count].join(" + ");
+            Parser::new(&format!("RETURN {terms}")).parse()
+        };
+        assert!(pairs(operators - 2).is_ok());
+        assert!(pairs(operators).is_err());
+        // A long chain fails with the limit, without a stack overflow.
+        let error = sum(100_000).unwrap_err().to_string();
+        assert!(error.contains("nesting depth"), "{error}");
+    }
+
+    #[test]
+    fn test_and_or_xor_and_union_chains_are_balanced_trees() {
+        /// The depth of the tree of `op` at `expression`, and its leaves.
+        fn shape(expression: &Expression, op: BinaryOp, leaves: &mut Vec<i64>) -> usize {
+            match expression {
+                Expression::Binary {
+                    left,
+                    op: found,
+                    right,
+                } if *found == op => 1 + shape(left, op, leaves).max(shape(right, op, leaves)),
+                Expression::Literal(Literal::Integer(leaf)) => {
+                    leaves.push(*leaf);
+                    0
+                }
+                other => panic!("an operand of {op:?} or a leaf: {other:?}"),
+            }
+        }
+        for (keyword, op) in [
+            ("OR", BinaryOp::Or),
+            ("AND", BinaryOp::And),
+            ("XOR", BinaryOp::Xor),
+        ] {
+            let terms: Vec<String> = (0..100_000).map(|i| i.to_string()).collect();
+            let query = format!("RETURN {} AS v", terms.join(&format!(" {keyword} ")));
+            let statement = Parser::new(&query).parse().unwrap();
+            let Statement::Query(query) = statement else {
+                panic!("a query")
+            };
+            let mut leaves = Vec::new();
+            let depth = shape(&query.return_clause.items[0].expression, op, &mut leaves);
+            assert_eq!(depth, 17, "{keyword}: ceil(log2(100,000)) levels");
+            assert_eq!(
+                leaves,
+                (0..100_000).collect::<Vec<i64>>(),
+                "{keyword}: in order"
+            );
+        }
+        // A chain of one associative set operator is balanced too; EXCEPT
+        // still nests one level per operator.
+        let union = vec!["RETURN 3 AS v"; 10_000].join(" UNION ALL ");
+        assert!(Parser::new(&union).parse().is_ok());
+        let except = |count: usize| {
+            let query = vec!["RETURN 3 AS v"; count].join(" EXCEPT ");
+            Parser::new(&query).parse()
+        };
+        let limit = crate::query::limits::MAX_NESTING_DEPTH as usize;
+        assert!(except(limit / 2).is_ok());
+        assert!(except(limit + 2).is_err());
+        // An operand deeper than the rest counts where it sits in the tree.
+        let deep = format!("{}3{}", "(".repeat(55), ")".repeat(55));
+        let chain = |count: usize| {
+            let mut terms = vec!["3".to_string(); count];
+            terms[0] = deep.clone();
+            Parser::new(&format!("RETURN {}", terms.join(" OR "))).parse()
+        };
+        // The expression, 55 parentheses and the joins above the operand.
+        assert!(chain(64).is_ok(), "six joins above the operand");
+        assert!(chain(1_000).is_err(), "ten joins above the operand");
     }
 
     #[test]
@@ -11148,6 +12212,75 @@ mod tests {
         );
     }
 
+    /// The options of `CREATE INDEX ... USING TEXT {...}` reach the statement.
+    #[test]
+    fn create_text_index_takes_bm25_tokenizer_and_stop_word_options() {
+        let parsed = Parser::new(
+            "CREATE INDEX notes FOR (n:Note) ON (n.body) USING TEXT \
+             {K1: 1.5, b: 0, tokenizer: 'cjk_bigram', stop_words: ['и', \"в\"]}",
+        )
+        .parse()
+        .expect("text index options parse");
+        let Statement::Schema(SchemaStatement::CreateIndex(stmt)) = parsed else {
+            panic!("a CREATE INDEX statement: {parsed:?}");
+        };
+        assert_eq!(stmt.index_kind, IndexKind::Text);
+        assert_eq!(stmt.options.k1, Some(1.5));
+        assert_eq!(stmt.options.b, Some(0.0), "an integer is a number too");
+        assert_eq!(stmt.options.tokenizer.as_deref(), Some("cjk_bigram"));
+        assert_eq!(
+            stmt.options.stop_words,
+            Some(vec!["и".to_string(), "в".to_string()])
+        );
+
+        let negative = Parser::new(
+            "CREATE INDEX notes FOR (n:Note) ON (n.body) USING TEXT {k1: -3, stop_words: []}",
+        )
+        .parse()
+        .expect("a negative k1 parses; the engine refuses it");
+        let Statement::Schema(SchemaStatement::CreateIndex(stmt)) = negative else {
+            panic!("a CREATE INDEX statement: {negative:?}");
+        };
+        assert_eq!(stmt.options.k1, Some(-3.0));
+        assert_eq!(stmt.options.stop_words, Some(Vec::new()));
+
+        let plain = Parser::new("CREATE INDEX notes FOR (n:Note) ON (n.body) USING TEXT")
+            .parse()
+            .expect("no options");
+        let Statement::Schema(SchemaStatement::CreateIndex(stmt)) = plain else {
+            panic!("a CREATE INDEX statement: {plain:?}");
+        };
+        assert_eq!(
+            (
+                stmt.options.k1,
+                stmt.options.b,
+                stmt.options.tokenizer,
+                stmt.options.stop_words
+            ),
+            (None, None, None, None)
+        );
+    }
+
+    #[test]
+    fn unknown_or_mistyped_text_index_options_are_errors() {
+        for (options, says) in [
+            (
+                "{analyzer: 'standard'}",
+                "Unknown text index option 'analyzer'",
+            ),
+            ("{k1: 'high'}", "Expected a number for k1"),
+            ("{tokenizer: standard}", "Expected string for tokenizer"),
+            ("{stop_words: ['and', 3]}", "Expected string in stop_words"),
+        ] {
+            let error = Parser::new(&format!(
+                "CREATE INDEX notes FOR (n:Note) ON (n.body) USING TEXT {options}"
+            ))
+            .parse()
+            .expect_err(options);
+            assert!(error.to_string().contains(says), "{options}: {error}");
+        }
+    }
+
     #[test]
     fn test_create_or_replace_node_type_parses() {
         // Exercises try_parse_or_replace via the NODE TYPE branch.
@@ -11252,5 +12385,486 @@ mod tests {
             Parser::new("CALL db.labels()").parse().unwrap(),
             Statement::Call(_)
         ));
+    }
+
+    /// A statement that modifies data needs no result statement (ISO GQL's
+    /// linear data-modifying statement), and an inline CALL whose body
+    /// modifies data is such a statement (a call of a data-modifying
+    /// procedure): a query may end with it. A query that only reads still
+    /// needs one, also when it ends with a CALL that only reads.
+    #[test]
+    fn test_parse_query_ending_with_a_data_modifying_call() {
+        for query in [
+            "MATCH (n) CALL { INSERT (:X) }",
+            "MATCH (n) CALL (n) { SET n.k = 3 }",
+            "FOR i IN [3, 19] CALL (i) { FOR x IN [i] INSERT (:X {x: x}) }",
+            "MATCH (n) OPTIONAL CALL (n) { MATCH (n)-[e]->() DELETE e }",
+            "MATCH (n) CALL { CALL { INSERT (:X) } }",
+            "MATCH (n) CALL (n) { INSERT (x:X) RETURN x }",
+            "MATCH (n) CALL { INSERT (:X) } MATCH (m)",
+        ] {
+            let Statement::Query(statement) = Parser::new(query)
+                .parse()
+                .unwrap_or_else(|error| panic!("`{query}` must parse: {error}"))
+            else {
+                panic!("expected a query: {query}");
+            };
+            let result = &statement.return_clause;
+            assert!(
+                result.items.is_empty() && !result.is_wildcard && !result.is_finish,
+                "`{query}` has no result statement: {result:?}"
+            );
+        }
+        for query in [
+            "MATCH (n) CALL { MATCH (m) RETURN m }",
+            "MATCH (n) CALL (n) { MATCH (n)-[]->(m) FINISH }",
+            "MATCH (n) CALL { RETURN 1 AS x UNION RETURN 2 AS x }",
+        ] {
+            let error = Parser::new(query)
+                .parse()
+                .expect_err(&format!("`{query}` reads only and has no result"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("Expected RETURN, FINISH, or SELECT"),
+                "`{query}`: {error}"
+            );
+        }
+    }
+
+    // ==================== Statements in any order (#483) ====================
+    //
+    // ISO/IEC 39075:2024: a <simple linear query statement> is a sequence of
+    // <simple query statement>s (<match statement>, <let statement>, <for
+    // statement>, <filter statement>, <order by and page statement>, <call
+    // query statement>) in any order, and a <linear data-modifying statement>
+    // mixes them with <simple data-modifying statement>s (<insert statement>,
+    // <set statement>, <remove statement>, <delete statement>). Grafeo's WITH
+    // and a WHERE between statements (a filter) are statements of the same
+    // sequence.
+
+    /// The clauses of `query` in source order, by the name of their
+    /// `QueryClause` variant (`OPTIONAL MATCH` for an optional match).
+    fn clause_names(query: &str) -> Vec<String> {
+        let Statement::Query(statement) = Parser::new(query)
+            .parse()
+            .unwrap_or_else(|error| panic!("`{query}` must parse: {error}"))
+        else {
+            panic!("expected a query: {query}");
+        };
+        statement
+            .ordered_clauses
+            .iter()
+            .map(|clause| match clause {
+                QueryClause::Match(clause) if clause.optional => "OPTIONAL MATCH".to_string(),
+                other => {
+                    let debug = format!("{other:?}");
+                    let end = debug
+                        .find(|c: char| !c.is_ascii_alphanumeric())
+                        .unwrap_or(debug.len());
+                    debug[..end].to_string()
+                }
+            })
+            .collect()
+    }
+
+    /// <order by and page statement> between other statements: after a
+    /// MATCH, after a WITH, before a MATCH, a write or another page statement.
+    #[test]
+    fn test_parse_order_by_and_page_statement_between_statements() {
+        for (query, expected) in [
+            (
+                "MATCH (p:Person) ORDER BY p.id LIMIT 2 RETURN p.id",
+                &["Match", "OrderByAndPage"][..],
+            ),
+            (
+                "MATCH (p:Person) WITH p ORDER BY p.id LIMIT 2 RETURN p.id",
+                &["Match", "With", "OrderByAndPage"],
+            ),
+            (
+                "MATCH (p:Person) WITH p LIMIT 1 RETURN p.id",
+                &["Match", "With", "OrderByAndPage"],
+            ),
+            (
+                "MATCH (p) ORDER BY p.id DESC OFFSET 1 LIMIT 2 MATCH (p)-[:R]->(q) RETURN q",
+                &["Match", "OrderByAndPage", "Match"],
+            ),
+            ("MATCH (p) SKIP 3 RETURN p", &["Match", "OrderByAndPage"]),
+            (
+                "MATCH (p) OFFSET 3 LIMIT 19 ORDER BY p.name LIMIT 1 RETURN p",
+                &["Match", "OrderByAndPage", "OrderByAndPage"],
+            ),
+            (
+                "MATCH (p) WITH p ORDER BY p.age LIMIT 3 SET p.top = true",
+                &["Match", "With", "OrderByAndPage", "Set"],
+            ),
+            (
+                "MATCH (p) WITH p ORDER BY p.age LIMIT 3 WHERE p.age > 19 RETURN p",
+                &["Match", "With", "OrderByAndPage", "Filter"],
+            ),
+        ] {
+            assert_eq!(clause_names(query), expected, "{query}");
+        }
+    }
+
+    /// The page statement holds its own keys and counts; the RETURN after it
+    /// keeps its own ORDER BY and LIMIT.
+    #[test]
+    fn test_parse_order_by_and_page_statement_parts() {
+        let Statement::Query(query) = Parser::new(
+            "MATCH (p) ORDER BY p.age DESC, p.name OFFSET 3 LIMIT 19 RETURN p.name ORDER BY p.name LIMIT 1",
+        )
+        .parse()
+        .unwrap() else {
+            panic!("expected a query");
+        };
+        let pages: Vec<&OrderByAndPage> = query
+            .ordered_clauses
+            .iter()
+            .filter_map(|clause| match clause {
+                QueryClause::OrderByAndPage(page) => Some(page),
+                _ => None,
+            })
+            .collect();
+        let [page] = pages.as_slice() else {
+            panic!("expected one page statement: {pages:?}");
+        };
+        let keys = &page.order_by.as_ref().expect("the ORDER BY").items;
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].order, SortOrder::Desc);
+        assert_eq!(keys[1].order, SortOrder::Asc);
+        assert!(matches!(
+            page.offset,
+            Some(Expression::Literal(Literal::Integer(3)))
+        ));
+        assert!(matches!(
+            page.limit,
+            Some(Expression::Literal(Literal::Integer(19)))
+        ));
+        let result = &query.return_clause;
+        assert_eq!(result.order_by.as_ref().map(|o| o.items.len()), Some(1));
+        assert!(matches!(
+            result.limit,
+            Some(Expression::Literal(Literal::Integer(1)))
+        ));
+        assert!(result.skip.is_none());
+
+        // Each part is optional, but one of them must be there.
+        for (query, order_by, offset, limit) in [
+            ("MATCH (p) LIMIT 3 RETURN p", false, false, true),
+            ("MATCH (p) OFFSET 3 RETURN p", false, true, false),
+            ("MATCH (p) ORDER BY p.age RETURN p", true, false, false),
+            (
+                "MATCH (p) ORDER BY p.age SKIP 3 RETURN p",
+                true,
+                true,
+                false,
+            ),
+        ] {
+            let Statement::Query(statement) = Parser::new(query).parse().unwrap() else {
+                panic!("expected a query: {query}");
+            };
+            let Some(QueryClause::OrderByAndPage(page)) = statement.ordered_clauses.last() else {
+                panic!("expected a page statement last: {query}");
+            };
+            assert_eq!(
+                (
+                    page.order_by.is_some(),
+                    page.offset.is_some(),
+                    page.limit.is_some()
+                ),
+                (order_by, offset, limit),
+                "{query}"
+            );
+        }
+    }
+
+    /// A WHERE or FILTER between MATCH statements is a filter of the rows so
+    /// far, kept in its place among the clauses (no longer one WHERE for the
+    /// whole statement).
+    #[test]
+    fn test_parse_where_and_filter_between_statements() {
+        for (query, expected) in [
+            (
+                "MATCH (a:Person) WHERE a.age > 30 MATCH (c:City) RETURN a, c",
+                &["Match", "Filter", "Match"][..],
+            ),
+            (
+                "MATCH (a) FILTER a.age > 30 OPTIONAL MATCH (a)-[:R]->(b) RETURN a, b",
+                &["Match", "Filter", "OPTIONAL MATCH"],
+            ),
+            (
+                "MATCH (a) WITH a MATCH (b) WHERE a.age < b.age RETURN a, b",
+                &["Match", "With", "Match", "Filter"],
+            ),
+            (
+                "MATCH (a) WHERE a.age > 30 CALL { WITH a RETURN a.name AS m } RETURN m",
+                &["Match", "Filter", "InlineCall"],
+            ),
+            (
+                "MATCH (s) WHERE s.grade IN ['C'] LET x = s.grade RETURN x",
+                &["Match", "Filter", "Let"],
+            ),
+            (
+                "MATCH (s) FILTER s.grade IN ['C'] LET x = s.grade RETURN x",
+                &["Match", "Filter", "Let"],
+            ),
+            (
+                "MATCH (n) WHERE n.id IN [1] MATCH (n)-[*1..2]-(m) RETURN m.id",
+                &["Match", "Filter", "Match"],
+            ),
+            (
+                "MATCH (f) MATCH (t) WHERE t.path = f.path MATCH (x) RETURN x",
+                &["Match", "Match", "Filter", "Match"],
+            ),
+            (
+                "MATCH (a) WHERE a.x = 3 FILTER WHERE a.y = 19 RETURN a",
+                &["Match", "Filter", "Filter"],
+            ),
+        ] {
+            assert_eq!(clause_names(query), expected, "{query}");
+            let Statement::Query(statement) = Parser::new(query).parse().unwrap() else {
+                unreachable!("checked above");
+            };
+            assert!(
+                statement.where_clause.is_none(),
+                "{query}: each WHERE is among the ordered clauses"
+            );
+        }
+    }
+
+    /// <linear data-modifying statement>: data-modifying statements after a
+    /// WITH, a SET, a LET or a FOR, and query statements after them.
+    #[test]
+    fn test_parse_data_modifying_statements_in_any_order() {
+        for (query, expected) in [
+            (
+                "MATCH (n) WITH n SET n.x = 3 RETURN n",
+                &["Match", "With", "Set"][..],
+            ),
+            (
+                "MATCH (n) WITH n DETACH DELETE n",
+                &["Match", "With", "Delete"],
+            ),
+            (
+                "MATCH (n) WITH n REMOVE n.x RETURN n",
+                &["Match", "With", "Remove"],
+            ),
+            (
+                "MATCH (n) WITH n INSERT (n)-[:R]->(:T) RETURN n",
+                &["Match", "With", "Create"],
+            ),
+            (
+                "MATCH (n) WITH n CALL { WITH n RETURN n.x AS a } RETURN a",
+                &["Match", "With", "InlineCall"],
+            ),
+            (
+                "MATCH (n) WITH n OPTIONAL CALL (n) { MATCH (n)-[]->(m) RETURN m } RETURN m",
+                &["Match", "With", "InlineCall"],
+            ),
+            (
+                "MATCH (n) SET n.x = 3 CALL { WITH n RETURN n.x AS a } RETURN a",
+                &["Match", "Set", "InlineCall"],
+            ),
+            (
+                "MATCH (n) SET n.x = 3 DELETE n",
+                &["Match", "Set", "Delete"],
+            ),
+            (
+                "MATCH (n) SET n.x = 3 FILTER n.y > 3 RETURN n",
+                &["Match", "Set", "Filter"],
+            ),
+            (
+                "MATCH (n) REMOVE n.x SET n.y = 3 RETURN n",
+                &["Match", "Remove", "Set"],
+            ),
+            (
+                "MATCH (n) SET n.y = 3 REMOVE n.x SET n.z = 19",
+                &["Match", "Set", "Remove", "Set"],
+            ),
+            ("MATCH (n) LET y = 3 DELETE n", &["Match", "Let", "Delete"]),
+            (
+                "MATCH (n) WITH n FOR x IN [1] DELETE n",
+                &["Match", "With", "For", "Delete"],
+            ),
+            (
+                "MATCH (n) INSERT (m:T) WITH n, m FOR x IN [3] MATCH (k) INSERT (k)-[:R]->(m)",
+                &["Match", "Create", "With", "For", "Match", "Create"],
+            ),
+            (
+                "MATCH (n) DELETE n WITH count(*) AS c RETURN c",
+                &["Match", "Delete", "With"],
+            ),
+            (
+                "MATCH (n) SET n.x = 3 MERGE (m:T) RETURN m",
+                &["Match", "Set", "Merge"],
+            ),
+        ] {
+            assert_eq!(clause_names(query), expected, "{query}");
+        }
+    }
+
+    /// A statement may start with any simple query statement: LET, FILTER,
+    /// FOR, an order by and page statement, a CALL, or a MATCH; also after
+    /// NEXT.
+    #[test]
+    fn test_parse_statement_starting_with_let_filter_or_page() {
+        for (query, expected) in [
+            ("LET x = 3 RETURN x", &["Let"][..]),
+            ("FILTER 3 > 1 RETURN 19", &["Filter"]),
+            ("FILTER WHERE 3 > 1 RETURN 19", &["Filter"]),
+            ("LET x = 3 FILTER x > 1 RETURN x", &["Let", "Filter"]),
+            (
+                "LET who = 'Alix' MATCH (p {name: who}) RETURN p",
+                &["Let", "Match"],
+            ),
+            ("LIMIT 1 RETURN 3", &["OrderByAndPage"]),
+            ("ORDER BY 3 RETURN 3", &["OrderByAndPage"]),
+            ("OFFSET 0 MATCH (n) RETURN n", &["OrderByAndPage", "Match"]),
+        ] {
+            assert_eq!(clause_names(query), expected, "{query}");
+        }
+        let Statement::CompositeQuery { right, .. } =
+            Parser::new("RETURN 3 AS x NEXT LET y = x + 19 RETURN y")
+                .parse()
+                .unwrap()
+        else {
+            panic!("expected NEXT");
+        };
+        let Statement::Query(right) = *right else {
+            panic!("expected a query after NEXT");
+        };
+        assert!(matches!(
+            right.ordered_clauses.as_slice(),
+            [QueryClause::Let(_)]
+        ));
+    }
+
+    /// A filter among the clauses keeps the keyword it was written with: a
+    /// FILTER filters every row, also right after an OPTIONAL MATCH, whose
+    /// WHERE belongs to its graph pattern.
+    #[test]
+    fn test_parse_filter_clause_keeps_its_keyword() {
+        let Statement::Query(statement) = Parser::new(
+            "MATCH (a) OPTIONAL MATCH (a)-[:R]->(b) WHERE b.x = 3 FILTER b.y = 19 \
+             FILTER WHERE b.z = 88 RETURN a",
+        )
+        .parse()
+        .unwrap() else {
+            panic!("expected a query");
+        };
+        let keywords: Vec<bool> = statement
+            .ordered_clauses
+            .iter()
+            .filter_map(|clause| match clause {
+                QueryClause::Filter(filter) => Some(filter.filter),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keywords, [false, true, true], "WHERE, FILTER, FILTER WHERE");
+    }
+
+    /// A WITH may follow a FOR: the FOR takes `WITH` only for `WITH
+    /// ORDINALITY` or `WITH OFFSET`.
+    #[test]
+    fn test_parse_with_after_for() {
+        assert_eq!(
+            clause_names("FOR x IN [3, 19] WITH x RETURN x"),
+            ["For", "With"]
+        );
+        assert_eq!(
+            clause_names("FOR x IN [3, 19] WITH ORDINALITY i WITH x, i RETURN x"),
+            ["For", "With"]
+        );
+        let Statement::Query(statement) = Parser::new("FOR x IN [3, 19] WITH OFFSET i RETURN x, i")
+            .parse()
+            .unwrap()
+        else {
+            panic!("expected a query");
+        };
+        let [QueryClause::For(for_clause)] = statement.ordered_clauses.as_slice() else {
+            panic!("expected one FOR: {:?}", statement.ordered_clauses);
+        };
+        assert_eq!(for_clause.offset_var.as_deref(), Some("i"));
+    }
+
+    /// What the standard does not allow still fails: a query that only reads
+    /// needs a result statement, nothing follows the result statement, and a
+    /// page statement needs its count.
+    #[test]
+    fn test_parse_statement_order_errors() {
+        for (query, message) in [
+            (
+                "MATCH (n) WHERE n.x = 3",
+                "Expected RETURN, FINISH, or SELECT",
+            ),
+            (
+                "MATCH (n) ORDER BY n.x LIMIT 3",
+                "Expected RETURN, FINISH, or SELECT",
+            ),
+            (
+                "MATCH (n) RETURN n MATCH (m) RETURN m",
+                "unexpected 'MATCH' after the end of the statement",
+            ),
+            (
+                "MATCH (n) RETURN n WHERE n.x = 3",
+                "unexpected 'WHERE' after the end of the statement",
+            ),
+            ("MATCH (n) LIMIT RETURN n", ""),
+            ("MATCH (n) ORDER n.x RETURN n", ""),
+        ] {
+            let error = parse_err(query);
+            assert!(error.contains(message), "`{query}`: {error}");
+        }
+    }
+
+    /// A WHERE or FILTER right after INSERT, CREATE, MERGE or DELETE would
+    /// filter the rows after the write; it used to filter the rows before it,
+    /// so it is an error instead of a silent change of what the write
+    /// touches. After SET or REMOVE a FILTER filters the rows after the
+    /// write; a WHERE does not stand there. A WHERE on a later MATCH, or one
+    /// of a WITH, filters the rows after the write.
+    #[test]
+    fn test_parse_filter_after_a_write() {
+        for query in [
+            "MATCH (n) DETACH DELETE n WHERE n.age > 30",
+            "MATCH (n) DETACH DELETE n FILTER n.age > 30",
+            "MATCH (a) INSERT (a)-[:R]->(:T) WHERE a.age > 30 RETURN a",
+            "MATCH (a) INSERT (a)-[:R]->(:T) FILTER a.age > 30 RETURN a",
+            "MATCH (a) CREATE (a)-[:R]->(:T) WHERE a.age > 30",
+            "MATCH (a) MERGE (c:City {name: 'Paris'}) FILTER a.age > 30 RETURN a",
+        ] {
+            let error = parse_err(query);
+            assert!(
+                error.contains("a WHERE or FILTER cannot follow INSERT, CREATE, MERGE or DELETE"),
+                "`{query}`: {error}"
+            );
+        }
+        for query in [
+            "MATCH (a) SET a.x = 3 WHERE a.y = 19 RETURN a",
+            "MATCH (a) REMOVE a.x WHERE a.y = 19 RETURN a",
+        ] {
+            let error = parse_err(query);
+            assert!(
+                error.contains("a WHERE cannot follow SET or REMOVE"),
+                "`{query}`: {error}"
+            );
+        }
+        for (query, expected) in [
+            (
+                "MATCH (a) SET a.x = 3 FILTER a.y = 19 RETURN a",
+                &["Match", "Set", "Filter"][..],
+            ),
+            (
+                "MATCH (a) INSERT (a)-[:R]->(t:T) WITH a, t WHERE a.x > 3 RETURN t",
+                &["Match", "Create", "With"],
+            ),
+            (
+                "MATCH (a) INSERT (:T) MATCH (b:T) WHERE a.x > 3 RETURN b",
+                &["Match", "Create", "Match", "Filter"],
+            ),
+        ] {
+            assert_eq!(clause_names(query), expected, "{query}");
+        }
     }
 }

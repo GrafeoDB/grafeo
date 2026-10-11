@@ -436,7 +436,7 @@ impl SpillableSortPushOperator {
         let buffer = std::mem::take(&mut self.buffer);
         if let Some(ref mut ext) = self.external_sort {
             ext.spill_sorted_run(buffer)
-                .map_err(|e| OperatorError::Execution(e.to_string()))?;
+                .map_err(|e| OperatorError::from(grafeo_common::utils::error::Error::Io(e)))?;
         }
 
         // Reset memory tracking after spill
@@ -510,7 +510,7 @@ impl PushOperator for SpillableSortPushOperator {
             // Merge all runs with remaining buffer
             let buffer = std::mem::take(&mut self.buffer);
             ext.merge_all(buffer)
-                .map_err(|e| OperatorError::Execution(e.to_string()))?
+                .map_err(|e| OperatorError::from(grafeo_common::utils::error::Error::Io(e)))?
         } else {
             // No spilling occurred: just sort in memory
             let keys = &self.keys;

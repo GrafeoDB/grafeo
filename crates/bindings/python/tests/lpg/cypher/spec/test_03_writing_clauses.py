@@ -293,16 +293,16 @@ class TestCreateEdgePhantom:
         assert result[0]["dst"] == "Gus"
 
     def test_startnode_endnode(self, db):
-        """startNode(r) and endNode(r) return node IDs (#180)."""
+        """startNode(r) and endNode(r) return the nodes, as in openCypher (0.6.0; IDs before)."""
         db.execute_cypher("CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
         result = list(
             db.execute_cypher("MATCH ()-[r:KNOWS]->() RETURN startNode(r) AS sn, endNode(r) AS en")
         )
         assert len(result) == 1
-        assert result[0]["sn"] is not None
-        assert result[0]["en"] is not None
-        assert isinstance(result[0]["sn"], int)
-        assert isinstance(result[0]["en"], int)
+        start, end = result[0]["sn"], result[0]["en"]
+        assert start["name"] == "Alix" and start["_labels"] == ["Person"]
+        assert end["name"] == "Gus" and end["_labels"] == ["Person"]
+        assert start["_id"] != end["_id"]
 
     def test_startnode_equals_source(self, db):
         """startNode(r) == id(s) and endNode(r) == id(t) (#180)."""

@@ -14,10 +14,24 @@ use grafeo_common::utils::error::{Error, Result};
 
 /// Container format version written by this module.
 pub const FORMAT_V3: u32 = 3;
+/// The format revision a new file gets. A file keeps the revision it was
+/// created with: every checkpoint writes the revision of the header it
+/// replaces.
+pub const FORMAT_REVISION: u32 = 1;
+/// The highest format revision this build reads.
+pub const MAX_FORMAT_REVISION: u32 = 1;
+// A build reads the revision it gives new files.
+const _: () = assert!(FORMAT_REVISION >= 1 && FORMAT_REVISION <= MAX_FORMAT_REVISION);
 /// Size of a page, and of each header, in bytes.
 pub const PAGE_SIZE: u64 = 4096;
 /// First page after the file header and the two database headers.
 pub const DATA_START_PAGE: u64 = 3;
+
+/// Byte offset of database header slot 0 or 1.
+#[must_use]
+pub fn slot_offset(slot: u8) -> u64 {
+    PAGE_SIZE * (1 + u64::from(slot))
+}
 
 const PAGE_BYTES: usize = 4096;
 const FILE_MAGIC: [u8; 4] = *b"GRAF";
@@ -119,28 +133,37 @@ impl FileHeaderV3 {
     ///
     /// # Errors
     ///
-    /// Returns an error when the page is too short, the magic or checksum is
-    /// wrong, the format version is not 3, the page size is not 4096, or an
-    /// incompatible feature flag this build does not know is set.
+    /// Returns [`Error::Serialization`] when the magic is wrong (not a Grafeo
+    /// database), the format version is not 3, the page size is not 4096, or
+    /// an incompatible feature flag this build does not know is set, and
+    /// [`Error::Corruption`] at byte 0 when the page is too short for a
+    /// header or its checksum is wrong.
     pub fn decode(page: &[u8]) -> Result<Self> {
-        if page.len() < FILE_CRC_OFFSET + 4 {
-            return Err(Error::Serialization(format!(
-                "file header is {} bytes, expected at least {}",
-                page.len(),
-                FILE_CRC_OFFSET + 4
-            )));
-        }
-        if page[0..4] != FILE_MAGIC {
+        if page.get(0..4) != Some(FILE_MAGIC.as_slice()) {
             return Err(Error::Serialization(
                 "invalid file header magic, not a Grafeo database".to_string(),
+            ));
+        }
+        if page.len() < FILE_CRC_OFFSET + 4 {
+            return Err(Error::corruption_at(
+                format!(
+                    "file header is {} bytes, expected at least {}",
+                    page.len(),
+                    FILE_CRC_OFFSET + 4
+                ),
+                0,
             ));
         }
         let stored = read_u32(page, FILE_CRC_OFFSET);
         let computed = crc32fast::hash(&page[..FILE_CRC_OFFSET]);
         if stored != computed {
-            return Err(Error::Serialization(format!(
-                "file header checksum mismatch: stored {stored:#010x}, computed {computed:#010x}"
-            )));
+            return Err(Error::corruption_at(
+                format!(
+                    "file header checksum mismatch: stored {stored:#010x}, computed \
+                     {computed:#010x}"
+                ),
+                0,
+            ));
         }
         let format = read_u32(page, 4);
         if format != FORMAT_V3 {
@@ -191,14 +214,20 @@ pub struct BlockRef {
 /// One of the two alternating database headers, in the 4 KiB pages at
 /// offsets 4096 (slot 0) and 8192 (slot 1).
 ///
-/// Layout (little-endian): `0 magic "GDBH"`, `4 reserved u32`,
+/// Layout (little-endian): `0 magic "GDBH"`, `4 format revision u32`,
 /// `8 iteration u64`, `16 checkpoint lsn u64`, `24 epoch u64`,
 /// `32 last transaction id u64`, `40 root.offset u64`, `48 root.length u32`,
 /// `52 root.crc u32`, `56 node count u64`, `64 edge count u64`,
-/// `72 timestamp u64`, `80 CRC-32 u32` of bytes 0..80. The reserved field
-/// and the rest of the page are written as zero and ignored by readers.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// `72 timestamp u64`, `80 CRC-32 u32` of bytes 0..80. The rest of the page
+/// is written as zero and ignored by readers.
+///
+/// The format revision says which additions to container v3 the image may
+/// use; see [`check_format_revision`] for what a reader accepts. The default
+/// header has [`FORMAT_REVISION`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbHeaderV3 {
+    /// The format revision of the image (see [`check_format_revision`]).
+    pub format_revision: u32,
     /// Monotonic write counter; the higher one is the active header.
     pub iteration: u64,
     /// WAL sequence number the checkpoint covers.
@@ -217,12 +246,29 @@ pub struct DbHeaderV3 {
     pub timestamp_ms: u64,
 }
 
+impl Default for DbHeaderV3 {
+    fn default() -> Self {
+        Self {
+            format_revision: FORMAT_REVISION,
+            iteration: 0,
+            checkpoint_lsn: 0,
+            epoch: 0,
+            last_transaction_id: 0,
+            root: BlockRef::default(),
+            node_count: 0,
+            edge_count: 0,
+            timestamp_ms: 0,
+        }
+    }
+}
+
 impl DbHeaderV3 {
     /// Encodes the header into a 4 KiB page.
     #[must_use]
     pub fn encode(&self) -> [u8; PAGE_BYTES] {
         let mut page = [0u8; PAGE_BYTES];
         page[0..4].copy_from_slice(&DB_MAGIC);
+        page[4..8].copy_from_slice(&self.format_revision.to_le_bytes());
         page[8..16].copy_from_slice(&self.iteration.to_le_bytes());
         page[16..24].copy_from_slice(&self.checkpoint_lsn.to_le_bytes());
         page[24..32].copy_from_slice(&self.epoch.to_le_bytes());
@@ -243,7 +289,9 @@ impl DbHeaderV3 {
     /// A slot whose bytes are all zero was never written
     /// ([`HeaderSlot::Empty`]). Any other slot without the magic and a
     /// matching checksum is [`HeaderSlot::Damaged`] (a torn or corrupted
-    /// write), and so is a slot shorter than a header.
+    /// write), and so is a slot shorter than a header. The format revision
+    /// comes back as stored: whether this build reads it is
+    /// [`check_format_revision`]'s call, for the active header.
     #[must_use]
     pub fn decode(slot: &[u8]) -> HeaderSlot {
         if slot.len() < DB_CRC_OFFSET + 4 {
@@ -258,6 +306,7 @@ impl DbHeaderV3 {
             return HeaderSlot::Damaged;
         }
         HeaderSlot::Valid(Self {
+            format_revision: read_u32(slot, 4),
             iteration: read_u64(slot, 8),
             checkpoint_lsn: read_u64(slot, 16),
             epoch: read_u64(slot, 24),
@@ -297,7 +346,8 @@ pub enum HeaderSlot {
 ///
 /// # Errors
 ///
-/// Returns an error when no slot is valid and at least one is damaged.
+/// Returns [`Error::Corruption`] at the first damaged slot when no slot is
+/// valid and at least one is damaged.
 pub fn active_header(slots: [HeaderSlot; 2]) -> Result<Option<(u8, DbHeaderV3)>> {
     use HeaderSlot::{Damaged, Empty, Valid};
     match slots {
@@ -309,15 +359,45 @@ pub fn active_header(slots: [HeaderSlot; 2]) -> Result<Option<(u8, DbHeaderV3)>>
         [Valid(first), _] => Ok(Some((0, first))),
         [_, Valid(second)] => Ok(Some((1, second))),
         [Empty, Empty] => Ok(None),
-        [Damaged, Damaged] => Err(Error::Serialization(
-            "both database headers are damaged".to_string(),
+        [Damaged, Damaged] => Err(Error::corruption_at(
+            "both database headers are damaged",
+            slot_offset(0),
         )),
-        [Damaged, Empty] => Err(Error::Serialization(
-            "database header slot 0 is damaged and slot 1 was never written".to_string(),
+        [Damaged, Empty] => Err(Error::corruption_at(
+            "database header slot 0 is damaged and slot 1 was never written",
+            slot_offset(0),
         )),
-        [Empty, Damaged] => Err(Error::Serialization(
-            "database header slot 1 is damaged and slot 0 was never written".to_string(),
+        [Empty, Damaged] => Err(Error::corruption_at(
+            "database header slot 1 is damaged and slot 0 was never written",
+            slot_offset(1),
         )),
+    }
+}
+
+/// Checks that this build reads an image of format `revision` (that of the
+/// active database header): revisions 1 to [`MAX_FORMAT_REVISION`].
+///
+/// Revision 0 is the reserved field of a 0.6.0 development build from before
+/// format revisions: no release wrote container v3 without one, so no
+/// release reads it. A revision above the highest known was written by a
+/// newer Grafeo; the file is left as it is.
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] naming the revision for 0 and for one
+/// above [`MAX_FORMAT_REVISION`].
+pub fn check_format_revision(revision: u32) -> Result<()> {
+    match revision {
+        0 => Err(Error::Serialization(
+            "the file has format revision 0: it was written by a 0.6.0 development build \
+             before format revisions, which no release reads; recreate the database"
+                .to_string(),
+        )),
+        1..=MAX_FORMAT_REVISION => Ok(()),
+        _ => Err(Error::Serialization(format!(
+            "the file has format revision {revision}, written by a newer version of Grafeo: \
+             this version reads format revisions 1 to {MAX_FORMAT_REVISION}"
+        ))),
     }
 }
 
@@ -365,6 +445,7 @@ mod tests {
             file.database_id
         );
         let db = DbHeaderV3 {
+            format_revision: 3,
             iteration: 19,
             checkpoint_lsn: 88,
             epoch: 3,
@@ -445,14 +526,17 @@ mod tests {
             HeaderSlot::Damaged,
             "a slot shorter than a header"
         );
-        let mut reserved = header.encode();
-        reserved[4..8].copy_from_slice(&[3, 19, 88, 3]);
-        let crc = crc32fast::hash(&reserved[..80]);
-        reserved[80..84].copy_from_slice(&crc.to_le_bytes());
+        let mut revised = header.encode();
+        revised[4..8].copy_from_slice(&[3, 19, 88, 3]);
+        let crc = crc32fast::hash(&revised[..80]);
+        revised[80..84].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(
-            DbHeaderV3::decode(&reserved),
-            HeaderSlot::Valid(header),
-            "readers ignore the reserved bytes"
+            DbHeaderV3::decode(&revised),
+            HeaderSlot::Valid(DbHeaderV3 {
+                format_revision: 0x0358_1303,
+                ..header
+            }),
+            "a slot keeps any format revision as stored: refusing one is not damage"
         );
     }
 
@@ -584,6 +668,7 @@ mod tests {
     #[test]
     fn the_database_header_has_its_documented_byte_layout() {
         let header = DbHeaderV3 {
+            format_revision: 1,
             iteration: 3,
             checkpoint_lsn: 19,
             epoch: 88,
@@ -599,7 +684,7 @@ mod tests {
         };
         let page = header.encode();
         assert_eq!(&page[0..4], b"GDBH", "magic");
-        assert_eq!(page[4..8], [0, 0, 0, 0], "reserved");
+        assert_eq!(page[4..8], [1, 0, 0, 0], "format revision");
         assert_eq!(page[8..16], [3, 0, 0, 0, 0, 0, 0, 0], "iteration");
         assert_eq!(page[16..24], [19, 0, 0, 0, 0, 0, 0, 0], "checkpoint lsn");
         assert_eq!(page[24..32], [88, 0, 0, 0, 0, 0, 0, 0], "epoch");
@@ -628,6 +713,32 @@ mod tests {
             "CRC over bytes 0..80"
         );
         assert!(page[84..].iter().all(|&byte| byte == 0), "rest is zero");
+    }
+
+    #[test]
+    fn a_new_header_has_the_current_format_revision() {
+        assert_eq!(DbHeaderV3::default().format_revision, FORMAT_REVISION);
+        assert_eq!(FORMAT_REVISION, 1, "0.6.0 writes revision 1");
+    }
+
+    #[test]
+    fn this_build_reads_format_revisions_1_to_the_highest_it_knows() {
+        check_format_revision(1).unwrap();
+        check_format_revision(MAX_FORMAT_REVISION).unwrap();
+        let error = check_format_revision(0).unwrap_err().to_string();
+        assert!(
+            error.contains("format revision 0") && error.contains("development build"),
+            "{error}"
+        );
+        for newer in [MAX_FORMAT_REVISION + 1, u32::MAX] {
+            let error = check_format_revision(newer).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("format revision {newer}"))
+                    && error.contains("newer version")
+                    && error.contains(&format!("1 to {MAX_FORMAT_REVISION}")),
+                "{error}"
+            );
+        }
     }
 
     #[test]

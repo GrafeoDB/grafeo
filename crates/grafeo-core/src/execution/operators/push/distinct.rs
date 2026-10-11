@@ -2,101 +2,12 @@
 
 use crate::execution::chunk::DataChunk;
 use crate::execution::operators::OperatorError;
+use crate::execution::operators::accumulator::RowKey;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 use crate::execution::selection::SelectionVector;
 use crate::execution::vector::ValueVector;
 use grafeo_common::types::Value;
 use std::collections::HashSet;
-
-/// Hash key for distinct tracking.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RowKey(Vec<u64>);
-
-impl RowKey {
-    fn from_row(chunk: &DataChunk, row: usize, columns: &[usize]) -> Self {
-        let hashes: Vec<u64> = columns
-            .iter()
-            .map(|&col| {
-                chunk
-                    .column(col)
-                    .and_then(|c| c.get_value(row))
-                    .map_or(0, |v| hash_value(&v))
-            })
-            .collect();
-        Self(hashes)
-    }
-
-    fn from_all_columns(chunk: &DataChunk, row: usize) -> Self {
-        let hashes: Vec<u64> = (0..chunk.column_count())
-            .map(|col| {
-                chunk
-                    .column(col)
-                    .and_then(|c| c.get_value(row))
-                    .map_or(0, |v| hash_value(&v))
-            })
-            .collect();
-        Self(hashes)
-    }
-}
-
-fn hash_value(value: &Value) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::Hasher;
-
-    let mut hasher = DefaultHasher::new();
-    hash_value_into(value, &mut hasher);
-    hasher.finish()
-}
-
-/// Recursively hashes a Value into a Hasher without relying on Debug output.
-///
-/// Each variant is prefixed with a discriminant tag to prevent cross-type collisions.
-fn hash_value_into(value: &Value, hasher: &mut impl std::hash::Hasher) {
-    use std::hash::Hash;
-
-    std::mem::discriminant(value).hash(hasher);
-    match value {
-        Value::Null => {}
-        Value::Bool(b) => b.hash(hasher),
-        Value::Int64(i) => i.hash(hasher),
-        Value::Float64(f) => f.to_bits().hash(hasher),
-        Value::String(s) => s.hash(hasher),
-        Value::Bytes(b) => b.hash(hasher),
-        Value::List(items) => {
-            items.len().hash(hasher);
-            for item in items.iter() {
-                hash_value_into(item, hasher);
-            }
-        }
-        Value::Map(map) => {
-            map.len().hash(hasher);
-            // BTreeMap iterates in key order: deterministic
-            for (k, v) in map.iter() {
-                k.as_str().hash(hasher);
-                hash_value_into(v, hasher);
-            }
-        }
-        Value::Vector(vec) => {
-            vec.len().hash(hasher);
-            for f in vec.iter() {
-                f.to_bits().hash(hasher);
-            }
-        }
-        Value::Path { nodes, edges } => {
-            nodes.len().hash(hasher);
-            for n in nodes.iter() {
-                hash_value_into(n, hasher);
-            }
-            edges.len().hash(hasher);
-            for e in edges.iter() {
-                hash_value_into(e, hasher);
-            }
-        }
-        // Temporal and other scalar types: use their Display representation
-        // which is stable and semantically meaningful (ISO 8601 for dates, etc.)
-        _ => format!("{value}").hash(hasher),
-    }
-}
 
 /// Push-based distinct operator.
 ///
@@ -106,7 +17,7 @@ fn hash_value_into(value: &Value, hasher: &mut impl std::hash::Hasher) {
 pub struct DistinctPushOperator {
     /// Columns to check for distinctness (None = all columns).
     columns: Option<Vec<usize>>,
-    /// Set of seen row hashes.
+    /// The keys of the rows seen (see `RowKey`).
     seen: HashSet<RowKey>,
 }
 
@@ -194,7 +105,7 @@ pub struct DistinctMaterializingOperator {
     columns: Option<Vec<usize>>,
     /// Buffered unique rows.
     rows: Vec<Vec<Value>>,
-    /// Set of seen row hashes.
+    /// The keys of the rows seen (see `RowKey`).
     seen: HashSet<RowKey>,
     /// Number of columns.
     num_columns: Option<usize>,
@@ -523,12 +434,13 @@ mod tests {
         assert_eq!(distinct.unique_count(), 2);
     }
 
+    /// Values of different types are distinct, but numbers compare by their
+    /// value (openCypher equivalence): `1` and `1.0` are one value.
     #[test]
-    fn test_distinct_mixed_types_are_distinct() {
+    fn values_of_different_types_are_distinct_but_equal_numbers_are_one() {
         let mut distinct = DistinctPushOperator::new();
         let mut sink = CollectorSink::new();
 
-        // Different types with "similar" content should be distinct
         let chunk = create_mixed_chunk(&[
             Value::Int64(1),
             Value::Float64(1.0),
@@ -537,18 +449,23 @@ mod tests {
         ]);
         distinct.push(chunk, &mut sink).unwrap();
         distinct.finalize(&mut sink).unwrap();
-        assert_eq!(distinct.unique_count(), 4);
+        assert_eq!(distinct.unique_count(), 3);
     }
 
+    /// `-0.0` is `0.0`, and every NaN is one value, whatever its bits.
     #[test]
-    fn test_hash_value_deterministic() {
-        // Same value should always produce the same hash
-        let v1 = Value::from("test");
-        let v2 = Value::from("test");
-        assert_eq!(hash_value(&v1), hash_value(&v2));
+    fn negative_zero_is_zero_and_nan_is_nan() {
+        let mut distinct = DistinctPushOperator::new();
+        let mut sink = CollectorSink::new();
 
-        // Different values should (almost certainly) produce different hashes
-        let v3 = Value::from("other");
-        assert_ne!(hash_value(&v1), hash_value(&v3));
+        let chunk = create_mixed_chunk(&[
+            Value::Float64(0.0),
+            Value::Float64(-0.0),
+            Value::Float64(f64::NAN),
+            Value::Float64(f64::from_bits(f64::NAN.to_bits() | 1)),
+        ]);
+        distinct.push(chunk, &mut sink).unwrap();
+        distinct.finalize(&mut sink).unwrap();
+        assert_eq!(distinct.unique_count(), 2);
     }
 }

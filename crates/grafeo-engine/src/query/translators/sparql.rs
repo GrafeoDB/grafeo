@@ -11,6 +11,7 @@ use crate::query::plan::{
     SortKey, SortOrder, TripleComponent, TripleScanOp, TripleTemplate, UnaryOp, UnionOp,
 };
 use grafeo_adapters::query::sparql::{self, ast};
+use grafeo_common::storage::log_record::RdfGraphTarget;
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use std::collections::HashMap;
@@ -55,7 +56,8 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 
     let sparql_query = sparql::parse(actual_query)?;
     let mut translator = SparqlTranslator::new();
-    let mut plan = translator.translate_query(&sparql_query)?;
+    let plan = translator.translate_query(&sparql_query)?;
+    let mut plan = crate::query::limits::check_plan_depth(plan)?;
     plan.explain = explain;
     plan.profile = profile;
     Ok(plan)
@@ -227,10 +229,39 @@ impl SparqlTranslator {
         // Clear dataset after translating the WHERE clause
         self.dataset = None;
 
-        // Limit to 1 result for efficiency
+        // The first solution decides: stop there.
         let plan = wrap_limit(plan, 1);
 
-        Ok(LogicalPlan::new(plan))
+        // One row holding one Boolean, whether there is a solution, in the
+        // column the SPARQL 1.1 Query Results JSON Format names an ASK result
+        // (section 4.2, "boolean").
+        const SOLUTIONS: &str = "__ask_solutions";
+        let counted = LogicalOperator::Aggregate(AggregateOp {
+            group_by: Vec::new(),
+            aggregates: vec![AggregateExpr {
+                function: AggregateFunction::Count,
+                expression: None,
+                expression2: None,
+                distinct: false,
+                alias: Some(SOLUTIONS.to_string()),
+                percentile: None,
+                separator: None,
+            }],
+            input: Box::new(plan),
+            having: None,
+        });
+        Ok(LogicalPlan::new(LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Variable(SOLUTIONS.to_string())),
+                    op: BinaryOp::Gt,
+                    right: Box::new(LogicalExpression::Literal(Value::Int64(0))),
+                },
+                alias: Some("boolean".to_string()),
+            }],
+            input: Box::new(counted),
+            pass_through_input: false,
+        })))
     }
 
     fn translate_construct(&mut self, construct: &ast::ConstructQuery) -> Result<LogicalPlan> {
@@ -313,7 +344,7 @@ impl SparqlTranslator {
 
         let plan = if let Some(where_clause) = &describe.where_clause {
             let where_plan = self.translate_graph_pattern(where_clause)?;
-            self.join_patterns(where_plan, cbd_plan)
+            self.join_patterns(where_plan, cbd_plan)?
         } else {
             cbd_plan
         };
@@ -631,18 +662,28 @@ impl SparqlTranslator {
     }
 
     fn translate_clear(&mut self, silent: bool, target: &ast::GraphTarget) -> Result<LogicalPlan> {
-        let graph = self.translate_graph_target(target);
+        let target = self.translate_graphs_target(target);
         Ok(LogicalPlan::new(LogicalOperator::ClearGraph(
-            ClearGraphOp { graph, silent },
+            ClearGraphOp { target, silent },
         )))
     }
 
     fn translate_drop(&mut self, silent: bool, target: &ast::GraphTarget) -> Result<LogicalPlan> {
-        let graph = self.translate_graph_target(target);
+        let target = self.translate_graphs_target(target);
         Ok(LogicalPlan::new(LogicalOperator::DropGraph(DropGraphOp {
-            graph,
+            target,
             silent,
         })))
+    }
+
+    /// The graphs a `CLEAR` or `DROP` names.
+    fn translate_graphs_target(&self, target: &ast::GraphTarget) -> RdfGraphTarget {
+        match target {
+            ast::GraphTarget::Default => RdfGraphTarget::Default,
+            ast::GraphTarget::Named(iri) => RdfGraphTarget::Named(self.resolve_iri(iri)),
+            ast::GraphTarget::AllNamed => RdfGraphTarget::AllNamed,
+            ast::GraphTarget::All => RdfGraphTarget::All,
+        }
     }
 
     fn translate_create(&mut self, silent: bool, graph: &ast::Iri) -> Result<LogicalPlan> {
@@ -661,8 +702,8 @@ impl SparqlTranslator {
         destination: &ast::GraphTarget,
     ) -> Result<LogicalPlan> {
         Ok(LogicalPlan::new(LogicalOperator::CopyGraph(CopyGraphOp {
-            source: self.translate_graph_target(source),
-            destination: self.translate_graph_target(destination),
+            source: self.translate_graph_target(source)?,
+            destination: self.translate_graph_target(destination)?,
             silent,
         })))
     }
@@ -674,8 +715,8 @@ impl SparqlTranslator {
         destination: &ast::GraphTarget,
     ) -> Result<LogicalPlan> {
         Ok(LogicalPlan::new(LogicalOperator::MoveGraph(MoveGraphOp {
-            source: self.translate_graph_target(source),
-            destination: self.translate_graph_target(destination),
+            source: self.translate_graph_target(source)?,
+            destination: self.translate_graph_target(destination)?,
             silent,
         })))
     }
@@ -687,17 +728,24 @@ impl SparqlTranslator {
         destination: &ast::GraphTarget,
     ) -> Result<LogicalPlan> {
         Ok(LogicalPlan::new(LogicalOperator::AddGraph(AddGraphOp {
-            source: self.translate_graph_target(source),
-            destination: self.translate_graph_target(destination),
+            source: self.translate_graph_target(source)?,
+            destination: self.translate_graph_target(destination)?,
             silent,
         })))
     }
 
-    fn translate_graph_target(&self, target: &ast::GraphTarget) -> Option<String> {
+    /// The one graph a `COPY`, `MOVE` or `ADD` reads or writes: `None` for
+    /// the default graph.
+    fn translate_graph_target(&self, target: &ast::GraphTarget) -> Result<Option<String>> {
         match target {
-            ast::GraphTarget::Default => None,
-            ast::GraphTarget::Named(iri) => Some(self.resolve_iri(iri)),
-            ast::GraphTarget::All => Some(String::new()), // Empty string represents "all"
+            ast::GraphTarget::Default => Ok(None),
+            ast::GraphTarget::Named(iri) => Ok(Some(self.resolve_iri(iri))),
+            ast::GraphTarget::AllNamed | ast::GraphTarget::All => {
+                Err(Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    "COPY, MOVE and ADD name one graph: DEFAULT or a graph IRI, not NAMED or ALL",
+                )))
+            }
         }
     }
 
@@ -816,13 +864,7 @@ impl SparqlTranslator {
                                     if conditions.is_empty() {
                                         branches.push(plan.clone());
                                     } else {
-                                        let combined = conditions
-                                            .into_iter()
-                                            .reduce(|acc, c| LogicalExpression::Binary {
-                                                left: Box::new(acc),
-                                                op: BinaryOp::And,
-                                                right: Box::new(c),
-                                            })
+                                        let combined = LogicalExpression::conjunction(conditions)
                                             .expect("conditions non-empty");
                                         branches.push(wrap_filter(plan.clone(), combined));
                                     }
@@ -836,7 +878,7 @@ impl SparqlTranslator {
                         }
                         _ => {
                             let p_plan = self.translate_graph_pattern(p)?;
-                            plan = self.join_patterns(plan, p_plan);
+                            plan = self.join_patterns(plan, p_plan)?;
                         }
                     }
                 }
@@ -856,7 +898,7 @@ impl SparqlTranslator {
                 for inner in exists_patterns {
                     let inner_plan = self.translate_graph_pattern(inner)?;
                     if !matches!(plan, LogicalOperator::Empty) {
-                        plan = self.join_patterns(plan, inner_plan);
+                        plan = self.join_patterns(plan, inner_plan)?;
                     }
                 }
 
@@ -868,13 +910,7 @@ impl SparqlTranslator {
                         .collect::<Result<Vec<_>>>()?;
 
                     // Combine all predicates with AND
-                    let combined = predicates
-                        .into_iter()
-                        .reduce(|acc, pred| LogicalExpression::Binary {
-                            left: Box::new(acc),
-                            op: BinaryOp::And,
-                            right: Box::new(pred),
-                        })
+                    let combined = LogicalExpression::conjunction(predicates)
                         .expect("predicates non-empty after is_empty check");
 
                     plan = wrap_filter(plan, combined);
@@ -988,7 +1024,7 @@ impl SparqlTranslator {
 
         for triple in triples {
             let triple_scan = self.translate_triple_pattern(triple)?;
-            plan = self.join_patterns(plan, triple_scan);
+            plan = self.join_patterns(plan, triple_scan)?;
         }
 
         Ok(plan)
@@ -1031,7 +1067,7 @@ impl SparqlTranslator {
                     self.translate_triple_pattern(&sub_triple)?
                 };
 
-                plan = self.join_patterns(plan, step);
+                plan = self.join_patterns(plan, step)?;
                 current_subject = next_object;
             }
 
@@ -1622,12 +1658,20 @@ impl SparqlTranslator {
         }
     }
 
-    fn join_patterns(&self, left: LogicalOperator, right: LogicalOperator) -> LogicalOperator {
+    fn join_patterns(
+        &self,
+        mut left: LogicalOperator,
+        mut right: LogicalOperator,
+    ) -> Result<LogicalOperator> {
+        // The variables of each side are collected recursively: a pattern of
+        // many triples joins one at a time, so stop before that is too deep.
+        crate::query::limits::check_partial_plan_depth(&mut right)?;
+        crate::query::limits::check_partial_plan_depth(&mut left)?;
         if matches!(left, LogicalOperator::Empty) {
-            return right;
+            return Ok(right);
         }
         if matches!(right, LogicalOperator::Empty) {
-            return left;
+            return Ok(left);
         }
 
         // Collect output variables from each side and build explicit join
@@ -1646,12 +1690,12 @@ impl SparqlTranslator {
             }
         }
 
-        LogicalOperator::Join(JoinOp {
+        Ok(LogicalOperator::Join(JoinOp {
             left: Box::new(left),
             right: Box::new(right),
             join_type: JoinType::Inner,
             conditions,
-        })
+        }))
     }
 
     /// Collects all variable names produced by an operator subtree.
@@ -1926,13 +1970,7 @@ impl SparqlTranslator {
                 })
                 .collect();
 
-            let predicate = conditions
-                .into_iter()
-                .reduce(|left, right| LogicalExpression::Binary {
-                    left: Box::new(left),
-                    op: BinaryOp::And,
-                    right: Box::new(right),
-                })
+            let predicate = LogicalExpression::conjunction(conditions)
                 .expect("excluded non-empty after is_empty check");
 
             Ok(wrap_filter(scan, predicate))
@@ -2164,7 +2202,7 @@ impl SparqlTranslator {
                 plan = scan;
                 first = false;
             } else {
-                plan = self.join_patterns(plan, scan);
+                plan = self.join_patterns(plan, scan)?;
             }
 
             current_subject = next_object;
@@ -2310,7 +2348,7 @@ impl SparqlTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::plan::{LimitOp, SkipOp, SortOp};
+    use crate::query::plan::{SkipOp, SortOp};
 
     // === Basic SELECT Tests ===
 
@@ -2398,18 +2436,21 @@ mod tests {
     #[test]
     fn test_translate_ask() {
         let query = "ASK { ?x ?y ?z }";
-        let result = translate(query);
-        assert!(result.is_ok());
-
-        let plan = result.unwrap();
-        // ASK should have a Limit(1)
-        fn find_limit(op: &LogicalOperator) -> Option<&LimitOp> {
-            match op {
-                LogicalOperator::Limit(l) => Some(l),
-                _ => None,
-            }
-        }
-        let limit = find_limit(&plan.root).expect("Expected Limit");
+        let plan = translate(query).unwrap();
+        // One Boolean in `boolean`: whether the count of at most one solution
+        // passes zero.
+        let LogicalOperator::Project(project) = &plan.root else {
+            panic!("ASK projects its answer: {:?}", plan.root);
+        };
+        assert_eq!(project.projections.len(), 1);
+        assert_eq!(project.projections[0].alias.as_deref(), Some("boolean"));
+        let LogicalOperator::Aggregate(count) = project.input.as_ref() else {
+            panic!("ASK counts the solutions: {:?}", project.input);
+        };
+        assert!(count.group_by.is_empty());
+        let LogicalOperator::Limit(limit) = count.input.as_ref() else {
+            panic!("ASK stops at the first solution: {:?}", count.input);
+        };
         assert_eq!(limit.count, 1);
     }
 

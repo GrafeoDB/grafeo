@@ -5,7 +5,7 @@
 # just like CI does. Use this to catch dependency issues before pushing.
 #
 # Examples:
-#   .\scripts\ci-clean.ps1              # Test all Python versions (3.12, 3.13, 3.14)
+#   .\scripts\ci-clean.ps1              # Test all Python versions (3.12, 3.13, 3.14, 3.15)
 #   .\scripts\ci-clean.ps1 -SkipRust    # Skip Rust checks, test all Python versions
 #   .\scripts\ci-clean.ps1 -Python 3.12 # Test only Python 3.12
 
@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$pythonVersions = @("3.12", "3.13", "3.14")
+$pythonVersions = @("3.12", "3.13", "3.14", "3.15")
 
 if ($Python) {
     $pythonVersions = @($Python)

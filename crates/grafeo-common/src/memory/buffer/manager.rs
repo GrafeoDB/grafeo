@@ -831,6 +831,112 @@ mod tests {
     }
 
     #[test]
+    fn overflow_reservation_leaves_counters_unchanged() {
+        let manager = BufferManager::with_budget(1024);
+        let held = manager
+            .try_allocate(256, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+
+        assert!(
+            manager
+                .try_allocate(usize::MAX, MemoryRegion::ExecutionBuffers)
+                .is_none()
+        );
+        assert_eq!(manager.allocated(), 256);
+        assert_eq!(held.size(), 256);
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn overflow_resize_preserves_both_grants() {
+        let manager = BufferManager::with_budget(1024);
+        let mut first = manager
+            .try_allocate(128, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        let second = manager
+            .try_allocate(128, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+
+        assert!(!first.resize(usize::MAX));
+        assert_eq!(first.size(), 128);
+        assert_eq!(second.size(), 128);
+        assert_eq!(manager.allocated(), 256);
+        drop(first);
+        drop(second);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    fn simultaneous_reservations(resize: bool) {
+        use std::sync::Barrier;
+
+        let workers = if cfg!(miri) { 4 } else { 16 };
+        let rounds = if cfg!(miri) { 4 } else { 16_384 };
+        let hard_limit = 1;
+        let manager = BufferManager::new(BufferManagerConfig {
+            budget: hard_limit,
+            soft_limit_fraction: 1.0,
+            evict_limit_fraction: 1.0,
+            hard_limit_fraction: 1.0,
+            background_eviction: false,
+            spill_path: None,
+        });
+        let barrier = Barrier::new(workers);
+        let overcommitted = AtomicBool::new(false);
+
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let manager = &manager;
+                let barrier = &barrier;
+                let overcommitted = &overcommitted;
+                let mut resize_grant = resize.then(|| {
+                    manager
+                        .try_allocate(0, MemoryRegion::ExecutionBuffers)
+                        .unwrap()
+                });
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..rounds {
+                        let grant = if let Some(ref mut grant) = resize_grant {
+                            grant.resize(1);
+                            None
+                        } else {
+                            manager.try_allocate(1, MemoryRegion::ExecutionBuffers)
+                        };
+                        if manager.allocated() > hard_limit {
+                            overcommitted.store(true, Ordering::Relaxed);
+                        }
+                        if let Some(ref mut grant) = resize_grant {
+                            grant.resize(0);
+                        }
+                        drop(grant);
+                    }
+                });
+            }
+        });
+
+        assert!(
+            !overcommitted.load(Ordering::Relaxed),
+            "simultaneous reservations exceeded the hard limit"
+        );
+        assert_eq!(manager.allocated(), 0);
+        assert_eq!(
+            manager.stats().region_usage(MemoryRegion::ExecutionBuffers),
+            0
+        );
+    }
+
+    #[test]
+    fn concurrent_grants_obey_hard_limit() {
+        simultaneous_reservations(false);
+    }
+
+    #[test]
+    fn concurrent_resizes_obey_hard_limit() {
+        simultaneous_reservations(true);
+    }
+
+    #[test]
     fn test_available_memory() {
         let manager = BufferManager::with_budget(1000);
 

@@ -196,22 +196,17 @@ impl BufferManager {
         size: usize,
         region: MemoryRegion,
     ) -> Option<MemoryGrant> {
-        // Check if we can allocate
-        let current = self.allocated.load(Ordering::Relaxed);
-
-        if current + size > self.hard_limit {
-            // Try eviction first
+        // An impossible request cannot benefit from eviction.
+        if size > self.hard_limit {
+            return None;
+        }
+        if !self.reserve_bytes(size) {
             self.run_eviction_cycle(true);
-
-            // Check again
-            let current = self.allocated.load(Ordering::Relaxed);
-            if current + size > self.hard_limit {
+            if !self.reserve_bytes(size) {
                 return None;
             }
         }
 
-        // Perform allocation
-        self.allocated.fetch_add(size, Ordering::Relaxed);
         self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
 
         // Check pressure and potentially trigger background eviction
@@ -222,6 +217,17 @@ impl BufferManager {
             size,
             region,
         ))
+    }
+
+    /// Reserves bytes without separating the limit check from the increment.
+    fn reserve_bytes(&self, size: usize) -> bool {
+        self.allocated
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current
+                    .checked_add(size)
+                    .filter(|next| *next <= self.hard_limit)
+            })
+            .is_ok()
     }
 
     /// Returns the current pressure level.
@@ -599,19 +605,16 @@ impl GrantReleaser for BufferManager {
     }
 
     fn try_allocate_raw(&self, size: usize, region: MemoryRegion) -> bool {
-        let current = self.allocated.load(Ordering::Relaxed);
-
-        if current + size > self.hard_limit {
-            // Try eviction
+        if size > self.hard_limit {
+            return false;
+        }
+        if !self.reserve_bytes(size) {
             self.run_eviction_cycle(true);
-
-            let current = self.allocated.load(Ordering::Relaxed);
-            if current + size > self.hard_limit {
+            if !self.reserve_bytes(size) {
                 return false;
             }
         }
 
-        self.allocated.fetch_add(size, Ordering::Relaxed);
         self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
         true
     }

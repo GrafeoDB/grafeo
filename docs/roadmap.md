@@ -24,7 +24,7 @@ The 0.6 series makes Grafeo dependable by design: durable and crash-safe persist
 
 | Release | Focus |
 | --- | --- |
-| [**0.6.0**](https://github.com/GrafeoDB/grafeo/milestone/3) | One storage format: WAL v2 and chunked sections without the 4 GiB limit, with automatic migration. Transactions own their changes: versioned properties and labels, a commit that is logged before it becomes visible. A compact-core store: a dense memory layout, enforced memory limits, incremental checkpoints |
+| [**0.6.0**](https://github.com/GrafeoDB/grafeo/milestone/10) | One storage format: WAL v2 and chunked sections without the 4 GiB limit, with automatic migration. Transactions own their changes: versioned properties and labels, a commit that is logged before it becomes visible. A compact-core store: a dense memory layout, enforced memory limits, incremental checkpoints |
 | [**0.6.1**](https://github.com/GrafeoDB/grafeo/milestone/4) | Transaction fixes on the new model; ADBC driver, SPARQL 1.1 Protocol and Graph Store Protocol, GQL vector types |
 | [**0.6.2**](https://github.com/GrafeoDB/grafeo/milestone/5) | To be planned |
 | [**0.6.3**](https://github.com/GrafeoDB/grafeo/milestone/6) | Push-only execution engine and benchmark-gated parallelism |

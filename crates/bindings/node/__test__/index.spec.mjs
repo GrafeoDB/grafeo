@@ -1,5 +1,8 @@
+import { readFileSync } from 'node:fs'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { GrafeoDB, version, simdSupport } from '../index.js'
+
+const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -23,7 +26,7 @@ function seedDb() {
 
 describe('module exports', () => {
   it('should export version()', () => {
-    expect(version()).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(version()).toBe(packageVersion)
   })
 
   it('should export simdSupport()', () => {
@@ -1737,7 +1740,7 @@ describe('admin operations', () => {
   it('should return version string', () => {
     const db = GrafeoDB.create()
     const ver = db.version()
-    expect(ver).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(ver).toBe(packageVersion)
     db.close()
   })
 })

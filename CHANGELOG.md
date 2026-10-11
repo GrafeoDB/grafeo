@@ -86,6 +86,8 @@ File format release: every database is now a single file in a new format, and 0.
 
 ### Fixed
 
+- **Buffer admission**: simultaneous buffer grants and grant resizing obey the buffer manager's hard limit. Oversized requests return refusal instead of overflowing.
+
 - **A query past its timeout is the retryable `GRAFEO-Q003` in every plan**: one that timed out inside a pipeline (sorts, aggregates) was `GRAFEO-X001`; and the `query_timeouts` metric counts the timeouts of a database with a query timeout set, which it missed.
 - **Indexes created or dropped since the last checkpoint did not survive a crash or a reopen of a WAL-backed database** ([#401](https://github.com/GrafeoDB/grafeo/issues/401)): property, text and vector indexes, made with the API or DDL, in any graph, are replayed, and vector indexes keep all their parameters.
 - **Schema changes made since the last checkpoint lost parts of their definition in a crash**: default values, parent types, edge type endpoints, KEY labels of inline element types, and properties added by ALTER with their defaults now survive.

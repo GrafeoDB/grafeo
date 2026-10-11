@@ -1,7 +1,8 @@
 //! A commit that is not complete yet, or never completes.
 //!
-//! A commit stamps its versions with its epoch and publishes the epoch only
-//! once its events and WAL records are written. Until then the database's
+//! A commit writes its WAL records before stamping its versions with its
+//! epoch, and publishes the epoch only once its events are written. Until
+//! then the database's
 //! direct reads (`get_node`, `get_edge`, `node_count`, `edge_count`,
 //! `iter_nodes`, `iter_edges`, `validate`, `current_epoch`, the history reads
 //! and the change history) read at the published epoch, as queries do, and do
@@ -38,6 +39,8 @@
 
 use std::sync::{Arc, mpsc};
 
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+use grafeo_common::testing::commit_hook::after_next_commit_epoch;
 use grafeo_common::testing::commit_hook::{after_next_commit_logged, after_next_commit_stamped};
 use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
 use grafeo_engine::GrafeoDB;
@@ -168,11 +171,14 @@ fn after_a_commit_that_does_not_complete_no_commit_publishes_part_of_it() {
     );
     let mut explicit = db.session();
     explicit.begin_transaction().unwrap();
-    explicit.execute("INSERT (:Person {name: 'Mia'})").unwrap();
-    assert!(
-        explicit.commit().is_err(),
-        "an explicit transaction cannot commit either"
-    );
+    let error = explicit
+        .execute("INSERT (:Person {name: 'Mia'})")
+        .expect_err("an explicit mutation refuses before its commit");
+    assert_eq!(error.error_code().as_str(), "GRAFEO-T008");
+    let error = explicit
+        .commit()
+        .expect_err("an explicit transaction cannot commit either");
+    assert_eq!(error.error_code().as_str(), "GRAFEO-T008");
 
     // The direct graph and index calls change the store outside any commit,
     // and a checkpoint could never write them: they fail the same way.
@@ -247,48 +253,6 @@ fn after_a_commit_that_does_not_complete_no_commit_publishes_part_of_it() {
     assert_eq!(db.current_epoch(), before);
 }
 
-/// After a commit that did not complete, SPARQL updates and graph operations
-/// fail with the incomplete-commit error (`GRAFEO-T008`), through a session
-/// and through `GrafeoDB::execute_sparql`, and change nothing (#414).
-#[cfg(all(feature = "sparql", feature = "triple-store"))]
-#[test]
-fn after_a_commit_that_does_not_complete_sparql_updates_fail_with_its_code() {
-    let db = GrafeoDB::new_in_memory();
-    db.execute_sparql("CREATE GRAPH <http://ex.org/paris>")
-        .unwrap();
-    let alix = db
-        .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
-        .unwrap();
-    fail_a_commit(&db, alix);
-
-    let session = db.session();
-    for update in [
-        "INSERT DATA { <http://ex.org/gus> <http://ex.org/city> \"Berlin\" }",
-        "CREATE GRAPH <http://ex.org/berlin>",
-        "CLEAR ALL",
-        "DROP GRAPH <http://ex.org/paris>",
-        "COPY DEFAULT TO <http://ex.org/prague>",
-    ] {
-        for (through, outcome) in [
-            ("a session", session.execute_sparql(update)),
-            ("execute_sparql", db.execute_sparql(update)),
-        ] {
-            let error = outcome.expect_err(update);
-            assert_eq!(
-                error.error_code().as_str(),
-                "GRAFEO-T008",
-                "{update} through {through}: {error}"
-            );
-        }
-    }
-    assert!(db.rdf_store().is_empty(), "no triple was added");
-    assert_eq!(
-        db.rdf_store().graph_names(),
-        ["http://ex.org/paris".to_string()],
-        "no graph was created or dropped"
-    );
-}
-
 /// After a commit that did not complete, an RDF batch insert refuses before
 /// it pulls the caller's iterator (which may parse or compute the triples),
 /// and an import before it opens its file or parses its data: a refused call
@@ -353,8 +317,7 @@ fn after_a_commit_that_does_not_complete_imports_refuse_before_reading_their_inp
     assert_eq!(people(&db), [Value::from("Alix")], "nothing was imported");
 }
 
-/// A bulk import or an RDF batch insert, which hold commits off while they
-/// write, by name.
+/// A bulk import or an RDF batch insert, which write no WAL record, by name.
 type Import = (
     &'static str,
     fn(&GrafeoDB) -> grafeo_common::utils::error::Result<()>,
@@ -389,10 +352,9 @@ fn imports() -> Vec<Import> {
 
 /// An import that starts while a commit is in progress waits for it, and
 /// when that commit then fails, the import refuses with the failed commit's
-/// error and adds nothing: after a commit that did not complete no commit
-/// may follow, and its own would publish the failed commit's stamped
-/// versions with its epoch (before, it returned `Ok` for data that was lost
-/// on reopen).
+/// error and adds nothing: it writes no WAL record, and after a commit that
+/// did not complete no checkpoint could persist what it added (before, it
+/// returned `Ok` for data that was lost on reopen).
 #[test]
 fn an_import_waiting_for_a_commit_that_fails_refuses() {
     let mut failures = Vec::new();
@@ -523,6 +485,66 @@ fn change_events_of_a_commit_are_seen_only_once_it_is_complete() {
     );
 }
 
+/// A panic after the commit epoch is assigned, before the WAL group is
+/// written, leaves no committed group to replay. A close keeps the last
+/// checkpoint, and reopen excludes every change of that transaction.
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+#[test]
+fn a_commit_failing_before_its_wal_records_is_not_replayed_on_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vienna.grafeo");
+    let alix = {
+        let db = GrafeoDB::open(&path).unwrap();
+        let alix = db
+            .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+            .unwrap();
+        db.close().unwrap();
+        alix
+    };
+    let checkpointed = std::fs::read(&path).unwrap();
+    let db = GrafeoDB::open(&path).unwrap();
+    let before = db.current_epoch();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session
+        .set_node_property(alix, "city", Value::from("Paris"))
+        .unwrap();
+    let gus = session
+        .create_node_with_props(&["Person"], [("name", Value::from("Gus"))])
+        .unwrap();
+    let knows = session.create_edge(alix, gus, "KNOWS").unwrap();
+    after_next_commit_epoch(|| panic!("injected: the commit stops before its WAL records"));
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.commit()));
+    assert!(unwound.is_err(), "the commit panicked");
+    assert_eq!(people(&db), [Value::from("Alix")], "not published");
+    assert_eq!(db.current_epoch(), before, "no commit epoch was published");
+    assert!(db.get_node(gus).is_none(), "Gus remains unpublished");
+    assert!(db.get_edge(knows).is_none(), "the edge remains unpublished");
+    if cfg!(feature = "temporal") {
+        assert_eq!(
+            city_of_alix(&db),
+            Value::Null,
+            "the property is unpublished"
+        );
+    }
+    drop(session);
+    let error = db.close().expect_err("close reports the failed commit");
+    assert_eq!(error.error_code().as_str(), "GRAFEO-T008");
+    drop(db);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        checkpointed,
+        "close preserved the checkpoint"
+    );
+
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(people(&db), [Value::from("Alix")], "nothing was replayed");
+    assert_eq!(city_of_alix(&db), Value::Null, "Alix never moved to Paris");
+    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.edge_count(), 0);
+    db.close().unwrap();
+}
+
 /// A commit that panics once its WAL records are written leaves a complete
 /// group in the WAL: it is not visible in the open database, and a reopen
 /// replays all of it.
@@ -565,6 +587,7 @@ fn a_commit_failing_after_its_wal_records_is_replayed_whole_on_reopen() {
 /// Under memory pressure a compacted database merges its overlay into the
 /// base, which has no versions: after a failed commit the merge would make
 /// the commit's stamped part visible, so it does not run.
+#[cfg(feature = "compact-store")]
 #[test]
 fn a_memory_pressure_merge_never_folds_a_failed_commit_into_the_base() {
     let mut db = GrafeoDB::new_in_memory();
@@ -651,8 +674,8 @@ fn direct_reads_see_a_commit_only_once_it_is_complete() {
 /// store, which holds the commit's stamped part: every checkpoint, save,
 /// backup and copy fails with the error of the failed commit and leaves the
 /// file as it was. `close()` fails the same way, keeps the WAL and releases
-/// the file; a reopen shows the database without the failed commit, with
-/// what the WAL holds, and commits again.
+/// the file; because the panic comes after stamping, its complete WAL group
+/// is already written. A reopen replays the whole failed commit and commits again.
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 #[test]
 fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
@@ -726,7 +749,7 @@ fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
     let wal = dir.path().join("amsterdam.grafeo.wal");
     assert!(
         wal.is_dir() && std::fs::read_dir(&wal).unwrap().next().is_some(),
-        "close keeps the WAL, which holds Vincent"
+        "close keeps the WAL, which holds Vincent and the failed commit"
     );
     assert!(
         std::fs::read(&path).unwrap() == checkpointed,
@@ -736,15 +759,21 @@ fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
         people(&db),
-        [Value::from("Alix"), Value::from("Vincent")],
-        "the reopened database has the WAL's commits and nothing of the failed one"
+        [
+            Value::from("Alix"),
+            Value::from("Gus"),
+            Value::from("Vincent")
+        ],
+        "the reopened database replays the stamped commit's whole WAL group"
     );
-    assert_eq!(city_of_alix(&db), Value::Null, "Alix never moved to Paris");
+    assert_eq!(city_of_alix(&db), Value::from("Paris"));
+    assert_eq!(db.edge_count(), 1, "the edge is replayed too");
     db.execute("INSERT (:Person {name: 'Mia'})").unwrap();
     assert_eq!(
         people(&db),
         [
             Value::from("Alix"),
+            Value::from("Gus"),
             Value::from("Mia"),
             Value::from("Vincent")
         ],

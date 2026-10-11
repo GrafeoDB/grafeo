@@ -122,12 +122,12 @@ Full results: [embedded](https://github.com/GrafeoDB/graph-bench/blob/main/RESUL
 
 | Query Language | LPG | RDF |
 |----------------|-----|-----|
-| GQL | âœ… | - |
-| Cypher | âœ… | - |
-| GraphQL | âœ… | âœ… | 
-| Gremlin | âœ… | - |
-| SPARQL | - | âœ… |
-| SQL/PGQ | âœ… | - |
+| GQL | ✅ | - |
+| Cypher | ✅ | - |
+| GraphQL | ✅ | ✅ | 
+| Gremlin | ✅ | - |
+| SPARQL | - | ✅ |
+| SQL/PGQ | ✅ | - |
 
 Grafeo uses a modular translator architecture where query languages are parsed into ASTs, then translated to a unified logical plan that executes against the appropriate storage backend (LPG or RDF).
 

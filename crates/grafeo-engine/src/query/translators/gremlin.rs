@@ -81,17 +81,15 @@ struct EdgeContext {
 }
 
 /// TinkerPop `not()` semantics: a traverser missing the property is *retained*.
-/// SQL `NOT NULL` is `NULL` (row dropped), so widen to `NOT(p) OR p IS NULL`.
+/// SQL `NOT NULL` is `NULL` (row dropped), so use `NOT coalesce(p, false)`; `p` appears
+/// once, so nested `not()` stays linear in size.
 fn negate_null_safe(pred: LogicalExpression) -> LogicalExpression {
-    LogicalExpression::Binary {
-        left: Box::new(LogicalExpression::Unary {
-            op: UnaryOp::Not,
-            operand: Box::new(pred.clone()),
-        }),
-        op: BinaryOp::Or,
-        right: Box::new(LogicalExpression::Unary {
-            op: UnaryOp::IsNull,
-            operand: Box::new(pred),
+    LogicalExpression::Unary {
+        op: UnaryOp::Not,
+        operand: Box::new(LogicalExpression::FunctionCall {
+            name: "coalesce".to_string(),
+            args: vec![pred, LogicalExpression::Literal(Value::Bool(false))],
+            distinct: false,
         }),
     }
 }

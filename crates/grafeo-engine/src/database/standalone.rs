@@ -488,6 +488,10 @@ fn put(
     applying: &mut Applying<'_>,
 ) -> Result<()> {
     match record {
+        CatalogRecord::StoredConfig(config) => {
+            catalog.set_stored_config(Some(config.clone()));
+            Ok(())
+        }
         CatalogRecord::Schema(schema) => {
             let outcome = catalog.register_schema_namespace(schema.name.clone());
             applying.catalog(op, outcome)
@@ -715,6 +719,13 @@ fn drop_entry(
     applying: &mut Applying<'_>,
 ) -> Result<()> {
     match key {
+        CatalogKey::StoredConfig => {
+            if catalog.set_stored_config(None).is_some() {
+                Ok(())
+            } else {
+                applying.missing(op, "the database stores no configuration")
+            }
+        }
         CatalogKey::Schema(name) => {
             let outcome = catalog.drop_schema_namespace(name);
             applying.catalog(op, outcome)

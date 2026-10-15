@@ -83,7 +83,7 @@ impl super::GrafeoDB {
     /// In-memory databases return false.
     #[must_use]
     pub fn is_persistent(&self) -> bool {
-        self.config.path.is_some()
+        self.config.path().is_some()
     }
 
     /// Returns the database file path, if persistent.
@@ -91,7 +91,7 @@ impl super::GrafeoDB {
     /// In-memory databases return None.
     #[must_use]
     pub fn path(&self) -> Option<&Path> {
-        self.config.path.as_deref()
+        self.config.path()
     }
 
     /// Returns high-level database information.
@@ -104,8 +104,8 @@ impl super::GrafeoDB {
             node_count: self.node_count(),
             edge_count: self.edge_count(),
             is_persistent: self.is_persistent(),
-            path: self.config.path.clone(),
-            wal_enabled: self.config.wal_enabled,
+            path: self.config.path().map(Path::to_path_buf),
+            wal_enabled: self.config.wal_enabled(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             features: {
                 let mut f = vec!["gql".into()];
@@ -231,7 +231,7 @@ impl super::GrafeoDB {
     #[must_use]
     pub fn detailed_stats(&self) -> crate::admin::DatabaseStats {
         #[cfg(feature = "wal")]
-        let disk_bytes = self.config.path.as_ref().and_then(|p| {
+        let disk_bytes = self.config.path().as_ref().and_then(|p| {
             // The spelling the files are named after: the caller's (`db/`)
             // no longer exists once a migrated directory became a file.
             let path = super::normalize_path(p).ok()?;

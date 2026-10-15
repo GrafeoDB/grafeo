@@ -141,20 +141,20 @@ fn memory_limit_accessor_returns_configured_value() {
 #[test]
 fn default_durability_is_batch() {
     let config = Config::default();
-    assert_eq!(config.wal_durability, DurabilityMode::default());
+    assert_eq!(config.wal_durability(), DurabilityMode::default());
 }
 
 #[test]
 fn config_with_sync_durability() {
     let config = Config::persistent("/tmp/db").with_wal_durability(DurabilityMode::Sync);
-    assert_eq!(config.wal_durability, DurabilityMode::Sync);
+    assert_eq!(config.wal_durability(), DurabilityMode::Sync);
     assert!(config.validate().is_ok());
 }
 
 #[test]
 fn config_with_nosync_durability() {
     let config = Config::persistent("/tmp/db").with_wal_durability(DurabilityMode::NoSync);
-    assert_eq!(config.wal_durability, DurabilityMode::NoSync);
+    assert_eq!(config.wal_durability(), DurabilityMode::NoSync);
     assert!(config.validate().is_ok());
 }
 
@@ -163,13 +163,13 @@ fn config_with_nosync_durability() {
 #[test]
 fn schema_constraints_default_is_false() {
     let config = Config::default();
-    assert!(!config.schema_constraints);
+    assert!(!config.schema_constraints());
 }
 
 #[test]
 fn schema_constraints_can_be_enabled() {
     let config = Config::in_memory().with_schema_constraints();
-    assert!(config.schema_constraints);
+    assert!(config.schema_constraints());
 }
 
 // --- CDC retention ---

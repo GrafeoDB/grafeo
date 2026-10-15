@@ -536,6 +536,9 @@ impl CatalogSection {
         for def in &schema.procedures {
             writer.write(&CatalogRecord::Procedure(procedure_record(def)))?;
         }
+        if let Some(config) = self.catalog.stored_config() {
+            writer.write(&CatalogRecord::StoredConfig(config))?;
+        }
         Ok(())
     }
 
@@ -585,6 +588,9 @@ impl CatalogSection {
                 .catalog
                 .replace_procedure(procedure_definition(record))
                 .map_err(refused)?,
+            CatalogRecord::StoredConfig(record) => {
+                self.catalog.set_stored_config(Some(record));
+            }
         }
         Ok(())
     }
@@ -611,6 +617,33 @@ impl CatalogSection {
     }
 }
 
+/// The stored configuration a catalog section holds (see
+/// `database::stored_config`), read without loading the catalog: `None` for
+/// a section that stores none (0.5.x bytes, or written before 0.6.0).
+///
+/// # Errors
+///
+/// The errors of reading the section's records.
+pub(crate) fn read_stored_config(
+    source: &dyn SectionSource,
+) -> Result<Option<grafeo_common::storage::catalog_record::StoredConfigRecord>> {
+    if legacy_bytes(source).map_err(in_section)?.is_some() {
+        return Ok(None);
+    }
+    check_version(SectionType::Catalog, source, CATALOG_SECTION_VERSION)?;
+    read_meta(source)?;
+    let mut reader = ChunkStreamReader::new(source, 0, CATALOG_STREAM);
+    let mut stored = None;
+    read_catalog_records(&mut reader, &mut |record| {
+        if let CatalogRecord::StoredConfig(config) = record {
+            stored = Some(config);
+        }
+        Ok(())
+    })
+    .map_err(in_section)?;
+    Ok(stored)
+}
+
 /// What a load of a version 2 section keeps between records: the key of the
 /// last record of each kind, which the next one must follow, and the records
 /// applied once all are read.
@@ -626,6 +659,7 @@ struct Loading {
     index: Option<IndexKey>,
     index_name: Option<(String, String, String, u8)>,
     procedure: Option<String>,
+    stored_config: Option<()>,
     constraints: Vec<ConstraintDefinition>,
     indexes: Vec<IndexRecord>,
     index_names: Vec<IndexName>,
@@ -678,6 +712,7 @@ impl Loading {
             CatalogRecord::Procedure(record) => {
                 follow(&mut self.procedure, record.name.clone(), name)
             }
+            CatalogRecord::StoredConfig(_) => follow(&mut self.stored_config, (), name),
         }
     }
 }

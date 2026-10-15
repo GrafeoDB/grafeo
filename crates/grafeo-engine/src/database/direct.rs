@@ -480,7 +480,7 @@ impl GrafeoDB {
             .map(|(schema, _)| schema);
         let mut validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
             .with_store(Arc::clone(store) as Arc<dyn GraphStoreSearch>)
-            .with_max_property_size(self.config.max_property_size)
+            .with_max_property_size(self.config.max_property_size())
             .with_transaction_context(context.0, context.1)
             .with_schema(schema);
         if let Some(graph) = graph {
@@ -519,9 +519,9 @@ impl GrafeoDB {
     /// Every `gc_interval` commits, prunes the versions no reader needs, in
     /// the root store and `store`.
     fn prune_versions(&self, root: &Arc<LpgStore>, store: &Arc<LpgStore>) {
-        if self.config.gc_interval > 0 {
+        if self.config.gc_interval() > 0 {
             let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if count.is_multiple_of(self.config.gc_interval) {
+            if count.is_multiple_of(self.config.gc_interval()) {
                 let min_epoch = self.transaction_manager.min_active_epoch();
                 root.gc_versions(min_epoch);
                 if !Arc::ptr_eq(root, store) {

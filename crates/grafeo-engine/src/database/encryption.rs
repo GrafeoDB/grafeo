@@ -52,7 +52,7 @@ impl DatabaseKeys {
     /// The keys `config` asks for.
     pub(crate) fn from_config(config: &Config) -> Self {
         #[cfg(feature = "encryption")]
-        if let Some(encryption) = &config.encryption {
+        if let Some(encryption) = &config.encryption() {
             return Self::from_encryption(encryption);
         }
         #[cfg(not(feature = "encryption"))]

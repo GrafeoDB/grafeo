@@ -37,6 +37,8 @@ pub(crate) mod encryption;
 pub(crate) mod flush;
 #[cfg(feature = "lpg")]
 mod graph_handle;
+#[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+mod stored_config;
 #[cfg(feature = "lpg")]
 pub use direct::BatchEdge;
 #[cfg(feature = "lpg")]
@@ -444,7 +446,22 @@ impl GrafeoDB {
         // and `.` is the directory it names, so `<path>.pre-0.6` and the
         // other side files go next to it, never inside it. `config.path`
         // keeps the caller's spelling, which `path()` reports.
-        let database_path = config.path.as_deref().map(normalize_path).transpose()?;
+        let database_path = config.path().map(normalize_path).transpose()?;
+
+        // An existing database file applies the configuration it stores to
+        // every setting the open does not set itself (#551), before anything
+        // is built: the memory limit sizes the buffer manager, the backward
+        // edges shape the store.
+        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        let config = match database_path.as_deref() {
+            Some(path) if path.is_file() && matches!(detect(path)?, OnDisk::Current) => {
+                match stored_config::read(path, &encryption::DatabaseKeys::from_config(&config))? {
+                    Some(stored) => stored_config::applied(config, &stored, path)?,
+                    None => config,
+                }
+            }
+            _ => config,
+        };
 
         // Validate configuration before proceeding
         config.validate().map_err(config_error)?;
@@ -452,7 +469,7 @@ impl GrafeoDB {
         // An encrypted database spills nothing: a spill file would hold its
         // data in plaintext (`validate` refuses an explicit spill path).
         #[cfg(feature = "encryption")]
-        let derive_spill_path = derive_spill_path && config.encryption.is_none();
+        let derive_spill_path = derive_spill_path && config.encryption().is_none();
 
         #[cfg(feature = "lpg")]
         let store = Arc::new(LpgStore::new()?);
@@ -460,20 +477,20 @@ impl GrafeoDB {
         let rdf_store = Arc::new(RdfStore::new());
         let transaction_manager = Arc::new(TransactionManager::new());
 
-        let is_read_only = config.access_mode == crate::config::AccessMode::ReadOnly;
+        let is_read_only = config.access_mode() == crate::config::AccessMode::ReadOnly;
 
         // Where this open spills (see `spill_directory`): a read-only open
         // writes nothing beside its file, and databases sharing an explicit
         // spill path keep their vector caches apart.
         let spill_layout = spill_directory::SpillLayout::for_open(
-            config.spill_path.as_deref(),
+            config.spill_path(),
             database_path.as_deref().filter(|_| derive_spill_path),
             is_read_only,
         );
         // Where an older build may have spilled embeddings (#594).
         #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
         let legacy_spill_directories =
-            legacy_spill::directories(database_path.as_deref(), config.spill_path.as_deref());
+            legacy_spill::directories(database_path.as_deref(), config.spill_path());
         // Whether this open reads a 0.5.x database in place: only then are old
         // spill files in a configured spill path its own, and every vector
         // index is rebuilt (see `legacy_spill`).
@@ -482,7 +499,7 @@ impl GrafeoDB {
 
         // Create buffer manager with configured limits
         let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit.unwrap_or_else(|| {
+            budget: config.memory_limit().unwrap_or_else(|| {
                 // reason: product of system RAM and 0.75 is always a valid positive usize
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
@@ -531,6 +548,11 @@ impl GrafeoDB {
         // commits).
         #[cfg(all(feature = "wal", feature = "lpg"))]
         let mut retire_sidecar_wal: Option<bool> = None;
+
+        // Whether this open creates the database file, which then stores the
+        // configuration (see `stored_config`).
+        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        let mut creates_the_file = false;
 
         // The migration lock while a read-write open creates a database at a
         // missing path, released once the database exists (see
@@ -709,6 +731,10 @@ impl GrafeoDB {
                         return Err(wal_directories_are_no_longer_created(db_path));
                     }
                     Self::refuse_leftover_sidecar_wal(db_path)?;
+                    #[cfg(feature = "lpg")]
+                    {
+                        creates_the_file = true;
+                    }
                     let database_id = new_database_id();
                     GrafeoFileManager::create_with_id(
                         db_path,
@@ -806,7 +832,7 @@ impl GrafeoDB {
                     // writer continues after the last complete group.
                     replayed.end.cut_torn_tail()?;
                     wal_start_lsn = replayed.end.end_lsn.max(fm.active_header().checkpoint_lsn);
-                    if !config.wal_enabled {
+                    if !config.wal_enabled() {
                         retire_sidecar_wal = Some(replayed.groups > 0);
                     }
                 }
@@ -840,9 +866,9 @@ impl GrafeoDB {
         Self::continue_epochs(&store, &transaction_manager);
 
         #[cfg(feature = "cdc")]
-        let cdc_enabled_val = config.cdc_enabled;
+        let cdc_enabled_val = config.cdc_enabled();
         #[cfg(feature = "cdc")]
-        let cdc_retention = config.cdc_retention.clone();
+        let cdc_retention = config.cdc_retention().clone();
 
         let mut db = Self {
             config,
@@ -922,7 +948,7 @@ impl GrafeoDB {
         // the sidecar, at the log position the file's checkpoint recorded.
         #[cfg(feature = "wal")]
         if !is_read_only
-            && db.config.wal_enabled
+            && db.config.wal_enabled()
             && let Some(fm) = db.file_manager.clone()
         {
             #[cfg(feature = "lpg")]
@@ -969,6 +995,18 @@ impl GrafeoDB {
         // the consumers we're about to spill.
         db.apply_force_disk_overrides();
 
+        // A new database file stores its configuration, written at once so
+        // the next open reads it from the image (it reads the record before
+        // it replays the WAL).
+        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        if creates_the_file
+            && let (Some(fm), Some(path)) = (db.file_manager.clone(), database_path.as_deref())
+        {
+            db.catalog
+                .set_stored_config(Some(stored_config::record_of(&db.config, path)));
+            db.checkpoint_to_file(&fm)?;
+        }
+
         Ok(db)
     }
 
@@ -1008,7 +1046,7 @@ impl GrafeoDB {
         transaction_manager.sync_epoch(store.current_epoch());
 
         let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit.unwrap_or_else(|| {
+            budget: config.memory_limit().unwrap_or_else(|| {
                 // reason: product of system RAM and 0.75 is always a valid positive usize
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
@@ -1022,7 +1060,7 @@ impl GrafeoDB {
         let query_cache = Arc::new(QueryCache::default());
 
         #[cfg(feature = "cdc")]
-        let cdc_enabled_val = config.cdc_enabled;
+        let cdc_enabled_val = config.cdc_enabled();
 
         Ok(Self {
             config,
@@ -1105,7 +1143,7 @@ impl GrafeoDB {
         transaction_manager.sync_epoch(store.current_epoch());
 
         let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit.unwrap_or_else(|| {
+            budget: config.memory_limit().unwrap_or_else(|| {
                 // reason: product of system RAM and 0.75 is always a valid positive usize
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
@@ -1119,7 +1157,7 @@ impl GrafeoDB {
         let query_cache = Arc::new(QueryCache::default());
 
         #[cfg(feature = "cdc")]
-        let cdc_enabled_val = config.cdc_enabled;
+        let cdc_enabled_val = config.cdc_enabled();
 
         Ok(Self {
             config,
@@ -1264,7 +1302,7 @@ impl GrafeoDB {
 
         let path = fm.sidecar_wal_path();
         std::fs::create_dir_all(&path)?;
-        let durability = match self.config.wal_durability {
+        let durability = match self.config.wal_durability() {
             crate::config::DurabilityMode::Sync => WalDurabilityMode::Sync,
             crate::config::DurabilityMode::Batch {
                 max_delay_ms,
@@ -1290,7 +1328,7 @@ impl GrafeoDB {
             .map_err(Error::from)?,
         );
         if let crate::config::DurabilityMode::Adaptive { target_interval_ms } =
-            self.config.wal_durability
+            self.config.wal_durability()
         {
             let synced = Arc::clone(&wal);
             *self.wal_flusher.lock() = Some(grafeo_storage::wal::AdaptiveFlusher::with_sync(
@@ -2013,16 +2051,16 @@ impl GrafeoDB {
             transaction_manager: Arc::clone(&self.transaction_manager),
             query_cache: Arc::clone(&self.query_cache),
             catalog: Arc::clone(&self.catalog),
-            factorized_execution: self.config.factorized_execution,
-            shuffle_unordered: self.config.shuffle_unordered,
-            graph_model: self.config.graph_model,
-            query_timeout: self.config.query_timeout,
-            max_property_size: self.config.max_property_size,
+            factorized_execution: self.config.factorized_execution(),
+            shuffle_unordered: self.config.shuffle_unordered(),
+            graph_model: self.config.graph_model(),
+            query_timeout: self.config.query_timeout(),
+            max_property_size: self.config.max_property_size(),
             path_search_budget: self.config.path_search_budget(),
             #[cfg(feature = "spill")]
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
             commit_counter: Arc::clone(&self.commit_counter),
-            gc_interval: self.config.gc_interval,
+            gc_interval: self.config.gc_interval(),
             read_only: self.read_only || force_read_only,
             identity: identity.clone(),
             #[cfg(feature = "lpg")]
@@ -2167,13 +2205,13 @@ impl GrafeoDB {
     /// Returns the graph data model of this database.
     #[must_use]
     pub fn graph_model(&self) -> crate::config::GraphModel {
-        self.config.graph_model
+        self.config.graph_model()
     }
 
     /// Returns the configured memory limit in bytes, if any.
     #[must_use]
     pub fn memory_limit(&self) -> Option<usize> {
-        self.config.memory_limit
+        self.config.memory_limit()
     }
 
     /// Returns a point-in-time snapshot of all metrics.
@@ -2596,7 +2634,7 @@ impl GrafeoDB {
         // timer stops: the lock is released again before the timer thread is
         // joined. An in-memory database has nothing to persist and keeps
         // taking writes.
-        if self.config.path.is_some() && !self.read_only {
+        if self.config.path().is_some() && !self.read_only {
             self.transaction_manager.close_for_writes();
         }
 
@@ -2712,7 +2750,7 @@ impl GrafeoDB {
     #[cfg(any(feature = "lpg", feature = "triple-store"))]
     pub(crate) fn hold_open(&self) -> Result<parking_lot::RwLockReadGuard<'_, bool>> {
         let open = self.is_open.read();
-        if !*open && self.config.path.is_some() {
+        if !*open && self.config.path().is_some() {
             return Err(Error::Transaction(
                 grafeo_common::utils::error::TransactionError::DatabaseClosed,
             ));
@@ -2947,7 +2985,7 @@ impl GrafeoDB {
     fn apply_force_disk_overrides(&self) {
         use grafeo_common::storage::TierOverride;
 
-        for (section_type, mem_config) in &self.config.section_configs {
+        for (section_type, mem_config) in self.config.section_configs() {
             let consumer_name = format!("section:{section_type:?}");
             match mem_config.tier {
                 TierOverride::ForceDisk => {
@@ -3062,7 +3100,7 @@ impl GrafeoDB {
         self.stop_checkpoint_timer();
         // A file opened read-only stays so; a closed database has released
         // its file.
-        if let (Some(interval), Some(fm)) = (self.config.checkpoint_interval, &self.file_manager)
+        if let (Some(interval), Some(fm)) = (self.config.checkpoint_interval(), &self.file_manager)
             && !self.read_only
             && !fm.is_read_only()
             && *self.is_open.read()
@@ -3082,6 +3120,72 @@ impl GrafeoDB {
         if let Some(mut timer) = running {
             timer.stop();
         }
+    }
+
+    /// Changes the configuration the database file stores (#551): the
+    /// settings `changes` sets with its builders replace the stored ones,
+    /// and the database checkpoints at once, so the next open applies them
+    /// (`GrafeoDB::open` and `Config::read_only` apply what the file stores
+    /// to every setting they do not set themselves). This database keeps the
+    /// configuration it opened with.
+    ///
+    /// What a file stores: the graph model and the backward edges (both
+    /// fixed at creation), schema constraints, the WAL and its durability
+    /// mode, the memory limit, the section tier overrides, and the spill
+    /// path when it lies in the database's directory.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> grafeo_common::utils::error::Result<()> {
+    /// use grafeo_engine::config::DurabilityMode;
+    /// use grafeo_engine::{Config, GrafeoDB};
+    ///
+    /// let db = GrafeoDB::open("berlin.grafeo")?;
+    /// db.set_stored_config(
+    ///     &Config::in_memory()
+    ///         .with_memory_limit(88 * 1024 * 1024)
+    ///         .with_wal_durability(DurabilityMode::Sync),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An unsupported-query error for an in-memory or read-only database,
+    /// [`Error::InvalidValue`] when `changes` sets the graph model or the
+    /// backward edges to another value than the database was created with,
+    /// the database-closed error after `close()`, and the errors of the
+    /// checkpoint.
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    pub fn set_stored_config(&self, changes: &Config) -> Result<()> {
+        let _open = self.hold_open()?;
+        let unsupported =
+            |what: &str| Error::Query(grafeo_common::utils::error::QueryError::unsupported(what));
+        let (Some(fm), Some(path)) = (self.file_manager.as_ref(), self.config.path()) else {
+            return Err(unsupported(
+                "a stored configuration needs a database file: an in-memory database stores none",
+            ));
+        };
+        if self.read_only {
+            return Err(unsupported(
+                "a database opened read-only cannot change its stored configuration",
+            ));
+        }
+        let path = normalize_path(path)?;
+        let stored = self
+            .catalog
+            .stored_config()
+            .unwrap_or_else(|| stored_config::record_of(&self.config, &path));
+        let changed = stored_config::changed(stored, changes, &path)?;
+        let previous = self.catalog.set_stored_config(Some(changed));
+        if let Err(error) = self.checkpoint_to_file(fm) {
+            // Nothing was stored: the record goes back to what the file holds.
+            self.catalog.set_stored_config(previous);
+            return Err(error);
+        }
+        Ok(())
     }
 
     // =========================================================================
@@ -3992,8 +4096,8 @@ mod tests {
         let config = Config::in_memory().with_threads(4).with_query_logging();
 
         let db = GrafeoDB::with_config(config).unwrap();
-        assert_eq!(db.config().threads, 4);
-        assert!(db.config().query_logging);
+        assert_eq!(db.config().threads(), 4);
+        assert!(db.config().query_logging());
     }
 
     #[test]
@@ -4236,7 +4340,7 @@ mod tests {
         let config = Config::in_memory().with_memory_limit(64 * 1024 * 1024); // 64 MB
 
         let db = GrafeoDB::with_config(config).unwrap();
-        assert_eq!(db.config().memory_limit, Some(64 * 1024 * 1024));
+        assert_eq!(db.config().memory_limit(), Some(64 * 1024 * 1024));
         assert_eq!(db.node_count(), 0);
     }
 
@@ -4998,13 +5102,13 @@ mod tests {
     #[test]
     fn test_config_with_cdc() {
         let config = Config::in_memory().with_cdc();
-        assert!(config.cdc_enabled);
+        assert!(config.cdc_enabled());
     }
 
     #[test]
     fn test_config_cdc_default_false() {
         let config = Config::in_memory();
-        assert!(!config.cdc_enabled);
+        assert!(!config.cdc_enabled());
     }
 
     // =========================================================================

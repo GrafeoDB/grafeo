@@ -6,6 +6,10 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 Changes since 0.6.0-beta.1.
 
+### Added
+
+- **Rust: `GrafeoDB::set_stored_config`** changes the configuration a database file stores (see Fixed), checkpointing at once. **`Config` getters** for every setting (`config.memory_limit()`, `config.wal_durability()` and so on), and the builders `with_wal()` and `without_schema_constraints()`.
+
 ### Changed
 
 - **New write-ahead log format**: the WAL is a chain of segments of checksummed frames (encrypted per segment, with a key from its own salt, for an encrypted database), one group per commit, and the file's database header records the log position its image covers. A database whose WAL from 0.5.x or 0.6.0-beta.1 still holds commits replays them on its first read-write open, checkpoints them into the file and removes that WAL.
@@ -16,10 +20,12 @@ Changes since 0.6.0-beta.1.
 ### Deprecated
 
 - **Rust: `BackupCursor::log_sequence`**, 0 in the cursors this release writes: the cursor's position in the WAL is `wal_lsn`. Removed in 0.7.0.
+- **Rust: the public fields of `Config`**: read a setting with its getter and set it with its builder. A field written directly does not count as set, so a database file's stored value wins over it on open. Private in 0.7.0.
 - **Rust: `LpgStore::copy_graph`**: it only created the destination graph; `CREATE GRAPH dst AS COPY OF src` copies a graph. Removed in 0.7.0.
 
 ### Fixed
 
+- **A database file keeps the configuration it was created with** ([#551](https://github.com/GrafeoDB/grafeo/issues/551)): it stores its graph model, backward edges, schema constraints, WAL and sync mode, memory limit, section tier overrides and a spill path inside its directory, and `GrafeoDB::open(path)` and `Config::read_only(path)` apply them to every setting they do not set themselves (a value set for an open applies to that open only). The graph model and the backward edges are fixed at creation: an open that sets another value fails. The thread count and other paths are not stored. A database written before 0.6.0 opens with the defaults, as before.
 - **`CREATE GRAPH dst AS COPY OF src` copies the graph** ([#423](https://github.com/GrafeoDB/grafeo/issues/423)): the new graph holds the source's nodes, edges, labels and properties as of the statement (an open transaction's changes are left out, property history is not copied) and its graph type, and survives a reopen. It created an empty graph. Indexes are not copied: create them on the copy.
 - **A commit whose WAL write fails is no longer reported as committed** ([#498](https://github.com/GrafeoDB/grafeo/issues/498)): a commit, an auto-commit statement and a direct call write their WAL group, and in `Sync` mode sync it, before anything of them becomes visible. When the group is not written, the commit is rolled back and fails with `GRAFEO-T009`, which can be retried. When it is written but cannot be synced, it fails with `GRAFEO-T010` (outcome unknown): nothing of it is visible, nothing commits until the database is reopened, and the reopen finds it or not. A direct call while no transaction is open cannot be rolled back, so any failed WAL write fails it with `GRAFEO-T010`. The failure was logged as a warning and the commit succeeded, then was lost on the next restart.
 - **Buffer admission**: simultaneous buffer grants and grant resizing obey the buffer manager's hard limit. Oversized requests return refusal instead of overflowing.

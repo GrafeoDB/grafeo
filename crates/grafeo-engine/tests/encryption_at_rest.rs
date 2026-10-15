@@ -371,12 +371,15 @@ fn an_open_with_the_wal_off_replays_the_sidecar_wal_and_keeps_its_commits() {
             "key {key:?}: the child left Jules in the sidecar WAL"
         );
         let config = |wal_enabled: bool| {
-            let mut config = match key {
+            let config = match key {
                 None => Config::persistent(&path),
                 Some(seed) => encrypted(&path, &key_chain(seed)),
             };
-            config.wal_enabled = wal_enabled;
-            config
+            if wal_enabled {
+                config.with_wal()
+            } else {
+                config.without_wal()
+            }
         };
 
         // What an open with the WAL off sees, whether its close() leaves the

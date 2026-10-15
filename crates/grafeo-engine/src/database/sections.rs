@@ -823,7 +823,13 @@ impl super::GrafeoDB {
     /// Finishes a load once the database is built: builds the indexes the
     /// sections did not hold from all the data.
     pub(super) fn finish_load(&self, loaded: LoadedSections) {
-        for indexes in loaded.unbuilt {
+        self.build_unbuilt(loaded.unbuilt);
+    }
+
+    /// Builds the vector and text indexes of `unbuilt` from the data (see
+    /// [`finish_load`](Self::finish_load)).
+    pub(super) fn build_unbuilt(&self, unbuilt: Vec<GraphIndexes>) {
+        for indexes in unbuilt {
             self.build_indexes(indexes);
         }
     }

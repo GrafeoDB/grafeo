@@ -44,11 +44,7 @@ pub(crate) enum Applying<'a> {
     /// or miss what a later op of the WAL removed: an op that finds its
     /// entry there (or gone, for a drop) changes nothing. The vector and
     /// text indexes it puts are kept in `unbuilt`, built from the data once
-    /// the whole WAL is replayed.
-    #[cfg_attr(
-        not(feature = "wal"),
-        expect(dead_code, reason = "only the replay of a WAL applies as replay")
-    )]
+    /// the whole WAL is replayed. A snapshot's catalog applies the same way.
     Replay {
         /// The indexes left to build once the database is built.
         unbuilt: &'a mut Vec<GraphIndexes>,

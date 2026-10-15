@@ -15,11 +15,152 @@ use crate::catalog::{
     EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition, ProcedureDefinition,
 };
 
-/// Current snapshot version.
-const SNAPSHOT_VERSION: u8 = 4;
+/// Current snapshot version: 5 holds the catalog as its records (the
+/// catalog section's own, see `catalog_record`); 4, which 0.5.x and
+/// 0.6.0-beta.1 wrote, its schema and index definitions, which an import
+/// still reads.
+const SNAPSHOT_VERSION: u8 = 5;
 
-/// Binary snapshot format (v4: graph data, named graphs, RDF, schema, index metadata,
-/// and property version history for temporal support).
+/// The snapshot version of 0.5.x and 0.6.0-beta.1.
+const SNAPSHOT_V4: u8 = 4;
+
+/// Binary snapshot format v5: the graph data of v4 (nodes and edges with
+/// their property histories, named graphs, RDF), and the catalog as the
+/// framed records the catalog section writes, so a snapshot holds every
+/// definition a file holds (named constraints, index names, the options of
+/// text and vector indexes, the indexes of every graph), except the stored
+/// configuration, which belongs to the database file.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotV5 {
+    version: u8,
+    nodes: Vec<SnapshotNode>,
+    edges: Vec<SnapshotEdge>,
+    named_graphs: Vec<NamedGraphSnapshot>,
+    rdf_triples: Vec<SnapshotTriple>,
+    rdf_named_graphs: Vec<RdfNamedGraphSnapshot>,
+    /// The catalog's records, framed.
+    catalog: Vec<u8>,
+    /// Current store epoch at snapshot time (0 when temporal is disabled).
+    epoch: u64,
+}
+
+/// A snapshot as read: its data in the v4 layout (a v5 snapshot's schema
+/// and index definitions are empty there) and, for v5, its catalog records.
+struct DecodedSnapshot {
+    snapshot: Snapshot,
+    records: Vec<grafeo_common::storage::CatalogRecord>,
+}
+
+/// Reads a snapshot of version 4 or 5, for `action` (`import`, `restore`).
+///
+/// # Errors
+///
+/// [`Error::InvalidValue`] for empty data or another version,
+/// [`Error::Serialization`] when the data or the catalog records do not
+/// decode.
+fn decode_snapshot(data: &[u8], action: &str) -> Result<DecodedSnapshot> {
+    let Some(&version) = data.first() else {
+        return Err(Error::InvalidValue("empty snapshot data".to_string()));
+    };
+    let config = bincode::config::standard();
+    let failed = |e: bincode::error::DecodeError| {
+        Error::Serialization(format!("snapshot {action} failed: {e}"))
+    };
+    match version {
+        SNAPSHOT_V4 => {
+            let (snapshot, _): (Snapshot, _) =
+                bincode::serde::decode_from_slice(data, config).map_err(failed)?;
+            Ok(DecodedSnapshot {
+                snapshot,
+                records: Vec::new(),
+            })
+        }
+        SNAPSHOT_VERSION => {
+            let (snapshot, _): (SnapshotV5, _) =
+                bincode::serde::decode_from_slice(data, config).map_err(failed)?;
+            let mut records = Vec::new();
+            grafeo_common::storage::read_catalog_records(
+                &mut &snapshot.catalog[..],
+                &mut |record| {
+                    records.push(record);
+                    Ok(())
+                },
+            )
+            .map_err(|e| {
+                Error::Serialization(format!("snapshot {action} failed: its catalog: {e}"))
+            })?;
+            Ok(DecodedSnapshot {
+                snapshot: Snapshot {
+                    version,
+                    nodes: snapshot.nodes,
+                    edges: snapshot.edges,
+                    named_graphs: snapshot.named_graphs,
+                    rdf_triples: snapshot.rdf_triples,
+                    rdf_named_graphs: snapshot.rdf_named_graphs,
+                    schema: SnapshotSchema::default(),
+                    indexes: SnapshotIndexes::default(),
+                    epoch: snapshot.epoch,
+                },
+                records,
+            })
+        }
+        _ => Err(Error::InvalidValue(format!(
+            "unsupported snapshot version: {version} (expected 4 or 5)"
+        ))),
+    }
+}
+
+/// Applies the catalog records of a v5 snapshot to `db`, whose data is
+/// restored already, as the replay of a WAL applies logged catalog puts (a
+/// definition the catalog holds already is replaced or kept), then builds
+/// the vector and text indexes they define from the data. As in the load of
+/// a catalog section, a constraint record restores only the name: the node
+/// type records hold the type constraints that enforce it. A stored
+/// configuration in the records is left out: it belongs to the database
+/// file.
+///
+/// # Errors
+///
+/// The error of a record the catalog refuses.
+fn apply_snapshot_records(
+    db: &super::GrafeoDB,
+    records: Vec<grafeo_common::storage::CatalogRecord>,
+) -> Result<()> {
+    use super::catalog_records::constraint_definition;
+    use super::standalone::{Applying, apply};
+    use grafeo_common::change::StandaloneOp;
+    use grafeo_common::storage::CatalogRecord;
+
+    let store = db.lpg_store();
+    let mut unbuilt = Vec::new();
+    let mut constraints = Vec::new();
+    for record in records {
+        let record = match record {
+            CatalogRecord::StoredConfig(_) => continue,
+            CatalogRecord::Constraint(constraint) => {
+                constraints.push(constraint_definition(constraint));
+                continue;
+            }
+            record => record,
+        };
+        apply(
+            &StandaloneOp::PutCatalog(record),
+            None,
+            &store,
+            &db.catalog,
+            &mut Applying::Replay {
+                unbuilt: &mut unbuilt,
+            },
+        )?;
+    }
+    db.catalog.restore_constraint_names(constraints);
+    db.build_unbuilt(unbuilt);
+    Ok(())
+}
+
+/// Binary snapshot format v4 (graph data, named graphs, RDF, schema, index
+/// metadata, and property version history for temporal support), which an
+/// import still reads. Removed in 0.7.0.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Snapshot {
     version: u8,
@@ -306,8 +447,35 @@ fn refuse_too_deep(
 /// Returns an error that says what the snapshot holds (`1 in the default
 /// graph, 3 in graph trips`, `on :Document(embedding)`) and the features, in
 /// that case.
-fn refuse_unreadable_snapshot(snapshot: &Snapshot, action: &str) -> Result<()> {
+fn refuse_unreadable_snapshot(decoded: &DecodedSnapshot, action: &str) -> Result<()> {
     use super::sections::{FeatureData, RDF_TRIPLES, TEXT_INDEXES, VECTOR_INDEXES, refusal_of};
+    use grafeo_common::storage::CatalogRecord;
+    use grafeo_common::storage::catalog_record::{IndexKindRecord, IndexRecord};
+
+    let snapshot = &decoded.snapshot;
+    // The vector (`true`) and text index definitions of the v5 records.
+    let index_records = |vector: bool| {
+        decoded
+            .records
+            .iter()
+            .filter_map(move |record| match record {
+                CatalogRecord::Index(IndexRecord {
+                    index:
+                        IndexKindRecord::Vector {
+                            label, property, ..
+                        },
+                    ..
+                }) if vector => Some((label.as_str(), property.as_str())),
+                CatalogRecord::Index(IndexRecord {
+                    index:
+                        IndexKindRecord::Text {
+                            label, property, ..
+                        },
+                    ..
+                }) if !vector => Some((label.as_str(), property.as_str())),
+                _ => None,
+            })
+    };
 
     // Plain loops that append to one string per kind of data: this runs in
     // the WebAssembly packages, whose size is gated.
@@ -335,6 +503,9 @@ fn refuse_unreadable_snapshot(snapshot: &Snapshot, action: &str) -> Result<()> {
         for def in &snapshot.indexes.vector_indexes {
             push_index_on(&mut held, &def.label, &def.property);
         }
+        for (label, property) in index_records(true) {
+            push_index_on(&mut held, label, property);
+        }
         if !held.is_empty() {
             found.push((&VECTOR_INDEXES, held));
         }
@@ -343,6 +514,9 @@ fn refuse_unreadable_snapshot(snapshot: &Snapshot, action: &str) -> Result<()> {
         let mut held = String::new();
         for def in &snapshot.indexes.text_indexes {
             push_index_on(&mut held, &def.label, &def.property);
+        }
+        for (label, property) in index_records(false) {
+            push_index_on(&mut held, label, property);
         }
         if !held.is_empty() {
             found.push((&TEXT_INDEXES, held));
@@ -666,18 +840,6 @@ fn restore_schema_from_snapshot(
     }
 }
 
-/// Collects schema definitions from the catalog into snapshot format.
-fn collect_schema(catalog: &std::sync::Arc<crate::catalog::Catalog>) -> SnapshotSchema {
-    SnapshotSchema {
-        node_types: catalog.all_node_type_defs(),
-        edge_types: catalog.all_edge_type_defs(),
-        graph_types: catalog.all_graph_type_defs(),
-        procedures: catalog.all_procedure_defs(),
-        schemas: catalog.schema_names(),
-        graph_type_bindings: catalog.all_graph_type_bindings(),
-    }
-}
-
 /// Restores indexes from snapshot metadata by rebuilding them from existing data.
 ///
 /// Must be called after all nodes/edges have been populated, since index
@@ -717,52 +879,6 @@ fn restore_indexes_from_snapshot(db: &super::GrafeoDB, indexes: &SnapshotIndexes
                 property = ti.property,
             );
         }
-    }
-}
-
-/// Collects index metadata from a store into snapshot format.
-fn collect_index_metadata(store: &grafeo_core::graph::lpg::LpgStore) -> SnapshotIndexes {
-    let property_indexes = store.property_index_keys();
-
-    #[cfg(feature = "vector-index")]
-    let vector_indexes: Vec<SnapshotVectorIndex> = store
-        .vector_index_entries()
-        .into_iter()
-        .filter_map(|(key, index)| {
-            let (label, property) = key.split_once(':')?;
-            let config = index.config();
-            Some(SnapshotVectorIndex {
-                label: label.to_string(),
-                property: property.to_string(),
-                dimensions: config.dimensions,
-                metric: config.metric,
-                m: config.m,
-                ef_construction: config.ef_construction,
-            })
-        })
-        .collect();
-    #[cfg(not(feature = "vector-index"))]
-    let vector_indexes = Vec::new();
-
-    #[cfg(feature = "text-index")]
-    let text_indexes: Vec<SnapshotTextIndex> = store
-        .text_index_entries()
-        .into_iter()
-        .filter_map(|(key, _)| {
-            let (label, property) = key.split_once(':')?;
-            Some(SnapshotTextIndex {
-                label: label.to_string(),
-                property: property.to_string(),
-            })
-        })
-        .collect();
-    #[cfg(not(feature = "text-index"))]
-    let text_indexes = Vec::new();
-
-    SnapshotIndexes {
-        property_indexes,
-        vector_indexes,
-        text_indexes,
     }
 }
 
@@ -1095,18 +1211,23 @@ impl super::GrafeoDB {
         #[cfg(not(feature = "triple-store"))]
         let rdf_named_graphs = Vec::new();
 
-        let schema = collect_schema(&self.catalog);
-        let indexes = collect_index_metadata(&self.lpg_store());
+        // The catalog's records, with the indexes of every graph of the
+        // database (the committed copy holds none).
+        let catalog = super::catalog_section::CatalogSection::new(
+            std::sync::Arc::clone(&self.catalog),
+            self.lpg_store(),
+            || 0,
+        )
+        .snapshot_records()?;
 
-        let snapshot = Snapshot {
+        let snapshot = SnapshotV5 {
             version: SNAPSHOT_VERSION,
             nodes,
             edges,
             named_graphs,
             rdf_triples,
             rdf_named_graphs,
-            schema,
-            indexes,
+            catalog,
             #[cfg(feature = "temporal")]
             epoch: self.transaction_manager.current_epoch().as_u64(),
             #[cfg(not(feature = "temporal"))]
@@ -1139,23 +1260,11 @@ impl super::GrafeoDB {
     /// N-Triples term, or deserialization fails; and, naming the data and the
     /// feature, if it holds data this build cannot read.
     pub fn import_snapshot(data: &[u8]) -> Result<Self> {
-        if data.is_empty() {
-            return Err(Error::InvalidValue("empty snapshot data".to_string()));
-        }
-
-        let version = data[0];
-        if version != 4 {
-            return Err(Error::InvalidValue(format!(
-                "unsupported snapshot version: {version} (expected 4)"
-            )));
-        }
-
-        let config = bincode::config::standard();
-        let (snapshot, _): (Snapshot, _) = bincode::serde::decode_from_slice(data, config)
-            .map_err(|e| Error::Serialization(format!("snapshot import failed: {e}")))?;
+        let decoded = decode_snapshot(data, "import")?;
         // Before the database is created: this build would import the
         // snapshot without the data it cannot read.
-        refuse_unreadable_snapshot(&snapshot, "import")?;
+        refuse_unreadable_snapshot(&decoded, "import")?;
+        let DecodedSnapshot { snapshot, records } = decoded;
 
         // Validate default graph data
         validate_snapshot_data(&snapshot.nodes, &snapshot.edges)?;
@@ -1207,6 +1316,7 @@ impl super::GrafeoDB {
 
         // Restore indexes (must come after data population)
         restore_indexes_from_snapshot(&db, &snapshot.indexes);
+        apply_snapshot_records(&db, records)?;
 
         Ok(db)
     }
@@ -1251,24 +1361,12 @@ impl super::GrafeoDB {
         }
         self.transaction_manager.check_no_incomplete_commit()?;
         self.transaction_manager.check_open()?;
-        if data.is_empty() {
-            return Err(Error::InvalidValue("empty snapshot data".to_string()));
-        }
-
-        let version = data[0];
-        if version != 4 {
-            return Err(Error::InvalidValue(format!(
-                "unsupported snapshot version: {version} (expected 4)"
-            )));
-        }
-
-        let config = bincode::config::standard();
-        let (snapshot, _): (Snapshot, _) = bincode::serde::decode_from_slice(data, config)
-            .map_err(|e| Error::Serialization(format!("snapshot restore failed: {e}")))?;
+        let decoded = decode_snapshot(data, "restore")?;
 
         // Validate all data before making any changes, and refuse data this
         // build cannot read, which it would restore the database without.
-        refuse_unreadable_snapshot(&snapshot, "restore")?;
+        refuse_unreadable_snapshot(&decoded, "restore")?;
+        let DecodedSnapshot { snapshot, records } = decoded;
         validate_snapshot_data(&snapshot.nodes, &snapshot.edges)?;
         for ng in &snapshot.named_graphs {
             validate_snapshot_data(&ng.nodes, &ng.edges)?;
@@ -1321,6 +1419,7 @@ impl super::GrafeoDB {
 
         // Restore indexes (must come after data population)
         restore_indexes_from_snapshot(self, &snapshot.indexes);
+        apply_snapshot_records(self, records)?;
 
         Ok(())
     }

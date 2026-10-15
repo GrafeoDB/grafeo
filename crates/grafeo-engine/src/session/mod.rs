@@ -447,7 +447,10 @@ impl Session {
         commit: crate::transaction::CommitGuard<'a>,
         transaction_id: TransactionId,
         changes: Option<&crate::transaction::TransactionChanges>,
-    ) -> Result<crate::transaction::CommitGuard<'a>> {
+    ) -> Result<(
+        crate::transaction::CommitGuard<'a>,
+        Option<crate::database::wal_log::Logged>,
+    )> {
         match (self.wal(), changes) {
             (Some(wal), Some(changes)) => crate::database::wal_log::write_commit(
                 wal,
@@ -456,7 +459,7 @@ impl Session {
                 changes,
                 grafeo_common::storage::log_record::Origin::Transaction,
             ),
-            _ => Ok(commit),
+            _ => Ok((commit, None)),
         }
     }
 
@@ -4018,81 +4021,102 @@ impl Session {
         // Write the transaction's group to the WAL before anything of it is
         // stamped or reported (#498): a group that is not written leaves
         // nothing behind, so the commit is taken back and the transaction
-        // rolled back; one written but not made durable may survive, so the
-        // database refuses commits until a reopen decides from the log.
+        // rolled back.
         #[cfg(feature = "wal")]
-        let commit = match self.write_commit_group(commit, transaction_id, changes.as_deref()) {
-            Ok(commit) => commit,
-            Err(error) => {
-                // A taken-back commit left the transaction active: roll it
-                // back, so the session can go on (and retry).
-                if self.transaction_manager.state(transaction_id)
-                    == Some(crate::transaction::TransactionState::Active)
-                {
-                    let _ = self.abort_transaction(transaction_id, changes.as_deref());
+        let (commit, logged) =
+            match self.write_commit_group(commit, transaction_id, changes.as_deref()) {
+                Ok(written) => written,
+                Err(error) => {
+                    // A taken-back commit left the transaction active: roll
+                    // it back, so the session can go on (and retry).
+                    if self.transaction_manager.state(transaction_id)
+                        == Some(crate::transaction::TransactionState::Active)
+                    {
+                        let _ = self.abort_transaction(transaction_id, changes.as_deref());
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-        };
-
-        // Stamp the changes with the commit epoch, per graph through the
-        // store each was applied to: the pending versions become visible at
-        // the epoch once it is published, and the stores' counters and
-        // epochs follow. A store that fails leaves the commit half stamped:
-        // dropping the commit guard uncompleted poisons the database.
-        if let Some(changes) = &changes
-            && let Err(error) = changes.stamp(commit_epoch)
-        {
-            return Err(grafeo_common::utils::error::Error::Internal(format!(
-                "the commit of transaction {transaction_id:?} could not stamp its changes: {error}"
-            )));
-        }
-
-        // Apply the RDF triples, in recorded order: the store holds only
-        // committed triples, so readers see them from now on. The ones that
-        // changed nothing (another transaction wrote them first) are dropped
-        // from the set, so the log and change data capture skip them.
-        #[cfg(feature = "triple-store")]
-        if let Some(changes) = &changes
-            && let Err(error) = changes.apply_triples(&self.rdf_store)
-        {
-            return Err(grafeo_common::utils::error::Error::Internal(format!(
-                "the commit of transaction {transaction_id:?} could not apply its RDF changes: \
-                 {error}"
-            )));
-        }
-
-        #[cfg(feature = "testing-statement-injection")]
-        grafeo_common::testing::commit_hook::run_after_commit_stamped();
-
-        // Report the changes to CDC at the commit epoch, in the commit's
-        // ordered step (no other commit runs until this one is complete), so
-        // the events' timestamps follow the commit epochs.
-        #[cfg(feature = "cdc")]
-        if self.records_cdc
-            && let Some(changes) = &changes
-        {
-            changes.read(|set| self.cdc_log.record_commit(set, commit_epoch));
-        }
-
-        #[cfg(feature = "testing-statement-injection")]
-        grafeo_common::testing::commit_hook::run_after_commit_logged();
-
-        // The stores the transaction wrote moved to the epoch when it was
-        // stamped, so a lookup at a store's own epoch sees the commit from
-        // then on; the database's direct reads and queries read at the
-        // published epoch, which moves only once the commit is complete. The
-        // database has one epoch: the root store follows every commit, also
-        // one that only wrote named graphs (a checkpoint saves the root's
-        // epoch for all of them).
-        self.root_store().sync_epoch(commit_epoch);
+            };
 
         // Reset read-only flag and clear savepoints before completing the
-        // commit: a transaction this session begins next waits for the commit
-        // and sets its own flag after it.
+        // commit: the session's next transaction begins after it.
         *self.read_only_tx.lock() = self.db_read_only;
         self.savepoints.lock().clear();
-        commit.complete()?;
+
+        // The group is in the log: the commit lock goes, so the next commit
+        // writes its group while this one syncs and waits for its turn.
+        let publish = commit.written();
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_after_commit_written();
+
+        // Durable as the mode asks before anything is published (in `Sync`
+        // mode one fsync covers the groups of every commit waiting here). A
+        // group written but not made durable may survive, so the commit ends
+        // unpublished, which poisons the database until a reopen decides from
+        // the log.
+        #[cfg(feature = "wal")]
+        if let (Some(wal), Some(logged)) = (self.wal(), logged) {
+            crate::database::wal_log::sync_commit(wal, logged)?;
+        }
+
+        // In the commit's turn, after every commit below it is published:
+        // what must follow the epochs.
+        let published = publish.complete_with(|| {
+            // Stamp the changes with the commit epoch, per graph through the
+            // store each was applied to: the pending versions become visible
+            // at the epoch once it is published, and the stores' counters and
+            // epochs follow. A store that fails leaves the commit half
+            // stamped: it is not published, which poisons the database.
+            if let Some(changes) = &changes
+                && let Err(error) = changes.stamp(commit_epoch)
+            {
+                return Err(grafeo_common::utils::error::Error::Internal(format!(
+                    "the commit of transaction {transaction_id:?} could not stamp its changes: \
+                     {error}"
+                )));
+            }
+
+            // Apply the RDF triples, in recorded order: the store holds only
+            // committed triples, so readers see them from now on.
+            #[cfg(feature = "triple-store")]
+            if let Some(changes) = &changes
+                && let Err(error) = changes.apply_triples(&self.rdf_store)
+            {
+                return Err(grafeo_common::utils::error::Error::Internal(format!(
+                    "the commit of transaction {transaction_id:?} could not apply its RDF \
+                     changes: {error}"
+                )));
+            }
+
+            #[cfg(feature = "testing-statement-injection")]
+            grafeo_common::testing::commit_hook::run_after_commit_stamped();
+
+            // Report the changes to CDC at the commit epoch, in epoch order,
+            // so the events' timestamps follow the commit epochs.
+            #[cfg(feature = "cdc")]
+            if self.records_cdc
+                && let Some(changes) = &changes
+            {
+                changes.read(|set| self.cdc_log.record_commit(set, commit_epoch));
+            }
+
+            #[cfg(feature = "testing-statement-injection")]
+            grafeo_common::testing::commit_hook::run_after_commit_logged();
+
+            // The stores the transaction wrote moved to the epoch when it
+            // was stamped, so a lookup at a store's own epoch sees the commit
+            // from then on; the database's direct reads and queries read at
+            // the published epoch, which moves only once the commit is
+            // complete. The database has one epoch: the root store follows
+            // every commit, also one that only wrote named graphs (a
+            // checkpoint saves the root's epoch for all of them).
+            self.root_store().sync_epoch(commit_epoch);
+            Ok(())
+        });
+        #[cfg(feature = "wal")]
+        let published = published
+            .map_err(|error| crate::database::wal_log::publish_error(error, logged.is_some()));
+        published?;
         let written = changes
             .as_ref()
             .map(|changes| changes.written_graphs())

@@ -11,6 +11,7 @@ Changes since 0.6.0-beta.1.
 - **New write-ahead log format**: the WAL is a chain of segments of checksummed frames (encrypted per segment, with a key from its own salt, for an encrypted database), one group per commit, and the file's database header records the log position its image covers. A database whose WAL from 0.5.x or 0.6.0-beta.1 still holds commits replays them on its first read-write open, checkpoints them into the file and removes that WAL.
 - **Incremental backups copy WAL segments** (backup file version 2). A restore still reads the incremental backups of 0.5.x and 0.6.0-beta.1; after the upgrade, take a full backup before the next incremental one.
 - **Breaking (Rust): `GrafeoDB::wal()` returns the new WAL writer**, `Option<&Arc<grafeo_storage::wal::Wal>>`.
+- **Commits are pipelined**: a commit writes its WAL group and lets the next commit start, then syncs and becomes visible in commit order, so in `Sync` mode commits of several sessions that wait for the disk at the same time share one sync. A transaction or direct call that starts while another commit is still in progress no longer waits for it: it reads the last published commit, and a write to something that commit wrote fails with `GRAFEO-T001`, which can be retried. Work that starts after `commit()` returned sees the commit.
 
 ### Deprecated
 

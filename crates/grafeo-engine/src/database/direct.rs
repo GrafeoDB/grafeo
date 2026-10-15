@@ -635,7 +635,7 @@ impl GrafeoDB {
         // (#498): one that is not written takes the commit back, and the
         // call is rolled back.
         #[cfg(feature = "wal")]
-        let commit = match &self.wal {
+        let (commit, logged) = match &self.wal {
             Some(wal) => match crate::database::wal_log::write_commit(
                 wal,
                 commit,
@@ -643,7 +643,7 @@ impl GrafeoDB {
                 changes,
                 grafeo_common::storage::log_record::Origin::Direct,
             ) {
-                Ok(commit) => commit,
+                Ok(written) => written,
                 Err(error) => {
                     if self.transaction_manager.state(transaction)
                         == Some(crate::transaction::TransactionState::Active)
@@ -653,29 +653,42 @@ impl GrafeoDB {
                     return Err(error);
                 }
             },
-            None => commit,
+            None => (commit, None),
         };
 
-        // A store that fails to stamp leaves the commit half done: the
-        // guard, dropped uncompleted, poisons the database.
-        changes.stamp(epoch).map_err(|error| {
-            Error::Internal(format!(
-                "the commit of a direct write could not stamp its changes: {error}"
-            ))
-        })?;
-
-        // Reported in the commit's ordered step, before its epoch is
-        // published.
-        #[cfg(feature = "cdc")]
-        if self.cdc_active() {
-            changes.read(|set| self.cdc_log.record_commit(set, epoch));
+        // As a session's commit: the commit lock goes once the group is
+        // written, the sync comes after it, then the ordered publish.
+        let publish = commit.written();
+        #[cfg(feature = "wal")]
+        if let (Some(wal), Some(logged)) = (&self.wal, logged) {
+            crate::database::wal_log::sync_commit(wal, logged)?;
         }
 
-        // The database has one epoch: the root store follows every commit
-        // (the stamp moved the written store's).
         let root = self.lpg_store();
-        root.sync_epoch(epoch);
-        commit.complete()?;
+        let published = publish.complete_with(|| {
+            // A store that fails to stamp leaves the commit half done: it is
+            // not published, which poisons the database.
+            changes.stamp(epoch).map_err(|error| {
+                Error::Internal(format!(
+                    "the commit of a direct write could not stamp its changes: {error}"
+                ))
+            })?;
+
+            // Reported in epoch order, before the epoch is published.
+            #[cfg(feature = "cdc")]
+            if self.cdc_active() {
+                changes.read(|set| self.cdc_log.record_commit(set, epoch));
+            }
+
+            // The database has one epoch: the root store follows every
+            // commit (the stamp moved the written store's).
+            root.sync_epoch(epoch);
+            Ok(())
+        });
+        #[cfg(feature = "wal")]
+        let published = published
+            .map_err(|error| crate::database::wal_log::publish_error(error, logged.is_some()));
+        published?;
 
         self.prune_versions(&root, store);
         Ok(())

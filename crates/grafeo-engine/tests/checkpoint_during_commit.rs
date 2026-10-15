@@ -731,7 +731,13 @@ fn a_crash_inside_a_commit_with_a_checkpoint_started_is_resolved_by_the_log() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prague.grafeo");
     database_with_alix(&path);
+    let checkpointed = std::fs::read(&path).unwrap();
     run_child("failing", &path);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        checkpointed,
+        "the waiting checkpoint wrote no image before the crash"
+    );
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
         people(&db),

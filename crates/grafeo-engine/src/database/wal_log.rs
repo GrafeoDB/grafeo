@@ -109,31 +109,40 @@ pub(crate) fn write_standalone(
     Ok(())
 }
 
+/// Where a commit's group ends in the log, and whether the durability mode
+/// asks for a sync up to there (see [`sync_commit`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Logged {
+    /// The log position right after the group's LAST frame.
+    end_lsn: u64,
+    /// Whether the commit syncs the log up to `end_lsn` before it publishes.
+    sync_due: bool,
+}
+
 /// Writes the group of the commit `commit` of `transaction_id` to `wal` from
-/// what it changed (`changes`), and syncs it as the durability mode asks,
+/// what it changed (`changes`), under the commit lock and without syncing,
 /// before anything of the commit is stamped or published. A commit that
-/// changed nothing writes nothing. Returns the commit to go on with.
+/// changed nothing writes nothing (`None`). Returns the commit to go on with:
+/// the caller releases the commit lock ([`CommitGuard::written`]), then
+/// syncs ([`sync_commit`]) and publishes, so the next commit writes its group
+/// meanwhile and one fsync covers both.
 ///
 /// # Errors
 ///
-/// - The group was not written ([`TransactionError::LogWriteFailed`], or the
-///   error of a record over a limit) or the WAL takes no more writes
-///   ([`TransactionError::LogUnavailable`]): nothing of it is in the log, the
-///   commit is taken back (its epoch goes back) and the transaction is active
-///   again, for the caller to roll back.
-/// - The group was written but not made durable
-///   ([`TransactionError::CommitOutcomeUnknown`]): it may survive, so the
-///   commit ends without completing, which poisons the database until a
-///   reopen decides from the log.
+/// The group was not written ([`TransactionError::LogWriteFailed`], or the
+/// error of a record over a limit) or the WAL takes no more writes
+/// ([`TransactionError::LogUnavailable`]): nothing of it is in the log, the
+/// commit is taken back (its epoch goes back) and the transaction is active
+/// again, for the caller to roll back.
 pub(crate) fn write_commit<'a>(
     wal: &grafeo_storage::wal::Wal,
     commit: CommitGuard<'a>,
     transaction_id: TransactionId,
     changes: &TransactionChanges,
     origin: Origin,
-) -> Result<CommitGuard<'a>> {
+) -> Result<(CommitGuard<'a>, Option<Logged>)> {
     if changes.is_empty() {
-        return Ok(commit);
+        return Ok((commit, None));
     }
     let mut group = match wal.begin_group(transaction_id) {
         Ok(group) => group,
@@ -149,17 +158,56 @@ pub(crate) fn write_commit<'a>(
         commit.abort();
         return Err(error);
     }
-    match group.finish() {
-        Ok(_) => Ok(commit),
-        Err(error @ GroupError::OutcomeUnknown(_)) => {
-            // Not taken back: the epoch may be in the log.
-            drop(commit);
-            Err(commit_error(error))
-        }
+    match group.finish_unsynced() {
+        Ok(end) => Ok((
+            commit,
+            Some(Logged {
+                end_lsn: end.end_lsn,
+                sync_due: wal.sync_due(),
+            }),
+        )),
         Err(error) => {
             commit.abort();
             Err(commit_error(error))
         }
+    }
+}
+
+/// Makes a written commit's group durable as the durability mode asks
+/// (always in `Sync` mode, see [`Wal::sync_due`]), outside the commit lock:
+/// one fsync covers every group written up to it, so commits that wait here
+/// together share it.
+///
+/// # Errors
+///
+/// [`TransactionError::CommitOutcomeUnknown`] when the sync failed: the
+/// group may or may not survive, so the caller drops its commit unpublished,
+/// which poisons the database until a reopen decides from the log.
+///
+/// [`Wal::sync_due`]: grafeo_storage::wal::Wal::sync_due
+pub(crate) fn sync_commit(wal: &grafeo_storage::wal::Wal, logged: Logged) -> Result<()> {
+    if !logged.sync_due {
+        return Ok(());
+    }
+    grafeo_common::testing::crash::maybe_crash("commit:before_sync");
+    wal.sync_until(logged.end_lsn)
+        .map_err(|error| commit_error(GroupError::OutcomeUnknown(error)))
+}
+
+/// The error of a commit whose publish was refused (a commit before it did
+/// not complete): with its group in the log the commit may survive, which
+/// [`TransactionError::CommitOutcomeUnknown`] says; without one it is
+/// [`TransactionError::IncompleteCommit`] as before.
+pub(crate) fn publish_error(error: Error, logged: bool) -> Error {
+    match error {
+        Error::Transaction(TransactionError::IncompleteCommit) if logged => {
+            Error::Transaction(TransactionError::CommitOutcomeUnknown(
+                "the commit is in the WAL, but a commit before it did not complete: the \
+                 database must be reopened, which replays both"
+                    .to_string(),
+            ))
+        }
+        other => other,
     }
 }
 

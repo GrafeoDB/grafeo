@@ -62,6 +62,8 @@ The sync mode decides when the WAL is flushed to disk (`fsync`). Every mode hand
 
 `Batch` checks its limits when a commit is written. The last commit before an idle period is therefore synced by the next write or by `close()`, not when the delay passes.
 
+A commit becomes visible to other sessions once the WAL holds it as the mode promises: in `Sync` mode after its sync. Commits of several sessions that wait for the disk at the same time share one sync. A transaction or direct call that starts while another commit is still in progress does not wait for it: it reads the last published commit, and a write to something that commit wrote fails with `GRAFEO-T001`, which can be retried. Work that starts after `commit()` returned sees the commit.
+
 The sync mode is set through the Rust `Config` builder; the Python constructor uses the default. Build the modes with settings with `DurabilityMode::batch(max_delay, max_records)` and `DurabilityMode::adaptive(interval)`, in whole milliseconds.
 
 ```rust

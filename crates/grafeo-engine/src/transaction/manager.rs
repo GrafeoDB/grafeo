@@ -423,14 +423,10 @@ impl CommitGuard<'_> {
     }
 }
 
-#[cfg(test)]
 impl<'a> CommitGuard<'a> {
     /// The commit's group is in the log: releases the commit lock, so the
     /// next commit can take its epoch and write, and returns the handle that
     /// publishes this one after every commit below it.
-    ///
-    /// Built for tests only until the engine's commit writes its own log
-    /// group and publishes outside the commit lock (WAL v2).
     pub(crate) fn written(self) -> Publish<'a> {
         let Self { commit, _commit } = self;
         commit
@@ -470,12 +466,28 @@ impl Publish<'_> {
     ///
     /// # Errors
     ///
+    /// As [`complete_with`](Self::complete_with).
+    pub(crate) fn complete(self) -> Result<()> {
+        self.complete_with(|| Ok(()))
+    }
+
+    /// Publishes the commit as [`complete`](Self::complete) does, once
+    /// `ordered` ran in the commit's turn: after every commit below it is
+    /// published and before any above it publishes. The commit's steps whose
+    /// order must follow the epochs go there: stamping its versions, applying
+    /// its RDF triples, reporting its change events, moving the store's epoch.
+    /// `ordered` must not wait for anything that waits for a commit to be
+    /// published (it holds the publish turn).
+    ///
+    /// # Errors
+    ///
     /// [`TransactionError::IncompleteCommit`] when a commit at a lower epoch
     /// did not complete meanwhile (or the manager was poisoned): this one is
     /// then not published either (its epoch would show the other's stamped
     /// versions) and stays `Committing`, in the log as it was written, until
-    /// the database is reopened.
-    pub(crate) fn complete(mut self) -> Result<()> {
+    /// the database is reopened. The error of `ordered`, which leaves the
+    /// commit incomplete as a dropped handle does.
+    pub(crate) fn complete_with(mut self, ordered: impl FnOnce() -> Result<()>) -> Result<()> {
         let manager = self.manager;
         let mut turn = manager.publish_turn.lock();
         loop {
@@ -488,6 +500,12 @@ impl Publish<'_> {
                 break;
             }
             manager.published.wait(&mut turn);
+        }
+        if let Err(error) = ordered() {
+            // Not published: the handle, dropped unfinished, poisons the
+            // manager once the turn is free.
+            drop(turn);
+            return Err(error);
         }
         {
             let mut transactions = manager.transactions.write();
@@ -570,11 +588,11 @@ impl TransactionManager {
 
     /// Begins a new transaction with the specified isolation level.
     pub fn begin_with_isolation(&self, isolation_level: IsolationLevel) -> TransactionId {
-        // Wait for a direct call that commits at once, and for a commit in
-        // progress: the snapshot holds every commit up to its epoch,
-        // complete.
+        // Wait for a direct call that commits at once (it needs no open
+        // transaction), not for a commit in progress: the snapshot is the
+        // published epoch, which holds every commit up to it, complete, and
+        // none of one still being written or synced.
         let _gate = self.idle_gate.lock();
-        let _commit = self.commit_lock.lock();
         self.register(isolation_level, false).0
     }
 
@@ -592,13 +610,11 @@ impl TransactionManager {
     /// Begins a private transaction: one without a session, for a direct
     /// call of the database or a graph handle while a transaction is open
     /// (or a batch), committed or rolled back by the call itself. Like
-    /// [`begin`](Self::begin) it waits for a commit in progress (and for a
-    /// checkpoint holding commits off, and a direct call holding the idle
-    /// gate), so it never starts in the middle of one: a direct call made
-    /// while a transaction commits lands after it. It does not wait for open transactions: its
-    /// writes are claimed like any transaction's, so it conflicts with an
-    /// open transaction that wrote the same entity first, and the other way
-    /// round.
+    /// [`begin`](Self::begin) it waits for a direct call holding the idle
+    /// gate, not for a commit in progress: it reads at the published epoch.
+    /// It does not wait for open transactions either: its writes are claimed
+    /// like any transaction's, so it conflicts with an open (or committing)
+    /// transaction that wrote the same entity first, and the other way round.
     ///
     /// # Errors
     ///
@@ -606,7 +622,6 @@ impl TransactionManager {
     /// [`check_open`](Self::check_open)): the call's commit would fail.
     pub(crate) fn begin_private(&self) -> Result<(TransactionId, Arc<TransactionChanges>)> {
         let _gate = self.idle_gate.lock();
-        let _commit = self.commit_lock.lock();
         self.check_open()?;
         Ok(self.register(IsolationLevel::default(), true))
     }
@@ -784,12 +799,16 @@ impl TransactionManager {
     /// Records `claim` of each of `entities` for `transaction_id`, after
     /// checking it against the writes and claims of the other open
     /// transactions (first-writer-wins): all of them, or none on a conflict.
+    /// After a commit that did not complete nothing can commit, so a write
+    /// fails with that error first, not with a conflict a retry cannot get
+    /// past (the incomplete commit keeps its claims until the reopen).
     fn record_claims<const N: usize>(
         &self,
         transaction_id: TransactionId,
         claim: Claim,
         entities: [GraphEntity; N],
     ) -> Result<()> {
+        self.check_no_incomplete_commit()?;
         let mut txns = self.transactions.write();
 
         // First-writer-wins conflict detection. Skip the scan when only one
@@ -2140,68 +2159,61 @@ mod tests {
         mgr.record_write(next, NodeId::new(1)).unwrap();
     }
 
-    /// A private transaction (a direct call) begins between commits too: it
-    /// waits for the commit in progress and starts at its epoch, registered
-    /// with its change set. It does not wait for an open transaction, and
-    /// conflicts with one that wrote an entity first.
+    /// A private transaction (a direct call) begins during a commit without
+    /// waiting for it, at the published epoch, registered with its change
+    /// set; it conflicts with the committing transaction on what that one
+    /// wrote, and with an open transaction that wrote an entity first.
     #[test]
-    fn a_private_transaction_waits_for_a_commit_in_progress_only() {
+    fn a_private_transaction_begins_during_a_commit_at_the_published_epoch() {
         let mgr = TransactionManager::new();
         let open = mgr.begin();
         mgr.record_write(open, NodeId::new(3)).unwrap();
         let tx = mgr.begin();
+        mgr.record_write(tx, NodeId::new(19)).unwrap();
+        let published = mgr.current_epoch();
         let commit = mgr.start_commit(tx).unwrap();
-        let epoch = commit.epoch();
 
-        let manager = &mgr;
-        std::thread::scope(|scope| {
-            let (finished, late) =
-                spawn_and_wait(scope, BRIEFLY, move || manager.begin_private().unwrap());
-            assert!(!finished, "begin_private returned during the commit");
-            commit.complete().unwrap();
-            let (direct, changes) = late.join().unwrap();
-            assert_eq!(mgr.start_epoch(direct), Some(epoch));
-            assert_eq!((changes.id(), changes.snapshot()), (direct, epoch));
-            assert!(mgr.changes(direct).is_some(), "registered with its set");
+        let (direct, changes) = mgr.begin_private().unwrap();
+        assert_eq!(mgr.start_epoch(direct), Some(published));
+        assert_eq!((changes.id(), changes.snapshot()), (direct, published));
+        assert!(mgr.changes(direct).is_some(), "registered with its set");
+        for (node, whose) in [(3, "the open transaction"), (19, "the committing one")] {
             assert!(
                 matches!(
-                    mgr.record_write(direct, NodeId::new(3)),
+                    mgr.record_write(direct, NodeId::new(node)),
                     Err(Error::Transaction(TransactionError::WriteConflict(_)))
                 ),
-                "the open transaction wrote the node first"
+                "{whose} wrote node {node} first"
             );
-            mgr.abort(direct).unwrap();
-            assert!(mgr.changes(direct).is_none(), "an abort drops its set");
-        });
+        }
+        commit.complete().unwrap();
+        mgr.abort(direct).unwrap();
+        assert!(mgr.changes(direct).is_none(), "an abort drops its set");
     }
 
-    /// A transaction begins between commits, never during one: it waits for
-    /// the commit in progress and starts at its epoch.
+    /// A transaction begins during a commit without waiting for it: it
+    /// starts at the published epoch, which holds none of the commit; one
+    /// that begins once the commit is published starts at its epoch.
     #[test]
-    fn begin_waits_for_a_commit_in_progress() {
+    fn begin_does_not_wait_for_a_commit_in_progress() {
         let mgr = TransactionManager::new();
         let tx = mgr.begin();
+        let published = mgr.current_epoch();
         let commit = mgr.start_commit(tx).unwrap();
         let epoch = commit.epoch();
 
-        let manager = &mgr;
-        std::thread::scope(|scope| {
-            let (began, waited) = std::sync::mpsc::channel();
-            let late = scope.spawn(move || {
-                let late = manager.begin();
-                began.send(()).unwrap();
-                late
-            });
-            assert!(
-                waited
-                    .recv_timeout(std::time::Duration::from_millis(100))
-                    .is_err(),
-                "begin returned while the commit was in progress"
-            );
-            commit.complete().unwrap();
-            let late = late.join().unwrap();
-            assert_eq!(mgr.start_epoch(late), Some(epoch));
-        });
+        let during = mgr.begin();
+        assert_eq!(mgr.start_epoch(during), Some(published));
+        let publish = commit.written();
+        let written = mgr.begin();
+        assert_eq!(
+            mgr.start_epoch(written),
+            Some(published),
+            "written is not published"
+        );
+        publish.complete().unwrap();
+        let after = mgr.begin();
+        assert_eq!(mgr.start_epoch(after), Some(epoch));
     }
 
     /// Readers see a commit's epoch only once the commit is complete, so a
@@ -2548,8 +2560,9 @@ mod tests {
     /// A commit that does not complete (its code panicked between the commit
     /// decision and `complete`) is not reported as committed and does not
     /// publish its epoch: its writes stay locked against other transactions,
-    /// and the commit lock is released, so transactions still begin (no
-    /// transaction commits afterwards, see the next test).
+    /// which get the error of the failed commit (not a retryable conflict)
+    /// when they write, and the commit lock is released, so transactions
+    /// still begin (no transaction commits afterwards, see the next test).
     #[test]
     fn a_commit_that_does_not_complete_keeps_its_writes_locked() {
         let mgr = TransactionManager::new();
@@ -2568,7 +2581,7 @@ mod tests {
         assert_eq!(mgr.current_epoch(), before);
         assert!(matches!(
             mgr.record_write(other, NodeId::new(1)),
-            Err(Error::Transaction(TransactionError::WriteConflict(_)))
+            Err(Error::Transaction(TransactionError::IncompleteCommit))
         ));
         let next = mgr.begin();
         assert_eq!(mgr.start_epoch(next), Some(before));
@@ -2600,7 +2613,13 @@ mod tests {
                 "a new transaction reads what was published before the failed commit"
             );
             if wrote {
-                mgr.record_write(next, NodeId::new(19)).unwrap();
+                assert!(
+                    matches!(
+                        mgr.record_write(next, NodeId::new(19)),
+                        Err(Error::Transaction(TransactionError::IncompleteCommit))
+                    ),
+                    "a write fails with the failed commit's error"
+                );
             }
             let Err(error) = mgr.start_commit(next) else {
                 panic!("a commit after an incomplete one (wrote: {wrote}) succeeded");

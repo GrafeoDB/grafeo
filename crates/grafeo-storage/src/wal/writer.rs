@@ -604,17 +604,25 @@ impl Wal {
     /// synced now, as the durability mode asks.
     fn sync_due_after(&self, records: u64) -> bool {
         self.records_written.fetch_add(records, Ordering::AcqRel);
-        let pending = self
-            .records_since_sync
-            .fetch_add(records, Ordering::AcqRel)
-            .saturating_add(records);
+        self.records_since_sync.fetch_add(records, Ordering::AcqRel);
+        self.sync_due()
+    }
+
+    /// Whether the durability mode asks for a sync of the groups written
+    /// since the last one: always in `Sync` mode, once a threshold is
+    /// reached in `Batch` mode, never in `Adaptive` (its flusher syncs) and
+    /// `NoSync`. A commit pipeline asks after
+    /// [`GroupWriter::finish_unsynced`], then syncs with
+    /// [`sync_until`](Self::sync_until) outside its own commit lock.
+    #[must_use]
+    pub fn sync_due(&self) -> bool {
         match self.durability {
             DurabilityMode::Sync => true,
             DurabilityMode::Batch {
                 max_delay_ms,
                 max_records,
             } => {
-                pending >= max_records
+                self.records_since_sync.load(Ordering::Acquire) >= max_records
                     || self.last_sync.lock().elapsed() >= Duration::from_millis(max_delay_ms)
             }
             DurabilityMode::Adaptive { .. } | DurabilityMode::NoSync => false,

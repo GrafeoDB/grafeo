@@ -654,7 +654,14 @@ impl WriteClaims for TransactionClaims {
                 .manager
                 .record_endpoints(transaction, [self.entity(src), self.entity(dst)]),
         }
-        .map_err(|error| OperatorError::WriteConflict(error.to_string()))
+        .map_err(|error| match error {
+            // Not a conflict: no write can commit until a reopen, which the
+            // caller must learn (a conflict reads as retryable).
+            error @ Error::Transaction(TransactionError::IncompleteCommit) => {
+                OperatorError::Wrapped(Box::new(error))
+            }
+            error => OperatorError::WriteConflict(error.to_string()),
+        })
     }
 
     fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {

@@ -288,6 +288,11 @@ mod tests {
         path.with_extension("returned")
     }
 
+    /// The file the child writes when it crashes, holding the crash point.
+    fn crashed_marker(path: &Path) -> PathBuf {
+        path.with_extension("crashed")
+    }
+
     /// Child-process entry for [`a_crash_in_a_commit_leaves_it_whole_or_absent`]:
     /// writes Alix, then Mia with a crash at the given point; a no-op when run
     /// directly.
@@ -303,9 +308,11 @@ mod tests {
         let write = WRITES[write.parse::<usize>().unwrap()];
         let path = PathBuf::from(path);
         // The crash exits here, before anything unwinds: no cut back of a
-        // group, no close().
-        std::panic::set_hook(Box::new(|info| {
+        // group, no close(). It records where it crashed.
+        let crashed_at = crashed_marker(&path);
+        std::panic::set_hook(Box::new(move |info| {
             eprintln!("{info}");
+            let _ = std::fs::write(&crashed_at, info.to_string());
             std::process::exit(0);
         }));
         let db = open(&path);
@@ -324,12 +331,13 @@ mod tests {
 
     /// A crash at every point of each way to commit Mia, in `Sync` mode: the
     /// reopen holds Alix and Mia, or Alix alone when the call had not
-    /// returned success. The sweep ends at the first point the call no
-    /// longer reaches.
+    /// returned success, and both once the crash came after the commit's
+    /// fsync (`wal:after_sync`, before it is published). The sweep ends at
+    /// the first point the call no longer reaches.
     #[test]
     fn a_crash_in_a_commit_leaves_it_whole_or_absent() {
         for (index, write) in WRITES.iter().enumerate() {
-            let mut crashed = 0;
+            let (mut crashed, mut synced_crashes) = (0, 0);
             for point in 1..=64 {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("db.grafeo");
@@ -358,6 +366,11 @@ mod tests {
                     Some(other) => panic!("{write:?}, point {point}: the write failed ({other})"),
                     None => {
                         crashed += 1;
+                        let at = std::fs::read_to_string(crashed_marker(&path)).unwrap_or_default();
+                        if at.contains("wal:after_sync") {
+                            synced_crashes += 1;
+                            assert_eq!(found, both, "{write:?}, a crash after the fsync: {at}");
+                        }
                         assert!(
                             found == alix || found == both,
                             "{write:?}, crash point {point}: {found:?}"
@@ -368,6 +381,10 @@ mod tests {
             assert!(
                 crashed >= 2,
                 "{write:?}: only {crashed} crash points in its commit"
+            );
+            assert!(
+                synced_crashes >= 1,
+                "{write:?}: no crash after the commit's fsync"
             );
         }
     }

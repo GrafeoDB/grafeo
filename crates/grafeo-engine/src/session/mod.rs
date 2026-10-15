@@ -1032,8 +1032,6 @@ impl Session {
                 change.push(StandaloneOp::CreateGraph {
                     name: storage_key.clone(),
                 });
-                // AS COPY OF copies no data yet: the store's graph copy only
-                // created the graph, so the graph is created empty, as before.
 
                 // Bind to graph type if specified.
                 // If the parser produced a '/' in the name it is already a qualified
@@ -1058,20 +1056,43 @@ impl Session {
                     )));
                 }
 
-                // LIKE: copy the source's graph type binding, when its graph
-                // type exists.
-                if let Some(ref src) = like_graph {
+                // LIKE and AS COPY OF: copy the source's graph type binding,
+                // when its graph type exists.
+                if let Some(src) = like_graph.as_ref().or(copy_of.as_ref()) {
                     let src_key = self.effective_graph_key(src);
                     if let Some(src_type) = self.catalog.get_graph_type_binding(&src_key)
                         && self.catalog.get_graph_type_def(&src_type).is_some()
                     {
                         change.push(StandaloneOp::PutCatalog(CatalogRecord::GraphBinding(
                             GraphBindingRecord {
-                                graph: storage_key,
+                                graph: storage_key.clone(),
                                 graph_type: src_type,
                             },
                         )));
                     }
+                }
+
+                // AS COPY OF: the new graph holds the source's data, logged
+                // and applied with the graph's creation (#423).
+                if let Some(ref src) = copy_of {
+                    let src_key = self.effective_graph_key(src);
+                    let source = self.root_store().graph(&src_key).ok_or_else(|| {
+                        Error::Query(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            format!("Source graph '{src}' does not exist"),
+                        ))
+                    })?;
+                    crate::database::standalone::commit_copy(
+                        change,
+                        &held,
+                        #[cfg(feature = "wal")]
+                        self.wal().map(|wal| &**wal),
+                        &self.root_store(),
+                        &self.catalog,
+                        &self.transaction_manager,
+                        (&source, &storage_key),
+                    )?;
+                    return Ok(QueryResult::empty());
                 }
 
                 self.commit_standalone(change, &held)?;

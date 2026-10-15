@@ -1444,4 +1444,20 @@ for case_id, query, is_ordered in [
 ]:
     case(case_id, query, GQL, "social", is_ordered)
 
+# BU: CREATE GRAPH ... AS COPY OF copies the source's nodes, edges, labels and properties
+#     (#423; it created an empty graph), on the `writes` fixture after the BS cases: the
+#     copy holds both people and their edge (BU6, BU7), then the session goes back to the
+#     default graph for the cases after it (BU8)
+for case_id, query in [
+    ("BU1", "CREATE GRAPH copy_src"),
+    ("BU2", "USE GRAPH copy_src"),
+    ("BU3", "INSERT (:Person {name: 'Mia', w: 106})-[:KNOWS {since: 2019, w: 6}]->(:Person {name: 'Butch', w: 107})"),
+    ("BU4", "CREATE GRAPH copy_dst AS COPY OF copy_src"),
+    ("BU5", "USE GRAPH copy_dst"),
+    ("BU6", "MATCH (p:Person) RETURN p.name, p.w"),
+    ("BU7", "MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN a.name, b.name, k.since, k.w"),
+    ("BU8", "USE GRAPH default"),
+]:
+    case(case_id, query, GQL, "writes")
+
 # fmt: on

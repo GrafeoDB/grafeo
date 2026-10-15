@@ -22,6 +22,7 @@ use grafeo_common::change::StandaloneOp;
 use grafeo_common::storage::catalog_record::{
     CatalogKey, CatalogRecord, IndexKeyRecord, IndexKindRecord, IndexNameRecord, IndexRecord,
 };
+use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::graph::lpg::LpgStore;
 
@@ -204,6 +205,123 @@ pub(crate) fn commit(
         }
     }
     Ok(())
+}
+
+/// Commits a graph copy (`CREATE GRAPH dest AS COPY OF ...`): `change`
+/// creates the graph `dest` (with the source's type binding), and the copy
+/// holds every node and edge of `source` as a reader at the published epoch
+/// sees them, with their ids, labels and current properties (no open
+/// transaction's writes, no property history). Logged as one WAL group, the
+/// graph's records then a create record per copied entity, then applied,
+/// each copied entity through the replay's own apply at that epoch, so a
+/// reopen rebuilds the same graph. The caller holds commits off.
+///
+/// # Errors
+///
+/// As [`commit`]; a copied entity that does not apply poisons the database
+/// (the graph is new and empty, so it cannot conflict).
+pub(crate) fn commit_copy(
+    change: StandaloneChange,
+    _held: &CommitsHeld<'_>,
+    #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::Wal>,
+    store: &Arc<LpgStore>,
+    catalog: &Catalog,
+    manager: &TransactionManager,
+    (source, dest): (&LpgStore, &str),
+) -> Result<()> {
+    use grafeo_core::graph::apply::{ChangeTarget, Writer};
+
+    let epoch = manager.current_epoch();
+    #[cfg(feature = "wal")]
+    if let Some(wal) = wal {
+        log_copy(wal, &change, manager, epoch, (source, dest))?;
+    }
+    for (op, built) in change.into_ops() {
+        if let Err(error) = apply(&op, built, store, catalog, &mut Applying::Live) {
+            manager.poison(&format!("a logged change did not apply: {error}"));
+            return Err(error);
+        }
+    }
+    let Some(target) = store.graph(dest) else {
+        let message = format!("the copy {dest} was created, then not found");
+        manager.poison(&message);
+        return Err(Error::Internal(message));
+    };
+    for op in copied(source, epoch) {
+        if let Err(error) = target.apply(&op, Writer::Replay { epoch }) {
+            let message = format!("a logged copy into {dest} did not apply: {error}");
+            manager.poison(&message);
+            return Err(Error::Internal(message));
+        }
+    }
+    target.sync_epoch(epoch);
+    Ok(())
+}
+
+/// The create ops of every node, then every edge, of `source` that a reader
+/// at `epoch` sees, with their ids, labels and properties at that epoch.
+fn copied(
+    source: &LpgStore,
+    epoch: EpochId,
+) -> impl Iterator<Item = grafeo_common::change::DataOp> + '_ {
+    use grafeo_common::change::DataOp;
+    use grafeo_common::types::EdgeId;
+
+    let nodes = source
+        .all_node_ids()
+        .into_iter()
+        .filter_map(move |id| source.get_node_at_epoch(id, epoch))
+        .map(|node| DataOp::CreateNode {
+            id: node.id,
+            labels: node.labels,
+            properties: node.properties.into_iter().collect(),
+        });
+    let edges = (0..source.next_edge_id())
+        .filter_map(move |id| source.get_edge_at_epoch(EdgeId::new(id), epoch))
+        .map(|edge| DataOp::CreateEdge {
+            id: edge.id,
+            src: edge.src,
+            dst: edge.dst,
+            edge_type: edge.edge_type,
+            properties: edge.properties.into_iter().collect(),
+        });
+    nodes.chain(edges)
+}
+
+/// Writes a graph copy to `wal` as one group (see [`commit_copy`]) at
+/// `epoch`, and syncs it as the durability mode asks.
+///
+/// # Errors
+///
+/// As [`log`].
+#[cfg(feature = "wal")]
+fn log_copy(
+    wal: &grafeo_storage::wal::Wal,
+    change: &StandaloneChange,
+    manager: &TransactionManager,
+    epoch: EpochId,
+    (source, dest): (&LpgStore, &str),
+) -> Result<()> {
+    use grafeo_common::types::TransactionId;
+    use grafeo_storage::wal::GroupError;
+
+    use super::wal_log::{commit_error, write_copy};
+
+    let mut group = wal
+        .begin_group(TransactionId::SYSTEM)
+        .map_err(commit_error)?;
+    write_copy(&mut group, change, epoch, dest, copied(source, epoch))?;
+    match group.finish() {
+        Ok(_) => Ok(()),
+        Err(error @ GroupError::OutcomeUnknown(_)) => {
+            let error = commit_error(error);
+            manager.poison(&format!(
+                "a graph copy may be in the WAL unapplied: {error}"
+            ));
+            Err(error)
+        }
+        Err(error) => Err(commit_error(error)),
+    }
 }
 
 /// Writes `change` to `wal` as one group of its own, at the published epoch

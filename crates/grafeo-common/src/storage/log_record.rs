@@ -40,7 +40,7 @@
 //! | 25 | [`RemoveNodeLabel`](DataOp::RemoveNodeLabel) | graph, id, label |
 //! | 32 | [`CreateGraph`](StandaloneOp::CreateGraph) | name |
 //! | 33 | [`DropGraph`](StandaloneOp::DropGraph) | name |
-//! | 34 | reserved for copying a graph (`CREATE GRAPH ... AS COPY OF`) | |
+//! | 34 | reserved, unused (a graph copy logs a create record per copied entity) | |
 //! | 40 | [`PutCatalog`](StandaloneOp::PutCatalog) | the catalog record's kind (u8), then its payload |
 //! | 41 | [`DropCatalog`](StandaloneOp::DropCatalog) | the dropped catalog record's kind (u8), then its [`CatalogKey`] |
 //! | 64 | [`InsertTriple`](DataOp::InsertTriple) | graph, subject, predicate, object |

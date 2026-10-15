@@ -109,6 +109,37 @@ pub(crate) fn write_standalone(
     Ok(())
 }
 
+/// Writes the group of a graph copy (`CREATE GRAPH ... AS COPY OF`) at
+/// `epoch` into `group`: its [`GroupBegin`], the records of `change` (the
+/// new graph and its type binding), then one create record in the graph
+/// `dest` per copied entity of `copied`, streamed as they come. The caller
+/// finishes the group; on an error it drops the group, which cuts it back.
+///
+/// # Errors
+///
+/// As [`write_group`].
+#[cfg(feature = "lpg")]
+pub(crate) fn write_copy(
+    group: &mut GroupWriter<'_>,
+    change: &StandaloneChange,
+    epoch: EpochId,
+    dest: &str,
+    copied: impl Iterator<Item = grafeo_common::change::DataOp>,
+) -> Result<()> {
+    let mut encoder = Encoder::new(group);
+    encoder.begin(epoch, Origin::Schema)?;
+    for op in change.ops() {
+        encoder.push(&LogRecordRef::Standalone(op))?;
+    }
+    for op in copied {
+        encoder.push(&LogRecordRef::Data {
+            graph: Some(dest),
+            op: &op,
+        })?;
+    }
+    Ok(())
+}
+
 /// Where a commit's group ends in the log, and whether the durability mode
 /// asks for a sync up to there (see [`sync_commit`]).
 #[derive(Debug, Clone, Copy)]

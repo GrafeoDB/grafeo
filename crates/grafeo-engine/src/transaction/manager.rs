@@ -400,10 +400,7 @@ impl CommitGuard<'_> {
     /// which is safe because the commit lock is still held and no later
     /// commit took one, and the transaction is active again, with its claims,
     /// for the caller to roll back. Nothing is published or poisoned.
-    ///
-    /// Built for tests only until a failed log write fails the commit
-    /// (WAL v2, #498).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "wal"))]
     pub(crate) fn abort(self) {
         let Self {
             mut commit,

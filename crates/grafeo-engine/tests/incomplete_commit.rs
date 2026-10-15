@@ -651,8 +651,10 @@ fn direct_reads_see_a_commit_only_once_it_is_complete() {
 /// store, which holds the commit's stamped part: every checkpoint, save,
 /// backup and copy fails with the error of the failed commit and leaves the
 /// file as it was. `close()` fails the same way, keeps the WAL and releases
-/// the file; a reopen shows the database without the failed commit, with
-/// what the WAL holds, and commits again.
+/// the file; a reopen shows the database with what the WAL holds, and
+/// commits again. The failed commit wrote its group to the WAL before it
+/// stamped its versions, so the WAL holds it whole: the reopen has it, as
+/// for any commit whose outcome a failure left open (#498).
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 #[test]
 fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
@@ -736,15 +738,32 @@ fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
         people(&db),
-        [Value::from("Alix"), Value::from("Vincent")],
-        "the reopened database has the WAL's commits and nothing of the failed one"
+        [
+            Value::from("Alix"),
+            Value::from("Gus"),
+            Value::from("Vincent")
+        ],
+        "the reopened database has the WAL's commits, the failed one included"
     );
-    assert_eq!(city_of_alix(&db), Value::Null, "Alix never moved to Paris");
+    assert_eq!(
+        city_of_alix(&db),
+        Value::from("Paris"),
+        "the failed commit is there whole: Alix moved to Paris"
+    );
+    assert_eq!(
+        db.execute("MATCH (:Person {name: 'Alix'})-[:KNOWS]->(p) RETURN p.name")
+            .unwrap()
+            .rows()
+            .to_vec(),
+        vec![vec![Value::from("Gus")]],
+        "and knows Gus"
+    );
     db.execute("INSERT (:Person {name: 'Mia'})").unwrap();
     assert_eq!(
         people(&db),
         [
             Value::from("Alix"),
+            Value::from("Gus"),
             Value::from("Mia"),
             Value::from("Vincent")
         ],

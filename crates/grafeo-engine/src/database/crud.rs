@@ -35,8 +35,8 @@ impl super::GrafeoDB {
 
     /// The epoch the direct reads see: the last one whose commit is
     /// complete, as for queries. A store's own epoch moves when a commit
-    /// stamps its versions, before its WAL records are written and the
-    /// commit is complete (or when it never completes, see
+    /// stamps its versions, before the commit is complete and published
+    /// (or when it never completes, see
     /// [`TransactionManager`](crate::transaction::TransactionManager)), so a
     /// read at it could see part of a commit.
     pub(crate) fn read_epoch(&self) -> EpochId {

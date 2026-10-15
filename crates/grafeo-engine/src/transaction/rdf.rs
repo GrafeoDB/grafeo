@@ -247,7 +247,7 @@ pub(crate) struct RdfWriter {
     manager: Arc<TransactionManager>,
     /// The WAL a whole-graph operation is logged to, when the database logs.
     #[cfg(feature = "wal")]
-    wal: Option<Arc<grafeo_storage::wal::LpgWal>>,
+    wal: Option<Arc<grafeo_storage::wal::Wal>>,
 }
 
 impl RdfWriter {
@@ -264,7 +264,7 @@ impl RdfWriter {
         store: Arc<RdfStore>,
         changes: Arc<TransactionChanges>,
         manager: Arc<TransactionManager>,
-        #[cfg(feature = "wal")] wal: Option<Arc<grafeo_storage::wal::LpgWal>>,
+        #[cfg(feature = "wal")] wal: Option<Arc<grafeo_storage::wal::Wal>>,
     ) -> Self {
         Self {
             store,
@@ -460,9 +460,8 @@ pub(crate) fn update_privately<T>(
     Ok(value)
 }
 
-/// The N-Triples strings of a triple's terms, as an RDF WAL record and a
-/// change event hold them.
-#[cfg(any(feature = "wal", feature = "cdc"))]
+/// The N-Triples strings of a triple's terms, as a change event holds them.
+#[cfg(feature = "cdc")]
 pub(crate) fn ntriples_terms(
     triple: &grafeo_common::storage::log_record::TripleRecord,
 ) -> (String, String, String) {

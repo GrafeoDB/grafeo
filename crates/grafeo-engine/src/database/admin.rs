@@ -283,7 +283,9 @@ impl super::GrafeoDB {
         if dir.is_dir() {
             for entry in std::fs::read_dir(dir)? {
                 let entry = entry?;
-                let metadata = entry.metadata()?;
+                // From the file itself: on Windows a listing's size is stale
+                // while the file is open (the active WAL segment).
+                let metadata = std::fs::metadata(entry.path())?;
                 if metadata.is_file() {
                     total = total.saturating_add(Self::file_size(&entry.path(), &metadata)?);
                 } else if metadata.is_dir() {
@@ -441,6 +443,14 @@ impl super::GrafeoDB {
         result
     }
 
+    /// When the file's last checkpoint was written, in seconds since the Unix
+    /// epoch; `None` before the first one.
+    #[cfg(feature = "wal")]
+    fn last_checkpoint_seconds(&self) -> Option<u64> {
+        let header = self.file_manager.as_ref()?.active_header();
+        (header.iteration > 0).then_some(header.timestamp_ms / 1000)
+    }
+
     /// Returns WAL (Write-Ahead Log) status.
     ///
     /// Returns None if WAL is not enabled.
@@ -452,11 +462,17 @@ impl super::GrafeoDB {
                 enabled: true,
                 // The sidecar WAL of the database file, `<path>.wal/`.
                 path: Some(wal.dir().to_path_buf()),
-                size_bytes: wal.size_bytes(),
-                // reason: WAL record count fits usize on 64-bit targets
-                #[allow(clippy::cast_possible_truncation)]
-                record_count: wal.record_count() as usize,
-                last_checkpoint: wal.last_checkpoint_timestamp(),
+                // The log after the last checkpoint: what a reopen replays.
+                size_bytes: usize::try_from(wal.end_lsn().saturating_sub(self.checkpoint_lsn()))
+                    .unwrap_or(usize::MAX),
+                record_count: usize::try_from(
+                    wal.records_written().saturating_sub(
+                        self.wal_records_at_checkpoint
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    ),
+                )
+                .unwrap_or(usize::MAX),
+                last_checkpoint: self.last_checkpoint_seconds(),
                 current_epoch: self.read_epoch().as_u64(),
             };
         }

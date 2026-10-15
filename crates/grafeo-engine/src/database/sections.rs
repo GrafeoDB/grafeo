@@ -42,6 +42,14 @@ pub(super) struct CheckpointSources {
     pub transaction_manager: Arc<crate::transaction::TransactionManager>,
     #[cfg(feature = "triple-store")]
     pub rdf_store: Arc<grafeo_core::graph::rdf::RdfStore>,
+    /// The WAL a checkpoint starts a new segment of and truncates, `None`
+    /// without one.
+    #[cfg(feature = "wal")]
+    pub wal: Option<Arc<grafeo_storage::wal::Wal>>,
+    /// The WAL's records written up to the last checkpoint, which each
+    /// checkpoint sets (see `GrafeoDB::wal_status`).
+    #[cfg(feature = "wal")]
+    pub wal_records_at_checkpoint: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CheckpointSources {

@@ -338,7 +338,7 @@ impl GrafeoDB {
         // what it wrote is committed and logged first.
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&call.writer)));
-        self.finish_immediate(call, store);
+        self.finish_immediate(call, store)?;
         match outcome {
             Ok(result) => result.map_err(crate::query::executor::convert_operator_error),
             Err(panic) => std::panic::resume_unwind(panic),
@@ -386,7 +386,17 @@ impl GrafeoDB {
 
     /// Finishes a direct call that commits at once: logs what it wrote,
     /// publishes its epoch, reports its changes to change data capture.
-    fn finish_immediate(&self, call: ImmediateCall<'_>, store: &Arc<LpgStore>) {
+    ///
+    /// # Errors
+    ///
+    /// [`TransactionError::CommitOutcomeUnknown`] when its WAL group is not
+    /// written or not made durable: its writes are applied and stamped at an
+    /// epoch nobody reads, and cannot be taken back, so the epoch is not
+    /// published and the database is poisoned; a reopen decides from the log
+    /// whether the call happened.
+    ///
+    /// [`TransactionError::CommitOutcomeUnknown`]: grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown
+    fn finish_immediate(&self, call: ImmediateCall<'_>, store: &Arc<LpgStore>) -> Result<()> {
         let ImmediateCall {
             commits,
             root,
@@ -399,20 +409,16 @@ impl GrafeoDB {
         #[cfg(feature = "wal")]
         if let Some(wal) = &self.wal
             && !changes.is_empty()
+            && let Err(error) = Self::log_immediate(wal, &changes, epoch)
         {
-            use grafeo_storage::wal::WalRecord;
-            let group = crate::transaction::v1_group::build_group(
-                crate::transaction::v1_group::v1_records(&changes),
-                &[
-                    WalRecord::TransactionCommit {
-                        transaction_id: TransactionId::SYSTEM,
-                    },
-                    WalRecord::EpochAdvance { epoch },
-                ],
-            );
-            if let Err(e) = wal.log_batch(&group) {
-                grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
-            }
+            self.transaction_manager.poison(&format!(
+                "a direct write at epoch {epoch:?} is applied but not in the WAL: {error}"
+            ));
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown(
+                    error.to_string(),
+                ),
+            ));
         }
         // Reported before the epoch is published, while commits are held
         // off: in epoch order, as a commit reports its changes.
@@ -426,6 +432,34 @@ impl GrafeoDB {
         self.transaction_manager.sync_epoch(epoch);
         drop(commits);
         self.prune_versions(&root, store);
+        Ok(())
+    }
+
+    /// Writes the WAL group of a direct call that committed at once at
+    /// `epoch`, which wrote `changes`.
+    ///
+    /// # Errors
+    ///
+    /// The group's error: it is cut back when it was not written.
+    #[cfg(feature = "wal")]
+    fn log_immediate(
+        wal: &grafeo_storage::wal::Wal,
+        changes: &grafeo_common::change::ChangeSet,
+        epoch: EpochId,
+    ) -> Result<()> {
+        let mut group = wal
+            .begin_group(TransactionId::SYSTEM)
+            .map_err(crate::database::wal_log::commit_error)?;
+        crate::database::wal_log::write_group(
+            &mut group,
+            changes,
+            epoch,
+            grafeo_common::storage::log_record::Origin::Direct,
+        )?;
+        group
+            .finish()
+            .map(|_| ())
+            .map_err(crate::database::wal_log::commit_error)
     }
 
     /// The writer of a direct call on `store` (the graph with storage key
@@ -597,6 +631,31 @@ impl GrafeoDB {
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_held_change();
 
+        // The group is in the log before anything of the commit is stamped
+        // (#498): one that is not written takes the commit back, and the
+        // call is rolled back.
+        #[cfg(feature = "wal")]
+        let commit = match &self.wal {
+            Some(wal) => match crate::database::wal_log::write_commit(
+                wal,
+                commit,
+                transaction,
+                changes,
+                grafeo_common::storage::log_record::Origin::Direct,
+            ) {
+                Ok(commit) => commit,
+                Err(error) => {
+                    if self.transaction_manager.state(transaction)
+                        == Some(crate::transaction::TransactionState::Active)
+                    {
+                        let _ = self.rollback_private(transaction, changes);
+                    }
+                    return Err(error);
+                }
+            },
+            None => commit,
+        };
+
         // A store that fails to stamp leaves the commit half done: the
         // guard, dropped uncompleted, poisons the database.
         changes.stamp(epoch).map_err(|error| {
@@ -604,26 +663,6 @@ impl GrafeoDB {
                 "the commit of a direct write could not stamp its changes: {error}"
             ))
         })?;
-
-        #[cfg(feature = "wal")]
-        if let Some(wal) = &self.wal
-            && !changes.is_empty()
-        {
-            use grafeo_storage::wal::WalRecord;
-            let records = changes.read(crate::transaction::v1_group::v1_records);
-            let group = crate::transaction::v1_group::build_group(
-                records,
-                &[
-                    WalRecord::TransactionCommit {
-                        transaction_id: transaction,
-                    },
-                    WalRecord::EpochAdvance { epoch },
-                ],
-            );
-            if let Err(e) = wal.log_batch(&group) {
-                grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
-            }
-        }
 
         // Reported in the commit's ordered step, before its epoch is
         // published.

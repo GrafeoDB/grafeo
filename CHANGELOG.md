@@ -6,8 +6,19 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 Changes since 0.6.0-beta.1.
 
+### Changed
+
+- **New write-ahead log format**: the WAL is a chain of segments of checksummed frames (encrypted per segment, with a key from its own salt, for an encrypted database), one group per commit, and the file's database header records the log position its image covers. A database whose WAL from 0.5.x or 0.6.0-beta.1 still holds commits replays them on its first read-write open, checkpoints them into the file and removes that WAL.
+- **Incremental backups copy WAL segments** (backup file version 2). A restore still reads the incremental backups of 0.5.x and 0.6.0-beta.1; after the upgrade, take a full backup before the next incremental one.
+- **Breaking (Rust): `GrafeoDB::wal()` returns the new WAL writer**, `Option<&Arc<grafeo_storage::wal::Wal>>`.
+
+### Deprecated
+
+- **Rust: `BackupCursor::log_sequence`**, 0 in the cursors this release writes: the cursor's position in the WAL is `wal_lsn`. Removed in 0.7.0.
+
 ### Fixed
 
+- **A commit whose WAL write fails is no longer reported as committed** ([#498](https://github.com/GrafeoDB/grafeo/issues/498)): a commit, an auto-commit statement and a direct call write their WAL group, and in `Sync` mode sync it, before anything of them becomes visible. When the group is not written, the commit is rolled back and fails with `GRAFEO-T009`, which can be retried. When it is written but cannot be synced, it fails with `GRAFEO-T010` (outcome unknown): nothing of it is visible, nothing commits until the database is reopened, and the reopen finds it or not. A direct call while no transaction is open cannot be rolled back, so any failed WAL write fails it with `GRAFEO-T010`. The failure was logged as a warning and the commit succeeded, then was lost on the next restart.
 - **Buffer admission**: simultaneous buffer grants and grant resizing obey the buffer manager's hard limit. Oversized requests return refusal instead of overflowing.
 - **SPARQL `+` and `*` paths stopped after 50 repetitions**: endpoint reachability now follows finite predicate, inverse, sequence and alternative steps without a hop cap. The traversal preserves graph and dataset boundaries and pending transaction writes, streams one origin at a time, and fails when its memory budget or query deadline is exhausted.
 

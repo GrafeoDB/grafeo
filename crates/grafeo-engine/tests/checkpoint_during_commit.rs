@@ -64,8 +64,9 @@ fn database_with_alix(path: &Path) {
 }
 
 /// A checkpoint started inside a commit that then fails (after its versions
-/// are stamped) waits for the commit, gets its error, and writes nothing: a
-/// reopen shows the database without the commit.
+/// are stamped) waits for the commit, gets its error, and writes nothing. The
+/// commit wrote its group to the WAL before it stamped, so a reopen resolves
+/// it from the log and has it whole (#498).
 #[test]
 fn a_checkpoint_during_a_failing_commit_gets_its_error_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -104,7 +105,11 @@ fn a_checkpoint_during_a_failing_commit_gets_its_error_and_writes_nothing() {
         "the file is byte for byte the last checkpoint"
     );
     let db = GrafeoDB::open(&path).unwrap();
-    assert_eq!(people(&db), [Value::from("Alix")]);
+    assert_eq!(
+        people(&db),
+        [Value::from("Alix"), Value::from("Gus")],
+        "the reopen replays the logged commit"
+    );
 }
 
 /// A checkpoint started inside a commit that completes waits for it, and
@@ -396,8 +401,9 @@ fn checkpoint_child() {
     session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
     let checkpointer = Arc::clone(&db);
     match which.as_str() {
-        // The process ends inside the commit, before its WAL records are
-        // written, with a checkpoint started meanwhile.
+        // The process ends inside the commit, once its versions are stamped
+        // (its group is in the WAL by then), with a checkpoint started
+        // meanwhile.
         "failing" => {
             after_next_commit_stamped(move || {
                 let checkpoint = Started::spawn(move || checkpointer.wal_checkpoint().is_ok());
@@ -717,10 +723,11 @@ fn checkpoints_among_open_transactions_always_leave_a_file_that_opens() {
 }
 
 /// A process that ends inside a commit, with a checkpoint started in it,
-/// leaves no part of the commit: the checkpoint waited for the commit, which
-/// never completed.
+/// leaves no part of the commit in the file: the checkpoint waited for the
+/// commit, which never completed. The commit's group was in the WAL before
+/// the process ended, so the reopen has the commit whole, from the log.
 #[test]
-fn a_crash_inside_a_commit_with_a_checkpoint_started_leaves_none_of_it() {
+fn a_crash_inside_a_commit_with_a_checkpoint_started_is_resolved_by_the_log() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prague.grafeo");
     database_with_alix(&path);
@@ -728,8 +735,8 @@ fn a_crash_inside_a_commit_with_a_checkpoint_started_leaves_none_of_it() {
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
         people(&db),
-        [Value::from("Alix")],
-        "the reopened database has nothing of the commit"
+        [Value::from("Alix"), Value::from("Gus")],
+        "the reopened database has the logged commit"
     );
 }
 

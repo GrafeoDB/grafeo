@@ -49,7 +49,6 @@ impl CheckpointTimer {
         interval: Duration,
         file_manager: Arc<GrafeoFileManager>,
         sources: CheckpointSources,
-        #[cfg(feature = "wal")] wal: Option<Arc<grafeo_storage::wal::LpgWal>>,
     ) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = Arc::clone(&shutdown);
@@ -57,14 +56,7 @@ impl CheckpointTimer {
         let handle = std::thread::Builder::new()
             .name("grafeo-checkpoint".to_string())
             .spawn(move || {
-                Self::run(
-                    &shutdown_clone,
-                    interval,
-                    &file_manager,
-                    &sources,
-                    #[cfg(feature = "wal")]
-                    wal.as_deref(),
-                );
+                Self::run(&shutdown_clone, interval, &file_manager, &sources);
             })
             .expect("failed to spawn checkpoint timer thread");
 
@@ -91,7 +83,6 @@ impl CheckpointTimer {
         interval: Duration,
         file_manager: &GrafeoFileManager,
         sources: &CheckpointSources,
-        #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
     ) {
         let mut elapsed = Duration::ZERO;
 
@@ -109,12 +100,7 @@ impl CheckpointTimer {
             elapsed = Duration::ZERO;
 
             // Attempt checkpoint (errors are logged, not propagated)
-            if let Err(e) = Self::try_checkpoint(
-                file_manager,
-                sources,
-                #[cfg(feature = "wal")]
-                wal,
-            ) {
+            if let Err(e) = Self::try_checkpoint(file_manager, sources) {
                 // After a commit that did not complete, no checkpoint can
                 // ever succeed (it would write the commit's stamped part):
                 // say so once and stop.
@@ -130,18 +116,8 @@ impl CheckpointTimer {
     }
 
     /// Runs a single checkpoint cycle.
-    fn try_checkpoint(
-        file_manager: &GrafeoFileManager,
-        sources: &CheckpointSources,
-        #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
-    ) -> Result<()> {
-        super::flush::flush(
-            file_manager,
-            sources,
-            #[cfg(feature = "wal")]
-            wal,
-        )
-        .map(|_| ())
+    fn try_checkpoint(file_manager: &GrafeoFileManager, sources: &CheckpointSources) -> Result<()> {
+        super::flush::flush(file_manager, sources).map(|_| ())
     }
 }
 
@@ -168,6 +144,10 @@ mod tests {
             transaction_manager: Arc::new(TransactionManager::new()),
             #[cfg(feature = "triple-store")]
             rdf_store: Arc::new(grafeo_core::graph::rdf::RdfStore::new()),
+            #[cfg(feature = "wal")]
+            wal: None,
+            #[cfg(feature = "wal")]
+            wal_records_at_checkpoint: Arc::default(),
         }
     }
 
@@ -176,13 +156,7 @@ mod tests {
         fm: &Arc<GrafeoFileManager>,
         store: &Arc<LpgStore>,
     ) -> CheckpointTimer {
-        CheckpointTimer::start(
-            interval,
-            Arc::clone(fm),
-            sources(store),
-            #[cfg(feature = "wal")]
-            None,
-        )
+        CheckpointTimer::start(interval, Arc::clone(fm), sources(store))
     }
 
     #[test]

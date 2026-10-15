@@ -853,7 +853,8 @@ impl super::GrafeoDB {
             database_id,
             keys.container_cipher(database_id),
         )?;
-        let written = fm.write_checkpoint(&section_refs, &sources.context().checkpoint_header());
+        // A new database: its WAL starts at log position 0.
+        let written = fm.write_checkpoint(&section_refs, &sources.context().checkpoint_header(0));
         drop(commits);
         let written = written.and_then(|()| fm.close());
         if written.is_err() {

@@ -17,11 +17,13 @@
 use grafeo_common::change::ChangeSet;
 use grafeo_common::storage::LogRecordRef;
 use grafeo_common::storage::log_record::{GroupBegin, Origin};
-use grafeo_common::types::EpochId;
+use grafeo_common::types::{EpochId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_storage::wal::{GroupError, GroupWriter};
 
+#[cfg(feature = "lpg")]
 use crate::transaction::StandaloneChange;
+use crate::transaction::{CommitGuard, TransactionChanges};
 
 /// Encodes records into a group one at a time, through one scratch buffer.
 struct Encoder<'group, 'wal> {
@@ -92,6 +94,7 @@ pub(crate) fn write_group(
 /// # Errors
 ///
 /// As [`write_group`].
+#[cfg(feature = "lpg")]
 pub(crate) fn write_standalone(
     group: &mut GroupWriter<'_>,
     change: &StandaloneChange,
@@ -104,6 +107,60 @@ pub(crate) fn write_standalone(
         encoder.push(&LogRecordRef::Standalone(op))?;
     }
     Ok(())
+}
+
+/// Writes the group of the commit `commit` of `transaction_id` to `wal` from
+/// what it changed (`changes`), and syncs it as the durability mode asks,
+/// before anything of the commit is stamped or published. A commit that
+/// changed nothing writes nothing. Returns the commit to go on with.
+///
+/// # Errors
+///
+/// - The group was not written ([`TransactionError::LogWriteFailed`], or the
+///   error of a record over a limit) or the WAL takes no more writes
+///   ([`TransactionError::LogUnavailable`]): nothing of it is in the log, the
+///   commit is taken back (its epoch goes back) and the transaction is active
+///   again, for the caller to roll back.
+/// - The group was written but not made durable
+///   ([`TransactionError::CommitOutcomeUnknown`]): it may survive, so the
+///   commit ends without completing, which poisons the database until a
+///   reopen decides from the log.
+pub(crate) fn write_commit<'a>(
+    wal: &grafeo_storage::wal::Wal,
+    commit: CommitGuard<'a>,
+    transaction_id: TransactionId,
+    changes: &TransactionChanges,
+    origin: Origin,
+) -> Result<CommitGuard<'a>> {
+    if changes.is_empty() {
+        return Ok(commit);
+    }
+    let mut group = match wal.begin_group(transaction_id) {
+        Ok(group) => group,
+        Err(error) => {
+            commit.abort();
+            return Err(commit_error(error));
+        }
+    };
+    let epoch = commit.epoch();
+    if let Err(error) = changes.read(|set| write_group(&mut group, set, epoch, origin)) {
+        // The group is cut back as it is dropped.
+        drop(group);
+        commit.abort();
+        return Err(error);
+    }
+    match group.finish() {
+        Ok(_) => Ok(commit),
+        Err(error @ GroupError::OutcomeUnknown(_)) => {
+            // Not taken back: the epoch may be in the log.
+            drop(commit);
+            Err(commit_error(error))
+        }
+        Err(error) => {
+            commit.abort();
+            Err(commit_error(error))
+        }
+    }
 }
 
 /// The commit error of a log group that failed: a group that was not written
@@ -126,7 +183,7 @@ pub(crate) fn commit_error(error: GroupError) -> Error {
 
 /// Milliseconds since the Unix epoch, for a group's timestamp; 0 for a clock
 /// set before it.
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| {
@@ -134,7 +191,7 @@ fn now_ms() -> u64 {
         })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 mod tests {
     use grafeo_common::change::{
         Before, ChangeSet, DataModel, DataOp, EdgeImage, GraphRef, Labels, NodeImage,

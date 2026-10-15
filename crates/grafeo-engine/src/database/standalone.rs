@@ -185,7 +185,7 @@ pub(crate) fn refuse_drop_with_open_changes(
 pub(crate) fn commit(
     change: StandaloneChange,
     _held: &CommitsHeld<'_>,
-    #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
+    #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::Wal>,
     store: &Arc<LpgStore>,
     catalog: &Catalog,
     manager: &TransactionManager,
@@ -195,7 +195,7 @@ pub(crate) fn commit(
     }
     #[cfg(feature = "wal")]
     if let Some(wal) = wal {
-        wal.log_batch(&crate::transaction::v1_group::standalone_group(&change)?)?;
+        log(wal, &change, manager)?;
     }
     for (op, built) in change.into_ops() {
         if let Err(error) = apply(&op, built, store, catalog, &mut Applying::Live) {
@@ -204,6 +204,52 @@ pub(crate) fn commit(
         }
     }
     Ok(())
+}
+
+/// Writes `change` to `wal` as one group of its own, at the published epoch
+/// (the change takes effect at once), and syncs it as the durability mode
+/// asks.
+///
+/// # Errors
+///
+/// The group was not written, or the WAL takes no more writes: nothing of
+/// the change is applied, and the statement fails
+/// ([`TransactionError::LogWriteFailed`] or
+/// [`TransactionError::LogUnavailable`]). The group was written but not made
+/// durable ([`TransactionError::CommitOutcomeUnknown`]): it may survive, but
+/// nothing of it is applied here, so the database is poisoned until a reopen
+/// decides from the log.
+///
+/// [`TransactionError::LogWriteFailed`]: grafeo_common::utils::error::TransactionError::LogWriteFailed
+/// [`TransactionError::LogUnavailable`]: grafeo_common::utils::error::TransactionError::LogUnavailable
+/// [`TransactionError::CommitOutcomeUnknown`]: grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown
+#[cfg(feature = "wal")]
+fn log(
+    wal: &grafeo_storage::wal::Wal,
+    change: &StandaloneChange,
+    manager: &TransactionManager,
+) -> Result<()> {
+    use grafeo_common::storage::log_record::Origin;
+    use grafeo_common::types::TransactionId;
+    use grafeo_storage::wal::GroupError;
+
+    use super::wal_log::{commit_error, write_standalone};
+
+    let mut group = wal
+        .begin_group(TransactionId::SYSTEM)
+        .map_err(commit_error)?;
+    write_standalone(&mut group, change, manager.current_epoch(), Origin::Schema)?;
+    match group.finish() {
+        Ok(_) => Ok(()),
+        Err(error @ GroupError::OutcomeUnknown(_)) => {
+            let error = commit_error(error);
+            manager.poison(&format!(
+                "a standalone change may be in the WAL unapplied: {error}"
+            ));
+            Err(error)
+        }
+        Err(error) => Err(commit_error(error)),
+    }
 }
 
 /// Applies `op` to `store` (the root store, which holds the named graphs)
@@ -266,7 +312,7 @@ pub(crate) fn apply(
 pub(crate) fn commit_rdf(
     op: grafeo_common::change::RdfGraphOp,
     _held: &CommitsHeld<'_>,
-    #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
+    #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::Wal>,
     rdf: &grafeo_core::graph::rdf::RdfStore,
     manager: &TransactionManager,
 ) -> Result<()> {
@@ -275,7 +321,7 @@ pub(crate) fn commit_rdf(
     if let Some(wal) = wal {
         let mut change = StandaloneChange::new();
         change.push(op.clone());
-        wal.log_batch(&crate::transaction::v1_group::standalone_group(&change)?)?;
+        log(wal, &change, manager)?;
     }
     if let Err(error) = apply_rdf(&op, rdf, &Applying::Live) {
         manager.poison(&format!("a logged change did not apply: {error}"));

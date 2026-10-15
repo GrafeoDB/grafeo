@@ -64,6 +64,8 @@ mod schema_replay;
 mod search;
 pub(crate) mod section_consumer;
 mod sections;
+// The commit's WAL v2 group, written from its change set. Built for tests
+// only until the commit path writes it (the switch from the v1 records).
 mod spill_directory;
 #[cfg(feature = "lpg")]
 pub(crate) mod standalone;
@@ -78,6 +80,8 @@ mod upsert;
     not(feature = "temporal")
 ))]
 mod vector_spill;
+#[cfg(all(test, feature = "wal", feature = "lpg"))]
+mod wal_log;
 
 use grafeo_common::grafeo_error;
 #[cfg(feature = "wal")]

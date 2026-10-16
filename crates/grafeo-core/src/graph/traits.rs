@@ -232,6 +232,23 @@ pub trait GraphStore: Send + Sync {
         self.nodes_by_label(label).len()
     }
 
+    /// Returns the number of nodes visible at `epoch` that have `label` then:
+    /// what a query counts, without the nodes of a transaction that has not
+    /// committed (the label index holds those too).
+    ///
+    /// The default builds each node of the label index at `epoch`; stores
+    /// override it with a visibility check and a label read, without building
+    /// nodes and their properties.
+    fn nodes_by_label_count_at_epoch(&self, label: &str, epoch: EpochId) -> usize {
+        self.nodes_by_label(label)
+            .into_iter()
+            .filter(|&id| {
+                self.get_node_at_epoch(id, epoch)
+                    .is_some_and(|node| node.has_label(label))
+            })
+            .count()
+    }
+
     /// Returns the total number of non-deleted nodes.
     fn node_count(&self) -> usize;
 

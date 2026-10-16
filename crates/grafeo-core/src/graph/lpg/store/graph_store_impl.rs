@@ -132,6 +132,10 @@ impl GraphStore for LpgStore {
         LpgStore::nodes_by_label_count(self, label)
     }
 
+    fn nodes_by_label_count_at_epoch(&self, label: &str, epoch: EpochId) -> usize {
+        LpgStore::nodes_by_label_count_at_epoch(self, label, epoch)
+    }
+
     fn node_count(&self) -> usize {
         LpgStore::node_count(self)
     }

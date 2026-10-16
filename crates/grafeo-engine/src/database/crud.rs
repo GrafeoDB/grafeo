@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
+use grafeo_core::graph::Direction;
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
 
 use super::direct::{BatchEdge, DirectTarget};
@@ -91,6 +92,31 @@ impl super::GrafeoDB {
         self.read_store(DirectTarget::Current)
             .ok()?
             .get_node_at_epoch(id, epoch)
+    }
+
+    /// The edges of a node in `direction` as `(neighbor, edge)` pairs, as of
+    /// the current epoch, without a query: only those of `edge_types` unless
+    /// it is empty. `Direction::Both` lists a self-loop once; a node that does
+    /// not exist has none.
+    ///
+    /// ```
+    /// # use grafeo_engine::{Direction, GrafeoDB};
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alix = db.create_node(&["Person"]).unwrap();
+    /// let gus = db.create_node(&["Person"]).unwrap();
+    /// let knows = db.create_edge(alix, gus, "KNOWS").unwrap();
+    /// assert_eq!(db.get_node_edges(alix, Direction::Outgoing, &["KNOWS"]), vec![(gus, knows)]);
+    /// ```
+    #[must_use]
+    pub fn get_node_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[&str],
+    ) -> Vec<(NodeId, EdgeId)> {
+        self.direct(DirectTarget::Current)
+            .get_node_edges(node, direction, edge_types)
+            .unwrap_or_default()
     }
 
     /// Gets a node as it existed at a specific epoch.

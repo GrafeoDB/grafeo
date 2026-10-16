@@ -321,6 +321,27 @@ Get an edge by ID. Returns `None` if the edge does not exist.
 def get_edge(self, id: int) -> Optional[Edge]
 ```
 
+### get_node_edges()
+
+The edges of a node as `(neighbor_id, edge_id)` tuples, without a query. `direction` is `"out"`
+(the default), `"in"` or `"both"`, which lists a self-loop once; `edge_types` keeps only edges of
+those types (a type or a list of types). A node that does not exist has none. A graph handle
+(`db.graph(name)`) has the same method for its graph.
+
+```python
+def get_node_edges(
+    self,
+    node_id: int,
+    direction: str = "out",
+    edge_types: Optional[Union[str, Sequence[str]]] = None,
+) -> List[Tuple[int, int]]
+```
+
+```python
+for neighbor_id, edge_id in db.get_node_edges(alix.id, "out", ["KNOWS"]):
+    print(db.get_node(neighbor_id))
+```
+
 ### delete_edge()
 
 Delete an edge by ID. Returns `True` if the edge existed and was deleted.

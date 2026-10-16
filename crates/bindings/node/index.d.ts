@@ -44,6 +44,13 @@ export declare class GrafeoDB {
   createEdge(sourceId: number, targetId: number, edgeType: string, properties?: object | undefined | null): JsEdge
   /** Get a node by ID. */
   getNode(id: number): JsNode | null
+  /**
+   * The edges of a node as `[neighborId, edgeId]` pairs, without a query:
+   * `options.direction` is `"out"` (default), `"in"` or `"both"` (which
+   * lists a self-loop once), and `options.edgeTypes` keeps only those
+   * types. Committed edges; none for a node that does not exist.
+   */
+  getNodeEdges(id: number, options?: NodeEdgesOptions | undefined | null): Array<Array<number>>
   /** Get an edge by ID. */
   getEdge(id: number): JsEdge | null
   /** Delete a node by ID. Returns true if the node existed. */
@@ -364,6 +371,11 @@ export declare class GraphHandle {
   createEdge(sourceId: number, targetId: number, edgeType: string, properties?: object | undefined | null): JsEdge
   /** Gets a node by ID, or null. */
   getNode(id: number): JsNode | null
+  /**
+   * `GrafeoDB.getNodeEdges` in this graph; throws if the graph no longer
+   * exists.
+   */
+  getNodeEdges(id: number, options?: NodeEdgesOptions | undefined | null): Array<Array<number>>
   /** Gets an edge by ID, or null. */
   getEdge(id: number): JsEdge | null
   /** Sets a node property; throws if the node does not exist. */
@@ -625,6 +637,14 @@ export interface CsvImportOptions {
 export interface JsonlImportOptions {
   /** Label to assign to created nodes (default: "Row") */
   label?: string
+}
+
+/** Options for `getNodeEdges`. */
+export interface NodeEdgesOptions {
+  /** `"out"` (default), `"in"` or `"both"`. */
+  direction?: string
+  /** Only edges of these types (default: every type). */
+  edgeTypes?: Array<string>
 }
 
 /** Returns the active SIMD instruction set for vector operations. */

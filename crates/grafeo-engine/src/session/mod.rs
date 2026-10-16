@@ -5577,6 +5577,34 @@ impl Session {
         )
     }
 
+    /// The edges of a node in `direction` as `(neighbor, edge)` pairs, as the
+    /// session sees them (its open transaction's own changes included),
+    /// without a query: only those of `edge_types` unless it is empty.
+    /// `Direction::Both` lists a self-loop once; a node that does not exist
+    /// has none. See [`GrafeoDB::get_node_edges`](crate::GrafeoDB::get_node_edges).
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn get_node_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[&str],
+    ) -> Vec<(NodeId, EdgeId)> {
+        let (epoch, transaction_id) = self.get_transaction_context();
+        let transaction_id = transaction_id.unwrap_or(TransactionId::SYSTEM);
+        let store = self.active_store();
+        let node_visible = store.is_node_visible_versioned(node, epoch, transaction_id);
+        crate::database::direct::node_edges(
+            &*store,
+            node,
+            direction,
+            edge_types,
+            node_visible,
+            |edge| store.is_edge_visible_versioned(edge, epoch, transaction_id),
+            |edge| store.edge_type_versioned(edge, epoch, transaction_id),
+        )
+    }
+
     /// Gets outgoing neighbors of a node directly, bypassing query planning.
     ///
     /// Returns (neighbor_id, edge_id) pairs for all outgoing edges.

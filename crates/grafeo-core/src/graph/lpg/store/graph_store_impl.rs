@@ -132,6 +132,10 @@ impl GraphStore for LpgStore {
         LpgStore::nodes_by_label_count(self, label)
     }
 
+    fn nodes_by_label_count_at_epoch(&self, label: &str, epoch: EpochId) -> usize {
+        LpgStore::nodes_by_label_count_at_epoch(self, label, epoch)
+    }
+
     fn node_count(&self) -> usize {
         LpgStore::node_count(self)
     }
@@ -224,6 +228,54 @@ impl GraphStore for LpgStore {
 
     fn all_property_keys(&self) -> Vec<String> {
         LpgStore::all_property_keys(self)
+    }
+
+    // Without `temporal` a node or edge holds its current properties, which
+    // `get_node_versioned` and `get_node_at_epoch` return for a visible one:
+    // one value is read after the visibility check, without building the
+    // entity. With `temporal` the defaults read through the versioned node.
+    #[cfg(not(feature = "temporal"))]
+    fn node_property_versioned(
+        &self,
+        id: NodeId,
+        key: &str,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Option<Value> {
+        if !LpgStore::is_node_visible_versioned(self, id, epoch, transaction_id) {
+            return None;
+        }
+        self.node_properties.get(id, key)
+    }
+
+    #[cfg(not(feature = "temporal"))]
+    fn node_property_at_epoch(&self, id: NodeId, key: &str, epoch: EpochId) -> Option<Value> {
+        if !LpgStore::is_node_visible_at_epoch(self, id, epoch) {
+            return None;
+        }
+        self.node_properties.get(id, key)
+    }
+
+    #[cfg(not(feature = "temporal"))]
+    fn edge_property_versioned(
+        &self,
+        id: EdgeId,
+        key: &str,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Option<Value> {
+        if !LpgStore::is_edge_visible_versioned(self, id, epoch, transaction_id) {
+            return None;
+        }
+        self.edge_properties.get(id, key)
+    }
+
+    #[cfg(not(feature = "temporal"))]
+    fn edge_property_at_epoch(&self, id: EdgeId, key: &str, epoch: EpochId) -> Option<Value> {
+        if !LpgStore::is_edge_visible_at_epoch(self, id, epoch) {
+            return None;
+        }
+        self.edge_properties.get(id, key)
     }
 
     fn is_node_visible_at_epoch(&self, id: NodeId, epoch: EpochId) -> bool {

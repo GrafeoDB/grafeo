@@ -43,6 +43,7 @@ mod parameter_scan;
 mod project;
 pub mod push;
 mod range_scan;
+mod rdf_path;
 mod scan;
 #[cfg(feature = "text-index")]
 mod scan_text;
@@ -111,6 +112,11 @@ pub use push::{
 #[cfg(feature = "spill")]
 pub use push::{SpillableAggregatePushOperator, SpillableSortPushOperator};
 pub use range_scan::RangeScanOperator;
+pub use rdf_path::{PathStep, RdfPathGraph};
+#[cfg(feature = "triple-store")]
+pub use rdf_path::{
+    RdfPathConfig, RdfPathOperator, RdfPathPendingGraph, RdfPathReadControl, RdfPathReadOverlay,
+};
 pub use scan::ScanOperator;
 #[cfg(feature = "text-index")]
 pub use scan_text::TextScanOperator;

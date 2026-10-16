@@ -375,13 +375,25 @@ impl PyGrafeoDB {
     /// shuffle_unordered=True returns the rows of every query without ORDER BY
     /// in random order: for tests, to find code that relies on a row order
     /// that is unspecified.
+    ///
+    /// wal_salvage=True opens a database whose WAL has damage before its end
+    /// (which an open refuses) with the commits before the damage; what it
+    /// does not replay is kept in `<path>.wal.damaged`. For this open only.
     #[new]
-    #[pyo3(signature = (path=None, *, cdc=false, section_tiers=None, shuffle_unordered=false))]
+    #[pyo3(signature = (
+        path=None,
+        *,
+        cdc=false,
+        section_tiers=None,
+        shuffle_unordered=false,
+        wal_salvage=false
+    ))]
     fn new(
         path: Option<String>,
         cdc: bool,
         section_tiers: Option<HashMap<String, String>>,
         shuffle_unordered: bool,
+        wal_salvage: bool,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
             Config::persistent(p)
@@ -392,6 +404,9 @@ impl PyGrafeoDB {
             config = config.with_cdc();
         }
         config = config.with_shuffle_unordered(shuffle_unordered);
+        if wal_salvage {
+            config = config.with_wal_salvage();
+        }
         if let Some(tiers) = section_tiers {
             for (section_name, tier_name) in tiers {
                 let section_type = parse_section_type(&section_name)?;
@@ -880,6 +895,40 @@ impl PyGrafeoDB {
         Ok(db.get_edge(EdgeId(id)).map(crate::direct::edge))
     }
 
+    /// The edges of a node as ``(neighbor_id, edge_id)`` tuples, without a
+    /// query.
+    ///
+    /// Args:
+    ///     node_id: The node.
+    ///     direction: ``"out"`` (default), ``"in"`` or ``"both"``; ``"both"``
+    ///         lists a self-loop once.
+    ///     edge_types: Only edges of these types (a type or a list of types);
+    ///         None for every type.
+    ///
+    /// Returns:
+    ///     The committed edges; an empty list for a node that does not exist.
+    ///
+    /// Example:
+    ///     for neighbor, edge in db.get_node_edges(alix, "out", ["KNOWS"]):
+    ///         print(db.get_node(neighbor))
+    #[pyo3(signature = (node_id, direction="out", edge_types=None))]
+    fn get_node_edges(
+        &self,
+        node_id: u64,
+        direction: &str,
+        edge_types: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<(u64, u64)>> {
+        let direction = crate::direct::direction(direction)?;
+        let edge_types = crate::direct::edge_types(edge_types)?;
+        let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
+        let db = self.inner.read();
+        Ok(crate::direct::edge_pairs(db.get_node_edges(
+            NodeId(node_id),
+            direction,
+            &edge_types,
+        )))
+    }
+
     /// Get a node at a specific historical epoch.
     ///
     /// Returns the node as it existed at the given epoch, including
@@ -1165,6 +1214,17 @@ impl PyGrafeoDB {
     fn delete_node(&self, id: u64) -> PyResult<bool> {
         let db = self.inner.read();
         Ok(db.delete_node(NodeId(id)).map_err(PyGrafeoError::from)?)
+    }
+
+    /// Delete a node with all its edges, as `DETACH DELETE` does.
+    ///
+    /// Returns False if the node does not exist. The node and its edges are
+    /// one change: they commit and roll back together.
+    fn detach_delete_node(&self, id: u64) -> PyResult<bool> {
+        let db = self.inner.read();
+        Ok(db
+            .detach_delete_node(NodeId(id))
+            .map_err(PyGrafeoError::from)?)
     }
 
     /// Delete an edge by ID.
@@ -2525,6 +2585,73 @@ impl PyGrafeoDB {
         dict.set_item("record_count", status.record_count)?;
         dict.set_item("last_checkpoint", status.last_checkpoint)?;
         dict.set_item("current_epoch", status.current_epoch)?;
+
+        Ok(dict.into())
+    }
+
+    /// Sets when the database checkpoints by itself: every
+    /// `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes
+    /// since the last checkpoint. Leave both out to turn automatic
+    /// checkpoints off (the default). For this open only.
+    ///
+    /// Raises for a database in memory or opened read-only, which never
+    /// checkpoint, and for a zero value.
+    ///
+    /// Example:
+    ///     db.set_checkpoint_triggers(interval_secs=60, wal_bytes=64 * 1024 * 1024)
+    #[pyo3(signature = (interval_secs=None, wal_bytes=None))]
+    fn set_checkpoint_triggers(
+        &self,
+        interval_secs: Option<f64>,
+        wal_bytes: Option<u64>,
+    ) -> PyResult<()> {
+        let mut triggers = grafeo_engine::admin::CheckpointTriggers::none();
+        if let Some(seconds) = interval_secs {
+            let interval = std::time::Duration::try_from_secs_f64(seconds).map_err(|e| {
+                PyGrafeoError::InvalidArgument(format!("interval_secs {seconds}: {e}"))
+            })?;
+            triggers = triggers.with_interval(interval);
+        }
+        if let Some(bytes) = wal_bytes {
+            triggers = triggers.with_wal_bytes(bytes);
+        }
+        let db = self.inner.read();
+        db.set_checkpoint_triggers(triggers)
+            .map_err(PyGrafeoError::from)?;
+        Ok(())
+    }
+
+    /// How the automatic checkpoints fare.
+    ///
+    /// Returns:
+    ///     dict with keys: interval_secs, wal_bytes (the triggers, None when
+    ///     off), last_checkpoint (Unix seconds of the last checkpoint of any
+    ///     kind), failures (automatic ones that failed since the last that
+    ///     succeeded), last_error, last_failure (Unix seconds), stopped
+    ///     (no automatic checkpoint can succeed until a reopen)
+    ///
+    /// Example:
+    ///     status = db.checkpoint_status()
+    ///     if status["failures"]:
+    ///         print(status["last_error"])
+    fn checkpoint_status(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let db = self.inner.read();
+        let status = db.checkpoint_status();
+
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item(
+            "interval_secs",
+            status
+                .triggers
+                .interval
+                .map(|interval| interval.as_secs_f64()),
+        )?;
+        dict.set_item("wal_bytes", status.triggers.wal_bytes)?;
+        dict.set_item("last_checkpoint", status.last_checkpoint)?;
+        dict.set_item("failures", status.failures)?;
+        dict.set_item("last_error", status.last_error)?;
+        dict.set_item("last_failure", status.last_failure)?;
+        dict.set_item("stopped", status.stopped)?;
 
         Ok(dict.into())
     }
@@ -4207,6 +4334,13 @@ fn change_event_to_dict(
         "dst_id".to_string(),
         event
             .dst_id
+            .into_py_any(py)
+            .expect("u64 to Python conversion"),
+    );
+    map.insert(
+        "deleted_with".to_string(),
+        event
+            .deleted_with
             .into_py_any(py)
             .expect("u64 to Python conversion"),
     );

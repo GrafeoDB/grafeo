@@ -104,7 +104,7 @@ CRUD operations (`createNode`, `deleteNode`, etc.) and transaction control (`com
 | `setNodeProperty`, `setEdgeProperty` | Sync |
 | `nodeCount`, `edgeCount`, `info`, `schema` | Sync |
 | `beginTransaction`, `commit`, `rollback` | Sync |
-| `save`, `walCheckpoint`, `backupFull`, `backupIncremental` | Sync |
+| `save`, `walCheckpoint`, `setCheckpointTriggers`, `checkpointStatus`, `backupFull`, `backupIncremental` | Sync |
 | `execute`, `executeCypher`, `executeSql`, etc. | **Async** |
 | `createVectorIndex`, `vectorSearch` | **Async** |
 | `batchCreateNodes`, `batchVectorSearch` | **Async** |

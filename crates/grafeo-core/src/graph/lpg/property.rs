@@ -521,7 +521,11 @@ impl<Id: EntityId> PropertyStorage<Id> {
 
     /// Gets a property value for an entity.
     #[must_use]
-    pub fn get(&self, id: Id, key: &PropertyKey) -> Option<Value> {
+    pub fn get<Q>(&self, id: Id, key: &Q) -> Option<Value>
+    where
+        PropertyKey: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
         let columns = self.columns.read();
         columns.get(key).and_then(|col| col.get(id))
     }

@@ -126,86 +126,45 @@ fn non_ascii_terms_survive_a_crash() {
     assert_found(&db, "after the WAL replay");
 }
 
-/// A WAL record whose term does not parse fails the open, naming the record,
-/// where 0.5.x replayed the WAL without the triple. The record is damaged
-/// after the crash: the IRI loses its closing '>' and keeps its length, and
-/// its frame gets a matching CRC, so only the term is wrong.
+/// A record of the WAL format of 0.5.x and 0.6.0-beta.1 whose term does not
+/// parse fails the open, naming the record, where 0.5.x replayed the WAL
+/// without the triple. (The WAL of this release stores terms as typed
+/// values, which a damaged frame cannot turn into another term: its checksum
+/// fails first.)
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 #[test]
 fn a_wal_record_whose_term_does_not_parse_fails_the_open() {
-    use std::cell::RefCell;
+    use grafeo_common::types::TransactionId;
+    use grafeo_storage::wal::{WalManager, WalRecord};
 
-    let refused = RefCell::new(None);
-    let open = |path: &std::path::Path| {
-        // In the child the WAL does not exist yet; in the parent the crash
-        // left it.
-        if damage_wal_term(path) == 0 {
-            return rdf_file(path);
-        }
-        match GrafeoDB::with_config(rdf_file_config(path)) {
-            Ok(db) => db,
-            Err(error) => {
-                *refused.borrow_mut() = Some(error.to_string());
-                rdf_in_memory()
-            }
-        }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("terms.grafeo");
+    rdf_file(&path).close().unwrap();
+    {
+        // As a writer of that format left it: the IRI lost its closing '>'.
+        let wal = WalManager::open(format!("{}.wal", path.display())).unwrap();
+        wal.log(&WalRecord::InsertRdfTriple {
+            subject: "<http://example.org/alix".to_string(),
+            predicate: "<http://example.org/name>".to_string(),
+            object: "\"Alix\"".to_string(),
+            graph: None,
+        })
+        .unwrap();
+        wal.log(&WalRecord::TransactionCommit {
+            transaction_id: TransactionId::new(19),
+        })
+        .unwrap();
+        wal.sync().unwrap();
+    }
+    let error = match GrafeoDB::with_config(rdf_file_config(&path)) {
+        Ok(_) => panic!("the open with a damaged WAL record succeeded"),
+        Err(error) => error.to_string(),
     };
-    let (_dir, _db) = common::replay::reopened_after_crash(
-        "a_wal_record_whose_term_does_not_parse_fails_the_open",
-        open,
-        |db| {
-            db.session()
-                .execute_sparql(
-                    r#"INSERT DATA { <http://example.org/alix> <http://example.org/name> "Alix" . }"#,
-                )
-                .unwrap();
-        },
-    );
-    let error = refused
-        .into_inner()
-        .expect("the open with a damaged WAL record failed");
     assert!(
         error.contains("WAL record InsertRdfTriple in the default graph, subject")
             && error.contains("an IRI without its closing '>'"),
         "{error}"
     );
-}
-
-/// Damages the WAL next to the database at `path`: the IRI
-/// `<http://example.org/alix>` loses its closing '>' in every frame that holds
-/// it, and the frame's CRC is recomputed. Returns the frames changed.
-#[cfg(all(feature = "wal", feature = "grafeo-file"))]
-fn damage_wal_term(path: &std::path::Path) -> usize {
-    let iri = b"<http://example.org/alix>";
-    let Ok(logs) = std::fs::read_dir(format!("{}.wal", path.display())) else {
-        return 0;
-    };
-    let mut changed = 0;
-    for log in logs {
-        let log = log.unwrap().path();
-        let mut bytes = std::fs::read(&log).unwrap();
-        // Frames: [length u32][data][crc32 of the data u32].
-        let mut at = 0;
-        while at + 4 <= bytes.len() {
-            let length = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-            let data = at + 4..at + 4 + usize::try_from(length).unwrap();
-            if data.end + 4 > bytes.len() {
-                break;
-            }
-            if let Some(found) = bytes[data.clone()]
-                .windows(iri.len())
-                .position(|window| window == iri)
-            {
-                bytes[data.start + found + iri.len() - 1] = b' ';
-                let crc = crc32fast::hash(&bytes[data.clone()]);
-                bytes[data.end..data.end + 4].copy_from_slice(&crc.to_le_bytes());
-                changed += 1;
-            }
-            at = data.end + 4;
-        }
-        std::fs::write(&log, bytes).unwrap();
-    }
-    changed
 }
 
 #[test]

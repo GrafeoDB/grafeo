@@ -58,8 +58,10 @@ impl GrafeoDB {
 
         // EXPLAIN: return the physical plan tree without executing
         if optimized_plan.explain {
+            let path_budget = self.config.path_search_budget();
             let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
-                .with_shuffle_unordered(self.config.shuffle_unordered);
+                .with_shuffle_unordered(self.config.shuffle_unordered())
+                .with_path_search_budget(path_budget);
             let (_, entries) = planner.plan_profiled(&optimized_plan)?;
             use crate::query::processor::physical_explain_result;
             return Ok(physical_explain_result(&optimized_plan, entries));
@@ -139,22 +141,24 @@ impl GrafeoDB {
         if triples.is_empty() {
             return Ok(0);
         }
-        let changes = self.streaming_changes(held);
+        let changes = self.streaming_changes(held, false);
         #[cfg(feature = "wal")]
         let changes = {
+            use grafeo_common::storage::log_record::TripleRecord;
+
             let mut changes = changes;
             for triple in &triples {
-                changes.log(grafeo_storage::wal::WalRecord::InsertRdfTriple {
-                    subject: triple.subject().to_string(),
-                    predicate: triple.predicate().to_string(),
-                    object: triple.object().to_string(),
-                    graph: None,
-                })?;
+                changes.log_triple(
+                    None,
+                    &grafeo_common::change::DataOp::InsertTriple {
+                        triple: Box::new(TripleRecord::from(triple)),
+                    },
+                )?;
             }
             changes
         };
-        // No epoch: the RDF store has none, and the triples apply after the
-        // marker.
+        // No epoch: the RDF store has none, and the triples apply once the
+        // group is written.
         changes.commit(None)?;
         Ok(self.rdf_store.batch_insert(triples))
     }

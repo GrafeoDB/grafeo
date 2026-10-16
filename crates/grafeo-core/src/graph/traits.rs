@@ -102,6 +102,56 @@ pub trait GraphStore: Send + Sync {
     /// Gets a property for multiple nodes in a single batch operation.
     fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>>;
 
+    /// The value of property `key` of node `id` as
+    /// [`get_node_versioned`](Self::get_node_versioned) sees the node: `None`
+    /// when the node is not visible or has no such property. A query reads
+    /// every `n.prop` through this; the default builds the node, a store
+    /// that can read one value of a visible node overrides it.
+    fn node_property_versioned(
+        &self,
+        id: NodeId,
+        key: &str,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Option<Value> {
+        self.get_node_versioned(id, epoch, transaction_id)?
+            .get_property(key)
+            .cloned()
+    }
+
+    /// The value of property `key` of node `id` as
+    /// [`get_node_at_epoch`](Self::get_node_at_epoch) sees the node (see
+    /// [`node_property_versioned`](Self::node_property_versioned)).
+    fn node_property_at_epoch(&self, id: NodeId, key: &str, epoch: EpochId) -> Option<Value> {
+        self.get_node_at_epoch(id, epoch)?
+            .get_property(key)
+            .cloned()
+    }
+
+    /// The value of property `key` of edge `id` as
+    /// [`get_edge_versioned`](Self::get_edge_versioned) sees the edge (see
+    /// [`node_property_versioned`](Self::node_property_versioned)).
+    fn edge_property_versioned(
+        &self,
+        id: EdgeId,
+        key: &str,
+        epoch: EpochId,
+        transaction_id: TransactionId,
+    ) -> Option<Value> {
+        self.get_edge_versioned(id, epoch, transaction_id)?
+            .get_property(key)
+            .cloned()
+    }
+
+    /// The value of property `key` of edge `id` as
+    /// [`get_edge_at_epoch`](Self::get_edge_at_epoch) sees the edge (see
+    /// [`node_property_versioned`](Self::node_property_versioned)).
+    fn edge_property_at_epoch(&self, id: EdgeId, key: &str, epoch: EpochId) -> Option<Value> {
+        self.get_edge_at_epoch(id, epoch)?
+            .get_property(key)
+            .cloned()
+    }
+
     /// [`get_node_property_batch`](Self::get_node_property_batch) for the
     /// readers that must tell a value that cannot be read from no value (the
     /// key of an algorithm's `key=`): a spilled value that cannot be read is
@@ -180,6 +230,23 @@ pub trait GraphStore: Send + Sync {
     /// allocating the full ID list.
     fn nodes_by_label_count(&self, label: &str) -> usize {
         self.nodes_by_label(label).len()
+    }
+
+    /// Returns the number of nodes visible at `epoch` that have `label` then:
+    /// what a query counts, without the nodes of a transaction that has not
+    /// committed (the label index holds those too).
+    ///
+    /// The default builds each node of the label index at `epoch`; stores
+    /// override it with a visibility check and a label read, without building
+    /// nodes and their properties.
+    fn nodes_by_label_count_at_epoch(&self, label: &str, epoch: EpochId) -> usize {
+        self.nodes_by_label(label)
+            .into_iter()
+            .filter(|&id| {
+                self.get_node_at_epoch(id, epoch)
+                    .is_some_and(|node| node.has_label(label))
+            })
+            .count()
     }
 
     /// Returns the total number of non-deleted nodes.

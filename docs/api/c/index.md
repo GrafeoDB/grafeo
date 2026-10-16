@@ -174,6 +174,15 @@ uint64_t    grafeo_result_rows_scanned(const GrafeoResult* r);      /* estimated
 const char* grafeo_result_nodes_json(const GrafeoResult* r);        /* JSON array of node objects */
 const char* grafeo_result_edges_json(const GrafeoResult* r);        /* JSON array of edge objects */
 void        grafeo_free_result(GrafeoResult* r);                    /* free the result */
+
+/* What the statement wrote; 0 for a read */
+uint64_t    grafeo_result_nodes_created(const GrafeoResult* r);
+uint64_t    grafeo_result_nodes_deleted(const GrafeoResult* r);
+uint64_t    grafeo_result_edges_created(const GrafeoResult* r);
+uint64_t    grafeo_result_edges_deleted(const GrafeoResult* r);      /* also those DETACH DELETE removed */
+uint64_t    grafeo_result_properties_set(const GrafeoResult* r);
+uint64_t    grafeo_result_labels_added(const GrafeoResult* r);
+uint64_t    grafeo_result_labels_removed(const GrafeoResult* r);
 ```
 
 All `const char*` pointers from result accessors are valid until `grafeo_free_result` is called. Do NOT free them separately.
@@ -190,6 +199,8 @@ uint64_t grafeo_create_node(GrafeoDatabase* db, const char* labels_json, const c
 
 /* Returns 1 if deleted, 0 if not found, -1 on null pointer */
 int32_t grafeo_delete_node(GrafeoDatabase* db, uint64_t id);
+/* Deletes the node with all its edges, as DETACH DELETE does; same returns */
+int32_t grafeo_detach_delete_node(GrafeoDatabase* db, uint64_t id);
 ```
 
 `labels_json` is a JSON array of strings (e.g. `"[\"Person\",\"Employee\"]"`). `properties_json` is a JSON object (e.g. `"{\"name\":\"Alix\"}"`), or `NULL` for no properties.
@@ -246,6 +257,31 @@ uint64_t    grafeo_edge_target_id(const GrafeoEdge* edge);
 const char* grafeo_edge_type(const GrafeoEdge* edge);
 const char* grafeo_edge_properties_json(const GrafeoEdge* edge);
 void        grafeo_free_edge(GrafeoEdge* edge);
+```
+
+### A Node's Edges
+
+```c
+GrafeoStatus grafeo_get_node_edges(GrafeoDatabase* db, uint64_t node_id, GrafeoDirection direction,
+                                   const char* edge_types_json, uint64_t** out_neighbors, uint64_t** out_edges,
+                                   size_t* out_count);
+```
+
+The edges of a node without a query, as two id arrays of the same length: neighbor `i` is reached
+through edge `i`. `direction` is `GRAFEO_DIRECTION_OUT`, `GRAFEO_DIRECTION_IN` or
+`GRAFEO_DIRECTION_BOTH` (which lists a self-loop once); `edge_types_json` is `NULL` for every type,
+else a JSON array of strings. Free each array with `grafeo_free_node_ids(ptr, count)`; both are
+`NULL` when there are none, and a node that does not exist has none.
+
+```c
+uint64_t *neighbors, *edges;
+size_t count;
+if (grafeo_get_node_edges(db, alix, GRAFEO_DIRECTION_OUT, "[\"KNOWS\"]", &neighbors, &edges, &count) == GRAFEO_OK) {
+    for (size_t i = 0; i < count; i++) printf("%llu via %llu
+", neighbors[i], edges[i]);
+    grafeo_free_node_ids(neighbors, count);
+    grafeo_free_node_ids(edges, count);
+}
 ```
 
 ### Edge Properties
@@ -372,6 +408,35 @@ GrafeoStatus grafeo_mmr_search(GrafeoDatabase* db, const char* label, const char
 GrafeoStatus grafeo_batch_create_nodes(GrafeoDatabase* db, const char* label, const char* property, const float* vectors, size_t vector_count, size_t dimensions, uint64_t** out_ids, size_t* out_count);
 ```
 
+### Batch Writes
+
+Each call is one transaction: a row the schema refuses (or an edge naming a node that does not exist) fails the call and writes nothing. Rows go in as JSON; the ids come back in input order, freed with `grafeo_free_node_ids`.
+
+```c
+GrafeoStatus grafeo_batch_create_nodes_with_props(GrafeoDatabase* db, const char* labels_json, const char* rows_json, uint64_t** out_ids, size_t* out_count);
+GrafeoStatus grafeo_batch_create_edges(GrafeoDatabase* db, const char* edges_json, uint64_t** out_ids, size_t* out_count);
+```
+
+```c
+uint64_t* ids; size_t count;
+grafeo_batch_create_nodes_with_props(db, "[\"Person\"]", "[{\"name\": \"Alix\"}, {\"name\": \"Gus\"}]", &ids, &count);
+char edges[128];
+snprintf(edges, sizeof edges, "[{\"src\": %llu, \"dst\": %llu, \"type\": \"KNOWS\", \"properties\": {\"since\": 2020}}]",
+         (unsigned long long)ids[0], (unsigned long long)ids[1]);
+uint64_t* edge_ids; size_t edge_count;
+grafeo_batch_create_edges(db, edges, &edge_ids, &edge_count);
+grafeo_free_node_ids(edge_ids, edge_count);
+grafeo_free_node_ids(ids, count);
+```
+
+### Batch Vector Search
+
+`queries` holds `query_count * dimensions` floats; `ef` 0 uses the index's default; `filters_json` is NULL or a JSON object of property equalities. The result is a JSON array with one array per query of `{"id": ..., "distance": ...}` objects, nearest first.
+
+```c
+GrafeoStatus grafeo_batch_vector_search(GrafeoDatabase* db, const char* label, const char* property, const float* queries, size_t query_count, size_t dimensions, size_t k, size_t ef, const char* filters_json, char** out_json);
+```
+
 ### Freeing Vector Results
 
 ```c
@@ -399,6 +464,61 @@ if (grafeo_vector_search(db, "Document", "embedding", query_vec, 384, 5, -1, &id
 }
 ```
 
+## Upserts
+
+Create or update nodes and edges by a key property, in one statement each (a row the schema refuses fails the call and writes nothing). Rows go in as a JSON array of objects; the summary comes back as `{"created", "updated", "skipped", "skipped_rows"}` (free with `grafeo_free_string`).
+
+```c
+GrafeoStatus grafeo_upsert_nodes(GrafeoDatabase* db, const char* labels_json, const char* rows_json, const char* options_json, char** out_json);
+GrafeoStatus grafeo_upsert_edges(GrafeoDatabase* db, const char* edge_type, const char* rows_json, const char* options_json, char** out_json);
+```
+
+For nodes, `options_json` is NULL or `{"key": "id", "replace": false}`: a node is matched by the key and all labels; with `replace` its properties become exactly the row's, without the row's are merged in. A row without the key is skipped. For edges, each row names its endpoints in the source and target fields (`src` and `dst`) and holds the edge key; `options_json` sets `key`, `endpoint_key` (the node property the endpoint fields hold, `id`), `endpoint_labels`, `src_field`, `dst_field` and `replace`. A row whose endpoint matches no node or several is skipped; endpoints are never created.
+
+```c
+char* summary;
+grafeo_upsert_nodes(db, "[\"File\"]", "[{\"path\": \"a.rs\", \"size\": 3}]", "{\"key\": \"path\"}", &summary);
+grafeo_free_string(summary);
+```
+
+## Graph Handles
+
+A handle works in one named graph without switching the database's current graph, as `db.graph(name)` does in Python and Rust. `grafeo_graph` returns NULL when the graph does not exist; once it is dropped, every call through the handle fails. The functions work as their database counterparts.
+
+```c
+GrafeoGraph*  grafeo_graph(GrafeoDatabase* db, const char* name);
+void          grafeo_free_graph(GrafeoGraph* graph);
+GrafeoResult* grafeo_graph_execute(GrafeoGraph* graph, const char* query);
+GrafeoResult* grafeo_graph_execute_with_params(GrafeoGraph* graph, const char* query, const char* params_json);
+GrafeoResult* grafeo_graph_execute_language(GrafeoGraph* graph, const char* language, const char* query, const char* params_json);
+uint64_t      grafeo_graph_create_node(GrafeoGraph* graph, const char* labels_json, const char* properties_json);
+uint64_t      grafeo_graph_create_edge(GrafeoGraph* graph, uint64_t source_id, uint64_t target_id, const char* edge_type, const char* properties_json);
+GrafeoStatus  grafeo_graph_get_node(GrafeoGraph* graph, uint64_t id, GrafeoNode** out);
+GrafeoStatus  grafeo_graph_get_edge(GrafeoGraph* graph, uint64_t id, GrafeoEdge** out);
+GrafeoStatus  grafeo_graph_get_node_edges(GrafeoGraph* graph, uint64_t node_id, GrafeoDirection direction, const char* edge_types_json, uint64_t** out_neighbors, uint64_t** out_edges, size_t* out_count);
+GrafeoStatus  grafeo_graph_set_node_property(GrafeoGraph* graph, uint64_t id, const char* key, const char* value_json);
+GrafeoStatus  grafeo_graph_set_edge_property(GrafeoGraph* graph, uint64_t id, const char* key, const char* value_json);
+int32_t       grafeo_graph_remove_node_property(GrafeoGraph* graph, uint64_t id, const char* key);
+int32_t       grafeo_graph_remove_edge_property(GrafeoGraph* graph, uint64_t id, const char* key);
+int32_t       grafeo_graph_add_node_label(GrafeoGraph* graph, uint64_t id, const char* label);
+int32_t       grafeo_graph_remove_node_label(GrafeoGraph* graph, uint64_t id, const char* label);
+int32_t       grafeo_graph_delete_node(GrafeoGraph* graph, uint64_t id);
+int32_t       grafeo_graph_detach_delete_node(GrafeoGraph* graph, uint64_t id);
+int32_t       grafeo_graph_delete_edge(GrafeoGraph* graph, uint64_t id);
+GrafeoStatus  grafeo_graph_batch_create_nodes_with_props(GrafeoGraph* graph, const char* labels_json, const char* rows_json, uint64_t** out_ids, size_t* out_count);
+GrafeoStatus  grafeo_graph_batch_create_edges(GrafeoGraph* graph, const char* edges_json, uint64_t** out_ids, size_t* out_count);
+GrafeoStatus  grafeo_graph_upsert_nodes(GrafeoGraph* graph, const char* labels_json, const char* rows_json, const char* options_json, char** out_json);
+GrafeoStatus  grafeo_graph_upsert_edges(GrafeoGraph* graph, const char* edge_type, const char* rows_json, const char* options_json, char** out_json);
+```
+
+```c
+GrafeoGraph* trips = grafeo_graph(db, "trips");
+uint64_t prague = grafeo_graph_create_node(trips, "[\"City\"]", "{\"name\": \"Prague\"}");
+GrafeoResult* r = grafeo_graph_execute(trips, "MATCH (c:City) RETURN c.name");
+grafeo_free_result(r);
+grafeo_free_graph(trips);
+```
+
 ## CDC (Change Data Capture)
 
 Requires the `cdc` feature.
@@ -406,7 +526,15 @@ Requires the `cdc` feature.
 ```c
 void grafeo_set_cdc_enabled(GrafeoDatabase* db, bool enabled);
 bool grafeo_is_cdc_enabled(GrafeoDatabase* db);
+
+/* JSON arrays of events, NULL on error; free with grafeo_free_string */
+char* grafeo_node_history(GrafeoDatabase* db, uint64_t id);
+char* grafeo_edge_history(GrafeoDatabase* db, uint64_t id);
+char* grafeo_node_history_since(GrafeoDatabase* db, uint64_t id, uint64_t since_epoch);
+char* grafeo_changes_between(GrafeoDatabase* db, uint64_t start_epoch, uint64_t end_epoch);  /* in commit order */
 ```
+
+Each event is an object with `entity_id`, `entity_type` (`"node"` or `"edge"`), `graph` (null for the default graph), `kind` (`"create"`, `"update"` or `"delete"`), `epoch`, `timestamp`, `before` and `after` (property objects or null), `labels`, `before_labels`, `edge_type`, `src_id`, `dst_id` and `deleted_with` (on an edge a detach delete removed, the node it removed it with), the same shape the Node.js binding returns.
 
 ## Statistics
 
@@ -421,7 +549,12 @@ size_t grafeo_edge_count(GrafeoDatabase* db);
 char*        grafeo_info(GrafeoDatabase* db);             /* JSON string, free with grafeo_free_string */
 GrafeoStatus grafeo_save(GrafeoDatabase* db, const char* path);
 GrafeoStatus grafeo_wal_checkpoint(GrafeoDatabase* db);
+/* Automatic checkpoints every interval_ms and once the WAL holds wal_bytes; 0 turns one off */
+GrafeoStatus grafeo_set_checkpoint_triggers(GrafeoDatabase* db, uint64_t interval_ms, uint64_t wal_bytes);
+char*        grafeo_checkpoint_status(GrafeoDatabase* db); /* JSON string, free with grafeo_free_string */
 ```
+
+`grafeo_checkpoint_status` returns `interval_ms` and `wal_bytes` (the triggers, `null` when off), `last_checkpoint` (Unix seconds), `failures` (automatic checkpoints that failed since the last that succeeded), `last_error`, `last_failure` and `stopped`.
 
 ### Compact Store
 

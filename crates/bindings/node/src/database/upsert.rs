@@ -69,7 +69,7 @@ impl From<EngineUpsertSummary> for UpsertSummary {
 
 /// The engine options for `upsertEdges`: each option given, the default for
 /// the rest.
-fn edge_options(options: UpsertEdgesOptions) -> EdgeUpsertOptions {
+pub(super) fn edge_options(options: UpsertEdgesOptions) -> EdgeUpsertOptions {
     let mut edge = EdgeUpsertOptions::new();
     if let Some(key) = options.key {
         edge = edge.with_key(key);
@@ -90,6 +90,15 @@ fn edge_options(options: UpsertEdgesOptions) -> EdgeUpsertOptions {
         edge = edge.with_replace(replace);
     }
     edge
+}
+
+/// The key and replace flag of `upsertNodes`, defaults filled in.
+pub(super) fn node_options(options: Option<UpsertNodesOptions>) -> (String, bool) {
+    let (key, replace) = options.map_or((None, None), |options| (options.key, options.replace));
+    (
+        key.unwrap_or_else(|| "id".to_string()),
+        replace.unwrap_or(false),
+    )
 }
 
 /// Rows of properties from JSON objects.
@@ -129,13 +138,12 @@ impl JsGrafeoDB {
         options: Option<UpsertNodesOptions>,
     ) -> Result<UpsertSummary> {
         let rows = self::rows(&rows)?;
-        let (key, replace) = options.map_or((None, None), |options| (options.key, options.replace));
-        let key = key.unwrap_or_else(|| "id".to_string());
+        let (key, replace) = node_options(options);
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
             db.read()
-                .upsert_nodes(&labels, &key, rows, replace.unwrap_or(false))
+                .upsert_nodes(&labels, &key, rows, replace)
                 .map(UpsertSummary::from)
                 .map_err(|e| NodeGrafeoError::from(e).into())
         })

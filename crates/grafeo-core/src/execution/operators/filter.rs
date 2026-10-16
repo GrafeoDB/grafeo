@@ -553,6 +553,22 @@ pub enum UnaryFilterOp {
     Neg,
 }
 
+/// What reading one property of a node or edge found.
+enum PropertyRead {
+    /// The entity is visible and has the property.
+    Value(Value),
+    /// The entity is visible without the property.
+    Absent,
+    /// The entity is not visible to the read.
+    NotVisible,
+}
+
+impl PropertyRead {
+    fn of(value: Option<&Value>) -> Self {
+        value.map_or(Self::Absent, |value| Self::Value(value.clone()))
+    }
+}
+
 impl ExpressionPredicate {
     /// Creates a new expression predicate.
     pub fn new(
@@ -586,6 +602,60 @@ impl ExpressionPredicate {
     pub fn with_session_context(mut self, context: SessionContext) -> Self {
         self.session_context = context;
         self
+    }
+
+    /// The value of `property` of node `id` as [`resolve_node`](Self::resolve_node)
+    /// sees the node, read without building it.
+    fn resolve_node_property(&self, id: NodeId, property: &str) -> PropertyRead {
+        let found = |value: Option<Value>, visible: &dyn Fn() -> bool| match value {
+            Some(value) => PropertyRead::Value(value),
+            None if visible() => PropertyRead::Absent,
+            None => PropertyRead::NotVisible,
+        };
+        match (self.viewing_epoch, self.transaction_id) {
+            (Some(ep), Some(tx)) => found(
+                self.store.node_property_versioned(id, property, ep, tx),
+                &|| self.store.is_node_visible_versioned(id, ep, tx),
+            ),
+            (Some(ep), None) => found(self.store.node_property_at_epoch(id, property, ep), &|| {
+                self.store.is_node_visible_at_epoch(id, ep)
+            }),
+            (None, _) => self
+                .store
+                .get_node(id)
+                .map_or(PropertyRead::NotVisible, |node| {
+                    PropertyRead::of(node.get_property(property))
+                }),
+        }
+    }
+
+    /// The value of `property` of edge `id` as [`resolve_edge`](Self::resolve_edge)
+    /// sees the edge (see [`resolve_node_property`](Self::resolve_node_property)).
+    fn resolve_edge_property(
+        &self,
+        id: grafeo_common::types::EdgeId,
+        property: &str,
+    ) -> PropertyRead {
+        let found = |value: Option<Value>, visible: &dyn Fn() -> bool| match value {
+            Some(value) => PropertyRead::Value(value),
+            None if visible() => PropertyRead::Absent,
+            None => PropertyRead::NotVisible,
+        };
+        match (self.viewing_epoch, self.transaction_id) {
+            (Some(ep), Some(tx)) => found(
+                self.store.edge_property_versioned(id, property, ep, tx),
+                &|| self.store.is_edge_visible_versioned(id, ep, tx),
+            ),
+            (Some(ep), None) => found(self.store.edge_property_at_epoch(id, property, ep), &|| {
+                self.store.is_edge_visible_at_epoch(id, ep)
+            }),
+            (None, _) => self
+                .store
+                .get_edge(id)
+                .map_or(PropertyRead::NotVisible, |edge| {
+                    PropertyRead::of(edge.get_property(property))
+                }),
+        }
     }
 
     /// Resolves a node using transaction-aware access when available.
@@ -985,17 +1055,21 @@ impl ExpressionPredicate {
             FilterExpression::Property { variable, property } => {
                 let col_idx = *self.variable_columns.get(variable)?;
                 let col = chunk.column(col_idx)?;
-                // Try as node first
-                if let Some(node_id) = col.get_node_id(row)
-                    && let Some(node) = self.resolve_node(node_id)
-                {
-                    return node.get_property(property).cloned();
+                // Try as node first, then as edge: an entity not visible to
+                // the read lets the next interpretation try.
+                if let Some(node_id) = col.get_node_id(row) {
+                    match self.resolve_node_property(node_id, property) {
+                        PropertyRead::Value(value) => return Some(value),
+                        PropertyRead::Absent => return None,
+                        PropertyRead::NotVisible => {}
+                    }
                 }
-                // Try as edge if node lookup failed
-                if let Some(edge_id) = col.get_edge_id(row)
-                    && let Some(edge) = self.resolve_edge(edge_id)
-                {
-                    return edge.get_property(property).cloned();
+                if let Some(edge_id) = col.get_edge_id(row) {
+                    match self.resolve_edge_property(edge_id, property) {
+                        PropertyRead::Value(value) => return Some(value),
+                        PropertyRead::Absent => return None,
+                        PropertyRead::NotVisible => {}
+                    }
                 }
                 match col.get_value(row)? {
                     // A key of a map value (e.g. from UNWIND with map elements)

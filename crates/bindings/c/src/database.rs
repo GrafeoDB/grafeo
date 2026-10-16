@@ -51,7 +51,7 @@ macro_rules! db_ref_or_null {
 }
 
 /// Serialize a `QueryResult` into a `GrafeoResult`.
-fn build_result(result: &grafeo_engine::database::QueryResult) -> *mut GrafeoResult {
+pub(crate) fn build_result(result: &grafeo_engine::database::QueryResult) -> *mut GrafeoResult {
     let json_rows: Vec<serde_json::Value> = result
         .rows()
         .iter()
@@ -141,6 +141,7 @@ fn build_result(result: &grafeo_engine::database::QueryResult) -> *mut GrafeoRes
         rows_scanned: result.rows_scanned.unwrap_or(0),
         nodes_json: CString::new(nodes_str).unwrap_or_default(),
         edges_json: CString::new(edges_str).unwrap_or_default(),
+        counters: result.counters,
     }))
 }
 
@@ -150,7 +151,7 @@ fn build_result(result: &grafeo_engine::database::QueryResult) -> *mut GrafeoRes
 
 /// The id of a created node or edge, or `u64::MAX` with the error recorded
 /// for `grafeo_last_error`.
-fn created_id(result: grafeo_common::utils::error::Result<u64>) -> u64 {
+pub(crate) fn created_id(result: grafeo_common::utils::error::Result<u64>) -> u64 {
     result.unwrap_or_else(|e| {
         set_last_error(&e.to_string());
         u64::MAX
@@ -159,7 +160,7 @@ fn created_id(result: grafeo_common::utils::error::Result<u64>) -> u64 {
 
 /// `1` or `0` for a yes-or-no result, or `-1` with the error recorded for
 /// `grafeo_last_error`.
-fn flag(result: grafeo_common::utils::error::Result<bool>) -> i32 {
+pub(crate) fn flag(result: grafeo_common::utils::error::Result<bool>) -> i32 {
     match result {
         Ok(done) => i32::from(done),
         Err(e) => {
@@ -664,6 +665,59 @@ pub extern "C" fn grafeo_result_rows_scanned(result: *const GrafeoResult) -> u64
     unsafe { &*result }.rows_scanned
 }
 
+/// One write counter of a result: what the statement wrote, 0 for a
+/// statement that wrote nothing (a read, a schema command) and for NULL.
+macro_rules! result_counter {
+    ($(#[$doc:meta])* $name:ident, $field:ident) => {
+        $(#[$doc])*
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(result: *const GrafeoResult) -> u64 {
+            if result.is_null() {
+                return 0;
+            }
+            // SAFETY: Caller guarantees valid pointer.
+            unsafe { &*result }.counters.$field
+        }
+    };
+}
+
+result_counter!(
+    /// Nodes the statement created (`INSERT`, `CREATE`, `MERGE`).
+    grafeo_result_nodes_created,
+    nodes_created
+);
+result_counter!(
+    /// Nodes the statement deleted.
+    grafeo_result_nodes_deleted,
+    nodes_deleted
+);
+result_counter!(
+    /// Edges the statement created.
+    grafeo_result_edges_created,
+    edges_created
+);
+result_counter!(
+    /// Edges the statement deleted, also those `DETACH DELETE` removed.
+    grafeo_result_edges_deleted,
+    edges_deleted
+);
+result_counter!(
+    /// Property values the statement wrote or removed, also those of the
+    /// entities it created.
+    grafeo_result_properties_set,
+    properties_set
+);
+result_counter!(
+    /// Labels the statement added, also those of the nodes it created.
+    grafeo_result_labels_added,
+    labels_added
+);
+result_counter!(
+    /// Labels the statement removed.
+    grafeo_result_labels_removed,
+    labels_removed
+);
+
 /// Get a JSON array of typed node objects extracted from the result.
 ///
 /// Each node object has the structure:
@@ -832,7 +886,17 @@ pub extern "C" fn grafeo_get_node(
         return GrafeoStatus::ErrorNullPointer;
     }
     let guard = db.inner.read();
-    match guard.get_node(NodeId::new(id)) {
+    node_out(guard.get_node(NodeId::new(id)), id, out)
+}
+
+/// Hands `node` to the caller through `out` (checked not null), or reports
+/// node `id` as not found.
+pub(crate) fn node_out(
+    node: Option<grafeo_core::graph::lpg::Node>,
+    id: u64,
+    out: *mut *mut GrafeoNode,
+) -> GrafeoStatus {
+    match node {
         Some(node) => {
             let labels: Vec<serde_json::Value> = node
                 .labels
@@ -848,7 +912,7 @@ pub extern "C" fn grafeo_get_node(
                 labels_json,
                 properties_json,
             });
-            // SAFETY: We checked out is not null above.
+            // SAFETY: the caller checked out is not null.
             unsafe { *out = Box::into_raw(gnode) };
             GrafeoStatus::Ok
         }
@@ -871,6 +935,20 @@ pub extern "C" fn grafeo_delete_node(db: *mut GrafeoDatabase, id: u64) -> i32 {
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
     flag(db.inner.read().delete_node(NodeId::new(id)))
+}
+
+/// Delete a node with all its edges, as `DETACH DELETE` does. Returns 1 if
+/// deleted, 0 if not found, -1 on error. The node and its edges are one
+/// change: they commit and roll back together.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_detach_delete_node(db: *mut GrafeoDatabase, id: u64) -> i32 {
+    if db.is_null() {
+        set_last_error("Null database pointer");
+        return -1;
+    }
+    // SAFETY: Caller guarantees valid pointer.
+    let db = unsafe { &*db };
+    flag(db.inner.read().detach_delete_node(NodeId::new(id)))
 }
 
 /// Set a property on a node. `value_json` is a JSON-encoded value.
@@ -1074,7 +1152,17 @@ pub extern "C" fn grafeo_get_edge(
         return GrafeoStatus::ErrorNullPointer;
     }
     let guard = db.inner.read();
-    match guard.get_edge(EdgeId(id)) {
+    edge_out(guard.get_edge(EdgeId(id)), id, out)
+}
+
+/// Hands `edge` to the caller through `out` (checked not null), or reports
+/// edge `id` as not found.
+pub(crate) fn edge_out(
+    edge: Option<grafeo_core::graph::lpg::Edge>,
+    id: u64,
+    out: *mut *mut GrafeoEdge,
+) -> GrafeoStatus {
+    match edge {
         Some(edge) => {
             let edge_type = CString::new(edge.edge_type.to_string()).unwrap_or_default();
             let properties_json = crate::types::properties_to_json(&edge.properties);
@@ -2077,6 +2165,61 @@ pub extern "C" fn grafeo_restore_to_epoch(
         Ok(()) => GrafeoStatus::Ok,
         Err(e) => set_error(&e),
     }
+}
+
+/// Set when the database checkpoints by itself: every `interval_ms`
+/// milliseconds, and once the WAL holds `wal_bytes` bytes since the last
+/// checkpoint. 0 turns a trigger off; both 0 turn automatic checkpoints off
+/// (the default). For this open only. Fails for a database in memory or
+/// opened read-only.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_set_checkpoint_triggers(
+    db: *mut GrafeoDatabase,
+    interval_ms: u64,
+    wal_bytes: u64,
+) -> GrafeoStatus {
+    let db = db_ref!(db);
+    let mut triggers = grafeo_engine::admin::CheckpointTriggers::none();
+    if interval_ms > 0 {
+        triggers = triggers.with_interval(std::time::Duration::from_millis(interval_ms));
+    }
+    if wal_bytes > 0 {
+        triggers = triggers.with_wal_bytes(wal_bytes);
+    }
+    match db.inner.read().set_checkpoint_triggers(triggers) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(e) => set_error(&e),
+    }
+}
+
+/// How the automatic checkpoints fare, as a JSON string: `interval_ms` and
+/// `wal_bytes` (the triggers, null when off), `last_checkpoint` (Unix
+/// seconds), `failures` (automatic ones that failed since the last that
+/// succeeded), `last_error`, `last_failure` and `stopped`. Caller must free
+/// with `grafeo_free_string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_checkpoint_status(db: *mut GrafeoDatabase) -> *mut c_char {
+    if db.is_null() {
+        set_last_error("Null database pointer");
+        return std::ptr::null_mut();
+    }
+    // SAFETY: Caller guarantees valid pointer.
+    let db = unsafe { &*db };
+    let status = db.inner.read().checkpoint_status();
+    let json = serde_json::json!({
+        "interval_ms": status
+            .triggers
+            .interval
+            .map(|interval| u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)),
+        "wal_bytes": status.triggers.wal_bytes,
+        "last_checkpoint": status.last_checkpoint,
+        "failures": status.failures,
+        "last_error": status.last_error,
+        "last_failure": status.last_failure,
+        "stopped": status.stopped,
+    });
+    let s = serde_json::to_string(&json).unwrap_or_default();
+    CString::new(s).map_or(std::ptr::null_mut(), CString::into_raw)
 }
 
 /// Trigger a WAL checkpoint.

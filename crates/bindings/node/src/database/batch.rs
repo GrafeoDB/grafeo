@@ -22,6 +22,43 @@ pub struct BatchEdgeInput {
     pub properties: Option<serde_json::Value>,
 }
 
+/// A label or a list of labels, as a list.
+pub(super) fn label_list(labels: Either<String, Vec<String>>) -> Vec<String> {
+    match labels {
+        Either::A(label) => vec![label],
+        Either::B(labels) => labels,
+    }
+}
+
+/// The engine edges of `batchCreateEdges`.
+pub(super) fn batch_edges(edges: Vec<BatchEdgeInput>) -> Result<Vec<BatchEdge>> {
+    edges
+        .into_iter()
+        .map(|edge| {
+            let mut batch_edge = BatchEdge::new(
+                validate_node_id(edge.src)?,
+                validate_node_id(edge.dst)?,
+                edge.edge_type,
+            );
+            if let Some(properties) = edge.properties {
+                let serde_json::Value::Object(fields) = properties else {
+                    return Err(NodeGrafeoError::InvalidArgument(
+                        "edge properties must be an object".to_string(),
+                    )
+                    .into());
+                };
+                batch_edge = batch_edge.with_properties(
+                    fields
+                        .iter()
+                        .map(|(name, value)| Ok((name.as_str(), json_to_value(value)?)))
+                        .collect::<Result<Vec<_>>>()?,
+                );
+            }
+            Ok(batch_edge)
+        })
+        .collect()
+}
+
 #[napi]
 impl JsGrafeoDB {
     /// Creates one node per properties object, each with `labels` (a label
@@ -33,10 +70,7 @@ impl JsGrafeoDB {
         labels: Either<String, Vec<String>>,
         properties_list: Vec<serde_json::Value>,
     ) -> Result<Vec<f64>> {
-        let labels = match labels {
-            Either::A(label) => vec![label],
-            Either::B(labels) => labels,
-        };
+        let labels = label_list(labels);
         let properties_list = rows(&properties_list)?;
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
@@ -57,31 +91,7 @@ impl JsGrafeoDB {
     /// order.
     #[napi(js_name = "batchCreateEdges")]
     pub async fn batch_create_edges(&self, edges: Vec<BatchEdgeInput>) -> Result<Vec<f64>> {
-        let edges = edges
-            .into_iter()
-            .map(|edge| {
-                let mut batch_edge = BatchEdge::new(
-                    validate_node_id(edge.src)?,
-                    validate_node_id(edge.dst)?,
-                    edge.edge_type,
-                );
-                if let Some(properties) = edge.properties {
-                    let serde_json::Value::Object(fields) = properties else {
-                        return Err(NodeGrafeoError::InvalidArgument(
-                            "edge properties must be an object".to_string(),
-                        )
-                        .into());
-                    };
-                    batch_edge = batch_edge.with_properties(
-                        fields
-                            .iter()
-                            .map(|(name, value)| Ok((name.as_str(), json_to_value(value)?)))
-                            .collect::<Result<Vec<_>>>()?,
-                    );
-                }
-                Ok(batch_edge)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let edges = batch_edges(edges)?;
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let ids = db

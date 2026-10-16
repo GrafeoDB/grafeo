@@ -6,6 +6,8 @@
 //! JSON-to-Value conversion. Each language binding (Python, Node.js, C, WASM)
 //! depends on this crate and maps the generic types to its FFI layer.
 
+#[cfg(feature = "cdc")]
+pub mod cdc;
 pub mod entity;
 pub mod error;
 pub mod json;

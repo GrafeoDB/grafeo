@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
+use grafeo_core::graph::Direction;
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
 
 use super::direct::{BatchEdge, DirectTarget};
@@ -35,8 +36,8 @@ impl super::GrafeoDB {
 
     /// The epoch the direct reads see: the last one whose commit is
     /// complete, as for queries. A store's own epoch moves when a commit
-    /// stamps its versions, before its WAL records are written and the
-    /// commit is complete (or when it never completes, see
+    /// stamps its versions, before the commit is complete and published
+    /// (or when it never completes, see
     /// [`TransactionManager`](crate::transaction::TransactionManager)), so a
     /// read at it could see part of a commit.
     pub(crate) fn read_epoch(&self) -> EpochId {
@@ -91,6 +92,31 @@ impl super::GrafeoDB {
         self.read_store(DirectTarget::Current)
             .ok()?
             .get_node_at_epoch(id, epoch)
+    }
+
+    /// The edges of a node in `direction` as `(neighbor, edge)` pairs, as of
+    /// the current epoch, without a query: only those of `edge_types` unless
+    /// it is empty. `Direction::Both` lists a self-loop once; a node that does
+    /// not exist has none.
+    ///
+    /// ```
+    /// # use grafeo_engine::{Direction, GrafeoDB};
+    /// let db = GrafeoDB::new_in_memory();
+    /// let alix = db.create_node(&["Person"]).unwrap();
+    /// let gus = db.create_node(&["Person"]).unwrap();
+    /// let knows = db.create_edge(alix, gus, "KNOWS").unwrap();
+    /// assert_eq!(db.get_node_edges(alix, Direction::Outgoing, &["KNOWS"]), vec![(gus, knows)]);
+    /// ```
+    #[must_use]
+    pub fn get_node_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[&str],
+    ) -> Vec<(NodeId, EdgeId)> {
+        self.direct(DirectTarget::Current)
+            .get_node_edges(node, direction, edge_types)
+            .unwrap_or_default()
     }
 
     /// Gets a node as it existed at a specific epoch.
@@ -226,6 +252,20 @@ impl super::GrafeoDB {
     /// Returns an error if the node still has edges.
     pub fn delete_node(&self, id: NodeId) -> Result<bool> {
         self.direct(DirectTarget::Current).delete_node(id)
+    }
+
+    /// Deletes a node with all its edges, as `DETACH DELETE` does, and
+    /// returns whether the node existed: one change of the write, so the
+    /// node and its edges commit, roll back and replay together. Change data
+    /// capture reports a Delete event per edge, each naming the node in
+    /// `deleted_with`, then the node's.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict with a transaction that writes the node or one
+    /// of its edges, or creates an edge to it.
+    pub fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
+        self.direct(DirectTarget::Current).detach_delete_node(id)
     }
 
     /// Sets a property on a node.

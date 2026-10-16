@@ -735,21 +735,22 @@ impl LpgStore {
         }
     }
 
-    /// Copies all data from the source graph to the destination graph.
-    /// Creates the destination graph if it does not exist.
+    /// Creates the graph `dest` when it does not exist. It copies no data:
+    /// the engine's `CREATE GRAPH dest AS COPY OF source` copies a graph, and
+    /// logs the copy.
     ///
     /// # Errors
     ///
     /// Returns [`AllocError`] if the destination store cannot be allocated.
+    #[deprecated(
+        since = "0.6.0",
+        note = "copies no data: use `CREATE GRAPH dest AS COPY OF source`; removed in 0.7.0"
+    )]
     pub fn copy_graph(&self, source: Option<&str>, dest: Option<&str>) -> Result<(), AllocError> {
-        let _src = match source {
-            Some(n) => self.graph(n),
-            None => None, // default graph
-        };
-        let _dest_graph = dest.map(|n| self.graph_or_create(n)).transpose()?;
-        // Full graph copy is complex (requires iterating all entities).
-        // For now, this creates the destination graph structure.
-        // Full entity-level copy will be implemented when needed.
+        let _ = source;
+        if let Some(name) = dest {
+            self.graph_or_create(name)?;
+        }
         Ok(())
     }
 

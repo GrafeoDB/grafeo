@@ -159,6 +159,16 @@ impl Transaction {
     }
 
     pub(crate) fn new(db: Arc<RwLock<GrafeoDB>>, isolation_level: Option<&str>) -> Result<Self> {
+        let session = db.read().session();
+        Self::begin(db, session, isolation_level)
+    }
+
+    /// Begins a transaction in `session`, which works in the graph it selects.
+    pub(crate) fn begin(
+        db: Arc<RwLock<GrafeoDB>>,
+        mut session: grafeo_engine::Session,
+        isolation_level: Option<&str>,
+    ) -> Result<Self> {
         // Parse isolation level string
         let level = match isolation_level {
             Some("read_committed") => {
@@ -173,11 +183,6 @@ impl Transaction {
                 ))
                 .into());
             }
-        };
-
-        let mut session = {
-            let db_guard = db.read();
-            db_guard.session()
         };
 
         // Begin the transaction with the specified isolation level

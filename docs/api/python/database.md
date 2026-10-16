@@ -17,7 +17,8 @@ GrafeoDB(
     path: Optional[str] = None,
     *,
     cdc: bool = False,
-    shuffle_unordered: bool = False
+    shuffle_unordered: bool = False,
+    wal_salvage: bool = False
 )
 ```
 
@@ -28,6 +29,7 @@ GrafeoDB(
 | `path` | `str` | `None` | Database file path (None for in-memory) |
 | `cdc` | `bool` | `False` | Enable change data capture (keyword-only). When `True`, mutations are tracked and queryable via `node_history()` / `edge_history()`. |
 | `shuffle_unordered` | `bool` | `False` | Return the rows of every query without `ORDER BY` in random order (keyword-only). For tests: without `ORDER BY` the row order is unspecified, and this finds code that relies on it. |
+| `wal_salvage` | `bool` | `False` | Open a database whose write-ahead log has damage before its end with the commits before the damage (keyword-only). Without it the open fails with `GRAFEO-S002`, naming the file and offset. What is not replayed is kept in `<path>.wal.damaged`. For this open only. |
 
 ### Examples
 
@@ -206,6 +208,16 @@ Delete a node by ID. Returns `True` if the node existed and was deleted.
 def delete_node(self, id: int) -> bool
 ```
 
+A node that still has edges raises: delete them first, or use `detach_delete_node()`.
+
+### detach_delete_node()
+
+Delete a node with all its edges, as `DETACH DELETE` does. Returns `True` if the node existed. The node and its edges are one change: they commit and roll back together, and change data capture names the node in each edge's `deleted_with`.
+
+```python
+def detach_delete_node(self, id: int) -> bool
+```
+
 ### add_node_label()
 
 Add a label to an existing node. Returns `True` if the label was added, `False` if the node does not exist or already has the label.
@@ -307,6 +319,27 @@ Get an edge by ID. Returns `None` if the edge does not exist.
 
 ```python
 def get_edge(self, id: int) -> Optional[Edge]
+```
+
+### get_node_edges()
+
+The edges of a node as `(neighbor_id, edge_id)` tuples, without a query. `direction` is `"out"`
+(the default), `"in"` or `"both"`, which lists a self-loop once; `edge_types` keeps only edges of
+those types (a type or a list of types). A node that does not exist has none. A graph handle
+(`db.graph(name)`) has the same method for its graph.
+
+```python
+def get_node_edges(
+    self,
+    node_id: int,
+    direction: str = "out",
+    edge_types: Optional[Union[str, Sequence[str]]] = None,
+) -> List[Tuple[int, int]]
+```
+
+```python
+for neighbor_id, edge_id in db.get_node_edges(alix.id, "out", ["KNOWS"]):
+    print(db.get_node(neighbor_id))
 ```
 
 ### delete_edge()
@@ -1080,6 +1113,26 @@ def wal_status(self) -> Dict[str, Any]
 ```python
 wal = db.wal_status()
 print(f"WAL size: {wal['size_bytes']} bytes")
+```
+
+### set_checkpoint_triggers()
+
+Let the database checkpoint by itself: every `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes since the last checkpoint. Call it without arguments to turn automatic checkpoints off (the default). For this open only; an in-memory or read-only database raises.
+
+```python
+def set_checkpoint_triggers(self, interval_secs: Optional[float] = None, wal_bytes: Optional[int] = None) -> None
+```
+
+```python
+db.set_checkpoint_triggers(interval_secs=300, wal_bytes=64 * 1024 * 1024)
+```
+
+### checkpoint_status()
+
+How the automatic checkpoints fare. Returns a dict with keys: `interval_secs` and `wal_bytes` (the triggers, `None` when off), `last_checkpoint` (Unix seconds of the last checkpoint of any kind), `failures` (automatic checkpoints that failed since the last that succeeded), `last_error`, `last_failure` and `stopped` (no automatic checkpoint can succeed until a reopen). A failed automatic checkpoint is also logged and retried after a pause.
+
+```python
+def checkpoint_status(self) -> Dict[str, Any]
 ```
 
 ### save()

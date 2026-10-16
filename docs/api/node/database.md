@@ -122,12 +122,32 @@ Get a node by ID. Returns `null` if not found.
 getNode(id: number): JsNode | null
 ```
 
+### getNodeEdges()
+
+The edges of a node as `[neighborId, edgeId]` pairs, without a query. `direction` is `'out'` (the
+default), `'in'` or `'both'`, which lists a self-loop once; `edgeTypes` keeps only edges of those
+types. A node that does not exist has none. A `GraphHandle` has the same method for its graph.
+
+```typescript
+getNodeEdges(id: number, options?: { direction?: 'out' | 'in' | 'both'; edgeTypes?: string[] }): number[][]
+```
+
 ### deleteNode()
 
 Delete a node by ID. Returns `true` if the node existed.
 
 ```typescript
 deleteNode(id: number): boolean
+```
+
+A node that still has edges throws: delete them first, or use `detachDeleteNode()`.
+
+### detachDeleteNode()
+
+Delete a node with all its edges, as `DETACH DELETE` does. Returns `true` if the node existed; the node and its edges are one change.
+
+```typescript
+detachDeleteNode(id: number): boolean
 ```
 
 ### setNodeProperty()
@@ -241,6 +261,30 @@ Isolation levels: `"read_committed"`, `"snapshot"` (default), `"serializable"`.
 ```typescript
 const tx = db.beginTransaction();
 const tx = db.beginTransaction('serializable');
+```
+
+## Named Graphs
+
+### graph()
+
+A handle on a named graph of the current schema, to work in it without switching the current
+graph. Throws when the graph does not exist; once it is dropped, every call through the handle
+throws.
+
+```typescript
+graph(name: string): GraphHandle
+```
+
+A `GraphHandle` has the query and direct API of `GrafeoDB`, working in its graph: `execute()`,
+`executeLanguage()`, `beginTransaction()`, the node and edge operations above,
+`batchCreateNodesWithProps()`, `batchCreateEdges()`, `upsertNodes()` and `upsertEdges()`, and its
+`name`. Each call is its own transaction; `beginTransaction()` groups several.
+
+```typescript
+await db.execute('CREATE GRAPH trips');
+const trips = db.graph('trips');
+const prague = trips.createNode(['City'], { name: 'Prague' });
+const result = await trips.execute('MATCH (c:City) RETURN c.name');
 ```
 
 ## Vector Search

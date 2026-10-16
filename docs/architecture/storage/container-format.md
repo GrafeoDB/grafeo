@@ -726,19 +726,22 @@ Every checkpoint writes the whole database as a new image:
 
 ```text
 Checkpoint:
-  1. (Engine) Start a new WAL file
+  1. (Engine) Start a new WAL segment at the end of the log: every commit so
+     far is in the segments before its first log position, the checkpoint
+     LSN
   2. (Engine) Hand every section to the container; commits wait until the
      image is written
   3. Stream each section's chunks, one section at a time, into free pages as
      the section writes them (CRC-32, encrypted if enabled)
   4. Write the directory blocks into free pages
   5. fsync
-  6. Write the new database header (iteration + 1, the new root) into the
-     inactive slot
+  6. Write the new database header (iteration + 1, the new root, the
+     checkpoint LSN) into the inactive slot
   7. fsync
   8. Shorten the file to end at the last page of the new image
-  9. (Engine) Mark the WAL: recovery starts at the new WAL file, and earlier
-     WAL files are deleted unless an incremental backup still needs them
+  9. (Engine) Delete the WAL segments before the checkpoint LSN, unless an
+     incremental backup still needs them; a reopen replays the WAL from the
+     checkpoint LSN the active header records
 ```
 
 **Free space:** the pages free for a checkpoint are derived from the pages the
@@ -785,18 +788,21 @@ Open database:
      that no pages overlap
   5. Read each section's chunks, verify their CRC-32 (and decrypt them), and
      load the section into RAM
-  6. If a sidecar WAL exists: replay the changes committed since the last
-     checkpoint
+  6. If a sidecar WAL exists: replay the commits logged after the active
+     header's checkpoint LSN, each complete group at the epoch it names (a
+     group without its last frame was never committed and is skipped); a
+     WAL written by 0.5.x or 0.6.0-beta.1 is replayed once, checkpointed
+     into the file and removed
   7. Database is ready
 ```
 
 A read-only open takes a shared lock instead and goes through the same steps, the WAL
 replay included, but only into memory: it writes nothing, so a torn tail stays until
-the next read-write open. With the WAL enabled, that open seals the tail before it
+the next read-write open. With the WAL enabled, that open cuts the tail before it
 logs anything new; with `wal_enabled` off, it writes the replayed changes to the file
 and removes the WAL, the torn tail with it. A build without the `wal` feature cannot
-replay: it refuses to open a database whose sidecar WAL holds commits (a non-empty log
-file), read-only or not, and leaves the WAL as it is. Likewise a build refuses a file
+replay: it refuses to open a database whose sidecar WAL holds commits (a log file
+with more than a segment header), read-only or not, and leaves the WAL as it is. Likewise a build refuses a file
 that holds data only a feature it lacks reads, which it would load without and its next
 checkpoint drop: without `triple-store` RDF triples (an `RdfStore` or `RdfRing`
 section, or RDF records in the sidecar WAL), without `vector-index` or `text-index` the

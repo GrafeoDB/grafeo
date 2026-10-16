@@ -37,6 +37,7 @@ db.close();
 | [GrafeoDB](database.md) | Database connection, queries, CRUD, vector/text search |
 | [QueryResult](query.md) | Query result with rows, columns, nodes, edges |
 | [Transaction](transaction.md) | ACID transaction management |
+| [GraphHandle](database.md#named-graphs) | Queries and direct calls in one named graph, from `db.graph(name)` |
 | [JsNode](node.md) | Graph node with labels and properties |
 | [JsEdge](edge.md) | Graph edge with type, endpoints and properties |
 

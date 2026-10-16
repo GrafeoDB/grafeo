@@ -420,6 +420,27 @@ impl Binder {
 
             // RDF/SPARQL operators
             LogicalOperator::TripleScan(scan) => self.bind_triple_scan(scan),
+            LogicalOperator::PropertyPath(path) => {
+                for component in [Some(&path.subject), Some(&path.object), path.graph.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(name) = component.as_variable()
+                        && !self.context.contains(name)
+                    {
+                        self.context.add_variable(
+                            name.to_string(),
+                            VariableInfo {
+                                name: name.to_string(),
+                                data_type: LogicalType::Any,
+                                is_node: false,
+                                is_edge: false,
+                            },
+                        );
+                    }
+                }
+                Ok(())
+            }
             LogicalOperator::Union(union) => self.bind_branches(&union.inputs),
             LogicalOperator::LeftJoin(lj) => {
                 self.bind_join_inputs(&lj.left, &lj.right)?;

@@ -16,6 +16,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use grafeo_engine::GrafeoDB;
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 use {
+    grafeo_common::types::Value,
     grafeo_engine::{Config, GraphModel},
     std::fmt::Write,
 };
@@ -385,6 +386,101 @@ fn bench_rdf_insert_single(c: &mut Criterion) {
 }
 
 // ============================================================================
+// RDF Property Path Benchmarks (acyclic fixtures below the legacy depth cap)
+// ============================================================================
+
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+fn assert_rdf_path_endpoints(
+    session: &grafeo_engine::session::Session,
+    query: &str,
+    count: usize,
+    mut expected: Vec<String>,
+) {
+    let result = session.execute_sparql(query).unwrap();
+    assert_eq!(expected.len(), count);
+    assert_eq!(result.row_count(), count);
+    let mut actual: Vec<String> = result
+        .rows()
+        .iter()
+        .map(|row| {
+            assert_eq!(row.len(), 1);
+            match &row[0] {
+                Value::String(value) => value.to_string(),
+                other => panic!("expected an endpoint IRI, got {other:?}"),
+            }
+        })
+        .collect();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+}
+
+/// A fixed start reaches exactly 32 endpoints along a directed chain.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+fn bench_rdf_path_chain_32(c: &mut Criterion) {
+    let db = GrafeoDB::with_config(Config::in_memory().with_graph_model(GraphModel::Rdf)).unwrap();
+    let session = db.session();
+    let mut triples = String::from("INSERT DATA {\n");
+    for index in 0..32 {
+        writeln!(
+            triples,
+            "<http://ex.org/n{index}> <http://ex.org/p> <http://ex.org/n{}> .",
+            index + 1
+        )
+        .unwrap();
+    }
+    triples.push('}');
+    session.execute_sparql(&triples).unwrap();
+
+    let query = "SELECT ?o WHERE { <http://ex.org/n0> <http://ex.org/p>+ ?o }";
+    assert_rdf_path_endpoints(
+        &session,
+        query,
+        32,
+        (1..=32)
+            .map(|index| format!("http://ex.org/n{index}"))
+            .collect(),
+    );
+    c.bench_function("rdf_path_chain_32", |b| {
+        b.iter(|| {
+            let result = session.execute_sparql(query).unwrap();
+            black_box(result)
+        });
+    });
+}
+
+/// 256 two-hop arms share one sink, producing 257 unique endpoints.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+fn bench_rdf_path_fanout_256(c: &mut Criterion) {
+    let db = GrafeoDB::with_config(Config::in_memory().with_graph_model(GraphModel::Rdf)).unwrap();
+    let session = db.session();
+    let mut triples = String::from("INSERT DATA {\n");
+    for index in 0..256 {
+        writeln!(
+            triples,
+            "<http://ex.org/start> <http://ex.org/p> <http://ex.org/arm{index}> .\n\
+             <http://ex.org/arm{index}> <http://ex.org/p> <http://ex.org/sink> ."
+        )
+        .unwrap();
+    }
+    triples.push('}');
+    session.execute_sparql(&triples).unwrap();
+
+    let query = "SELECT ?o WHERE { <http://ex.org/start> <http://ex.org/p>+ ?o }";
+    let mut expected: Vec<String> = (0..256)
+        .map(|index| format!("http://ex.org/arm{index}"))
+        .collect();
+    expected.push("http://ex.org/sink".to_string());
+    assert_rdf_path_endpoints(&session, query, 257, expected);
+    c.bench_function("rdf_path_fanout_256", |b| {
+        b.iter(|| {
+            let result = session.execute_sparql(query).unwrap();
+            black_box(result)
+        });
+    });
+}
+
+// ============================================================================
 // RDF Join-Specific Benchmarks (larger dataset for join performance)
 // ============================================================================
 
@@ -586,7 +682,14 @@ criterion_group!(
 );
 
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
-criterion_main!(lpg_benches, rdf_benches, rdf_join_benches);
+criterion_group!(
+    rdf_path_benches,
+    bench_rdf_path_chain_32,
+    bench_rdf_path_fanout_256,
+);
+
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+criterion_main!(lpg_benches, rdf_benches, rdf_join_benches, rdf_path_benches);
 
 #[cfg(not(all(feature = "sparql", feature = "triple-store")))]
 criterion_main!(lpg_benches);

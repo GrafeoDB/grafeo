@@ -27,6 +27,53 @@ void _cleanup(String dirPath) {
 }
 
 void main() {
+  group('detach delete (#465)', () {
+    test('detachDeleteNode removes the node with its edges', () {
+      final db = GrafeoDB.memory();
+      db.execute(
+          "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})");
+      final rows = db
+          .execute("MATCH (g:Person {name: 'Gus'}) RETURN id(g) AS id")
+          .rows;
+      final gus = rows.first['id'] as int;
+      expect(db.detachDeleteNode(gus), isTrue);
+      expect(db.nodeCount, 1);
+      expect(db.edgeCount, 0);
+      expect(db.detachDeleteNode(gus), isFalse);
+      db.close();
+    });
+  });
+
+  group('automatic checkpoints (#426)', () {
+    test('the triggers set on an open database read back', () {
+      final (dir, dbPath) = _tempDbPath('triggers.grafeo');
+      try {
+        final db = GrafeoDB.open(dbPath);
+        db.setCheckpointTriggers(
+            interval: const Duration(milliseconds: 300), walBytes: 64 << 20);
+        var status = db.checkpointStatus();
+        expect(status['interval_ms'], 300);
+        expect(status['wal_bytes'], 64 << 20);
+        expect(status['failures'], 0);
+
+        db.setCheckpointTriggers();
+        status = db.checkpointStatus();
+        expect(status['interval_ms'], isNull);
+        expect(status['wal_bytes'], isNull);
+        db.close();
+      } finally {
+        _cleanup(dir);
+      }
+    });
+
+    test('an in-memory database refuses them', () {
+      final db = GrafeoDB.memory();
+      expect(() => db.setCheckpointTriggers(walBytes: 1024),
+          throwsA(isA<GrafeoException>()));
+      db.close();
+    });
+  });
+
   group('persistence', () {
     // -- Issue #185: .grafeo path must be a file, not a directory ------------
 

@@ -2,7 +2,8 @@
 //!
 //! The catalog section holds the catalog as records of the types below, one
 //! per schema, node type, edge type, graph type, graph type binding, named
-//! constraint, index, index name and procedure. They hold no engine types,
+//! constraint, index, index name and procedure, and the database's stored
+//! configuration. They hold no engine types,
 //! so the WAL can log the same records. Each record is framed:
 //!
 //! | Bytes | Field |
@@ -23,6 +24,7 @@
 //! | 7 | [`IndexRecord`] |
 //! | 8 | [`IndexNameRecord`] |
 //! | 9 | [`ProcedureRecord`] |
+//! | 10 | [`StoredConfigRecord`] |
 //!
 //! Kind 0 is never written. A reader skips a record of a kind it does not
 //! know when the record's required flag is clear, and refuses the catalog
@@ -161,6 +163,7 @@ const KIND_CONSTRAINT: u8 = 6;
 const KIND_INDEX: u8 = 7;
 const KIND_INDEX_NAME: u8 = 8;
 const KIND_PROCEDURE: u8 = 9;
+const KIND_STORED_CONFIG: u8 = 10;
 
 // ── Record types ────────────────────────────────────────────────────
 
@@ -529,6 +532,83 @@ pub struct GraphTypeRecord {
     pub open: bool,
 }
 
+/// The configuration a database stores (#551): what defines or protects it,
+/// which an open applies unless the open sets the value itself. Not stored:
+/// what belongs to the machine (the thread count, an absolute path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredConfigRecord {
+    /// The graph data model, fixed when the database is created.
+    pub graph_model: GraphModelRecord,
+    /// Whether the store keeps backward edges, fixed when it is created.
+    pub backward_edges: bool,
+    /// Whether the catalog enforces schema constraints.
+    pub schema_constraints: bool,
+    /// Whether commits are logged to the sidecar WAL.
+    pub wal_enabled: bool,
+    /// When the WAL is synced.
+    pub wal_durability: DurabilityRecord,
+    /// The memory limit in bytes, `None` for the default share of the RAM.
+    pub memory_limit: Option<u64>,
+    /// The spill directory, relative to the database file's directory.
+    pub spill_path: Option<String>,
+    /// The memory configuration of each section that has one, by section
+    /// type, ascending.
+    pub sections: Vec<SectionMemoryRecord>,
+}
+
+/// A graph data model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GraphModelRecord {
+    /// A labeled property graph.
+    Lpg,
+    /// An RDF triple store.
+    Rdf,
+}
+
+/// When the WAL is synced to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DurabilityRecord {
+    /// At every commit.
+    Sync,
+    /// At a commit once the delay has passed or that many records were
+    /// written.
+    Batch {
+        /// The longest delay, in milliseconds.
+        max_delay_ms: u64,
+        /// The most records between syncs.
+        max_records: u64,
+    },
+    /// By a background thread, at a steady interval.
+    Adaptive {
+        /// The interval, in milliseconds.
+        target_interval_ms: u64,
+    },
+    /// Never: the operating system writes the WAL back.
+    NoSync,
+}
+
+/// The memory configuration of one section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SectionMemoryRecord {
+    /// The section type's code (its byte in the file's directory).
+    pub section: u8,
+    /// The most RAM the section may hold, in bytes.
+    pub max_ram: Option<u64>,
+    /// The storage tier it is pinned to.
+    pub tier: TierRecord,
+}
+
+/// The storage tier a section is pinned to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TierRecord {
+    /// In memory first, spilled when the budget is exceeded.
+    Auto,
+    /// Always in memory.
+    ForceRam,
+    /// Spilled at open.
+    ForceDisk,
+}
+
 /// A graph bound to a graph type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphBindingRecord {
@@ -761,6 +841,9 @@ pub enum CatalogKey {
     IndexName(String),
     /// A stored procedure, by name (catalog kind 9).
     Procedure(String),
+    /// The stored configuration, of which a database has one (catalog
+    /// kind 10).
+    StoredConfig,
 }
 
 impl CatalogKey {
@@ -778,6 +861,7 @@ impl CatalogKey {
             Self::Index { .. } => KIND_INDEX,
             Self::IndexName(_) => KIND_INDEX_NAME,
             Self::Procedure(_) => KIND_PROCEDURE,
+            Self::StoredConfig => KIND_STORED_CONFIG,
         }
     }
 }
@@ -804,12 +888,15 @@ pub enum CatalogRecord {
     IndexName(IndexNameRecord),
     /// A stored procedure (kind 9).
     Procedure(ProcedureRecord),
+    /// The stored configuration (kind 10).
+    StoredConfig(StoredConfigRecord),
 }
 
 impl CatalogRecord {
     /// The record's kind, the first byte of its frame: 1 `Schema`,
     /// 2 `NodeType`, 3 `EdgeType`, 4 `GraphType`, 5 `GraphBinding`,
-    /// 6 `Constraint`, 7 `Index`, 8 `IndexName`, 9 `Procedure`.
+    /// 6 `Constraint`, 7 `Index`, 8 `IndexName`, 9 `Procedure`,
+    /// 10 `StoredConfig`.
     #[must_use]
     pub const fn kind(&self) -> u8 {
         match self {
@@ -822,6 +909,7 @@ impl CatalogRecord {
             Self::Index(_) => KIND_INDEX,
             Self::IndexName(_) => KIND_INDEX_NAME,
             Self::Procedure(_) => KIND_PROCEDURE,
+            Self::StoredConfig(_) => KIND_STORED_CONFIG,
         }
     }
 
@@ -858,6 +946,7 @@ impl CatalogRecord {
             },
             Self::IndexName(record) => CatalogKey::IndexName(record.name.clone()),
             Self::Procedure(record) => CatalogKey::Procedure(record.name.clone()),
+            Self::StoredConfig(_) => CatalogKey::StoredConfig,
         }
     }
 
@@ -915,6 +1004,7 @@ impl CatalogRecord {
             Self::Index(record) => encode_bincode_payload(record, out),
             Self::IndexName(record) => encode_bincode_payload(record, out),
             Self::Procedure(record) => encode_bincode_payload(record, out),
+            Self::StoredConfig(record) => encode_bincode_payload(record, out),
         }
     }
 
@@ -929,7 +1019,8 @@ impl CatalogRecord {
             | Self::Constraint(_)
             | Self::Index(_)
             | Self::IndexName(_)
-            | Self::Procedure(_) => &[],
+            | Self::Procedure(_)
+            | Self::StoredConfig(_) => &[],
         }
     }
 
@@ -970,6 +1061,7 @@ impl CatalogRecord {
             KIND_INDEX => Self::Index(decode(payload)?),
             KIND_INDEX_NAME => Self::IndexName(decode(payload)?),
             KIND_PROCEDURE => Self::Procedure(decode(payload)?),
+            KIND_STORED_CONFIG => Self::StoredConfig(decode(payload)?),
             _ => return Ok(None),
         };
         Ok(Some(record))
@@ -1548,6 +1640,23 @@ mod tests {
                 returns: vec![("name".into(), "STRING".into())],
                 body: "MATCH (p:Person) WHERE p.age >= 19 RETURN p.name AS name".into(),
             }),
+            CatalogRecord::StoredConfig(StoredConfigRecord {
+                graph_model: GraphModelRecord::Lpg,
+                backward_edges: false,
+                schema_constraints: true,
+                wal_enabled: true,
+                wal_durability: DurabilityRecord::Batch {
+                    max_delay_ms: 19,
+                    max_records: 88,
+                },
+                memory_limit: Some(88 * 1024 * 1024),
+                spill_path: Some("amsterdam.spill".into()),
+                sections: vec![SectionMemoryRecord {
+                    section: 10,
+                    max_ram: None,
+                    tier: TierRecord::ForceRam,
+                }],
+            }),
         ]
     }
 
@@ -1712,7 +1821,7 @@ mod tests {
         let kinds: Vec<u8> = back.iter().map(CatalogRecord::kind).collect();
         assert_eq!(
             kinds,
-            [1, 2, 3, 4, 5, 6, 7, 7, 7, 8, 9],
+            [1, 2, 3, 4, 5, 6, 7, 7, 7, 8, 9, 10],
             "one kind per record type, numbered as the module documents"
         );
     }
@@ -1752,6 +1861,7 @@ mod tests {
                 },
                 CatalogKey::IndexName("person_name".into()),
                 CatalogKey::Procedure("get_adults".into()),
+                CatalogKey::StoredConfig,
             ]
         );
         for record in one_of_each().iter().chain(&every_variant()) {
@@ -1920,6 +2030,16 @@ mod tests {
                 56, 77, 65, 84, 67, 72, 32, 40, 112, 58, 80, 101, 114, 115, 111, 110, 41, 32, 87,
                 72, 69, 82, 69, 32, 112, 46, 97, 103, 101, 32, 62, 61, 32, 49, 57, 32, 82, 69, 84,
                 85, 82, 78, 32, 112, 46, 110, 97, 109, 101, 32, 65, 83, 32, 110, 97, 109, 101,
+            ],
+            &[
+                10, 1, 34, 0, 0, 0, // kind 10 (StoredConfig), required, 34 bytes
+                0, // graph model: LPG
+                0, 1, 1, // no backward edges, schema constraints, the WAL on
+                1, 19, 88, // Batch durability: 19 ms, 88 records
+                1, 252, 0, 0, 128, 5, // memory limit Some(88 MiB): u32 marker, then LE
+                // spill path Some("amsterdam.spill")
+                1, 15, 97, 109, 115, 116, 101, 114, 100, 97, 109, 46, 115, 112, 105, 108, 108,
+                1, 10, 0, 1, // one section: VectorStore (10), no RAM cap, ForceRam
             ],
         ];
         let encoded: Vec<Vec<u8>> = one_of_each().iter().map(framed).collect();

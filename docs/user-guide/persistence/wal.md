@@ -33,6 +33,26 @@ db = grafeo.GrafeoDB(path="my_graph.db")
 # Database is now in a consistent state
 ```
 
+## Damage in the WAL
+
+The end of a write that a crash cut off (a torn tail) is expected: every open cuts it and keeps the commits before it. Damage anywhere else, a record whose checksum or authentication fails with whole records after it, is refused: replaying the commits after it on top of the missing ones would build a state that never existed. The open fails with `GRAFEO-S002`, naming the file and the offset of the damage, and changes nothing.
+
+To open such a database with the commits before the damage, salvage it at that open:
+
+```python
+db = grafeo.GrafeoDB("my_graph.grafeo", wal_salvage=True)
+```
+
+```javascript
+const db = GrafeoDB.create("my_graph.grafeo", { walSalvage: true });
+```
+
+```rust
+let db = GrafeoDB::with_config(Config::persistent("my_graph.grafeo").with_wal_salvage())?;
+```
+
+Nothing is deleted: what the open did not replay is kept in `<file>.wal.damaged` (`<file>.wal.damaged-2` and so on for later salvages). The setting applies to that open only; the database file does not store it.
+
 ## Checkpointing
 
 Checkpoints merge WAL changes into the database file:

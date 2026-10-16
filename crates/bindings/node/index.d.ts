@@ -7,7 +7,8 @@ export declare class GrafeoDB {
    *
    * `options.shuffleUnordered` returns the rows of every query without
    * ORDER BY in random order: for tests, to find code that relies on a row
-   * order that is unspecified.
+   * order that is unspecified. `options.walSalvage` opens a database whose
+   * WAL is damaged with the commits before the damage.
    */
   static create(path?: string | undefined | null, options?: CreateOptions | undefined | null): GrafeoDB
   /** Open an existing database at the given path. */
@@ -486,6 +487,13 @@ export interface CreateOptions {
    * order that is unspecified.
    */
   shuffleUnordered?: boolean
+  /**
+   * Open a database whose WAL has damage before its end, which an open
+   * refuses, with the commits before the damage (default `false`); what
+   * it does not replay is kept in `<path>.wal.damaged`. For this open
+   * only.
+   */
+  walSalvage?: boolean
 }
 
 /** Options for CSV import. */

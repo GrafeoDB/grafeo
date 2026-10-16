@@ -79,6 +79,11 @@ pub struct CreateOptions {
     /// (default `false`): a test option that finds code relying on a row
     /// order that is unspecified.
     pub shuffle_unordered: Option<bool>,
+    /// Open a database whose WAL has damage before its end, which an open
+    /// refuses, with the commits before the damage (default `false`); what
+    /// it does not replay is kept in `<path>.wal.damaged`. For this open
+    /// only.
+    pub wal_salvage: Option<bool>,
 }
 
 #[napi]
@@ -87,7 +92,8 @@ impl JsGrafeoDB {
     ///
     /// `options.shuffleUnordered` returns the rows of every query without
     /// ORDER BY in random order: for tests, to find code that relies on a row
-    /// order that is unspecified.
+    /// order that is unspecified. `options.walSalvage` opens a database whose
+    /// WAL is damaged with the commits before the damage.
     #[napi(factory)]
     pub fn create(path: Option<String>, options: Option<CreateOptions>) -> Result<Self> {
         let config = match path {
@@ -95,9 +101,16 @@ impl JsGrafeoDB {
             None => Config::in_memory(),
         };
         let shuffle_unordered = options
+            .as_ref()
             .and_then(|options| options.shuffle_unordered)
             .unwrap_or(false);
-        let config = config.with_shuffle_unordered(shuffle_unordered);
+        let mut config = config.with_shuffle_unordered(shuffle_unordered);
+        if options
+            .and_then(|options| options.wal_salvage)
+            .unwrap_or(false)
+        {
+            config = config.with_wal_salvage();
+        }
         let db = GrafeoDB::with_config(config).map_err(NodeGrafeoError::from)?;
         Ok(Self {
             inner: Arc::new(RwLock::new(db)),

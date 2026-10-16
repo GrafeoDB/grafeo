@@ -375,13 +375,25 @@ impl PyGrafeoDB {
     /// shuffle_unordered=True returns the rows of every query without ORDER BY
     /// in random order: for tests, to find code that relies on a row order
     /// that is unspecified.
+    ///
+    /// wal_salvage=True opens a database whose WAL has damage before its end
+    /// (which an open refuses) with the commits before the damage; what it
+    /// does not replay is kept in `<path>.wal.damaged`. For this open only.
     #[new]
-    #[pyo3(signature = (path=None, *, cdc=false, section_tiers=None, shuffle_unordered=false))]
+    #[pyo3(signature = (
+        path=None,
+        *,
+        cdc=false,
+        section_tiers=None,
+        shuffle_unordered=false,
+        wal_salvage=false
+    ))]
     fn new(
         path: Option<String>,
         cdc: bool,
         section_tiers: Option<HashMap<String, String>>,
         shuffle_unordered: bool,
+        wal_salvage: bool,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
             Config::persistent(p)
@@ -392,6 +404,9 @@ impl PyGrafeoDB {
             config = config.with_cdc();
         }
         config = config.with_shuffle_unordered(shuffle_unordered);
+        if wal_salvage {
+            config = config.with_wal_salvage();
+        }
         if let Some(tiers) = section_tiers {
             for (section_name, tier_name) in tiers {
                 let section_type = parse_section_type(&section_name)?;

@@ -645,6 +645,9 @@ pub struct Config {
         note = "read it with `Config::encryption()` and set it with its builder; private in 0.7.0"
     )]
     pub encryption: Option<EncryptionConfig>,
+    /// Whether an open that finds damage in the WAL keeps the commits before
+    /// it instead of failing (see [`Config::with_wal_salvage`]).
+    wal_salvage: bool,
     /// The settings a builder set: they win over the values a database file
     /// stores (see `GrafeoDB::open`), where a default does not.
     set: SetFields,
@@ -806,6 +809,7 @@ impl Default for Config {
             checkpoint_interval: None,
             #[cfg(feature = "encryption")]
             encryption: None,
+            wal_salvage: false,
             set: SetFields::default(),
         }
     }
@@ -882,6 +886,25 @@ impl Config {
     pub fn with_wal(mut self) -> Self {
         self.wal_enabled = true;
         self.set.insert(SetFields::WAL_ENABLED);
+        self
+    }
+
+    /// Salvages a damaged WAL at this open, instead of failing it.
+    ///
+    /// By default an open refuses a WAL with damage before its end (a record
+    /// whose checksum or authentication fails, with whole records after it):
+    /// replaying the commits after it on top of the missing ones would
+    /// build a state that never existed, so the open fails with
+    /// `GRAFEO-S002` naming the file and offset. A salvaging open replays
+    /// the commits before the damage and leaves the rest out; nothing is
+    /// deleted: what it did not replay moves to `<file>.wal.damaged` (or
+    /// `<file>.wal.damaged-<n>`). A torn tail, the end of a write a crash
+    /// cut off, is never damage: every open cuts it.
+    ///
+    /// For this open only: the database file does not store it.
+    #[must_use]
+    pub fn with_wal_salvage(mut self) -> Self {
+        self.wal_salvage = true;
         self
     }
 
@@ -1278,6 +1301,13 @@ impl Config {
     #[must_use]
     pub fn wal_durability(&self) -> DurabilityMode {
         self.wal_durability
+    }
+
+    /// Whether an open salvages a damaged WAL (see
+    /// [`with_wal_salvage`](Self::with_wal_salvage)).
+    #[must_use]
+    pub fn wal_salvage(&self) -> bool {
+        self.wal_salvage
     }
 
     /// The storage format for a persistent database.
@@ -1904,7 +1934,8 @@ mod tests {
             .with_access_mode(AccessMode::ReadOnly)
             .with_cdc()
             .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
-            .with_checkpoint_interval(Duration::from_secs(88));
+            .with_checkpoint_interval(Duration::from_secs(88))
+            .with_wal_salvage();
         #[cfg(feature = "cdc")]
         let config = config.with_cdc_retention(
             crate::cdc::CdcRetentionConfig::unlimited()
@@ -1947,9 +1978,12 @@ mod tests {
             checkpoint_interval,
             #[cfg(feature = "encryption")]
             encryption,
+            wal_salvage,
             // What the builders set: see the stored-configuration tests.
             set: _,
         } = config;
+
+        assert!(wal_salvage, "with_wal_salvage salvages at this open");
 
         assert_eq!(graph_model, GraphModel::Rdf);
         assert_eq!(

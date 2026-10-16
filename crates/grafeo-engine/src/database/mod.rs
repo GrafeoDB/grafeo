@@ -548,6 +548,10 @@ impl GrafeoDB {
         // commits).
         #[cfg(all(feature = "wal", feature = "lpg"))]
         let mut retire_sidecar_wal: Option<bool> = None;
+        // Whether that WAL holds damage a salvaging open stopped at: it is
+        // then moved aside instead of removed.
+        #[cfg(all(feature = "wal", feature = "lpg"))]
+        let mut set_aside_sidecar_wal = false;
 
         // Whether this open creates the database file, which then stores the
         // configuration (see `stored_config`).
@@ -614,6 +618,7 @@ impl GrafeoDB {
                                 &catalog,
                                 #[cfg(feature = "triple-store")]
                                 &rdf_store,
+                                config.wal_salvage(),
                             )?;
                         } else {
                             Self::load_legacy_file(
@@ -623,6 +628,7 @@ impl GrafeoDB {
                                 #[cfg(feature = "triple-store")]
                                 &rdf_store,
                                 &mut loaded_sections,
+                                config.wal_salvage(),
                             )?;
                         }
                         None
@@ -668,6 +674,7 @@ impl GrafeoDB {
                                 fm.sidecar_wal_path(),
                                 keys.wal_cipher(fm.database_id()),
                             )
+                            .with_salvage(config.wal_salvage())
                             .recover_with_tail()?;
                             Self::apply_wal_records(
                                 &fm.sidecar_wal_path(),
@@ -681,7 +688,7 @@ impl GrafeoDB {
                         } else {
                             replay::replay(
                                 &fm.sidecar_wal_path(),
-                                Self::scan_options(&fm, &keys),
+                                Self::scan_options(&fm, &keys, config.wal_salvage()),
                                 &mut replay::Targets {
                                     store: &store,
                                     #[cfg(feature = "triple-store")]
@@ -804,8 +811,10 @@ impl GrafeoDB {
                     let recovery = WalRecovery::with_cipher(
                         fm.sidecar_wal_path(),
                         keys.wal_cipher(fm.database_id()),
-                    );
+                    )
+                    .with_salvage(config.wal_salvage());
                     let recovered = recovery.recover_with_tail()?;
+                    set_aside_sidecar_wal = recovered.damage.is_some();
                     Self::apply_wal_records(
                         &fm.sidecar_wal_path(),
                         &store,
@@ -819,7 +828,7 @@ impl GrafeoDB {
                 } else {
                     let replayed = replay::replay(
                         &fm.sidecar_wal_path(),
-                        Self::scan_options(&fm, &keys),
+                        Self::scan_options(&fm, &keys, config.wal_salvage()),
                         &mut replay::Targets {
                             store: &store,
                             #[cfg(feature = "triple-store")]
@@ -941,7 +950,17 @@ impl GrafeoDB {
                 flush::flush_covering(&fm, &db.checkpoint_sources(), Some(wal_start_lsn))?;
             }
             grafeo_common::testing::crash::maybe_crash("open:before_remove_replayed_wal");
-            fm.remove_sidecar_wal()?;
+            if set_aside_sidecar_wal {
+                let kept = fm.set_aside_sidecar_wal()?;
+                grafeo_common::grafeo_warn!(
+                    "salvaged the WAL of {}: the commits after its damage are not replayed, \
+                     the WAL is kept in {}",
+                    fm.path().display(),
+                    kept.display()
+                );
+            } else {
+                fm.remove_sidecar_wal()?;
+            }
         }
 
         // The WAL continues after the replayed log, or, once the open removed
@@ -1346,9 +1365,11 @@ impl GrafeoDB {
     fn scan_options(
         fm: &GrafeoFileManager,
         keys: &encryption::DatabaseKeys,
+        salvage: bool,
     ) -> grafeo_storage::wal::ScanOptions {
         grafeo_storage::wal::ScanOptions {
             cipher_for_salt: keys.wal_segment_ciphers(fm.database_id()),
+            salvage,
             ..grafeo_storage::wal::ScanOptions::new(
                 fm.database_id(),
                 fm.active_header().checkpoint_lsn,
@@ -1753,10 +1774,11 @@ impl GrafeoDB {
         store: &Arc<LpgStore>,
         catalog: &Arc<Catalog>,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
+        salvage: bool,
     ) -> Result<()> {
         #[cfg(not(feature = "wal"))]
         {
-            let _ = (store, catalog);
+            let _ = (store, catalog, salvage);
             #[cfg(feature = "triple-store")]
             let _ = rdf_store;
             Err(Error::Query(
@@ -1769,7 +1791,9 @@ impl GrafeoDB {
         }
         #[cfg(feature = "wal")]
         {
-            let recovered = WalRecovery::new(path.join("wal")).recover_all_with_tail();
+            let recovered = WalRecovery::new(path.join("wal"))
+                .with_salvage(salvage)
+                .recover_all_with_tail();
             // Checked first: a recovery error may only be the directory
             // moving away while it was read.
             Self::refuse_migrated_while_read(path, OnDisk::WalDirectory)?;
@@ -1829,6 +1853,7 @@ impl GrafeoDB {
         catalog: &Arc<Catalog>,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         loaded: &mut sections::LoadedSections,
+        salvage: bool,
     ) -> Result<()> {
         use grafeo_common::storage::{MemoryImage, ServedOnce};
         use grafeo_storage::file::legacy::{LegacyContents, LegacyFile};
@@ -1836,6 +1861,8 @@ impl GrafeoDB {
         // Without the `wal` feature the sidecar WAL cannot be replayed, and
         // the file alone would lack its changes.
         migration::refuse_unreplayable_wal(path, cfg!(feature = "wal"))?;
+        #[cfg(not(feature = "wal"))]
+        let _ = salvage;
         let file = LegacyFile::open(path, None)?;
         match file.contents()? {
             LegacyContents::Empty => {}
@@ -1874,7 +1901,11 @@ impl GrafeoDB {
             let wal_path = file.sidecar_wal_path();
             let recovered = wal_path
                 .exists()
-                .then(|| WalRecovery::new(&wal_path).recover_with_tail())
+                .then(|| {
+                    WalRecovery::new(&wal_path)
+                        .with_salvage(salvage)
+                        .recover_with_tail()
+                })
                 .transpose();
             // A migration in another process moves the file and then its
             // sidecar WAL: a WAL read (or found missing) meanwhile may lack
@@ -3904,6 +3935,7 @@ mod tests {
             #[cfg(feature = "triple-store")]
             &rdf_store,
             &mut loaded,
+            false,
         )
         .unwrap();
         assert!(

@@ -47,6 +47,9 @@ pub struct GrafeoResult {
     pub(crate) nodes_json: CString,
     /// JSON array of extracted edge objects (deduplicated, metadata stripped).
     pub(crate) edges_json: CString,
+    /// What the statement wrote (see `grafeo_result_nodes_created` and the
+    /// other counter getters).
+    pub(crate) counters: grafeo_engine::database::WriteCounters,
 }
 
 /// Structured node returned by CRUD operations.

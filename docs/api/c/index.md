@@ -174,6 +174,15 @@ uint64_t    grafeo_result_rows_scanned(const GrafeoResult* r);      /* estimated
 const char* grafeo_result_nodes_json(const GrafeoResult* r);        /* JSON array of node objects */
 const char* grafeo_result_edges_json(const GrafeoResult* r);        /* JSON array of edge objects */
 void        grafeo_free_result(GrafeoResult* r);                    /* free the result */
+
+/* What the statement wrote; 0 for a read */
+uint64_t    grafeo_result_nodes_created(const GrafeoResult* r);
+uint64_t    grafeo_result_nodes_deleted(const GrafeoResult* r);
+uint64_t    grafeo_result_edges_created(const GrafeoResult* r);
+uint64_t    grafeo_result_edges_deleted(const GrafeoResult* r);      /* also those DETACH DELETE removed */
+uint64_t    grafeo_result_properties_set(const GrafeoResult* r);
+uint64_t    grafeo_result_labels_added(const GrafeoResult* r);
+uint64_t    grafeo_result_labels_removed(const GrafeoResult* r);
 ```
 
 All `const char*` pointers from result accessors are valid until `grafeo_free_result` is called. Do NOT free them separately.
@@ -374,6 +383,35 @@ GrafeoStatus grafeo_mmr_search(GrafeoDatabase* db, const char* label, const char
 GrafeoStatus grafeo_batch_create_nodes(GrafeoDatabase* db, const char* label, const char* property, const float* vectors, size_t vector_count, size_t dimensions, uint64_t** out_ids, size_t* out_count);
 ```
 
+### Batch Writes
+
+Each call is one transaction: a row the schema refuses (or an edge naming a node that does not exist) fails the call and writes nothing. Rows go in as JSON; the ids come back in input order, freed with `grafeo_free_node_ids`.
+
+```c
+GrafeoStatus grafeo_batch_create_nodes_with_props(GrafeoDatabase* db, const char* labels_json, const char* rows_json, uint64_t** out_ids, size_t* out_count);
+GrafeoStatus grafeo_batch_create_edges(GrafeoDatabase* db, const char* edges_json, uint64_t** out_ids, size_t* out_count);
+```
+
+```c
+uint64_t* ids; size_t count;
+grafeo_batch_create_nodes_with_props(db, "[\"Person\"]", "[{\"name\": \"Alix\"}, {\"name\": \"Gus\"}]", &ids, &count);
+char edges[128];
+snprintf(edges, sizeof edges, "[{\"src\": %llu, \"dst\": %llu, \"type\": \"KNOWS\", \"properties\": {\"since\": 2020}}]",
+         (unsigned long long)ids[0], (unsigned long long)ids[1]);
+uint64_t* edge_ids; size_t edge_count;
+grafeo_batch_create_edges(db, edges, &edge_ids, &edge_count);
+grafeo_free_node_ids(edge_ids, edge_count);
+grafeo_free_node_ids(ids, count);
+```
+
+### Batch Vector Search
+
+`queries` holds `query_count * dimensions` floats; `ef` 0 uses the index's default; `filters_json` is NULL or a JSON object of property equalities. The result is a JSON array with one array per query of `{"id": ..., "distance": ...}` objects, nearest first.
+
+```c
+GrafeoStatus grafeo_batch_vector_search(GrafeoDatabase* db, const char* label, const char* property, const float* queries, size_t query_count, size_t dimensions, size_t k, size_t ef, const char* filters_json, char** out_json);
+```
+
 ### Freeing Vector Results
 
 ```c
@@ -408,7 +446,15 @@ Requires the `cdc` feature.
 ```c
 void grafeo_set_cdc_enabled(GrafeoDatabase* db, bool enabled);
 bool grafeo_is_cdc_enabled(GrafeoDatabase* db);
+
+/* JSON arrays of events, NULL on error; free with grafeo_free_string */
+char* grafeo_node_history(GrafeoDatabase* db, uint64_t id);
+char* grafeo_edge_history(GrafeoDatabase* db, uint64_t id);
+char* grafeo_node_history_since(GrafeoDatabase* db, uint64_t id, uint64_t since_epoch);
+char* grafeo_changes_between(GrafeoDatabase* db, uint64_t start_epoch, uint64_t end_epoch);  /* in commit order */
 ```
+
+Each event is an object with `entity_id`, `entity_type` (`"node"` or `"edge"`), `graph` (null for the default graph), `kind` (`"create"`, `"update"` or `"delete"`), `epoch`, `timestamp`, `before` and `after` (property objects or null), `labels`, `before_labels`, `edge_type`, `src_id`, `dst_id` and `deleted_with` (on an edge a detach delete removed, the node it removed it with), the same shape the Node.js binding returns.
 
 ## Statistics
 

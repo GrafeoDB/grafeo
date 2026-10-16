@@ -141,6 +141,7 @@ fn build_result(result: &grafeo_engine::database::QueryResult) -> *mut GrafeoRes
         rows_scanned: result.rows_scanned.unwrap_or(0),
         nodes_json: CString::new(nodes_str).unwrap_or_default(),
         edges_json: CString::new(edges_str).unwrap_or_default(),
+        counters: result.counters,
     }))
 }
 
@@ -663,6 +664,59 @@ pub extern "C" fn grafeo_result_rows_scanned(result: *const GrafeoResult) -> u64
     // SAFETY: Caller guarantees valid pointer.
     unsafe { &*result }.rows_scanned
 }
+
+/// One write counter of a result: what the statement wrote, 0 for a
+/// statement that wrote nothing (a read, a schema command) and for NULL.
+macro_rules! result_counter {
+    ($(#[$doc:meta])* $name:ident, $field:ident) => {
+        $(#[$doc])*
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(result: *const GrafeoResult) -> u64 {
+            if result.is_null() {
+                return 0;
+            }
+            // SAFETY: Caller guarantees valid pointer.
+            unsafe { &*result }.counters.$field
+        }
+    };
+}
+
+result_counter!(
+    /// Nodes the statement created (`INSERT`, `CREATE`, `MERGE`).
+    grafeo_result_nodes_created,
+    nodes_created
+);
+result_counter!(
+    /// Nodes the statement deleted.
+    grafeo_result_nodes_deleted,
+    nodes_deleted
+);
+result_counter!(
+    /// Edges the statement created.
+    grafeo_result_edges_created,
+    edges_created
+);
+result_counter!(
+    /// Edges the statement deleted, also those `DETACH DELETE` removed.
+    grafeo_result_edges_deleted,
+    edges_deleted
+);
+result_counter!(
+    /// Property values the statement wrote or removed, also those of the
+    /// entities it created.
+    grafeo_result_properties_set,
+    properties_set
+);
+result_counter!(
+    /// Labels the statement added, also those of the nodes it created.
+    grafeo_result_labels_added,
+    labels_added
+);
+result_counter!(
+    /// Labels the statement removed.
+    grafeo_result_labels_removed,
+    labels_removed
+);
 
 /// Get a JSON array of typed node objects extracted from the result.
 ///

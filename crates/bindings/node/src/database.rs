@@ -1753,65 +1753,10 @@ pub(crate) fn extract_entities(
     )
 }
 
-/// Convert a Grafeo Value to serde_json::Value.
-#[cfg(feature = "cdc")]
-fn grafeo_value_to_json(v: &Value) -> serde_json::Value {
-    grafeo_bindings_common::json::value_to_json(v)
-}
-
-/// Convert a CDC ChangeEvent to a JSON object.
+/// Convert a CDC ChangeEvent to a JSON object (the shape every binding returns).
 #[cfg(feature = "cdc")]
 fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::Value {
-    let entity_type = if event.entity_id.is_node() {
-        "node"
-    } else {
-        "edge"
-    };
-    let kind = match event.kind {
-        grafeo_engine::cdc::ChangeKind::Create => "create",
-        grafeo_engine::cdc::ChangeKind::Update => "update",
-        grafeo_engine::cdc::ChangeKind::Delete => "delete",
-        _ => "unknown",
-    };
-
-    let before = match &event.before {
-        Some(props) => {
-            let obj: serde_json::Map<String, serde_json::Value> = props
-                .iter()
-                .map(|(k, v)| (k.clone(), grafeo_value_to_json(v)))
-                .collect();
-            serde_json::Value::Object(obj)
-        }
-        None => serde_json::Value::Null,
-    };
-
-    let after = match &event.after {
-        Some(props) => {
-            let obj: serde_json::Map<String, serde_json::Value> = props
-                .iter()
-                .map(|(k, v)| (k.clone(), grafeo_value_to_json(v)))
-                .collect();
-            serde_json::Value::Object(obj)
-        }
-        None => serde_json::Value::Null,
-    };
-
-    serde_json::json!({
-        "entity_id": event.entity_id.as_u64(),
-        "entity_type": entity_type,
-        "graph": event.graph,
-        "kind": kind,
-        "epoch": event.epoch.0,
-        "timestamp": event.timestamp,
-        "before": before,
-        "after": after,
-        "labels": event.labels,
-        "before_labels": event.before_labels,
-        "edge_type": event.edge_type,
-        "src_id": event.src_id,
-        "dst_id": event.dst_id,
-        "deleted_with": event.deleted_with,
-    })
+    grafeo_bindings_common::cdc::event_to_json(event)
 }
 
 // After `JsGrafeoDB`: napi-derive records a struct's `js_name` when it expands

@@ -502,42 +502,38 @@ impl Operator for ProjectOperator {
                     let epoch = self.viewing_epoch;
                     let tx_id = self.transaction_id;
                     for row in input.selected_indices() {
+                        // One value of the entity, read without building it
+                        // (see `GraphStore::node_property_versioned`).
+                        let node_value = |node_id| match (epoch, tx_id) {
+                            (Some(ep), Some(tx)) => {
+                                store.node_property_versioned(node_id, property, ep, tx)
+                            }
+                            (Some(ep), None) => store.node_property_at_epoch(node_id, property, ep),
+                            (None, _) => store
+                                .get_node(node_id)
+                                .and_then(|n| n.get_property(property).cloned()),
+                        };
+                        let edge_value = |edge_id| match (epoch, tx_id) {
+                            (Some(ep), Some(tx)) => {
+                                store.edge_property_versioned(edge_id, property, ep, tx)
+                            }
+                            (Some(ep), None) => store.edge_property_at_epoch(edge_id, property, ep),
+                            (None, _) => store
+                                .get_edge(edge_id)
+                                .and_then(|e| e.get_property(property).cloned()),
+                        };
                         let value = if let Some(node_id) = input_col.get_node_id(row) {
-                            let node = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                store.get_node_versioned(node_id, ep, tx)
-                            } else if let Some(ep) = epoch {
-                                store.get_node_at_epoch(node_id, ep)
-                            } else {
-                                store.get_node(node_id)
-                            };
-                            if let Some(prop) = node.and_then(|n| n.get_property(property).cloned())
-                            {
+                            if let Some(prop) = node_value(node_id) {
                                 prop
                             } else if let Some(edge_id) = input_col.get_edge_id(row) {
                                 // Node lookup failed: the ID may belong to an
                                 // edge (common with Generic columns after joins).
-                                let edge = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                    store.get_edge_versioned(edge_id, ep, tx)
-                                } else if let Some(ep) = epoch {
-                                    store.get_edge_at_epoch(edge_id, ep)
-                                } else {
-                                    store.get_edge(edge_id)
-                                };
-                                edge.and_then(|e| e.get_property(property).cloned())
-                                    .unwrap_or(Value::Null)
+                                edge_value(edge_id).unwrap_or(Value::Null)
                             } else {
                                 Value::Null
                             }
                         } else if let Some(edge_id) = input_col.get_edge_id(row) {
-                            let edge = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                store.get_edge_versioned(edge_id, ep, tx)
-                            } else if let Some(ep) = epoch {
-                                store.get_edge_at_epoch(edge_id, ep)
-                            } else {
-                                store.get_edge(edge_id)
-                            };
-                            edge.and_then(|e| e.get_property(property).cloned())
-                                .unwrap_or(Value::Null)
+                            edge_value(edge_id).unwrap_or(Value::Null)
                         } else {
                             match input_col.get_value(row) {
                                 Some(Value::Map(map)) => {

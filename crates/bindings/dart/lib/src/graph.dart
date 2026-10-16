@@ -114,6 +114,18 @@ class GrafeoGraph implements Finalizable {
   Edge getEdge(int id) => takeEdge(
       _bindings, (out) => _bindings.grafeoGraphGetEdge(_open, id, out));
 
+  /// [GrafeoDB.getNodeEdges] in the graph.
+  List<NodeEdge> getNodeEdges(
+    int id, {
+    Direction direction = Direction.out,
+    List<String>? edgeTypes,
+  }) =>
+      nodeEdges(
+          _bindings,
+          edgeTypes,
+          (types, neighbors, edges, count) => _bindings.grafeoGraphGetNodeEdges(
+              _open, id, direction.code, types, neighbors, edges, count));
+
   /// Set a property on node [id].
   void setNodeProperty(int id, String key, dynamic value) =>
       withNativeStrings([key, encodeValue(value)], (p) {

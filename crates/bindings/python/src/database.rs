@@ -895,6 +895,40 @@ impl PyGrafeoDB {
         Ok(db.get_edge(EdgeId(id)).map(crate::direct::edge))
     }
 
+    /// The edges of a node as ``(neighbor_id, edge_id)`` tuples, without a
+    /// query.
+    ///
+    /// Args:
+    ///     node_id: The node.
+    ///     direction: ``"out"`` (default), ``"in"`` or ``"both"``; ``"both"``
+    ///         lists a self-loop once.
+    ///     edge_types: Only edges of these types (a type or a list of types);
+    ///         None for every type.
+    ///
+    /// Returns:
+    ///     The committed edges; an empty list for a node that does not exist.
+    ///
+    /// Example:
+    ///     for neighbor, edge in db.get_node_edges(alix, "out", ["KNOWS"]):
+    ///         print(db.get_node(neighbor))
+    #[pyo3(signature = (node_id, direction="out", edge_types=None))]
+    fn get_node_edges(
+        &self,
+        node_id: u64,
+        direction: &str,
+        edge_types: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<(u64, u64)>> {
+        let direction = crate::direct::direction(direction)?;
+        let edge_types = crate::direct::edge_types(edge_types)?;
+        let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
+        let db = self.inner.read();
+        Ok(crate::direct::edge_pairs(db.get_node_edges(
+            NodeId(node_id),
+            direction,
+            &edge_types,
+        )))
+    }
+
     /// Get a node at a specific historical epoch.
     ///
     /// Returns the node as it existed at the given epoch, including

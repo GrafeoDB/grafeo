@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
-use grafeo_core::graph::GraphStoreSearch;
 use grafeo_core::graph::lpg::{Edge, Node};
+use grafeo_core::graph::{Direction, GraphStoreSearch};
 
 use super::direct::{BatchEdge, DirectCalls, DirectTarget, missing_graph};
 use super::{GrafeoDB, QueryResult};
@@ -394,6 +394,20 @@ impl GraphHandle<'_> {
     /// error; nothing of the batch is created then.
     pub fn batch_create_edges(&self, edges: Vec<BatchEdge>) -> Result<Vec<EdgeId>> {
         self.direct().batch_create_edges(edges)
+    }
+
+    /// The edges of a node of this graph, like [`GrafeoDB::get_node_edges`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graph no longer exists.
+    pub fn get_node_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[&str],
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        self.direct().get_node_edges(node, direction, edge_types)
     }
 
     /// Gets a node of this graph.

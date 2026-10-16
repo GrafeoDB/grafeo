@@ -72,6 +72,44 @@ pub struct JsGrafeoDB {
     inner: Arc<RwLock<GrafeoDB>>,
 }
 
+/// Options for `getNodeEdges`.
+#[napi(object)]
+pub struct NodeEdgesOptions {
+    /// `"out"` (default), `"in"` or `"both"`.
+    pub direction: Option<String>,
+    /// Only edges of these types (default: every type).
+    pub edge_types: Option<Vec<String>>,
+}
+
+/// The direction and edge types of `getNodeEdges`, defaults filled in.
+fn node_edges_options(
+    options: Option<NodeEdgesOptions>,
+) -> Result<(grafeo_engine::Direction, Vec<String>)> {
+    let (direction, edge_types) = options.map_or((None, None), |options| {
+        (options.direction, options.edge_types)
+    });
+    let direction = match direction.as_deref() {
+        None | Some("out" | "outgoing") => grafeo_engine::Direction::Outgoing,
+        Some("in" | "incoming") => grafeo_engine::Direction::Incoming,
+        Some("both") => grafeo_engine::Direction::Both,
+        Some(other) => {
+            return Err(NodeGrafeoError::InvalidArgument(format!(
+                "direction must be 'out', 'in' or 'both', not '{other}'"
+            ))
+            .into());
+        }
+    };
+    Ok((direction, edge_types.unwrap_or_default()))
+}
+
+/// `[neighborId, edgeId]` pairs for JavaScript.
+fn edge_pairs(edges: Vec<(NodeId, EdgeId)>) -> Vec<Vec<f64>> {
+    edges
+        .into_iter()
+        .map(|(neighbor, edge)| vec![js_number(neighbor.as_u64()), js_number(edge.as_u64())])
+        .collect()
+}
+
 /// When a database checkpoints by itself (`GrafeoDB.setCheckpointTriggers`).
 #[napi(object)]
 pub struct CheckpointTriggers {
@@ -298,6 +336,27 @@ impl JsGrafeoDB {
             let properties = node.properties.into_iter().collect();
             JsNode::new(node_id, labels, properties)
         }))
+    }
+
+    /// The edges of a node as `[neighborId, edgeId]` pairs, without a query:
+    /// `options.direction` is `"out"` (default), `"in"` or `"both"` (which
+    /// lists a self-loop once), and `options.edgeTypes` keeps only those
+    /// types. Committed edges; none for a node that does not exist.
+    #[napi(js_name = "getNodeEdges")]
+    pub fn get_node_edges(
+        &self,
+        id: f64,
+        options: Option<NodeEdgesOptions>,
+    ) -> Result<Vec<Vec<f64>>> {
+        let node_id = validate_node_id(id)?;
+        let (direction, edge_types) = node_edges_options(options)?;
+        let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
+        let db = self.inner.read();
+        Ok(edge_pairs(db.get_node_edges(
+            node_id,
+            direction,
+            &edge_types,
+        )))
     }
 
     /// Get an edge by ID.

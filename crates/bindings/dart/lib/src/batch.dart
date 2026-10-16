@@ -1,6 +1,45 @@
 /// Types of the batch writes, upserts and change history.
 library;
 
+/// Which edges [GrafeoDB.getNodeEdges] lists.
+enum Direction {
+  /// The edges that leave the node.
+  out(0),
+
+  /// The edges that reach the node.
+  incoming(1),
+
+  /// Both, a self-loop once.
+  both(2);
+
+  /// The `GrafeoDirection` value.
+  final int code;
+  const Direction(this.code);
+}
+
+/// One edge of a node and the neighbor it reaches.
+class NodeEdge {
+  /// The node at the other end.
+  final int neighborId;
+
+  /// The edge.
+  final int edgeId;
+
+  const NodeEdge(this.neighborId, this.edgeId);
+
+  @override
+  bool operator ==(Object other) =>
+      other is NodeEdge &&
+      other.neighborId == neighborId &&
+      other.edgeId == edgeId;
+
+  @override
+  int get hashCode => Object.hash(neighborId, edgeId);
+
+  @override
+  String toString() => 'NodeEdge($neighborId via $edgeId)';
+}
+
 /// One edge of [GrafeoDB.batchCreateEdges].
 class BatchEdge {
   /// Source node ID.

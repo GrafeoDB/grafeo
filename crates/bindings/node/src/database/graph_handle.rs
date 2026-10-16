@@ -15,8 +15,8 @@ use super::upsert::{
     UpsertEdgesOptions, UpsertNodesOptions, UpsertSummary, edge_options, node_options, rows,
 };
 use super::{
-    JsGrafeoDB, convert_json_params, js_edge, js_node, js_result, object_properties,
-    validate_edge_id, validate_node_id,
+    JsGrafeoDB, NodeEdgesOptions, convert_json_params, edge_pairs, js_edge, js_node, js_result,
+    node_edges_options, object_properties, validate_edge_id, validate_node_id,
 };
 use crate::error::NodeGrafeoError;
 use crate::graph::{JsEdge, JsNode};
@@ -182,6 +182,26 @@ impl JsGraphHandle {
     pub fn get_node(&self, id: f64) -> Result<Option<JsNode>> {
         let id = validate_node_id(id)?;
         self.with_graph(|graph| Ok(js(graph.get_node(id))?.map(|node| js_node(id, node))))
+    }
+
+    /// `GrafeoDB.getNodeEdges` in this graph; throws if the graph no longer
+    /// exists.
+    #[napi(js_name = "getNodeEdges")]
+    pub fn get_node_edges(
+        &self,
+        id: f64,
+        options: Option<NodeEdgesOptions>,
+    ) -> Result<Vec<Vec<f64>>> {
+        let id = validate_node_id(id)?;
+        let (direction, edge_types) = node_edges_options(options)?;
+        let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
+        self.with_graph(|graph| {
+            Ok(edge_pairs(js(graph.get_node_edges(
+                id,
+                direction,
+                &edge_types,
+            ))?))
+        })
     }
 
     /// Gets an edge by ID, or null.

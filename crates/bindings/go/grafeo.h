@@ -54,6 +54,12 @@ typedef enum {
     GRAFEO_ISOLATION_SERIALIZABLE   = 2
 } GrafeoIsolationLevel;
 
+typedef enum {
+    GRAFEO_DIRECTION_OUT  = 0,
+    GRAFEO_DIRECTION_IN   = 1,
+    GRAFEO_DIRECTION_BOTH = 2
+} GrafeoDirection;
+
 /* ---- Opaque types -------------------------------------------------------- */
 
 typedef struct GrafeoDatabase    GrafeoDatabase;
@@ -193,6 +199,13 @@ const char* grafeo_edge_type(const GrafeoEdge* edge);
 const char* grafeo_edge_properties_json(const GrafeoEdge* edge);
 void        grafeo_free_edge(GrafeoEdge* edge);
 
+/* A node's edges without a query: neighbor i is reached through edge i. edge_types_json is NULL for every type,
+ * else a JSON array of strings; GRAFEO_DIRECTION_BOTH lists a self-loop once. *out_neighbors and *out_edges hold
+ * *out_count ids each (NULL when none); free each with grafeo_free_node_ids(ptr, *out_count). */
+GrafeoStatus grafeo_get_node_edges(GrafeoDatabase* db, uint64_t node_id, GrafeoDirection direction,
+                                   const char* edge_types_json, uint64_t** out_neighbors, uint64_t** out_edges,
+                                   size_t* out_count);
+
 /* ---- Property indexes ---------------------------------------------------- */
 
 GrafeoStatus grafeo_create_property_index(GrafeoDatabase* db, const char* property);
@@ -258,6 +271,7 @@ uint64_t      grafeo_graph_create_node(GrafeoGraph* graph, const char* labels_js
 uint64_t      grafeo_graph_create_edge(GrafeoGraph* graph, uint64_t source_id, uint64_t target_id, const char* edge_type, const char* properties_json);
 GrafeoStatus  grafeo_graph_get_node(GrafeoGraph* graph, uint64_t id, GrafeoNode** out);
 GrafeoStatus  grafeo_graph_get_edge(GrafeoGraph* graph, uint64_t id, GrafeoEdge** out);
+GrafeoStatus  grafeo_graph_get_node_edges(GrafeoGraph* graph, uint64_t node_id, GrafeoDirection direction, const char* edge_types_json, uint64_t** out_neighbors, uint64_t** out_edges, size_t* out_count);
 GrafeoStatus  grafeo_graph_set_node_property(GrafeoGraph* graph, uint64_t id, const char* key, const char* value_json);
 GrafeoStatus  grafeo_graph_set_edge_property(GrafeoGraph* graph, uint64_t id, const char* key, const char* value_json);
 int32_t       grafeo_graph_remove_node_property(GrafeoGraph* graph, uint64_t id, const char* key);

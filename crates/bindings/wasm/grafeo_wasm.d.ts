@@ -140,6 +140,15 @@ export class Database {
   /** A handle on a named graph, to work in it without switching the current graph. */
   graph(name: string): GraphHandle;
 
+  /**
+   * A node's edges without a query, as `[neighborId, edgeId]` pairs; `"both"` lists a
+   * self-loop once. Reads through the open transaction when there is one.
+   */
+  getNodeEdges(
+    id: number,
+    options?: { direction?: "out" | "in" | "both"; edgeTypes?: string[] },
+  ): [number, number][];
+
   /** Returns the number of nodes in the database. */
   nodeCount(): number;
 

@@ -464,6 +464,17 @@ print(edge.sourceId); // 0
 print(edge.targetId); // 1
 ```
 
+#### getNodeEdges()
+
+A node's edges without a query, as `NodeEdge(neighborId, edgeId)`. `direction` is `Direction.out`
+(the default), `Direction.incoming` or `Direction.both` (which lists a self-loop once); `edgeTypes`
+keeps only edges of those types. A node that does not exist has none; a `GrafeoGraph` has the same
+method for its graph.
+
+```dart
+List<NodeEdge> getNodeEdges(int id, {Direction direction = Direction.out, List<String>? edgeTypes})
+```
+
 #### deleteEdge()
 
 Delete an edge by ID. Returns `true` if the edge existed.

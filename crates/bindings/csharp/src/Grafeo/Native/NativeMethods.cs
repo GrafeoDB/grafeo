@@ -264,6 +264,12 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int grafeo_remove_edge_property(nint db, ulong id, string key);
 
+    /// <summary>A node's edges as two id arrays of outCount ids each (free each with grafeo_free_node_ids).</summary>
+    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int grafeo_get_node_edges(
+        nint db, ulong nodeId, int direction, string? edgeTypesJson,
+        out nint outNeighbors, out nint outEdges, out nuint outCount);
+
     /// <summary>Free a GrafeoEdge.</summary>
     [LibraryImport(LibName)]
     internal static partial void grafeo_free_edge(nint edge);
@@ -536,6 +542,11 @@ internal static partial class NativeMethods
 
     [LibraryImport(LibName)]
     internal static partial int grafeo_graph_get_edge(nint graph, ulong id, out nint edgeOut);
+
+    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int grafeo_graph_get_node_edges(
+        nint graph, ulong nodeId, int direction, string? edgeTypesJson,
+        out nint outNeighbors, out nint outEdges, out nuint outCount);
 
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int grafeo_graph_set_node_property(nint graph, ulong id, string key, string valueJson);

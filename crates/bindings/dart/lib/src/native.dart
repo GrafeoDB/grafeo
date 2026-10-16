@@ -130,6 +130,41 @@ List<int> takeIds(
   }
 }
 
+/// A node's edges through [call], which gets the edge types (null for every
+/// type) and the three outputs; copies and frees both id arrays.
+List<NodeEdge> nodeEdges(
+  GrafeoBindings bindings,
+  List<String>? edgeTypes,
+  int Function(Pointer<Utf8> edgeTypes, Pointer<Pointer<Uint64>> neighbors,
+          Pointer<Pointer<Uint64>> edges, Pointer<IntPtr> count)
+      call,
+) {
+  final types =
+      edgeTypes == null || edgeTypes.isEmpty ? null : jsonEncode(edgeTypes);
+  return withNativeStrings([types], (p) {
+    final neighbors = malloc<Pointer<Uint64>>();
+    final edges = malloc<Pointer<Uint64>>();
+    final count = malloc<IntPtr>();
+    try {
+      final status = call(p[0], neighbors, edges, count);
+      if (status != GrafeoStatus.ok.code) throwStatus(bindings, status);
+      final n = count.value;
+      if (n == 0) return <NodeEdge>[];
+      final result = [
+        for (var i = 0; i < n; i++)
+          NodeEdge(neighbors.value[i], edges.value[i]),
+      ];
+      bindings.grafeoFreeNodeIds(neighbors.value, n);
+      bindings.grafeoFreeNodeIds(edges.value, n);
+      return result;
+    } finally {
+      malloc.free(neighbors);
+      malloc.free(edges);
+      malloc.free(count);
+    }
+  });
+}
+
 /// Runs [call] and takes the JSON string it hands out.
 String takeJson(
   GrafeoBindings bindings,

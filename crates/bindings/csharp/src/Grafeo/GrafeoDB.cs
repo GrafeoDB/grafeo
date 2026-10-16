@@ -434,6 +434,21 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// The committed edges of a node in <paramref name="direction"/>, without a query: only those
+    /// of <paramref name="edgeTypes"/> when given. <see cref="Direction.Both"/> lists a self-loop
+    /// once; a node that does not exist has none.
+    /// </summary>
+    public IReadOnlyList<NodeEdge> GetNodeEdges(
+        long nodeId, Direction direction = Direction.Out, IEnumerable<string>? edgeTypes = null)
+    {
+        ThrowIfDisposed();
+        var typesJson = BatchCalls.EdgeTypes(edgeTypes);
+        return BatchCalls.NodeEdges((out nint neighbors, out nint edges, out nuint count) =>
+            NativeMethods.grafeo_get_node_edges(
+                Handle, (ulong)nodeId, (int)direction, typesJson, out neighbors, out edges, out count));
+    }
+
     /// <summary>Delete an edge by ID. Returns true if deleted.</summary>
     public bool DeleteEdge(long id)
     {

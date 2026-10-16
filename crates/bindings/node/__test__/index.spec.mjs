@@ -2198,3 +2198,80 @@ describe('graph handles', () => {
     expect(() => trips.getNode(0)).toThrow()
   })
 })
+
+describe('getNodeEdges', () => {
+  let db
+  let ids
+
+  beforeEach(() => {
+    db = GrafeoDB.create()
+    const alix = db.createNode(['Person'], { name: 'Alix' }).id
+    const gus = db.createNode(['Person'], { name: 'Gus' }).id
+    const vincent = db.createNode(['Person'], { name: 'Vincent' }).id
+    ids = {
+      alix,
+      gus,
+      vincent,
+      knowsGus: db.createEdge(alix, gus, 'KNOWS').id,
+      knowsVincent: db.createEdge(alix, vincent, 'KNOWS').id,
+      worksWith: db.createEdge(gus, alix, 'WORKS_WITH').id,
+      note: db.createEdge(alix, alix, 'NOTE').id,
+    }
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  const sorted = (pairs) => [...pairs].sort((a, b) => a[1] - b[1])
+
+  it('should list outgoing edges by default as [neighborId, edgeId] pairs', () => {
+    const { alix, gus, vincent, knowsGus, knowsVincent, note } = ids
+    expect(sorted(db.getNodeEdges(alix))).toEqual(
+      sorted([
+        [gus, knowsGus],
+        [vincent, knowsVincent],
+        [alix, note],
+      ])
+    )
+  })
+
+  it('should take a direction and list a self-loop once for both', () => {
+    const { alix, gus, vincent, knowsGus, knowsVincent, worksWith, note } = ids
+    expect(sorted(db.getNodeEdges(alix, { direction: 'in' }))).toEqual(sorted([[gus, worksWith], [alix, note]]))
+    expect(sorted(db.getNodeEdges(alix, { direction: 'both' }))).toEqual(
+      sorted([
+        [gus, knowsGus],
+        [vincent, knowsVincent],
+        [gus, worksWith],
+        [alix, note],
+      ])
+    )
+    expect(() => db.getNodeEdges(alix, { direction: 'sideways' })).toThrow(/direction/)
+  })
+
+  it('should keep only the given edge types and skip deleted edges', () => {
+    const { alix, gus, vincent, knowsGus, knowsVincent } = ids
+    expect(sorted(db.getNodeEdges(alix, { direction: 'both', edgeTypes: ['KNOWS'] }))).toEqual(
+      sorted([
+        [gus, knowsGus],
+        [vincent, knowsVincent],
+      ])
+    )
+    db.deleteEdge(knowsGus)
+    expect(db.getNodeEdges(alix, { edgeTypes: ['KNOWS'] })).toEqual([[vincent, knowsVincent]])
+    expect(db.getNodeEdges(88888, { direction: 'both' })).toEqual([])
+  })
+
+  it('should list the edges of a graph handle\'s graph', async () => {
+    await db.execute('CREATE GRAPH trips')
+    const trips = db.graph('trips')
+    const prague = trips.createNode(['City'], { name: 'Prague' }).id
+    const berlin = trips.createNode(['City'], { name: 'Berlin' }).id
+    const route = trips.createEdge(prague, berlin, 'ROUTE').id
+    expect(trips.getNodeEdges(prague)).toEqual([[berlin, route]])
+    expect(trips.getNodeEdges(berlin, { direction: 'in', edgeTypes: ['ROUTE'] })).toEqual([[prague, route]])
+    await db.execute('DROP GRAPH trips')
+    expect(() => trips.getNodeEdges(prague)).toThrow()
+  })
+})

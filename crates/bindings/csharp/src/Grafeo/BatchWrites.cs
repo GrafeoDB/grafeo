@@ -94,6 +94,27 @@ public sealed record ChangeEvent(
     long? TargetId,
     long? DeletedWith);
 
+/// <summary>Which edges <see cref="GrafeoDB.GetNodeEdges"/> lists. Values match <c>GrafeoDirection</c>.</summary>
+public enum Direction
+{
+    /// <summary>The edges that leave the node.</summary>
+    Out = 0,
+
+    /// <summary>The edges that reach the node.</summary>
+    In = 1,
+
+    /// <summary>Both, a self-loop once.</summary>
+    Both = 2,
+}
+
+/// <summary>One edge of a node and the neighbor it reaches.</summary>
+/// <param name="NeighborId">The node at the other end.</param>
+/// <param name="EdgeId">The edge.</param>
+public readonly record struct NodeEdge(long NeighborId, long EdgeId);
+
+/// <summary>A native call that hands out neighbor and edge id arrays.</summary>
+internal delegate int EdgesCall(out nint neighbors, out nint edges, out nuint count);
+
 /// <summary>A native call that hands out an id array.</summary>
 internal delegate int IdsCall(out nint ids, out nuint count);
 
@@ -119,6 +140,37 @@ internal static class BatchCalls
         {
             NativeMethods.grafeo_free_node_ids(ids, count);
         }
+    }
+
+    /// <summary>Runs <paramref name="call"/>, pairs and frees the neighbor and edge ids it hands out.</summary>
+    internal static IReadOnlyList<NodeEdge> NodeEdges(EdgesCall call)
+    {
+        GrafeoException.ThrowIfFailed(call(out var neighbors, out var edges, out var count));
+        if (count == 0)
+            return Array.Empty<NodeEdge>();
+        try
+        {
+            var neighborIds = new long[(int)count];
+            var edgeIds = new long[(int)count];
+            Marshal.Copy(neighbors, neighborIds, 0, (int)count);
+            Marshal.Copy(edges, edgeIds, 0, (int)count);
+            var result = new NodeEdge[(int)count];
+            for (var i = 0; i < result.Length; i++)
+                result[i] = new NodeEdge(neighborIds[i], edgeIds[i]);
+            return result;
+        }
+        finally
+        {
+            NativeMethods.grafeo_free_node_ids(neighbors, count);
+            NativeMethods.grafeo_free_node_ids(edges, count);
+        }
+    }
+
+    /// <summary>The edge types argument: null for every type, else a JSON array.</summary>
+    internal static string? EdgeTypes(IEnumerable<string>? edgeTypes)
+    {
+        var types = edgeTypes?.ToArray();
+        return types is { Length: > 0 } ? JsonSerializer.Serialize(types) : null;
     }
 
     /// <summary>Runs <paramref name="call"/> and takes the JSON string it hands out.</summary>

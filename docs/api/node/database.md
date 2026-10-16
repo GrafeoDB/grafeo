@@ -122,6 +122,16 @@ Get a node by ID. Returns `null` if not found.
 getNode(id: number): JsNode | null
 ```
 
+### getNodeEdges()
+
+The edges of a node as `[neighborId, edgeId]` pairs, without a query. `direction` is `'out'` (the
+default), `'in'` or `'both'`, which lists a self-loop once; `edgeTypes` keeps only edges of those
+types. A node that does not exist has none. A `GraphHandle` has the same method for its graph.
+
+```typescript
+getNodeEdges(id: number, options?: { direction?: 'out' | 'in' | 'both'; edgeTypes?: string[] }): number[][]
+```
+
 ### deleteNode()
 
 Delete a node by ID. Returns `true` if the node existed.

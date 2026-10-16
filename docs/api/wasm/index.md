@@ -56,6 +56,7 @@ A raw result's `counters` tell what a write changed: `nodesCreated`, `nodesDelet
 ## Properties
 
 ```javascript
+db.getNodeEdges(id, { direction: "out", edgeTypes: ["KNOWS"] });  // [[neighborId, edgeId], ...]
 db.nodeCount();   // number of nodes
 db.edgeCount();   // number of edges
 db.schema();      // database schema as JSON

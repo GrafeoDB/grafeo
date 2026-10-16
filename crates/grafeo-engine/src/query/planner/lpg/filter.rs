@@ -752,14 +752,13 @@ impl super::Planner {
         ))
     }
 
-    /// Tries to optimize a filter shaped as `var.prop IN [literals]` using
-    /// the property index. For each literal, calls `find_nodes_by_property`
-    /// and unions the results. Returns `Ok(None)` when not applicable: the
-    /// input isn't a simple `NodeScan`, the right side isn't a list of
-    /// literals, the property is unindexed, or the predicate is compound
-    /// (e.g. `prop IN [...] AND label-or-other`).
-    ///
-    /// Pure `IN` is the common shape (`WHERE r.id IN $ids`).
+    /// Tries to optimize a filter with a `var.prop IN [literals]` conjunct on
+    /// an indexed property (the whole predicate, or a conjunct of its `AND`
+    /// chain, #456) using the property index: the union of the per-value
+    /// lookups are the candidates, and the whole predicate decides each.
+    /// Returns `Ok(None)` when not applicable: the input isn't a simple
+    /// `NodeScan`, no conjunct is such an `IN` list, or the index cannot
+    /// answer a value.
     pub(super) fn try_plan_filter_with_in_list_index(
         &self,
         filter: &FilterOp,
@@ -772,28 +771,15 @@ impl super::Planner {
             _ => return Ok(None),
         };
 
-        // Predicate must be a single `var.prop IN [literal, ...]`.
-        let LogicalExpression::Binary {
-            left,
-            op: BinaryOp::In,
-            right,
-        } = &filter.predicate
-        else {
-            return Ok(None);
-        };
-        let LogicalExpression::Property { variable, property } = left.as_ref() else {
-            return Ok(None);
-        };
-        if variable != &scan_variable {
+        if !self.reads_the_current_store() {
             return Ok(None);
         }
-        if !self.reads_the_current_store() || !self.store.has_property_index(property) {
-            return Ok(None);
-        }
-
-        let Some(values) = in_list_values(right) else {
+        let Some((property, values)) = indexed_in_list(&filter.predicate, &scan_variable, |p| {
+            self.store.has_property_index(p)
+        }) else {
             return Ok(None);
         };
+        let property = property.as_str();
         if values.is_empty() {
             // `prop IN []` is always false: return an empty result without
             // touching the store.
@@ -1150,6 +1136,39 @@ impl super::Planner {
     }
 }
 
+/// The first conjunct of `predicate`'s `AND` chain shaped
+/// `variable.prop IN list` with `has_index(prop)` and a list of constants: the
+/// property and the values to look up. A conjunct under `OR` or `NOT` does
+/// not narrow the rows, so it is none.
+fn indexed_in_list<'a>(
+    predicate: &'a LogicalExpression,
+    variable: &str,
+    has_index: impl Fn(&str) -> bool + Copy,
+) -> Option<(&'a String, Vec<Value>)> {
+    match predicate {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => indexed_in_list(left, variable, has_index)
+            .or_else(|| indexed_in_list(right, variable, has_index)),
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::In,
+            right,
+        } => match left.as_ref() {
+            LogicalExpression::Property {
+                variable: read,
+                property,
+            } if read == variable && has_index(property) => {
+                in_list_values(right).map(|values| (property, values))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The values the index path of `var.prop IN list` looks up: a list of
 /// literals that are not NULL (`None` when an element is something else,
 /// which the plan cannot enumerate), or a literal list without its NULLs.
@@ -1173,9 +1192,10 @@ fn in_list_values(list: &LogicalExpression) -> Option<Vec<Value>> {
 /// filter over `scan` after the seek, with the indexes of `store`; `current`
 /// as in `reads_the_current_store`. These paths read a scan without input,
 /// in the order the planner tries them: the index lookup of equalities with
-/// constants or the label-first scan of their label, the index lookup of an
-/// `IN` list of constants (no hint for a list without a value that is not
-/// NULL: it finds no node, and the planner reads neither index nor label),
+/// constants, the index lookup of an `IN` list of constants, also a conjunct
+/// of an `AND` chain (no hint for a list without a value that is not NULL: it
+/// finds no node, and the planner reads neither index nor label), the
+/// label-first scan of the label of equalities without an index,
 /// the range scan of a range of constants (with or without an index), a
 /// vector or text index search (no hint), and otherwise the scan of the label
 /// with the filter above it. A scan per input row takes none of them.
@@ -1193,33 +1213,18 @@ pub(crate) fn scan_hint(
     }
     let variable = scan.variable.as_str();
     let conditions = super::Planner::extract_equality_conditions(predicate, variable);
-    if !conditions.is_empty() {
-        if current && let Some((property, _)) = conditions.iter().find(|(p, _)| has_index(p)) {
-            return Some(PushdownHint::IndexLookup {
-                property: property.clone(),
-            });
-        }
-        if scan.label.is_some() {
-            return Some(PushdownHint::LabelFirst);
-        }
+    if current && let Some((property, _)) = conditions.iter().find(|(p, _)| has_index(p)) {
+        return Some(PushdownHint::IndexLookup {
+            property: property.clone(),
+        });
     }
-    if current
-        && let LogicalExpression::Binary {
-            left,
-            op: BinaryOp::In,
-            right,
-        } = predicate
-        && let LogicalExpression::Property {
-            variable: read,
-            property,
-        } = left.as_ref()
-        && read == variable
-        && has_index(property)
-        && let Some(values) = in_list_values(right)
-    {
+    if current && let Some((property, values)) = indexed_in_list(predicate, variable, has_index) {
         return (!values.is_empty()).then(|| PushdownHint::IndexLookup {
             property: property.clone(),
         });
+    }
+    if !conditions.is_empty() && scan.label.is_some() {
+        return Some(PushdownHint::LabelFirst);
     }
     if current {
         let between = super::Planner::extract_between_predicate(predicate)

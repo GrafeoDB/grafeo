@@ -947,6 +947,8 @@ for case_id, query, languages in [
 #     that parse as it and numbers within EPSILON equal; the lookups of an index found
 #     their exact value only, and a constant key on a label scan without an index used a
 #     stricter `=` of its own. AV1 to AV8 without an index, AV9 to AV16 with one
+#     An IN list in an AND chain takes the index too (#456): AV17 and AV18 without one, AV19
+#     and AV20 with one
 for case_id, query, fixture in [
     ("AV1", "MATCH (d:Doc) WHERE d.p = 42 RETURN d.n AS n", "mixed"),
     ("AV2", "MATCH (d:Doc) WHERE d.p = 42.0 RETURN d.n AS n", "mixed"),
@@ -964,6 +966,10 @@ for case_id, query, fixture in [
     ("AV14", "MATCH (o:Other) MATCH (d:Doc) WHERE d.p = 0.3 RETURN d.n AS n", "mixed_indexed"),
     ("AV15", "MATCH (d) WHERE d.p = 42 RETURN d.n AS n", "mixed_indexed"),
     ("AV16", "MATCH (a:Doc {n: 'int'}) MATCH (b:Doc) WHERE id(b) = toString(id(a)) RETURN b.n AS n", "mixed_indexed"),
+    ("AV17", "MATCH (d:Doc) WHERE d.p IN [42, 0.3, 'abc'] AND d.n <> 'float' RETURN d.n AS n", "mixed"),
+    ("AV18", "MATCH (d) WHERE d.n STARTS WITH 's' AND d.p IN ['42', 0.3] RETURN d.n AS n", "mixed"),
+    ("AV19", "MATCH (d:Doc) WHERE d.p IN [42, 0.3, 'abc'] AND d.n <> 'float' RETURN d.n AS n", "mixed_indexed"),
+    ("AV20", "MATCH (d) WHERE d.n STARTS WITH 's' AND d.p IN ['42', 0.3] RETURN d.n AS n", "mixed_indexed"),
 ]:
     case(case_id, query, BOTH, fixture)
 

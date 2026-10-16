@@ -51,7 +51,7 @@ macro_rules! db_ref_or_null {
 }
 
 /// Serialize a `QueryResult` into a `GrafeoResult`.
-fn build_result(result: &grafeo_engine::database::QueryResult) -> *mut GrafeoResult {
+pub(crate) fn build_result(result: &grafeo_engine::database::QueryResult) -> *mut GrafeoResult {
     let json_rows: Vec<serde_json::Value> = result
         .rows()
         .iter()
@@ -151,7 +151,7 @@ fn build_result(result: &grafeo_engine::database::QueryResult) -> *mut GrafeoRes
 
 /// The id of a created node or edge, or `u64::MAX` with the error recorded
 /// for `grafeo_last_error`.
-fn created_id(result: grafeo_common::utils::error::Result<u64>) -> u64 {
+pub(crate) fn created_id(result: grafeo_common::utils::error::Result<u64>) -> u64 {
     result.unwrap_or_else(|e| {
         set_last_error(&e.to_string());
         u64::MAX
@@ -160,7 +160,7 @@ fn created_id(result: grafeo_common::utils::error::Result<u64>) -> u64 {
 
 /// `1` or `0` for a yes-or-no result, or `-1` with the error recorded for
 /// `grafeo_last_error`.
-fn flag(result: grafeo_common::utils::error::Result<bool>) -> i32 {
+pub(crate) fn flag(result: grafeo_common::utils::error::Result<bool>) -> i32 {
     match result {
         Ok(done) => i32::from(done),
         Err(e) => {
@@ -886,7 +886,17 @@ pub extern "C" fn grafeo_get_node(
         return GrafeoStatus::ErrorNullPointer;
     }
     let guard = db.inner.read();
-    match guard.get_node(NodeId::new(id)) {
+    node_out(guard.get_node(NodeId::new(id)), id, out)
+}
+
+/// Hands `node` to the caller through `out` (checked not null), or reports
+/// node `id` as not found.
+pub(crate) fn node_out(
+    node: Option<grafeo_core::graph::lpg::Node>,
+    id: u64,
+    out: *mut *mut GrafeoNode,
+) -> GrafeoStatus {
+    match node {
         Some(node) => {
             let labels: Vec<serde_json::Value> = node
                 .labels
@@ -902,7 +912,7 @@ pub extern "C" fn grafeo_get_node(
                 labels_json,
                 properties_json,
             });
-            // SAFETY: We checked out is not null above.
+            // SAFETY: the caller checked out is not null.
             unsafe { *out = Box::into_raw(gnode) };
             GrafeoStatus::Ok
         }
@@ -1142,7 +1152,17 @@ pub extern "C" fn grafeo_get_edge(
         return GrafeoStatus::ErrorNullPointer;
     }
     let guard = db.inner.read();
-    match guard.get_edge(EdgeId(id)) {
+    edge_out(guard.get_edge(EdgeId(id)), id, out)
+}
+
+/// Hands `edge` to the caller through `out` (checked not null), or reports
+/// edge `id` as not found.
+pub(crate) fn edge_out(
+    edge: Option<grafeo_core::graph::lpg::Edge>,
+    id: u64,
+    out: *mut *mut GrafeoEdge,
+) -> GrafeoStatus {
+    match edge {
         Some(edge) => {
             let edge_type = CString::new(edge.edge_type.to_string()).unwrap_or_default();
             let properties_json = crate::types::properties_to_json(&edge.properties);

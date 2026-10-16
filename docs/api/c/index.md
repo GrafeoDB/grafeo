@@ -439,6 +439,60 @@ if (grafeo_vector_search(db, "Document", "embedding", query_vec, 384, 5, -1, &id
 }
 ```
 
+## Upserts
+
+Create or update nodes and edges by a key property, in one statement each (a row the schema refuses fails the call and writes nothing). Rows go in as a JSON array of objects; the summary comes back as `{"created", "updated", "skipped", "skipped_rows"}` (free with `grafeo_free_string`).
+
+```c
+GrafeoStatus grafeo_upsert_nodes(GrafeoDatabase* db, const char* labels_json, const char* rows_json, const char* options_json, char** out_json);
+GrafeoStatus grafeo_upsert_edges(GrafeoDatabase* db, const char* edge_type, const char* rows_json, const char* options_json, char** out_json);
+```
+
+For nodes, `options_json` is NULL or `{"key": "id", "replace": false}`: a node is matched by the key and all labels; with `replace` its properties become exactly the row's, without the row's are merged in. A row without the key is skipped. For edges, each row names its endpoints in the source and target fields (`src` and `dst`) and holds the edge key; `options_json` sets `key`, `endpoint_key` (the node property the endpoint fields hold, `id`), `endpoint_labels`, `src_field`, `dst_field` and `replace`. A row whose endpoint matches no node or several is skipped; endpoints are never created.
+
+```c
+char* summary;
+grafeo_upsert_nodes(db, "[\"File\"]", "[{\"path\": \"a.rs\", \"size\": 3}]", "{\"key\": \"path\"}", &summary);
+grafeo_free_string(summary);
+```
+
+## Graph Handles
+
+A handle works in one named graph without switching the database's current graph, as `db.graph(name)` does in Python and Rust. `grafeo_graph` returns NULL when the graph does not exist; once it is dropped, every call through the handle fails. The functions work as their database counterparts.
+
+```c
+GrafeoGraph*  grafeo_graph(GrafeoDatabase* db, const char* name);
+void          grafeo_free_graph(GrafeoGraph* graph);
+GrafeoResult* grafeo_graph_execute(GrafeoGraph* graph, const char* query);
+GrafeoResult* grafeo_graph_execute_with_params(GrafeoGraph* graph, const char* query, const char* params_json);
+GrafeoResult* grafeo_graph_execute_language(GrafeoGraph* graph, const char* language, const char* query, const char* params_json);
+uint64_t      grafeo_graph_create_node(GrafeoGraph* graph, const char* labels_json, const char* properties_json);
+uint64_t      grafeo_graph_create_edge(GrafeoGraph* graph, uint64_t source_id, uint64_t target_id, const char* edge_type, const char* properties_json);
+GrafeoStatus  grafeo_graph_get_node(GrafeoGraph* graph, uint64_t id, GrafeoNode** out);
+GrafeoStatus  grafeo_graph_get_edge(GrafeoGraph* graph, uint64_t id, GrafeoEdge** out);
+GrafeoStatus  grafeo_graph_set_node_property(GrafeoGraph* graph, uint64_t id, const char* key, const char* value_json);
+GrafeoStatus  grafeo_graph_set_edge_property(GrafeoGraph* graph, uint64_t id, const char* key, const char* value_json);
+int32_t       grafeo_graph_remove_node_property(GrafeoGraph* graph, uint64_t id, const char* key);
+int32_t       grafeo_graph_remove_edge_property(GrafeoGraph* graph, uint64_t id, const char* key);
+int32_t       grafeo_graph_add_node_label(GrafeoGraph* graph, uint64_t id, const char* label);
+int32_t       grafeo_graph_remove_node_label(GrafeoGraph* graph, uint64_t id, const char* label);
+int32_t       grafeo_graph_delete_node(GrafeoGraph* graph, uint64_t id);
+int32_t       grafeo_graph_detach_delete_node(GrafeoGraph* graph, uint64_t id);
+int32_t       grafeo_graph_delete_edge(GrafeoGraph* graph, uint64_t id);
+GrafeoStatus  grafeo_graph_batch_create_nodes_with_props(GrafeoGraph* graph, const char* labels_json, const char* rows_json, uint64_t** out_ids, size_t* out_count);
+GrafeoStatus  grafeo_graph_batch_create_edges(GrafeoGraph* graph, const char* edges_json, uint64_t** out_ids, size_t* out_count);
+GrafeoStatus  grafeo_graph_upsert_nodes(GrafeoGraph* graph, const char* labels_json, const char* rows_json, const char* options_json, char** out_json);
+GrafeoStatus  grafeo_graph_upsert_edges(GrafeoGraph* graph, const char* edge_type, const char* rows_json, const char* options_json, char** out_json);
+```
+
+```c
+GrafeoGraph* trips = grafeo_graph(db, "trips");
+uint64_t prague = grafeo_graph_create_node(trips, "[\"City\"]", "{\"name\": \"Prague\"}");
+GrafeoResult* r = grafeo_graph_execute(trips, "MATCH (c:City) RETURN c.name");
+grafeo_free_result(r);
+grafeo_free_graph(trips);
+```
+
 ## CDC (Change Data Capture)
 
 Requires the `cdc` feature.

@@ -59,6 +59,7 @@ typedef enum {
 typedef struct GrafeoDatabase    GrafeoDatabase;
 typedef struct GrafeoTransaction GrafeoTransaction;
 typedef struct GrafeoResult      GrafeoResult;
+typedef struct GrafeoGraph       GrafeoGraph;
 typedef struct GrafeoNode        GrafeoNode;
 typedef struct GrafeoEdge        GrafeoEdge;
 typedef struct GrafeoStream      GrafeoStream;
@@ -234,6 +235,42 @@ GrafeoStatus grafeo_batch_create_edges(GrafeoDatabase* db, const char* edges_jso
 GrafeoStatus grafeo_batch_vector_search(GrafeoDatabase* db, const char* label, const char* property,
                                         const float* queries, size_t query_count, size_t dimensions,
                                         size_t k, size_t ef, const char* filters_json, char** out_json);
+
+/* ---- Upserts (one statement each; *out_json: {"created", "updated", "skipped", "skipped_rows"}, free with
+ * grafeo_free_string) ----
+ * Nodes: rows_json is a JSON array of property objects matched by the key and all labels of labels_json;
+ * options_json NULL or {"key": "id", "replace": false}. Edges: rows name their endpoints in the source and target
+ * fields; options_json NULL or {"key", "endpoint_key", "endpoint_labels", "src_field", "dst_field", "replace"}. */
+GrafeoStatus grafeo_upsert_nodes(GrafeoDatabase* db, const char* labels_json, const char* rows_json,
+                                 const char* options_json, char** out_json);
+GrafeoStatus grafeo_upsert_edges(GrafeoDatabase* db, const char* edge_type, const char* rows_json,
+                                 const char* options_json, char** out_json);
+
+/* ---- Graph handles: one named graph without switching the current graph ----
+ * grafeo_graph returns NULL when the graph does not exist; each call fails once it was dropped. The functions
+ * work as their database counterparts. */
+GrafeoGraph*  grafeo_graph(GrafeoDatabase* db, const char* name);
+void          grafeo_free_graph(GrafeoGraph* graph);
+GrafeoResult* grafeo_graph_execute(GrafeoGraph* graph, const char* query);
+GrafeoResult* grafeo_graph_execute_with_params(GrafeoGraph* graph, const char* query, const char* params_json);
+GrafeoResult* grafeo_graph_execute_language(GrafeoGraph* graph, const char* language, const char* query, const char* params_json);
+uint64_t      grafeo_graph_create_node(GrafeoGraph* graph, const char* labels_json, const char* properties_json);
+uint64_t      grafeo_graph_create_edge(GrafeoGraph* graph, uint64_t source_id, uint64_t target_id, const char* edge_type, const char* properties_json);
+GrafeoStatus  grafeo_graph_get_node(GrafeoGraph* graph, uint64_t id, GrafeoNode** out);
+GrafeoStatus  grafeo_graph_get_edge(GrafeoGraph* graph, uint64_t id, GrafeoEdge** out);
+GrafeoStatus  grafeo_graph_set_node_property(GrafeoGraph* graph, uint64_t id, const char* key, const char* value_json);
+GrafeoStatus  grafeo_graph_set_edge_property(GrafeoGraph* graph, uint64_t id, const char* key, const char* value_json);
+int32_t       grafeo_graph_remove_node_property(GrafeoGraph* graph, uint64_t id, const char* key);
+int32_t       grafeo_graph_remove_edge_property(GrafeoGraph* graph, uint64_t id, const char* key);
+int32_t       grafeo_graph_add_node_label(GrafeoGraph* graph, uint64_t id, const char* label);
+int32_t       grafeo_graph_remove_node_label(GrafeoGraph* graph, uint64_t id, const char* label);
+int32_t       grafeo_graph_delete_node(GrafeoGraph* graph, uint64_t id);
+int32_t       grafeo_graph_detach_delete_node(GrafeoGraph* graph, uint64_t id);
+int32_t       grafeo_graph_delete_edge(GrafeoGraph* graph, uint64_t id);
+GrafeoStatus  grafeo_graph_batch_create_nodes_with_props(GrafeoGraph* graph, const char* labels_json, const char* rows_json, uint64_t** out_ids, size_t* out_count);
+GrafeoStatus  grafeo_graph_batch_create_edges(GrafeoGraph* graph, const char* edges_json, uint64_t** out_ids, size_t* out_count);
+GrafeoStatus  grafeo_graph_upsert_nodes(GrafeoGraph* graph, const char* labels_json, const char* rows_json, const char* options_json, char** out_json);
+GrafeoStatus  grafeo_graph_upsert_edges(GrafeoGraph* graph, const char* edge_type, const char* rows_json, const char* options_json, char** out_json);
 
 /* ---- Change data capture (requires cdc; JSON arrays of events, NULL on error, free with grafeo_free_string) ----
  * Each event: entity_id, entity_type ("node"/"edge"), graph, kind ("create"/"update"/"delete"), epoch, timestamp,

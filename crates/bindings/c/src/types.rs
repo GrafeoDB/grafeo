@@ -18,6 +18,16 @@ pub struct GrafeoDatabase {
     pub(crate) inner: Arc<RwLock<GrafeoDB>>,
 }
 
+/// Opaque handle on a named graph of a database (`grafeo_graph`, freed by
+/// `grafeo_free_graph`): queries and direct calls in that graph, without
+/// switching the database's current graph. Each call looks the graph up, so
+/// one dropped meanwhile fails the call.
+pub struct GrafeoGraph {
+    pub(crate) inner: Arc<RwLock<GrafeoDB>>,
+    pub(crate) schema: Option<String>,
+    pub(crate) name: String,
+}
+
 /// Opaque transaction handle. Created by `grafeo_begin_transaction*`, freed by `grafeo_free_transaction`.
 pub struct GrafeoTransaction {
     pub(crate) session: parking_lot::Mutex<Option<grafeo_engine::session::Session>>,

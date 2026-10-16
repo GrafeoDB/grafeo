@@ -28,5 +28,7 @@ mod batch;
 #[cfg(feature = "cdc")]
 mod cdc;
 mod error;
+mod graph;
 mod stream;
 mod types;
+mod upsert;

@@ -208,6 +208,16 @@ Delete a node by ID. Returns `True` if the node existed and was deleted.
 def delete_node(self, id: int) -> bool
 ```
 
+A node that still has edges raises: delete them first, or use `detach_delete_node()`.
+
+### detach_delete_node()
+
+Delete a node with all its edges, as `DETACH DELETE` does. Returns `True` if the node existed. The node and its edges are one change: they commit and roll back together, and change data capture names the node in each edge's `deleted_with`.
+
+```python
+def detach_delete_node(self, id: int) -> bool
+```
+
 ### add_node_label()
 
 Add a label to an existing node. Returns `True` if the label was added, `False` if the node does not exist or already has the label.

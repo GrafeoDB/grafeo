@@ -48,6 +48,11 @@ export declare class GrafeoDB {
   getEdge(id: number): JsEdge | null
   /** Delete a node by ID. Returns true if the node existed. */
   deleteNode(id: number): boolean
+  /**
+   * Delete a node with all its edges, as `DETACH DELETE` does. Returns
+   * true if the node existed; the node and its edges are one change.
+   */
+  detachDeleteNode(id: number): boolean
   /** Delete an edge by ID. Returns true if the edge existed. */
   deleteEdge(id: number): boolean
   /** Set a property on a node. */

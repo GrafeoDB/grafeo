@@ -484,6 +484,15 @@ class GrafeoDB implements Finalizable {
     return result == 1;
   }
 
+  /// Delete node [id] with all its edges, as `DETACH DELETE` does. Returns
+  /// true if the node existed; the node and its edges are one change.
+  bool detachDeleteNode(int id) {
+    _checkOpen();
+    final result = _bindings.grafeoDetachDeleteNode(_handle, id);
+    if (result < 0) throwLastError(_bindings);
+    return result == 1;
+  }
+
   /// Set a property on node [id].
   void setNodeProperty(int id, String key, dynamic value) {
     _checkOpen();

@@ -360,6 +360,17 @@ impl JsGrafeoDB {
         Ok(db.delete_node(node_id).map_err(NodeGrafeoError::from)?)
     }
 
+    /// Delete a node with all its edges, as `DETACH DELETE` does. Returns
+    /// true if the node existed; the node and its edges are one change.
+    #[napi(js_name = "detachDeleteNode")]
+    pub fn detach_delete_node(&self, id: f64) -> Result<bool> {
+        let node_id = validate_node_id(id)?;
+        let db = self.inner.read();
+        Ok(db
+            .detach_delete_node(node_id)
+            .map_err(NodeGrafeoError::from)?)
+    }
+
     /// Delete an edge by ID. Returns true if the edge existed.
     #[napi(js_name = "deleteEdge")]
     pub fn delete_edge(&self, id: f64) -> Result<bool> {
@@ -1799,6 +1810,7 @@ fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::
         "edge_type": event.edge_type,
         "src_id": event.src_id,
         "dst_id": event.dst_id,
+        "deleted_with": event.deleted_with,
     })
 }
 

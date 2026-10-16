@@ -367,6 +367,16 @@ impl PyGraphHandle {
         self.with_graph(|graph| Ok(graph.delete_node(NodeId(id)).map_err(PyGrafeoError::from)?))
     }
 
+    /// Deletes a node with all its edges, as `DETACH DELETE` does; returns
+    /// False if it does not exist.
+    fn detach_delete_node(&self, id: u64) -> PyResult<bool> {
+        self.with_graph(|graph| {
+            Ok(graph
+                .detach_delete_node(NodeId(id))
+                .map_err(PyGrafeoError::from)?)
+        })
+    }
+
     /// Deletes an edge; returns False if it does not exist.
     fn delete_edge(&self, id: u64) -> PyResult<bool> {
         self.with_graph(|graph| Ok(graph.delete_edge(EdgeId(id)).map_err(PyGrafeoError::from)?))

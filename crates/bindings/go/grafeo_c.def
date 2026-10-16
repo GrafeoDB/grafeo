@@ -12,6 +12,7 @@ grafeo_backup_incremental
 grafeo_batch_create_nodes
 grafeo_begin_transaction
 grafeo_begin_transaction_with_isolation
+grafeo_checkpoint_status
 grafeo_clear_error
 grafeo_clear_plan_cache
 grafeo_close
@@ -25,6 +26,7 @@ grafeo_create_vector_index
 grafeo_current_schema
 grafeo_delete_edge
 grafeo_delete_node
+grafeo_detach_delete_node
 grafeo_drop_projection
 grafeo_drop_property_index
 grafeo_drop_vector_index
@@ -88,6 +90,7 @@ grafeo_result_rows_scanned
 grafeo_rollback
 grafeo_save
 grafeo_set_cdc_enabled
+grafeo_set_checkpoint_triggers
 grafeo_set_edge_property
 grafeo_set_node_property
 grafeo_set_schema

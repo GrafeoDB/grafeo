@@ -27,6 +27,23 @@ void _cleanup(String dirPath) {
 }
 
 void main() {
+  group('detach delete (#465)', () {
+    test('detachDeleteNode removes the node with its edges', () {
+      final db = GrafeoDB.memory();
+      db.execute(
+          "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})");
+      final rows = db
+          .execute("MATCH (g:Person {name: 'Gus'}) RETURN id(g) AS id")
+          .rows;
+      final gus = rows.first['id'] as int;
+      expect(db.detachDeleteNode(gus), isTrue);
+      expect(db.nodeCount, 1);
+      expect(db.edgeCount, 0);
+      expect(db.detachDeleteNode(gus), isFalse);
+      db.close();
+    });
+  });
+
   group('automatic checkpoints (#426)', () {
     test('the triggers set on an open database read back', () {
       final (dir, dbPath) = _tempDbPath('triggers.grafeo');

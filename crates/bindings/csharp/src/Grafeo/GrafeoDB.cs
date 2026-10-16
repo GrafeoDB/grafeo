@@ -354,6 +354,19 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         return NativeMethods.grafeo_delete_node(Handle, (ulong)id) == 1;
     }
 
+    /// <summary>
+    /// Delete a node with all its edges, as <c>DETACH DELETE</c> does. Returns true if the node
+    /// existed; the node and its edges are one change.
+    /// </summary>
+    public bool DetachDeleteNode(long id)
+    {
+        ThrowIfDisposed();
+        var result = NativeMethods.grafeo_detach_delete_node(Handle, (ulong)id);
+        if (result < 0)
+            throw GrafeoException.FromLastError();
+        return result == 1;
+    }
+
     /// <summary>Set a property on a node.</summary>
     public void SetNodeProperty(long id, string key, object? value)
     {

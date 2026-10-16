@@ -157,6 +157,7 @@ const char*     grafeo_current_schema(const GrafeoDatabase* db);
 uint64_t     grafeo_create_node(GrafeoDatabase* db, const char* labels_json, const char* properties_json);
 GrafeoStatus grafeo_get_node(GrafeoDatabase* db, uint64_t id, GrafeoNode** out);
 int32_t      grafeo_delete_node(GrafeoDatabase* db, uint64_t id);
+int32_t      grafeo_detach_delete_node(GrafeoDatabase* db, uint64_t id);
 GrafeoStatus grafeo_set_node_property(GrafeoDatabase* db, uint64_t id, const char* key, const char* value_json);
 int32_t      grafeo_remove_node_property(GrafeoDatabase* db, uint64_t id, const char* key);
 int32_t      grafeo_add_node_label(GrafeoDatabase* db, uint64_t id, const char* label);

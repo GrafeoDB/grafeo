@@ -810,6 +810,10 @@ impl DirectCalls<'_> {
         self.write(|writer| writer.delete_node(id, false))
     }
 
+    pub(crate) fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
+        self.write(|writer| writer.delete_node(id, true))
+    }
+
     pub(crate) fn delete_edge(&self, id: EdgeId) -> Result<bool> {
         self.write(|writer| writer.delete_edge(id))
     }

@@ -246,6 +246,12 @@ final class GrafeoBindings {
       Int32 Function(Pointer<Void>, Uint64),
       int Function(Pointer<Void>, int)>('grafeo_delete_node');
 
+  /// Delete a node with all its edges. Returns 1 if deleted, 0 if not found,
+  /// -1 on error.
+  late final grafeoDetachDeleteNode = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(Pointer<Void>, int)>('grafeo_detach_delete_node');
+
   /// Set a property on a node. Returns GrafeoStatus.
   late final grafeoSetNodeProperty = library.lookupFunction<
           Int32 Function(

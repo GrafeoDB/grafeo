@@ -866,6 +866,23 @@ describe('transaction edge cases', () => {
 
 // ── Persistence and checkpoint ──────────────────────────────────────
 
+describe('detach delete (#465)', () => {
+  it('should delete a node with its edges', () => {
+    const db = GrafeoDB.create()
+    const alix = db.createNode(['Person'], { name: 'Alix' })
+    const gus = db.createNode(['Person'], { name: 'Gus' })
+    const vincent = db.createNode(['Person'], { name: 'Vincent' })
+    db.createEdge(alix.id, gus.id, 'KNOWS')
+    db.createEdge(alix.id, vincent.id, 'KNOWS')
+    db.createEdge(vincent.id, gus.id, 'KNOWS')
+    expect(() => db.deleteNode(gus.id)).toThrow()
+    expect(db.detachDeleteNode(gus.id)).toBe(true)
+    expect(db.nodeCount()).toBe(2)
+    expect(db.edgeCount()).toBe(1)
+    expect(db.detachDeleteNode(gus.id)).toBe(false)
+  })
+})
+
 describe('automatic checkpoints (#426)', () => {
   it('should set the triggers on an open database, checkpoint and read them back', async () => {
     const fs = await import('fs')

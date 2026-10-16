@@ -230,6 +230,12 @@ pub struct ChangeEvent {
     /// Edge destination node ID. Present on edge Create and Delete events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dst_id: Option<u64>,
+    /// On an edge Delete event, the node whose detach delete removed the
+    /// edge (`DETACH DELETE`, `GrafeoDB::detach_delete_node`): the node's own
+    /// Delete event follows in the same commit, so a consumer can group a
+    /// cascade by it. `None` for an edge deleted on its own (#465).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_with: Option<u64>,
     /// RDF triple subject (N-Triples encoded). Present only on triple events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub triple_subject: Option<String>,
@@ -414,6 +420,7 @@ impl CdcLog {
             edge_type: None,
             src_id: None,
             dst_id: None,
+            deleted_with: None,
             triple_subject: None,
             triple_predicate: None,
             triple_object: None,
@@ -444,6 +451,7 @@ impl CdcLog {
             edge_type: Some(edge_type),
             src_id: Some(src_id),
             dst_id: Some(dst_id),
+            deleted_with: None,
             triple_subject: None,
             triple_predicate: None,
             triple_object: None,
@@ -477,6 +485,7 @@ impl CdcLog {
             edge_type: None,
             src_id: None,
             dst_id: None,
+            deleted_with: None,
             triple_subject: Some(subject.to_string()),
             triple_predicate: Some(predicate.to_string()),
             triple_object: Some(object.to_string()),
@@ -509,6 +518,7 @@ impl CdcLog {
             edge_type: None,
             src_id: None,
             dst_id: None,
+            deleted_with: None,
             triple_subject: Some(subject.to_string()),
             triple_predicate: Some(predicate.to_string()),
             triple_object: Some(object.to_string()),
@@ -546,6 +556,7 @@ impl CdcLog {
             edge_type: None,
             src_id: None,
             dst_id: None,
+            deleted_with: None,
             triple_subject: None,
             triple_predicate: None,
             triple_object: None,
@@ -573,6 +584,7 @@ impl CdcLog {
             edge_type: None,
             src_id: None,
             dst_id: None,
+            deleted_with: None,
             triple_subject: None,
             triple_predicate: None,
             triple_object: None,
@@ -628,7 +640,9 @@ impl CdcLog {
     }
 
     /// Returns all change events across all entities and graphs in an epoch
-    /// range; each event names its graph.
+    /// range, in commit order (by epoch, then in the order each commit
+    /// applied its writes, which their timestamps follow); each event names
+    /// its graph.
     #[must_use]
     pub fn changes_between(&self, start_epoch: EpochId, end_epoch: EpochId) -> Vec<ChangeEvent> {
         let guard = self.events.read();
@@ -640,7 +654,7 @@ impl CdcLog {
                 }
             }
         }
-        results.sort_by_key(|e| e.epoch);
+        results.sort_by_key(|e| (e.epoch, e.timestamp));
         results
     }
 
@@ -931,6 +945,7 @@ pub(crate) fn events_for_commit(
             edge_type: None,
             src_id: None,
             dst_id: None,
+            deleted_with: None,
             triple_subject: None,
             triple_predicate: None,
             triple_object: None,
@@ -970,6 +985,7 @@ pub(crate) fn events_for_commit(
                 event.src_id = Some(image.src.as_u64());
                 event.dst_id = Some(image.dst.as_u64());
                 event.before = values(&image.properties);
+                event.deleted_with = image.deleted_with.map(|node| node.as_u64());
             }
             (
                 DataOp::SetNodeProperty { key, value, .. }
@@ -1041,6 +1057,7 @@ fn triple_event(
         edge_type: None,
         src_id: None,
         dst_id: None,
+        deleted_with: None,
         triple_subject: Some(subject),
         triple_predicate: Some(predicate),
         triple_object: Some(object),

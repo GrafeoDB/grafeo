@@ -130,6 +130,16 @@ Delete a node by ID. Returns `true` if the node existed.
 deleteNode(id: number): boolean
 ```
 
+A node that still has edges throws: delete them first, or use `detachDeleteNode()`.
+
+### detachDeleteNode()
+
+Delete a node with all its edges, as `DETACH DELETE` does. Returns `true` if the node existed; the node and its edges are one change.
+
+```typescript
+detachDeleteNode(id: number): boolean
+```
+
 ### setNodeProperty()
 
 Set a property on a node.

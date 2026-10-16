@@ -346,6 +346,7 @@ mod tests {
                 dst: NodeId::new(19),
                 edge_type: ArcStr::from("KNOWS"),
                 properties: Vec::new(),
+                deleted_with: None,
             })),
             _ => Before::Absent,
         }

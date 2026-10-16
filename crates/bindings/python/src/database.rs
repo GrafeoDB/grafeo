@@ -1182,6 +1182,17 @@ impl PyGrafeoDB {
         Ok(db.delete_node(NodeId(id)).map_err(PyGrafeoError::from)?)
     }
 
+    /// Delete a node with all its edges, as `DETACH DELETE` does.
+    ///
+    /// Returns False if the node does not exist. The node and its edges are
+    /// one change: they commit and roll back together.
+    fn detach_delete_node(&self, id: u64) -> PyResult<bool> {
+        let db = self.inner.read();
+        Ok(db
+            .detach_delete_node(NodeId(id))
+            .map_err(PyGrafeoError::from)?)
+    }
+
     /// Delete an edge by ID.
     fn delete_edge(&self, id: u64) -> PyResult<bool> {
         let db = self.inner.read();
@@ -4289,6 +4300,13 @@ fn change_event_to_dict(
         "dst_id".to_string(),
         event
             .dst_id
+            .into_py_any(py)
+            .expect("u64 to Python conversion"),
+    );
+    map.insert(
+        "deleted_with".to_string(),
+        event
+            .deleted_with
             .into_py_any(py)
             .expect("u64 to Python conversion"),
     );

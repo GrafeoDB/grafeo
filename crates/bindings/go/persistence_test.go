@@ -156,6 +156,44 @@ func TestMultipleReopenCycles(t *testing.T) {
 	}
 }
 
+func TestDetachDeleteNode(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, query := range []string{
+		"INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})",
+		"MATCH (a:Person {name: 'Alix'}) INSERT (a)-[:KNOWS]->(:Person {name: 'Vincent'})",
+	} {
+		if _, err := db.Execute(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := db.Execute("MATCH (a:Person {name: 'Alix'}) RETURN id(a) AS id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	number, ok := result.Rows[0]["id"].(json.Number)
+	if !ok {
+		t.Fatalf("expected a number id, got %T", result.Rows[0]["id"])
+	}
+	id, err := number.Int64()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DeleteNode(uint64(id)); err == nil {
+		t.Error("expected DeleteNode to refuse a node with edges")
+	}
+	deleted, err := db.DetachDeleteNode(uint64(id))
+	if err != nil || !deleted {
+		t.Fatalf("expected the detach delete to succeed, got %v, %v", deleted, err)
+	}
+	if db.NodeCount() != 2 || db.EdgeCount() != 0 {
+		t.Errorf("expected 2 nodes and no edges, got %d and %d", db.NodeCount(), db.EdgeCount())
+	}
+}
+
 func TestCheckpointTriggersReadBack(t *testing.T) {
 	_, dbPath := tempDbPath(t, "triggers.grafeo")
 

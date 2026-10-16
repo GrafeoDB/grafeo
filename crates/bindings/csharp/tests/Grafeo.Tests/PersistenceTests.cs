@@ -30,6 +30,19 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public void DetachDeleteNodeRemovesItsEdges()
+    {
+        using var db = GrafeoDB.Memory();
+        var alix = db.CreateNode(["Person"]);
+        var gus = db.CreateNode(["Person"]);
+        db.CreateEdge(alix, gus, "KNOWS");
+        Assert.True(db.DetachDeleteNode(gus));
+        Assert.Equal(1L, db.NodeCount);
+        Assert.Equal(0L, db.EdgeCount);
+        Assert.False(db.DetachDeleteNode(gus));
+    }
+
+    [Fact]
     public void CheckpointTriggersReadBack()
     {
         var dbPath = TempDbPath("triggers.grafeo");

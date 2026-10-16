@@ -190,6 +190,8 @@ uint64_t grafeo_create_node(GrafeoDatabase* db, const char* labels_json, const c
 
 /* Returns 1 if deleted, 0 if not found, -1 on null pointer */
 int32_t grafeo_delete_node(GrafeoDatabase* db, uint64_t id);
+/* Deletes the node with all its edges, as DETACH DELETE does; same returns */
+int32_t grafeo_detach_delete_node(GrafeoDatabase* db, uint64_t id);
 ```
 
 `labels_json` is a JSON array of strings (e.g. `"[\"Person\",\"Employee\"]"`). `properties_json` is a JSON object (e.g. `"{\"name\":\"Alix\"}"`), or `NULL` for no properties.

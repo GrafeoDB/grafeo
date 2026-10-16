@@ -176,6 +176,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_delete_node(nint db, ulong id);
 
+    /// <summary>Delete a node with its edges. Returns 1 if deleted, 0 if not found, -1 on error.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_detach_delete_node(nint db, ulong id);
+
     /// <summary>Set a property on a node.</summary>
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int grafeo_set_node_property(nint db, ulong id, string key, string valueJson);

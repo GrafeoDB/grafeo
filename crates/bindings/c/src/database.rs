@@ -873,6 +873,20 @@ pub extern "C" fn grafeo_delete_node(db: *mut GrafeoDatabase, id: u64) -> i32 {
     flag(db.inner.read().delete_node(NodeId::new(id)))
 }
 
+/// Delete a node with all its edges, as `DETACH DELETE` does. Returns 1 if
+/// deleted, 0 if not found, -1 on error. The node and its edges are one
+/// change: they commit and roll back together.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_detach_delete_node(db: *mut GrafeoDatabase, id: u64) -> i32 {
+    if db.is_null() {
+        set_last_error("Null database pointer");
+        return -1;
+    }
+    // SAFETY: Caller guarantees valid pointer.
+    let db = unsafe { &*db };
+    flag(db.inner.read().detach_delete_node(NodeId::new(id)))
+}
+
 /// Set a property on a node. `value_json` is a JSON-encoded value.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_set_node_property(

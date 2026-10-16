@@ -5334,6 +5334,21 @@ impl Session {
         self.write(|writer| writer.delete_node(id, false))
     }
 
+    /// Deletes a node with all its edges, as `DETACH DELETE` does, and
+    /// returns whether the node existed: one change of the write, so the
+    /// node and its edges commit, roll back and replay together. Change data
+    /// capture reports a Delete event per edge, each naming the node in
+    /// `deleted_with`, then the node's.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict with another transaction that writes the
+    /// node or one of its edges, or creates an edge to it.
+    #[cfg(feature = "lpg")]
+    pub fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
+        self.write(|writer| writer.delete_node(id, true))
+    }
+
     /// Deletes an edge and returns whether it existed.
     ///
     /// # Errors

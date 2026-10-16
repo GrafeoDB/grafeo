@@ -91,6 +91,20 @@ func (db *Database) DeleteNode(id uint64) (bool, error) {
 	return result == 1, nil
 }
 
+// DetachDeleteNode deletes a node with all its edges, as DETACH DELETE does.
+// Returns true if the node existed; the node and its edges are one change.
+func (db *Database) DetachDeleteNode(id uint64) (bool, error) {
+	runtime.LockOSThread()
+	result := int(C.grafeo_detach_delete_node(db.handle, C.uint64_t(id)))
+	if result < 0 {
+		err := lastError()
+		runtime.UnlockOSThread()
+		return false, err
+	}
+	runtime.UnlockOSThread()
+	return result == 1, nil
+}
+
 // SetNodeProperty sets a property on a node.
 func (db *Database) SetNodeProperty(id uint64, key string, value any) error {
 	cKey := C.CString(key)

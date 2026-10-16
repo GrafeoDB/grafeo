@@ -316,6 +316,20 @@ impl GraphHandle<'_> {
         self.direct().delete_node(id)
     }
 
+    /// Deletes a node with all its edges, as `DETACH DELETE` does, and
+    /// returns whether the node existed: one change of the write, so the
+    /// node and its edges commit, roll back and replay together. Change data
+    /// capture reports a Delete event per edge, each naming the node in
+    /// `deleted_with`, then the node's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graph no longer exists, and a write conflict
+    /// with a transaction that writes the node or one of its edges.
+    pub fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
+        self.direct().detach_delete_node(id)
+    }
+
     /// Deletes an edge; whether it existed.
     ///
     /// # Errors

@@ -387,6 +387,14 @@ Delete a node by ID. Returns `true` if the node existed.
 bool deleteNode(int id)
 ```
 
+#### detachDeleteNode()
+
+Delete a node with all its edges, as `DETACH DELETE` does. Returns `true` if the node existed; the node and its edges are one change.
+
+```dart
+bool detachDeleteNode(int id)
+```
+
 #### setNodeProperty()
 
 Set a property on a node.

@@ -23,7 +23,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use grafeo_common::change::{DataOp, Labels, Properties, Table};
+use grafeo_common::change::{Before, DataOp, Labels, Properties, Table};
 use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
 use grafeo_common::types::{
     ArcStr, EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, TransactionId, Value,
@@ -685,7 +685,7 @@ impl GraphWriter {
             let outgoing = self.store.edges_from(id, Direction::Outgoing);
             let incoming = self.store.edges_from(id, Direction::Incoming);
             for (_, edge) in outgoing.into_iter().chain(incoming) {
-                self.remove_edge(edge)?;
+                self.remove_edge(edge, Some(id))?;
             }
         } else if self.store.out_degree(id) + self.store.in_degree(id) > 0 {
             let degree = self.connected_edge_count(id);
@@ -894,7 +894,7 @@ impl GraphWriter {
     /// Returns a write conflict.
     pub fn delete_edge(&self, id: EdgeId) -> Result<bool, OperatorError> {
         let _writing = self.write_in_progress();
-        self.remove_edge(id)
+        self.remove_edge(id, None)
     }
 
     // === Bulk creates ===
@@ -1094,10 +1094,30 @@ impl GraphWriter {
 
     /// [`delete_edge`](Self::delete_edge), for a caller whose write is
     /// already in progress.
-    fn remove_edge(&self, id: EdgeId) -> Result<bool, OperatorError> {
+    /// Deletes edge `id`; `deleted_with` names the node whose detach delete
+    /// removes it, which its recorded before-image carries for change data
+    /// capture.
+    fn remove_edge(&self, id: EdgeId, deleted_with: Option<NodeId>) -> Result<bool, OperatorError> {
         self.claim(WriteClaim::Edge(id))?;
         let deleted = match &self.recording {
-            Some(recording) => self.apply_op(recording, DataOp::DeleteEdge { id })?,
+            Some(recording) => {
+                let op = DataOp::DeleteEdge { id };
+                let mut applied = recording
+                    .target
+                    .apply(&op, recording.recorder.writer())
+                    .map_err(store_refused)?;
+                if let (
+                    Some(node),
+                    Applied::Changed {
+                        before: Before::Edge(image),
+                        ..
+                    },
+                ) = (deleted_with, &mut applied)
+                {
+                    image.deleted_with = Some(node);
+                }
+                record_applied(recording, op, applied)?
+            }
             None => self
                 .store
                 .delete_edge_versioned(id, self.epoch(), self.transaction()),

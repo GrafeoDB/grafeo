@@ -542,7 +542,7 @@ fn push_index_on(held: &mut String, label: &str, property: &str) {
 /// Collects all triples from an RDF store into snapshot format.
 #[cfg(feature = "triple-store")]
 fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<SnapshotTriple> {
-    store
+    let mut triples: Vec<SnapshotTriple> = store
         .triples()
         .into_iter()
         .map(|t| SnapshotTriple {
@@ -550,7 +550,12 @@ fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<Snapsho
             predicate: t.predicate().to_string(),
             object: t.object().to_string(),
         })
-        .collect()
+        .collect();
+    // In a fixed order, as the export of the same data gives the same bytes.
+    triples.sort_unstable_by(|a, b| {
+        (&a.subject, &a.predicate, &a.object).cmp(&(&b.subject, &b.predicate, &b.object))
+    });
+    triples
 }
 
 /// The RDF graphs of a snapshot with their terms read: the default graph's
@@ -1176,9 +1181,12 @@ impl super::GrafeoDB {
             collect_snapshot_edges(store),
         );
 
-        // Collect named graphs
+        // Collect named graphs, by name: the export of the same data gives
+        // the same bytes.
         let mut named_graphs: Vec<NamedGraphSnapshot> = Vec::new();
-        for name in store.graph_names() {
+        let mut graph_names = store.graph_names();
+        graph_names.sort_unstable();
+        for name in graph_names {
             if let Some(graph_store) = store.graph(&name) {
                 named_graphs.push(NamedGraphSnapshot {
                     name,
@@ -1195,19 +1203,21 @@ impl super::GrafeoDB {
         let rdf_triples = Vec::new();
 
         #[cfg(feature = "triple-store")]
-        let rdf_named_graphs: Vec<RdfNamedGraphSnapshot> = self
-            .rdf_store
-            .graph_names()
-            .into_iter()
-            .filter_map(|name| {
-                self.rdf_store
-                    .graph(&name)
-                    .map(|graph| RdfNamedGraphSnapshot {
-                        name,
-                        triples: collect_rdf_triples(&graph),
-                    })
-            })
-            .collect();
+        let rdf_named_graphs: Vec<RdfNamedGraphSnapshot> = {
+            let mut names = self.rdf_store.graph_names();
+            names.sort_unstable();
+            names
+        }
+        .into_iter()
+        .filter_map(|name| {
+            self.rdf_store
+                .graph(&name)
+                .map(|graph| RdfNamedGraphSnapshot {
+                    name,
+                    triples: collect_rdf_triples(&graph),
+                })
+        })
+        .collect();
         #[cfg(not(feature = "triple-store"))]
         let rdf_named_graphs = Vec::new();
 

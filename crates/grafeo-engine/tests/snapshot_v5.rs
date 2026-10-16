@@ -102,6 +102,36 @@ fn an_import_keeps_the_whole_catalog() {
     );
 }
 
+/// The export of the same data gives the same bytes: named graphs came in
+/// the order of a hash map, which an import builds anew, so an imported
+/// database exported other bytes than the one it was imported from.
+#[test]
+fn the_export_of_the_same_data_gives_the_same_bytes() {
+    let db = GrafeoDB::new_in_memory();
+    for city in [
+        "amsterdam",
+        "berlin",
+        "paris",
+        "prague",
+        "barcelona",
+        "vienna",
+        "lisbon",
+        "oslo",
+    ] {
+        db.execute(&format!("CREATE GRAPH {city}")).unwrap();
+        let session = db.session();
+        session.use_graph(city);
+        session
+            .execute(&format!("INSERT (:City {{name: '{city}'}})"))
+            .unwrap();
+    }
+    let bytes = db.export_snapshot().unwrap();
+    for round in 0..3 {
+        let imported = GrafeoDB::import_snapshot(&bytes).unwrap();
+        assert_eq!(imported.export_snapshot().unwrap(), bytes, "round {round}");
+    }
+}
+
 /// The definitions version 4 lost do their work after an import: the named
 /// unique constraint refuses a duplicate, the named index can be dropped by
 /// its name, and the text index with options searches.

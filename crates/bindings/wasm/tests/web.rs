@@ -8,6 +8,14 @@ use wasm_bindgen_test::*;
 
 use grafeo_wasm::Database;
 
+/// A JS value as JavaScript code writes it: JSON objects become plain objects
+/// (`serde_wasm_bindgen::to_value` makes them `Map`s, which no caller passes).
+fn to_js<T: serde::Serialize>(
+    value: &T,
+) -> Result<wasm_bindgen::JsValue, serde_wasm_bindgen::Error> {
+    value.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+}
+
 #[wasm_bindgen_test]
 fn test_database_creation() {
     let db = Database::new().expect("should create in-memory database");
@@ -123,7 +131,7 @@ fn lpg_result_counts(result: &wasm_bindgen::JsValue) -> (u32, u32) {
 fn test_import_lpg_basic() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [
             { "labels": ["Person"], "properties": { "name": "Alix", "age": 30 } },
             { "labels": ["Person"], "properties": { "name": "Gus", "age": 25 } }
@@ -146,7 +154,7 @@ fn test_import_lpg_basic() {
 fn test_import_lpg_nodes_only() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [
             { "labels": ["Tag"], "properties": { "name": "rust" } },
             { "labels": ["Tag"], "properties": { "name": "wasm" } },
@@ -166,7 +174,7 @@ fn test_import_lpg_nodes_only() {
 fn test_import_lpg_empty() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": []
     }))
     .unwrap();
@@ -181,7 +189,7 @@ fn test_import_lpg_empty() {
 fn test_import_lpg_no_properties() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [
             { "labels": ["A"] },
             { "labels": ["B"] }
@@ -202,7 +210,7 @@ fn test_import_lpg_no_properties() {
 fn test_import_lpg_multiple_labels() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [
             { "labels": ["Person", "Employee", "Developer"], "properties": { "name": "Alix" } }
         ]
@@ -219,7 +227,7 @@ fn test_import_lpg_multiple_labels() {
 fn test_import_lpg_self_loop() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [{ "labels": ["Node"] }],
         "edges": [{ "source": 0, "target": 0, "type": "SELF" }]
     }))
@@ -235,7 +243,7 @@ fn test_import_lpg_self_loop() {
 fn test_import_lpg_multiple_edges_same_pair() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [
             { "labels": ["Person"], "properties": { "name": "Alix" } },
             { "labels": ["Person"], "properties": { "name": "Gus" } }
@@ -258,7 +266,7 @@ fn test_import_lpg_multiple_edges_same_pair() {
 fn test_import_lpg_edge_source_out_of_bounds() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [{ "labels": ["A"] }],
         "edges": [{ "source": 5, "target": 0, "type": "BAD" }]
     }))
@@ -276,7 +284,7 @@ fn test_import_lpg_edge_source_out_of_bounds() {
 fn test_import_lpg_edge_target_out_of_bounds() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [{ "labels": ["A"] }],
         "edges": [{ "source": 0, "target": 99, "type": "BAD" }]
     }))
@@ -295,7 +303,7 @@ fn test_import_lpg_invalid_shape() {
     let db = Database::new().expect("create db");
 
     // Missing required 'nodes' field
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "edges": []
     }))
     .unwrap();
@@ -309,7 +317,7 @@ fn test_import_lpg_invalid_shape() {
 fn test_import_lpg_queryable_after_import() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [
             { "labels": ["City"], "properties": { "name": "Amsterdam", "population": 905234 } },
             { "labels": ["City"], "properties": { "name": "Berlin", "population": 3748148 } }
@@ -339,7 +347,7 @@ fn test_import_lpg_queryable_after_import() {
 fn test_import_lpg_mixed_property_types() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [{
             "labels": ["Thing"],
             "properties": {
@@ -364,7 +372,7 @@ fn test_import_lpg_incremental() {
     let db = Database::new().expect("create db");
 
     // First batch
-    let data1 = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data1 = to_js(&serde_json::json!({
         "nodes": [
             { "labels": ["Person"], "properties": { "name": "Alix" } }
         ]
@@ -374,7 +382,7 @@ fn test_import_lpg_incremental() {
     assert_eq!(db.node_count(), 1);
 
     // Second batch
-    let data2 = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data2 = to_js(&serde_json::json!({
         "nodes": [
             { "labels": ["Person"], "properties": { "name": "Gus" } }
         ]
@@ -388,7 +396,7 @@ fn test_import_lpg_incremental() {
 fn test_import_lpg_snapshot_roundtrip() {
     let db = Database::new().expect("create db");
 
-    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let data = to_js(&serde_json::json!({
         "nodes": [
             { "labels": ["Person"], "properties": { "name": "Alix" } },
             { "labels": ["Person"], "properties": { "name": "Gus" } }
@@ -785,4 +793,336 @@ fn text_index_options_and_text_search_filters() {
             "{invalid} is refused"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Batches, upserts, write counters and graph handles
+// ---------------------------------------------------------------------------
+
+#[cfg(any(feature = "direct-api", feature = "vector-index"))]
+fn js(value: serde_json::Value) -> wasm_bindgen::JsValue {
+    to_js(&value).unwrap()
+}
+
+fn json(value: &wasm_bindgen::JsValue) -> serde_json::Value {
+    serde_wasm_bindgen::from_value(value.clone()).unwrap()
+}
+
+#[cfg(feature = "direct-api")]
+fn error_text(result: Result<wasm_bindgen::JsValue, wasm_bindgen::JsError>) -> String {
+    let error = wasm_bindgen::JsValue::from(result.expect_err("expected an error"));
+    js_sys::Error::from(error).message().into()
+}
+
+#[cfg(feature = "direct-api")]
+#[wasm_bindgen_test]
+fn test_batch_create_nodes_and_edges() {
+    let db = Database::new().unwrap();
+    let ids = db
+        .batch_create_nodes_with_props(
+            js(serde_json::json!(["Person", "Employee"])),
+            js(serde_json::json!([{ "name": "Alix" }, { "name": "Gus" }])),
+        )
+        .unwrap();
+    let ids: Vec<u64> = serde_wasm_bindgen::from_value(ids).unwrap();
+    assert_eq!(ids.len(), 2);
+    let edge_ids = db
+        .batch_create_edges(js(serde_json::json!([
+            { "src": ids[0], "dst": ids[1], "type": "KNOWS", "properties": { "since": 2020 } },
+            { "src": ids[1], "dst": ids[0], "type": "KNOWS" }
+        ])))
+        .unwrap();
+    assert_eq!(json(&edge_ids).as_array().unwrap().len(), 2);
+    let rows = db
+        .execute(
+            "MATCH (a:Employee {name: 'Alix'})-[k:KNOWS]->(b) RETURN b.name AS b, k.since AS since",
+        )
+        .unwrap();
+    assert_eq!(
+        json(&rows),
+        serde_json::json!([{ "b": "Gus", "since": 2020 }])
+    );
+
+    let missing = db.batch_create_edges(js(serde_json::json!([
+        { "src": ids[0], "dst": 88888, "type": "KNOWS" }
+    ])));
+    assert!(missing.is_err());
+    assert_eq!(db.edge_count(), 2);
+    let fractional = db.batch_create_edges(js(serde_json::json!([
+        { "src": 0.5, "dst": 1, "type": "KNOWS" }
+    ])));
+    assert!(fractional.is_err());
+}
+
+#[cfg(feature = "direct-api")]
+#[wasm_bindgen_test]
+fn test_batches_refuse_an_open_transaction_and_upserts_join_it() {
+    let db = Database::new().unwrap();
+    db.begin_transaction().unwrap();
+    let message = error_text(db.batch_create_nodes_with_props(
+        js(serde_json::json!("Person")),
+        js(serde_json::json!([{ "name": "Vincent" }])),
+    ));
+    assert!(message.contains("commit or roll back"), "{message}");
+
+    let summary = db
+        .upsert_nodes(
+            js(serde_json::json!(["Person"])),
+            js(serde_json::json!([{ "id": "v", "name": "Vincent" }])),
+            wasm_bindgen::JsValue::UNDEFINED,
+        )
+        .unwrap();
+    assert_eq!(json(&summary)["created"], 1);
+    db.rollback_transaction().unwrap();
+    assert_eq!(db.node_count(), 0);
+}
+
+#[cfg(feature = "direct-api")]
+#[wasm_bindgen_test]
+fn test_upserts_create_update_and_skip() {
+    let db = Database::new().unwrap();
+    let created = db
+        .upsert_nodes(
+            js(serde_json::json!(["File"])),
+            js(serde_json::json!([{ "path": "a.rs", "size": 3 }, { "path": "b.rs" }, { "size": 1 }])),
+            js(serde_json::json!({ "key": "path" })),
+        )
+        .unwrap();
+    assert_eq!(
+        json(&created),
+        serde_json::json!({ "created": 2, "updated": 0, "skipped": 1, "skippedRows": [2] })
+    );
+    let updated = db
+        .upsert_nodes(
+            js(serde_json::json!("File")),
+            js(serde_json::json!([{ "path": "a.rs", "size": 19 }])),
+            js(serde_json::json!({ "key": "path" })),
+        )
+        .unwrap();
+    assert_eq!(json(&updated)["updated"], 1);
+    assert_eq!(db.node_count(), 2);
+
+    let edges = db
+        .upsert_edges(
+            "IMPORTS",
+            js(serde_json::json!([
+                { "id": "a-b", "from": "a.rs", "to": "b.rs" },
+                { "id": "a-x", "from": "a.rs", "to": "x.rs" }
+            ])),
+            js(serde_json::json!({
+                "endpointKey": "path", "endpointLabels": ["File"], "srcField": "from", "dstField": "to"
+            })),
+        )
+        .unwrap();
+    assert_eq!(json(&edges)["created"], 1);
+    assert_eq!(json(&edges)["skippedRows"], serde_json::json!([1]));
+    assert_eq!(db.edge_count(), 1);
+}
+
+#[wasm_bindgen_test]
+fn test_raw_results_count_writes() {
+    let db = Database::new().unwrap();
+    let write = db
+        .execute_raw("INSERT (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})")
+        .unwrap();
+    assert_eq!(
+        json(&write)["counters"],
+        serde_json::json!({
+            "nodesCreated": 2, "nodesDeleted": 0, "edgesCreated": 1, "edgesDeleted": 0,
+            "propertiesSet": 2, "labelsAdded": 2, "labelsRemoved": 0
+        })
+    );
+    let read = db.execute_raw("MATCH (p:Person) RETURN p.name").unwrap();
+    assert_eq!(json(&read)["counters"]["nodesCreated"], 0);
+}
+
+#[cfg(feature = "direct-api")]
+#[wasm_bindgen_test]
+fn test_graph_handle_works_in_its_graph() {
+    let db = Database::new().unwrap();
+    db.execute("CREATE GRAPH trips").unwrap();
+    assert!(db.graph("nowhere").is_err());
+
+    let trips = db.graph("trips").unwrap();
+    assert_eq!(trips.name(), "trips");
+    trips
+        .execute("INSERT (:City {name: 'Prague'})-[:ROUTE {km: 350}]->(:City {name: 'Berlin'})")
+        .unwrap();
+    let rows = trips
+        .execute_with_params(
+            "MATCH (c:City {name: $name})-[r:ROUTE]->(d) RETURN d.name AS d, r.km AS km",
+            js(serde_json::json!({ "name": "Prague" })),
+        )
+        .unwrap();
+    assert_eq!(
+        json(&rows),
+        serde_json::json!([{ "d": "Berlin", "km": 350 }])
+    );
+    assert_eq!(db.node_count(), 0);
+
+    let ids = trips
+        .batch_create_nodes_with_props(
+            js(serde_json::json!("City")),
+            js(serde_json::json!([{ "name": "Paris" }, { "name": "Amsterdam" }])),
+        )
+        .unwrap();
+    let ids: Vec<u64> = serde_wasm_bindgen::from_value(ids).unwrap();
+    trips
+        .batch_create_edges(js(
+            serde_json::json!([{ "src": ids[0], "dst": ids[1], "type": "ROUTE" }]),
+        ))
+        .unwrap();
+    let upsert = trips
+        .upsert_nodes(
+            js(serde_json::json!(["City"])),
+            js(serde_json::json!([{ "name": "Prague", "country": "CZ" }])),
+            js(serde_json::json!({ "key": "name" })),
+        )
+        .unwrap();
+    assert_eq!(json(&upsert)["updated"], 1);
+    let raw = trips
+        .execute_raw("MATCH (c:City) RETURN count(c) AS n")
+        .unwrap();
+    assert_eq!(json(&raw)["rows"], serde_json::json!([[4]]));
+
+    db.begin_transaction().unwrap();
+    let message = error_text(trips.execute("MATCH (c:City) RETURN c"));
+    assert!(message.contains("commit or roll back"), "{message}");
+    db.rollback_transaction().unwrap();
+
+    db.execute("DROP GRAPH trips").unwrap();
+    assert!(trips.execute("RETURN 1").is_err());
+    db.close();
+    let message = error_text(trips.execute("RETURN 1"));
+    assert!(message.contains("closed"), "{message}");
+}
+
+#[cfg(feature = "vector-index")]
+#[wasm_bindgen_test]
+fn test_batch_vector_search_answers_each_query() {
+    let db = Database::new().unwrap();
+    db.execute("INSERT (:Doc {topic: 'a', e: vector([1.0, 0.0])}), (:Doc {topic: 'b', e: vector([0.0, 1.0])})")
+        .unwrap();
+    db.create_vector_index(
+        "Doc",
+        "e",
+        js(serde_json::json!({ "dimensions": 2, "metric": "cosine" })),
+    )
+    .unwrap();
+    let topic = |hit: &serde_json::Value| {
+        let rows = db
+            .execute_with_params(
+                "MATCH (d:Doc) WHERE id(d) = $id RETURN d.topic AS t",
+                js(serde_json::json!({ "id": hit["id"] })),
+            )
+            .unwrap();
+        json(&rows)[0]["t"].clone()
+    };
+
+    let results = db
+        .batch_vector_search(
+            "Doc",
+            "e",
+            js(serde_json::json!([[1.0, 0.0], [0.0, 1.0]])),
+            1,
+            wasm_bindgen::JsValue::UNDEFINED,
+        )
+        .unwrap();
+    let results = json(&results);
+    assert_eq!(results.as_array().unwrap().len(), 2);
+    assert_eq!(topic(&results[0][0]), "a");
+    assert_eq!(topic(&results[1][0]), "b");
+
+    let filtered = db
+        .batch_vector_search(
+            "Doc",
+            "e",
+            js(serde_json::json!([[1.0, 0.0]])),
+            2,
+            js(serde_json::json!({ "filters": { "topic": "b" } })),
+        )
+        .unwrap();
+    let filtered = json(&filtered);
+    assert_eq!(filtered[0].as_array().unwrap().len(), 1);
+    assert_eq!(topic(&filtered[0][0]), "b");
+}
+
+#[cfg(feature = "lpg-model")]
+#[wasm_bindgen_test]
+fn test_get_node_edges_by_direction_type_and_transaction() {
+    let db = Database::new().unwrap();
+    db.execute(
+        "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(g:Person {name: 'Gus'}), \
+         (g)-[:WORKS_WITH]->(a), (a)-[:NOTE]->(a)",
+    )
+    .unwrap();
+    let id_of = |name: &str| {
+        let rows = db
+            .execute(&format!(
+                "MATCH (p:Person {{name: '{name}'}}) RETURN id(p) AS id"
+            ))
+            .unwrap();
+        json(&rows)[0]["id"].as_u64().unwrap()
+    };
+    let (alix, gus) = (id_of("Alix"), id_of("Gus"));
+    let neighbors = |id: u64, options: serde_json::Value| -> Vec<u64> {
+        let mut found: Vec<u64> = json(
+            &db.get_node_edges(id as f64, to_js(&options).unwrap())
+                .unwrap(),
+        )
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pair| pair[0].as_u64().unwrap())
+        .collect();
+        found.sort_unstable();
+        found
+    };
+
+    assert_eq!(neighbors(alix, serde_json::json!(null)), {
+        let mut v = vec![gus, alix];
+        v.sort_unstable();
+        v
+    });
+    assert_eq!(neighbors(alix, serde_json::json!({ "direction": "in" })), {
+        let mut v = vec![gus, alix];
+        v.sort_unstable();
+        v
+    });
+    // Both directions list the self-loop once.
+    assert_eq!(
+        neighbors(alix, serde_json::json!({ "direction": "both" })).len(),
+        3
+    );
+    assert_eq!(
+        neighbors(
+            alix,
+            serde_json::json!({ "direction": "both", "edgeTypes": ["KNOWS"] })
+        ),
+        vec![gus]
+    );
+    assert!(
+        db.get_node_edges(
+            alix as f64,
+            to_js(&serde_json::json!({ "direction": "up" })).unwrap()
+        )
+        .is_err()
+    );
+    assert!(
+        db.get_node_edges(0.5, wasm_bindgen::JsValue::UNDEFINED)
+            .is_err()
+    );
+
+    db.begin_transaction().unwrap();
+    db.execute("MATCH (g:Person {name: 'Gus'}) INSERT (g)-[:KNOWS]->(:Person {name: 'Mia'})")
+        .unwrap();
+    assert_eq!(
+        neighbors(gus, serde_json::json!({ "edgeTypes": ["KNOWS"] })).len(),
+        1
+    );
+    db.rollback_transaction().unwrap();
+    assert_eq!(
+        neighbors(gus, serde_json::json!({ "edgeTypes": ["KNOWS"] })),
+        Vec::<u64>::new()
+    );
 }

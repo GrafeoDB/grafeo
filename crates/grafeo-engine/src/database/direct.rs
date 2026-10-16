@@ -50,7 +50,7 @@ use grafeo_core::execution::operators::{
 };
 use grafeo_core::graph::apply::{ChangeTarget, Writer};
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
-use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
+use grafeo_core::graph::{Direction, GraphStoreMut, GraphStoreSearch};
 
 use super::GrafeoDB;
 use crate::catalog::CatalogConstraintValidator;
@@ -848,6 +848,66 @@ impl DirectCalls<'_> {
         let epoch = self.db.read_epoch();
         Ok(self.store()?.get_edge_at_epoch(id, epoch))
     }
+
+    pub(crate) fn get_node_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[&str],
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        let epoch = self.db.read_epoch();
+        let store = self.store()?;
+        let node_visible = store.is_node_visible_at_epoch(node, epoch);
+        Ok(node_edges(
+            &*store,
+            node,
+            direction,
+            edge_types,
+            node_visible,
+            |edge| store.is_edge_visible_at_epoch(edge, epoch),
+            |edge| store.edge_type(edge),
+        ))
+    }
+}
+
+/// The edges of `node` in `direction` that `edge_visible` lets through, as
+/// `(neighbor, edge)` pairs, only those whose `edge_type` is one of
+/// `edge_types` unless it is empty; none when the node is not visible.
+/// `Direction::Both` lists a self-loop once. The reader's `edge_type` must see
+/// what `edge_visible` lets through (a transaction's own edges included).
+pub(crate) fn node_edges(
+    store: &dyn GraphStoreSearch,
+    node: NodeId,
+    direction: Direction,
+    edge_types: &[&str],
+    node_visible: bool,
+    edge_visible: impl Fn(EdgeId) -> bool,
+    edge_type: impl Fn(EdgeId) -> Option<ArcStr>,
+) -> Vec<(NodeId, EdgeId)> {
+    if !node_visible {
+        return Vec::new();
+    }
+    let mut edges = match direction {
+        Direction::Both => {
+            let mut edges = store.edges_from(node, Direction::Outgoing);
+            // A self-loop is in both lists; keep its outgoing entry.
+            edges.extend(
+                store
+                    .edges_from(node, Direction::Incoming)
+                    .into_iter()
+                    .filter(|&(neighbor, _)| neighbor != node),
+            );
+            edges
+        }
+        _ => store.edges_from(node, direction),
+    };
+    edges.retain(|&(_, edge)| {
+        edge_visible(edge)
+            && (edge_types.is_empty()
+                || edge_type(edge)
+                    .is_some_and(|edge_type| edge_types.contains(&edge_type.as_str())))
+    });
+    edges
 }
 
 // === The writes of the direct API, shared with `Session` ===

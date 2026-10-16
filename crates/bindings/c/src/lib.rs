@@ -27,6 +27,7 @@ mod database;
 mod batch;
 #[cfg(feature = "cdc")]
 mod cdc;
+mod edges;
 mod error;
 mod graph;
 mod stream;

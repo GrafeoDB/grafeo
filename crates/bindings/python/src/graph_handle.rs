@@ -283,6 +283,27 @@ impl PyGraphHandle {
         self.with_graph(|graph| crate::direct::upsert_edges(py, graph, edge_type, rows, &options))
     }
 
+    /// The edges of a node of this graph as ``(neighbor_id, edge_id)`` tuples,
+    /// like ``GrafeoDB.get_node_edges``; raises if the graph no longer exists.
+    #[pyo3(signature = (node_id, direction="out", edge_types=None))]
+    fn get_node_edges(
+        &self,
+        node_id: u64,
+        direction: &str,
+        edge_types: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<(u64, u64)>> {
+        let direction = direct::direction(direction)?;
+        let edge_types = direct::edge_types(edge_types)?;
+        let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
+        self.with_graph(|graph| {
+            Ok(direct::edge_pairs(
+                graph
+                    .get_node_edges(NodeId(node_id), direction, &edge_types)
+                    .map_err(PyGrafeoError::from)?,
+            ))
+        })
+    }
+
     /// Gets a node by ID, or None.
     fn get_node(&self, id: u64) -> PyResult<Option<PyNode>> {
         self.with_graph(|graph| {

@@ -66,6 +66,7 @@ grafeo_free_transaction
 grafeo_free_vector_results
 grafeo_get_edge
 grafeo_get_node
+grafeo_get_node_edges
 grafeo_get_node_labels
 grafeo_graph
 grafeo_graph_add_node_label
@@ -81,6 +82,7 @@ grafeo_graph_execute_language
 grafeo_graph_execute_with_params
 grafeo_graph_get_edge
 grafeo_graph_get_node
+grafeo_graph_get_node_edges
 grafeo_graph_remove_edge_property
 grafeo_graph_remove_node_label
 grafeo_graph_remove_node_property

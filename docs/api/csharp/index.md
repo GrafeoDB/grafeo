@@ -198,6 +198,7 @@ bool deleted = db.DeleteEdge(edgeId);
 | `CreateEdge(long sourceId, long targetId, string edgeType, Dictionary<string, object?>? properties = null)` | `long` | Create an edge, returns the new edge ID |
 | `GetEdge(long id)` | `Edge?` | Get an edge by ID, or `null` if not found |
 | `DeleteEdge(long id)` | `bool` | Delete an edge, returns `true` if deleted |
+| `GetNodeEdges(long nodeId, Direction direction = Direction.Out, IEnumerable<string>? edgeTypes = null)` | `IReadOnlyList<NodeEdge>` | A node's edges without a query, as `(NeighborId, EdgeId)`; `Direction.Both` lists a self-loop once |
 | `SetEdgeProperty(long id, string key, object? value)` | `void` | Set a property on an edge |
 | `RemoveEdgeProperty(long id, string key)` | `bool` | Remove a property, returns `true` if removed |
 

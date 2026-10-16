@@ -102,6 +102,10 @@ db.SetEdgeProperty(eid, "weight", 0.5)
 
 db.DeleteNode(id)
 db.DeleteEdge(eid)
+
+// A node's edges without a query: DirectionOut, DirectionIn or DirectionBoth (a self-loop once),
+// optionally of some types; each NodeEdge has NeighborID and EdgeID
+edges, err := db.GetNodeEdges(id, grafeo.DirectionOut, "KNOWS")
 ```
 
 ## Batches and Upserts

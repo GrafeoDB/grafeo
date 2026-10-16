@@ -354,6 +354,14 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_wal_checkpoint(nint db);
 
+    /// <summary>Set the automatic checkpoint triggers (0 turns one off).</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_set_checkpoint_triggers(nint db, ulong intervalMs, ulong walBytes);
+
+    /// <summary>Automatic checkpoint status as JSON. Caller must free with grafeo_free_string.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_checkpoint_status(nint db);
+
     /// <summary>Clear all cached query plans.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_clear_plan_cache(nint db);

@@ -622,4 +622,14 @@ final class GrafeoBindings {
   late final grafeoWalCheckpoint = library.lookupFunction<
       Int32 Function(Pointer<Void>),
       int Function(Pointer<Void>)>('grafeo_wal_checkpoint');
+
+  /// Set the automatic checkpoint triggers (0 turns one off). Returns GrafeoStatus.
+  late final grafeoSetCheckpointTriggers = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64, Uint64),
+      int Function(Pointer<Void>, int, int)>('grafeo_set_checkpoint_triggers');
+
+  /// Automatic checkpoint status as JSON. Caller must free with grafeoFreeString.
+  late final grafeoCheckpointStatus = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>),
+      Pointer<Utf8> Function(Pointer<Void>)>('grafeo_checkpoint_status');
 }

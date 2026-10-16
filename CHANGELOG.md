@@ -9,6 +9,7 @@ Changes since 0.6.0-beta.1.
 ### Added
 
 - **Rust: `GrafeoDB::set_stored_config`** changes the configuration a database file stores (see Fixed), checkpointing at once. **`Config` getters** for every setting (`config.memory_limit()`, `config.wal_durability()` and so on), and the builders `with_wal()` and `without_schema_constraints()`.
+- **Automatic checkpoints by WAL size and interval in every binding** ([#426](https://github.com/GrafeoDB/grafeo/issues/426)): `set_checkpoint_triggers` on an open database (Rust, Python, Node.js `setCheckpointTriggers`, C `grafeo_set_checkpoint_triggers`, Go, C#, Dart) and `Config::with_checkpoint_wal_size` checkpoint once the WAL holds the given bytes since the last checkpoint, and every given interval. Off by default, for the open database only. `checkpoint_status()` reports the triggers, the last checkpoint and the automatic checkpoints that failed since the last that succeeded, with the last error; a failure is logged and retried after a pause, where the periodic checkpoint printed it to stderr and tried again at the next interval.
 - **Salvaging a damaged WAL at an open**: `Config::with_wal_salvage()`, Python `GrafeoDB(path, wal_salvage=True)`, Node.js `GrafeoDB.create(path, { walSalvage: true })` (see Fixed).
 
 ### Changed

@@ -1084,6 +1084,26 @@ wal = db.wal_status()
 print(f"WAL size: {wal['size_bytes']} bytes")
 ```
 
+### set_checkpoint_triggers()
+
+Let the database checkpoint by itself: every `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes since the last checkpoint. Call it without arguments to turn automatic checkpoints off (the default). For this open only; an in-memory or read-only database raises.
+
+```python
+def set_checkpoint_triggers(self, interval_secs: Optional[float] = None, wal_bytes: Optional[int] = None) -> None
+```
+
+```python
+db.set_checkpoint_triggers(interval_secs=300, wal_bytes=64 * 1024 * 1024)
+```
+
+### checkpoint_status()
+
+How the automatic checkpoints fare. Returns a dict with keys: `interval_secs` and `wal_bytes` (the triggers, `None` when off), `last_checkpoint` (Unix seconds of the last checkpoint of any kind), `failures` (automatic checkpoints that failed since the last that succeeded), `last_error`, `last_failure` and `stopped` (no automatic checkpoint can succeed until a reopen). A failed automatic checkpoint is also logged and retried after a pause.
+
+```python
+def checkpoint_status(self) -> Dict[str, Any]
+```
+
 ### save()
 
 Save the database to a file path. For in-memory databases, creates a new persistent copy. For file-backed databases, creates a copy at the new path. The copy is a single file, whatever the extension of the path, and `save()` fails if the path already exists. The original database remains unchanged.

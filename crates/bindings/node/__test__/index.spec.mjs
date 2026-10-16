@@ -866,6 +866,45 @@ describe('transaction edge cases', () => {
 
 // ── Persistence and checkpoint ──────────────────────────────────────
 
+describe('automatic checkpoints (#426)', () => {
+  it('should set the triggers on an open database, checkpoint and read them back', async () => {
+    const fs = await import('fs')
+    const os = await import('os')
+    const path = await import('path')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grafeo-triggers-'))
+    const db = GrafeoDB.create(path.join(dir, 'paris.grafeo'))
+
+    let status = db.checkpointStatus()
+    expect(status.intervalMs).toBeUndefined()
+    expect(status.walBytes).toBeUndefined()
+    expect(status.failures).toBe(0)
+    expect(status.stopped).toBe(false)
+
+    db.createNode(['Person'], { name: 'Gus' })
+    db.setCheckpointTriggers({ intervalMs: 300, walBytes: 64 * 1024 * 1024 })
+    status = db.checkpointStatus()
+    expect(status.intervalMs).toBe(300)
+    expect(status.walBytes).toBe(64 * 1024 * 1024)
+
+    const deadline = Date.now() + 10000
+    while (db.checkpointStatus().lastCheckpoint === undefined && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    expect(db.checkpointStatus().lastCheckpoint).toBeDefined()
+
+    db.setCheckpointTriggers({})
+    expect(db.checkpointStatus().intervalMs).toBeUndefined()
+    db.close()
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
+  })
+
+  it('should refuse triggers where nothing checkpoints, and fractions', () => {
+    const db = GrafeoDB.create()
+    expect(() => db.setCheckpointTriggers({ walBytes: 1024 })).toThrow(/nothing to checkpoint/)
+    expect(() => db.setCheckpointTriggers({ intervalMs: 1.5 })).toThrow(/whole number/)
+  })
+})
+
 describe('persistence and checkpoint', () => {
   it('should checkpoint and reopen with data intact', async () => {
     const fs = await import('fs')

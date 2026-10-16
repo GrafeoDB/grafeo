@@ -2079,6 +2079,61 @@ pub extern "C" fn grafeo_restore_to_epoch(
     }
 }
 
+/// Set when the database checkpoints by itself: every `interval_ms`
+/// milliseconds, and once the WAL holds `wal_bytes` bytes since the last
+/// checkpoint. 0 turns a trigger off; both 0 turn automatic checkpoints off
+/// (the default). For this open only. Fails for a database in memory or
+/// opened read-only.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_set_checkpoint_triggers(
+    db: *mut GrafeoDatabase,
+    interval_ms: u64,
+    wal_bytes: u64,
+) -> GrafeoStatus {
+    let db = db_ref!(db);
+    let mut triggers = grafeo_engine::admin::CheckpointTriggers::none();
+    if interval_ms > 0 {
+        triggers = triggers.with_interval(std::time::Duration::from_millis(interval_ms));
+    }
+    if wal_bytes > 0 {
+        triggers = triggers.with_wal_bytes(wal_bytes);
+    }
+    match db.inner.read().set_checkpoint_triggers(triggers) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(e) => set_error(&e),
+    }
+}
+
+/// How the automatic checkpoints fare, as a JSON string: `interval_ms` and
+/// `wal_bytes` (the triggers, null when off), `last_checkpoint` (Unix
+/// seconds), `failures` (automatic ones that failed since the last that
+/// succeeded), `last_error`, `last_failure` and `stopped`. Caller must free
+/// with `grafeo_free_string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_checkpoint_status(db: *mut GrafeoDatabase) -> *mut c_char {
+    if db.is_null() {
+        set_last_error("Null database pointer");
+        return std::ptr::null_mut();
+    }
+    // SAFETY: Caller guarantees valid pointer.
+    let db = unsafe { &*db };
+    let status = db.inner.read().checkpoint_status();
+    let json = serde_json::json!({
+        "interval_ms": status
+            .triggers
+            .interval
+            .map(|interval| u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)),
+        "wal_bytes": status.triggers.wal_bytes,
+        "last_checkpoint": status.last_checkpoint,
+        "failures": status.failures,
+        "last_error": status.last_error,
+        "last_failure": status.last_failure,
+        "stopped": status.stopped,
+    });
+    let s = serde_json::to_string(&json).unwrap_or_default();
+    CString::new(s).map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
 /// Trigger a WAL checkpoint.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_wal_checkpoint(db: *mut GrafeoDatabase) -> GrafeoStatus {

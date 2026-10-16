@@ -677,6 +677,22 @@ Force a write-ahead log checkpoint, flushing buffered writes to the main data fi
 void walCheckpoint()
 ```
 
+#### setCheckpointTriggers()
+
+Let the database checkpoint by itself: every `interval`, and once the WAL holds `walBytes` bytes since the last checkpoint. Leave both out to turn automatic checkpoints off (the default). For this open only; an in-memory or read-only database refuses them.
+
+```dart
+void setCheckpointTriggers({Duration? interval, int? walBytes})
+```
+
+#### checkpointStatus()
+
+How the automatic checkpoints fare: `interval_ms` and `wal_bytes` (the triggers, null when off), `last_checkpoint`, `failures` (automatic checkpoints that failed since the last that succeeded), `last_error`, `last_failure` and `stopped`.
+
+```dart
+Map<String, dynamic> checkpointStatus()
+```
+
 ## Transaction
 
 An ACID transaction on a Grafeo database. Obtain via `GrafeoDB.beginTransaction()` or `GrafeoDB.beginTransactionWithIsolation()`. Must be explicitly committed or rolled back. If dropped without either, the Rust Drop implementation performs an automatic rollback.

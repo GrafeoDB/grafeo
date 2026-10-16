@@ -636,6 +636,7 @@ impl CatalogSection {
 /// # Errors
 ///
 /// The errors of reading the section's records.
+#[cfg(feature = "grafeo-file")]
 pub(crate) fn read_stored_config(
     source: &dyn SectionSource,
 ) -> Result<Option<grafeo_common::storage::catalog_record::StoredConfigRecord>> {

@@ -30,6 +30,37 @@ public sealed class PersistenceTests
     }
 
     [Fact]
+    public void CheckpointTriggersReadBack()
+    {
+        var dbPath = TempDbPath("triggers.grafeo");
+        try
+        {
+            using var db = GrafeoDB.Open(dbPath);
+            db.SetCheckpointTriggers(TimeSpan.FromMilliseconds(300), 64UL << 20);
+            var status = db.CheckpointStatus();
+            Assert.Equal(300L, Convert.ToInt64(status["interval_ms"]));
+            Assert.Equal(64L << 20, Convert.ToInt64(status["wal_bytes"]));
+            Assert.Equal(0L, Convert.ToInt64(status["failures"]));
+
+            db.SetCheckpointTriggers();
+            status = db.CheckpointStatus();
+            Assert.Null(status["interval_ms"]);
+            Assert.Null(status["wal_bytes"]);
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
+    [Fact]
+    public void CheckpointTriggersRefusedInMemory()
+    {
+        using var db = GrafeoDB.Memory();
+        Assert.ThrowsAny<GrafeoException>(() => db.SetCheckpointTriggers(walBytes: 1024));
+    }
+
+    [Fact]
     public void CreateAndReopen()
     {
         var dbPath = TempDbPath("reopen.grafeo");

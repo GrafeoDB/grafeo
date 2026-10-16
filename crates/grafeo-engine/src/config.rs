@@ -648,6 +648,9 @@ pub struct Config {
     /// Whether an open that finds damage in the WAL keeps the commits before
     /// it instead of failing (see [`Config::with_wal_salvage`]).
     wal_salvage: bool,
+    /// Checkpoint once the WAL holds this many bytes since the last
+    /// checkpoint (see [`Config::with_checkpoint_wal_size`]).
+    checkpoint_wal_size: Option<u64>,
     /// The settings a builder set: they win over the values a database file
     /// stores (see `GrafeoDB::open`), where a default does not.
     set: SetFields,
@@ -672,6 +675,7 @@ impl SetFields {
         self.0 |= field.0;
     }
 
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     fn contains(self, field: Self) -> bool {
         self.0 & field.0 == field.0
     }
@@ -810,6 +814,7 @@ impl Default for Config {
             #[cfg(feature = "encryption")]
             encryption: None,
             wal_salvage: false,
+            checkpoint_wal_size: None,
             set: SetFields::default(),
         }
     }
@@ -1199,13 +1204,25 @@ impl Config {
         )
     }
 
-    /// Sets the automatic checkpoint interval.
-    ///
-    /// When set, the engine periodically flushes dirty sections to disk.
-    /// Typical values: 30-300 seconds.
+    /// Sets the automatic checkpoint interval: the database checkpoints by
+    /// itself when this long has passed since its last automatic checkpoint.
+    /// Typical values: 30-300 seconds. Off by default; see
+    /// [`CheckpointTriggers`](crate::admin::CheckpointTriggers), and
+    /// `GrafeoDB::set_checkpoint_triggers` to change it on an open database.
     #[must_use]
     pub fn with_checkpoint_interval(mut self, interval: Duration) -> Self {
         self.checkpoint_interval = Some(interval);
+        self
+    }
+
+    /// Checkpoints once the WAL holds `bytes` since the last checkpoint,
+    /// which bounds the log a reopen replays (DuckDB's
+    /// `checkpoint_threshold` is 16 MiB). Off by default; see
+    /// [`CheckpointTriggers`](crate::admin::CheckpointTriggers). Without a
+    /// WAL it never fires.
+    #[must_use]
+    pub fn with_checkpoint_wal_size(mut self, bytes: u64) -> Self {
+        self.checkpoint_wal_size = Some(bytes);
         self
     }
 
@@ -1376,6 +1393,22 @@ impl Config {
         self.checkpoint_interval
     }
 
+    /// The WAL size that starts an automatic checkpoint (see
+    /// [`with_checkpoint_wal_size`](Self::with_checkpoint_wal_size)).
+    #[must_use]
+    pub fn checkpoint_wal_size(&self) -> Option<u64> {
+        self.checkpoint_wal_size
+    }
+
+    /// The automatic checkpoint triggers this configuration sets.
+    #[must_use]
+    pub fn checkpoint_triggers(&self) -> crate::admin::CheckpointTriggers {
+        let mut triggers = crate::admin::CheckpointTriggers::none();
+        triggers.interval = self.checkpoint_interval;
+        triggers.wal_bytes = self.checkpoint_wal_size;
+        triggers
+    }
+
     /// The encryption at rest, when the database is encrypted.
     #[cfg(feature = "encryption")]
     #[must_use]
@@ -1383,7 +1416,9 @@ impl Config {
         self.encryption.as_ref()
     }
 
-    /// Whether a builder set `field` (see [`SetFields`]).
+    /// Whether a builder set `field` (see [`SetFields`]): what a database
+    /// file stores yields to it.
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     #[must_use]
     pub(crate) fn was_set(&self, field: SetFields) -> bool {
         self.set.contains(field)
@@ -1935,6 +1970,7 @@ mod tests {
             .with_cdc()
             .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
             .with_checkpoint_interval(Duration::from_secs(88))
+            .with_checkpoint_wal_size(19 * 1024 * 1024)
             .with_wal_salvage();
         #[cfg(feature = "cdc")]
         let config = config.with_cdc_retention(
@@ -1979,9 +2015,12 @@ mod tests {
             #[cfg(feature = "encryption")]
             encryption,
             wal_salvage,
+            checkpoint_wal_size,
             // What the builders set: see the stored-configuration tests.
             set: _,
         } = config;
+
+        assert_eq!(checkpoint_wal_size, Some(19 * 1024 * 1024));
 
         assert!(wal_salvage, "with_wal_salvage salvages at this open");
 

@@ -2544,6 +2544,73 @@ impl PyGrafeoDB {
         Ok(dict.into())
     }
 
+    /// Sets when the database checkpoints by itself: every
+    /// `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes
+    /// since the last checkpoint. Leave both out to turn automatic
+    /// checkpoints off (the default). For this open only.
+    ///
+    /// Raises for a database in memory or opened read-only, which never
+    /// checkpoint, and for a zero value.
+    ///
+    /// Example:
+    ///     db.set_checkpoint_triggers(interval_secs=60, wal_bytes=64 * 1024 * 1024)
+    #[pyo3(signature = (interval_secs=None, wal_bytes=None))]
+    fn set_checkpoint_triggers(
+        &self,
+        interval_secs: Option<f64>,
+        wal_bytes: Option<u64>,
+    ) -> PyResult<()> {
+        let mut triggers = grafeo_engine::admin::CheckpointTriggers::none();
+        if let Some(seconds) = interval_secs {
+            let interval = std::time::Duration::try_from_secs_f64(seconds).map_err(|e| {
+                PyGrafeoError::InvalidArgument(format!("interval_secs {seconds}: {e}"))
+            })?;
+            triggers = triggers.with_interval(interval);
+        }
+        if let Some(bytes) = wal_bytes {
+            triggers = triggers.with_wal_bytes(bytes);
+        }
+        let db = self.inner.read();
+        db.set_checkpoint_triggers(triggers)
+            .map_err(PyGrafeoError::from)?;
+        Ok(())
+    }
+
+    /// How the automatic checkpoints fare.
+    ///
+    /// Returns:
+    ///     dict with keys: interval_secs, wal_bytes (the triggers, None when
+    ///     off), last_checkpoint (Unix seconds of the last checkpoint of any
+    ///     kind), failures (automatic ones that failed since the last that
+    ///     succeeded), last_error, last_failure (Unix seconds), stopped
+    ///     (no automatic checkpoint can succeed until a reopen)
+    ///
+    /// Example:
+    ///     status = db.checkpoint_status()
+    ///     if status["failures"]:
+    ///         print(status["last_error"])
+    fn checkpoint_status(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let db = self.inner.read();
+        let status = db.checkpoint_status();
+
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item(
+            "interval_secs",
+            status
+                .triggers
+                .interval
+                .map(|interval| interval.as_secs_f64()),
+        )?;
+        dict.set_item("wal_bytes", status.triggers.wal_bytes)?;
+        dict.set_item("last_checkpoint", status.last_checkpoint)?;
+        dict.set_item("failures", status.failures)?;
+        dict.set_item("last_error", status.last_error)?;
+        dict.set_item("last_failure", status.last_failure)?;
+        dict.set_item("stopped", status.stopped)?;
+
+        Ok(dict.into())
+    }
+
     /// Forces a WAL checkpoint.
     ///
     /// Flushes all pending WAL records to the main storage.

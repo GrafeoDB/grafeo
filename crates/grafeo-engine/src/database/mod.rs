@@ -187,10 +187,18 @@ pub struct GrafeoDB {
     /// Single-file database manager (when using `.grafeo` format).
     #[cfg(feature = "grafeo-file")]
     pub(super) file_manager: Option<Arc<GrafeoFileManager>>,
-    /// Periodic checkpoint timer (when `checkpoint_interval` is configured).
-    /// Wrapped in Mutex because `close()` takes `&self` but needs to stop the timer.
+    /// The automatic checkpointer (when a trigger is set). Wrapped in Mutex
+    /// because `close()` takes `&self` but needs to stop it.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     checkpoint_timer: parking_lot::Mutex<Option<checkpoint_timer::CheckpointTimer>>,
+    /// The automatic checkpoint triggers in force (see
+    /// [`set_checkpoint_triggers`](Self::set_checkpoint_triggers)).
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    checkpoint_triggers: parking_lot::Mutex<crate::admin::CheckpointTriggers>,
+    /// What the automatic checkpoints met (see
+    /// [`checkpoint_status`](Self::checkpoint_status)).
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    checkpoint_failures: Arc<checkpoint_timer::Failures>,
     /// Syncs the WAL in the background under `DurabilityMode::Adaptive`.
     /// Wrapped in Mutex because `close()` takes `&self` but stops it.
     #[cfg(feature = "wal")]
@@ -903,6 +911,10 @@ impl GrafeoDB {
             file_manager,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
+            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            checkpoint_failures: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
@@ -997,9 +1009,12 @@ impl GrafeoDB {
             reads_a_0_5_database,
         )?;
 
-        // Start periodic checkpoint timer if configured.
+        // Start the automatic checkpointer if a trigger is configured.
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        db.start_checkpoint_timer();
+        {
+            *db.checkpoint_triggers.lock() = db.config.checkpoint_triggers();
+            db.start_checkpoint_timer();
+        }
 
         // A spill cache is never data: what a previous read-write open (or a
         // crash) left of it goes, under this open's exclusive lock.
@@ -1105,6 +1120,10 @@ impl GrafeoDB {
             file_manager: None,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
+            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            checkpoint_failures: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
@@ -1202,6 +1221,10 @@ impl GrafeoDB {
             file_manager: None,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
+            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
+            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            checkpoint_failures: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
@@ -3124,22 +3147,51 @@ impl GrafeoDB {
         }
     }
 
-    /// Starts the periodic checkpoint timer when one is configured, replacing
-    /// a running one.
+    /// Starts the automatic checkpointer when a trigger is set, replacing a
+    /// running one.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     fn start_checkpoint_timer(&self) {
+        // A closed database has released its file.
+        if *self.is_open.read() {
+            self.restart_checkpoint_timer();
+        }
+    }
+
+    /// [`start_checkpoint_timer`](Self::start_checkpoint_timer) for a
+    /// caller that holds the database open.
+    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    fn restart_checkpoint_timer(&self) {
         self.stop_checkpoint_timer();
-        // A file opened read-only stays so; a closed database has released
-        // its file.
-        if let (Some(interval), Some(fm)) = (self.config.checkpoint_interval(), &self.file_manager)
+        let triggers = *self.checkpoint_triggers.lock();
+        // A file opened read-only stays so.
+        if let Some(fm) = &self.file_manager
+            && triggers.any()
             && !self.read_only
             && !fm.is_read_only()
-            && *self.is_open.read()
         {
+            let sources = self.checkpoint_sources();
+            let (checkpoint_fm, size_fm) = (Arc::clone(fm), Arc::clone(fm));
+            #[cfg(feature = "wal")]
+            let wal = self.wal.clone();
+            let transaction_manager = Arc::clone(&self.transaction_manager);
+            let job = checkpoint_timer::Job {
+                checkpoint: Box::new(move || flush::flush(&checkpoint_fm, &sources).map(|_| ())),
+                wal_bytes: Box::new(move || {
+                    #[cfg(feature = "wal")]
+                    if let Some(wal) = &wal {
+                        return wal
+                            .end_lsn()
+                            .saturating_sub(size_fm.active_header().checkpoint_lsn);
+                    }
+                    let _ = &size_fm;
+                    0
+                }),
+                hopeless: Box::new(move || transaction_manager.has_incomplete_commit()),
+            };
             *self.checkpoint_timer.lock() = Some(checkpoint_timer::CheckpointTimer::start(
-                interval,
-                Arc::clone(fm),
-                self.checkpoint_sources(),
+                triggers,
+                job,
+                Arc::clone(&self.checkpoint_failures),
             ));
         }
     }

@@ -72,6 +72,54 @@ pub struct JsGrafeoDB {
     inner: Arc<RwLock<GrafeoDB>>,
 }
 
+/// When a database checkpoints by itself (`GrafeoDB.setCheckpointTriggers`).
+#[napi(object)]
+pub struct CheckpointTriggers {
+    /// Checkpoint every this many milliseconds.
+    pub interval_ms: Option<f64>,
+    /// Checkpoint once the WAL holds this many bytes since the last
+    /// checkpoint.
+    pub wal_bytes: Option<f64>,
+}
+
+/// How the automatic checkpoints fare (`GrafeoDB.checkpointStatus`).
+#[napi(object)]
+pub struct CheckpointStatus {
+    /// The interval trigger in milliseconds, absent when off.
+    pub interval_ms: Option<f64>,
+    /// The WAL size trigger in bytes, absent when off.
+    pub wal_bytes: Option<f64>,
+    /// When the last checkpoint of any kind finished (Unix seconds).
+    pub last_checkpoint: Option<f64>,
+    /// Automatic checkpoints that failed since the last that succeeded.
+    pub failures: f64,
+    /// The error of the last failed automatic checkpoint.
+    pub last_error: Option<String>,
+    /// When it failed (Unix seconds).
+    pub last_failure: Option<f64>,
+    /// Whether no automatic checkpoint can succeed until a reopen.
+    pub stopped: bool,
+}
+
+/// `value` as a JavaScript number: exact up to `Number.MAX_SAFE_INTEGER`, at
+/// which it stops.
+fn js_number(value: u64) -> f64 {
+    const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "clamped to 2^53 - 1, which an f64 holds exactly"
+    )]
+    let number = value.min(MAX_SAFE_INTEGER) as f64;
+    number
+}
+
+/// A JavaScript number as a whole, positive count of `what`.
+fn whole_count(value: f64, what: &str) -> Result<u64> {
+    whole_id(value).ok_or_else(|| {
+        NodeGrafeoError::InvalidArgument(format!("{what} must be a whole number: {value}")).into()
+    })
+}
+
 /// Options for `GrafeoDB.create`.
 #[napi(object)]
 pub struct CreateOptions {
@@ -561,6 +609,49 @@ impl JsGrafeoDB {
     #[napi(js_name = "clearPlanCache")]
     pub fn clear_plan_cache(&self) {
         self.inner.read().clear_plan_cache();
+    }
+
+    /// Sets when the database checkpoints by itself: every
+    /// `triggers.intervalMs` milliseconds, and once the WAL holds
+    /// `triggers.walBytes` bytes since the last checkpoint. Leave both out to
+    /// turn automatic checkpoints off (the default). For this open only.
+    /// Throws for a database in memory or opened read-only, and for zero.
+    #[napi(js_name = "setCheckpointTriggers")]
+    pub fn set_checkpoint_triggers(&self, triggers: CheckpointTriggers) -> Result<()> {
+        let mut set = grafeo_engine::admin::CheckpointTriggers::none();
+        if let Some(ms) = triggers.interval_ms {
+            set = set.with_interval(std::time::Duration::from_millis(whole_count(
+                ms,
+                "intervalMs",
+            )?));
+        }
+        if let Some(bytes) = triggers.wal_bytes {
+            set = set.with_wal_bytes(whole_count(bytes, "walBytes")?);
+        }
+        let db = self.inner.read();
+        db.set_checkpoint_triggers(set)
+            .map_err(NodeGrafeoError::from)
+            .map_err(napi::Error::from)
+    }
+
+    /// How the automatic checkpoints fare: the triggers, the last checkpoint,
+    /// and the automatic ones that failed since the last that succeeded.
+    #[napi(js_name = "checkpointStatus")]
+    pub fn checkpoint_status(&self) -> CheckpointStatus {
+        let status = self.inner.read().checkpoint_status();
+        let number = js_number;
+        CheckpointStatus {
+            interval_ms: status
+                .triggers
+                .interval
+                .map(|interval| interval.as_secs_f64() * 1000.0),
+            wal_bytes: status.triggers.wal_bytes.map(number),
+            last_checkpoint: status.last_checkpoint.map(number),
+            failures: number(status.failures),
+            last_error: status.last_error,
+            last_failure: status.last_failure.map(number),
+            stopped: status.stopped,
+        }
     }
 
     /// Forces a WAL checkpoint.

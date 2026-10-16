@@ -100,6 +100,19 @@ export declare class GrafeoDB {
    */
   clearPlanCache(): void
   /**
+   * Sets when the database checkpoints by itself: every
+   * `triggers.intervalMs` milliseconds, and once the WAL holds
+   * `triggers.walBytes` bytes since the last checkpoint. Leave both out to
+   * turn automatic checkpoints off (the default). For this open only.
+   * Throws for a database in memory or opened read-only, and for zero.
+   */
+  setCheckpointTriggers(triggers: CheckpointTriggers): void
+  /**
+   * How the automatic checkpoints fare: the triggers, the last checkpoint,
+   * and the automatic ones that failed since the last that succeeded.
+   */
+  checkpointStatus(): CheckpointStatus
+  /**
    * Forces a WAL checkpoint.
    *
    * Flushes all pending WAL records to the main storage.
@@ -477,6 +490,35 @@ export interface BatchEdgeInput {
   type: string
   /** The edge's properties. */
   properties?: any
+}
+
+/** How the automatic checkpoints fare (`GrafeoDB.checkpointStatus`). */
+export interface CheckpointStatus {
+  /** The interval trigger in milliseconds, absent when off. */
+  intervalMs?: number
+  /** The WAL size trigger in bytes, absent when off. */
+  walBytes?: number
+  /** When the last checkpoint of any kind finished (Unix seconds). */
+  lastCheckpoint?: number
+  /** Automatic checkpoints that failed since the last that succeeded. */
+  failures: number
+  /** The error of the last failed automatic checkpoint. */
+  lastError?: string
+  /** When it failed (Unix seconds). */
+  lastFailure?: number
+  /** Whether no automatic checkpoint can succeed until a reopen. */
+  stopped: boolean
+}
+
+/** When a database checkpoints by itself (`GrafeoDB.setCheckpointTriggers`). */
+export interface CheckpointTriggers {
+  /** Checkpoint every this many milliseconds. */
+  intervalMs?: number
+  /**
+   * Checkpoint once the WAL holds this many bytes since the last
+   * checkpoint.
+   */
+  walBytes?: number
 }
 
 /** Options for `GrafeoDB.create`. */

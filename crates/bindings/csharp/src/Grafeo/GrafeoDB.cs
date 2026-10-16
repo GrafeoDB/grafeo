@@ -503,6 +503,45 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_save(Handle, path));
     }
 
+    /// <summary>
+    /// Set when the database checkpoints by itself: every <paramref name="interval"/>, and once
+    /// the WAL holds <paramref name="walBytes"/> bytes since the last checkpoint. Leave both null
+    /// to turn automatic checkpoints off (the default). For this open only.
+    /// </summary>
+    public void SetCheckpointTriggers(TimeSpan? interval = null, ulong? walBytes = null)
+    {
+        ThrowIfDisposed();
+        if (interval is { } value && value <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(interval), "the interval must be positive");
+        if (walBytes == 0)
+            throw new ArgumentOutOfRangeException(nameof(walBytes), "the WAL size must be positive");
+        var intervalMs = interval is { } set ? (ulong)Math.Ceiling(set.TotalMilliseconds) : 0UL;
+        GrafeoException.ThrowIfFailed(
+            NativeMethods.grafeo_set_checkpoint_triggers(Handle, intervalMs, walBytes ?? 0UL));
+    }
+
+    /// <summary>
+    /// How the automatic checkpoints fare: interval_ms and wal_bytes (the triggers, null when off),
+    /// last_checkpoint (Unix seconds), failures (automatic ones that failed since the last that
+    /// succeeded), last_error, last_failure and stopped.
+    /// </summary>
+    public IReadOnlyDictionary<string, object?> CheckpointStatus()
+    {
+        ThrowIfDisposed();
+        var ptr = NativeMethods.grafeo_checkpoint_status(Handle);
+        if (ptr == nint.Zero)
+            throw GrafeoException.FromLastError();
+        try
+        {
+            var json = Marshal.PtrToStringUTF8(ptr)!;
+            return ValueConverter.ParseObject(json);
+        }
+        finally
+        {
+            NativeMethods.grafeo_free_string(ptr);
+        }
+    }
+
     /// <summary>Clear all cached query plans, forcing re-parsing on next execution.</summary>
     public void ClearPlanCache()
     {

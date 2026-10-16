@@ -444,11 +444,85 @@ impl super::GrafeoDB {
     }
 
     /// When the file's last checkpoint was written, in seconds since the Unix
-    /// epoch; `None` before the first one.
-    #[cfg(feature = "wal")]
+    /// epoch; `None` before the first one, and without a file.
     fn last_checkpoint_seconds(&self) -> Option<u64> {
-        let header = self.file_manager.as_ref()?.active_header();
-        (header.iteration > 0).then_some(header.timestamp_ms / 1000)
+        #[cfg(feature = "grafeo-file")]
+        {
+            let header = self.file_manager.as_ref()?.active_header();
+            (header.iteration > 0).then_some(header.timestamp_ms / 1000)
+        }
+        #[cfg(not(feature = "grafeo-file"))]
+        None
+    }
+
+    /// Changes when this database checkpoints by itself (#426): when the
+    /// interval has passed since its last automatic checkpoint, or once the
+    /// WAL holds the given bytes since the last checkpoint. The new triggers
+    /// replace the ones in force (from
+    /// [`Config::with_checkpoint_interval`](crate::Config::with_checkpoint_interval)
+    /// and [`Config::with_checkpoint_wal_size`](crate::Config::with_checkpoint_wal_size),
+    /// or an earlier call), until the database closes; the file does not
+    /// store them. [`CheckpointTriggers::none`](crate::admin::CheckpointTriggers::none)
+    /// turns automatic checkpoints off.
+    ///
+    /// # Errors
+    ///
+    /// A zero interval or size, a database without a file (in memory) or
+    /// opened read-only, which never checkpoints, and the database-closed
+    /// error after `close()`.
+    pub fn set_checkpoint_triggers(
+        &self,
+        triggers: crate::admin::CheckpointTriggers,
+    ) -> Result<()> {
+        if triggers.interval.is_some_and(|interval| interval.is_zero())
+            || triggers.wal_bytes == Some(0)
+        {
+            return Err(grafeo_common::utils::error::Error::InvalidValue(
+                "a checkpoint trigger of zero would checkpoint without pause: leave it unset \
+                 to turn it off"
+                    .to_string(),
+            ));
+        }
+        let _open = self.hold_open()?;
+        if self.read_only {
+            return Err(grafeo_common::utils::error::Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
+        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        if self.file_manager.is_some() {
+            *self.checkpoint_triggers.lock() = triggers;
+            self.restart_checkpoint_timer();
+            return Ok(());
+        }
+        Err(grafeo_common::utils::error::Error::InvalidValue(
+            "a database without a file has nothing to checkpoint".to_string(),
+        ))
+    }
+
+    /// How the automatic checkpoints fare: the triggers in force, the last
+    /// checkpoint of any kind, and the automatic ones that failed since the
+    /// last that succeeded, with the last error. A failed automatic
+    /// checkpoint is also logged as a warning, and retried after a pause.
+    #[must_use]
+    pub fn checkpoint_status(&self) -> crate::admin::CheckpointStatus {
+        let status = crate::admin::CheckpointStatus {
+            last_checkpoint: self.last_checkpoint_seconds(),
+            ..crate::admin::CheckpointStatus::default()
+        };
+        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        let status = {
+            let failures = self.checkpoint_failures.snapshot();
+            crate::admin::CheckpointStatus {
+                triggers: *self.checkpoint_triggers.lock(),
+                failures: failures.failures,
+                last_error: failures.last_error,
+                last_failure: failures.last_failure,
+                stopped: failures.stopped,
+                ..status
+            }
+        };
+        status
     }
 
     /// Returns WAL (Write-Ahead Log) status.

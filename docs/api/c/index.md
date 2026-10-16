@@ -421,7 +421,12 @@ size_t grafeo_edge_count(GrafeoDatabase* db);
 char*        grafeo_info(GrafeoDatabase* db);             /* JSON string, free with grafeo_free_string */
 GrafeoStatus grafeo_save(GrafeoDatabase* db, const char* path);
 GrafeoStatus grafeo_wal_checkpoint(GrafeoDatabase* db);
+/* Automatic checkpoints every interval_ms and once the WAL holds wal_bytes; 0 turns one off */
+GrafeoStatus grafeo_set_checkpoint_triggers(GrafeoDatabase* db, uint64_t interval_ms, uint64_t wal_bytes);
+char*        grafeo_checkpoint_status(GrafeoDatabase* db); /* JSON string, free with grafeo_free_string */
 ```
+
+`grafeo_checkpoint_status` returns `interval_ms` and `wal_bytes` (the triggers, `null` when off), `last_checkpoint` (Unix seconds), `failures` (automatic checkpoints that failed since the last that succeeded), `last_error`, `last_failure` and `stopped`.
 
 ### Compact Store
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // tempDbPath creates a temp directory and returns (dir, dbPath).
@@ -152,6 +153,55 @@ func TestMultipleReopenCycles(t *testing.T) {
 	}
 	if len(result.Rows) != 3 {
 		t.Fatalf("expected 3 rows, got %d", len(result.Rows))
+	}
+}
+
+func TestCheckpointTriggersReadBack(t *testing.T) {
+	_, dbPath := tempDbPath(t, "triggers.grafeo")
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.SetCheckpointTriggers(300*time.Millisecond, 64<<20); err != nil {
+		t.Fatal(err)
+	}
+	status, err := db.CheckpointStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.IntervalMs == nil || *status.IntervalMs != 300 {
+		t.Errorf("expected an interval of 300 ms, got %v", status.IntervalMs)
+	}
+	if status.WalBytes == nil || *status.WalBytes != 64<<20 {
+		t.Errorf("expected a WAL size of 64 MiB, got %v", status.WalBytes)
+	}
+	if status.Failures != 0 || status.Stopped {
+		t.Errorf("expected no failures, got %+v", status)
+	}
+
+	if err := db.SetCheckpointTriggers(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	status, err = db.CheckpointStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.IntervalMs != nil || status.WalBytes != nil {
+		t.Errorf("expected the triggers off, got %+v", status)
+	}
+}
+
+func TestCheckpointTriggersRefusedInMemory(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.SetCheckpointTriggers(0, 1024); err == nil {
+		t.Error("expected an in-memory database to refuse checkpoint triggers")
 	}
 }
 

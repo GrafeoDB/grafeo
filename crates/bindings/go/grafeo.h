@@ -231,6 +231,11 @@ void               grafeo_free_transaction(GrafeoTransaction* tx);
 char*        grafeo_info(GrafeoDatabase* db);
 GrafeoStatus grafeo_save(GrafeoDatabase* db, const char* path);
 GrafeoStatus grafeo_wal_checkpoint(GrafeoDatabase* db);
+/* Automatic checkpoints: every interval_ms milliseconds and once the WAL holds
+ * wal_bytes bytes since the last checkpoint; 0 turns a trigger off. */
+GrafeoStatus grafeo_set_checkpoint_triggers(GrafeoDatabase* db, uint64_t interval_ms, uint64_t wal_bytes);
+/* How the automatic checkpoints fare, as JSON. Free with grafeo_free_string. */
+char*        grafeo_checkpoint_status(GrafeoDatabase* db);
 GrafeoStatus grafeo_compact(GrafeoDatabase* db);
 
 /* ---- Memory management --------------------------------------------------- */

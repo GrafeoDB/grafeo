@@ -994,6 +994,37 @@ class GrafeoDB implements Finalizable {
     if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
   }
 
+  /// Set when the database checkpoints by itself: every [interval], and once
+  /// the WAL holds [walBytes] bytes since the last checkpoint. Leave both out
+  /// to turn automatic checkpoints off (the default). For this open only.
+  void setCheckpointTriggers({Duration? interval, int? walBytes}) {
+    _checkOpen();
+    if (interval != null && interval <= Duration.zero) {
+      throw ArgumentError.value(interval, 'interval', 'must be positive');
+    }
+    if (walBytes != null && walBytes <= 0) {
+      throw ArgumentError.value(walBytes, 'walBytes', 'must be positive');
+    }
+    final status = _bindings.grafeoSetCheckpointTriggers(
+        _handle, interval?.inMilliseconds ?? 0, walBytes ?? 0);
+    if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+  }
+
+  /// How the automatic checkpoints fare: `interval_ms` and `wal_bytes` (the
+  /// triggers, null when off), `last_checkpoint` (Unix seconds), `failures`
+  /// (automatic ones that failed since the last that succeeded),
+  /// `last_error`, `last_failure` and `stopped`.
+  Map<String, dynamic> checkpointStatus() {
+    _checkOpen();
+    final ptr = _bindings.grafeoCheckpointStatus(_handle);
+    if (ptr == nullptr) throwLastError(_bindings);
+    try {
+      return parseObject(ptr.toDartString());
+    } finally {
+      _bindings.grafeoFreeString(ptr);
+    }
+  }
+
   // ===========================================================================
   // Internal helpers
   // ===========================================================================

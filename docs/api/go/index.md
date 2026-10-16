@@ -104,6 +104,48 @@ db.DeleteNode(id)
 db.DeleteEdge(eid)
 ```
 
+## Batches and Upserts
+
+```go
+// One transaction each; IDs in input order
+ids, err := db.BatchCreateNodesWithProps([]string{"Person"}, []map[string]any{
+    {"name": "Alix"}, {"name": "Gus"},
+})
+edgeIDs, err := db.BatchCreateEdges([]grafeo.BatchEdge{
+    {Src: ids[0], Dst: ids[1], Type: "KNOWS", Properties: map[string]any{"since": 2020}},
+})
+
+// Create or update by a key property: a summary of created, updated and skipped rows
+summary, err := db.UpsertNodes([]string{"File"}, []map[string]any{{"path": "a.rs"}},
+    &grafeo.UpsertNodesOptions{Key: "path"})
+summary, err = db.UpsertEdges("IMPORTS", []map[string]any{{"id": "a-b", "src": "a.rs", "dst": "b.rs"}},
+    &grafeo.UpsertEdgesOptions{EndpointKey: "path", EndpointLabels: []string{"File"}})
+```
+
+A result carries what a write changed in `result.Counters` (`NodesCreated`, `EdgesDeleted`, `PropertiesSet`, ...).
+
+## Named Graphs
+
+`db.Graph(name)` returns a handle that works in one named graph without switching the current graph: `Execute`, `ExecuteParams`, `ExecuteLanguage`, the node and edge calls, the batches and the upserts. Once the graph is dropped, every call fails. `Close` frees it.
+
+```go
+trips, err := db.Graph("trips")
+defer trips.Close()
+prague, err := trips.CreateNode([]string{"City"}, map[string]any{"name": "Prague"})
+result, err := trips.Execute("MATCH (c:City) RETURN c.name")
+```
+
+## Change History
+
+With change data capture on (`db.SetCDCEnabled(true)`), every committed change is recorded as a `ChangeEvent` (kind, epoch, properties before and after, labels, the endpoints of an edge, and `DeletedWith` on an edge a detach delete removed).
+
+```go
+events, err := db.NodeHistory(id)
+events, err = db.EdgeHistory(edgeID)
+events, err = db.NodeHistorySince(id, epoch)
+events, err = db.ChangesBetween(startEpoch, endEpoch)
+```
+
 ## Transactions
 
 ```go
@@ -127,6 +169,10 @@ results, err := db.VectorSearch("Doc", "emb", queryVec, 10,
 
 // MMR search
 results, err := db.MmrSearch("Doc", "emb", queryVec, 5, -1, 0.5, -1)
+
+// Several queries at once (ef 0 for the index default), with optional property filters
+batches, err := db.BatchVectorSearch("Doc", "emb", [][]float32{q1, q2}, 10, 0,
+    map[string]any{"lang": "en"})
 ```
 
 ## Building the Shared Library

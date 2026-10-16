@@ -56,6 +56,11 @@ func (db *Database) GetNode(id uint64) (*Node, error) {
 		return nil, err
 	}
 	runtime.UnlockOSThread()
+	return nodeFromC(cNode), nil
+}
+
+// nodeFromC copies and frees a node a C call handed out.
+func nodeFromC(cNode *C.GrafeoNode) *Node {
 	defer C.grafeo_free_node(cNode)
 
 	nodeID := uint64(C.grafeo_node_id(cNode))
@@ -75,7 +80,7 @@ func (db *Database) GetNode(id uint64) (*Node, error) {
 		props = make(map[string]any)
 	}
 
-	return &Node{ID: nodeID, Labels: labels, Properties: props}, nil
+	return &Node{ID: nodeID, Labels: labels, Properties: props}
 }
 
 // DeleteNode deletes a node by ID. Returns true if the node existed.

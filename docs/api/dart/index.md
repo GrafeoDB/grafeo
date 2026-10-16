@@ -613,6 +613,22 @@ print(ids); // [0, 1, 2]
     `batchCreateNodes` is only available when grafeo-c is built with
     `--features vector-index` (included in the `ai` and `analytics` profiles).
 
+#### batchVectorSearch()
+
+Search several query vectors of one dimension at once, with optional property
+filters. Returns one list per query, nearest first.
+
+```dart
+List<List<VectorResult>> batchVectorSearch(
+  String label,
+  String property,
+  List<List<double>> queries, {
+  required int k,
+  int ef = 0,
+  Map<String, dynamic>? filters,
+})
+```
+
 #### mmrSearch()
 
 Perform a Maximal Marginal Relevance (MMR) vector search for diverse nearest neighbors.
@@ -661,6 +677,53 @@ Rebuild a vector index by rescanning all matching nodes.
 
 ```dart
 void rebuildVectorIndex(String label, String property)
+```
+
+### Batches and Upserts
+
+```dart
+// One transaction each; IDs in input order
+final ids = db.batchCreateNodesWithProps(['Person'], [
+  {'name': 'Alix'},
+  {'name': 'Gus'},
+]);
+final edgeIds = db.batchCreateEdges([BatchEdge(ids[0], ids[1], 'KNOWS')]);
+
+// Create or update by a key property: created, updated and skipped rows
+final summary = db.upsertNodes(['File'], [{'path': 'a.rs'}], key: 'path');
+db.upsertEdges('IMPORTS', [{'id': 'a-b', 'src': 'a.rs', 'dst': 'b.rs'}],
+    endpointKey: 'path', endpointLabels: ['File']);
+```
+
+An edge to a missing node fails the edge batch and writes nothing. A node row
+without the key is skipped, and so is an edge row whose endpoint matches no node
+or several; endpoints are never created.
+
+### Named Graphs
+
+`db.graph(name)` returns a `GrafeoGraph` that works in one named graph without
+switching the current graph: `execute`, `executeWithParams`, `executeLanguage`,
+the node and edge methods, the batches and the upserts. Once the graph is
+dropped, every call throws. `close()` frees it.
+
+```dart
+final trips = db.graph('trips');
+final prague = trips.createNode(['City'], {'name': 'Prague'});
+final result = trips.execute('MATCH (c:City) RETURN c.name');
+trips.close();
+```
+
+### Change History
+
+With `db.cdcEnabled = true`, every committed change is recorded as a
+`ChangeEvent` (kind, epoch, properties before and after, labels, the endpoints
+of an edge, and `deletedWith` on an edge a detach delete removed).
+
+```dart
+final events = db.nodeHistory(id);
+db.edgeHistory(edgeId);
+db.nodeHistorySince(id, epoch);
+db.changesBetween(startEpoch, endEpoch);
 ```
 
 ### Admin
@@ -834,6 +897,7 @@ class QueryResult {
   final List<Edge> edges;
   final double executionTimeMs;
   final int rowsScanned;
+  final WriteCounters counters;
 }
 ```
 
@@ -845,6 +909,7 @@ class QueryResult {
 | `edges` | Deduplicated `Edge` entities found in the result rows |
 | `executionTimeMs` | Query execution time in milliseconds |
 | `rowsScanned` | Number of rows scanned during execution |
+| `counters` | What a write changed: `nodesCreated`, `nodesDeleted`, `edgesCreated`, `edgesDeleted`, `propertiesSet`, `labelsAdded`, `labelsRemoved` (all zero for a read) |
 
 ### VectorResult
 

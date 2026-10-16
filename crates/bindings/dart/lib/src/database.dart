@@ -9,9 +9,13 @@ import 'dart:ffi';
 
 import 'package:ffi/ffi.dart';
 
+import 'batch.dart';
 import 'error.dart';
 import 'ffi/bindings.dart';
 import 'ffi/loader.dart';
+import 'graph.dart';
+import 'native.dart' hide upsertEdges, upsertNodes;
+import 'native.dart' as native show upsertEdges, upsertNodes;
 import 'stream.dart';
 import 'transaction.dart';
 import 'types.dart';
@@ -652,6 +656,149 @@ class GrafeoDB implements Finalizable {
   }
 
   // ===========================================================================
+  // Batch writes and upserts
+  // ===========================================================================
+
+  /// Create one node per row, each with [labels] and the row's properties, in
+  /// one transaction. Returns the node IDs in row order.
+  List<int> batchCreateNodesWithProps(
+    List<String> labels,
+    List<Map<String, dynamic>> rows,
+  ) {
+    _checkOpen();
+    return batchNodes(
+        _bindings,
+        labels,
+        rows,
+        (labels, rows, ids, count) => _bindings.grafeoBatchCreateNodesWithProps(
+            _handle, labels, rows, ids, count));
+  }
+
+  /// Create the [edges] in one transaction: an edge to a missing node fails
+  /// the batch and writes nothing. Returns the edge IDs in input order.
+  List<int> batchCreateEdges(List<BatchEdge> edges) {
+    _checkOpen();
+    return batchEdges(
+        _bindings,
+        edges,
+        (edges, ids, count) =>
+            _bindings.grafeoBatchCreateEdges(_handle, edges, ids, count));
+  }
+
+  /// Create or update one node per row, matched by the [key] property
+  /// (default `id`) and all of [labels], in one statement: a row the schema
+  /// refuses fails the call and writes nothing. A row without the key is
+  /// skipped. With [replace] a node's properties become exactly the row's,
+  /// without the row's are merged in.
+  UpsertSummary upsertNodes(
+    List<String> labels,
+    List<Map<String, dynamic>> rows, {
+    String? key,
+    bool replace = false,
+  }) {
+    _checkOpen();
+    return native.upsertNodes(
+        _bindings,
+        labels,
+        rows,
+        key,
+        replace,
+        (labels, rows, options, json) =>
+            _bindings.grafeoUpsertNodes(_handle, labels, rows, options, json));
+  }
+
+  /// Create or update one edge per row; each row names its endpoints in the
+  /// [sourceField] and [targetField] (default `src` and `dst`), which hold the
+  /// [endpointKey] property (default `id`) of nodes with [endpointLabels], and
+  /// holds the edge [key] (default `id`). A row whose endpoint matches no
+  /// node or several is skipped; endpoints are never created.
+  UpsertSummary upsertEdges(
+    String edgeType,
+    List<Map<String, dynamic>> rows, {
+    String? key,
+    String? endpointKey,
+    List<String>? endpointLabels,
+    String? sourceField,
+    String? targetField,
+    bool replace = false,
+  }) {
+    _checkOpen();
+    return native.upsertEdges(
+        _bindings,
+        edgeType,
+        rows,
+        {
+          'key': key,
+          'endpoint_key': endpointKey,
+          'endpoint_labels': endpointLabels,
+          'src_field': sourceField,
+          'dst_field': targetField,
+          'replace': replace,
+        },
+        (edgeType, rows, options, json) => _bindings.grafeoUpsertEdges(
+            _handle, edgeType, rows, options, json));
+  }
+
+  // ===========================================================================
+  // Graph handles
+  // ===========================================================================
+
+  /// A handle on named graph [name] of the current schema, to work in it
+  /// without switching the current graph. Throws when it does not exist.
+  GrafeoGraph graph(String name) {
+    _checkOpen();
+    return withNativeStrings([name], (p) {
+      final ptr = _bindings.grafeoGraph(_handle, p[0]);
+      if (ptr == nullptr) throwLastError(_bindings);
+      return GrafeoGraph(ptr, _bindings);
+    });
+  }
+
+  // ===========================================================================
+  // Change data capture
+  // ===========================================================================
+
+  /// Whether change data capture records changes.
+  bool get cdcEnabled {
+    _checkOpen();
+    return _bindings.grafeoIsCdcEnabled(_handle);
+  }
+
+  /// Turn change data capture on or off.
+  set cdcEnabled(bool enabled) {
+    _checkOpen();
+    _bindings.grafeoSetCdcEnabled(_handle, enabled);
+  }
+
+  /// Every recorded change of node [id], oldest first.
+  List<ChangeEvent> nodeHistory(int id) {
+    _checkOpen();
+    return parseEvents(
+        takeString(_bindings, _bindings.grafeoNodeHistory(_handle, id)));
+  }
+
+  /// Every recorded change of edge [id], oldest first.
+  List<ChangeEvent> edgeHistory(int id) {
+    _checkOpen();
+    return parseEvents(
+        takeString(_bindings, _bindings.grafeoEdgeHistory(_handle, id)));
+  }
+
+  /// The changes of node [id] from epoch [sinceEpoch] on.
+  List<ChangeEvent> nodeHistorySince(int id, int sinceEpoch) {
+    _checkOpen();
+    return parseEvents(takeString(
+        _bindings, _bindings.grafeoNodeHistorySince(_handle, id, sinceEpoch)));
+  }
+
+  /// Every change in epochs [startEpoch] to [endEpoch], in commit order.
+  List<ChangeEvent> changesBetween(int startEpoch, int endEpoch) {
+    _checkOpen();
+    return parseEvents(takeString(_bindings,
+        _bindings.grafeoChangesBetween(_handle, startEpoch, endEpoch)));
+  }
+
+  // ===========================================================================
   // Property indexes
   // ===========================================================================
 
@@ -921,6 +1068,41 @@ class GrafeoDB implements Finalizable {
     }
   }
 
+  /// Search several query vectors of one dimension at once. [filters] keeps
+  /// only nodes whose properties equal the given values. Returns one list per
+  /// query, nearest first; [ef] 0 uses the index default.
+  List<List<VectorResult>> batchVectorSearch(
+    String label,
+    String property,
+    List<List<double>> queries, {
+    required int k,
+    int ef = 0,
+    Map<String, dynamic>? filters,
+  }) {
+    _checkOpen();
+    final dimensions = queries.isEmpty ? 0 : queries.first.length;
+    if (queries.any((q) => q.length != dimensions)) {
+      throw ArgumentError.value(
+          queries, 'queries', 'every query needs the same dimension');
+    }
+    final flat = malloc<Float>(queries.length * dimensions + 1);
+    for (var i = 0; i < queries.length; i++) {
+      for (var j = 0; j < dimensions; j++) {
+        flat[i * dimensions + j] = queries[i][j];
+      }
+    }
+    try {
+      return withNativeStrings(
+          [label, property, filters == null ? null : encodeParams(filters)],
+          (p) => parseVectorResults(takeJson(
+              _bindings,
+              (json) => _bindings.grafeoBatchVectorSearch(_handle, p[0], p[1],
+                  flat, queries.length, dimensions, k, ef, p[2], json))));
+    } finally {
+      malloc.free(flat);
+    }
+  }
+
   /// Perform an MMR (Maximal Marginal Relevance) vector search.
   List<VectorResult> mmrSearch(
     String label,
@@ -1039,28 +1221,6 @@ class GrafeoDB implements Finalizable {
   // ===========================================================================
 
   /// Extract a [QueryResult] from a native result pointer, then free it.
-  QueryResult _buildResult(Pointer<Void> resultPtr) {
-    try {
-      final jsonPtr = _bindings.grafeoResultJson(resultPtr);
-      final jsonString = jsonPtr.toDartString();
-      final executionTimeMs = _bindings.grafeoResultExecutionTimeMs(resultPtr);
-      final rowsScanned = _bindings.grafeoResultRowsScanned(resultPtr);
-
-      final rows = parseRows(jsonString);
-      final columns = extractColumns(rows);
-      final (nodes, edges) = extractEntities(rows);
-
-      return QueryResult(
-        columns: columns,
-        rows: rows,
-        nodes: nodes,
-        edges: edges,
-        executionTimeMs: executionTimeMs,
-        rowsScanned: rowsScanned,
-      );
-    } finally {
-      _bindings.grafeoFreeResult(resultPtr);
-    }
-  }
-
+  QueryResult _buildResult(Pointer<Void> resultPtr) =>
+      buildResult(_bindings, resultPtr);
 }

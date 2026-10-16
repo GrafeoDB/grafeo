@@ -458,6 +458,71 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     }
 
     // =========================================================================
+    // Batch writes and upserts
+    // =========================================================================
+
+    /// <summary>
+    /// Create one node per row, each with <paramref name="labels"/> and the row's properties, in one
+    /// transaction. Returns the node IDs in row order.
+    /// </summary>
+    public IReadOnlyList<long> BatchCreateNodesWithProps(
+        IEnumerable<string> labels, IEnumerable<IDictionary<string, object?>> rows)
+    {
+        ThrowIfDisposed();
+        var labelsJson = BatchCalls.Labels(labels);
+        var rowsJson = BatchCalls.Rows(rows);
+        return BatchCalls.Ids((out nint ids, out nuint count) =>
+            NativeMethods.grafeo_batch_create_nodes_with_props(Handle, labelsJson, rowsJson, out ids, out count));
+    }
+
+    /// <summary>
+    /// Create the edges in one transaction: an edge to a missing node fails the batch and writes
+    /// nothing. Returns the edge IDs in input order.
+    /// </summary>
+    public IReadOnlyList<long> BatchCreateEdges(IEnumerable<BatchEdge> edges)
+    {
+        ThrowIfDisposed();
+        var edgesJson = BatchCalls.Edges(edges);
+        return BatchCalls.Ids((out nint ids, out nuint count) =>
+            NativeMethods.grafeo_batch_create_edges(Handle, edgesJson, out ids, out count));
+    }
+
+    /// <summary>
+    /// Create or update one node per row, matched by the key property and all of
+    /// <paramref name="labels"/>, in one statement: a row the schema refuses fails the call and
+    /// writes nothing. A row without the key is skipped.
+    /// </summary>
+    public UpsertSummary UpsertNodes(
+        IEnumerable<string> labels,
+        IEnumerable<IDictionary<string, object?>> rows,
+        UpsertNodesOptions? options = null)
+    {
+        ThrowIfDisposed();
+        var labelsJson = BatchCalls.Labels(labels);
+        var rowsJson = BatchCalls.Rows(rows);
+        var optionsJson = BatchCalls.Options(options);
+        return BatchCalls.Summary(BatchCalls.Json((out nint json) =>
+            NativeMethods.grafeo_upsert_nodes(Handle, labelsJson, rowsJson, optionsJson, out json)));
+    }
+
+    /// <summary>
+    /// Create or update one edge per row; each row names its endpoints in the source and target
+    /// fields and holds the edge key. A row whose endpoint matches no node or several is skipped;
+    /// endpoints are never created.
+    /// </summary>
+    public UpsertSummary UpsertEdges(
+        string edgeType,
+        IEnumerable<IDictionary<string, object?>> rows,
+        UpsertEdgesOptions? options = null)
+    {
+        ThrowIfDisposed();
+        var rowsJson = BatchCalls.Rows(rows);
+        var optionsJson = BatchCalls.Options(options);
+        return BatchCalls.Summary(BatchCalls.Json((out nint json) =>
+            NativeMethods.grafeo_upsert_edges(Handle, edgeType, rowsJson, optionsJson, out json)));
+    }
+
+    // =========================================================================
     // Admin
     // =========================================================================
 
@@ -586,6 +651,25 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         ThrowIfDisposed();
         var ptr = NativeMethods.grafeo_current_schema(Handle);
         return ptr == nint.Zero ? null : Marshal.PtrToStringUTF8(ptr);
+    }
+
+    // =========================================================================
+    // Graph handles
+    // =========================================================================
+
+    /// <summary>
+    /// A handle on named graph <paramref name="name"/> of the current schema, to work in it without
+    /// switching the current graph. Each call looks the graph up again: once it is dropped, every
+    /// call fails.
+    /// </summary>
+    /// <exception cref="GrafeoException">The graph does not exist.</exception>
+    public GrafeoGraph Graph(string name)
+    {
+        ThrowIfDisposed();
+        var ptr = NativeMethods.grafeo_graph(Handle, name);
+        if (ptr == nint.Zero)
+            throw GrafeoException.FromLastError();
+        return new GrafeoGraph(ptr);
     }
 
     // =========================================================================
@@ -721,6 +805,36 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         }
     }
 
+    /// <summary>Every recorded change of a node, oldest first.</summary>
+    public IReadOnlyList<ChangeEvent> NodeHistory(long id)
+    {
+        ThrowIfDisposed();
+        return BatchCalls.Events(BatchCalls.Take(NativeMethods.grafeo_node_history(Handle, (ulong)id)));
+    }
+
+    /// <summary>Every recorded change of an edge, oldest first.</summary>
+    public IReadOnlyList<ChangeEvent> EdgeHistory(long id)
+    {
+        ThrowIfDisposed();
+        return BatchCalls.Events(BatchCalls.Take(NativeMethods.grafeo_edge_history(Handle, (ulong)id)));
+    }
+
+    /// <summary>The changes of a node from epoch <paramref name="sinceEpoch"/> on.</summary>
+    public IReadOnlyList<ChangeEvent> NodeHistorySince(long id, ulong sinceEpoch)
+    {
+        ThrowIfDisposed();
+        return BatchCalls.Events(BatchCalls.Take(
+            NativeMethods.grafeo_node_history_since(Handle, (ulong)id, sinceEpoch)));
+    }
+
+    /// <summary>Every change in epochs <paramref name="startEpoch"/> to <paramref name="endEpoch"/>, in commit order.</summary>
+    public IReadOnlyList<ChangeEvent> ChangesBetween(ulong startEpoch, ulong endEpoch)
+    {
+        ThrowIfDisposed();
+        return BatchCalls.Events(BatchCalls.Take(
+            NativeMethods.grafeo_changes_between(Handle, startEpoch, endEpoch)));
+    }
+
     // =========================================================================
     // Vector Search
     // =========================================================================
@@ -761,6 +875,42 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
 
                 GrafeoException.ThrowIfFailed(status);
                 return ReadVectorResults(idsPtr, distsPtr, count);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Search several query vectors of one dimension at once. <paramref name="filters"/> keeps only
+    /// nodes whose properties equal the given values. Returns one list per query, nearest first.
+    /// </summary>
+    public IReadOnlyList<IReadOnlyList<VectorResult>> BatchVectorSearch(
+        string label,
+        string property,
+        IReadOnlyList<float[]> queries,
+        int k,
+        int ef = 0,
+        Dictionary<string, object?>? filters = null)
+    {
+        ThrowIfDisposed();
+        var dimensions = queries.Count > 0 ? queries[0].Length : 0;
+        var flat = new float[queries.Count * dimensions];
+        for (var i = 0; i < queries.Count; i++)
+        {
+            if (queries[i].Length != dimensions)
+                throw new ArgumentException("every query needs the same dimension", nameof(queries));
+            queries[i].CopyTo(flat, i * dimensions);
+        }
+        var filtersJson = filters is not null ? ValueConverter.EncodeParams(filters) : null;
+        unsafe
+        {
+            fixed (float* queriesPtr = flat)
+            {
+                var status = NativeMethods.grafeo_batch_vector_search(
+                    Handle, label, property,
+                    queriesPtr, (nuint)queries.Count, (nuint)dimensions, (nuint)k, (nuint)ef,
+                    filtersJson, out var json);
+                GrafeoException.ThrowIfFailed(status);
+                return BatchCalls.VectorResults(BatchCalls.Take(json));
             }
         }
     }
@@ -837,7 +987,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         };
 
     /// <summary>Parse a native result pointer into a QueryResult, then free the native result.</summary>
-    private static QueryResult BuildResult(nint resultPtr)
+    internal static QueryResult BuildResult(nint resultPtr)
     {
         try
         {
@@ -850,7 +1000,17 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
             var columns = ValueConverter.ExtractColumns(rows);
             var (nodes, edges) = ValueConverter.ExtractEntities(rows);
 
-            return new QueryResult(columns, rows, nodes, edges, executionTimeMs, rowsScanned);
+            return new QueryResult(columns, rows, nodes, edges, executionTimeMs, rowsScanned)
+            {
+                Counters = new WriteCounters(
+                    (long)NativeMethods.grafeo_result_nodes_created(resultPtr),
+                    (long)NativeMethods.grafeo_result_nodes_deleted(resultPtr),
+                    (long)NativeMethods.grafeo_result_edges_created(resultPtr),
+                    (long)NativeMethods.grafeo_result_edges_deleted(resultPtr),
+                    (long)NativeMethods.grafeo_result_properties_set(resultPtr),
+                    (long)NativeMethods.grafeo_result_labels_added(resultPtr),
+                    (long)NativeMethods.grafeo_result_labels_removed(resultPtr)),
+            };
         }
         finally
         {
@@ -859,7 +1019,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     }
 
     /// <summary>Read a node from a native GrafeoNode pointer.</summary>
-    private static Node ReadNode(nint nodePtr)
+    internal static Node ReadNode(nint nodePtr)
     {
         var id = (long)NativeMethods.grafeo_node_id(nodePtr);
         var labelsJsonPtr = NativeMethods.grafeo_node_labels_json(nodePtr);
@@ -874,7 +1034,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     }
 
     /// <summary>Read an edge from a native GrafeoEdge pointer.</summary>
-    private static Edge ReadEdge(nint edgePtr)
+    internal static Edge ReadEdge(nint edgePtr)
     {
         var id = (long)NativeMethods.grafeo_edge_id(edgePtr);
         var sourceId = (long)NativeMethods.grafeo_edge_source_id(edgePtr);

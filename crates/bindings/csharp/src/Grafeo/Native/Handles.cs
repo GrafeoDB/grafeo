@@ -61,3 +61,20 @@ internal sealed class ResultHandle : SafeHandle
         return true;
     }
 }
+
+/// <summary>
+/// Safe handle wrapping a <c>GrafeoGraph*</c>.
+/// Frees the handle on release.
+/// </summary>
+internal sealed class GraphHandle : SafeHandle
+{
+    public GraphHandle() : base(nint.Zero, ownsHandle: true) { }
+
+    public override bool IsInvalid => handle == nint.Zero;
+
+    protected override bool ReleaseHandle()
+    {
+        NativeMethods.grafeo_free_graph(handle);
+        return true;
+    }
+}

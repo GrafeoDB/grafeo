@@ -198,29 +198,14 @@ impl JsGrafeoDB {
         params: Option<serde_json::Value>,
     ) -> Result<QueryResult> {
         let db = self.inner.clone();
-        let mut result = tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let db = db.read();
             execute_language_query(&db, &query, language, params.as_ref())
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
 
-        let db = self.inner.read();
-        let (nodes, edges) = extract_entities(&result, &db);
-        let columns = std::mem::take(&mut result.columns);
-        let exec_time = result.execution_time_ms;
-        let scanned = result.rows_scanned;
-        let counters = result.counters;
-
-        Ok(QueryResult::with_metrics(
-            columns,
-            result.into_rows(),
-            nodes,
-            edges,
-            exec_time,
-            scanned,
-        )
-        .with_counters(counters))
+        Ok(js_result(result))
     }
 
     /// Execute a GQL query. Returns a Promise<QueryResult>.
@@ -269,17 +254,7 @@ impl JsGrafeoDB {
         let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
 
         let id = if let Some(props_obj) = properties {
-            let mut props = Vec::new();
-            let keys = props_obj.get_property_names()?;
-            let len = keys.get_array_length()?;
-            for i in 0..len {
-                let key: JsString = keys.get_element(i)?;
-                let key_str = key.into_utf8()?.into_owned()?;
-                let value: Unknown<'_> = props_obj.get_named_property(&key_str)?;
-                let val = types::js_to_value(&env, value)?;
-                props.push((grafeo_common::types::PropertyKey::new(key_str), val));
-            }
-            db.create_node_with_props(&label_refs, props)
+            db.create_node_with_props(&label_refs, object_properties(env, &props_obj)?)
                 .map_err(NodeGrafeoError::from)?
         } else {
             db.create_node(&label_refs).map_err(NodeGrafeoError::from)?
@@ -303,17 +278,7 @@ impl JsGrafeoDB {
         let dst = validate_node_id(target_id)?;
 
         let id = if let Some(props_obj) = properties {
-            let mut props = Vec::new();
-            let keys = props_obj.get_property_names()?;
-            let len = keys.get_array_length()?;
-            for i in 0..len {
-                let key: JsString = keys.get_element(i)?;
-                let key_str = key.into_utf8()?.into_owned()?;
-                let value: Unknown<'_> = props_obj.get_named_property(&key_str)?;
-                let val = types::js_to_value(&env, value)?;
-                props.push((grafeo_common::types::PropertyKey::new(key_str), val));
-            }
-            db.create_edge_with_props(src, dst, &edge_type, props)
+            db.create_edge_with_props(src, dst, &edge_type, object_properties(env, &props_obj)?)
                 .map_err(NodeGrafeoError::from)?
         } else {
             db.create_edge(src, dst, &edge_type)
@@ -1430,29 +1395,14 @@ impl JsGrafeoDB {
         params: Option<serde_json::Value>,
     ) -> Result<QueryResult> {
         let db = self.inner.clone();
-        let mut result = tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let db = db.read();
             execute_language_query(&db, &query, &language, params.as_ref())
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
 
-        let db = self.inner.read();
-        let (nodes, edges) = extract_entities(&result, &db);
-        let columns = std::mem::take(&mut result.columns);
-        let exec_time = result.execution_time_ms;
-        let scanned = result.rows_scanned;
-        let counters = result.counters;
-
-        Ok(QueryResult::with_metrics(
-            columns,
-            result.into_rows(),
-            nodes,
-            edges,
-            exec_time,
-            scanned,
-        )
-        .with_counters(counters))
+        Ok(js_result(result))
     }
 }
 
@@ -1741,11 +1691,69 @@ fn fetch_edge(db: &GrafeoDB, id: EdgeId) -> Result<JsEdge> {
         .ok_or_else(|| NodeGrafeoError::Database("Failed to fetch created edge".into()).into())
 }
 
+/// The properties of a JavaScript object, as Grafeo values.
+fn object_properties(
+    env: Env,
+    object: &Object<'_>,
+) -> Result<Vec<(grafeo_common::types::PropertyKey, Value)>> {
+    let keys = object.get_property_names()?;
+    let len = keys.get_array_length()?;
+    let mut properties = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let key: JsString = keys.get_element(i)?;
+        let key = key.into_utf8()?.into_owned()?;
+        let value: Unknown<'_> = object.get_named_property(&key)?;
+        let value = types::js_to_value(&env, value)?;
+        properties.push((grafeo_common::types::PropertyKey::new(key), value));
+    }
+    Ok(properties)
+}
+
+/// A query result for JavaScript: rows, entities, metrics and counters.
+fn js_result(mut result: EngineQueryResult) -> QueryResult {
+    let (nodes, edges) = entities(&result);
+    let columns = std::mem::take(&mut result.columns);
+    let exec_time = result.execution_time_ms;
+    let scanned = result.rows_scanned;
+    let counters = result.counters;
+    QueryResult::with_metrics(
+        columns,
+        result.into_rows(),
+        nodes,
+        edges,
+        exec_time,
+        scanned,
+    )
+    .with_counters(counters)
+}
+
+/// A node of the engine as a JavaScript node.
+fn js_node(id: NodeId, node: grafeo_core::graph::lpg::Node) -> JsNode {
+    let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
+    JsNode::new(id, labels, node.properties.into_iter().collect())
+}
+
+/// An edge of the engine as a JavaScript edge.
+fn js_edge(id: EdgeId, edge: grafeo_core::graph::lpg::Edge) -> JsEdge {
+    JsEdge::new(
+        id,
+        edge.edge_type.to_string(),
+        edge.src,
+        edge.dst,
+        edge.properties.into_iter().collect(),
+    )
+}
+
 /// Extract nodes and edges from query results based on column types.
 pub(crate) fn extract_entities(
     result: &EngineQueryResult,
     _db: &GrafeoDB,
 ) -> (Vec<JsNode>, Vec<JsEdge>) {
+    entities(result)
+}
+
+/// The nodes and edges of a query result, by column type.
+fn entities(result: &EngineQueryResult) -> (Vec<JsNode>, Vec<JsEdge>) {
     grafeo_bindings_common::entity::extract_and_map(
         result,
         |n| JsNode::new(n.id, n.labels, n.properties),
@@ -1764,4 +1772,5 @@ fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::
 // the Rust name when the struct has not expanded yet. Declared earlier, these
 // modules' methods would land on a class named after the Rust struct.
 mod batch;
+mod graph_handle;
 mod upsert;

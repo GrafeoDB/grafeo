@@ -2105,3 +2105,96 @@ describe('procedure arguments from parameters', () => {
     db.close()
   })
 })
+
+describe('graph handles', () => {
+  let db
+
+  beforeEach(async () => {
+    db = GrafeoDB.create()
+    await db.execute('CREATE GRAPH trips')
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  it('should refuse a graph that does not exist', () => {
+    expect(() => db.graph('nowhere')).toThrow()
+  })
+
+  it('should work in its graph without switching the current graph', async () => {
+    const trips = db.graph('trips')
+    expect(trips.name).toBe('trips')
+    const prague = trips.createNode(['City'], { name: 'Prague' })
+    const berlin = trips.createNode(['City'], { name: 'Berlin' })
+    const route = trips.createEdge(prague.id, berlin.id, 'ROUTE', { km: 350 })
+    expect([route.sourceId, route.targetId, route.edgeType]).toEqual([prague.id, berlin.id, 'ROUTE'])
+
+    trips.setNodeProperty(prague.id, 'country', 'CZ')
+    expect(trips.getNode(prague.id).get('country')).toBe('CZ')
+    trips.setEdgeProperty(route.id, 'km', 349)
+    expect(trips.getEdge(route.id).get('km')).toBe(349)
+    expect(trips.addNodeLabel(prague.id, 'Capital')).toBe(true)
+    expect(trips.addNodeLabel(prague.id, 'Capital')).toBe(false)
+    expect(trips.removeNodeLabel(prague.id, 'Capital')).toBe(true)
+    expect(trips.removeNodeProperty(prague.id, 'country')).toBe(true)
+    expect(trips.removeEdgeProperty(route.id, 'missing')).toBe(false)
+
+    const result = await trips.execute(
+      'MATCH (c:City {name: $name})-[:ROUTE]->(d) RETURN d.name AS d',
+      { name: 'Prague' }
+    )
+    expect(result.toArray()).toEqual([{ d: 'Berlin' }])
+    const cypher = await trips.executeLanguage('cypher', 'MATCH (c:City) RETURN count(c) AS n')
+    expect(cypher.toArray()).toEqual([{ n: 2 }])
+
+    expect(db.nodeCount()).toBe(0)
+    expect(db.getNode(prague.id)).toBeNull()
+    expect(trips.getNode(88888)).toBeNull()
+  })
+
+  it('should batch, upsert and delete in its graph', async () => {
+    const trips = db.graph('trips')
+    const ids = await trips.batchCreateNodesWithProps(['City', 'Stop'], [{ name: 'Paris' }, { name: 'Amsterdam' }])
+    expect(trips.getNode(ids[1]).labels.sort()).toEqual(['City', 'Stop'])
+    const edgeIds = await trips.batchCreateEdges([{ src: ids[0], dst: ids[1], type: 'ROUTE', properties: { km: 500 } }])
+    expect(trips.getEdge(edgeIds[0]).get('km')).toBe(500)
+    await expect(trips.batchCreateEdges([{ src: ids[0], dst: 88888, type: 'ROUTE' }])).rejects.toThrow()
+
+    const upserted = await trips.upsertNodes(['City'], [{ name: 'Paris', country: 'FR' }, { country: 'NL' }], { key: 'name' })
+    expect(upserted).toEqual({ created: 0, updated: 1, skipped: 1, skippedRows: [1] })
+    const edges = await trips.upsertEdges('ROUTE', [{ id: 'p-a', src: 'Paris', dst: 'Amsterdam' }], {
+      endpointKey: 'name',
+      endpointLabels: ['City'],
+    })
+    expect(edges.created).toBe(1)
+
+    expect(() => trips.deleteNode(ids[0])).toThrow()
+    expect(trips.detachDeleteNode(ids[0])).toBe(true)
+    expect(trips.detachDeleteNode(ids[0])).toBe(false)
+    expect(trips.deleteEdge(edgeIds[0])).toBe(false)
+    expect(db.nodeCount()).toBe(0)
+  })
+
+  it('should group writes in a transaction in its graph', async () => {
+    const trips = db.graph('trips')
+    const tx = trips.beginTransaction()
+    await tx.execute("INSERT (:City {name: 'Barcelona'})")
+    await tx.rollback()
+    expect((await trips.execute('MATCH (c:City) RETURN count(c) AS n')).toArray()).toEqual([{ n: 0 }])
+
+    const committed = trips.beginTransaction()
+    await committed.execute("INSERT (:City {name: 'Barcelona'})")
+    await committed.commit()
+    expect((await trips.execute('MATCH (c:City) RETURN c.name AS name')).toArray()).toEqual([{ name: 'Barcelona' }])
+    expect(db.nodeCount()).toBe(0)
+  })
+
+  it('should throw once its graph is dropped', async () => {
+    const trips = db.graph('trips')
+    await db.execute('DROP GRAPH trips')
+    await expect(trips.execute('RETURN 1')).rejects.toThrow()
+    expect(() => trips.createNode(['City'])).toThrow()
+    expect(() => trips.getNode(0)).toThrow()
+  })
+})

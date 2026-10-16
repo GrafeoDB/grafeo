@@ -307,6 +307,11 @@ export declare class GrafeoDB {
    */
   batchCreateEdges(edges: Array<BatchEdgeInput>): Promise<Array<number>>
   /**
+   * A handle on named graph `name` of the current schema, to work in it
+   * without switching the current graph. Throws when it does not exist.
+   */
+  graph(name: string): GraphHandle
+  /**
    * Creates or updates one node per row, matched by `key` and all of
    * `labels`, in one statement. Returns a Promise.
    *
@@ -332,6 +337,71 @@ export declare class GrafeoDB {
   upsertEdges(edgeType: string, rows: Array<any>, options?: UpsertEdgesOptions | undefined | null): Promise<UpsertSummary>
 }
 export type JsGrafeoDB = GrafeoDB
+
+/**
+ * A handle on one named graph, from `db.graph(name)`.
+ *
+ * It has the query and direct API of `GrafeoDB`, working in its graph
+ * whatever graph the database selects. Each call is its own transaction
+ * (use `beginTransaction()` to group several). Every call throws once the
+ * graph no longer exists.
+ */
+export declare class GraphHandle {
+  /** The graph's name. */
+  get name(): string
+  /** Runs a GQL query in this graph. Returns a Promise<QueryResult>. */
+  execute(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /**
+   * Runs a query in a named language (for example `"cypher"`) in this
+   * graph. Returns a Promise<QueryResult>.
+   */
+  executeLanguage(language: string, query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Begins a transaction in this graph. */
+  beginTransaction(isolationLevel?: string | undefined | null): Transaction
+  /** Creates a node with labels and optional properties. */
+  createNode(labels: Array<string>, properties?: object | undefined | null): JsNode
+  /** Creates an edge between two nodes of this graph. */
+  createEdge(sourceId: number, targetId: number, edgeType: string, properties?: object | undefined | null): JsEdge
+  /** Gets a node by ID, or null. */
+  getNode(id: number): JsNode | null
+  /** Gets an edge by ID, or null. */
+  getEdge(id: number): JsEdge | null
+  /** Sets a node property; throws if the node does not exist. */
+  setNodeProperty(id: number, key: string, value: unknown): void
+  /** Sets an edge property; throws if the edge does not exist. */
+  setEdgeProperty(id: number, key: string, value: unknown): void
+  /** Removes a node property; returns whether the node had it. */
+  removeNodeProperty(id: number, key: string): boolean
+  /** Removes an edge property; returns whether the edge had it. */
+  removeEdgeProperty(id: number, key: string): boolean
+  /** Adds a label; returns false if the node does not exist or has it. */
+  addNodeLabel(id: number, label: string): boolean
+  /** Removes a label; returns false if the node does not exist or lacks it. */
+  removeNodeLabel(id: number, label: string): boolean
+  /**
+   * Deletes a node; returns false if it does not exist, throws if it
+   * still has edges.
+   */
+  deleteNode(id: number): boolean
+  /**
+   * Deletes a node with all its edges, as `DETACH DELETE` does; returns
+   * false if it does not exist.
+   */
+  detachDeleteNode(id: number): boolean
+  /** Deletes an edge; returns false if it does not exist. */
+  deleteEdge(id: number): boolean
+  /** `GrafeoDB.batchCreateNodesWithProps` in this graph. */
+  batchCreateNodesWithProps(labels: string | Array<string>, propertiesList: Array<any>): Promise<Array<number>>
+  /** `GrafeoDB.batchCreateEdges` in this graph. */
+  batchCreateEdges(edges: Array<BatchEdgeInput>): Promise<Array<number>>
+  /** `GrafeoDB.upsertNodes` in this graph. */
+  upsertNodes(labels: Array<string>, rows: Array<any>, options?: UpsertNodesOptions | undefined | null): Promise<UpsertSummary>
+  /** `GrafeoDB.upsertEdges` in this graph. */
+  upsertEdges(edgeType: string, rows: Array<any>, options?: UpsertEdgesOptions | undefined | null): Promise<UpsertSummary>
+  /** String representation. */
+  toString(): string
+}
+export type JsGraphHandle = GraphHandle
 
 /** An edge (relationship) between two nodes with a type and properties. */
 export declare class JsEdge {

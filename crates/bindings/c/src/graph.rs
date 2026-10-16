@@ -8,6 +8,7 @@ use grafeo_common::types::{EdgeId, NodeId};
 
 use crate::batch::{batch_edges, clear_ids, json_arg, labels, parse_node_rows, write_ids};
 use crate::database::{build_result, created_id, edge_out, flag, node_out};
+use crate::edges::{edges_args, write_edges};
 use crate::error::{GrafeoStatus, set_error, set_last_error, str_from_ptr};
 use crate::types::{GrafeoDatabase, GrafeoEdge, GrafeoGraph, GrafeoNode, GrafeoResult};
 use crate::upsert::{clear_json, edge_options, node_options, rows, write_summary};
@@ -182,6 +183,36 @@ pub extern "C" fn grafeo_graph_get_node(
     with_graph!(graph, GrafeoStatus::ErrorDatabase, |handle| {
         match handle.get_node(NodeId::new(id)) {
             Ok(node) => node_out(node, id, out),
+            Err(e) => set_error(&e),
+        }
+    })
+}
+
+/// The edges of a node of the graph, as `grafeo_get_node_edges`.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_graph_get_node_edges(
+    graph: *mut GrafeoGraph,
+    node_id: u64,
+    direction: i32,
+    edge_types_json: *const c_char,
+    out_neighbors: *mut *mut u64,
+    out_edges: *mut *mut u64,
+    out_count: *mut usize,
+) -> GrafeoStatus {
+    let (direction, edge_types) = match edges_args(
+        direction,
+        edge_types_json,
+        out_neighbors,
+        out_edges,
+        out_count,
+    ) {
+        Ok(args) => args,
+        Err(status) => return status,
+    };
+    let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
+    with_graph!(graph, GrafeoStatus::ErrorDatabase, |handle| {
+        match handle.get_node_edges(NodeId::new(node_id), direction, &edge_types) {
+            Ok(edges) => write_edges(&edges, out_neighbors, out_edges, out_count),
             Err(e) => set_error(&e),
         }
     })
@@ -706,6 +737,51 @@ mod tests {
         let result = grafeo_graph_execute(graph, insert.as_ptr());
         assert_eq!(grafeo_result_nodes_created(result), 1);
         grafeo_free_result(result);
+        close(db, graph);
+    }
+
+    #[test]
+    fn a_handle_lists_the_edges_of_its_graph() {
+        let (db, graph) = with_trips();
+        let labels = c(r#"["City"]"#);
+        let prague = grafeo_graph_create_node(graph, labels.as_ptr(), std::ptr::null());
+        let berlin = grafeo_graph_create_node(graph, labels.as_ptr(), std::ptr::null());
+        let route_type = c("ROUTE");
+        let route =
+            grafeo_graph_create_edge(graph, prague, berlin, route_type.as_ptr(), std::ptr::null());
+        let mut neighbors = std::ptr::null_mut();
+        let mut edges = std::ptr::null_mut();
+        let mut count = 0;
+        let only_routes = c(r#"["ROUTE"]"#);
+        let status = grafeo_graph_get_node_edges(
+            graph,
+            berlin,
+            1,
+            only_routes.as_ptr(),
+            &raw mut neighbors,
+            &raw mut edges,
+            &raw mut count,
+        );
+        assert_eq!(status, GrafeoStatus::Ok, "{}", last_error());
+        assert_eq!(count, 1);
+        // SAFETY: both arrays hold `count` ids.
+        assert_eq!(unsafe { (*neighbors, *edges) }, (prague, route));
+        grafeo_free_node_ids(neighbors, count);
+        grafeo_free_node_ids(edges, count);
+
+        let drop = c("DROP GRAPH trips");
+        grafeo_free_result(grafeo_execute(db, drop.as_ptr()));
+        let status = grafeo_graph_get_node_edges(
+            graph,
+            berlin,
+            1,
+            std::ptr::null(),
+            &raw mut neighbors,
+            &raw mut edges,
+            &raw mut count,
+        );
+        assert_ne!(status, GrafeoStatus::Ok);
+        assert!(neighbors.is_null() && edges.is_null() && count == 0);
         close(db, graph);
     }
 }

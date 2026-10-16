@@ -1046,3 +1046,83 @@ fn test_batch_vector_search_answers_each_query() {
     assert_eq!(filtered[0].as_array().unwrap().len(), 1);
     assert_eq!(topic(&filtered[0][0]), "b");
 }
+
+#[cfg(feature = "lpg-model")]
+#[wasm_bindgen_test]
+fn test_get_node_edges_by_direction_type_and_transaction() {
+    let db = Database::new().unwrap();
+    db.execute(
+        "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(g:Person {name: 'Gus'}), \
+         (g)-[:WORKS_WITH]->(a), (a)-[:NOTE]->(a)",
+    )
+    .unwrap();
+    let id_of = |name: &str| {
+        let rows = db
+            .execute(&format!(
+                "MATCH (p:Person {{name: '{name}'}}) RETURN id(p) AS id"
+            ))
+            .unwrap();
+        json(&rows)[0]["id"].as_u64().unwrap()
+    };
+    let (alix, gus) = (id_of("Alix"), id_of("Gus"));
+    let neighbors = |id: u64, options: serde_json::Value| -> Vec<u64> {
+        let mut found: Vec<u64> = json(
+            &db.get_node_edges(id as f64, to_js(&options).unwrap())
+                .unwrap(),
+        )
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pair| pair[0].as_u64().unwrap())
+        .collect();
+        found.sort_unstable();
+        found
+    };
+
+    assert_eq!(neighbors(alix, serde_json::json!(null)), {
+        let mut v = vec![gus, alix];
+        v.sort_unstable();
+        v
+    });
+    assert_eq!(neighbors(alix, serde_json::json!({ "direction": "in" })), {
+        let mut v = vec![gus, alix];
+        v.sort_unstable();
+        v
+    });
+    // Both directions list the self-loop once.
+    assert_eq!(
+        neighbors(alix, serde_json::json!({ "direction": "both" })).len(),
+        3
+    );
+    assert_eq!(
+        neighbors(
+            alix,
+            serde_json::json!({ "direction": "both", "edgeTypes": ["KNOWS"] })
+        ),
+        vec![gus]
+    );
+    assert!(
+        db.get_node_edges(
+            alix as f64,
+            to_js(&serde_json::json!({ "direction": "up" })).unwrap()
+        )
+        .is_err()
+    );
+    assert!(
+        db.get_node_edges(0.5, wasm_bindgen::JsValue::UNDEFINED)
+            .is_err()
+    );
+
+    db.begin_transaction().unwrap();
+    db.execute("MATCH (g:Person {name: 'Gus'}) INSERT (g)-[:KNOWS]->(:Person {name: 'Mia'})")
+        .unwrap();
+    assert_eq!(
+        neighbors(gus, serde_json::json!({ "edgeTypes": ["KNOWS"] })).len(),
+        1
+    );
+    db.rollback_transaction().unwrap();
+    assert_eq!(
+        neighbors(gus, serde_json::json!({ "edgeTypes": ["KNOWS"] })),
+        Vec::<u64>::new()
+    );
+}

@@ -245,6 +245,57 @@ impl Database {
         Ok(raw_result_to_js(&result))
     }
 
+    /// The edges of a node as `[neighborId, edgeId]` pairs, without a query:
+    /// `options.direction` is `"out"` (default), `"in"` or `"both"` (which
+    /// lists a self-loop once), and `options.edgeTypes` keeps only those
+    /// types. Reads through the open transaction when there is one; a node
+    /// that does not exist has none.
+    ///
+    /// ```js
+    /// for (const [neighbor, edge] of db.getNodeEdges(alix, { edgeTypes: ["KNOWS"] })) { }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the database is closed, the ID is not a whole
+    /// number, or the options are malformed.
+    #[cfg(feature = "lpg-model")]
+    #[wasm_bindgen(js_name = "getNodeEdges")]
+    pub fn get_node_edges(&self, id: f64, options: JsValue) -> Result<JsValue, JsError> {
+        self.check_open()?;
+        let node = node_id(id)?;
+        let options: NodeEdgesOptions = if options.is_undefined() || options.is_null() {
+            NodeEdgesOptions::default()
+        } else {
+            serde_wasm_bindgen::from_value(options)
+                .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
+        };
+        let direction = match options.direction.as_deref() {
+            None | Some("out" | "outgoing") => grafeo_engine::Direction::Outgoing,
+            Some("in" | "incoming") => grafeo_engine::Direction::Incoming,
+            Some("both") => grafeo_engine::Direction::Both,
+            Some(other) => {
+                return Err(JsError::new(&format!(
+                    "direction must be 'out', 'in' or 'both', not '{other}'"
+                )));
+            }
+        };
+        let edge_types = options.edge_types.unwrap_or_default();
+        let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
+        let edges = match self.tx.borrow().as_ref() {
+            Some(session) => session.get_node_edges(node, direction, &edge_types),
+            None => self.db().get_node_edges(node, direction, &edge_types),
+        };
+        let array = Array::new_with_length(edges.len() as u32);
+        for (i, (neighbor, edge)) in edges.iter().enumerate() {
+            let pair = Array::new_with_length(2);
+            pair.set(0, id_to_js(neighbor.as_u64())?);
+            pair.set(1, id_to_js(edge.as_u64())?);
+            array.set(i as u32, pair.into());
+        }
+        Ok(array.into())
+    }
+
     /// Returns the number of nodes in the database.
     #[wasm_bindgen(js_name = "nodeCount")]
     pub fn node_count(&self) -> usize {
@@ -1650,6 +1701,48 @@ struct VectorSearchOptions {
 struct BatchSearchOptions {
     ef: Option<usize>,
     filters: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// Options for `getNodeEdges()`.
+#[cfg(feature = "lpg-model")]
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeEdgesOptions {
+    direction: Option<String>,
+    edge_types: Option<Vec<String>>,
+}
+
+/// The largest integer a JS number holds exactly, 2^53 - 1.
+#[cfg(feature = "lpg-model")]
+const MAX_SAFE_ID: u64 = (1 << 53) - 1;
+
+/// A node ID from a JS number: whole and at least 0.
+#[cfg(feature = "lpg-model")]
+fn node_id(id: f64) -> Result<grafeo_common::types::NodeId, JsError> {
+    if id.fract() != 0.0 || !(0.0..=9_007_199_254_740_991.0).contains(&id) {
+        return Err(JsError::new(&format!("{id} is not a node ID")));
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "checked above to be a whole number from 0 to 2^53 - 1"
+    )]
+    Ok(grafeo_common::types::NodeId::new(id as u64))
+}
+
+/// An ID as a JS number; an error for one a number cannot hold exactly.
+#[cfg(feature = "lpg-model")]
+fn id_to_js(id: u64) -> Result<JsValue, JsError> {
+    if id > MAX_SAFE_ID {
+        return Err(JsError::new(&format!(
+            "ID {id} is larger than a JS number holds exactly"
+        )));
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "checked above to be at most 2^53 - 1, which an f64 holds exactly"
+    )]
+    Ok(JsValue::from_f64(id as f64))
 }
 
 /// Options for `mmrSearch()`.

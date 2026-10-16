@@ -615,6 +615,22 @@ class GrafeoDB implements Finalizable {
     }
   }
 
+  /// The committed edges of node [id] in [direction], without a query: only
+  /// those of [edgeTypes] when given. [Direction.both] lists a self-loop once;
+  /// a node that does not exist has none.
+  List<NodeEdge> getNodeEdges(
+    int id, {
+    Direction direction = Direction.out,
+    List<String>? edgeTypes,
+  }) {
+    _checkOpen();
+    return nodeEdges(
+        _bindings,
+        edgeTypes,
+        (types, neighbors, edges, count) => _bindings.grafeoGetNodeEdges(
+            _handle, id, direction.code, types, neighbors, edges, count));
+  }
+
   /// Delete an edge by [id]. Returns true on success.
   bool deleteEdge(int id) {
     _checkOpen();

@@ -115,6 +115,16 @@ public sealed class GrafeoGraph : IDisposable
         }
     }
 
+    /// <summary><see cref="GrafeoDB.GetNodeEdges"/> in the graph.</summary>
+    public IReadOnlyList<NodeEdge> GetNodeEdges(
+        long nodeId, Direction direction = Direction.Out, IEnumerable<string>? edgeTypes = null)
+    {
+        var typesJson = BatchCalls.EdgeTypes(edgeTypes);
+        return BatchCalls.NodeEdges((out nint neighbors, out nint edges, out nuint count) =>
+            NativeMethods.grafeo_graph_get_node_edges(
+                Handle, (ulong)nodeId, (int)direction, typesJson, out neighbors, out edges, out count));
+    }
+
     /// <summary>Set a property on a node.</summary>
     public void SetNodeProperty(long id, string key, object? value) =>
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_graph_set_node_property(

@@ -451,6 +451,33 @@ final class GrafeoBindings {
         Pointer<IntPtr>,
       )>('grafeo_find_nodes_by_property');
 
+  /// A node's edges as neighbor and edge id arrays of the same length (free
+  /// each with grafeoFreeNodeIds).
+  late final grafeoGetNodeEdges = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64, Int32, Pointer<Utf8>,
+          Pointer<Pointer<Uint64>>, Pointer<Pointer<Uint64>>, Pointer<IntPtr>),
+      int Function(
+          Pointer<Void>,
+          int,
+          int,
+          Pointer<Utf8>,
+          Pointer<Pointer<Uint64>>,
+          Pointer<Pointer<Uint64>>,
+          Pointer<IntPtr>)>('grafeo_get_node_edges');
+
+  /// `grafeo_graph_get_node_edges`.
+  late final grafeoGraphGetNodeEdges = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64, Int32, Pointer<Utf8>,
+          Pointer<Pointer<Uint64>>, Pointer<Pointer<Uint64>>, Pointer<IntPtr>),
+      int Function(
+          Pointer<Void>,
+          int,
+          int,
+          Pointer<Utf8>,
+          Pointer<Pointer<Uint64>>,
+          Pointer<Pointer<Uint64>>,
+          Pointer<IntPtr>)>('grafeo_graph_get_node_edges');
+
   /// Free a node ID array returned by grafeoFindNodesByProperty.
   late final grafeoFreeNodeIds = library.lookupFunction<
       Void Function(Pointer<Uint64>, IntPtr),

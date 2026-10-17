@@ -52,6 +52,47 @@ mod tests {
         );
     }
 
+    /// The query of #361 (three `OPTIONAL` patterns that bind, `LIMIT`, no
+    /// `ORDER BY`) and its variants run on a 128 KB stack. Hosts such as a
+    /// BEAM dirty scheduler (about 320 KB) run queries on small stacks, and a
+    /// stack overflow aborts the process. Linux enforces the size; it needed
+    /// about 31 KB when this test was written.
+    #[test]
+    fn optionals_with_a_limit_run_on_a_small_stack() {
+        const STACK: usize = 128 * 1024;
+        let db = std::sync::Arc::new(rdf_db());
+        db.execute_sparql(
+            r#"INSERT DATA {
+                <http://ex.org/kv1> <http://ex.org/version_public_key> "deadbeefcafe" .
+                <http://ex.org/kv1> <http://ex.org/version> "1" .
+                <http://ex.org/kv1> <http://ex.org/status> "active" .
+                <http://ex.org/kv1> <http://ex.org/valid_until> "2027-01-01" .
+            }"#,
+        )
+        .unwrap();
+        let pattern = r#"?kv <http://ex.org/version_public_key> "deadbeefcafe" .
+            OPTIONAL { ?kv <http://ex.org/version> ?version }
+            OPTIONAL { ?kv <http://ex.org/status> ?status }
+            OPTIONAL { ?kv <http://ex.org/valid_until> ?valid_until }"#;
+        for tail in ["LIMIT 1", "", "ORDER BY ?version LIMIT 1"] {
+            let query =
+                format!("SELECT ?version ?status ?valid_until WHERE {{ {pattern} }} {tail}");
+            let db = std::sync::Arc::clone(&db);
+            let rows = std::thread::Builder::new()
+                .stack_size(STACK)
+                .spawn(move || db.execute_sparql(&query).map(|r| r.rows().to_vec()))
+                .unwrap()
+                .join()
+                .expect("the query thread does not panic")
+                .unwrap();
+            assert_eq!(
+                format!("{rows:?}"),
+                r#"[[String("1"), String("active"), String("2027-01-01")]]"#,
+                "{tail}"
+            );
+        }
+    }
+
     #[test]
     fn multiple_optionals_preserve_results() {
         let db = rdf_db();

@@ -15,10 +15,10 @@ fn storage_format_and_durability_come_from_the_facade() {
     let config = Config::persistent("amsterdam.grafeo")
         .with_storage_format(StorageFormat::Auto)
         .with_wal_durability(DurabilityMode::batch(Duration::from_millis(19), 88));
-    assert_eq!(config.storage_format(), StorageFormat::Auto);
+    assert_eq!(config.storage_format, StorageFormat::Auto);
     assert!(
         matches!(
-            config.wal_durability(),
+            config.wal_durability,
             DurabilityMode::Batch {
                 max_delay_ms: 19,
                 max_records: 88,
@@ -26,7 +26,7 @@ fn storage_format_and_durability_come_from_the_facade() {
             }
         ),
         "{:?}",
-        config.wal_durability()
+        config.wal_durability
     );
     assert_eq!(config.validate(), Ok(()));
 
@@ -34,14 +34,14 @@ fn storage_format_and_durability_come_from_the_facade() {
         .with_wal_durability(DurabilityMode::adaptive(Duration::from_millis(3)));
     assert!(
         matches!(
-            config.wal_durability(),
+            config.wal_durability,
             DurabilityMode::Adaptive {
                 target_interval_ms: 3,
                 ..
             }
         ),
         "{:?}",
-        config.wal_durability()
+        config.wal_durability
     );
 }
 
@@ -55,8 +55,8 @@ fn cdc_retention_comes_from_the_facade() {
         .with_cdc_retention(CdcRetentionConfig::unlimited().with_max_events(88));
     assert_eq!(
         (
-            config.cdc_retention().max_epochs,
-            config.cdc_retention().max_events
+            config.cdc_retention.max_epochs,
+            config.cdc_retention.max_events
         ),
         (None, Some(88))
     );

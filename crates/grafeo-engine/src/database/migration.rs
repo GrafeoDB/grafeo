@@ -292,12 +292,8 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
     // spill file may hold the old data in plaintext meanwhile.
     let keys = DatabaseKeys::from_config(config);
     let mut old_config = Config::read_only(path);
-    if let Some(limit) = config.memory_limit() {
-        old_config = old_config.with_memory_limit(limit);
-    }
-    if let Some(spill_path) = config.spill_path() {
-        old_config = old_config.with_spill_path(spill_path);
-    }
+    old_config.memory_limit = config.memory_limit;
+    old_config.spill_path.clone_from(&config.spill_path);
     let old = GrafeoDB::with_config_and_spill(old_config, !keys.is_encrypted()).map_err(failed)?;
     old.write_image_with(&migrating, &keys).map_err(failed)?;
     grafeo_info!(

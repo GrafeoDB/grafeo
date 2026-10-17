@@ -50,7 +50,7 @@ fn regenerate_snapshot_fixture() {
 
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/snapshot_v5.bin"
+        "/tests/fixtures/snapshot_v4.bin"
     );
     std::fs::write(path, &bytes).unwrap();
     println!("Wrote {} bytes to {path}", bytes.len());

@@ -38,7 +38,6 @@ mod chunked;
 mod dictionary;
 mod graph_store_adapter;
 pub mod nquads;
-pub(crate) mod path_budget;
 pub mod section;
 pub mod sink;
 mod store;

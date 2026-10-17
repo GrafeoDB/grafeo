@@ -2,7 +2,6 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use crate::query::plan::BuiltinFunction;
 
 impl GqlTranslator {
     /// Translates a MERGE clause into a MergeOp.
@@ -318,13 +317,14 @@ impl GqlTranslator {
         expr: &ast::LabelExpression,
     ) -> LogicalExpression {
         match expr {
-            ast::LabelExpression::Label(name) => LogicalExpression::builtin(
-                BuiltinFunction::HasLabel,
-                vec![
+            ast::LabelExpression::Label(name) => LogicalExpression::FunctionCall {
+                name: "hasLabel".into(),
+                args: vec![
                     LogicalExpression::Variable(variable.to_string()),
                     LogicalExpression::Literal(Value::from(name.as_str())),
                 ],
-            ),
+                distinct: false,
+            },
             ast::LabelExpression::Conjunction(operands) => LogicalExpression::conjunction(
                 operands
                     .iter()
@@ -450,11 +450,11 @@ impl GqlTranslator {
         let single_hop = matches!(path.edges.as_slice(), [edge] if edge.min_hops.is_none() && edge.max_hops.is_none());
         let whole_path_check = match path_mode {
             PathMode::Walk => None,
-            PathMode::Trail => Some(BuiltinFunction::IsTrail),
-            PathMode::Simple => Some(BuiltinFunction::IsSimple),
-            PathMode::Acyclic => Some(BuiltinFunction::IsAcyclic),
+            PathMode::Trail => Some("isTrail"),
+            PathMode::Simple => Some("isSimple"),
+            PathMode::Acyclic => Some("isAcyclic"),
         }
-        .filter(|check| edge_count > 1 || (single_hop && *check == BuiltinFunction::IsAcyclic));
+        .filter(|check| edge_count > 1 || (single_hop && *check == "isAcyclic"));
         let tracks_hops = whole_path_alias.is_some() || whole_path_check.is_some();
         let mut hops: Vec<crate::query::translators::common::PathHop> = Vec::new();
 
@@ -558,15 +558,17 @@ impl GqlTranslator {
                 plan = wrap_filter(
                     plan,
                     LogicalExpression::Binary {
-                        left: Box::new(LogicalExpression::builtin(
-                            BuiltinFunction::Id,
-                            vec![LogicalExpression::Variable(expand_target.clone())],
-                        )),
+                        left: Box::new(LogicalExpression::FunctionCall {
+                            name: "id".into(),
+                            args: vec![LogicalExpression::Variable(expand_target.clone())],
+                            distinct: false,
+                        }),
                         op: BinaryOp::Eq,
-                        right: Box::new(LogicalExpression::builtin(
-                            BuiltinFunction::Id,
-                            vec![LogicalExpression::Variable(target_var.clone())],
-                        )),
+                        right: Box::new(LogicalExpression::FunctionCall {
+                            name: "id".into(),
+                            args: vec![LogicalExpression::Variable(target_var.clone())],
+                            distinct: false,
+                        }),
                     },
                 );
             }
@@ -630,13 +632,14 @@ impl GqlTranslator {
                 for target_label in &edge.target.labels {
                     plan = wrap_filter(
                         plan,
-                        LogicalExpression::builtin(
-                            BuiltinFunction::HasLabel,
-                            vec![
+                        LogicalExpression::FunctionCall {
+                            name: "hasLabel".into(),
+                            args: vec![
                                 LogicalExpression::Variable(target_var.clone()),
                                 LogicalExpression::Literal(Value::from(target_label.clone())),
                             ],
-                        ),
+                            distinct: false,
+                        },
                     );
                 }
             }
@@ -681,7 +684,14 @@ impl GqlTranslator {
                 Some(alias) => LogicalExpression::Variable(alias.to_string()),
                 None => crate::query::translators::common::whole_path(&path_start, &hops),
             };
-            plan = wrap_filter(plan, LogicalExpression::builtin(check, vec![path]));
+            plan = wrap_filter(
+                plan,
+                LogicalExpression::FunctionCall {
+                    name: check.into(),
+                    args: vec![path],
+                    distinct: false,
+                },
+            );
         }
 
         Ok(plan)

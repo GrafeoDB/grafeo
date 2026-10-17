@@ -379,7 +379,6 @@ impl Inner {
             dst: NodeId::new(dst),
             edge_type: self.edge_types.get_name(edge_type)?.clone(),
             properties: self.values(&group.columns, row),
-            deleted_with: None,
         })
     }
 

@@ -1204,7 +1204,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: crate-ci/typos@v1.51.1
+      - uses: crate-ci/typos@v1.50.3
 
   # Repository policy (scripts/check_policy.py): crate boundaries from cargo metadata,
   # workflow toolchain pins that match rust-toolchain.toml and the MSRV, and the

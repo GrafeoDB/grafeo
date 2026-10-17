@@ -372,28 +372,6 @@ impl TransactionChanges {
         self.state.lock().triples.state(graph, triple)
     }
 
-    /// Borrows the existing RDF net and entries under a deadline-aware lock. The reader
-    /// may acquire a store index afterwards, matching `apply_triples`' lock
-    /// order, but its callbacks must not reenter storage or transaction state.
-    #[cfg(feature = "triple-store")]
-    pub(crate) fn with_path_pending(
-        &self,
-        control: &mut grafeo_core::execution::operators::RdfPathReadControl<'_>,
-        read: impl FnOnce(
-            &super::rdf::PendingTriples,
-            &ChangeSet,
-            &mut grafeo_core::execution::operators::RdfPathReadControl<'_>,
-        ) -> std::result::Result<(), OperatorError>,
-    ) -> std::result::Result<(), OperatorError> {
-        loop {
-            let wait = control.lock_wait()?;
-            if let Some(state) = self.state.try_lock_for(wait) {
-                control.poll()?;
-                return read(&state.triples, &state.set, control);
-            }
-        }
-    }
-
     /// The triples the transaction wrote that match `pattern` in the graphs
     /// `graphs` names, each with its graph and whether it is there once the
     /// transaction commits (see `PendingTriples::matching`).
@@ -654,14 +632,7 @@ impl WriteClaims for TransactionClaims {
                 .manager
                 .record_endpoints(transaction, [self.entity(src), self.entity(dst)]),
         }
-        .map_err(|error| match error {
-            // Not a conflict: no write can commit until a reopen, which the
-            // caller must learn (a conflict reads as retryable).
-            error @ Error::Transaction(TransactionError::IncompleteCommit) => {
-                OperatorError::Wrapped(Box::new(error))
-            }
-            error => OperatorError::WriteConflict(error.to_string()),
-        })
+        .map_err(|error| OperatorError::WriteConflict(error.to_string()))
     }
 
     fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {
@@ -743,6 +714,11 @@ impl ChangeRecorder for GraphRecorder {
     }
 }
 
+/// The records a [`StreamingChanges`] writes to the WAL at a time, about
+/// 64 KiB of frames: what it holds of the log however many rows it writes.
+#[cfg(feature = "wal")]
+pub(crate) const STREAMED_RECORDS: usize = 2048;
+
 /// The changes of a bulk write that holds commits off for its whole run (an
 /// import, an RDF batch insert): a streaming change set, whose memory does
 /// not grow with the rows it writes.
@@ -750,18 +726,18 @@ impl ChangeRecorder for GraphRecorder {
 /// Its ids are reserved in ranges ([`reserve`](Self::reserve)), each one
 /// entry of its change set however many rows it creates there; its rows are
 /// applied as pending versions of its own transaction
-/// ([`apply`](Self::apply)) and written to the WAL as they go, as the
-/// records of one group, which holds the WAL's writer until it ends. Nothing
-/// else writes the WAL meanwhile, since commits wait. Its commit
-/// ([`commit`](Self::commit)) writes the group's LAST frame before it stamps
-/// the ranges; until then a crash leaves a group that recovery drops (no LAST
-/// frame), and a failure, or a panic, drops it unfinished, which cuts the
-/// group back and undoes the ranges. Records of changes applied after the
-/// commit (RDF triples) are written into the same group
-/// ([`log_triple`](Self::log_triple)).
+/// ([`apply`](Self::apply)) and written to the WAL as they go, a run of
+/// records at a time, without a commit marker. Nothing else writes the WAL
+/// meanwhile, since commits wait, so the records stay one group, which its
+/// commit closes with the marker ([`commit`](Self::commit)) before it
+/// stamps the ranges. Until then a crash leaves records that recovery drops
+/// (no marker closes them), and a failure, or a panic, drops it unfinished,
+/// which undoes the ranges and closes the records with an abort marker.
+/// Records of changes applied after the marker (RDF triples) are written the
+/// same way ([`log`](Self::log)).
 ///
 /// A bulk write reports no change data capture events.
-pub(crate) struct StreamingChanges<'wal> {
+pub(crate) struct StreamingChanges {
     /// The transaction manager, which it poisons when it cannot undo or
     /// close what it wrote.
     manager: Arc<TransactionManager>,
@@ -775,49 +751,24 @@ pub(crate) struct StreamingChanges<'wal> {
     /// The store its ranges are in, with the graph's slot, once it reserved
     /// one.
     target: Option<(GraphSlot, Arc<dyn ChangeTarget>)>,
-    /// The WAL and the group it writes.
+    /// The WAL, with the records not written yet.
     #[cfg(feature = "wal")]
-    log: Option<StreamedLog<'wal>>,
+    log: Option<StreamedLog>,
     /// Whether it committed or aborted.
     finished: bool,
-    #[cfg(not(feature = "wal"))]
-    _wal: std::marker::PhantomData<&'wal ()>,
 }
 
-/// The WAL a [`StreamingChanges`] writes, and its group once it began.
+/// The WAL a [`StreamingChanges`] writes, with its pending records.
 #[cfg(feature = "wal")]
-struct StreamedLog<'wal> {
-    wal: &'wal grafeo_storage::wal::Wal,
-    /// The epoch the group's changes take (its `GroupBegin` names it).
-    epoch: EpochId,
-    /// The group, from the first record on.
-    group: Option<grafeo_storage::wal::GroupWriter<'wal>>,
-    /// The bytes of the record being written; reused for every record.
-    scratch: Vec<u8>,
+struct StreamedLog {
+    wal: Arc<grafeo_storage::wal::LpgWal>,
+    /// At most [`STREAMED_RECORDS`] records, written next.
+    pending: Vec<grafeo_storage::wal::WalRecord>,
+    /// Whether records were written: an abort closes them.
+    written: bool,
 }
 
-#[cfg(feature = "wal")]
-impl<'wal> StreamingChanges<'wal> {
-    /// The same changes, logged to `wal` when there is one, as a group at
-    /// `epoch`: the epoch the bulk write commits at (commits wait, so it is
-    /// known from the start).
-    #[cfg(feature = "wal")]
-    pub(crate) fn logged_to(
-        mut self,
-        wal: Option<&'wal grafeo_storage::wal::Wal>,
-        epoch: EpochId,
-    ) -> Self {
-        self.log = wal.map(|wal| StreamedLog {
-            wal,
-            epoch,
-            group: None,
-            scratch: Vec::new(),
-        });
-        self
-    }
-}
-
-impl StreamingChanges<'_> {
+impl StreamingChanges {
     /// The changes of a bulk write by `transaction`, reading at `snapshot`
     /// (see [`TransactionManager::bulk_writer`]), not logged. The caller
     /// holds commits off until it commits or aborts them.
@@ -834,9 +785,18 @@ impl StreamingChanges<'_> {
             #[cfg(feature = "wal")]
             log: None,
             finished: false,
-            #[cfg(not(feature = "wal"))]
-            _wal: std::marker::PhantomData,
         }
+    }
+
+    /// The same changes, logged to `wal` when there is one.
+    #[cfg(feature = "wal")]
+    pub(crate) fn logged_to(mut self, wal: Option<Arc<grafeo_storage::wal::LpgWal>>) -> Self {
+        self.log = wal.map(|wal| StreamedLog {
+            wal,
+            pending: Vec::with_capacity(STREAMED_RECORDS),
+            written: false,
+        });
+        self
     }
 
     /// Reserves `count` consecutive ids in `table` of `target`, the default
@@ -891,7 +851,7 @@ impl StreamingChanges<'_> {
     /// # Errors
     ///
     /// Fails when the store refuses the row (nothing of it applied), or
-    /// the WAL write of a frame fails.
+    /// the WAL write of a run of records fails.
     pub(crate) fn apply(&mut self, op: DataOp) -> Result<()> {
         let Some((_, target)) = &self.target else {
             return Err(Error::Internal(
@@ -907,30 +867,27 @@ impl StreamingChanges<'_> {
             .map_err(|error| Error::Internal(error.to_string()))?;
         #[cfg(feature = "wal")]
         if let Some(log) = &mut self.log {
-            log.push(
-                self.transaction,
-                &grafeo_common::storage::LogRecordRef::Data {
-                    graph: None,
-                    op: &op,
-                },
-            )?;
+            super::v1_group::push_v1_records(&op, None, |record| log.pending.push(record));
+            if log.pending.len() >= STREAMED_RECORDS {
+                log.write()?;
+            }
         }
         Ok(())
     }
 
-    /// Logs `op`, a triple inserted into or deleted from the RDF graph
-    /// `graph`, which the caller applies once the bulk write commits.
+    /// Logs `record`, of a change applied after the commit marker (an RDF
+    /// triple).
     ///
     /// # Errors
     ///
-    /// Fails when the WAL write of a frame fails.
+    /// Fails when the WAL write of a run of records fails.
     #[cfg(all(feature = "wal", feature = "triple-store"))]
-    pub(crate) fn log_triple(&mut self, graph: Option<&str>, op: &DataOp) -> Result<()> {
+    pub(crate) fn log(&mut self, record: grafeo_storage::wal::WalRecord) -> Result<()> {
         if let Some(log) = &mut self.log {
-            log.push(
-                self.transaction,
-                &grafeo_common::storage::LogRecordRef::Data { graph, op },
-            )?;
+            log.pending.push(record);
+            if log.pending.len() >= STREAMED_RECORDS {
+                log.write()?;
+            }
         }
         Ok(())
     }
@@ -938,7 +895,10 @@ impl StreamingChanges<'_> {
     /// Whether it changed nothing yet: no range, no record.
     pub(crate) fn is_empty(&self) -> bool {
         #[cfg(feature = "wal")]
-        let logged = self.log.as_ref().is_some_and(|log| log.group.is_some());
+        let logged = self
+            .log
+            .as_ref()
+            .is_some_and(|log| log.written || !log.pending.is_empty());
         #[cfg(not(feature = "wal"))]
         let logged = false;
         self.set.is_empty() && !logged
@@ -951,42 +911,40 @@ impl StreamingChanges<'_> {
         self.set.approx_bytes()
     }
 
-    /// Commits it: writes its group's LAST frame (and syncs it as the
-    /// durability mode asks), then stamps its ranges at `epoch`. Without an
-    /// epoch it has no ranges (an RDF batch insert, whose triples the caller
-    /// applies once this returns). The caller publishes the epoch.
+    /// The records not written to the WAL yet: at most a run.
+    #[cfg(all(test, feature = "wal"))]
+    pub(crate) fn pending_records(&self) -> usize {
+        self.log.as_ref().map_or(0, |log| log.pending.len())
+    }
+
+    /// Commits it: writes the rest of its records and the commit marker,
+    /// which closes them, as one group, then stamps its ranges at `epoch`
+    /// (the epoch advance follows the marker). Without an epoch it has no
+    /// ranges (an RDF batch insert, whose triples the caller applies once
+    /// this returns). The caller publishes the epoch.
+    ///
+    /// A WAL write of the marker that fails is reported and the commit goes
+    /// on, as a transaction's commit does.
     ///
     /// # Errors
     ///
-    /// - The group was not written: nothing of the bulk write is in the log,
-    ///   and it is aborted ([`TransactionError::LogWriteFailed`]).
-    /// - The group was written but not made durable: the bulk write may
-    ///   survive, so the database is poisoned
-    ///   ([`TransactionError::CommitOutcomeUnknown`]).
-    /// - It has ranges and no epoch, or the store cannot stamp its ranges (a
-    ///   broken invariant: the transaction manager is poisoned).
-    ///
-    /// [`TransactionError::LogWriteFailed`]: grafeo_common::utils::error::TransactionError::LogWriteFailed
-    /// [`TransactionError::CommitOutcomeUnknown`]: grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown
+    /// Fails when it has ranges and no epoch, or the store cannot stamp its
+    /// ranges (a broken invariant: the transaction manager is poisoned).
     pub(crate) fn commit(mut self, epoch: Option<EpochId>) -> Result<()> {
+        self.finished = true;
         #[cfg(feature = "wal")]
-        if let Some(group) = self.log.as_mut().and_then(|log| log.group.take()) {
-            grafeo_common::testing::crash::maybe_crash("streaming_changes:after_records");
-            match group.finish() {
-                Ok(_) => {}
-                Err(error @ grafeo_storage::wal::GroupError::OutcomeUnknown(_)) => {
-                    self.finished = true;
-                    let error = crate::database::wal_log::commit_error(error);
-                    self.manager.poison(&format!(
-                        "a bulk write may be in the WAL unapplied: {error}"
-                    ));
-                    return Err(error);
-                }
-                // Not written: the drop aborts it (undoes the ranges).
-                Err(error) => return Err(crate::database::wal_log::commit_error(error)),
+        if let Some(log) = &mut self.log {
+            use grafeo_storage::wal::WalRecord;
+            log.pending.push(WalRecord::TransactionCommit {
+                transaction_id: self.transaction,
+            });
+            if let Some(epoch) = epoch {
+                log.pending.push(WalRecord::EpochAdvance { epoch });
+            }
+            if let Err(error) = log.write() {
+                grafeo_common::grafeo_warn!("Failed to write a bulk write to the WAL: {}", error);
             }
         }
-        self.finished = true;
         if let Some((slot, target)) = &self.target {
             let Some(epoch) = epoch else {
                 let message = "a bulk write with ranges committed without an epoch".to_string();
@@ -1005,72 +963,68 @@ impl StreamingChanges<'_> {
         Ok(())
     }
 
-    /// Aborts it (when it is dropped before it committed): drops its group,
-    /// which cuts it back, so no record of it stays in the log, and undoes its
-    /// ranges.
+    /// Aborts it (when it is dropped before it committed): drops its pending
+    /// records, closes the ones written with an abort marker, so no later
+    /// commit marker commits them, and undoes its ranges.
     ///
     /// # Errors
     ///
-    /// Fails, after poisoning the transaction manager, when the store cannot
-    /// undo a range.
+    /// Fails, after poisoning the transaction manager, when the abort marker
+    /// cannot be written (a later commit marker would commit the records
+    /// written) or the store cannot undo a range.
     fn abort(&mut self) -> Result<()> {
         self.finished = true;
+        let mut failure = None;
         #[cfg(feature = "wal")]
         if let Some(log) = &mut self.log {
-            drop(log.group.take());
+            log.pending.clear();
+            if log.written {
+                log.pending
+                    .push(grafeo_storage::wal::WalRecord::TransactionAbort {
+                        transaction_id: self.transaction,
+                    });
+                if let Err(error) = log.write() {
+                    failure = Some(format!(
+                        "a bulk write that failed could not close its WAL records: {error}"
+                    ));
+                }
+            }
         }
         if let Some((slot, target)) = &self.target {
             let mut entries = self.set.in_graph(*slot);
             if let Err(error) = target.undo(self.transaction, &mut entries) {
-                let message = format!("a bulk write that failed could not undo its rows: {error}");
-                self.manager.poison(&message);
-                return Err(Error::Internal(message));
+                failure.get_or_insert(format!(
+                    "a bulk write that failed could not undo its rows: {error}"
+                ));
             }
         }
-        Ok(())
+        match failure {
+            Some(message) => {
+                self.manager.poison(&message);
+                Err(Error::Internal(message))
+            }
+            None => Ok(()),
+        }
     }
 }
 
 #[cfg(feature = "wal")]
-impl StreamedLog<'_> {
-    /// Encodes `record` into the group, which it begins with its
-    /// `GroupBegin` on the first record.
-    ///
-    /// # Errors
-    ///
-    /// The record's own error (over a limit), or the commit error of a frame
-    /// write that failed (the group is cut back).
-    fn push(
-        &mut self,
-        transaction: TransactionId,
-        record: &grafeo_common::storage::LogRecordRef<'_>,
-    ) -> Result<()> {
-        use grafeo_common::storage::LogRecordRef;
-        use grafeo_common::storage::log_record::{GroupBegin, Origin};
-
-        use crate::database::wal_log::commit_error;
-
-        grafeo_common::testing::crash::maybe_fail("streaming_changes:write")?;
-        if self.group.is_none() {
-            let mut group = self.wal.begin_group(transaction).map_err(commit_error)?;
-            self.scratch.clear();
-            LogRecordRef::GroupBegin(GroupBegin {
-                epoch: self.epoch,
-                timestamp_ms: crate::database::wal_log::now_ms(),
-                origin: Origin::Bulk,
-            })
-            .encode_framed(&mut self.scratch)?;
-            group.push(&self.scratch).map_err(commit_error)?;
-            self.group = Some(group);
-        }
-        self.scratch.clear();
-        record.encode_framed(&mut self.scratch)?;
-        let group = self.group.as_mut().expect("the group began above");
-        group.push(&self.scratch).map_err(commit_error)
+impl StreamedLog {
+    /// Writes the pending records, and empties them.
+    fn write(&mut self) -> Result<()> {
+        // Set first: a write that fails may have written some of them.
+        self.written = true;
+        let written = grafeo_common::testing::crash::maybe_fail("streaming_changes:write")
+            .and_then(|()| self.wal.log_batch(&self.pending));
+        self.pending.clear();
+        written?;
+        // Tests crash here: records written, no marker closes them.
+        grafeo_common::testing::crash::maybe_crash("streaming_changes:after_records");
+        Ok(())
     }
 }
 
-impl Drop for StreamingChanges<'_> {
+impl Drop for StreamingChanges {
     /// A bulk write dropped before it committed (an error the caller passed
     /// on, a panic) is aborted; what cannot be aborted poisons the database.
     fn drop(&mut self) {
@@ -1144,209 +1098,4 @@ pub(crate) enum BuiltIndex {
     /// A text index.
     #[cfg(feature = "text-index")]
     Text(grafeo_core::index::text::InvertedIndex),
-}
-
-#[cfg(all(test, feature = "triple-store"))]
-mod path_overlay_tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
-
-    use grafeo_common::types::{EpochId, TransactionId};
-    use grafeo_core::execution::operators::{
-        Operator, OperatorError, PathStep, RdfPathConfig, RdfPathGraph, RdfPathOperator,
-        RdfPathPendingGraph, RdfPathReadControl, RdfPathReadOverlay,
-    };
-    use grafeo_core::graph::rdf::{RdfStore, Term, Triple, TriplePattern};
-
-    use super::super::rdf::RdfWriter;
-    use super::{TransactionChanges, TransactionManager};
-
-    enum Probe {
-        Lock,
-        ExpiredLock,
-        Pending,
-    }
-
-    /// Reaches the real adapter after native traversal starts. Expiration is
-    /// placed at the indicated stage, so initial State admission cannot pass
-    /// one of these controls merely by returning an early timeout.
-    struct ProbeOverlay {
-        inner: Arc<dyn RdfPathReadOverlay>,
-        entered: Arc<AtomicBool>,
-        deadline: Instant,
-        probe: Probe,
-    }
-
-    impl ProbeOverlay {
-        fn expire(&self, control: &mut RdfPathReadControl<'_>) {
-            control.poll().unwrap();
-            self.entered.store(true, Ordering::SeqCst);
-            std::thread::sleep(
-                self.deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
-            );
-        }
-    }
-
-    impl RdfPathReadOverlay for ProbeOverlay {
-        fn with_graph(
-            &self,
-            graph: Option<&str>,
-            control: &mut RdfPathReadControl<'_>,
-            read: &mut dyn FnMut(
-                &dyn RdfPathPendingGraph,
-                &mut RdfPathReadControl<'_>,
-            ) -> Result<(), OperatorError>,
-        ) -> Result<(), OperatorError> {
-            match self.probe {
-                Probe::Lock => {
-                    control.poll()?;
-                    self.entered.store(true, Ordering::SeqCst);
-                    self.inner.with_graph(graph, control, read)
-                }
-                Probe::ExpiredLock => {
-                    self.expire(control);
-                    self.inner.with_graph(graph, control, read)
-                }
-                Probe::Pending => self
-                    .inner
-                    .with_graph(graph, control, &mut |pending, control| {
-                        self.expire(control);
-                        let mut visits = 0;
-                        let result = pending.visit_present(
-                            &TriplePattern::with_predicate(Term::iri("p")),
-                            control,
-                            &mut |_, _| {
-                                visits += 1;
-                                Ok(())
-                            },
-                        );
-                        assert_eq!(visits, 0);
-                        assert!(matches!(result, Err(OperatorError::Timeout)));
-                        result
-                    }),
-            }
-        }
-
-        fn visit_graph_names(
-            &self,
-            control: &mut RdfPathReadControl<'_>,
-            visit: &mut dyn FnMut(&str, &mut RdfPathReadControl<'_>) -> Result<(), OperatorError>,
-        ) -> Result<(), OperatorError> {
-            self.inner.visit_graph_names(control, visit)
-        }
-
-        fn retained_bytes(&self) -> usize {
-            self.inner.retained_bytes() + std::mem::size_of::<Self>()
-        }
-    }
-
-    fn path(changes: &Arc<TransactionChanges>, probe: Probe) -> (RdfPathOperator, Arc<AtomicBool>) {
-        let store = Arc::new(RdfStore::new());
-        let writer = RdfWriter::new(
-            Arc::clone(&store),
-            Arc::clone(changes),
-            Arc::new(TransactionManager::new()),
-            #[cfg(feature = "wal")]
-            None,
-        );
-        let deadline = Instant::now() + Duration::from_millis(100);
-        let entered = Arc::new(AtomicBool::new(false));
-        let overlay = Arc::new(ProbeOverlay {
-            inner: writer.path_overlay(),
-            entered: Arc::clone(&entered),
-            deadline,
-            probe,
-        });
-        let config = RdfPathConfig {
-            subject: Some(Term::iri("s")),
-            object: None,
-            subject_var: None,
-            object_var: None,
-            graph_var: None,
-            min_hops: false,
-            path: PathStep::Predicate("p".into()),
-            graph: RdfPathGraph::Default,
-            companions: false,
-            transaction_id: None,
-            chunk_capacity: 16,
-        };
-        (
-            RdfPathOperator::new(store, config)
-                .with_read_overlay(Some(overlay))
-                .with_deadline(Some(deadline)),
-            entered,
-        )
-    }
-
-    #[test]
-    fn path_overlay_deadline_bounds_changes_lock_wait() {
-        let changes = Arc::new(TransactionChanges::new(
-            TransactionId::new(2),
-            EpochId::new(0),
-        ));
-        std::thread::scope(|scope| {
-            let (held_tx, held_rx) = std::sync::mpsc::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            let changes_ref = &changes;
-            scope.spawn(move || {
-                let _guard = changes_ref.state.lock();
-                held_tx.send(()).unwrap();
-                // Release even if the path regresses to an unbounded lock wait,
-                // so this control fails instead of hanging the test suite.
-                let _ = release_rx.recv_timeout(Duration::from_secs(2));
-            });
-            held_rx.recv().unwrap();
-            let (mut path, entered) = path(&changes, Probe::Lock);
-            let result = path.next();
-            assert!(changes.state.try_lock().is_none());
-            release_tx.send(()).unwrap();
-            assert!(entered.load(Ordering::SeqCst));
-            assert!(matches!(result, Err(OperatorError::Timeout)));
-            assert!(path.next().unwrap().is_none());
-        });
-    }
-
-    #[test]
-    fn path_overlay_refuses_expired_changes_lock_read() {
-        let changes = Arc::new(TransactionChanges::new(
-            TransactionId::new(2),
-            EpochId::new(0),
-        ));
-        let (mut path, entered) = path(&changes, Probe::ExpiredLock);
-        assert!(matches!(path.next(), Err(OperatorError::Timeout)));
-        assert!(entered.load(Ordering::SeqCst));
-        assert!(path.next().unwrap().is_none());
-        assert!(changes.state.try_lock().is_some());
-    }
-
-    #[test]
-    fn path_overlay_polls_deleted_and_rejected_pending_entries() {
-        for present in [false, true] {
-            let changes = Arc::new(TransactionChanges::new(
-                TransactionId::new(2),
-                EpochId::new(0),
-            ));
-            for n in 0..64 {
-                changes
-                    .record_triple(
-                        None,
-                        Triple::new(
-                            Term::iri("s"),
-                            Term::iri("other"),
-                            Term::literal(n.to_string()),
-                        ),
-                        present,
-                    )
-                    .unwrap();
-            }
-            let (mut path, entered) = path(&changes, Probe::Pending);
-            assert!(matches!(path.next(), Err(OperatorError::Timeout)));
-            assert!(entered.load(Ordering::SeqCst));
-            // The reflexive, zero-column row was buffered before traversal;
-            // an error discards it and releases the borrowed changes lock.
-            assert!(path.next().unwrap().is_none());
-            assert!(changes.state.try_lock().is_some());
-        }
-    }
 }

@@ -124,9 +124,9 @@ let keys = KeyChain::new(*master_key);
 | Encrypted | Not encrypted |
 |-----------|---------------|
 | The database file: every section (data, schema, indexes) and the directory that lists them | The file header (format version, the encrypted flag, the database id, the creation time and Grafeo version) and the two database headers (checkpoint counters and time, node and edge counts) |
-| The sidecar WAL (`<file>.wal/`): every record | Each WAL segment's header (database id, log position, salt, key check) and the backup cursor |
+| The sidecar WAL (`<file>.wal/`): every record | WAL bookkeeping files (the checkpoint marker, the backup cursor) |
 | A copy written by `save()` | The bytes `export_snapshot()` returns: plaintext, to be stored as safely as the data |
-| Full backups (`backup_full()`, a copy of the encrypted file) and incremental segments (`backup_incremental()`, encrypted WAL segments) | The backup manifest (segment names, epochs, sizes, checksums) |
+| Full backups (`backup_full()`, a copy of the encrypted file) and incremental segments (`backup_incremental()`, encrypted WAL records) | The backup manifest (segment names, epochs, sizes, checksums) |
 | A database restored with `restore_to_epoch_with()`, and the WAL it writes next to it | An in-memory copy made with `to_memory()`: it has no key, so a copy saved from it is plaintext (call `save()` on the encrypted database instead) |
 | | The `.pre-0.6` files a migration keeps of a database written by 0.5.x: the file and, if they existed, its WAL, a pending checkpoint image and its spill directory, or the whole WAL directory (and its spill directory) |
 
@@ -134,7 +134,7 @@ An encrypted database writes no spill files: spill files are not encrypted, so i
 
 ### Keys
 
-The key chain derives the keys with HKDF-SHA256, one per database and component: `"grafeo-container"` for the file, with the database id from the file header, and `"grafeo-wal-segment"` for each segment of its WAL, with the database id and the segment's random salt. Two databases configured with the same master key therefore have different keys, and a copy made with `save()` gets a new database id and keys of its own.
+The key chain derives the keys with HKDF-SHA256, one per database and component: `"grafeo-container"` for the file and `"grafeo-wal"` for its WAL, each with the database id from the file header. Two databases configured with the same master key therefore have different keys, and a copy made with `save()` gets a new database id and keys of its own.
 
 ### Opening an Encrypted Database
 

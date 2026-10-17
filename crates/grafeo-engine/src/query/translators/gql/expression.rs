@@ -2,8 +2,6 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use crate::query::functions::resolve_call;
-use crate::query::plan::BuiltinFunction;
 
 impl GqlTranslator {
     pub(super) fn translate_expression(&self, expr: &ast::Expression) -> Result<LogicalExpression> {
@@ -50,7 +48,7 @@ impl GqlTranslator {
                 // by a WITH, unwound from a list).
 
                 // NULLIF(a, b) desugars to CASE WHEN a = b THEN NULL ELSE a END
-                if BuiltinFunction::from_name(name) == Some(BuiltinFunction::Nullif) {
+                if name.eq_ignore_ascii_case("nullif") {
                     if args.len() != 2 {
                         return Err(Error::Query(QueryError::new(
                             QueryErrorKind::Semantic,
@@ -77,7 +75,11 @@ impl GqlTranslator {
                     .iter()
                     .map(|a| self.translate_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                resolve_call(name, args, *distinct)
+                Ok(LogicalExpression::FunctionCall {
+                    name: name.clone(),
+                    args,
+                    distinct: *distinct,
+                })
             }
             ast::Expression::List(items) => {
                 let items = items
@@ -541,8 +543,8 @@ mod tests {
     }
 
     #[test]
-    fn test_length_with_multiple_args_is_an_arity_error() {
-        // length(a, b) is no path length either: the translator refuses the call.
+    fn test_length_with_multiple_args_is_regular_function() {
+        // length(a, b) should remain a regular function call (path optimization is single-arg only)
         let t = translator();
         let expr = ast::Expression::FunctionCall {
             name: "length".to_string(),
@@ -553,7 +555,10 @@ mod tests {
             distinct: false,
         };
 
-        let error = t.translate_expression(&expr).unwrap_err().to_string();
-        assert!(error.contains("length"), "{error}");
+        let result = t.translate_expression(&expr).unwrap();
+        assert!(
+            matches!(&result, LogicalExpression::FunctionCall { name, .. } if name == "length"),
+            "length(a, b) should stay as FunctionCall, got: {result:?}"
+        );
     }
 }

@@ -40,7 +40,7 @@
 //! | 25 | [`RemoveNodeLabel`](DataOp::RemoveNodeLabel) | graph, id, label |
 //! | 32 | [`CreateGraph`](StandaloneOp::CreateGraph) | name |
 //! | 33 | [`DropGraph`](StandaloneOp::DropGraph) | name |
-//! | 34 | reserved, unused (a graph copy logs a create record per copied entity) | |
+//! | 34 | reserved for copying a graph (`CREATE GRAPH ... AS COPY OF`) | |
 //! | 40 | [`PutCatalog`](StandaloneOp::PutCatalog) | the catalog record's kind (u8), then its payload |
 //! | 41 | [`DropCatalog`](StandaloneOp::DropCatalog) | the dropped catalog record's kind (u8), then its [`CatalogKey`] |
 //! | 64 | [`InsertTriple`](DataOp::InsertTriple) | graph, subject, predicate, object |
@@ -755,8 +755,6 @@ fn encode_catalog_key(key: &CatalogKey, out: &mut PayloadWriter<'_>) -> Result<(
         | CatalogKey::IndexName(name)
         | CatalogKey::Procedure(name) => encode_bincode_payload(name, out),
         CatalogKey::Index { graph, index } => encode_bincode_payload(&(graph, index), out),
-        // There is one: the kind names it.
-        CatalogKey::StoredConfig => Ok(()),
     }
 }
 
@@ -822,13 +820,6 @@ fn decode_catalog_key(required: bool, payload: &[u8]) -> Result<Option<CatalogKe
         }
         8 => CatalogKey::IndexName(name()?),
         9 => CatalogKey::Procedure(name()?),
-        10 if key.is_empty() => CatalogKey::StoredConfig,
-        10 => {
-            return Err(Error::corruption(format!(
-                "the key of the stored configuration holds {} bytes, where it holds none",
-                key.len()
-            )));
-        }
         _ if required => return Err(unknown_catalog_kind(WHAT, kind)),
         _ => return Ok(None),
     };
@@ -1719,16 +1710,6 @@ mod tests {
                 returns: vec![("name".into(), "STRING".into())],
                 body: "MATCH (p:Person {city: $city}) RETURN p.name AS name".into(),
             }),
-            CatalogRecord::StoredConfig(crate::storage::catalog_record::StoredConfigRecord {
-                graph_model: crate::storage::catalog_record::GraphModelRecord::Rdf,
-                backward_edges: true,
-                schema_constraints: false,
-                wal_enabled: false,
-                wal_durability: crate::storage::catalog_record::DurabilityRecord::NoSync,
-                memory_limit: None,
-                spill_path: None,
-                sections: Vec::new(),
-            }),
         ]
     }
 
@@ -1761,7 +1742,6 @@ mod tests {
             },
             CatalogKey::IndexName("person_city".into()),
             CatalogKey::Procedure("visitors".into()),
-            CatalogKey::StoredConfig,
         ]
     }
 
@@ -1858,9 +1838,9 @@ mod tests {
     #[test]
     fn every_catalog_kind_has_a_record_and_a_key() {
         let record_kinds: Vec<u8> = catalog_records().iter().map(CatalogRecord::kind).collect();
-        assert_eq!(record_kinds, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(record_kinds, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let key_kinds: Vec<u8> = catalog_keys().iter().map(CatalogKey::kind).collect();
-        assert_eq!(key_kinds, [1, 2, 3, 4, 5, 6, 7, 7, 7, 8, 9, 10]);
+        assert_eq!(key_kinds, [1, 2, 3, 4, 5, 6, 7, 7, 7, 8, 9]);
     }
 
     /// Characterization: pins the bytes of one record of every kind.
@@ -2041,7 +2021,7 @@ mod tests {
         }
         assert_eq!(
             (bytes.len(), fnv1a(&bytes)),
-            (2360, 14_030_477_899_162_761_609),
+            (2338, 13_352_241_720_832_839_041),
             "{bytes:?}"
         );
     }
@@ -2087,7 +2067,7 @@ mod tests {
             .into_iter()
             .map(|key| payload(standalone(StandaloneOp::DropCatalog(key))))
             .collect();
-        let expected: [&[u8]; 12] = [
+        let expected: [&[u8]; 11] = [
             &[1, 6, b't', b'r', b'a', b'v', b'e', b'l'],
             &[2, 4, b'C', b'i', b't', b'y'],
             &[3, 5, b'R', b'O', b'U', b'T', b'E'],
@@ -2111,8 +2091,6 @@ mod tests {
                 8, 11, b'p', b'e', b'r', b's', b'o', b'n', b'_', b'c', b'i', b't', b'y',
             ],
             &[9, 8, b'v', b'i', b's', b'i', b't', b'o', b'r', b's'],
-            // the stored configuration: its kind names it
-            &[10],
         ];
         assert_eq!(keys, expected);
     }

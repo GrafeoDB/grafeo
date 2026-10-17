@@ -2,7 +2,7 @@
 //!
 //! A database opened with `Config::encryption` writes its `.grafeo` file and
 //! its sidecar WAL encrypted, with keys the key chain derives for that
-//! database (`"grafeo-container"` and `"grafeo-wal-segment"`, each with the database
+//! database (`"grafeo-container"` and `"grafeo-wal"`, each with the database
 //! id), and opens only with that key chain. These tests also run in CI with
 //! the minimal feature set:
 //!
@@ -32,7 +32,7 @@ use grafeo_engine::config::EncryptionConfig;
 use grafeo_engine::{Config, GrafeoDB};
 use grafeo_storage::file::GrafeoFileManager;
 use grafeo_storage::file::v3::header::FileHeaderV3;
-use grafeo_storage::wal::{CipherForSalt, SALT_BYTES, ScanOptions, WalScan, list_wal_directory};
+use grafeo_storage::wal::WalRecovery;
 
 /// A property value whose bytes must never be found in an encrypted file.
 const MARKER: &str = "Amsterdam-3-19-88-marker";
@@ -300,35 +300,14 @@ fn an_encrypted_wal_replays_with_the_key_after_an_exit_without_close() {
         "the child left its last write in the sidecar WAL: {wal_files:?}"
     );
 
-    // Each WAL segment's key is derived per database and segment:
-    // "grafeo-wal-segment" with the id and the segment's salt.
+    // The WAL key is derived per database: "grafeo-wal" with the id.
     let database_id = file_header(&path).database_id;
     let chain = key_chain(19);
-    let segment_key: CipherForSalt = {
-        let chain = Arc::clone(&chain);
-        Arc::new(move |salt: &[u8; SALT_BYTES]| {
-            let mut component = database_id.to_le_bytes().to_vec();
-            component.extend_from_slice(salt);
-            chain.encryptor_for("grafeo-wal-segment", &component)
-        })
-    };
-    let first_lsn = list_wal_directory(&sidecar_wal(&path)).unwrap().segments[0].0;
-    let mut scan = WalScan::open(
-        sidecar_wal(&path),
-        ScanOptions {
-            cipher_for_salt: Some(segment_key),
-            ..ScanOptions::new(database_id, first_lsn)
-        },
-    )
-    .unwrap();
-    let mut group = scan
-        .next_group()
-        .unwrap()
-        .expect("the WAL holds Jules's commit");
+    let mut recovery = WalRecovery::new(sidecar_wal(&path));
+    recovery.set_encryptor(chain.encryptor_for("grafeo-wal", &database_id.to_le_bytes()));
     assert!(
-        group.next_payload().unwrap().is_some(),
-        "the WAL decrypts with the key derived from \"grafeo-wal-segment\", the database id and \
-         the segment's salt"
+        !recovery.recover().unwrap().is_empty(),
+        "the WAL decrypts with the key derived from \"grafeo-wal\" and the database id"
     );
 
     let db = open_encrypted(&path, &chain);
@@ -371,15 +350,12 @@ fn an_open_with_the_wal_off_replays_the_sidecar_wal_and_keeps_its_commits() {
             "key {key:?}: the child left Jules in the sidecar WAL"
         );
         let config = |wal_enabled: bool| {
-            let config = match key {
+            let mut config = match key {
                 None => Config::persistent(&path),
                 Some(seed) => encrypted(&path, &key_chain(seed)),
             };
-            if wal_enabled {
-                config.with_wal()
-            } else {
-                config.without_wal()
-            }
+            config.wal_enabled = wal_enabled;
+            config
         };
 
         // What an open with the WAL off sees, whether its close() leaves the

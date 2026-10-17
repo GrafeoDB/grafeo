@@ -201,5 +201,24 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
             throw new TransactionException("Transaction is already committed or rolled back");
     }
 
-    private static QueryResult BuildResult(nint resultPtr) => GrafeoDB.BuildResult(resultPtr);
+    private static QueryResult BuildResult(nint resultPtr)
+    {
+        try
+        {
+            var jsonPtr = NativeMethods.grafeo_result_json(resultPtr);
+            var json = Marshal.PtrToStringUTF8(jsonPtr) ?? "[]";
+            var executionTimeMs = NativeMethods.grafeo_result_execution_time_ms(resultPtr);
+            var rowsScanned = (long)NativeMethods.grafeo_result_rows_scanned(resultPtr);
+
+            var rows = ValueConverter.ParseRows(json);
+            var columns = ValueConverter.ExtractColumns(rows);
+            var (nodes, edges) = ValueConverter.ExtractEntities(rows);
+
+            return new QueryResult(columns, rows, nodes, edges, executionTimeMs, rowsScanned);
+        }
+        finally
+        {
+            NativeMethods.grafeo_free_result(resultPtr);
+        }
+    }
 }

@@ -13,8 +13,9 @@ use super::common::{
     check_branch_columns, collect_expression_variables, combine_with_and,
     comma_part_join_variables, comma_part_reads_earlier_rows, expand_subquery_return_star,
     flatten_and_conjuncts, has_all_labels, is_aggregate_function, is_binary_set_function,
-    join_and_conjuncts, no_result, optional_join, push_set_property, references_any, with_imports,
-    wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    join_and_conjuncts, no_result, optional_join, push_set_property, references_any,
+    to_aggregate_function, with_imports, wrap_distinct, wrap_filter, wrap_limit, wrap_return,
+    wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
@@ -1204,12 +1205,10 @@ impl GqlTranslator {
                 operand: Box::new(Self::substitute_let_bindings(*operand, bindings)),
             },
             LogicalExpression::FunctionCall {
-                callee,
                 name,
                 args,
                 distinct,
             } => LogicalExpression::FunctionCall {
-                callee,
                 name,
                 args: args
                     .into_iter()
@@ -2374,9 +2373,7 @@ impl GqlTranslator {
                 name,
                 args,
                 distinct,
-            } if AggregateFunction::from_name(name) == Some(AggregateFunction::Count)
-                && args.len() <= 1 =>
-            {
+            } if name.eq_ignore_ascii_case("count") && args.len() <= 1 => {
                 Some((args.first(), *distinct))
             }
             _ => None,
@@ -3005,32 +3002,20 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_from_name() {
+    fn test_to_aggregate_function() {
         assert_eq!(
-            AggregateFunction::from_name("COUNT"),
+            to_aggregate_function("COUNT"),
             Some(AggregateFunction::Count)
         );
+        assert_eq!(to_aggregate_function("sum"), Some(AggregateFunction::Sum));
+        assert_eq!(to_aggregate_function("Avg"), Some(AggregateFunction::Avg));
+        assert_eq!(to_aggregate_function("min"), Some(AggregateFunction::Min));
+        assert_eq!(to_aggregate_function("MAX"), Some(AggregateFunction::Max));
         assert_eq!(
-            AggregateFunction::from_name("sum"),
-            Some(AggregateFunction::Sum)
-        );
-        assert_eq!(
-            AggregateFunction::from_name("Avg"),
-            Some(AggregateFunction::Avg)
-        );
-        assert_eq!(
-            AggregateFunction::from_name("min"),
-            Some(AggregateFunction::Min)
-        );
-        assert_eq!(
-            AggregateFunction::from_name("MAX"),
-            Some(AggregateFunction::Max)
-        );
-        assert_eq!(
-            AggregateFunction::from_name("collect"),
+            to_aggregate_function("collect"),
             Some(AggregateFunction::Collect)
         );
-        assert_eq!(AggregateFunction::from_name("UNKNOWN"), None);
+        assert_eq!(to_aggregate_function("UNKNOWN"), None);
     }
 
     #[test]

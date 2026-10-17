@@ -155,29 +155,10 @@ pub struct GroupEnd {
 
 /// The segment the writer appends to.
 struct ActiveSegment {
-    /// The open file; `None` once the WAL is closed ([`Wal::close`]).
-    file: Option<Arc<File>>,
+    file: Arc<File>,
     path: PathBuf,
     first_lsn: u64,
     cipher: Option<Arc<WalCipher>>,
-}
-
-impl ActiveSegment {
-    /// The open file.
-    ///
-    /// # Errors
-    ///
-    /// [`WalError::Unavailable`] once the WAL is closed.
-    fn open_file(&self) -> Result<&Arc<File>, WalError> {
-        self.file.as_ref().ok_or_else(closed)
-    }
-}
-
-/// The error of a write or sync after [`Wal::close`].
-fn closed() -> WalError {
-    WalError::Unavailable {
-        reason: "the WAL is closed".to_string(),
-    }
 }
 
 /// What the writer's lock guards: the active segment and the end of the log.
@@ -194,8 +175,7 @@ struct WriterState {
 /// What a sync needs, kept apart from the writer's lock so a sync never
 /// waits for a group being written.
 struct SyncTarget {
-    /// The open file; `None` once the WAL is closed ([`Wal::close`]).
-    file: Option<Arc<File>>,
+    file: Arc<File>,
     path: PathBuf,
     /// The end of the last complete group in `file`.
     end_lsn: u64,
@@ -220,8 +200,6 @@ pub struct Wal {
     frames_per_segment_key: u64,
     /// Successful fsyncs of [`sync_until`](Self::sync_until).
     sync_count: AtomicU64,
-    /// Records of the groups finished since the writer opened.
-    records_written: AtomicU64,
     /// A sync covered groups and no group that began after it records it
     /// yet: the next chance to write a sync marker takes it.
     marker_due: AtomicBool,
@@ -296,7 +274,7 @@ impl Wal {
         let frames = (start - first_lsn) / FRAME_HEADER_BYTES as u64;
         Ok(Self {
             published: Mutex::new(SyncTarget {
-                file: segment.file.clone(),
+                file: Arc::clone(&segment.file),
                 path: segment.path.clone(),
                 end_lsn: start,
             }),
@@ -319,7 +297,6 @@ impl Wal {
             last_sync: Mutex::new(Instant::now()),
             frames_per_segment_key: options.frames_per_segment_key.max(1),
             sync_count: AtomicU64::new(0),
-            records_written: AtomicU64::new(0),
             marker_due: AtomicBool::new(false),
             marker_start_lsn: AtomicU64::new(0),
             marker_end_lsn: AtomicU64::new(0),
@@ -447,7 +424,7 @@ impl Wal {
         let (file, path, target) = {
             let published = self.published.lock();
             (
-                published.file.clone().ok_or_else(closed)?,
+                Arc::clone(&published.file),
                 published.path.clone(),
                 published.end_lsn,
             )
@@ -486,24 +463,6 @@ impl Wal {
     #[must_use]
     pub fn sync_count(&self) -> u64 {
         self.sync_count.load(Ordering::Acquire)
-    }
-
-    /// Closes the WAL: waits for a group in progress, then releases its files,
-    /// so the directory can be removed (on Windows an open file keeps it).
-    /// From then on every group and sync fails with
-    /// [`WalError::Unavailable`]. The caller syncs first.
-    pub fn close(&self) {
-        let mut state = self.state.lock();
-        self.poison("the WAL is closed".to_string());
-        state.segment.file = None;
-        self.published.lock().file = None;
-    }
-
-    /// How many records the groups finished since the writer opened hold
-    /// (sync markers hold none).
-    #[must_use]
-    pub fn records_written(&self) -> u64 {
-        self.records_written.load(Ordering::Acquire)
     }
 
     /// Deletes the sealed segments that end at or below `lsn`, never the
@@ -569,16 +528,6 @@ impl Wal {
         self.database_id
     }
 
-    /// The options to scan this WAL from `from_lsn` on: its database and
-    /// its key, without salvage.
-    #[must_use]
-    pub fn scan_options(&self, from_lsn: u64) -> super::ScanOptions {
-        super::ScanOptions {
-            cipher_for_salt: self.cipher_for_salt.clone(),
-            ..super::ScanOptions::new(self.database_id, from_lsn)
-        }
-    }
-
     /// Stops the writer for good: the first reason is kept.
     fn poison(&self, reason: String) {
         let mut stored = self.poison_reason.lock();
@@ -603,26 +552,17 @@ impl Wal {
     /// Whether a group of `records` records that just finished must be
     /// synced now, as the durability mode asks.
     fn sync_due_after(&self, records: u64) -> bool {
-        self.records_written.fetch_add(records, Ordering::AcqRel);
-        self.records_since_sync.fetch_add(records, Ordering::AcqRel);
-        self.sync_due()
-    }
-
-    /// Whether the durability mode asks for a sync of the groups written
-    /// since the last one: always in `Sync` mode, once a threshold is
-    /// reached in `Batch` mode, never in `Adaptive` (its flusher syncs) and
-    /// `NoSync`. A commit pipeline asks after
-    /// [`GroupWriter::finish_unsynced`], then syncs with
-    /// [`sync_until`](Self::sync_until) outside its own commit lock.
-    #[must_use]
-    pub fn sync_due(&self) -> bool {
+        let pending = self
+            .records_since_sync
+            .fetch_add(records, Ordering::AcqRel)
+            .saturating_add(records);
         match self.durability {
             DurabilityMode::Sync => true,
             DurabilityMode::Batch {
                 max_delay_ms,
                 max_records,
             } => {
-                self.records_since_sync.load(Ordering::Acquire) >= max_records
+                pending >= max_records
                     || self.last_sync.lock().elapsed() >= Duration::from_millis(max_delay_ms)
             }
             DurabilityMode::Adaptive { .. } | DurabilityMode::NoSync => false,
@@ -636,7 +576,7 @@ impl Wal {
         if end_lsn == state.segment.first_lsn {
             return Ok(end_lsn);
         }
-        if let Err(error) = sync_file(state.segment.open_file()?, &state.segment.path) {
+        if let Err(error) = sync_file(&state.segment.file, &state.segment.path) {
             self.poison(format!(
                 "syncing a WAL segment before rotating failed: {error}"
             ));
@@ -661,7 +601,7 @@ impl Wal {
             }
         };
         *self.published.lock() = SyncTarget {
-            file: segment.file.clone(),
+            file: Arc::clone(&segment.file),
             path: segment.path.clone(),
             end_lsn,
         };
@@ -763,9 +703,6 @@ impl GroupWriter<'_> {
         let end = self.write_last()?;
         self.wal
             .records_since_sync
-            .fetch_add(self.records, Ordering::AcqRel);
-        self.wal
-            .records_written
             .fetch_add(self.records, Ordering::AcqRel);
         self.write_marker_if_due();
         self.state = None;
@@ -908,7 +845,7 @@ impl GroupWriter<'_> {
         if !self.marker {
             maybe_fail("wal:write").map_err(|error| WalError::injected(&segment.path, error))?;
         }
-        let mut file = &**segment.open_file()?;
+        let mut file = &*segment.file;
         let written = if body.len() <= FRAME_TARGET {
             // One write for a frame of the usual size.
             self.frame.clear();
@@ -958,11 +895,11 @@ impl GroupWriter<'_> {
         let offset = (SEGMENT_HEADER_BYTES as u64) + (self.start_lsn - segment.first_lsn);
         maybe_fail("wal:truncate").map_err(|error| WalError::injected(&segment.path, error))?;
         segment
-            .open_file()?
+            .file
             .set_len(offset)
             .map_err(|source| WalError::io(&segment.path, source))?;
         maybe_crash("wal:after_cut_back");
-        (&**segment.open_file()?)
+        (&*segment.file)
             .seek(SeekFrom::Start(offset))
             .map_err(|source| WalError::io(&segment.path, source))?;
         self.touched_file = false;
@@ -1074,7 +1011,7 @@ fn open_newest(
     sync_file(&file, path)?;
     file.seek(SeekFrom::End(0)).map_err(io)?;
     Ok(Some(ActiveSegment {
-        file: Some(Arc::new(file)),
+        file: Arc::new(file),
         path: path.to_path_buf(),
         first_lsn,
         cipher,
@@ -1154,7 +1091,7 @@ fn create_segment(
         });
     }
     Ok(ActiveSegment {
-        file: Some(Arc::new(file)),
+        file: Arc::new(file),
         path,
         first_lsn,
         cipher,

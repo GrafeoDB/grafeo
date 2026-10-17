@@ -2,7 +2,6 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use crate::query::functions::resolve_call;
 
 impl GqlTranslator {
     /// Takes the horizontal aggregates out of `items` (a RETURN or WITH list),
@@ -498,7 +497,11 @@ impl GqlTranslator {
                         translated_args.push(self.translate_expression(arg)?);
                     }
                 }
-                resolve_call(name, translated_args, *distinct)
+                Ok(LogicalExpression::FunctionCall {
+                    name: name.clone(),
+                    args: translated_args,
+                    distinct: *distinct,
+                })
             }
             ast::Expression::Binary { left, op, right } => {
                 let binary_op = self.translate_binary_op(*op);
@@ -589,7 +592,7 @@ impl GqlTranslator {
                 args,
                 distinct,
             } => {
-                if let Some(func) = AggregateFunction::from_name(name) {
+                if let Some(func) = to_aggregate_function(name) {
                     let agg_expr = if args.is_empty() {
                         // COUNT(*) case
                         AggregateExpr {
@@ -789,12 +792,10 @@ impl HavingScope {
                 operand: Box::new(self.resolve(*operand)),
             },
             LogicalExpression::FunctionCall {
-                callee,
                 name,
                 args,
                 distinct,
             } => LogicalExpression::FunctionCall {
-                callee,
                 name,
                 args: args.into_iter().map(|arg| self.resolve(arg)).collect(),
                 distinct,

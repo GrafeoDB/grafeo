@@ -163,13 +163,12 @@ fn multiple_checkpoints_alternate_headers() {
     session.execute("INSERT (:Person {name: 'Jules'})").unwrap();
     db.wal_checkpoint().unwrap();
 
-    // The creation's own checkpoint (it stores the configuration) is 1.
     let fm = db.file_manager().unwrap();
-    assert_eq!(fm.active_header().iteration, 2);
+    assert_eq!(fm.active_header().iteration, 1);
 
     session.execute("INSERT (:Person {name: 'Mia'})").unwrap();
     db.wal_checkpoint().unwrap();
-    assert_eq!(fm.active_header().iteration, 3);
+    assert_eq!(fm.active_header().iteration, 2);
     assert_eq!(fm.active_header().node_count, 2);
 
     db.close().unwrap();
@@ -262,8 +261,7 @@ fn checkpoint_merges_incremental_writes() {
     let header = db.file_manager().unwrap().active_header();
     assert_eq!(header.node_count, 4);
     assert_eq!(header.edge_count, 1);
-    // The creation's checkpoint (it stores the configuration), then 3.
-    assert_eq!(header.iteration, 4);
+    assert_eq!(header.iteration, 3); // 3 checkpoints = iteration 3
 
     db.close().unwrap();
 

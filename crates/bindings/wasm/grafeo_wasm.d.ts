@@ -7,64 +7,6 @@
  */
 export default function init(): Promise<void>;
 
-/** What a write statement changed (all zero for a read). */
-export interface WriteCounters {
-  nodesCreated: number;
-  nodesDeleted: number;
-  edgesCreated: number;
-  edgesDeleted: number;
-  propertiesSet: number;
-  labelsAdded: number;
-  labelsRemoved: number;
-}
-
-/** The result of the `executeRaw*` methods. */
-export interface RawResult {
-  columns: string[];
-  rows: unknown[][];
-  executionTimeMs?: number;
-  counters: WriteCounters;
-}
-
-/** What an upsert did with its rows. */
-export interface UpsertSummary {
-  created: number;
-  updated: number;
-  skipped: number;
-  skippedRows: number[];
-}
-
-/**
- * A handle on one named graph, from `db.graph(name)`. Each call runs on its own, so a call
- * throws while the database has a transaction open, once the graph is dropped, and after close.
- */
-export class GraphHandle {
-  readonly name: string;
-  execute(query: string): Record<string, unknown>[];
-  executeWithParams(query: string, params: Record<string, unknown>): Record<string, unknown>[];
-  executeWithLanguage(query: string, language: string): Record<string, unknown>[];
-  executeWithLanguageAndParams(
-    query: string,
-    language: string,
-    params: Record<string, unknown>,
-  ): Record<string, unknown>[];
-  executeRaw(query: string): RawResult;
-  executeRawWithParams(query: string, params: Record<string, unknown>): RawResult;
-  executeRawWithLanguage(query: string, language: string): RawResult;
-  executeRawWithLanguageAndParams(query: string, language: string, params: Record<string, unknown>): RawResult;
-  batchCreateNodesWithProps(labels: string | string[], rows: Record<string, unknown>[]): number[];
-  batchCreateEdges(
-    edges: { src: number; dst: number; type: string; properties?: Record<string, unknown> }[],
-  ): number[];
-  upsertNodes(
-    labels: string | string[],
-    rows: Record<string, unknown>[],
-    options?: { key?: string; replace?: boolean },
-  ): UpsertSummary;
-  upsertEdges(edgeType: string, rows: Record<string, unknown>[], options?: Record<string, unknown>): UpsertSummary;
-  free(): void;
-}
-
 /**
  * A Grafeo graph database instance running in WebAssembly.
  *
@@ -92,62 +34,13 @@ export class Database {
   /**
    * Executes a GQL query and returns raw columns, rows, and metadata.
    *
-   * @returns `{ columns: string[], rows: unknown[][], executionTimeMs?: number, counters }`
+   * @returns `{ columns: string[], rows: unknown[][], executionTimeMs?: number }`
    */
-  executeRaw(query: string): RawResult;
-
-  /**
-   * Creates one node per row in one transaction; the node IDs in row order. This, the edge
-   * batch, the upserts and `graph()` need the direct-api feature (lpg and full builds).
-   */
-  batchCreateNodesWithProps(labels: string | string[], rows: Record<string, unknown>[]): number[];
-
-  /** Creates the edges in one transaction; the edge IDs in input order. */
-  batchCreateEdges(
-    edges: { src: number; dst: number; type: string; properties?: Record<string, unknown> }[],
-  ): number[];
-
-  /** Creates or updates nodes by a key property, in one statement. */
-  upsertNodes(
-    labels: string | string[],
-    rows: Record<string, unknown>[],
-    options?: { key?: string; replace?: boolean },
-  ): UpsertSummary;
-
-  /** Creates or updates edges between existing nodes by a key property, in one statement. */
-  upsertEdges(
-    edgeType: string,
-    rows: Record<string, unknown>[],
-    options?: {
-      key?: string;
-      endpointKey?: string;
-      endpointLabels?: string[];
-      srcField?: string;
-      dstField?: string;
-      replace?: boolean;
-    },
-  ): UpsertSummary;
-
-  /** Searches several query vectors at once (requires the vector-index feature). */
-  batchVectorSearch(
-    label: string,
-    property: string,
-    queries: number[][],
-    k: number,
-    options?: { ef?: number; filters?: Record<string, unknown> },
-  ): { id: number; distance: number }[][];
-
-  /** A handle on a named graph, to work in it without switching the current graph. */
-  graph(name: string): GraphHandle;
-
-  /**
-   * A node's edges without a query, as `[neighborId, edgeId]` pairs; `"both"` lists a
-   * self-loop once. Reads through the open transaction when there is one.
-   */
-  getNodeEdges(
-    id: number,
-    options?: { direction?: "out" | "in" | "both"; edgeTypes?: string[] },
-  ): [number, number][];
+  executeRaw(query: string): {
+    columns: string[];
+    rows: unknown[][];
+    executionTimeMs?: number;
+  };
 
   /** Returns the number of nodes in the database. */
   nodeCount(): number;

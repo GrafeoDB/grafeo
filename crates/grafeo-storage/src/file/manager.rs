@@ -543,81 +543,15 @@ impl GrafeoFileManager {
     /// restart can still recover in-flight mutations; only an orderly `close()`
     /// discards it.
     ///
-    /// What a salvaging open set aside in it (its `damaged-<lsn>/`
-    /// directories) is not removed: it moves into a new
-    /// [`set-aside directory`](Self::new_set_aside_wal_path) first.
-    ///
     /// # Errors
     ///
-    /// Returns an error if the directory exists but cannot be removed, or
-    /// what it set aside cannot be moved.
+    /// Returns an error if the directory exists but cannot be removed.
     pub fn remove_sidecar_wal(&self) -> Result<()> {
         let wal_path = self.sidecar_wal_path();
         if wal_path.exists() {
-            let set_aside: Vec<PathBuf> = fs::read_dir(&wal_path)?
-                .filter_map(std::result::Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("damaged-"))
-                })
-                .collect();
-            if !set_aside.is_empty() {
-                let target = self.new_set_aside_wal_path();
-                fs::create_dir(&target)?;
-                for path in &set_aside {
-                    if let Some(name) = path.file_name() {
-                        fs::rename(path, target.join(name))?;
-                    }
-                }
-                sync_parent_dir(&target.join("."))?;
-                sync_parent_dir(&target)?;
-                grafeo_warn!(
-                    "kept what a salvaging open set aside from the WAL of {} in {}",
-                    self.path.display(),
-                    target.display()
-                );
-            }
             fs::remove_dir_all(&wal_path)?;
         }
         Ok(())
-    }
-
-    /// Moves the whole sidecar WAL directory aside, to a new
-    /// [`set-aside directory`](Self::new_set_aside_wal_path), instead of
-    /// removing it: a salvaging open keeps a log it could not replay to its
-    /// end. Returns where it went.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the directory cannot be moved.
-    pub fn set_aside_sidecar_wal(&self) -> Result<PathBuf> {
-        let target = self.new_set_aside_wal_path();
-        fs::rename(self.sidecar_wal_path(), &target)?;
-        sync_parent_dir(&target)?;
-        Ok(target)
-    }
-
-    /// `<file>.wal.damaged`, or `<file>.wal.damaged-<n>` with the first free
-    /// `n` from 2 when an earlier salvage made that one: where what a
-    /// salvaging open did not replay is kept, never overwritten.
-    #[must_use]
-    pub fn new_set_aside_wal_path(&self) -> PathBuf {
-        let wal_path = self.sidecar_wal_path();
-        let name = wal_path
-            .file_name()
-            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        (1..=u32::MAX)
-            .map(|n| {
-                if n == 1 {
-                    wal_path.with_file_name(format!("{name}.damaged"))
-                } else {
-                    wal_path.with_file_name(format!("{name}.damaged-{n}"))
-                }
-            })
-            .find(|path| fs::symlink_metadata(path).is_err())
-            .unwrap_or_else(|| wal_path.with_file_name(format!("{name}.damaged-{}", u32::MAX)))
     }
 
     /// Returns the file path.

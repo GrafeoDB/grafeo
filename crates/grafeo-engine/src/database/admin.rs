@@ -83,7 +83,7 @@ impl super::GrafeoDB {
     /// In-memory databases return false.
     #[must_use]
     pub fn is_persistent(&self) -> bool {
-        self.config.path().is_some()
+        self.config.path.is_some()
     }
 
     /// Returns the database file path, if persistent.
@@ -91,7 +91,7 @@ impl super::GrafeoDB {
     /// In-memory databases return None.
     #[must_use]
     pub fn path(&self) -> Option<&Path> {
-        self.config.path()
+        self.config.path.as_deref()
     }
 
     /// Returns high-level database information.
@@ -104,8 +104,8 @@ impl super::GrafeoDB {
             node_count: self.node_count(),
             edge_count: self.edge_count(),
             is_persistent: self.is_persistent(),
-            path: self.config.path().map(Path::to_path_buf),
-            wal_enabled: self.config.wal_enabled(),
+            path: self.config.path.clone(),
+            wal_enabled: self.config.wal_enabled,
             version: env!("CARGO_PKG_VERSION").to_string(),
             features: {
                 let mut f = vec!["gql".into()];
@@ -231,7 +231,7 @@ impl super::GrafeoDB {
     #[must_use]
     pub fn detailed_stats(&self) -> crate::admin::DatabaseStats {
         #[cfg(feature = "wal")]
-        let disk_bytes = self.config.path().as_ref().and_then(|p| {
+        let disk_bytes = self.config.path.as_ref().and_then(|p| {
             // The spelling the files are named after: the caller's (`db/`)
             // no longer exists once a migrated directory became a file.
             let path = super::normalize_path(p).ok()?;
@@ -283,9 +283,7 @@ impl super::GrafeoDB {
         if dir.is_dir() {
             for entry in std::fs::read_dir(dir)? {
                 let entry = entry?;
-                // From the file itself: on Windows a listing's size is stale
-                // while the file is open (the active WAL segment).
-                let metadata = std::fs::metadata(entry.path())?;
+                let metadata = entry.metadata()?;
                 if metadata.is_file() {
                     total = total.saturating_add(Self::file_size(&entry.path(), &metadata)?);
                 } else if metadata.is_dir() {
@@ -317,13 +315,21 @@ impl super::GrafeoDB {
         let store = self.graph_store();
         // The label index holds every node with the label, also those of a
         // transaction that has not committed: count the nodes that have the
-        // label at the current epoch, without building them (#546).
+        // label at the current epoch.
         let epoch = self.read_epoch();
         let labels = store
             .all_labels()
             .into_iter()
             .map(|name| crate::admin::LabelInfo {
-                count: store.nodes_by_label_count_at_epoch(&name, epoch),
+                count: store
+                    .nodes_by_label(&name)
+                    .into_iter()
+                    .filter(|&id| {
+                        store
+                            .get_node_at_epoch(id, epoch)
+                            .is_some_and(|node| node.has_label(&name))
+                    })
+                    .count(),
                 name,
             })
             .collect();
@@ -435,88 +441,6 @@ impl super::GrafeoDB {
         result
     }
 
-    /// When the file's last checkpoint was written, in seconds since the Unix
-    /// epoch; `None` before the first one, and without a file.
-    fn last_checkpoint_seconds(&self) -> Option<u64> {
-        #[cfg(feature = "grafeo-file")]
-        {
-            let header = self.file_manager.as_ref()?.active_header();
-            (header.iteration > 0).then_some(header.timestamp_ms / 1000)
-        }
-        #[cfg(not(feature = "grafeo-file"))]
-        None
-    }
-
-    /// Changes when this database checkpoints by itself (#426): when the
-    /// interval has passed since its last automatic checkpoint, or once the
-    /// WAL holds the given bytes since the last checkpoint. The new triggers
-    /// replace the ones in force (from
-    /// [`Config::with_checkpoint_interval`](crate::Config::with_checkpoint_interval)
-    /// and [`Config::with_checkpoint_wal_size`](crate::Config::with_checkpoint_wal_size),
-    /// or an earlier call), until the database closes; the file does not
-    /// store them. [`CheckpointTriggers::none`](crate::admin::CheckpointTriggers::none)
-    /// turns automatic checkpoints off.
-    ///
-    /// # Errors
-    ///
-    /// A zero interval or size, a database without a file (in memory) or
-    /// opened read-only, which never checkpoints, and the database-closed
-    /// error after `close()`.
-    pub fn set_checkpoint_triggers(
-        &self,
-        triggers: crate::admin::CheckpointTriggers,
-    ) -> Result<()> {
-        if triggers.interval.is_some_and(|interval| interval.is_zero())
-            || triggers.wal_bytes == Some(0)
-        {
-            return Err(grafeo_common::utils::error::Error::InvalidValue(
-                "a checkpoint trigger of zero would checkpoint without pause: leave it unset \
-                 to turn it off"
-                    .to_string(),
-            ));
-        }
-        let _open = self.hold_open()?;
-        if self.read_only {
-            return Err(grafeo_common::utils::error::Error::Transaction(
-                grafeo_common::utils::error::TransactionError::ReadOnly,
-            ));
-        }
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        if self.file_manager.is_some() {
-            *self.checkpoint_triggers.lock() = triggers;
-            self.restart_checkpoint_timer();
-            return Ok(());
-        }
-        Err(grafeo_common::utils::error::Error::InvalidValue(
-            "a database without a file has nothing to checkpoint".to_string(),
-        ))
-    }
-
-    /// How the automatic checkpoints fare: the triggers in force, the last
-    /// checkpoint of any kind, and the automatic ones that failed since the
-    /// last that succeeded, with the last error. A failed automatic
-    /// checkpoint is also logged as a warning, and retried after a pause.
-    #[must_use]
-    pub fn checkpoint_status(&self) -> crate::admin::CheckpointStatus {
-        let status = crate::admin::CheckpointStatus {
-            last_checkpoint: self.last_checkpoint_seconds(),
-            ..crate::admin::CheckpointStatus::default()
-        };
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let status = {
-            let failures = self.checkpoint_failures.snapshot();
-            crate::admin::CheckpointStatus {
-                triggers: *self.checkpoint_triggers.lock(),
-                failures: failures.failures,
-                last_error: failures.last_error,
-                last_failure: failures.last_failure,
-                stopped: failures.stopped,
-                ..status
-            }
-        };
-        status
-    }
-
     /// Returns WAL (Write-Ahead Log) status.
     ///
     /// Returns None if WAL is not enabled.
@@ -528,17 +452,11 @@ impl super::GrafeoDB {
                 enabled: true,
                 // The sidecar WAL of the database file, `<path>.wal/`.
                 path: Some(wal.dir().to_path_buf()),
-                // The log after the last checkpoint: what a reopen replays.
-                size_bytes: usize::try_from(wal.end_lsn().saturating_sub(self.checkpoint_lsn()))
-                    .unwrap_or(usize::MAX),
-                record_count: usize::try_from(
-                    wal.records_written().saturating_sub(
-                        self.wal_records_at_checkpoint
-                            .load(std::sync::atomic::Ordering::Acquire),
-                    ),
-                )
-                .unwrap_or(usize::MAX),
-                last_checkpoint: self.last_checkpoint_seconds(),
+                size_bytes: wal.size_bytes(),
+                // reason: WAL record count fits usize on 64-bit targets
+                #[allow(clippy::cast_possible_truncation)]
+                record_count: wal.record_count() as usize,
+                last_checkpoint: wal.last_checkpoint_timestamp(),
                 current_epoch: self.read_epoch().as_u64(),
             };
         }

@@ -317,27 +317,20 @@ fn a_crash_after_a_reload_keeps_embeddings() {
 }
 
 /// A crash while spilled leaves the cache behind; the next read-write open
-/// has every embedding and removes the stale cache. The file stores the
-/// forced spill of the vector section (#551), so that open spills again,
-/// into files of new names.
+/// has every embedding and removes the stale cache.
 #[test]
 fn a_crash_while_spilled_keeps_embeddings_and_the_next_open_removes_the_cache() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("barcelona.grafeo");
     crash_in_child(&path, "while_spilled");
-    let stale = names_in(&cache_dir(&path));
-    assert_eq!(stale.len(), 1, "the crash left it");
+    assert_eq!(names_in(&cache_dir(&path)).len(), 1, "the crash left it");
     // A 0.5.x spill file beside the cache is not the cache's to remove (one
     // of an index this database does not have, which the fold leaves alone).
     let old = spill_dir(&path).join("vectors_Doc%3Aembedding.bin");
     std::fs::write(&old, b"0.5.x").unwrap();
 
     let db = GrafeoDB::open(&path).unwrap();
-    let now = names_in(&cache_dir(&path));
-    assert!(
-        stale.iter().all(|name| !now.contains(name)),
-        "the stale cache was removed: {stale:?} in {now:?}"
-    );
+    assert!(!cache_dir(&path).exists(), "the stale cache was removed");
     assert_eq!(std::fs::read(&old).unwrap(), b"0.5.x", "the old file stays");
     assert_eq!(embeddings(&db), all_three());
 }

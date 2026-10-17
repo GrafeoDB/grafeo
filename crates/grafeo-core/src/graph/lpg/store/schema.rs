@@ -202,46 +202,6 @@ impl LpgStore {
             .map_or(0, |set| set.len())
     }
 
-    /// Returns the number of nodes visible at `epoch` that have `label` then,
-    /// as [`get_node_at_epoch`](Self::get_node_at_epoch) reads them, without
-    /// building the nodes: a visibility check per node of the label index,
-    /// then a read of its label set.
-    #[must_use]
-    pub fn nodes_by_label_count_at_epoch(&self, label: &str, epoch: EpochId) -> usize {
-        let Some(label_id) = self.label_registry.read().get_id(label) else {
-            return 0;
-        };
-        let candidates: Vec<NodeId> = self
-            .label_index
-            .read()
-            .get(label_id as usize)
-            .map(|set| set.keys().copied().collect())
-            .unwrap_or_default();
-        // One lock at a time: the visibility checks read `nodes`, the label
-        // reads `node_labels` after them.
-        let visible: Vec<NodeId> = candidates
-            .into_iter()
-            .filter(|&id| self.is_node_visible_at_epoch(id, epoch))
-            .collect();
-        #[cfg(feature = "temporal")]
-        let latest = epoch >= self.current_epoch();
-        let node_labels = self.node_labels.read();
-        visible
-            .into_iter()
-            .filter(|id| {
-                #[cfg(not(feature = "temporal"))]
-                let labels = node_labels.get(id);
-                // As `get_node_at_epoch`: the latest set at the current
-                // epoch, the set of `epoch` before it.
-                #[cfg(feature = "temporal")]
-                let labels = node_labels
-                    .get(id)
-                    .and_then(|log| if latest { log.latest() } else { log.at(epoch) });
-                labels.is_some_and(|labels| labels.contains(&label_id))
-            })
-            .count()
-    }
-
     /// Returns the number of distinct labels in the store.
     #[must_use]
     pub fn label_count(&self) -> usize {

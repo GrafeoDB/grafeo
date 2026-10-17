@@ -416,11 +416,6 @@ pub struct EdgeImage {
     pub edge_type: ArcStr,
     /// Its properties.
     pub properties: Properties,
-    /// For a delete, the node whose detach delete removed the edge
-    /// (`DETACH DELETE`, `detach_delete_node`), which change data capture
-    /// reports; `None` for every other write. Not logged: replay deletes the
-    /// edge the same either way.
-    pub deleted_with: Option<NodeId>,
 }
 
 /// The ids a bulk write reserved in one table of a graph: one entry however
@@ -1159,7 +1154,6 @@ mod tests {
             dst: NodeId::new(dst),
             edge_type: edge_type.into(),
             properties,
-            deleted_with: None,
         }))
     }
 

@@ -1,10 +1,8 @@
 //! Runs a test's code inside a commit or a checkpoint, to check what other
 //! threads can do meanwhile: right after a commit's epoch is assigned
-//! ([`after_next_commit_epoch`]), once its WAL group is written and the
-//! commit lock released but before it is synced and published
-//! ([`after_next_commit_written`]), once its versions are stamped but before
-//! its events are reported ([`after_next_commit_stamped`]), once its events
-//! are reported but before the commit is complete
+//! ([`after_next_commit_epoch`]), once its versions are stamped but before
+//! its events and WAL records are written ([`after_next_commit_stamped`]),
+//! once its WAL records are written but before the commit is complete
 //! ([`after_next_commit_logged`]), inside a checkpoint while it holds
 //! commits off, before it writes its image ([`during_next_checkpoint`]), or
 //! inside a change outside any commit (a schema statement, a graph command, an
@@ -29,7 +27,6 @@ mod inner {
 
     thread_local! {
         static AFTER_EPOCH: RefCell<Option<Hook>> = const { RefCell::new(None) };
-        static AFTER_WRITTEN: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_STAMPED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_LOGGED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT: RefCell<Option<Hook>> = const { RefCell::new(None) };
@@ -43,22 +40,6 @@ mod inner {
     /// after its commit epoch is assigned.
     pub fn after_next_commit_epoch(hook: impl FnOnce() + 'static) {
         AFTER_EPOCH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-    }
-
-    /// Arms `hook` to run once, inside the next commit on this thread, once
-    /// its WAL group is written and the commit lock released, before the
-    /// commit is synced and published.
-    pub fn after_next_commit_written(hook: impl FnOnce() + 'static) {
-        AFTER_WRITTEN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-    }
-
-    /// Runs the [`after_next_commit_written`] hook armed on this thread, if
-    /// any. Called by the engine's commit.
-    #[inline]
-    pub fn run_after_commit_written() {
-        if let Some(hook) = AFTER_WRITTEN.with(|slot| slot.borrow_mut().take()) {
-            hook();
-        }
     }
 
     /// Arms `hook` to run once, inside the next commit on this thread, once
@@ -166,13 +147,6 @@ mod inner {
     /// No-op when injection is disabled.
     #[inline]
     pub fn run_after_commit_epoch() {}
-
-    /// No-op when injection is disabled.
-    pub fn after_next_commit_written(_hook: impl FnOnce() + 'static) {}
-
-    /// No-op when injection is disabled.
-    #[inline]
-    pub fn run_after_commit_written() {}
 
     /// No-op when injection is disabled.
     pub fn after_next_commit_stamped(_hook: impl FnOnce() + 'static) {}

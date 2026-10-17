@@ -132,7 +132,7 @@ fn vincent_with_section_tier_preserves_max_ram() {
         .with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk);
 
     let cfg = config
-        .section_configs()
+        .section_configs
         .get(&SectionType::VectorStore)
         .expect("VectorStore config present");
 
@@ -150,7 +150,7 @@ fn jules_with_section_tier_no_existing_config_uses_none_max_ram() {
         Config::in_memory().with_section_tier(SectionType::CompactStore, TierOverride::ForceDisk);
 
     let cfg = config
-        .section_configs()
+        .section_configs
         .get(&SectionType::CompactStore)
         .expect("CompactStore config present");
 

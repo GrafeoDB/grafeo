@@ -196,17 +196,22 @@ impl BufferManager {
         size: usize,
         region: MemoryRegion,
     ) -> Option<MemoryGrant> {
-        // An impossible request cannot benefit from eviction.
-        if size > self.hard_limit {
-            return None;
-        }
-        if !self.reserve_bytes(size) {
+        // Check if we can allocate
+        let current = self.allocated.load(Ordering::Relaxed);
+
+        if current + size > self.hard_limit {
+            // Try eviction first
             self.run_eviction_cycle(true);
-            if !self.reserve_bytes(size) {
+
+            // Check again
+            let current = self.allocated.load(Ordering::Relaxed);
+            if current + size > self.hard_limit {
                 return None;
             }
         }
 
+        // Perform allocation
+        self.allocated.fetch_add(size, Ordering::Relaxed);
         self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
 
         // Check pressure and potentially trigger background eviction
@@ -217,17 +222,6 @@ impl BufferManager {
             size,
             region,
         ))
-    }
-
-    /// Reserves bytes without separating the limit check from the increment.
-    fn reserve_bytes(&self, size: usize) -> bool {
-        self.allocated
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current
-                    .checked_add(size)
-                    .filter(|next| *next <= self.hard_limit)
-            })
-            .is_ok()
     }
 
     /// Returns the current pressure level.
@@ -605,16 +599,19 @@ impl GrantReleaser for BufferManager {
     }
 
     fn try_allocate_raw(&self, size: usize, region: MemoryRegion) -> bool {
-        if size > self.hard_limit {
-            return false;
-        }
-        if !self.reserve_bytes(size) {
+        let current = self.allocated.load(Ordering::Relaxed);
+
+        if current + size > self.hard_limit {
+            // Try eviction
             self.run_eviction_cycle(true);
-            if !self.reserve_bytes(size) {
+
+            let current = self.allocated.load(Ordering::Relaxed);
+            if current + size > self.hard_limit {
                 return false;
             }
         }
 
+        self.allocated.fetch_add(size, Ordering::Relaxed);
         self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
         true
     }
@@ -831,112 +828,6 @@ mod tests {
         // This should fail (would exceed hard limit)
         let g2 = manager.try_allocate(100, MemoryRegion::ExecutionBuffers);
         assert!(g2.is_none());
-    }
-
-    #[test]
-    fn overflow_reservation_leaves_counters_unchanged() {
-        let manager = BufferManager::with_budget(1024);
-        let held = manager
-            .try_allocate(256, MemoryRegion::ExecutionBuffers)
-            .unwrap();
-
-        assert!(
-            manager
-                .try_allocate(usize::MAX, MemoryRegion::ExecutionBuffers)
-                .is_none()
-        );
-        assert_eq!(manager.allocated(), 256);
-        assert_eq!(held.size(), 256);
-        drop(held);
-        assert_eq!(manager.allocated(), 0);
-    }
-
-    #[test]
-    fn overflow_resize_preserves_both_grants() {
-        let manager = BufferManager::with_budget(1024);
-        let mut first = manager
-            .try_allocate(128, MemoryRegion::ExecutionBuffers)
-            .unwrap();
-        let second = manager
-            .try_allocate(128, MemoryRegion::ExecutionBuffers)
-            .unwrap();
-
-        assert!(!first.resize(usize::MAX));
-        assert_eq!(first.size(), 128);
-        assert_eq!(second.size(), 128);
-        assert_eq!(manager.allocated(), 256);
-        drop(first);
-        drop(second);
-        assert_eq!(manager.allocated(), 0);
-    }
-
-    fn simultaneous_reservations(resize: bool) {
-        use std::sync::Barrier;
-
-        let workers = if cfg!(miri) { 4 } else { 16 };
-        let rounds = if cfg!(miri) { 4 } else { 16_384 };
-        let hard_limit = 1;
-        let manager = BufferManager::new(BufferManagerConfig {
-            budget: hard_limit,
-            soft_limit_fraction: 1.0,
-            evict_limit_fraction: 1.0,
-            hard_limit_fraction: 1.0,
-            background_eviction: false,
-            spill_path: None,
-        });
-        let barrier = Barrier::new(workers);
-        let overcommitted = AtomicBool::new(false);
-
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                let manager = &manager;
-                let barrier = &barrier;
-                let overcommitted = &overcommitted;
-                let mut resize_grant = resize.then(|| {
-                    manager
-                        .try_allocate(0, MemoryRegion::ExecutionBuffers)
-                        .unwrap()
-                });
-                scope.spawn(move || {
-                    barrier.wait();
-                    for _ in 0..rounds {
-                        let grant = if let Some(ref mut grant) = resize_grant {
-                            grant.resize(1);
-                            None
-                        } else {
-                            manager.try_allocate(1, MemoryRegion::ExecutionBuffers)
-                        };
-                        if manager.allocated() > hard_limit {
-                            overcommitted.store(true, Ordering::Relaxed);
-                        }
-                        if let Some(ref mut grant) = resize_grant {
-                            grant.resize(0);
-                        }
-                        drop(grant);
-                    }
-                });
-            }
-        });
-
-        assert!(
-            !overcommitted.load(Ordering::Relaxed),
-            "simultaneous reservations exceeded the hard limit"
-        );
-        assert_eq!(manager.allocated(), 0);
-        assert_eq!(
-            manager.stats().region_usage(MemoryRegion::ExecutionBuffers),
-            0
-        );
-    }
-
-    #[test]
-    fn concurrent_grants_obey_hard_limit() {
-        simultaneous_reservations(false);
-    }
-
-    #[test]
-    fn concurrent_resizes_obey_hard_limit() {
-        simultaneous_reservations(true);
     }
 
     #[test]

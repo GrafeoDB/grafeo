@@ -7,8 +7,7 @@ export declare class GrafeoDB {
    *
    * `options.shuffleUnordered` returns the rows of every query without
    * ORDER BY in random order: for tests, to find code that relies on a row
-   * order that is unspecified. `options.walSalvage` opens a database whose
-   * WAL is damaged with the commits before the damage.
+   * order that is unspecified.
    */
   static create(path?: string | undefined | null, options?: CreateOptions | undefined | null): GrafeoDB
   /** Open an existing database at the given path. */
@@ -44,22 +43,10 @@ export declare class GrafeoDB {
   createEdge(sourceId: number, targetId: number, edgeType: string, properties?: object | undefined | null): JsEdge
   /** Get a node by ID. */
   getNode(id: number): JsNode | null
-  /**
-   * The edges of a node as `[neighborId, edgeId]` pairs, without a query:
-   * `options.direction` is `"out"` (default), `"in"` or `"both"` (which
-   * lists a self-loop once), and `options.edgeTypes` keeps only those
-   * types. Committed edges; none for a node that does not exist.
-   */
-  getNodeEdges(id: number, options?: NodeEdgesOptions | undefined | null): Array<Array<number>>
   /** Get an edge by ID. */
   getEdge(id: number): JsEdge | null
   /** Delete a node by ID. Returns true if the node existed. */
   deleteNode(id: number): boolean
-  /**
-   * Delete a node with all its edges, as `DETACH DELETE` does. Returns
-   * true if the node existed; the node and its edges are one change.
-   */
-  detachDeleteNode(id: number): boolean
   /** Delete an edge by ID. Returns true if the edge existed. */
   deleteEdge(id: number): boolean
   /** Set a property on a node. */
@@ -111,19 +98,6 @@ export declare class GrafeoDB {
    * Called automatically after DDL operations, but can be invoked manually.
    */
   clearPlanCache(): void
-  /**
-   * Sets when the database checkpoints by itself: every
-   * `triggers.intervalMs` milliseconds, and once the WAL holds
-   * `triggers.walBytes` bytes since the last checkpoint. Leave both out to
-   * turn automatic checkpoints off (the default). For this open only.
-   * Throws for a database in memory or opened read-only, and for zero.
-   */
-  setCheckpointTriggers(triggers: CheckpointTriggers): void
-  /**
-   * How the automatic checkpoints fare: the triggers, the last checkpoint,
-   * and the automatic ones that failed since the last that succeeded.
-   */
-  checkpointStatus(): CheckpointStatus
   /**
    * Forces a WAL checkpoint.
    *
@@ -314,11 +288,6 @@ export declare class GrafeoDB {
    */
   batchCreateEdges(edges: Array<BatchEdgeInput>): Promise<Array<number>>
   /**
-   * A handle on named graph `name` of the current schema, to work in it
-   * without switching the current graph. Throws when it does not exist.
-   */
-  graph(name: string): GraphHandle
-  /**
    * Creates or updates one node per row, matched by `key` and all of
    * `labels`, in one statement. Returns a Promise.
    *
@@ -344,76 +313,6 @@ export declare class GrafeoDB {
   upsertEdges(edgeType: string, rows: Array<any>, options?: UpsertEdgesOptions | undefined | null): Promise<UpsertSummary>
 }
 export type JsGrafeoDB = GrafeoDB
-
-/**
- * A handle on one named graph, from `db.graph(name)`.
- *
- * It has the query and direct API of `GrafeoDB`, working in its graph
- * whatever graph the database selects. Each call is its own transaction
- * (use `beginTransaction()` to group several). Every call throws once the
- * graph no longer exists.
- */
-export declare class GraphHandle {
-  /** The graph's name. */
-  get name(): string
-  /** Runs a GQL query in this graph. Returns a Promise<QueryResult>. */
-  execute(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /**
-   * Runs a query in a named language (for example `"cypher"`) in this
-   * graph. Returns a Promise<QueryResult>.
-   */
-  executeLanguage(language: string, query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Begins a transaction in this graph. */
-  beginTransaction(isolationLevel?: string | undefined | null): Transaction
-  /** Creates a node with labels and optional properties. */
-  createNode(labels: Array<string>, properties?: object | undefined | null): JsNode
-  /** Creates an edge between two nodes of this graph. */
-  createEdge(sourceId: number, targetId: number, edgeType: string, properties?: object | undefined | null): JsEdge
-  /** Gets a node by ID, or null. */
-  getNode(id: number): JsNode | null
-  /**
-   * `GrafeoDB.getNodeEdges` in this graph; throws if the graph no longer
-   * exists.
-   */
-  getNodeEdges(id: number, options?: NodeEdgesOptions | undefined | null): Array<Array<number>>
-  /** Gets an edge by ID, or null. */
-  getEdge(id: number): JsEdge | null
-  /** Sets a node property; throws if the node does not exist. */
-  setNodeProperty(id: number, key: string, value: unknown): void
-  /** Sets an edge property; throws if the edge does not exist. */
-  setEdgeProperty(id: number, key: string, value: unknown): void
-  /** Removes a node property; returns whether the node had it. */
-  removeNodeProperty(id: number, key: string): boolean
-  /** Removes an edge property; returns whether the edge had it. */
-  removeEdgeProperty(id: number, key: string): boolean
-  /** Adds a label; returns false if the node does not exist or has it. */
-  addNodeLabel(id: number, label: string): boolean
-  /** Removes a label; returns false if the node does not exist or lacks it. */
-  removeNodeLabel(id: number, label: string): boolean
-  /**
-   * Deletes a node; returns false if it does not exist, throws if it
-   * still has edges.
-   */
-  deleteNode(id: number): boolean
-  /**
-   * Deletes a node with all its edges, as `DETACH DELETE` does; returns
-   * false if it does not exist.
-   */
-  detachDeleteNode(id: number): boolean
-  /** Deletes an edge; returns false if it does not exist. */
-  deleteEdge(id: number): boolean
-  /** `GrafeoDB.batchCreateNodesWithProps` in this graph. */
-  batchCreateNodesWithProps(labels: string | Array<string>, propertiesList: Array<any>): Promise<Array<number>>
-  /** `GrafeoDB.batchCreateEdges` in this graph. */
-  batchCreateEdges(edges: Array<BatchEdgeInput>): Promise<Array<number>>
-  /** `GrafeoDB.upsertNodes` in this graph. */
-  upsertNodes(labels: Array<string>, rows: Array<any>, options?: UpsertNodesOptions | undefined | null): Promise<UpsertSummary>
-  /** `GrafeoDB.upsertEdges` in this graph. */
-  upsertEdges(edgeType: string, rows: Array<any>, options?: UpsertEdgesOptions | undefined | null): Promise<UpsertSummary>
-  /** String representation. */
-  toString(): string
-}
-export type JsGraphHandle = GraphHandle
 
 /** An edge (relationship) between two nodes with a type and properties. */
 export declare class JsEdge {
@@ -579,35 +478,6 @@ export interface BatchEdgeInput {
   properties?: any
 }
 
-/** How the automatic checkpoints fare (`GrafeoDB.checkpointStatus`). */
-export interface CheckpointStatus {
-  /** The interval trigger in milliseconds, absent when off. */
-  intervalMs?: number
-  /** The WAL size trigger in bytes, absent when off. */
-  walBytes?: number
-  /** When the last checkpoint of any kind finished (Unix seconds). */
-  lastCheckpoint?: number
-  /** Automatic checkpoints that failed since the last that succeeded. */
-  failures: number
-  /** The error of the last failed automatic checkpoint. */
-  lastError?: string
-  /** When it failed (Unix seconds). */
-  lastFailure?: number
-  /** Whether no automatic checkpoint can succeed until a reopen. */
-  stopped: boolean
-}
-
-/** When a database checkpoints by itself (`GrafeoDB.setCheckpointTriggers`). */
-export interface CheckpointTriggers {
-  /** Checkpoint every this many milliseconds. */
-  intervalMs?: number
-  /**
-   * Checkpoint once the WAL holds this many bytes since the last
-   * checkpoint.
-   */
-  walBytes?: number
-}
-
 /** Options for `GrafeoDB.create`. */
 export interface CreateOptions {
   /**
@@ -616,13 +486,6 @@ export interface CreateOptions {
    * order that is unspecified.
    */
   shuffleUnordered?: boolean
-  /**
-   * Open a database whose WAL has damage before its end, which an open
-   * refuses, with the commits before the damage (default `false`); what
-   * it does not replay is kept in `<path>.wal.damaged`. For this open
-   * only.
-   */
-  walSalvage?: boolean
 }
 
 /** Options for CSV import. */
@@ -637,14 +500,6 @@ export interface CsvImportOptions {
 export interface JsonlImportOptions {
   /** Label to assign to created nodes (default: "Row") */
   label?: string
-}
-
-/** Options for `getNodeEdges`. */
-export interface NodeEdgesOptions {
-  /** `"out"` (default), `"in"` or `"both"`. */
-  direction?: string
-  /** Only edges of these types (default: every type). */
-  edgeTypes?: Array<string>
 }
 
 /** Returns the active SIMD instruction set for vector operations. */

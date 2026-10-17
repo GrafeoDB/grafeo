@@ -718,7 +718,6 @@ pub(crate) fn graph_indexes(records: Vec<IndexRecord>) -> Result<Vec<GraphIndexe
 #[must_use]
 pub(crate) fn record_name(record: &CatalogRecord) -> String {
     match record {
-        CatalogRecord::StoredConfig(_) => "the stored configuration".to_string(),
         CatalogRecord::Schema(record) => format!("schema '{}'", record.name),
         CatalogRecord::NodeType(record) => format!("node type '{}'", record.name),
         CatalogRecord::EdgeType(record) => format!("edge type '{}'", record.name),

@@ -84,7 +84,8 @@ pub use filter::{
     ListPredicateKind, Predicate, SessionContext, UnaryFilterOp,
 };
 pub use functions::{
-    Arity, FunctionSupport, REGEX_SUPPORT, function_names, function_support, regex_pattern_error,
+    Arity, BuiltinFunction, FunctionGroup, FunctionSupport, REGEX_SUPPORT, Volatility,
+    function_names, function_support, regex_pattern_error,
 };
 pub use horizontal_aggregate::{EntityKind, HorizontalAggregateOperator};
 pub use join::{

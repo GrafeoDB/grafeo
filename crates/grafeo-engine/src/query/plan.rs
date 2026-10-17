@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use grafeo_common::types::Value;
+pub use grafeo_core::execution::operators::BuiltinFunction;
 
 /// A count expression for SKIP/LIMIT: either a resolved literal or an unresolved parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1567,7 +1568,8 @@ fn fmt_expr(expr: &LogicalExpression) -> String {
         LogicalExpression::Unary { op, operand } => {
             format!("{op:?} {}", fmt_expr(operand))
         }
-        LogicalExpression::FunctionCall { name, args, .. } => {
+        LogicalExpression::FunctionCall { name, args, .. }
+        | LogicalExpression::SparqlCall { name, args } => {
             let arg_strs: Vec<String> = args.iter().map(fmt_expr).collect();
             format!("{name}({})", arg_strs.join(", "))
         }
@@ -1814,6 +1816,44 @@ pub struct AggregateExpr {
     pub separator: Option<String>,
 }
 
+/// What a call resolves to: a built-in function, or an aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Callee {
+    /// A built-in function the expression evaluator computes.
+    Builtin(BuiltinFunction),
+    /// An aggregate, which groups rows.
+    Aggregate(AggregateFunction),
+}
+
+#[cfg(test)]
+impl Callee {
+    /// The callee `name` resolves to, for tests that build calls by hand.
+    ///
+    /// # Panics
+    ///
+    /// When `name` is neither an aggregate nor a built-in function.
+    pub(crate) fn named(name: &str) -> Self {
+        AggregateFunction::from_name(name)
+            .map(Self::Aggregate)
+            .or_else(|| BuiltinFunction::from_name(name).map(Self::Builtin))
+            .unwrap_or_else(|| panic!("{name} is no function"))
+    }
+}
+
+impl LogicalExpression {
+    /// A call of `function` the planner or a translator makes itself (a
+    /// label in a pattern becomes `hasLabel`), named by the function's name.
+    #[must_use]
+    pub fn builtin(function: BuiltinFunction, args: Vec<LogicalExpression>) -> Self {
+        Self::FunctionCall {
+            callee: Callee::Builtin(function),
+            name: function.name().to_string(),
+            args,
+            distinct: false,
+        }
+    }
+}
+
 /// Aggregate function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1872,6 +1912,71 @@ pub enum AggregateFunction {
     RegrAvgx,
     /// Regression average of y (REGR_AVGY(y, x)).
     RegrAvgy,
+}
+
+impl AggregateFunction {
+    /// Every spelling of an aggregate, with its function; case does not
+    /// matter. `count` is [`Count`](Self::Count): the translators turn
+    /// `count(x)` into [`CountNonNull`](Self::CountNonNull) themselves.
+    #[cfg(any(
+        test,
+        feature = "gql",
+        feature = "cypher",
+        feature = "sql-pgq",
+        feature = "sparql"
+    ))]
+    pub(crate) const ALIASES: &'static [(&'static str, AggregateFunction)] = &[
+        ("count", Self::Count),
+        ("sum", Self::Sum),
+        ("avg", Self::Avg),
+        ("min", Self::Min),
+        ("max", Self::Max),
+        ("collect", Self::Collect),
+        ("stdev", Self::StdDev),
+        ("stddev", Self::StdDev),
+        ("stddev_samp", Self::StdDev),
+        ("stdevp", Self::StdDevPop),
+        ("stddevp", Self::StdDevPop),
+        ("stddev_pop", Self::StdDevPop),
+        ("variance", Self::Variance),
+        ("var_samp", Self::Variance),
+        ("var_pop", Self::VariancePop),
+        ("percentile_disc", Self::PercentileDisc),
+        ("percentileDisc", Self::PercentileDisc),
+        ("percentile_cont", Self::PercentileCont),
+        ("percentileCont", Self::PercentileCont),
+        ("group_concat", Self::GroupConcat),
+        ("groupConcat", Self::GroupConcat),
+        ("listagg", Self::GroupConcat),
+        ("sample", Self::Sample),
+        ("covar_samp", Self::CovarSamp),
+        ("covar_pop", Self::CovarPop),
+        ("corr", Self::Corr),
+        ("regr_slope", Self::RegrSlope),
+        ("regr_intercept", Self::RegrIntercept),
+        ("regr_r2", Self::RegrR2),
+        ("regr_count", Self::RegrCount),
+        ("regr_sxx", Self::RegrSxx),
+        ("regr_syy", Self::RegrSyy),
+        ("regr_sxy", Self::RegrSxy),
+        ("regr_avgx", Self::RegrAvgx),
+        ("regr_avgy", Self::RegrAvgy),
+    ];
+
+    /// The aggregate a call names, in any case.
+    #[cfg(any(
+        test,
+        feature = "gql",
+        feature = "cypher",
+        feature = "sql-pgq",
+        feature = "sparql"
+    ))]
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        Self::ALIASES
+            .iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(name))
+            .map(|&(_, function)| function)
+    }
 }
 
 /// Hint about how a filter will be executed at the physical level.
@@ -2977,14 +3082,25 @@ pub enum LogicalExpression {
         operand: Box<LogicalExpression>,
     },
 
-    /// Function call.
+    /// A call of a built-in or an aggregate, resolved by the translator.
     FunctionCall {
-        /// Function name.
+        /// What the call resolves to.
+        callee: Callee,
+        /// The name as the query wrote it, for `EXPLAIN` and errors only:
+        /// decisions read `callee`.
         name: String,
         /// Arguments.
         args: Vec<LogicalExpression>,
         /// Whether DISTINCT is applied (e.g., COUNT(DISTINCT x)).
         distinct: bool,
+    },
+
+    /// A call of a SPARQL function, by name: only the RDF planner computes it.
+    SparqlCall {
+        /// The function's name, as the query wrote it.
+        name: String,
+        /// Arguments.
+        args: Vec<LogicalExpression>,
     },
 
     /// List literal.
@@ -5242,6 +5358,7 @@ mod tests {
         assert!(s.contains("Not"));
 
         let fc = LogicalExpression::FunctionCall {
+            callee: Callee::named("toLower"),
             name: "toLower".into(),
             args: vec![var("name")],
             distinct: false,

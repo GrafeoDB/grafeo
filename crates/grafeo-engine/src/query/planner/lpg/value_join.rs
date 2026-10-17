@@ -411,6 +411,7 @@ mod tests {
         assert_eq!(keys(&joined, true), None, "a statement that writes");
 
         let random = LogicalExpression::FunctionCall {
+            callee: crate::query::plan::Callee::named("rand"),
             name: "rand".to_string(),
             args: Vec::new(),
             distinct: false,

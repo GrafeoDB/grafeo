@@ -3,6 +3,7 @@
 //! Translates SPARQL 1.1 AST to the common logical plan representation.
 
 use super::common::{wrap_distinct, wrap_filter, wrap_limit, wrap_skip, wrap_sort};
+use crate::query::plan::Callee;
 use crate::query::plan::{
     AddGraphOp, AggregateExpr, AggregateFunction, AggregateOp, AntiJoinOp, BinaryOp, BindOp,
     ClearGraphOp, ConstructOp, CopyGraphOp, CreateGraphOp, DatasetRestriction, DeleteTripleOp,
@@ -1277,19 +1278,14 @@ impl SparqlTranslator {
                     .iter()
                     .map(|a| self.translate_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(LogicalExpression::FunctionCall {
-                    name,
-                    args,
-                    distinct: false,
-                })
+                Ok(LogicalExpression::SparqlCall { name, args })
             }
 
             ast::Expression::Bound(var) => {
                 // BOUND(?x) checks if variable is bound
-                Ok(LogicalExpression::FunctionCall {
+                Ok(LogicalExpression::SparqlCall {
                     name: "BOUND".to_string(),
                     args: vec![LogicalExpression::Variable(var.clone())],
-                    distinct: false,
                 })
             }
 
@@ -1313,10 +1309,9 @@ impl SparqlTranslator {
                     .iter()
                     .map(|e| self.translate_expression(e))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(LogicalExpression::FunctionCall {
+                Ok(LogicalExpression::SparqlCall {
                     name: "COALESCE".to_string(),
                     args,
-                    distinct: false,
                 })
             }
 
@@ -1402,7 +1397,13 @@ impl SparqlTranslator {
             }
         };
 
+        let aggregate = AggregateFunction::from_name(func_name).ok_or_else(|| {
+            Error::Internal(format!(
+                "SPARQL aggregate {func_name} has no aggregate function"
+            ))
+        })?;
         Ok(LogicalExpression::FunctionCall {
+            callee: Callee::Aggregate(aggregate),
             name: func_name.to_string(),
             args,
             distinct,
@@ -1622,28 +1623,19 @@ impl SparqlTranslator {
         aggregates: &[AggregateExpr],
     ) -> LogicalExpression {
         match expr {
-            LogicalExpression::FunctionCall { name, .. } => {
-                // Match aggregate function names to their aliases
-                let upper = name.to_uppercase();
-                if matches!(
-                    upper.as_str(),
-                    "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "SAMPLE" | "GROUP_CONCAT"
-                ) {
-                    // Find the matching aggregate by function name.
-                    // CountNonNull is the physical variant of COUNT(expr),
-                    // so treat it as matching "COUNT" for HAVING rewriting.
-                    for agg in aggregates {
-                        let agg_name = format!("{:?}", agg.function).to_uppercase();
-                        let matches_name =
-                            agg_name == upper || (upper == "COUNT" && agg_name == "COUNTNONNULL");
-                        if matches_name && agg.alias.is_some() {
-                            return LogicalExpression::Variable(
-                                agg.alias.clone().expect("alias checked by is_some guard"),
-                            );
-                        }
-                    }
-                }
-                expr.clone()
+            LogicalExpression::FunctionCall {
+                callee: Callee::Aggregate(function),
+                ..
+            } => {
+                // The aggregate's column, by function. CountNonNull is the
+                // physical variant of COUNT(expr), so it matches COUNT.
+                let alias = aggregates.iter().find_map(|agg| {
+                    let same = agg.function == *function
+                        || (*function == AggregateFunction::Count
+                            && agg.function == AggregateFunction::CountNonNull);
+                    if same { agg.alias.clone() } else { None }
+                });
+                alias.map_or_else(|| expr.clone(), LogicalExpression::Variable)
             }
             LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
                 left: Box::new(Self::rewrite_aggregates_as_refs(left, aggregates)),
@@ -1820,10 +1812,9 @@ impl SparqlTranslator {
         let lang_literal = LogicalExpression::Literal(Value::String(lang_tag.clone().into()));
 
         // Build LANG(?var)
-        let lang_call = LogicalExpression::FunctionCall {
+        let lang_call = LogicalExpression::SparqlCall {
             name: "LANG".to_string(),
             args: vec![translated_var.clone()],
-            distinct: false,
         };
 
         let (value_op, lang_op, combine_op) = if operator == ast::BinaryOperator::Equal {

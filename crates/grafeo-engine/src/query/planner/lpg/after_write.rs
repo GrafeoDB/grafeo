@@ -386,6 +386,7 @@ mod tests {
                 right: Box::new(LogicalExpression::Literal(Value::Int64(4))),
             },
             LogicalExpression::FunctionCall {
+                callee: crate::query::plan::Callee::named("toString"),
                 name: "toString".to_string(),
                 args: vec![variable("i")],
                 distinct: false,

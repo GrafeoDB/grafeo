@@ -6,6 +6,7 @@ use super::{
     NestedLoopJoinOperator, NodeScanOp, Operator, PhysicalJoinType, Result, ScanOperator,
     TransactionId, Value,
 };
+use crate::query::plan::{BuiltinFunction, Callee};
 
 /// The copy of `filter` whose node scan reads the label with the fewest
 /// nodes, or `None` when the scan reads that label already.
@@ -99,12 +100,14 @@ pub(crate) fn may_choose_scan_label(
 
 /// The label of a `hasLabel(variable, 'Label')` check.
 fn label_check<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<&'a str> {
-    let LogicalExpression::FunctionCall { name, args, .. } = expression else {
+    let LogicalExpression::FunctionCall {
+        callee: Callee::Builtin(BuiltinFunction::HasLabel),
+        args,
+        ..
+    } = expression
+    else {
         return None;
     };
-    if !name.eq_ignore_ascii_case("hasLabel") {
-        return None;
-    }
     match args.as_slice() {
         [
             LogicalExpression::Variable(checked),
@@ -292,7 +295,7 @@ impl super::Planner {
                         .map(|(i, name)| (name.clone(), i))
                         .collect();
                     let filter_expr = FilterExpression::FunctionCall {
-                        name: "hasLabel".to_string(),
+                        function: grafeo_core::execution::operators::BuiltinFunction::HasLabel,
                         args: vec![
                             FilterExpression::Variable(scan.variable.clone()),
                             FilterExpression::Literal(Value::String(label.as_str().into())),
@@ -366,6 +369,7 @@ mod tests {
 
     fn has_label(variable: &str, label: &str) -> LogicalExpression {
         LogicalExpression::FunctionCall {
+            callee: crate::query::plan::Callee::named("hasLabel"),
             name: "hasLabel".to_string(),
             args: vec![
                 LogicalExpression::Variable(variable.to_string()),

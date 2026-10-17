@@ -390,8 +390,8 @@ fn row_reads_all<'a>(
 
 /// Adds the variables `expr` reads to `reads`. False when `expr` is not
 /// known to be a function of the row alone: a subquery (it plans more of the
-/// graph, which this module does not follow), a function that can change
-/// between calls or that `same_on_every_call` does not list, or the `*` of
+/// graph, which this module does not follow), a function that is not
+/// [`deterministic`](super::seek::deterministic), or the `*` of
 /// `RETURN *`, which reads every column.
 fn row_reads(expr: &LogicalExpression, reads: &mut HashSet<String>) -> bool {
     match expr {
@@ -441,8 +441,11 @@ fn row_reads(expr: &LogicalExpression, reads: &mut HashSet<String>) -> bool {
                     .iter()
                     .all(|(when, then)| row_reads(when, reads) && row_reads(then, reads))
         }
-        LogicalExpression::FunctionCall { name, args, .. } => {
-            same_on_every_call(name, args.len()) && row_reads_all(args, reads)
+        // Entity functions (`id`, `labels`, `hasLabel`, which a label in a
+        // node pattern becomes) are Immutable: they read the entity's state
+        // when the call runs.
+        LogicalExpression::FunctionCall { callee, args, .. } => {
+            super::seek::deterministic(*callee, args.len()) && row_reads_all(args, reads)
         }
         // The variable a comprehension, list predicate or `reduce` binds is
         // its own: only the other names its body uses come from the row
@@ -490,23 +493,6 @@ fn row_reads(expr: &LogicalExpression, reads: &mut HashSet<String>) -> bool {
         }
         _ => false,
     }
-}
-
-/// Whether the function `name` with `arity` arguments gives the same value
-/// for the same arguments: the functions a seek evaluates once
-/// ([`deterministic`](super::seek::deterministic)), and those that read an
-/// entity's identity or labels (a label in a node pattern becomes a filter on
-/// `hasLabel`).
-fn same_on_every_call(name: &str, arity: usize) -> bool {
-    const ENTITY: [&str; 6] = [
-        "id",
-        "elementid",
-        "element_id",
-        "labels",
-        "type",
-        "haslabel",
-    ];
-    super::seek::deterministic(name, arity) || ENTITY.iter().any(|f| name.eq_ignore_ascii_case(f))
 }
 
 #[cfg(all(test, feature = "gql", feature = "cypher"))]

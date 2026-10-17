@@ -17,20 +17,12 @@
 // On 64-bit (clippy host), these are flagged but the code only runs on WASM.
 #![allow(clippy::cast_possible_truncation)]
 
-#[cfg(feature = "direct-api")]
-mod graph_handle;
 mod signed_snapshot;
 mod types;
 mod utils;
-#[cfg(feature = "direct-api")]
-mod writes;
 
-#[cfg(feature = "direct-api")]
-pub use graph_handle::GraphHandle;
-
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
@@ -47,14 +39,14 @@ use grafeo_engine::session::Session;
 /// the higher-level `@grafeo-db/web` package.
 #[wasm_bindgen]
 pub struct Database {
-    inner: Rc<RefCell<GrafeoDB>>,
+    inner: GrafeoDB,
     /// Active transaction session, set by `beginTransaction()` and cleared by
     /// `commitTransaction()` / `rollbackTransaction()` / `close()`.
     /// When present, `execute*` methods route through this session so
     /// uncommitted writes are visible only to the transaction.
-    tx: Rc<RefCell<Option<Session>>>,
+    tx: RefCell<Option<Session>>,
     /// Once set by `close()`, every subsequent method call errors.
-    closed: Rc<Cell<bool>>,
+    closed: Cell<bool>,
 }
 
 #[wasm_bindgen]
@@ -67,7 +59,11 @@ impl Database {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<Database, JsError> {
         utils::set_panic_hook();
-        Ok(Database::from_engine(GrafeoDB::new_in_memory()))
+        Ok(Database {
+            inner: GrafeoDB::new_in_memory(),
+            tx: RefCell::new(None),
+            closed: Cell::new(false),
+        })
     }
 
     /// Begins a new transaction.
@@ -94,7 +90,7 @@ impl Database {
                 "Transaction already active. Commit or rollback before starting a new one.",
             ));
         }
-        let mut session = self.db().session();
+        let mut session = self.inner.session();
         session
             .begin_transaction()
             .map_err(|e| JsError::new(&e.to_string()))?;
@@ -160,7 +156,7 @@ impl Database {
         if let Some(mut session) = self.tx.borrow_mut().take() {
             let _ = session.rollback();
         }
-        self.db().clear_plan_cache();
+        self.inner.clear_plan_cache();
         self.closed.set(true);
     }
 
@@ -184,7 +180,7 @@ impl Database {
                 .map_err(|e| JsError::new(&e.to_string()))
         } else {
             drop(tx_slot);
-            self.db()
+            self.inner
                 .execute(query)
                 .map_err(|e| JsError::new(&e.to_string()))
         }
@@ -205,7 +201,7 @@ impl Database {
                 .map_err(|e| JsError::new(&e.to_string()))
         } else {
             drop(tx_slot);
-            self.db()
+            self.inner
                 .execute_language(query, language, params)
                 .map_err(|e| JsError::new(&e.to_string()))
         }
@@ -227,7 +223,11 @@ impl Database {
         self.check_open()?;
         let result = self.run_query(query)?;
 
-        Ok(rows_to_js(&result))
+        let rows = Array::new_with_length(result.rows().len() as u32);
+        for (i, row) in result.rows().iter().enumerate() {
+            rows.set(i as u32, types::row_to_js_object(&result.columns, row));
+        }
+        Ok(rows.into())
     }
 
     /// Executes a GQL query and returns raw columns, rows, and metadata.
@@ -245,67 +245,16 @@ impl Database {
         Ok(raw_result_to_js(&result))
     }
 
-    /// The edges of a node as `[neighborId, edgeId]` pairs, without a query:
-    /// `options.direction` is `"out"` (default), `"in"` or `"both"` (which
-    /// lists a self-loop once), and `options.edgeTypes` keeps only those
-    /// types. Reads through the open transaction when there is one; a node
-    /// that does not exist has none.
-    ///
-    /// ```js
-    /// for (const [neighbor, edge] of db.getNodeEdges(alix, { edgeTypes: ["KNOWS"] })) { }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns `JsError` if the database is closed, the ID is not a whole
-    /// number, or the options are malformed.
-    #[cfg(feature = "lpg-model")]
-    #[wasm_bindgen(js_name = "getNodeEdges")]
-    pub fn get_node_edges(&self, id: f64, options: JsValue) -> Result<JsValue, JsError> {
-        self.check_open()?;
-        let node = node_id(id)?;
-        let options: NodeEdgesOptions = if options.is_undefined() || options.is_null() {
-            NodeEdgesOptions::default()
-        } else {
-            serde_wasm_bindgen::from_value(options)
-                .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
-        };
-        let direction = match options.direction.as_deref() {
-            None | Some("out" | "outgoing") => grafeo_engine::Direction::Outgoing,
-            Some("in" | "incoming") => grafeo_engine::Direction::Incoming,
-            Some("both") => grafeo_engine::Direction::Both,
-            Some(other) => {
-                return Err(JsError::new(&format!(
-                    "direction must be 'out', 'in' or 'both', not '{other}'"
-                )));
-            }
-        };
-        let edge_types = options.edge_types.unwrap_or_default();
-        let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
-        let edges = match self.tx.borrow().as_ref() {
-            Some(session) => session.get_node_edges(node, direction, &edge_types),
-            None => self.db().get_node_edges(node, direction, &edge_types),
-        };
-        let array = Array::new_with_length(edges.len() as u32);
-        for (i, (neighbor, edge)) in edges.iter().enumerate() {
-            let pair = Array::new_with_length(2);
-            pair.set(0, id_to_js(neighbor.as_u64())?);
-            pair.set(1, id_to_js(edge.as_u64())?);
-            array.set(i as u32, pair.into());
-        }
-        Ok(array.into())
-    }
-
     /// Returns the number of nodes in the database.
     #[wasm_bindgen(js_name = "nodeCount")]
     pub fn node_count(&self) -> usize {
-        self.db().node_count()
+        self.inner.node_count()
     }
 
     /// Returns the number of edges in the database.
     #[wasm_bindgen(js_name = "edgeCount")]
     pub fn edge_count(&self) -> usize {
-        self.db().edge_count()
+        self.inner.edge_count()
     }
 
     /// Clears all cached query plans.
@@ -313,7 +262,7 @@ impl Database {
     /// Forces re-parsing and re-optimization on next execution.
     #[wasm_bindgen(js_name = "clearPlanCache")]
     pub fn clear_plan_cache(&self) {
-        self.db().clear_plan_cache();
+        self.inner.clear_plan_cache();
     }
 
     /// Executes a query using a specific query language.
@@ -352,7 +301,7 @@ impl Database {
     #[wasm_bindgen(js_name = "exportSnapshot")]
     pub fn export_snapshot(&self) -> Result<Vec<u8>, JsError> {
         self.check_open()?;
-        self.db()
+        self.inner
             .export_snapshot()
             .map_err(|e| JsError::new(&e.to_string()))
     }
@@ -392,7 +341,7 @@ impl Database {
             ));
         }
         let payload = self
-            .db()
+            .inner
             .export_snapshot()
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(signed_snapshot::wrap(key, &payload))
@@ -425,7 +374,11 @@ impl Database {
             ));
         }
         let inner = GrafeoDB::import_snapshot(data).map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Database::from_engine(inner))
+        Ok(Database {
+            inner,
+            tx: RefCell::new(None),
+            closed: Cell::new(false),
+        })
     }
 
     /// Creates a database from a tamper-evident binary snapshot.
@@ -457,7 +410,11 @@ impl Database {
         }
         let payload = signed_snapshot::unwrap(key, data).map_err(|msg| JsError::new(&msg))?;
         let inner = GrafeoDB::import_snapshot(payload).map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Database::from_engine(inner))
+        Ok(Database {
+            inner,
+            tx: RefCell::new(None),
+            closed: Cell::new(false),
+        })
     }
 
     /// Returns schema information about the database.
@@ -473,7 +430,7 @@ impl Database {
     ///
     /// Returns `JsError` if the schema info cannot be serialised to a JS value.
     pub fn schema(&self) -> Result<JsValue, JsError> {
-        let info = self.db().schema();
+        let info = self.inner.schema();
         serde_wasm_bindgen::to_value(&info).map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -516,7 +473,7 @@ impl Database {
             opts.stop_words.as_deref(),
         )
         .map_err(|e| JsError::new(&e.to_string()))?;
-        self.db()
+        self.inner
             .create_text_index_with(label, property, options)
             .map_err(|e| JsError::new(&e.to_string()))
     }
@@ -531,7 +488,7 @@ impl Database {
     #[cfg(feature = "text-index")]
     #[wasm_bindgen(js_name = "dropTextIndex")]
     pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool, JsError> {
-        self.db()
+        self.inner
             .drop_text_index(label, property)
             .map_err(|e| JsError::new(&e.to_string()))
     }
@@ -546,7 +503,7 @@ impl Database {
     #[cfg(feature = "text-index")]
     #[wasm_bindgen(js_name = "rebuildTextIndex")]
     pub fn rebuild_text_index(&self, label: &str, property: &str) -> Result<(), JsError> {
-        self.db()
+        self.inner
             .rebuild_text_index(label, property)
             .map_err(|e| JsError::new(&e.to_string()))
     }
@@ -593,7 +550,7 @@ impl Database {
                 .collect::<HashMap<String, Value>>()
         });
         let results = self
-            .db()
+            .inner
             .text_search(label, property, query, k, filters.as_ref())
             .map_err(|e| JsError::new(&e.to_string()))?;
 
@@ -658,7 +615,7 @@ impl Database {
         });
 
         let results = self
-            .db()
+            .inner
             .hybrid_search(
                 label,
                 text_property,
@@ -722,7 +679,7 @@ impl Database {
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
 
-        self.db()
+        self.inner
             .create_vector_index(
                 label,
                 property,
@@ -745,7 +702,7 @@ impl Database {
     #[cfg(feature = "vector-index")]
     #[wasm_bindgen(js_name = "dropVectorIndex")]
     pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool, JsError> {
-        self.db()
+        self.inner
             .drop_vector_index(label, property)
             .map_err(|e| JsError::new(&e.to_string()))
     }
@@ -761,7 +718,7 @@ impl Database {
     #[cfg(feature = "vector-index")]
     #[wasm_bindgen(js_name = "rebuildVectorIndex")]
     pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<(), JsError> {
-        self.db()
+        self.inner
             .rebuild_vector_index(label, property)
             .map_err(|e| JsError::new(&e.to_string()))
     }
@@ -804,61 +761,11 @@ impl Database {
         });
 
         let results = self
-            .db()
+            .inner
             .vector_search(label, property, query, k, opts.ef, filters.as_ref())
             .map_err(|e| JsError::new(&e.to_string()))?;
 
         Ok(vector_results_to_js(&results))
-    }
-
-    /// Searches several query vectors of one dimension at once.
-    /// `options.ef` sets the search width (default: the index's) and
-    /// `options.filters` keeps only nodes whose properties equal the given
-    /// values. Returns one `[{id, distance}]` array per query, nearest first.
-    ///
-    /// ```js
-    /// const results = db.batchVectorSearch("Doc", "embedding", [[1, 0], [0, 1]], 5);
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns `JsError` if the arguments are malformed, no vector index
-    /// exists, or the search fails.
-    #[cfg(feature = "vector-index")]
-    #[wasm_bindgen(js_name = "batchVectorSearch")]
-    pub fn batch_vector_search(
-        &self,
-        label: &str,
-        property: &str,
-        queries: JsValue,
-        k: usize,
-        options: JsValue,
-    ) -> Result<JsValue, JsError> {
-        self.check_open()?;
-        let queries: Vec<Vec<f32>> = serde_wasm_bindgen::from_value(queries).map_err(|e| {
-            JsError::new(&format!("queries must be an array of number arrays: {e}"))
-        })?;
-        let options: BatchSearchOptions = if options.is_undefined() || options.is_null() {
-            BatchSearchOptions::default()
-        } else {
-            serde_wasm_bindgen::from_value(options)
-                .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
-        };
-        let filters = options.filters.as_ref().map(|filters| {
-            filters
-                .iter()
-                .map(|(name, value)| (name.clone(), json_to_value(value)))
-                .collect::<HashMap<String, Value>>()
-        });
-        let results = self
-            .db()
-            .batch_vector_search(label, property, &queries, k, options.ef, filters.as_ref())
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        let array = Array::new_with_length(results.len() as u32);
-        for (i, hits) in results.iter().enumerate() {
-            array.set(i as u32, vector_results_to_js(hits));
-        }
-        Ok(array.into())
     }
 
     /// Performs Maximal Marginal Relevance search for diverse results.
@@ -899,7 +806,7 @@ impl Database {
         });
 
         let results = self
-            .db()
+            .inner
             .mmr_search(
                 label,
                 property,
@@ -1161,7 +1068,7 @@ impl Database {
                 })
                 .unwrap_or_default();
             let id = self
-                .db()
+                .inner
                 .create_node_with_props(&labels, props)
                 .map_err(|e| JsError::new(&e.to_string()))?;
             node_ids.push(id);
@@ -1193,7 +1100,7 @@ impl Database {
                         .collect()
                 })
                 .unwrap_or_default();
-            self.db()
+            self.inner
                 .create_edge_with_props(src, dst, &edge.edge_type, props)
                 .map_err(|e| JsError::new(&e.to_string()))?;
             edge_count += 1;
@@ -1278,7 +1185,7 @@ impl Database {
         });
 
         let inserted = self
-            .db()
+            .inner
             .batch_insert_rdf(triples)
             .map_err(|e| JsError::new(&e.to_string()))?;
 
@@ -1309,7 +1216,7 @@ impl Database {
     /// Returns `JsError` if the memory usage data cannot be serialised to a JS value.
     #[wasm_bindgen(js_name = "memoryUsage")]
     pub fn memory_usage(&self) -> Result<JsValue, JsError> {
-        let usage = self.db().memory_usage();
+        let usage = self.inner.memory_usage();
         serde_wasm_bindgen::to_value(&usage).map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -1319,7 +1226,7 @@ impl Database {
     ///
     /// Returns `JsError` if the info data cannot be serialised to a JS value.
     pub fn info(&self) -> Result<JsValue, JsError> {
-        let info = self.db().info();
+        let info = self.inner.info();
         serde_wasm_bindgen::to_value(&info).map_err(|e| JsError::new(&e.to_string()))
     }
 
@@ -1332,10 +1239,9 @@ impl Database {
     /// # Errors
     ///
     /// Returns `JsError` after a commit that did not complete.
-    pub fn compact(&self) -> Result<JsValue, JsError> {
+    pub fn compact(&mut self) -> Result<JsValue, JsError> {
         let report = self
             .inner
-            .borrow_mut()
             .compact()
             .map_err(|e| JsError::new(&e.to_string()))?;
         serde_wasm_bindgen::to_value(&report).map_err(|e| JsError::new(&e.to_string()))
@@ -1404,7 +1310,7 @@ impl Database {
                         .filter(|(_, v)| !v.is_null())
                         .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                         .collect();
-                    self.db()
+                    self.inner
                         .create_node_with_props(&label_refs, props)
                         .map_err(|e| JsError::new(&format!("rows[{count}]: {e}")))?;
                     count += 1;
@@ -1437,7 +1343,7 @@ impl Database {
                         .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                         .collect();
 
-                    self.db()
+                    self.inner
                         .create_edge_with_props(src_id, dst_id, edge_type, props)
                         .map_err(|e| JsError::new(&format!("rows[{i}]: {e}")))?;
                     count += 1;
@@ -1475,7 +1381,7 @@ impl Database {
     /// ```
     #[wasm_bindgen(js_name = "setSchema")]
     pub fn set_schema(&self, name: &str) -> Result<(), JsValue> {
-        self.db()
+        self.inner
             .set_current_schema(Some(name))
             .map_err(|e| JsError::new(&e.to_string()).into())
     }
@@ -1485,13 +1391,13 @@ impl Database {
     /// Subsequent `execute()` calls will use the default (no-schema) namespace.
     #[wasm_bindgen(js_name = "resetSchema")]
     pub fn reset_schema(&self) {
-        let _ = self.db().set_current_schema(None);
+        let _ = self.inner.set_current_schema(None);
     }
 
     /// Returns the current schema name, or `undefined` if no schema is set.
     #[wasm_bindgen(js_name = "currentSchema")]
     pub fn current_schema(&self) -> Option<String> {
-        self.db().current_schema()
+        self.inner.current_schema()
     }
 
     // ── Graph projections ───────────────────────────────────────────────
@@ -1522,7 +1428,7 @@ impl Database {
         if let Some(types) = edge_types.filter(|t| !t.is_empty()) {
             spec = spec.with_edge_types(types);
         }
-        self.db()
+        self.inner
             .create_projection(name, spec)
             .map_err(|e| JsError::new(&e.to_string()))
     }
@@ -1530,13 +1436,13 @@ impl Database {
     /// Drops a named graph projection. Returns `true` if it existed.
     #[wasm_bindgen(js_name = "dropProjection")]
     pub fn drop_projection(&self, name: &str) -> bool {
-        self.db().drop_projection(name)
+        self.inner.drop_projection(name)
     }
 
     /// Returns the names of all graph projections.
     #[wasm_bindgen(js_name = "listProjections")]
     pub fn list_projections(&self) -> Vec<String> {
-        self.db().list_projections()
+        self.inner.list_projections()
     }
 }
 
@@ -1545,20 +1451,6 @@ impl Database {
 // ---------------------------------------------------------------------------
 
 impl Database {
-    /// A database around an engine, with no transaction open.
-    fn from_engine(db: GrafeoDB) -> Database {
-        Database {
-            inner: Rc::new(RefCell::new(db)),
-            tx: Rc::new(RefCell::new(None)),
-            closed: Rc::new(Cell::new(false)),
-        }
-    }
-
-    /// The engine, borrowed for one call.
-    fn db(&self) -> Ref<'_, GrafeoDB> {
-        self.inner.borrow()
-    }
-
     /// Shared implementation for all language-specific execute methods.
     ///
     /// Converts an optional JS params object to the internal
@@ -1574,7 +1466,11 @@ impl Database {
         let param_map = Self::convert_params(params)?;
         let result = self.run_language_query(query, language, param_map)?;
 
-        Ok(rows_to_js(&result))
+        let rows = Array::new_with_length(result.rows().len() as u32);
+        for (i, row) in result.rows().iter().enumerate() {
+            rows.set(i as u32, types::row_to_js_object(&result.columns, row));
+        }
+        Ok(rows.into())
     }
 
     /// Converts a JS params value (object or null/undefined) to an optional
@@ -1592,44 +1488,8 @@ impl Database {
     }
 }
 
-/// A query result's rows as an array of objects keyed by column name, the
-/// shape of the `execute*` methods.
-fn rows_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
-    let rows = Array::new_with_length(result.rows().len() as u32);
-    for (i, row) in result.rows().iter().enumerate() {
-        rows.set(i as u32, types::row_to_js_object(&result.columns, row));
-    }
-    rows.into()
-}
-
-/// What a write statement changed, as `{nodesCreated, nodesDeleted,
-/// edgesCreated, edgesDeleted, propertiesSet, labelsAdded, labelsRemoved}`.
-fn counters_to_js(counters: &grafeo_engine::database::WriteCounters) -> JsValue {
-    let obj = js_sys::Object::new();
-    for (name, count) in [
-        ("nodesCreated", counters.nodes_created),
-        ("nodesDeleted", counters.nodes_deleted),
-        ("edgesCreated", counters.edges_created),
-        ("edgesDeleted", counters.edges_deleted),
-        ("propertiesSet", counters.properties_set),
-        ("labelsAdded", counters.labels_added),
-        ("labelsRemoved", counters.labels_removed),
-    ] {
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "wasm32 memory is at most 4 GiB, so a statement changes fewer than 2^32 entities"
-        )]
-        let _ = js_sys::Reflect::set(
-            &obj,
-            &JsValue::from_str(name),
-            &JsValue::from_f64(count as f64),
-        );
-    }
-    obj.into()
-}
-
-/// Converts a query result to `{ columns: string[], rows: any[][], executionTimeMs?: number,
-/// counters }`, the shape of the `executeRaw*` methods.
+/// Converts a query result to `{ columns: string[], rows: any[][], executionTimeMs?: number }`,
+/// the shape of the `executeRaw*` methods.
 fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
     let obj = js_sys::Object::new();
 
@@ -1660,12 +1520,6 @@ fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
         );
     }
 
-    let _ = js_sys::Reflect::set(
-        &obj,
-        &JsValue::from_str("counters"),
-        &counters_to_js(&result.counters),
-    );
-
     obj.into()
 }
 
@@ -1692,57 +1546,6 @@ struct VectorIndexOptions {
 struct VectorSearchOptions {
     ef: Option<usize>,
     filters: Option<HashMap<String, serde_json::Value>>,
-}
-
-/// Options of `batchVectorSearch`.
-#[cfg(feature = "vector-index")]
-#[derive(Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BatchSearchOptions {
-    ef: Option<usize>,
-    filters: Option<HashMap<String, serde_json::Value>>,
-}
-
-/// Options for `getNodeEdges()`.
-#[cfg(feature = "lpg-model")]
-#[derive(Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NodeEdgesOptions {
-    direction: Option<String>,
-    edge_types: Option<Vec<String>>,
-}
-
-/// The largest integer a JS number holds exactly, 2^53 - 1.
-#[cfg(feature = "lpg-model")]
-const MAX_SAFE_ID: u64 = (1 << 53) - 1;
-
-/// A node ID from a JS number: whole and at least 0.
-#[cfg(feature = "lpg-model")]
-fn node_id(id: f64) -> Result<grafeo_common::types::NodeId, JsError> {
-    if id.fract() != 0.0 || !(0.0..=9_007_199_254_740_991.0).contains(&id) {
-        return Err(JsError::new(&format!("{id} is not a node ID")));
-    }
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "checked above to be a whole number from 0 to 2^53 - 1"
-    )]
-    Ok(grafeo_common::types::NodeId::new(id as u64))
-}
-
-/// An ID as a JS number; an error for one a number cannot hold exactly.
-#[cfg(feature = "lpg-model")]
-fn id_to_js(id: u64) -> Result<JsValue, JsError> {
-    if id > MAX_SAFE_ID {
-        return Err(JsError::new(&format!(
-            "ID {id} is larger than a JS number holds exactly"
-        )));
-    }
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "checked above to be at most 2^53 - 1, which an f64 holds exactly"
-    )]
-    Ok(JsValue::from_f64(id as f64))
 }
 
 /// Options for `mmrSearch()`.

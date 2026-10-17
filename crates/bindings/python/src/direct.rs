@@ -344,45 +344,6 @@ pub(crate) fn labels(value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     })
 }
 
-/// The direction of `get_node_edges`: `"out"`, `"in"` or `"both"`.
-pub(crate) fn direction(value: &str) -> PyResult<grafeo_engine::Direction> {
-    match value {
-        "out" | "outgoing" => Ok(grafeo_engine::Direction::Outgoing),
-        "in" | "incoming" => Ok(grafeo_engine::Direction::Incoming),
-        "both" => Ok(grafeo_engine::Direction::Both),
-        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "direction must be \"out\", \"in\" or \"both\", not {other:?}"
-        ))),
-    }
-}
-
-/// The edge types of `get_node_edges`: none for every type, a type, or a
-/// list or tuple of types.
-pub(crate) fn edge_types(value: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
-    match value {
-        None => Ok(Vec::new()),
-        Some(value) if value.is_none() => Ok(Vec::new()),
-        Some(value) => {
-            if let Ok(edge_type) = value.extract::<String>() {
-                return Ok(vec![edge_type]);
-            }
-            value.extract::<Vec<String>>().map_err(|_| {
-                pyo3::exceptions::PyTypeError::new_err(
-                    "edge_types must be a string or a list of strings",
-                )
-            })
-        }
-    }
-}
-
-/// `(neighbor_id, edge_id)` pairs for Python.
-pub(crate) fn edge_pairs(edges: Vec<(NodeId, EdgeId)>) -> Vec<(u64, u64)> {
-    edges
-        .into_iter()
-        .map(|(neighbor, edge)| (neighbor.as_u64(), edge.as_u64()))
-        .collect()
-}
-
 /// Edges for a batch from `(src, dst, type)` or `(src, dst, type, properties)`
 /// tuples.
 pub(crate) fn batch_edges(edges: &Bound<'_, PyList>) -> PyResult<Vec<BatchEdge>> {

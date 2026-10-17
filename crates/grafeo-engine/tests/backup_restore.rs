@@ -661,30 +661,6 @@ fn a_backup_chain_taken_by_0_5_44_still_restores() {
     );
 }
 
-/// Damage in an incremental backup of 0.5.44 fails the restore, never
-/// replaying the commits after it on top of the missing ones (#425): the
-/// checksum of the backup file catches it before its records are read.
-#[test]
-fn a_damaged_incremental_backup_of_0_5_44_fails_the_restore() {
-    let dir = tempfile::tempdir().expect("create temp dir");
-    let backups = backups_of_0_5_44(dir.path());
-    let first = backups.join("backup_incr_0001.wal");
-    let mut bytes = std::fs::read(&first).expect("read the incremental backup");
-    // A byte of the first record (a 32-byte header, then the frames).
-    bytes[32 + 6] ^= 0x01;
-    std::fs::write(&first, bytes).expect("damage the incremental backup");
-
-    let path = dir.path().join("restored.grafeo");
-    let result = GrafeoDB::restore_to_epoch(&backups, EpochId::new(7), &path);
-    let Err(error) = result else {
-        panic!("the restore of a damaged backup succeeded");
-    };
-    assert!(
-        error.to_string().contains("backup_incr_0001.wal"),
-        "{error}"
-    );
-}
-
 /// After an upgrade, the database restored from a 0.5.44 chain goes on
 /// backing up into the same directory: the manifest is rewritten as JSON with
 /// the 0.5.44 segments kept, and both the old and the new segments restore.

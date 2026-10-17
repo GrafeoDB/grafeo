@@ -169,12 +169,42 @@ pub(crate) fn unaliased_with_expression() -> Error {
     ))
 }
 
-// Whether a function name is an aggregate: one list with the translators'
-// check of function calls.
-#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+// Whether a function name is an aggregate: one list with the planner's check
+// of function calls.
 pub(crate) use crate::query::functions::is_aggregate_function;
-use crate::query::plan::BuiltinFunction;
-use crate::query::plan::Callee;
+
+/// Converts a function name to an `AggregateFunction` enum variant.
+pub(crate) fn to_aggregate_function(name: &str) -> Option<AggregateFunction> {
+    match name.to_uppercase().as_str() {
+        "COUNT" => Some(AggregateFunction::Count),
+        "SUM" => Some(AggregateFunction::Sum),
+        "AVG" => Some(AggregateFunction::Avg),
+        "MIN" => Some(AggregateFunction::Min),
+        "MAX" => Some(AggregateFunction::Max),
+        "COLLECT" => Some(AggregateFunction::Collect),
+        "STDEV" | "STDDEV" | "STDDEV_SAMP" => Some(AggregateFunction::StdDev),
+        "STDEVP" | "STDDEVP" | "STDDEV_POP" => Some(AggregateFunction::StdDevPop),
+        "VARIANCE" | "VAR_SAMP" => Some(AggregateFunction::Variance),
+        "VAR_POP" => Some(AggregateFunction::VariancePop),
+        "PERCENTILE_DISC" | "PERCENTILEDISC" => Some(AggregateFunction::PercentileDisc),
+        "PERCENTILE_CONT" | "PERCENTILECONT" => Some(AggregateFunction::PercentileCont),
+        "GROUP_CONCAT" | "GROUPCONCAT" | "LISTAGG" => Some(AggregateFunction::GroupConcat),
+        "SAMPLE" => Some(AggregateFunction::Sample),
+        "COVAR_SAMP" => Some(AggregateFunction::CovarSamp),
+        "COVAR_POP" => Some(AggregateFunction::CovarPop),
+        "CORR" => Some(AggregateFunction::Corr),
+        "REGR_SLOPE" => Some(AggregateFunction::RegrSlope),
+        "REGR_INTERCEPT" => Some(AggregateFunction::RegrIntercept),
+        "REGR_R2" => Some(AggregateFunction::RegrR2),
+        "REGR_COUNT" => Some(AggregateFunction::RegrCount),
+        "REGR_SXX" => Some(AggregateFunction::RegrSxx),
+        "REGR_SYY" => Some(AggregateFunction::RegrSyy),
+        "REGR_SXY" => Some(AggregateFunction::RegrSxy),
+        "REGR_AVGX" => Some(AggregateFunction::RegrAvgx),
+        "REGR_AVGY" => Some(AggregateFunction::RegrAvgy),
+        _ => None,
+    }
+}
 
 /// Returns true if the aggregate function is a binary set function (requires two arguments).
 pub(crate) fn is_binary_set_function(func: AggregateFunction) -> bool {
@@ -303,14 +333,13 @@ pub(crate) fn combine_with_and(predicates: Vec<LogicalExpression>) -> Result<Log
 /// when `labels` is empty. A node pattern with several labels requires all of
 /// them, wherever the node appears in a pattern.
 pub(crate) fn has_all_labels(variable: &str, labels: &[String]) -> Option<LogicalExpression> {
-    LogicalExpression::conjunction(labels.iter().map(|label| {
-        LogicalExpression::builtin(
-            BuiltinFunction::HasLabel,
-            vec![
-                LogicalExpression::Variable(variable.to_string()),
-                LogicalExpression::Literal(Value::String(label.clone().into())),
-            ],
-        )
+    LogicalExpression::conjunction(labels.iter().map(|label| LogicalExpression::FunctionCall {
+        name: "hasLabel".into(),
+        args: vec![
+            LogicalExpression::Variable(variable.to_string()),
+            LogicalExpression::Literal(Value::String(label.clone().into())),
+        ],
+        distinct: false,
     }))
 }
 
@@ -362,12 +391,13 @@ fn path_node_ids(source: &str, hops: &[PathHop]) -> LogicalExpression {
     for hop in hops {
         parts.push(match &hop.segment {
             // The first node of a segment is the last node of the hop before
-            Some(segment) => LogicalExpression::builtin(
-                BuiltinFunction::Tail,
-                vec![LogicalExpression::Variable(format!(
+            Some(segment) => LogicalExpression::FunctionCall {
+                name: "tail".into(),
+                args: vec![LogicalExpression::Variable(format!(
                     "_path_nodes_{segment}"
                 ))],
-            ),
+                distinct: false,
+            },
             None => id_list(&hop.target),
         });
     }
@@ -404,10 +434,11 @@ fn concatenation(parts: Vec<LogicalExpression>) -> LogicalExpression {
 /// The path that starts at `source` and takes `hops`, as one path value.
 #[cfg(any(feature = "gql", feature = "cypher"))]
 pub(crate) fn whole_path(source: &str, hops: &[PathHop]) -> LogicalExpression {
-    LogicalExpression::builtin(
-        BuiltinFunction::Path,
-        vec![path_node_ids(source, hops), path_edge_ids(hops)],
-    )
+    LogicalExpression::FunctionCall {
+        name: "path".into(),
+        args: vec![path_node_ids(source, hops), path_edge_ids(hops)],
+        distinct: false,
+    }
 }
 
 /// Binds the path variable `alias` to the whole path of a path pattern with
@@ -432,7 +463,11 @@ pub(crate) fn bind_whole_path(
             projection(path_node_ids(source, hops), format!("_path_nodes_{alias}")),
             projection(path_edge_ids(hops), format!("_path_edges_{alias}")),
             projection(
-                LogicalExpression::builtin(BuiltinFunction::Size, vec![path_edge_ids(hops)]),
+                LogicalExpression::FunctionCall {
+                    name: "size".into(),
+                    args: vec![path_edge_ids(hops)],
+                    distinct: false,
+                },
                 format!("_path_length_{alias}"),
             ),
             projection(whole_path(source, hops), alias.to_string()),
@@ -593,16 +628,15 @@ pub(crate) fn different_edges(
 ) -> Option<LogicalExpression> {
     let checks = groups
         .iter()
-        .map(|members| {
-            LogicalExpression::builtin(
-                BuiltinFunction::AllDifferent,
-                vec![concatenation(
-                    members
-                        .iter()
-                        .map(|&index| edges[index].edge_ids())
-                        .collect(),
-                )],
-            )
+        .map(|members| LogicalExpression::FunctionCall {
+            name: "all_different".into(),
+            args: vec![concatenation(
+                members
+                    .iter()
+                    .map(|&index| edges[index].edge_ids())
+                    .collect(),
+            )],
+            distinct: false,
         })
         .collect();
     join_and_conjuncts(checks)
@@ -686,10 +720,11 @@ pub(crate) fn every_edge_matches(
     LogicalExpression::ListPredicate {
         kind: crate::query::plan::ListPredicateKind::All,
         variable: hop,
-        list_expr: Box::new(LogicalExpression::builtin(
-            BuiltinFunction::Edges,
-            vec![LogicalExpression::Variable(path)],
-        )),
+        list_expr: Box::new(LogicalExpression::FunctionCall {
+            name: "edges".into(),
+            args: vec![LogicalExpression::Variable(path)],
+            distinct: false,
+        }),
         predicate: Box::new(predicate),
     }
 }
@@ -748,16 +783,17 @@ fn can_be_map(expr: &LogicalExpression) -> bool {
         LogicalExpression::IndexAccess { base, .. } => {
             matches!(**base, LogicalExpression::List(_)) || can_be_list(base) || can_be_map(base)
         }
-        LogicalExpression::FunctionCall { callee, .. } => matches!(
-            callee,
-            Callee::Builtin(
-                BuiltinFunction::Properties
-                    | BuiltinFunction::StartNode
-                    | BuiltinFunction::EndNode
-                    | BuiltinFunction::Head
-                    | BuiltinFunction::Last
-            )
-        ),
+        LogicalExpression::FunctionCall { name, .. } => [
+            "properties",
+            "startnode",
+            "start_node",
+            "endnode",
+            "end_node",
+            "head",
+            "last",
+        ]
+        .iter()
+        .any(|function| name.eq_ignore_ascii_case(function)),
         _ => false,
     }
 }
@@ -766,26 +802,22 @@ fn can_be_map(expr: &LogicalExpression) -> bool {
 /// be maps, nodes or edges (`nodes(p)`, `relationships(p)`, and `tail` or
 /// `reverse` of a list).
 fn can_be_list(expr: &LogicalExpression) -> bool {
-    matches!(
-        expr,
-        LogicalExpression::FunctionCall {
-            callee: Callee::Builtin(
-                BuiltinFunction::Nodes
-                    | BuiltinFunction::Edges
-                    | BuiltinFunction::Tail
-                    | BuiltinFunction::Reverse
-            ),
-            ..
+    match expr {
+        LogicalExpression::FunctionCall { name, .. } => {
+            ["nodes", "relationships", "edges", "tail", "reverse"]
+                .iter()
+                .any(|function| name.eq_ignore_ascii_case(function))
         }
-    )
+        _ => false,
+    }
 }
 
 /// Whether an expression calls an aggregate function in a function argument,
 /// an index or a key read (`head(collect(n))`, `collect(n)[0]`).
 fn calls_an_aggregate(expr: &LogicalExpression) -> bool {
     match expr {
-        LogicalExpression::FunctionCall { callee, args, .. } => {
-            matches!(callee, Callee::Aggregate(_)) || args.iter().any(calls_an_aggregate)
+        LogicalExpression::FunctionCall { name, args, .. } => {
+            is_aggregate_function(name) || args.iter().any(calls_an_aggregate)
         }
         LogicalExpression::IndexAccess { base, index } => {
             calls_an_aggregate(base) || calls_an_aggregate(index)
@@ -813,8 +845,7 @@ pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut 
         LogicalExpression::Unary { operand, .. } => {
             collect_expression_variables(operand, vars);
         }
-        LogicalExpression::FunctionCall { args, .. }
-        | LogicalExpression::SparqlCall { args, .. } => {
+        LogicalExpression::FunctionCall { args, .. } => {
             for arg in args {
                 collect_expression_variables(arg, vars);
             }
@@ -1046,9 +1077,7 @@ fn has_subquery(expr: &LogicalExpression) -> bool {
         | LogicalExpression::Id(_) => false,
         LogicalExpression::Binary { left, right, .. } => has_subquery(left) || has_subquery(right),
         LogicalExpression::Unary { operand, .. } => has_subquery(operand),
-        LogicalExpression::FunctionCall { args: items, .. }
-        | LogicalExpression::SparqlCall { args: items, .. }
-        | LogicalExpression::List(items) => {
+        LogicalExpression::FunctionCall { args: items, .. } | LogicalExpression::List(items) => {
             items.iter().any(has_subquery)
         }
         LogicalExpression::Map(pairs) => pairs.iter().any(|(_, value)| has_subquery(value)),
@@ -1728,8 +1757,7 @@ pub(crate) fn references_any(expr: &LogicalExpression, names: &[String]) -> bool
             references_any(left, names) || references_any(right, names)
         }
         LogicalExpression::Unary { operand, .. } => references_any(operand, names),
-        LogicalExpression::FunctionCall { args, .. }
-        | LogicalExpression::SparqlCall { args, .. } => {
+        LogicalExpression::FunctionCall { args, .. } => {
             args.iter().any(|a| references_any(a, names))
         }
         LogicalExpression::Case {
@@ -1995,88 +2023,88 @@ mod tests {
     #[test]
     fn to_aggregate_all_variants() {
         assert!(matches!(
-            AggregateFunction::from_name("count"),
+            to_aggregate_function("count"),
             Some(AggregateFunction::Count)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("SUM"),
+            to_aggregate_function("SUM"),
             Some(AggregateFunction::Sum)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("Avg"),
+            to_aggregate_function("Avg"),
             Some(AggregateFunction::Avg)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("MIN"),
+            to_aggregate_function("MIN"),
             Some(AggregateFunction::Min)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("max"),
+            to_aggregate_function("max"),
             Some(AggregateFunction::Max)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("collect"),
+            to_aggregate_function("collect"),
             Some(AggregateFunction::Collect)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("stdev"),
+            to_aggregate_function("stdev"),
             Some(AggregateFunction::StdDev)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("stddev"),
+            to_aggregate_function("stddev"),
             Some(AggregateFunction::StdDev)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("stdevp"),
+            to_aggregate_function("stdevp"),
             Some(AggregateFunction::StdDevPop)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("stddevp"),
+            to_aggregate_function("stddevp"),
             Some(AggregateFunction::StdDevPop)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("stddev_samp"),
+            to_aggregate_function("stddev_samp"),
             Some(AggregateFunction::StdDev)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("STDDEV_POP"),
+            to_aggregate_function("STDDEV_POP"),
             Some(AggregateFunction::StdDevPop)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("variance"),
+            to_aggregate_function("variance"),
             Some(AggregateFunction::Variance)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("VAR_SAMP"),
+            to_aggregate_function("VAR_SAMP"),
             Some(AggregateFunction::Variance)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("VAR_POP"),
+            to_aggregate_function("VAR_POP"),
             Some(AggregateFunction::VariancePop)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("percentile_disc"),
+            to_aggregate_function("percentile_disc"),
             Some(AggregateFunction::PercentileDisc)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("percentiledisc"),
+            to_aggregate_function("percentiledisc"),
             Some(AggregateFunction::PercentileDisc)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("percentile_cont"),
+            to_aggregate_function("percentile_cont"),
             Some(AggregateFunction::PercentileCont)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("percentilecont"),
+            to_aggregate_function("percentilecont"),
             Some(AggregateFunction::PercentileCont)
         ));
     }
 
     #[test]
     fn to_aggregate_unknown_returns_none() {
-        assert!(AggregateFunction::from_name("unknown").is_none());
-        assert!(AggregateFunction::from_name("").is_none());
-        assert!(AggregateFunction::from_name("size").is_none());
+        assert!(to_aggregate_function("unknown").is_none());
+        assert!(to_aggregate_function("").is_none());
+        assert!(to_aggregate_function("size").is_none());
     }
 
     // --- is_aggregate_function: bivariate / concat / sample ---
@@ -2124,67 +2152,67 @@ mod tests {
     #[test]
     fn to_aggregate_bivariate_variants() {
         assert!(matches!(
-            AggregateFunction::from_name("group_concat"),
+            to_aggregate_function("group_concat"),
             Some(AggregateFunction::GroupConcat)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("GROUPCONCAT"),
+            to_aggregate_function("GROUPCONCAT"),
             Some(AggregateFunction::GroupConcat)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("LISTAGG"),
+            to_aggregate_function("LISTAGG"),
             Some(AggregateFunction::GroupConcat)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("sample"),
+            to_aggregate_function("sample"),
             Some(AggregateFunction::Sample)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("COVAR_SAMP"),
+            to_aggregate_function("COVAR_SAMP"),
             Some(AggregateFunction::CovarSamp)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("COVAR_POP"),
+            to_aggregate_function("COVAR_POP"),
             Some(AggregateFunction::CovarPop)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("CORR"),
+            to_aggregate_function("CORR"),
             Some(AggregateFunction::Corr)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("REGR_SLOPE"),
+            to_aggregate_function("REGR_SLOPE"),
             Some(AggregateFunction::RegrSlope)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("REGR_INTERCEPT"),
+            to_aggregate_function("REGR_INTERCEPT"),
             Some(AggregateFunction::RegrIntercept)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("REGR_R2"),
+            to_aggregate_function("REGR_R2"),
             Some(AggregateFunction::RegrR2)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("REGR_COUNT"),
+            to_aggregate_function("REGR_COUNT"),
             Some(AggregateFunction::RegrCount)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("REGR_SXX"),
+            to_aggregate_function("REGR_SXX"),
             Some(AggregateFunction::RegrSxx)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("REGR_SYY"),
+            to_aggregate_function("REGR_SYY"),
             Some(AggregateFunction::RegrSyy)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("REGR_SXY"),
+            to_aggregate_function("REGR_SXY"),
             Some(AggregateFunction::RegrSxy)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("REGR_AVGX"),
+            to_aggregate_function("REGR_AVGX"),
             Some(AggregateFunction::RegrAvgx)
         ));
         assert!(matches!(
-            AggregateFunction::from_name("REGR_AVGY"),
+            to_aggregate_function("REGR_AVGY"),
             Some(AggregateFunction::RegrAvgy)
         ));
     }
@@ -2486,10 +2514,11 @@ mod tests {
 
     #[test]
     fn collect_vars_from_function_call() {
-        let expr = LogicalExpression::builtin(
-            BuiltinFunction::Size,
-            vec![LogicalExpression::Variable("list".into())],
-        );
+        let expr = LogicalExpression::FunctionCall {
+            name: "size".into(),
+            args: vec![LogicalExpression::Variable("list".into())],
+            distinct: false,
+        };
         let mut vars = HashSet::new();
         collect_expression_variables(&expr, &mut vars);
         assert!(vars.contains("list"));

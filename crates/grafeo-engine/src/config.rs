@@ -374,37 +374,17 @@ impl std::error::Error for ConfigError {}
 #[non_exhaustive]
 pub struct Config {
     /// Graph data model (LPG or RDF). Immutable after database creation.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::graph_model()` and set it with its builder; private in 0.7.0"
-    )]
     pub graph_model: GraphModel,
     /// Path to the database directory (None for in-memory only).
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::path()` and set it with its builder; private in 0.7.0"
-    )]
     pub path: Option<PathBuf>,
 
     /// Memory limit in bytes (None for unlimited).
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::memory_limit()` and set it with its builder; private in 0.7.0"
-    )]
     pub memory_limit: Option<usize>,
 
     /// Path for spilling data to disk under memory pressure.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::spill_path()` and set it with its builder; private in 0.7.0"
-    )]
     pub spill_path: Option<PathBuf>,
 
     /// Number of worker threads for query execution.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::threads()` and set it with its builder; private in 0.7.0"
-    )]
     pub threads: usize,
 
     /// Whether new commits are logged to the sidecar WAL (`<path>.wal/`) for
@@ -422,24 +402,12 @@ pub struct Config {
     ///
     /// On for [`Config::persistent()`], off for [`Config::in_memory()`] and
     /// [`Config::read_only()`]; [`Config::without_wal()`] turns it off.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::wal_enabled()` and set it with its builder; private in 0.7.0"
-    )]
     pub wal_enabled: bool,
 
     /// Whether to maintain backward edges.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::backward_edges()` and set it with its builder; private in 0.7.0"
-    )]
     pub backward_edges: bool,
 
     /// Whether to enable query logging.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::query_logging()` and set it with its builder; private in 0.7.0"
-    )]
     pub query_logging: bool,
 
     /// Adaptive execution configuration. It has no effect: no query reads
@@ -461,10 +429,6 @@ pub struct Config {
     /// 5-100x speedup for multi-hop queries with high fan-out.
     ///
     /// Enabled by default.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::factorized_execution()` and set it with its builder; private in 0.7.0"
-    )]
     pub factorized_execution: bool,
 
     /// Whether every query without `ORDER BY` returns its rows in random
@@ -475,17 +439,9 @@ pub struct Config {
     /// tests find code that relies on an order anyway. A streamed result is
     /// shuffled within each chunk, so the stream keeps its bounded memory.
     /// Default: `false`.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::shuffle_unordered()` and set it with its builder; private in 0.7.0"
-    )]
     pub shuffle_unordered: bool,
 
     /// WAL durability mode. Only used when `wal_enabled` is true.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::wal_durability()` and set it with its builder; private in 0.7.0"
-    )]
     pub wal_durability: DurabilityMode,
 
     /// Storage format for persistent databases: what a new path becomes.
@@ -493,10 +449,6 @@ pub struct Config {
     /// With `Auto` (the default) a new path is a single file whatever its
     /// extension; an existing path opens as what it holds (see
     /// [`StorageFormat`]).
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::storage_format()` and set it with its builder; private in 0.7.0"
-    )]
     pub storage_format: StorageFormat,
 
     /// Whether to enable catalog schema constraint enforcement.
@@ -504,10 +456,6 @@ pub struct Config {
     /// When true, the catalog enforces label, edge type, and property constraints
     /// (e.g. required properties, uniqueness). The server sets this for JSON
     /// Schema databases and populates constraints after creation.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::schema_constraints()` and set it with its builder; private in 0.7.0"
-    )]
     pub schema_constraints: bool,
 
     /// Maximum time a single query may run before being cancelled.
@@ -518,10 +466,6 @@ pub struct Config {
     ///
     /// Default: 30 seconds. Use `with_query_timeout()` to change or
     /// `without_query_timeout()` to disable.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::query_timeout()` and set it with its builder; private in 0.7.0"
-    )]
     pub query_timeout: Option<Duration>,
 
     /// Maximum size in bytes for a single property value.
@@ -532,20 +476,12 @@ pub struct Config {
     ///
     /// Default: 16 MiB. Use `with_max_property_size()` to change or
     /// `without_max_property_size()` to disable.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::max_property_size()` and set it with its builder; private in 0.7.0"
-    )]
     pub max_property_size: Option<usize>,
 
     /// Run MVCC version garbage collection every N commits.
     ///
     /// Old versions that are no longer visible to any active transaction are
     /// pruned to reclaim memory. Set to 0 to disable automatic GC.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::gc_interval()` and set it with its builder; private in 0.7.0"
-    )]
     pub gc_interval: usize,
 
     /// Access mode: read-write (default) or read-only.
@@ -553,10 +489,6 @@ pub struct Config {
     /// Read-only mode uses a shared file lock, allowing multiple processes to
     /// read the same database concurrently. Mutations are rejected at the
     /// session level.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::access_mode()` and set it with its builder; private in 0.7.0"
-    )]
     pub access_mode: AccessMode,
 
     /// Whether CDC (Change Data Capture) is enabled for new sessions by default.
@@ -569,10 +501,6 @@ pub struct Config {
     ///
     /// Default: `false` (CDC is opt-in to avoid overhead on the mutation
     /// hot path).
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::cdc_enabled()` and set it with its builder; private in 0.7.0"
-    )]
     pub cdc_enabled: bool,
 
     /// CDC event retention policy.
@@ -583,10 +511,6 @@ pub struct Config {
     /// disables pruning, but beware of unbounded memory growth on
     /// long-running instances. Set it with [`Config::with_cdc_retention()`].
     #[cfg(feature = "cdc")]
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::cdc_retention()` and set it with its builder; private in 0.7.0"
-    )]
     pub cdc_retention: crate::cdc::CdcRetentionConfig,
 
     /// Per-section memory configuration.
@@ -594,10 +518,6 @@ pub struct Config {
     /// Maps `SectionType` to `SectionMemoryConfig` for sections that need
     /// custom budgets or tier pinning. Sections not listed here use the
     /// global `memory_limit` budget with automatic management.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::section_configs()` and set it with its builder; private in 0.7.0"
-    )]
     pub section_configs: hashbrown::HashMap<
         grafeo_common::storage::SectionType,
         grafeo_common::storage::SectionMemoryConfig,
@@ -608,10 +528,6 @@ pub struct Config {
     /// When set, the engine periodically flushes dirty sections to the
     /// `.grafeo` container and truncates the WAL. `None` means checkpoints
     /// only happen on explicit `wal_checkpoint()` or database close.
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::checkpoint_interval()` and set it with its builder; private in 0.7.0"
-    )]
     pub checkpoint_interval: Option<Duration>,
 
     /// Encryption at rest, set with [`Config::with_encryption()`].
@@ -640,45 +556,7 @@ pub struct Config {
     /// in-memory copy made with [`to_memory`](crate::GrafeoDB::to_memory)
     /// (it has no key, so a copy saved from it is plaintext).
     #[cfg(feature = "encryption")]
-    #[deprecated(
-        since = "0.6.0",
-        note = "read it with `Config::encryption()` and set it with its builder; private in 0.7.0"
-    )]
     pub encryption: Option<EncryptionConfig>,
-    /// Whether an open that finds damage in the WAL keeps the commits before
-    /// it instead of failing (see [`Config::with_wal_salvage`]).
-    wal_salvage: bool,
-    /// Checkpoint once the WAL holds this many bytes since the last
-    /// checkpoint (see [`Config::with_checkpoint_wal_size`]).
-    checkpoint_wal_size: Option<u64>,
-    /// The settings a builder set: they win over the values a database file
-    /// stores (see `GrafeoDB::open`), where a default does not.
-    set: SetFields,
-}
-
-/// The settings of a [`Config`] a database file can store, as a set: a
-/// builder adds the ones it sets (see [`Config::was_set`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct SetFields(u16);
-
-impl SetFields {
-    pub(crate) const GRAPH_MODEL: Self = Self(1);
-    pub(crate) const MEMORY_LIMIT: Self = Self(1 << 1);
-    pub(crate) const SPILL_PATH: Self = Self(1 << 2);
-    pub(crate) const WAL_ENABLED: Self = Self(1 << 3);
-    pub(crate) const BACKWARD_EDGES: Self = Self(1 << 4);
-    pub(crate) const WAL_DURABILITY: Self = Self(1 << 5);
-    pub(crate) const SCHEMA_CONSTRAINTS: Self = Self(1 << 6);
-    pub(crate) const SECTION_CONFIGS: Self = Self(1 << 7);
-
-    fn insert(&mut self, field: Self) {
-        self.0 |= field.0;
-    }
-
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    fn contains(self, field: Self) -> bool {
-        self.0 & field.0 == field.0
-    }
 }
 
 /// Configuration for adaptive query execution.
@@ -777,10 +655,6 @@ impl AdaptiveConfig {
     }
 }
 
-#[allow(
-    deprecated,
-    reason = "the configuration sets and reads its own fields, deprecated for callers until 0.7.0 makes them private"
-)]
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -813,17 +687,10 @@ impl Default for Config {
             checkpoint_interval: None,
             #[cfg(feature = "encryption")]
             encryption: None,
-            wal_salvage: false,
-            checkpoint_wal_size: None,
-            set: SetFields::default(),
         }
     }
 }
 
-#[allow(
-    deprecated,
-    reason = "the configuration sets and reads its own fields, deprecated for callers until 0.7.0 makes them private"
-)]
 impl Config {
     /// Creates a new configuration for an in-memory database.
     #[must_use]
@@ -849,7 +716,6 @@ impl Config {
     #[must_use]
     pub fn with_memory_limit(mut self, limit: usize) -> Self {
         self.memory_limit = Some(limit);
-        self.set.insert(SetFields::MEMORY_LIMIT);
         self
     }
 
@@ -880,36 +746,6 @@ impl Config {
     #[must_use]
     pub fn without_wal(mut self) -> Self {
         self.wal_enabled = false;
-        self.set.insert(SetFields::WAL_ENABLED);
-        self
-    }
-
-    /// Turns the sidecar WAL on, the default for a persistent database: set
-    /// it to override a database stored with the WAL off (see
-    /// [`without_wal`](Self::without_wal)).
-    #[must_use]
-    pub fn with_wal(mut self) -> Self {
-        self.wal_enabled = true;
-        self.set.insert(SetFields::WAL_ENABLED);
-        self
-    }
-
-    /// Salvages a damaged WAL at this open, instead of failing it.
-    ///
-    /// By default an open refuses a WAL with damage before its end (a record
-    /// whose checksum or authentication fails, with whole records after it):
-    /// replaying the commits after it on top of the missing ones would
-    /// build a state that never existed, so the open fails with
-    /// `GRAFEO-S002` naming the file and offset. A salvaging open replays
-    /// the commits before the damage and leaves the rest out; nothing is
-    /// deleted: what it did not replay moves to `<file>.wal.damaged` (or
-    /// `<file>.wal.damaged-<n>`). A torn tail, the end of a write a crash
-    /// cut off, is never damage: every open cuts it.
-    ///
-    /// For this open only: the database file does not store it.
-    #[must_use]
-    pub fn with_wal_salvage(mut self) -> Self {
-        self.wal_salvage = true;
         self
     }
 
@@ -917,7 +753,6 @@ impl Config {
     #[must_use]
     pub fn without_backward_edges(mut self) -> Self {
         self.backward_edges = false;
-        self.set.insert(SetFields::BACKWARD_EDGES);
         self
     }
 
@@ -937,7 +772,6 @@ impl Config {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let budget = (system_memory as f64 * fraction) as usize;
         self.memory_limit = Some(budget);
-        self.set.insert(SetFields::MEMORY_LIMIT);
         self
     }
 
@@ -945,7 +779,6 @@ impl Config {
     #[must_use]
     pub fn with_spill_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.spill_path = Some(path.into());
-        self.set.insert(SetFields::SPILL_PATH);
         self
     }
 
@@ -1005,7 +838,6 @@ impl Config {
     #[must_use]
     pub fn with_graph_model(mut self, model: GraphModel) -> Self {
         self.graph_model = model;
-        self.set.insert(SetFields::GRAPH_MODEL);
         self
     }
 
@@ -1013,7 +845,6 @@ impl Config {
     #[must_use]
     pub fn with_wal_durability(mut self, mode: DurabilityMode) -> Self {
         self.wal_durability = mode;
-        self.set.insert(SetFields::WAL_DURABILITY);
         self
     }
 
@@ -1028,17 +859,6 @@ impl Config {
     #[must_use]
     pub fn with_schema_constraints(mut self) -> Self {
         self.schema_constraints = true;
-        self.set.insert(SetFields::SCHEMA_CONSTRAINTS);
-        self
-    }
-
-    /// Turns catalog schema constraint enforcement off, the default: set it
-    /// to override a database stored with it on (see
-    /// [`with_schema_constraints`](Self::with_schema_constraints)).
-    #[must_use]
-    pub fn without_schema_constraints(mut self) -> Self {
-        self.schema_constraints = false;
-        self.set.insert(SetFields::SCHEMA_CONSTRAINTS);
         self
     }
 
@@ -1126,7 +946,7 @@ impl Config {
     /// let config = Config::in_memory()
     ///     .with_cdc()
     ///     .with_cdc_retention(CdcRetentionConfig::unlimited().with_max_events(88_000));
-    /// assert_eq!(config.cdc_retention().max_events, Some(88_000));
+    /// assert_eq!(config.cdc_retention.max_events, Some(88_000));
     /// ```
     #[cfg(feature = "cdc")]
     #[must_use]
@@ -1159,7 +979,6 @@ impl Config {
         config: grafeo_common::storage::SectionMemoryConfig,
     ) -> Self {
         self.section_configs.insert(section_type, config);
-        self.set.insert(SetFields::SECTION_CONFIGS);
         self
     }
 
@@ -1204,25 +1023,13 @@ impl Config {
         )
     }
 
-    /// Sets the automatic checkpoint interval: the database checkpoints by
-    /// itself when this long has passed since its last automatic checkpoint.
-    /// Typical values: 30-300 seconds. Off by default; see
-    /// [`CheckpointTriggers`](crate::admin::CheckpointTriggers), and
-    /// `GrafeoDB::set_checkpoint_triggers` to change it on an open database.
+    /// Sets the automatic checkpoint interval.
+    ///
+    /// When set, the engine periodically flushes dirty sections to disk.
+    /// Typical values: 30-300 seconds.
     #[must_use]
     pub fn with_checkpoint_interval(mut self, interval: Duration) -> Self {
         self.checkpoint_interval = Some(interval);
-        self
-    }
-
-    /// Checkpoints once the WAL holds `bytes` since the last checkpoint,
-    /// which bounds the log a reopen replays (DuckDB's
-    /// `checkpoint_threshold` is 16 MiB). Off by default; see
-    /// [`CheckpointTriggers`](crate::admin::CheckpointTriggers). Without a
-    /// WAL it never fires.
-    #[must_use]
-    pub fn with_checkpoint_wal_size(mut self, bytes: u64) -> Self {
-        self.checkpoint_wal_size = Some(bytes);
         self
     }
 
@@ -1250,178 +1057,6 @@ impl Config {
     pub fn with_encryption(mut self, encryption: EncryptionConfig) -> Self {
         self.encryption = Some(encryption);
         self
-    }
-
-    /// The graph data model (LPG or RDF), fixed when the database is created.
-    #[must_use]
-    pub fn graph_model(&self) -> GraphModel {
-        self.graph_model
-    }
-
-    /// The path of the database file, `None` for an in-memory database.
-    #[must_use]
-    pub fn path(&self) -> Option<&std::path::Path> {
-        self.path.as_deref()
-    }
-
-    /// The memory limit in bytes, `None` for three quarters of the system's
-    /// RAM.
-    #[must_use]
-    pub fn memory_limit(&self) -> Option<usize> {
-        self.memory_limit
-    }
-
-    /// The spill directory for out-of-core processing, when one is set.
-    #[must_use]
-    pub fn spill_path(&self) -> Option<&std::path::Path> {
-        self.spill_path.as_deref()
-    }
-
-    /// The number of worker threads.
-    #[must_use]
-    pub fn threads(&self) -> usize {
-        self.threads
-    }
-
-    /// Whether commits are logged to the sidecar WAL.
-    #[must_use]
-    pub fn wal_enabled(&self) -> bool {
-        self.wal_enabled
-    }
-
-    /// Whether the store keeps backward edges (incoming adjacency).
-    #[must_use]
-    pub fn backward_edges(&self) -> bool {
-        self.backward_edges
-    }
-
-    /// Whether queries are logged.
-    #[must_use]
-    pub fn query_logging(&self) -> bool {
-        self.query_logging
-    }
-
-    /// Whether multi-hop queries run factorized.
-    #[must_use]
-    pub fn factorized_execution(&self) -> bool {
-        self.factorized_execution
-    }
-
-    /// Whether queries without `ORDER BY` return their rows in random order
-    /// (a test option).
-    #[must_use]
-    pub fn shuffle_unordered(&self) -> bool {
-        self.shuffle_unordered
-    }
-
-    /// When the WAL is synced to disk.
-    #[must_use]
-    pub fn wal_durability(&self) -> DurabilityMode {
-        self.wal_durability
-    }
-
-    /// Whether an open salvages a damaged WAL (see
-    /// [`with_wal_salvage`](Self::with_wal_salvage)).
-    #[must_use]
-    pub fn wal_salvage(&self) -> bool {
-        self.wal_salvage
-    }
-
-    /// The storage format for a persistent database.
-    #[must_use]
-    pub fn storage_format(&self) -> StorageFormat {
-        self.storage_format
-    }
-
-    /// Whether the catalog enforces schema constraints.
-    #[must_use]
-    pub fn schema_constraints(&self) -> bool {
-        self.schema_constraints
-    }
-
-    /// The longest a query may run, `None` for no limit.
-    #[must_use]
-    pub fn query_timeout(&self) -> Option<Duration> {
-        self.query_timeout
-    }
-
-    /// The largest property value in bytes, `None` for no limit.
-    #[must_use]
-    pub fn max_property_size(&self) -> Option<usize> {
-        self.max_property_size
-    }
-
-    /// Every how many commits old versions are collected (0: never).
-    #[must_use]
-    pub fn gc_interval(&self) -> usize {
-        self.gc_interval
-    }
-
-    /// Read-write or read-only.
-    #[must_use]
-    pub fn access_mode(&self) -> AccessMode {
-        self.access_mode
-    }
-
-    /// Whether new sessions record change data capture events.
-    #[must_use]
-    pub fn cdc_enabled(&self) -> bool {
-        self.cdc_enabled
-    }
-
-    /// How many change data capture events are kept.
-    #[cfg(feature = "cdc")]
-    #[must_use]
-    pub fn cdc_retention(&self) -> &crate::cdc::CdcRetentionConfig {
-        &self.cdc_retention
-    }
-
-    /// The memory configuration of each section that has one.
-    #[must_use]
-    pub fn section_configs(
-        &self,
-    ) -> &hashbrown::HashMap<
-        grafeo_common::storage::SectionType,
-        grafeo_common::storage::SectionMemoryConfig,
-    > {
-        &self.section_configs
-    }
-
-    /// How often the database checkpoints on its own, when it does.
-    #[must_use]
-    pub fn checkpoint_interval(&self) -> Option<Duration> {
-        self.checkpoint_interval
-    }
-
-    /// The WAL size that starts an automatic checkpoint (see
-    /// [`with_checkpoint_wal_size`](Self::with_checkpoint_wal_size)).
-    #[must_use]
-    pub fn checkpoint_wal_size(&self) -> Option<u64> {
-        self.checkpoint_wal_size
-    }
-
-    /// The automatic checkpoint triggers this configuration sets.
-    #[must_use]
-    pub fn checkpoint_triggers(&self) -> crate::admin::CheckpointTriggers {
-        let mut triggers = crate::admin::CheckpointTriggers::none();
-        triggers.interval = self.checkpoint_interval;
-        triggers.wal_bytes = self.checkpoint_wal_size;
-        triggers
-    }
-
-    /// The encryption at rest, when the database is encrypted.
-    #[cfg(feature = "encryption")]
-    #[must_use]
-    pub fn encryption(&self) -> Option<&EncryptionConfig> {
-        self.encryption.as_ref()
-    }
-
-    /// Whether a builder set `field` (see [`SetFields`]): what a database
-    /// file stores yields to it.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    #[must_use]
-    pub(crate) fn was_set(&self, field: SetFields) -> bool {
-        self.set.contains(field)
     }
 
     /// Validates the configuration, returning an error for invalid combinations.
@@ -1502,65 +1137,68 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        assert_eq!(config.graph_model(), GraphModel::Lpg);
-        assert!(config.path().is_none());
-        assert!(config.memory_limit().is_none());
-        assert!(config.spill_path().is_none());
-        assert!(config.threads() > 0);
-        assert!(config.wal_enabled());
-        assert!(config.backward_edges());
-        assert!(!config.query_logging());
-        assert!(config.factorized_execution());
-        assert_eq!(config.wal_durability(), DurabilityMode::default());
-        assert!(!config.schema_constraints());
-        assert_eq!(config.query_timeout(), Some(Duration::from_secs(30)));
-        assert_eq!(config.gc_interval(), 100);
+        assert_eq!(config.graph_model, GraphModel::Lpg);
+        assert!(config.path.is_none());
+        assert!(config.memory_limit.is_none());
+        assert!(config.spill_path.is_none());
+        assert!(config.threads > 0);
+        assert!(config.wal_enabled);
+        assert!(config.backward_edges);
+        assert!(!config.query_logging);
+        assert!(config.factorized_execution);
+        assert_eq!(config.wal_durability, DurabilityMode::default());
+        assert!(!config.schema_constraints);
+        assert_eq!(config.query_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(config.gc_interval, 100);
     }
 
     #[test]
     fn test_config_in_memory() {
         let config = Config::in_memory();
-        assert!(config.path().is_none());
-        assert!(!config.wal_enabled());
-        assert!(config.backward_edges());
+        assert!(config.path.is_none());
+        assert!(!config.wal_enabled);
+        assert!(config.backward_edges);
     }
 
     #[test]
     fn test_config_persistent() {
         let config = Config::persistent("/tmp/test_db");
-        assert_eq!(config.path(), Some(std::path::Path::new("/tmp/test_db")));
-        assert!(config.wal_enabled());
+        assert_eq!(
+            config.path.as_deref(),
+            Some(std::path::Path::new("/tmp/test_db"))
+        );
+        assert!(config.wal_enabled);
     }
 
     #[test]
     fn test_config_with_memory_limit() {
         let config = Config::in_memory().with_memory_limit(1024 * 1024);
-        assert_eq!(config.memory_limit(), Some(1024 * 1024));
+        assert_eq!(config.memory_limit, Some(1024 * 1024));
     }
 
     #[test]
     fn test_config_with_threads() {
         let config = Config::in_memory().with_threads(8);
-        assert_eq!(config.threads(), 8);
+        assert_eq!(config.threads, 8);
     }
 
     #[test]
     fn test_config_without_backward_edges() {
         let config = Config::in_memory().without_backward_edges();
-        assert!(!config.backward_edges());
+        assert!(!config.backward_edges);
     }
 
     #[test]
     fn test_config_with_query_logging() {
         let config = Config::in_memory().with_query_logging();
-        assert!(config.query_logging());
+        assert!(config.query_logging);
     }
 
     #[test]
     fn test_config_with_spill_path() {
         let config = Config::in_memory().with_spill_path("/tmp/spill");
         assert_eq!(
-            config.spill_path(),
+            config.spill_path.as_deref(),
             Some(std::path::Path::new("/tmp/spill"))
         );
     }
@@ -1568,14 +1206,14 @@ mod tests {
     #[test]
     fn test_config_with_memory_fraction() {
         let config = Config::in_memory().with_memory_fraction(0.5);
-        assert!(config.memory_limit().is_some());
-        assert!(config.memory_limit().unwrap() > 0);
+        assert!(config.memory_limit.is_some());
+        assert!(config.memory_limit.unwrap() > 0);
     }
 
     #[test]
     fn test_config_without_factorized_execution() {
         let config = Config::in_memory().without_factorized_execution();
-        assert!(!config.factorized_execution());
+        assert!(!config.factorized_execution);
     }
 
     #[test]
@@ -1587,12 +1225,12 @@ mod tests {
             .without_backward_edges()
             .with_spill_path("/tmp/spill");
 
-        assert!(config.path().is_some());
-        assert_eq!(config.memory_limit(), Some(512 * 1024 * 1024));
-        assert_eq!(config.threads(), 4);
-        assert!(config.query_logging());
-        assert!(!config.backward_edges());
-        assert!(config.spill_path().is_some());
+        assert!(config.path.is_some());
+        assert_eq!(config.memory_limit, Some(512 * 1024 * 1024));
+        assert_eq!(config.threads, 4);
+        assert!(config.query_logging);
+        assert!(!config.backward_edges);
+        assert!(config.spill_path.is_some());
     }
 
     // --- GraphModel tests ---
@@ -1611,7 +1249,7 @@ mod tests {
     #[test]
     fn test_config_with_graph_model() {
         let config = Config::in_memory().with_graph_model(GraphModel::Rdf);
-        assert_eq!(config.graph_model(), GraphModel::Rdf);
+        assert_eq!(config.graph_model, GraphModel::Rdf);
     }
 
     // --- DurabilityMode tests ---
@@ -1631,13 +1269,13 @@ mod tests {
     #[test]
     fn test_config_with_wal_durability() {
         let config = Config::persistent("/tmp/db").with_wal_durability(DurabilityMode::Sync);
-        assert_eq!(config.wal_durability(), DurabilityMode::Sync);
+        assert_eq!(config.wal_durability, DurabilityMode::Sync);
     }
 
     #[test]
     fn test_config_with_wal_durability_nosync() {
         let config = Config::persistent("/tmp/db").with_wal_durability(DurabilityMode::NoSync);
-        assert_eq!(config.wal_durability(), DurabilityMode::NoSync);
+        assert_eq!(config.wal_durability, DurabilityMode::NoSync);
     }
 
     #[test]
@@ -1646,7 +1284,7 @@ mod tests {
             target_interval_ms: 50,
         });
         assert_eq!(
-            config.wal_durability(),
+            config.wal_durability,
             DurabilityMode::Adaptive {
                 target_interval_ms: 50
             }
@@ -1658,19 +1296,19 @@ mod tests {
     #[test]
     fn test_config_default_max_property_size() {
         let config = Config::in_memory();
-        assert_eq!(config.max_property_size(), Some(16 * 1024 * 1024));
+        assert_eq!(config.max_property_size, Some(16 * 1024 * 1024));
     }
 
     #[test]
     fn test_config_with_max_property_size() {
         let config = Config::in_memory().with_max_property_size(1024);
-        assert_eq!(config.max_property_size(), Some(1024));
+        assert_eq!(config.max_property_size, Some(1024));
     }
 
     #[test]
     fn test_config_without_max_property_size() {
         let config = Config::in_memory().without_max_property_size();
-        assert!(config.max_property_size().is_none());
+        assert!(config.max_property_size.is_none());
     }
 
     // --- schema_constraints tests ---
@@ -1678,7 +1316,7 @@ mod tests {
     #[test]
     fn test_config_with_schema_constraints() {
         let config = Config::in_memory().with_schema_constraints();
-        assert!(config.schema_constraints());
+        assert!(config.schema_constraints);
     }
 
     // --- query_timeout tests ---
@@ -1686,19 +1324,19 @@ mod tests {
     #[test]
     fn test_config_with_query_timeout() {
         let config = Config::in_memory().with_query_timeout(Duration::from_mins(1));
-        assert_eq!(config.query_timeout(), Some(Duration::from_mins(1)));
+        assert_eq!(config.query_timeout, Some(Duration::from_mins(1)));
     }
 
     #[test]
     fn test_config_without_query_timeout() {
         let config = Config::in_memory().without_query_timeout();
-        assert!(config.query_timeout().is_none());
+        assert!(config.query_timeout.is_none());
     }
 
     #[test]
     fn test_config_default_query_timeout() {
         let config = Config::in_memory();
-        assert_eq!(config.query_timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(config.query_timeout, Some(Duration::from_secs(30)));
     }
 
     // --- gc_interval tests ---
@@ -1706,13 +1344,13 @@ mod tests {
     #[test]
     fn test_config_with_gc_interval() {
         let config = Config::in_memory().with_gc_interval(50);
-        assert_eq!(config.gc_interval(), 50);
+        assert_eq!(config.gc_interval, 50);
     }
 
     #[test]
     fn test_config_gc_disabled() {
         let config = Config::in_memory().with_gc_interval(0);
-        assert_eq!(config.gc_interval(), 0);
+        assert_eq!(config.gc_interval, 0);
     }
 
     // --- validate() tests ---
@@ -1833,7 +1471,8 @@ mod tests {
         let encryption = EncryptionConfig::new(std::sync::Arc::new(
             grafeo_common::encryption::KeyChain::new([3; 32]),
         ));
-        let in_memory = Config::in_memory().with_encryption(encryption.clone());
+        let mut in_memory = Config::in_memory();
+        in_memory.encryption = Some(encryption.clone());
         assert_eq!(
             in_memory.validate(),
             Err(ConfigError::EncryptionRequiresPersistentPath)
@@ -1843,12 +1482,12 @@ mod tests {
                 .to_string()
                 .contains("requires a persistent database path")
         );
-        for config in [
+        for mut config in [
             Config::persistent("amsterdam.grafeo"),
             Config::read_only("amsterdam.grafeo"),
         ] {
-            let config = config.with_encryption(encryption.clone());
-            assert_eq!(config.validate(), Ok(()), "{:?}", config.path());
+            config.encryption = Some(encryption.clone());
+            assert_eq!(config.validate(), Ok(()), "{:?}", config.path);
         }
     }
 
@@ -1856,9 +1495,9 @@ mod tests {
     #[cfg(all(feature = "encryption", not(miri)))]
     #[test]
     fn encryption_with_a_spill_path_is_invalid() {
-        let config = Config::persistent("berlin.grafeo").with_spill_path("berlin.spill");
+        let mut config = Config::persistent("berlin.grafeo").with_spill_path("berlin.spill");
         assert_eq!(config.validate(), Ok(()), "a spill path alone is fine");
-        let config = config.with_encryption(EncryptionConfig::new(std::sync::Arc::new(
+        config.encryption = Some(EncryptionConfig::new(std::sync::Arc::new(
             grafeo_common::encryption::KeyChain::new([19; 32]),
         )));
         assert_eq!(config.validate(), Err(ConfigError::EncryptionWithSpillPath));
@@ -1874,20 +1513,16 @@ mod tests {
     /// is invalid, while `Auto` and `ForceRam` are fine.
     #[cfg(all(feature = "encryption", not(miri)))]
     #[test]
-    #[allow(
-        deprecated,
-        reason = "the test unsets the key, which no builder does, to check the other half of the rule"
-    )]
     fn encryption_with_a_section_forced_to_disk_is_invalid() {
         use grafeo_common::storage::{SectionType, TierOverride};
 
         let encryption = EncryptionConfig::new(std::sync::Arc::new(
             grafeo_common::encryption::KeyChain::new([88; 32]),
         ));
-        let config = Config::persistent("prague.grafeo")
+        let mut config = Config::persistent("prague.grafeo")
             .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
-            .with_section_tier(SectionType::TextIndex, TierOverride::Auto)
-            .with_encryption(encryption);
+            .with_section_tier(SectionType::TextIndex, TierOverride::Auto);
+        config.encryption = Some(encryption);
         assert_eq!(
             config.validate(),
             Ok(()),
@@ -1929,16 +1564,16 @@ mod tests {
             .with_spill_path("/tmp/spill")
             .with_query_timeout(Duration::from_mins(1));
 
-        assert_eq!(config.graph_model(), GraphModel::Lpg);
-        assert!(config.path().is_some());
-        assert_eq!(config.memory_limit(), Some(512 * 1024 * 1024));
-        assert_eq!(config.threads(), 4);
-        assert!(config.query_logging());
-        assert_eq!(config.wal_durability(), DurabilityMode::Sync);
-        assert!(config.schema_constraints());
-        assert!(!config.backward_edges());
-        assert!(config.spill_path().is_some());
-        assert_eq!(config.query_timeout(), Some(Duration::from_mins(1)));
+        assert_eq!(config.graph_model, GraphModel::Lpg);
+        assert!(config.path.is_some());
+        assert_eq!(config.memory_limit, Some(512 * 1024 * 1024));
+        assert_eq!(config.threads, 4);
+        assert!(config.query_logging);
+        assert_eq!(config.wal_durability, DurabilityMode::Sync);
+        assert!(config.schema_constraints);
+        assert!(!config.backward_edges);
+        assert!(config.spill_path.is_some());
+        assert_eq!(config.query_timeout, Some(Duration::from_mins(1)));
         assert!(config.validate().is_ok());
     }
 
@@ -1969,9 +1604,7 @@ mod tests {
             .with_access_mode(AccessMode::ReadOnly)
             .with_cdc()
             .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
-            .with_checkpoint_interval(Duration::from_secs(88))
-            .with_checkpoint_wal_size(19 * 1024 * 1024)
-            .with_wal_salvage();
+            .with_checkpoint_interval(Duration::from_secs(88));
         #[cfg(feature = "cdc")]
         let config = config.with_cdc_retention(
             crate::cdc::CdcRetentionConfig::unlimited()
@@ -2014,15 +1647,7 @@ mod tests {
             checkpoint_interval,
             #[cfg(feature = "encryption")]
             encryption,
-            wal_salvage,
-            checkpoint_wal_size,
-            // What the builders set: see the stored-configuration tests.
-            set: _,
         } = config;
-
-        assert_eq!(checkpoint_wal_size, Some(19 * 1024 * 1024));
-
-        assert!(wal_salvage, "with_wal_salvage salvages at this open");
 
         assert_eq!(graph_model, GraphModel::Rdf);
         assert_eq!(
@@ -2088,21 +1713,21 @@ mod tests {
     #[test]
     fn test_config_with_access_mode() {
         let config = Config::persistent("/tmp/db").with_access_mode(AccessMode::ReadOnly);
-        assert_eq!(config.access_mode(), AccessMode::ReadOnly);
+        assert_eq!(config.access_mode, AccessMode::ReadOnly);
     }
 
     #[test]
     fn test_config_read_only() {
         let config = Config::read_only("/tmp/db.grafeo");
-        assert_eq!(config.access_mode(), AccessMode::ReadOnly);
-        assert!(config.path().is_some());
-        assert!(!config.wal_enabled());
+        assert_eq!(config.access_mode, AccessMode::ReadOnly);
+        assert!(config.path.is_some());
+        assert!(!config.wal_enabled);
     }
 
     #[test]
     fn test_config_default_is_read_write() {
         let config = Config::default();
-        assert_eq!(config.access_mode(), AccessMode::ReadWrite);
+        assert_eq!(config.access_mode, AccessMode::ReadWrite);
     }
 
     // --- StorageFormat tests ---
@@ -2141,13 +1766,13 @@ mod tests {
     #[test]
     fn test_config_with_cdc() {
         let config = Config::in_memory().with_cdc();
-        assert!(config.cdc_enabled());
+        assert!(config.cdc_enabled);
     }
 
     #[test]
     fn test_config_cdc_default_false() {
         let config = Config::default();
-        assert!(!config.cdc_enabled());
+        assert!(!config.cdc_enabled);
     }
 
     // --- ConfigError as std::error::Error ---
@@ -2175,7 +1800,7 @@ mod tests {
     #[test]
     fn test_validate_accepts_none_memory_limit() {
         let config = Config::in_memory();
-        assert!(config.memory_limit().is_none());
+        assert!(config.memory_limit.is_none());
         assert!(config.validate().is_ok());
     }
 
@@ -2197,11 +1822,11 @@ mod tests {
     #[test]
     fn test_read_only_config_full() {
         let config = Config::read_only("/tmp/data.grafeo");
-        assert_eq!(config.access_mode(), AccessMode::ReadOnly);
-        assert!(!config.wal_enabled());
-        assert!(config.path().is_some());
+        assert_eq!(config.access_mode, AccessMode::ReadOnly);
+        assert!(!config.wal_enabled);
+        assert!(config.path.is_some());
         // Other defaults should still apply
-        assert!(config.backward_edges());
-        assert_eq!(config.graph_model(), GraphModel::Lpg);
+        assert!(config.backward_edges);
+        assert_eq!(config.graph_model, GraphModel::Lpg);
     }
 }

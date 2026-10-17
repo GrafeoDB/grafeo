@@ -12,9 +12,6 @@ use grafeo_common::utils::error::Result;
 #[cfg(feature = "grafeo-file")]
 use grafeo_storage::file::{CheckpointHeader, GrafeoFileManager};
 
-#[cfg(all(feature = "wal", feature = "grafeo-file"))]
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use super::sections::CheckpointSources;
 #[cfg(feature = "grafeo-file")]
 use crate::transaction::CommitsHeld;
@@ -29,12 +26,12 @@ pub(super) struct FlushContext {
 
 #[cfg(feature = "grafeo-file")]
 impl FlushContext {
-    /// The values the checkpoint records in its database header, with
-    /// `checkpoint_lsn`, the log position the image covers: a reopen
-    /// replays the WAL from there.
-    pub fn checkpoint_header(&self, checkpoint_lsn: u64) -> CheckpointHeader {
+    /// The values the checkpoint records in its database header.
+    /// `checkpoint_lsn` stays 0 until the WAL records sequence numbers: the
+    /// WAL's own checkpoint marker tells recovery where to start.
+    pub fn checkpoint_header(&self) -> CheckpointHeader {
         CheckpointHeader {
-            checkpoint_lsn,
+            checkpoint_lsn: 0,
             epoch: self.epoch,
             last_transaction_id: self.transaction_id,
             node_count: self.node_count,
@@ -60,20 +57,17 @@ pub(super) struct FlushResult {
 /// and its header's epoch and counts are those of its sections. With a WAL,
 /// the order of the steps is what makes a crash at any point safe (#417):
 ///
-/// 1. start a new WAL segment: every group logged so far is in the sealed,
-///    synced segments before its first log position, the checkpoint LSN,
+/// 1. start a new WAL file, so every record logged so far is in an earlier file,
 /// 2. serialize the sections and write them as a new image (the snapshot then
-///    contains all those groups), whose database header records the
-///    checkpoint LSN; the file manager syncs the image, then switches the
-///    database header to it, and from then on a reopen replays the WAL from
-///    that LSN,
-/// 3. only then delete the segments before it, except those an incremental
-///    backup still needs.
+///    contains all those records); the file manager syncs the image, then
+///    switches the database header to it,
+/// 3. only then mark the WAL: recovery starts at the new file, and the earlier
+///    files are deleted unless an incremental backup still needs them.
 ///
-/// A crash before the header switch leaves the previous header, whose
-/// checkpoint LSN is older, and the segments after it: a reopen replays them
-/// onto the previous image. A failed image write keeps every segment for the
-/// same reason: the new header may have reached the disk, or not.
+/// A crash before step 3 leaves the previous mark in place, so recovery
+/// replays more than needed, which is harmless because replay is idempotent.
+/// A failed image write keeps the WAL for the same reason: the new header may
+/// have reached the disk, or not.
 ///
 /// Lock order: the file's checkpoint guard, then the commit lock.
 ///
@@ -82,23 +76,10 @@ pub(super) struct FlushResult {
 /// Returns an error if serialization or I/O fails, or after a commit that
 /// did not complete.
 #[cfg(feature = "grafeo-file")]
-pub(super) fn flush(fm: &GrafeoFileManager, sources: &CheckpointSources) -> Result<FlushResult> {
-    flush_covering(fm, sources, None)
-}
-
-/// [`flush`], recording `covered_lsn` as the image's checkpoint LSN when the
-/// database has no WAL: the end of a log the open replayed and retires, so
-/// a crash before it is removed does not replay it onto the image again.
-/// Without it a WAL-less checkpoint keeps the previous image's.
-///
-/// # Errors
-///
-/// As [`flush`].
-#[cfg(feature = "grafeo-file")]
-pub(super) fn flush_covering(
+pub(super) fn flush(
     fm: &GrafeoFileManager,
     sources: &CheckpointSources,
-    covered_lsn: Option<u64>,
+    #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
 ) -> Result<FlushResult> {
     #[cfg(feature = "testing-statement-injection")]
     grafeo_common::testing::commit_hook::count_checkpoint(fm.path());
@@ -118,26 +99,20 @@ pub(super) fn flush_covering(
         &section_refs,
         &context,
         #[cfg(feature = "wal")]
-        sources
-            .wal
-            .as_deref()
-            .map(|wal| (wal, &*sources.wal_records_at_checkpoint)),
-        covered_lsn,
+        wal,
         commits,
     )
 }
 
 /// Steps 1 to 3 of [`flush`] for `sections`: the caller holds the file's
 /// checkpoint guard, and `commits` until the image is written, when this
-/// releases them. `log` is the WAL, with the count of its records the
-/// checkpoint covers, which this sets.
+/// releases them.
 #[cfg(feature = "grafeo-file")]
 fn write_sections(
     fm: &GrafeoFileManager,
     sections: &[&dyn Section],
     context: &FlushContext,
-    #[cfg(feature = "wal")] log: Option<(&grafeo_storage::wal::Wal, &AtomicU64)>,
-    covered_lsn: Option<u64>,
+    #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::LpgWal>,
     commits: CommitsHeld<'_>,
 ) -> Result<FlushResult> {
     use grafeo_common::testing::crash::maybe_crash;
@@ -150,26 +125,21 @@ fn write_sections(
         });
     }
 
-    // Step 1: the groups logged before the checkpoint LSN are in sealed
-    // segments, and their effects are in the snapshot below (commits are
-    // held, so no group follows them until the image is written).
+    // Step 1: records logged before this point land in files below
+    // `covered_sequence`, and their effects are in the snapshot below.
     #[cfg(feature = "wal")]
-    let covered = match log {
-        Some((wal, _)) => Some((wal.rotate()?, wal.records_written())),
+    let covered_sequence = match wal {
+        Some(wal) => {
+            wal.rotate()?;
+            Some(wal.current_sequence())
+        }
         None => None,
     };
-    // Without a WAL the image covers the log the previous one did, or the
-    // one the caller names.
-    let without_log = covered_lsn.unwrap_or_else(|| fm.active_header().checkpoint_lsn);
-    #[cfg(feature = "wal")]
-    let checkpoint_lsn = covered.map_or(without_log, |(lsn, _)| lsn);
-    #[cfg(not(feature = "wal"))]
-    let checkpoint_lsn = without_log;
 
     maybe_crash("flush:after_rotate");
 
     // Step 2: serialize each section into the new image.
-    fm.write_checkpoint(sections, &context.checkpoint_header(checkpoint_lsn))?;
+    fm.write_checkpoint(sections, &context.checkpoint_header())?;
     let sections_written = sections.len();
 
     for section in sections {
@@ -183,25 +153,31 @@ fn write_sections(
     // Step 3: the image is durable and active (`write_checkpoint` synced the
     // image and its header).
     #[cfg(feature = "wal")]
-    if let (Some((wal, records)), Some((lsn, written))) = (log, covered) {
-        records.store(written, Ordering::Release);
+    if let (Some(wal), Some(sequence)) = (wal, covered_sequence) {
+        use grafeo_common::types::{EpochId, TransactionId};
 
-        maybe_crash("flush:before_remove_segments");
+        wal.mark_checkpoint(
+            sequence,
+            EpochId::new(context.epoch),
+            TransactionId::new(context.transaction_id),
+        )?;
 
-        // An incremental backup reads the segments after its cursor: keep
-        // those.
+        maybe_crash("flush:after_mark_checkpoint");
+
+        // Incremental backups read the files after their cursor: keep those.
         let keep_from = match super::backup::read_backup_cursor(wal.dir()) {
-            Ok(Some(cursor)) => cursor.wal_lsn.map_or(lsn, |backed_up| lsn.min(backed_up)),
-            Ok(None) => lsn,
+            Ok(Some(cursor)) => sequence.min(cursor.log_sequence + 1),
+            Ok(None) => sequence,
             Err(e) => {
                 grafeo_common::grafeo_warn!(
-                    "keeping WAL segments after checkpoint: cannot read backup cursor: {}",
+                    "keeping WAL files after checkpoint: cannot read backup cursor: {}",
                     e
                 );
                 0
             }
         };
-        wal.remove_segments_before(keep_from)?;
+        wal.remove_files_before(keep_from)?;
+        wal.sync()?;
     }
 
     Ok(FlushResult { sections_written })
@@ -302,9 +278,9 @@ mod tests {
         let _checkpoint = fm.checkpoint_guard();
         let commits = manager.hold_commits().unwrap();
         #[cfg(feature = "wal")]
-        let result = write_sections(fm, sections, context, None, None, commits);
-        #[cfg(not(feature = "wal"))]
         let result = write_sections(fm, sections, context, None, commits);
+        #[cfg(not(feature = "wal"))]
+        let result = write_sections(fm, sections, context, commits);
         result.unwrap().sections_written
     }
 
@@ -327,8 +303,8 @@ mod tests {
         .unwrap()
     }
 
-    /// The new image's database header records the flush context; without
-    /// a WAL it keeps the previous image's log position (0 for the first).
+    /// The new image's database header records the flush context; it has
+    /// no WAL sequence number until the WAL records them.
     #[test]
     fn the_checkpoint_header_carries_the_flush_context() {
         let dir = tempfile::tempdir().unwrap();

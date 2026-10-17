@@ -37,8 +37,6 @@ pub(crate) mod encryption;
 pub(crate) mod flush;
 #[cfg(feature = "lpg")]
 mod graph_handle;
-#[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-mod stored_config;
 #[cfg(feature = "lpg")]
 pub use direct::BatchEdge;
 #[cfg(feature = "lpg")]
@@ -66,11 +64,6 @@ mod schema_replay;
 mod search;
 pub(crate) mod section_consumer;
 mod sections;
-// Replay of the WAL v2 groups at open.
-#[cfg(all(feature = "wal", feature = "lpg"))]
-mod replay;
-// The commit's WAL v2 group, written from its change set. Built for tests
-// only until the commit path writes it (the switch from the v1 records).
 mod spill_directory;
 #[cfg(feature = "lpg")]
 pub(crate) mod standalone;
@@ -85,16 +78,11 @@ mod upsert;
     not(feature = "temporal")
 ))]
 mod vector_spill;
-// The commit's WAL group, written from its change set.
-#[cfg(feature = "wal")]
-pub(crate) mod wal_log;
 
 use grafeo_common::grafeo_error;
 #[cfg(feature = "wal")]
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(feature = "wal")]
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 
 use parking_lot::RwLock;
@@ -113,7 +101,7 @@ use grafeo_storage::file::detect::{OnDisk, detect};
 #[cfg(feature = "grafeo-file")]
 use grafeo_storage::file::v3::header::new_database_id;
 #[cfg(feature = "wal")]
-use grafeo_storage::wal::DurabilityMode as WalDurabilityMode;
+use grafeo_storage::wal::{DurabilityMode as WalDurabilityMode, LpgWal, WalConfig};
 #[cfg(all(feature = "wal", feature = "lpg"))]
 use grafeo_storage::wal::{WalRecord, WalRecovery};
 
@@ -163,11 +151,7 @@ pub struct GrafeoDB {
     pub(super) buffer_manager: Arc<BufferManager>,
     /// Write-ahead log manager (if durability is enabled).
     #[cfg(feature = "wal")]
-    pub(super) wal: Option<Arc<grafeo_storage::wal::Wal>>,
-    /// The WAL's [`records_written`](grafeo_storage::wal::Wal::records_written)
-    /// at the last checkpoint: the status reports the records after it.
-    #[cfg(feature = "wal")]
-    pub(super) wal_records_at_checkpoint: Arc<AtomicU64>,
+    pub(super) wal: Option<Arc<LpgWal>>,
     /// Query cache for parsed and optimized plans.
     pub(super) query_cache: Arc<QueryCache>,
     /// Shared commit counter for auto-GC across sessions.
@@ -187,18 +171,10 @@ pub struct GrafeoDB {
     /// Single-file database manager (when using `.grafeo` format).
     #[cfg(feature = "grafeo-file")]
     pub(super) file_manager: Option<Arc<GrafeoFileManager>>,
-    /// The automatic checkpointer (when a trigger is set). Wrapped in Mutex
-    /// because `close()` takes `&self` but needs to stop it.
+    /// Periodic checkpoint timer (when `checkpoint_interval` is configured).
+    /// Wrapped in Mutex because `close()` takes `&self` but needs to stop the timer.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     checkpoint_timer: parking_lot::Mutex<Option<checkpoint_timer::CheckpointTimer>>,
-    /// The automatic checkpoint triggers in force (see
-    /// [`set_checkpoint_triggers`](Self::set_checkpoint_triggers)).
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    checkpoint_triggers: parking_lot::Mutex<crate::admin::CheckpointTriggers>,
-    /// What the automatic checkpoints met (see
-    /// [`checkpoint_status`](Self::checkpoint_status)).
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    checkpoint_failures: Arc<checkpoint_timer::Failures>,
     /// Syncs the WAL in the background under `DurabilityMode::Adaptive`.
     /// Wrapped in Mutex because `close()` takes `&self` but stops it.
     #[cfg(feature = "wal")]
@@ -454,22 +430,7 @@ impl GrafeoDB {
         // and `.` is the directory it names, so `<path>.pre-0.6` and the
         // other side files go next to it, never inside it. `config.path`
         // keeps the caller's spelling, which `path()` reports.
-        let database_path = config.path().map(normalize_path).transpose()?;
-
-        // An existing database file applies the configuration it stores to
-        // every setting the open does not set itself (#551), before anything
-        // is built: the memory limit sizes the buffer manager, the backward
-        // edges shape the store.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let config = match database_path.as_deref() {
-            Some(path) if path.is_file() && matches!(detect(path)?, OnDisk::Current) => {
-                match stored_config::read(path, &encryption::DatabaseKeys::from_config(&config))? {
-                    Some(stored) => stored_config::applied(config, &stored, path)?,
-                    None => config,
-                }
-            }
-            _ => config,
-        };
+        let database_path = config.path.as_deref().map(normalize_path).transpose()?;
 
         // Validate configuration before proceeding
         config.validate().map_err(config_error)?;
@@ -477,7 +438,7 @@ impl GrafeoDB {
         // An encrypted database spills nothing: a spill file would hold its
         // data in plaintext (`validate` refuses an explicit spill path).
         #[cfg(feature = "encryption")]
-        let derive_spill_path = derive_spill_path && config.encryption().is_none();
+        let derive_spill_path = derive_spill_path && config.encryption.is_none();
 
         #[cfg(feature = "lpg")]
         let store = Arc::new(LpgStore::new()?);
@@ -485,20 +446,20 @@ impl GrafeoDB {
         let rdf_store = Arc::new(RdfStore::new());
         let transaction_manager = Arc::new(TransactionManager::new());
 
-        let is_read_only = config.access_mode() == crate::config::AccessMode::ReadOnly;
+        let is_read_only = config.access_mode == crate::config::AccessMode::ReadOnly;
 
         // Where this open spills (see `spill_directory`): a read-only open
         // writes nothing beside its file, and databases sharing an explicit
         // spill path keep their vector caches apart.
         let spill_layout = spill_directory::SpillLayout::for_open(
-            config.spill_path(),
+            config.spill_path.as_deref(),
             database_path.as_deref().filter(|_| derive_spill_path),
             is_read_only,
         );
         // Where an older build may have spilled embeddings (#594).
         #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
         let legacy_spill_directories =
-            legacy_spill::directories(database_path.as_deref(), config.spill_path());
+            legacy_spill::directories(database_path.as_deref(), config.spill_path.as_deref());
         // Whether this open reads a 0.5.x database in place: only then are old
         // spill files in a configured spill path its own, and every vector
         // index is rebuilt (see `legacy_spill`).
@@ -507,7 +468,7 @@ impl GrafeoDB {
 
         // Create buffer manager with configured limits
         let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit().unwrap_or_else(|| {
+            budget: config.memory_limit.unwrap_or_else(|| {
                 // reason: product of system RAM and 0.75 is always a valid positive usize
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
@@ -541,30 +502,19 @@ impl GrafeoDB {
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
         let mut loaded_sections = sections::LoadedSections::default();
 
-        // Where the WAL continues: the end of the replayed log, or the
-        // checkpoint's log position when the log ends below it.
+        // What WAL recovery found at the end of the log, applied once the WAL
+        // is open (#411): a torn tail must be sealed before anything new is
+        // logged, and a log that ends inside a named graph must switch back
+        // to the default graph, where every new group starts.
         #[cfg(all(feature = "wal", feature = "lpg"))]
-        let mut wal_start_lsn: u64 = 0;
-        #[cfg(all(feature = "wal", not(feature = "lpg")))]
-        let wal_start_lsn: u64 = 0;
-        // A sidecar WAL this open replays but does not continue: one in the
-        // first log format (0.5.x and 0.6.0-beta.1 wrote it), whose files the
-        // segments of this release cannot share a directory with, or any
-        // when a read-write open has `wal_enabled` off (nothing of this
-        // handle would trim it). The open writes the replayed commits to the
-        // file and removes it before it returns (`Some(true)` when it held
-        // commits).
+        let mut wal_torn_tail = false;
+        #[cfg(all(feature = "wal", feature = "lpg"))]
+        let mut wal_in_named_graph = false;
+        // A sidecar WAL a read-write open with `wal_enabled` off replayed:
+        // nothing of this handle ever marks or trims it, so the open retires
+        // it before it returns (`Some(true)` when it held records).
         #[cfg(all(feature = "wal", feature = "lpg"))]
         let mut retire_sidecar_wal: Option<bool> = None;
-        // Whether that WAL holds damage a salvaging open stopped at: it is
-        // then moved aside instead of removed.
-        #[cfg(all(feature = "wal", feature = "lpg"))]
-        let mut set_aside_sidecar_wal = false;
-
-        // Whether this open creates the database file, which then stores the
-        // configuration (see `stored_config`).
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        let mut creates_the_file = false;
 
         // The migration lock while a read-write open creates a database at a
         // missing path, released once the database exists (see
@@ -626,7 +576,6 @@ impl GrafeoDB {
                                 &catalog,
                                 #[cfg(feature = "triple-store")]
                                 &rdf_store,
-                                config.wal_salvage(),
                             )?;
                         } else {
                             Self::load_legacy_file(
@@ -636,7 +585,6 @@ impl GrafeoDB {
                                 #[cfg(feature = "triple-store")]
                                 &rdf_store,
                                 &mut loaded_sections,
-                                config.wal_salvage(),
                             )?;
                         }
                         None
@@ -677,35 +625,20 @@ impl GrafeoDB {
                     // out, so the WAL does not change while it is read.
                     #[cfg(all(feature = "wal", feature = "lpg"))]
                     if fm.has_sidecar_wal() {
-                        if Self::holds_first_format_wal(&fm.sidecar_wal_path())? {
-                            let recovered = WalRecovery::with_cipher(
-                                fm.sidecar_wal_path(),
-                                keys.wal_cipher(fm.database_id()),
-                            )
-                            .with_salvage(config.wal_salvage())
-                            .recover_with_tail()?;
-                            Self::apply_wal_records(
-                                &fm.sidecar_wal_path(),
-                                &store,
-                                &catalog,
-                                #[cfg(feature = "triple-store")]
-                                &rdf_store,
-                                &recovered.records,
-                                loaded_sections.unbuilt_mut(),
-                            )?;
-                        } else {
-                            replay::replay(
-                                &fm.sidecar_wal_path(),
-                                Self::scan_options(&fm, &keys, config.wal_salvage()),
-                                &mut replay::Targets {
-                                    store: &store,
-                                    #[cfg(feature = "triple-store")]
-                                    rdf: &rdf_store,
-                                    catalog: &catalog,
-                                    unbuilt: loaded_sections.unbuilt_mut(),
-                                },
-                            )?;
-                        }
+                        let recovered = WalRecovery::with_cipher(
+                            fm.sidecar_wal_path(),
+                            keys.wal_cipher(fm.database_id()),
+                        )
+                        .recover_with_tail()?;
+                        Self::apply_wal_records(
+                            &fm.sidecar_wal_path(),
+                            &store,
+                            &catalog,
+                            #[cfg(feature = "triple-store")]
+                            &rdf_store,
+                            &recovered.records,
+                            loaded_sections.unbuilt_mut(),
+                        )?;
                     }
                     Some(Arc::new(fm))
                 }
@@ -746,10 +679,6 @@ impl GrafeoDB {
                         return Err(wal_directories_are_no_longer_created(db_path));
                     }
                     Self::refuse_leftover_sidecar_wal(db_path)?;
-                    #[cfg(feature = "lpg")]
-                    {
-                        creates_the_file = true;
-                    }
                     let database_id = new_database_id();
                     GrafeoFileManager::create_with_id(
                         db_path,
@@ -815,43 +744,24 @@ impl GrafeoDB {
             // `close()` removes the WAL.
             #[cfg(all(feature = "wal", feature = "lpg"))]
             if fm.has_sidecar_wal() {
-                if Self::holds_first_format_wal(&fm.sidecar_wal_path())? {
-                    let recovery = WalRecovery::with_cipher(
-                        fm.sidecar_wal_path(),
-                        keys.wal_cipher(fm.database_id()),
-                    )
-                    .with_salvage(config.wal_salvage());
-                    let recovered = recovery.recover_with_tail()?;
-                    set_aside_sidecar_wal = recovered.damage.is_some();
-                    Self::apply_wal_records(
-                        &fm.sidecar_wal_path(),
-                        &store,
-                        &catalog,
-                        #[cfg(feature = "triple-store")]
-                        &rdf_store,
-                        &recovered.records,
-                        loaded_sections.unbuilt_mut(),
-                    )?;
+                let recovery = WalRecovery::with_cipher(
+                    fm.sidecar_wal_path(),
+                    keys.wal_cipher(fm.database_id()),
+                );
+                let recovered = recovery.recover_with_tail()?;
+                Self::apply_wal_records(
+                    &fm.sidecar_wal_path(),
+                    &store,
+                    &catalog,
+                    #[cfg(feature = "triple-store")]
+                    &rdf_store,
+                    &recovered.records,
+                    loaded_sections.unbuilt_mut(),
+                )?;
+                wal_torn_tail = recovered.torn_tail;
+                wal_in_named_graph = Self::ends_in_named_graph(&recovered.records);
+                if !config.wal_enabled {
                     retire_sidecar_wal = Some(!recovered.records.is_empty());
-                } else {
-                    let replayed = replay::replay(
-                        &fm.sidecar_wal_path(),
-                        Self::scan_options(&fm, &keys, config.wal_salvage()),
-                        &mut replay::Targets {
-                            store: &store,
-                            #[cfg(feature = "triple-store")]
-                            rdf: &rdf_store,
-                            catalog: &catalog,
-                            unbuilt: loaded_sections.unbuilt_mut(),
-                        },
-                    )?;
-                    // Cut what no commit finished (a torn group) before the
-                    // writer continues after the last complete group.
-                    replayed.end.cut_torn_tail()?;
-                    wal_start_lsn = replayed.end.end_lsn.max(fm.active_header().checkpoint_lsn);
-                    if !config.wal_enabled() {
-                        retire_sidecar_wal = Some(replayed.groups > 0);
-                    }
                 }
             }
 
@@ -865,14 +775,65 @@ impl GrafeoDB {
         #[cfg(feature = "grafeo-file")]
         drop(create_lock);
 
-        // The WAL is the sidecar directory of the database file. It opens once
-        // the open has replayed (and, if need be, retired) what the sidecar
-        // held: see `open_wal` below. A read-only open, and one with
-        // `wal_enabled` off, logs nothing and opens none.
+        // The WAL is the sidecar directory of the database file. A read-only
+        // open, and one with `wal_enabled` off, logs nothing: it opens no WAL
+        // (an existing sidecar WAL was replayed above).
         #[cfg(feature = "wal")]
-        let wal: Option<Arc<grafeo_storage::wal::Wal>> = None;
+        let wal = match file_manager {
+            Some(ref fm) if !is_read_only && config.wal_enabled => {
+                let wal_path = fm.sidecar_wal_path();
+                std::fs::create_dir_all(&wal_path)?;
+
+                // Open/create WAL manager with configured durability
+                let wal_durability = match config.wal_durability {
+                    crate::config::DurabilityMode::Sync => WalDurabilityMode::Sync,
+                    crate::config::DurabilityMode::Batch {
+                        max_delay_ms,
+                        max_records,
+                    } => WalDurabilityMode::Batch {
+                        max_delay_ms,
+                        max_records,
+                    },
+                    crate::config::DurabilityMode::Adaptive { target_interval_ms } => {
+                        WalDurabilityMode::Adaptive { target_interval_ms }
+                    }
+                    crate::config::DurabilityMode::NoSync => WalDurabilityMode::NoSync,
+                };
+                let wal_config = WalConfig {
+                    durability: wal_durability,
+                    ..WalConfig::default()
+                };
+                // The sidecar WAL of an encrypted database is encrypted from
+                // its first record on.
+                let wal_cipher = keys.wal_cipher(fm.database_id());
+                let wal_manager =
+                    LpgWal::with_config_and_cipher(&wal_path, wal_config, wal_cipher)?;
+                #[cfg(feature = "lpg")]
+                {
+                    if wal_torn_tail {
+                        wal_manager.seal_torn_tail()?;
+                    }
+                    if wal_in_named_graph {
+                        wal_manager.log(&WalRecord::SwitchGraph { name: None })?;
+                    }
+                }
+                Some(Arc::new(wal_manager))
+            }
+            _ => None,
+        };
+
+        // `Adaptive` leaves syncing the WAL to a background flusher.
         #[cfg(feature = "wal")]
-        let wal_flusher: Option<grafeo_storage::wal::AdaptiveFlusher> = None;
+        let wal_flusher = match (&wal, config.wal_durability) {
+            (Some(wal), crate::config::DurabilityMode::Adaptive { target_interval_ms }) => {
+                let wal = Arc::clone(wal);
+                Some(grafeo_storage::wal::AdaptiveFlusher::with_sync(
+                    move || wal.sync(),
+                    target_interval_ms,
+                )?)
+            }
+            _ => None,
+        };
 
         // Create query cache with default capacity (1000 queries)
         let query_cache = Arc::new(QueryCache::default());
@@ -883,9 +844,9 @@ impl GrafeoDB {
         Self::continue_epochs(&store, &transaction_manager);
 
         #[cfg(feature = "cdc")]
-        let cdc_enabled_val = config.cdc_enabled();
+        let cdc_enabled_val = config.cdc_enabled;
         #[cfg(feature = "cdc")]
-        let cdc_retention = config.cdc_retention().clone();
+        let cdc_retention = config.cdc_retention.clone();
 
         let mut db = Self {
             config,
@@ -911,12 +872,6 @@ impl GrafeoDB {
             file_manager,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-            checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-            checkpoint_failures: Arc::default(),
-            #[cfg(feature = "wal")]
-            wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(wal_flusher),
             _spill_root: spill_layout.root_guard.clone(),
@@ -951,48 +906,15 @@ impl GrafeoDB {
         // sidecar WAL it replayed: left in place, a crash after a later
         // checkpoint would replay it over the newer image and revert what
         // changed since. The replayed commits are written to the file now,
-        // whose header records the end of the replayed log, and the WAL is
-        // removed. A crash before the removal replays nothing again: the log
-        // ends where the file's checkpoint starts it (a WAL of the first
-        // format replays again, harmlessly, as its replay skips what the
-        // file holds).
+        // and the WAL is removed. A crash before the removal replays the same
+        // commits again, which the file already holds.
         #[cfg(all(feature = "wal", feature = "lpg"))]
         if let (Some(held_records), Some(fm)) = (retire_sidecar_wal, db.file_manager.clone()) {
             if held_records {
-                flush::flush_covering(&fm, &db.checkpoint_sources(), Some(wal_start_lsn))?;
+                db.checkpoint_to_file(&fm)?;
             }
             grafeo_common::testing::crash::maybe_crash("open:before_remove_replayed_wal");
-            if set_aside_sidecar_wal {
-                let kept = fm.set_aside_sidecar_wal()?;
-                grafeo_common::grafeo_warn!(
-                    "salvaged the WAL of {}: the commits after its damage are not replayed, \
-                     the WAL is kept in {}",
-                    fm.path().display(),
-                    kept.display()
-                );
-            } else {
-                fm.remove_sidecar_wal()?;
-            }
-        }
-
-        // The WAL continues after the replayed log, or, once the open removed
-        // the sidecar, at the log position the file's checkpoint recorded.
-        #[cfg(feature = "wal")]
-        if !is_read_only
-            && db.config.wal_enabled()
-            && let Some(fm) = db.file_manager.clone()
-        {
-            #[cfg(feature = "lpg")]
-            if retire_sidecar_wal.is_some() {
-                wal_start_lsn = fm.active_header().checkpoint_lsn;
-            }
-            // Never below the image's checkpoint LSN: without a sidecar (a
-            // clean close removed it) the log starts where the image ends.
-            db.open_wal(
-                &fm,
-                &keys,
-                wal_start_lsn.max(fm.active_header().checkpoint_lsn),
-            )?;
+            fm.remove_sidecar_wal()?;
         }
 
         // Embeddings an older build spilled come back into their columns
@@ -1009,12 +931,9 @@ impl GrafeoDB {
             reads_a_0_5_database,
         )?;
 
-        // Start the automatic checkpointer if a trigger is configured.
+        // Start periodic checkpoint timer if configured.
         #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        {
-            *db.checkpoint_triggers.lock() = db.config.checkpoint_triggers();
-            db.start_checkpoint_timer();
-        }
+        db.start_checkpoint_timer();
 
         // A spill cache is never data: what a previous read-write open (or a
         // crash) left of it goes, under this open's exclusive lock.
@@ -1028,18 +947,6 @@ impl GrafeoDB {
         // Must happen after register_section_consumers() which creates
         // the consumers we're about to spill.
         db.apply_force_disk_overrides();
-
-        // A new database file stores its configuration, written at once so
-        // the next open reads it from the image (it reads the record before
-        // it replays the WAL).
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-        if creates_the_file
-            && let (Some(fm), Some(path)) = (db.file_manager.clone(), database_path.as_deref())
-        {
-            db.catalog
-                .set_stored_config(Some(stored_config::record_of(&db.config, path)));
-            db.checkpoint_to_file(&fm)?;
-        }
 
         Ok(db)
     }
@@ -1080,7 +987,7 @@ impl GrafeoDB {
         transaction_manager.sync_epoch(store.current_epoch());
 
         let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit().unwrap_or_else(|| {
+            budget: config.memory_limit.unwrap_or_else(|| {
                 // reason: product of system RAM and 0.75 is always a valid positive usize
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
@@ -1094,7 +1001,7 @@ impl GrafeoDB {
         let query_cache = Arc::new(QueryCache::default());
 
         #[cfg(feature = "cdc")]
-        let cdc_enabled_val = config.cdc_enabled();
+        let cdc_enabled_val = config.cdc_enabled;
 
         Ok(Self {
             config,
@@ -1120,12 +1027,6 @@ impl GrafeoDB {
             file_manager: None,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-            checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-            checkpoint_failures: Arc::default(),
-            #[cfg(feature = "wal")]
-            wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
             _spill_root: None,
@@ -1181,7 +1082,7 @@ impl GrafeoDB {
         transaction_manager.sync_epoch(store.current_epoch());
 
         let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit().unwrap_or_else(|| {
+            budget: config.memory_limit.unwrap_or_else(|| {
                 // reason: product of system RAM and 0.75 is always a valid positive usize
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
@@ -1195,7 +1096,7 @@ impl GrafeoDB {
         let query_cache = Arc::new(QueryCache::default());
 
         #[cfg(feature = "cdc")]
-        let cdc_enabled_val = config.cdc_enabled();
+        let cdc_enabled_val = config.cdc_enabled;
 
         Ok(Self {
             config,
@@ -1221,12 +1122,6 @@ impl GrafeoDB {
             file_manager: None,
             #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
             checkpoint_timer: parking_lot::Mutex::new(None),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-            checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-            checkpoint_failures: Arc::default(),
-            #[cfg(feature = "wal")]
-            wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
             _spill_root: None,
@@ -1326,116 +1221,20 @@ impl GrafeoDB {
         store.sync_epoch(grafeo_common::types::EpochId::new(fm.active_header().epoch));
     }
 
-    /// Opens the WAL in the sidecar directory of `fm`, continuing at
-    /// `start_lsn`, with the configured durability and, for an encrypted
-    /// database, a key per segment; `Adaptive` starts its flusher.
+    /// Whether replaying `records` leaves the graph cursor on a named graph.
     ///
-    /// # Errors
-    ///
-    /// The errors of creating the directory and of opening the WAL.
-    #[cfg(feature = "wal")]
-    fn open_wal(
-        &mut self,
-        fm: &GrafeoFileManager,
-        keys: &encryption::DatabaseKeys,
-        start_lsn: u64,
-    ) -> Result<()> {
-        use grafeo_storage::wal::{Wal, WalOptions};
-
-        let path = fm.sidecar_wal_path();
-        std::fs::create_dir_all(&path)?;
-        let durability = match self.config.wal_durability() {
-            crate::config::DurabilityMode::Sync => WalDurabilityMode::Sync,
-            crate::config::DurabilityMode::Batch {
-                max_delay_ms,
-                max_records,
-            } => WalDurabilityMode::Batch {
-                max_delay_ms,
-                max_records,
-            },
-            crate::config::DurabilityMode::Adaptive { target_interval_ms } => {
-                WalDurabilityMode::Adaptive { target_interval_ms }
-            }
-            crate::config::DurabilityMode::NoSync => WalDurabilityMode::NoSync,
-        };
-        let wal = Arc::new(
-            Wal::open(
-                &path,
-                WalOptions {
-                    durability,
-                    cipher_for_salt: keys.wal_segment_ciphers(fm.database_id()),
-                    ..WalOptions::new(fm.database_id(), start_lsn)
-                },
-            )
-            .map_err(Error::from)?,
-        );
-        if let crate::config::DurabilityMode::Adaptive { target_interval_ms } =
-            self.config.wal_durability()
-        {
-            let synced = Arc::clone(&wal);
-            *self.wal_flusher.lock() = Some(grafeo_storage::wal::AdaptiveFlusher::with_sync(
-                move || synced.sync().map_err(Error::from),
-                target_interval_ms,
-            )?);
-        }
-        self.wal = Some(wal);
-        Ok(())
-    }
-
-    /// How to scan the sidecar WAL of `fm`: from the log position its
-    /// checkpoint recorded, with a key per segment for an encrypted database.
-    #[cfg(feature = "wal")]
-    fn scan_options(
-        fm: &GrafeoFileManager,
-        keys: &encryption::DatabaseKeys,
-        salvage: bool,
-    ) -> grafeo_storage::wal::ScanOptions {
-        grafeo_storage::wal::ScanOptions {
-            cipher_for_salt: keys.wal_segment_ciphers(fm.database_id()),
-            salvage,
-            ..grafeo_storage::wal::ScanOptions::new(
-                fm.database_id(),
-                fm.active_header().checkpoint_lsn,
-            )
-        }
-    }
-
-    /// The log position the last checkpoint of the file recorded: replay
-    /// starts there. 0 without a file.
-    #[cfg(feature = "wal")]
-    pub(super) fn checkpoint_lsn(&self) -> u64 {
-        self.file_manager
-            .as_ref()
-            .map_or(0, |fm| fm.active_header().checkpoint_lsn)
-    }
-
-    /// Whether the sidecar WAL `dir` holds files of the first log format
-    /// (0.5.x and 0.6.0-beta.1 wrote it): `wal_` with 8 digits and `.log`,
-    /// or its `checkpoint.meta`. A segment of this release has 20 digits.
+    /// Logs written before 0.5.44 could end inside a named graph; new groups
+    /// assume they start in the default graph.
     #[cfg(all(feature = "wal", feature = "lpg"))]
-    fn holds_first_format_wal(dir: &std::path::Path) -> Result<bool> {
-        let cannot_list = |error: std::io::Error| {
-            Error::Io(std::io::Error::new(
-                error.kind(),
-                format!("cannot list the sidecar WAL {}: {error}", dir.display()),
-            ))
-        };
-        for entry in std::fs::read_dir(dir).map_err(cannot_list)? {
-            let name = entry.map_err(cannot_list)?.file_name();
-            let name = name.to_string_lossy();
-            if name == "checkpoint.meta" {
-                return Ok(true);
-            }
-            if let Some(digits) = name
-                .strip_prefix("wal_")
-                .and_then(|rest| rest.strip_suffix(".log"))
-                && digits.len() == 8
-                && digits.bytes().all(|byte| byte.is_ascii_digit())
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+    fn ends_in_named_graph(records: &[WalRecord]) -> bool {
+        records
+            .iter()
+            .rev()
+            .find_map(|record| match record {
+                WalRecord::SwitchGraph { name } => Some(name.is_some()),
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 
     /// Applies WAL records, those of the WAL `wal`, to restore the database
@@ -1735,22 +1534,10 @@ impl GrafeoDB {
         for entry in entries {
             let entry = entry.map_err(cannot_list)?;
             let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // A segment (`wal_` and 20 digits) starts with its header; an
-            // older log file holds only records.
-            let empty = match name
-                .strip_prefix("wal_")
-                .and_then(|n| n.strip_suffix(".log"))
-            {
-                Some(digits) if digits.len() == 20 => {
-                    grafeo_storage::file::detect::WAL_SEGMENT_HEADER_BYTES
-                }
-                _ => 0,
-            };
             if path.extension().is_some_and(|extension| extension == "log")
-                && entry.metadata().map_err(cannot_list)?.len() > empty
+                && entry.metadata().map_err(cannot_list)?.len() > 0
             {
-                logs.push(name);
+                logs.push(entry.file_name().to_string_lossy().into_owned());
             }
         }
         if logs.is_empty() {
@@ -1797,11 +1584,10 @@ impl GrafeoDB {
         store: &Arc<LpgStore>,
         catalog: &Arc<Catalog>,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
-        salvage: bool,
     ) -> Result<()> {
         #[cfg(not(feature = "wal"))]
         {
-            let _ = (store, catalog, salvage);
+            let _ = (store, catalog);
             #[cfg(feature = "triple-store")]
             let _ = rdf_store;
             Err(Error::Query(
@@ -1814,9 +1600,7 @@ impl GrafeoDB {
         }
         #[cfg(feature = "wal")]
         {
-            let recovered = WalRecovery::new(path.join("wal"))
-                .with_salvage(salvage)
-                .recover_all_with_tail();
+            let recovered = WalRecovery::new(path.join("wal")).recover_all_with_tail();
             // Checked first: a recovery error may only be the directory
             // moving away while it was read.
             Self::refuse_migrated_while_read(path, OnDisk::WalDirectory)?;
@@ -1876,7 +1660,6 @@ impl GrafeoDB {
         catalog: &Arc<Catalog>,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         loaded: &mut sections::LoadedSections,
-        salvage: bool,
     ) -> Result<()> {
         use grafeo_common::storage::{MemoryImage, ServedOnce};
         use grafeo_storage::file::legacy::{LegacyContents, LegacyFile};
@@ -1884,8 +1667,6 @@ impl GrafeoDB {
         // Without the `wal` feature the sidecar WAL cannot be replayed, and
         // the file alone would lack its changes.
         migration::refuse_unreplayable_wal(path, cfg!(feature = "wal"))?;
-        #[cfg(not(feature = "wal"))]
-        let _ = salvage;
         let file = LegacyFile::open(path, None)?;
         match file.contents()? {
             LegacyContents::Empty => {}
@@ -1924,11 +1705,7 @@ impl GrafeoDB {
             let wal_path = file.sidecar_wal_path();
             let recovered = wal_path
                 .exists()
-                .then(|| {
-                    WalRecovery::new(&wal_path)
-                        .with_salvage(salvage)
-                        .recover_with_tail()
-                })
+                .then(|| WalRecovery::new(&wal_path).recover_with_tail())
                 .transpose();
             // A migration in another process moves the file and then its
             // sidecar WAL: a WAL read (or found missing) meanwhile may lack
@@ -2105,16 +1882,16 @@ impl GrafeoDB {
             transaction_manager: Arc::clone(&self.transaction_manager),
             query_cache: Arc::clone(&self.query_cache),
             catalog: Arc::clone(&self.catalog),
-            factorized_execution: self.config.factorized_execution(),
-            shuffle_unordered: self.config.shuffle_unordered(),
-            graph_model: self.config.graph_model(),
-            query_timeout: self.config.query_timeout(),
-            max_property_size: self.config.max_property_size(),
+            factorized_execution: self.config.factorized_execution,
+            shuffle_unordered: self.config.shuffle_unordered,
+            graph_model: self.config.graph_model,
+            query_timeout: self.config.query_timeout,
+            max_property_size: self.config.max_property_size,
             path_search_budget: self.config.path_search_budget(),
             #[cfg(feature = "spill")]
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
             commit_counter: Arc::clone(&self.commit_counter),
-            gc_interval: self.config.gc_interval(),
+            gc_interval: self.config.gc_interval,
             read_only: self.read_only || force_read_only,
             identity: identity.clone(),
             #[cfg(feature = "lpg")]
@@ -2259,13 +2036,13 @@ impl GrafeoDB {
     /// Returns the graph data model of this database.
     #[must_use]
     pub fn graph_model(&self) -> crate::config::GraphModel {
-        self.config.graph_model()
+        self.config.graph_model
     }
 
     /// Returns the configured memory limit in bytes, if any.
     #[must_use]
     pub fn memory_limit(&self) -> Option<usize> {
-        self.config.memory_limit()
+        self.config.memory_limit
     }
 
     /// Returns a point-in-time snapshot of all metrics.
@@ -2688,7 +2465,7 @@ impl GrafeoDB {
         // timer stops: the lock is released again before the timer thread is
         // joined. An in-memory database has nothing to persist and keeps
         // taking writes.
-        if self.config.path().is_some() && !self.read_only {
+        if self.config.path.is_some() && !self.read_only {
             self.transaction_manager.close_for_writes();
         }
 
@@ -2729,7 +2506,7 @@ impl GrafeoDB {
                 if let Err(e) = wal.sync() {
                     grafeo_common::grafeo_warn!("failed to sync the WAL while closing: {e}");
                 }
-                wal.close();
+                wal.close_active_log();
             }
             #[cfg(feature = "grafeo-file")]
             if let Some(ref fm) = self.file_manager
@@ -2755,18 +2532,14 @@ impl GrafeoDB {
             // On Windows, open handles prevent directory deletion.
             #[cfg(feature = "wal")]
             if let Some(ref wal) = self.wal {
-                wal.close();
+                wal.close_active_log();
             }
 
             // Only remove the sidecar WAL after verifying the checkpoint wrote
-            // data to the container. If nothing was written and the WAL holds
-            // groups after the image's log position, keep the sidecar so the
-            // next open can recover from it.
+            // data to the container. If nothing was written and the WAL had
+            // records, keep the sidecar so the next open can recover from it.
             #[cfg(feature = "wal")]
-            let has_wal_records = self
-                .wal
-                .as_ref()
-                .is_some_and(|wal| wal.end_lsn() > self.checkpoint_lsn());
+            let has_wal_records = self.wal.as_ref().is_some_and(|wal| wal.record_count() > 0);
             #[cfg(not(feature = "wal"))]
             let has_wal_records = false;
 
@@ -2804,7 +2577,7 @@ impl GrafeoDB {
     #[cfg(any(feature = "lpg", feature = "triple-store"))]
     pub(crate) fn hold_open(&self) -> Result<parking_lot::RwLockReadGuard<'_, bool>> {
         let open = self.is_open.read();
-        if !*open && self.config.path().is_some() {
+        if !*open && self.config.path.is_some() {
             return Err(Error::Transaction(
                 grafeo_common::utils::error::TransactionError::DatabaseClosed,
             ));
@@ -2874,38 +2647,23 @@ impl GrafeoDB {
     /// off (`held`), written to the WAL as it goes (see
     /// [`StreamingChanges`](crate::transaction::StreamingChanges)).
     #[cfg(any(feature = "lpg", feature = "triple-store"))]
-    ///
-    /// `advances_epoch`: whether it commits at the next epoch (an import of
-    /// rows) or at the published one (an RDF batch insert, whose triples have
-    /// no epoch); its WAL group names that epoch.
     fn streaming_changes(
         &self,
         held: &crate::transaction::CommitsHeld<'_>,
-        advances_epoch: bool,
-    ) -> crate::transaction::StreamingChanges<'_> {
+    ) -> crate::transaction::StreamingChanges {
         let changes = crate::transaction::StreamingChanges::new(
             Arc::clone(&self.transaction_manager),
             self.transaction_manager.bulk_writer(held),
         );
         #[cfg(feature = "wal")]
-        let changes = {
-            let published = self.transaction_manager.current_epoch();
-            let epoch = if advances_epoch {
-                grafeo_common::types::EpochId::new(published.as_u64() + 1)
-            } else {
-                published
-            };
-            changes.logged_to(self.wal.as_deref(), epoch)
-        };
-        #[cfg(not(feature = "wal"))]
-        let _ = advances_epoch;
+        let changes = changes.logged_to(self.wal.clone());
         changes
     }
 
     /// Returns the typed WAL if available.
     #[cfg(feature = "wal")]
     #[must_use]
-    pub fn wal(&self) -> Option<&Arc<grafeo_storage::wal::Wal>> {
+    pub fn wal(&self) -> Option<&Arc<LpgWal>> {
         self.wal.as_ref()
     }
 
@@ -3039,7 +2797,7 @@ impl GrafeoDB {
     fn apply_force_disk_overrides(&self) {
         use grafeo_common::storage::TierOverride;
 
-        for (section_type, mem_config) in self.config.section_configs() {
+        for (section_type, mem_config) in &self.config.section_configs {
             let consumer_name = format!("section:{section_type:?}");
             match mem_config.tier {
                 TierOverride::ForceDisk => {
@@ -3140,58 +2898,27 @@ impl GrafeoDB {
             transaction_manager: Arc::clone(&self.transaction_manager),
             #[cfg(feature = "triple-store")]
             rdf_store: Arc::clone(&self.rdf_store),
-            #[cfg(feature = "wal")]
-            wal: self.wal.clone(),
-            #[cfg(feature = "wal")]
-            wal_records_at_checkpoint: Arc::clone(&self.wal_records_at_checkpoint),
         }
     }
 
-    /// Starts the automatic checkpointer when a trigger is set, replacing a
-    /// running one.
+    /// Starts the periodic checkpoint timer when one is configured, replacing
+    /// a running one.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
     fn start_checkpoint_timer(&self) {
-        // A closed database has released its file.
-        if *self.is_open.read() {
-            self.restart_checkpoint_timer();
-        }
-    }
-
-    /// [`start_checkpoint_timer`](Self::start_checkpoint_timer) for a
-    /// caller that holds the database open.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    fn restart_checkpoint_timer(&self) {
         self.stop_checkpoint_timer();
-        let triggers = *self.checkpoint_triggers.lock();
-        // A file opened read-only stays so.
-        if let Some(fm) = &self.file_manager
-            && triggers.any()
+        // A file opened read-only stays so; a closed database has released
+        // its file.
+        if let (Some(interval), Some(fm)) = (self.config.checkpoint_interval, &self.file_manager)
             && !self.read_only
             && !fm.is_read_only()
+            && *self.is_open.read()
         {
-            let sources = self.checkpoint_sources();
-            let (checkpoint_fm, size_fm) = (Arc::clone(fm), Arc::clone(fm));
-            #[cfg(feature = "wal")]
-            let wal = self.wal.clone();
-            let transaction_manager = Arc::clone(&self.transaction_manager);
-            let job = checkpoint_timer::Job {
-                checkpoint: Box::new(move || flush::flush(&checkpoint_fm, &sources).map(|_| ())),
-                wal_bytes: Box::new(move || {
-                    #[cfg(feature = "wal")]
-                    if let Some(wal) = &wal {
-                        return wal
-                            .end_lsn()
-                            .saturating_sub(size_fm.active_header().checkpoint_lsn);
-                    }
-                    let _ = &size_fm;
-                    0
-                }),
-                hopeless: Box::new(move || transaction_manager.has_incomplete_commit()),
-            };
             *self.checkpoint_timer.lock() = Some(checkpoint_timer::CheckpointTimer::start(
-                triggers,
-                job,
-                Arc::clone(&self.checkpoint_failures),
+                interval,
+                Arc::clone(fm),
+                self.checkpoint_sources(),
+                #[cfg(feature = "wal")]
+                self.wal.clone(),
             ));
         }
     }
@@ -3203,72 +2930,6 @@ impl GrafeoDB {
         if let Some(mut timer) = running {
             timer.stop();
         }
-    }
-
-    /// Changes the configuration the database file stores (#551): the
-    /// settings `changes` sets with its builders replace the stored ones,
-    /// and the database checkpoints at once, so the next open applies them
-    /// (`GrafeoDB::open` and `Config::read_only` apply what the file stores
-    /// to every setting they do not set themselves). This database keeps the
-    /// configuration it opened with.
-    ///
-    /// What a file stores: the graph model and the backward edges (both
-    /// fixed at creation), schema constraints, the WAL and its durability
-    /// mode, the memory limit, the section tier overrides, and the spill
-    /// path when it lies in the database's directory.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn main() -> grafeo_common::utils::error::Result<()> {
-    /// use grafeo_engine::config::DurabilityMode;
-    /// use grafeo_engine::{Config, GrafeoDB};
-    ///
-    /// let db = GrafeoDB::open("berlin.grafeo")?;
-    /// db.set_stored_config(
-    ///     &Config::in_memory()
-    ///         .with_memory_limit(88 * 1024 * 1024)
-    ///         .with_wal_durability(DurabilityMode::Sync),
-    /// )?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// An unsupported-query error for an in-memory or read-only database,
-    /// [`Error::InvalidValue`] when `changes` sets the graph model or the
-    /// backward edges to another value than the database was created with,
-    /// the database-closed error after `close()`, and the errors of the
-    /// checkpoint.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    pub fn set_stored_config(&self, changes: &Config) -> Result<()> {
-        let _open = self.hold_open()?;
-        let unsupported =
-            |what: &str| Error::Query(grafeo_common::utils::error::QueryError::unsupported(what));
-        let (Some(fm), Some(path)) = (self.file_manager.as_ref(), self.config.path()) else {
-            return Err(unsupported(
-                "a stored configuration needs a database file: an in-memory database stores none",
-            ));
-        };
-        if self.read_only {
-            return Err(unsupported(
-                "a database opened read-only cannot change its stored configuration",
-            ));
-        }
-        let path = normalize_path(path)?;
-        let stored = self
-            .catalog
-            .stored_config()
-            .unwrap_or_else(|| stored_config::record_of(&self.config, &path));
-        let changed = stored_config::changed(stored, changes, &path)?;
-        let previous = self.catalog.set_stored_config(Some(changed));
-        if let Err(error) = self.checkpoint_to_file(fm) {
-            // Nothing was stored: the record goes back to what the file holds.
-            self.catalog.set_stored_config(previous);
-            return Err(error);
-        }
-        Ok(())
     }
 
     // =========================================================================
@@ -3418,7 +3079,12 @@ impl GrafeoDB {
     /// separately after this returns.
     #[cfg(feature = "grafeo-file")]
     fn checkpoint_to_file(&self, fm: &GrafeoFileManager) -> Result<flush::FlushResult> {
-        flush::flush(fm, &self.checkpoint_sources())
+        flush::flush(
+            fm,
+            &self.checkpoint_sources(),
+            #[cfg(feature = "wal")]
+            self.wal.as_deref(),
+        )
     }
 
     /// Returns the file manager if using single-file format.
@@ -3987,7 +3653,6 @@ mod tests {
             #[cfg(feature = "triple-store")]
             &rdf_store,
             &mut loaded,
-            false,
         )
         .unwrap();
         assert!(
@@ -4180,8 +3845,8 @@ mod tests {
         let config = Config::in_memory().with_threads(4).with_query_logging();
 
         let db = GrafeoDB::with_config(config).unwrap();
-        assert_eq!(db.config().threads(), 4);
-        assert!(db.config().query_logging());
+        assert_eq!(db.config().threads, 4);
+        assert!(db.config().query_logging);
     }
 
     #[test]
@@ -4248,9 +3913,10 @@ mod tests {
         let node = db.create_node(&["Test"]).unwrap();
         db.delete_node(node).unwrap();
 
-        // The WAL holds a group of each direct call, with its GroupBegin.
-        let wal = db.wal().expect("a persistent database has a WAL");
-        assert!(wal.records_written() >= 4, "{}", wal.records_written());
+        // WAL should have records
+        if let Some(wal) = db.wal() {
+            assert!(wal.record_count() > 0);
+        }
 
         db.close().unwrap();
     }
@@ -4424,7 +4090,7 @@ mod tests {
         let config = Config::in_memory().with_memory_limit(64 * 1024 * 1024); // 64 MB
 
         let db = GrafeoDB::with_config(config).unwrap();
-        assert_eq!(db.config().memory_limit(), Some(64 * 1024 * 1024));
+        assert_eq!(db.config().memory_limit, Some(64 * 1024 * 1024));
         assert_eq!(db.node_count(), 0);
     }
 
@@ -5186,13 +4852,13 @@ mod tests {
     #[test]
     fn test_config_with_cdc() {
         let config = Config::in_memory().with_cdc();
-        assert!(config.cdc_enabled());
+        assert!(config.cdc_enabled);
     }
 
     #[test]
     fn test_config_cdc_default_false() {
         let config = Config::in_memory();
-        assert!(!config.cdc_enabled());
+        assert!(!config.cdc_enabled);
     }
 
     // =========================================================================

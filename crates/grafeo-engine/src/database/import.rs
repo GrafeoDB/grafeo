@@ -219,7 +219,7 @@ impl super::GrafeoDB {
 
         let held = self.hold_commits_for_import()?;
         let store: Arc<dyn ChangeTarget> = self.lpg_store();
-        let mut changes = self.streaming_changes(&held, true);
+        let mut changes = self.streaming_changes(&held);
         let nodes = changes.reserve(&store, Table::Nodes, rows.len())?;
         let labels: Labels = std::iter::once(ArcStr::from("_Imported")).collect();
         for raw in nodes.clone() {
@@ -577,49 +577,31 @@ mod tests {
     }
 
     /// An import's change set holds its two ranges whatever its size, and
-    /// its records go to the WAL as it goes (the group's frames are written
-    /// before it commits): the memory of an import of 1,000 lines and one of
-    /// 100,000 lines is the same.
+    /// its WAL records wait for their write a run at a time: the memory of
+    /// an import of 1,000 lines and one of 100,000 lines is the same.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     #[test]
     fn an_import_keeps_constant_change_set_memory() {
-        // The frame bytes in the segments of the WAL in `sidecar` (the size
-        // from the file itself: on Windows a directory listing's is stale
-        // while the file is open).
-        fn frame_bytes(sidecar: &std::path::Path) -> u64 {
-            std::fs::read_dir(sidecar)
-                .unwrap()
-                .map(|entry| std::fs::metadata(entry.unwrap().path()).unwrap().len())
-                .map(|length| {
-                    length.saturating_sub(grafeo_storage::wal::SEGMENT_HEADER_BYTES as u64)
-                })
-                .sum()
-        }
+        use crate::transaction::STREAMED_RECORDS;
 
         let mut most = Vec::new();
         for lines in [1_000_usize, 100_000] {
             let dir = tempfile::tempdir().unwrap();
             let db = GrafeoDB::open(dir.path().join("amsterdam.grafeo")).unwrap();
-            let sidecar = dir.path().join("amsterdam.grafeo.wal");
             let ring = u64::try_from(lines).unwrap();
             let edges: Vec<(u64, u64)> = (0..ring).map(|n| (n, (n + 3) % ring)).collect();
-            let (mut bytes, mut logged, mut rows) = (0, 0, 0_u64);
+            let (mut bytes, mut pending) = (0, 0);
             let (nodes, edge_count) = db
                 .import_edge_list_observed(&edges, "ROUTE", false, |changes| {
                     bytes = bytes.max(changes.approx_bytes());
-                    rows += 1;
-                    if rows % 10_000 == 0 {
-                        logged = logged.max(frame_bytes(&sidecar));
-                    }
+                    pending = pending.max(changes.pending_records());
                 })
                 .unwrap();
             assert_eq!((nodes, edge_count), (lines, 2 * lines));
-            if lines == 100_000 {
-                assert!(
-                    logged > 0,
-                    "{lines} lines: no frame was written before the import committed"
-                );
-            }
+            assert!(
+                pending < STREAMED_RECORDS,
+                "{lines} lines: {pending} records waited for their write"
+            );
             most.push(bytes);
             db.close().unwrap();
         }

@@ -1,8 +1,7 @@
 //! What the expression evaluator ([`ExpressionPredicate`](super::ExpressionPredicate))
-//! can compute: the built-in functions ([`BuiltinFunction`]), each declared
-//! once with its spellings, the numbers of arguments it takes, its evaluator
-//! group, its [`Volatility`] and the feature it needs, and whether this build
-//! has regular expressions for `=~` and LIKE.
+//! can compute: the scalar functions it knows with the numbers of arguments
+//! each takes, and whether this build has regular expressions for `=~` and
+//! LIKE.
 //!
 //! The evaluator answers a call it cannot compute with no value, a null, for
 //! every row. The planner asks here first, so a query that calls an unknown
@@ -15,273 +14,45 @@ use regex::Regex;
 #[cfg(all(feature = "regex-lite", not(feature = "regex")))]
 use regex_lite::Regex;
 
-/// How the result of a function depends on more than its arguments, as
-/// PostgreSQL and DataFusion classify functions (DuckDB: CONSISTENT,
-/// CONSISTENT_WITHIN_QUERY, VOLATILE).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Volatility {
-    /// The same arguments give the same result. An entity argument counts as
-    /// its state when the call runs: `labels(n)` is Immutable, but a rule that
-    /// kept a result across a write in the same statement would have to check
-    /// that write (see the planner's `after_write`).
-    Immutable,
-    /// Fixed for a statement: the clock (`now()`, `date()` without arguments)
-    /// and the session (`current_graph()`, `session_user()`).
-    Stable,
-    /// May differ on every call: `rand()`.
-    Volatile,
-}
+/// The scalar functions of the evaluator: every spelling it accepts, in the
+/// case the documentation writes it (a call's name may use any case), each
+/// followed by a slash and the numbers of arguments it takes (see [`Arity`]).
+/// One string rather than a list of strings keeps the browser build small.
+///
+/// Keep it in step with the `eval_*_fn` methods of `filter.rs`: a test reads
+/// their `match name` arms and compares.
+const SCALAR_FUNCTIONS: &str = "\
+    abs/1 acos/1 all_different/1+ asin/1 atan/1 atan2/2 byte_length/1 cardinality/1 ceil/1 \
+    ceiling/1 char_length/1 charLength/1 coalesce/1+ cos/1 cosine_distance/2 \
+    cosine_similarity/2 current_date/0 currentDate/0 current_graph/0 current_schema/0 \
+    current_time/0 currentTime/0 current_timestamp/0 currentTimestamp/0 date/0-1 \
+    date_trunc/2 datetime/0-1 day/1 degrees/1 dot_product/2 duration/1 e/0 edges/1 \
+    element_id/1 elementId/1 end_node/1 endNode/1 euclidean_distance/2 exists/1 exp/1 \
+    floor/1 hasLabel/2 head/1 home_graph/0 home_schema/0 hour/1 id/1 info/0 isAcyclic/1 \
+    isDestination/2 isDirected/1 isNormalized/1-2 isSimple/1 isSource/2 isTrail/1 isTyped/2 \
+    keys/1 labels/1 last/1 left/2 length/1 ln/1 local_datetime/0-1 local_time/0-1 \
+    localdatetime/0-1 log/1 log10/1 log2/1 lower/1 ltrim/1 manhattan_distance/2 minute/1 \
+    month/1 nodes/1 normalize/1 now/0 nullif/2 octet_length/1 path/1+ path_length/1 pi/0 \
+    pow/2 power/2 properties/1 property_exists/2 property_values/1 radians/1 rand/0 \
+    random/0 range/2-3 relationships/1 replace/3 reverse/1 right/2 round/1 rtrim/1 same/1+ \
+    schema/0 second/1 session_user/0 sign/1 sin/1 size/1 split/2 sqrt/1 start_node/1 \
+    startNode/1 string_join/2 substring/2-3 tail/1 tan/1 time/0-1 timestamp/0 toBool/1 \
+    toBoolean/1 toDate/0-1 toDatetime/0-1 toDuration/1 toFloat/1 toInt/1 toInteger/1 \
+    toList/1 toLower/1 toString/1 toTime/0-1 toTypedList/2 toUpper/1 toZonedDatetime/0-1 \
+    toZonedTime/1 trim/1,3 truncate/2 type/1 upper/1 vector/1 year/1 zoned_datetime/0-1 \
+    zonedDatetime/0-1 zonedTime/1";
 
-/// The evaluator method that computes a function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FunctionGroup {
-    /// Nodes and edges: `id`, `labels`, `type`, `startNode`, ...
-    GraphElement,
-    /// Conversions and type checks: `toString`, `toInteger`, `isTyped`, ...
-    Type,
-    /// Lists and maps: `size`, `coalesce`, `keys`, `head`, `range`, ...
-    Collection,
-    /// Strings: `trim`, `substring`, `toUpper`, ...
-    String,
-    /// Numbers: `abs`, `round`, `sqrt`, `rand`, ...
-    Numeric,
-    /// Dates, times and durations: `date`, `now`, `year`, ...
-    Temporal,
-    /// Paths: `nodes`, `edges`, `path_length`, ...
-    Path,
-    /// Vectors: `cosine_similarity`, `dot_product`, ...
-    Vector,
-    /// Full-text search: `text_score`, `text_match`.
-    Text,
-    /// The session and the database: `session_user`, `current_graph`, ...
-    Session,
-}
+/// The functions the evaluator computes only in a build with a feature: the
+/// name with its numbers of arguments (as in [`SCALAR_FUNCTIONS`]), the
+/// feature, and whether this build has it.
+const FEATURE_FUNCTIONS: &[(&str, &str, bool)] = &[
+    ("text_match/2", "text-index", cfg!(feature = "text-index")),
+    ("text_score/2", "text-index", cfg!(feature = "text-index")),
+];
 
-fn immutable(_: usize) -> Volatility {
-    Volatility::Immutable
-}
-
-fn stable(_: usize) -> Volatility {
-    Volatility::Stable
-}
-
-fn volatile(_: usize) -> Volatility {
-    Volatility::Volatile
-}
-
-/// A temporal constructor: from its argument (`date('2026-10-17')`), or from
-/// the clock without one.
-fn clock(arguments: usize) -> Volatility {
-    if arguments == 0 {
-        Volatility::Stable
-    } else {
-        Volatility::Immutable
-    }
-}
-
-/// Declares every built-in function once: its variant, its spellings (the
-/// first is the canonical name, in the case the documentation writes it; a
-/// call may use any case), the numbers of arguments it takes (see
-/// [`Arity`]), its evaluator group, its volatility for a number of arguments,
-/// and the feature it needs with whether this build has it. An entry without
-/// a volatility does not match, so a new function cannot compile without one.
-macro_rules! builtin_functions {
-    ($(
-        $variant:ident => [$($alias:literal),+ $(,)?], $arity:literal, $group:ident, $volatility:ident
-        $(, feature = $feature:literal, $enabled:expr)?;
-    )+) => {
-        /// A built-in function of the LPG query languages.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum BuiltinFunction {
-            $(
-                #[doc = concat!($("`", $alias, "` "),+)]
-                $variant,
-            )+
-        }
-
-        impl BuiltinFunction {
-            /// Every built-in function.
-            pub const ALL: &'static [BuiltinFunction] = &[$(BuiltinFunction::$variant,)+];
-
-            /// Every spelling of the function; the first is its name.
-            #[must_use]
-            pub fn aliases(self) -> &'static [&'static str] {
-                match self {
-                    $(Self::$variant => &[$($alias,)+],)+
-                }
-            }
-
-            /// The numbers of arguments it takes.
-            #[must_use]
-            pub fn arity(self) -> Arity {
-                match self {
-                    $(Self::$variant => Arity($arity),)+
-                }
-            }
-
-            /// The evaluator method that computes it.
-            #[must_use]
-            pub fn group(self) -> FunctionGroup {
-                match self {
-                    $(Self::$variant => FunctionGroup::$group,)+
-                }
-            }
-
-            /// How its result depends on more than its `arguments` arguments.
-            #[must_use]
-            pub fn volatility(self, arguments: usize) -> Volatility {
-                match self {
-                    $(Self::$variant => $volatility(arguments),)+
-                }
-            }
-
-            /// The feature it needs and whether this build has it; `None` for
-            /// a function every build computes.
-            #[must_use]
-            pub fn required_feature(self) -> Option<(&'static str, bool)> {
-                match self {
-                    $(Self::$variant => builtin_functions!(@feature $($feature, $enabled)?),)+
-                }
-            }
-        }
-    };
-    (@feature) => { None };
-    (@feature $feature:literal, $enabled:expr) => { Some(($feature, $enabled)) };
-}
-
-builtin_functions! {
-    Id => ["id"], "1", GraphElement, immutable;
-    ElementId => ["element_id", "elementId"], "1", GraphElement, immutable;
-    Labels => ["labels"], "1", GraphElement, immutable;
-    Type => ["type"], "1", GraphElement, immutable;
-    StartNode => ["startNode", "start_node"], "1", GraphElement, immutable;
-    EndNode => ["endNode", "end_node"], "1", GraphElement, immutable;
-    PropertyExists => ["property_exists"], "2", GraphElement, immutable;
-    HasLabel => ["hasLabel"], "2", GraphElement, immutable;
-    IsSource => ["isSource"], "2", GraphElement, immutable;
-    IsDestination => ["isDestination"], "2", GraphElement, immutable;
-    IsDirected => ["isDirected"], "1", GraphElement, immutable;
-    ToString => ["toString"], "1", Type, immutable;
-    ToInteger => ["toInteger", "toInt"], "1", Type, immutable;
-    ToFloat => ["toFloat"], "1", Type, immutable;
-    ToBoolean => ["toBoolean", "toBool"], "1", Type, immutable;
-    ToList => ["toList"], "1", Type, immutable;
-    ToTypedList => ["toTypedList"], "2", Type, immutable;
-    IsTyped => ["isTyped"], "2", Type, immutable;
-    Size => ["size", "length", "cardinality"], "1", Collection, immutable;
-    Coalesce => ["coalesce"], "1+", Collection, immutable;
-    Exists => ["exists"], "1", Collection, immutable;
-    Keys => ["keys"], "1", Collection, immutable;
-    Properties => ["properties"], "1", Collection, immutable;
-    PropertyValues => ["property_values"], "1", Collection, immutable;
-    Head => ["head"], "1", Collection, immutable;
-    Tail => ["tail"], "1", Collection, immutable;
-    Last => ["last"], "1", Collection, immutable;
-    Reverse => ["reverse"], "1", Collection, immutable;
-    Vector => ["vector"], "1", Collection, immutable;
-    AllDifferent => ["all_different"], "1+", Collection, immutable;
-    Same => ["same"], "1+", Collection, immutable;
-    Range => ["range"], "2-3", Collection, immutable;
-    StringJoin => ["string_join"], "2", Collection, immutable;
-    Trim => ["trim"], "1,3", String, immutable;
-    Ltrim => ["ltrim"], "1", String, immutable;
-    Rtrim => ["rtrim"], "1", String, immutable;
-    Replace => ["replace"], "3", String, immutable;
-    Substring => ["substring"], "2-3", String, immutable;
-    Split => ["split"], "2", String, immutable;
-    Upper => ["toUpper", "upper"], "1", String, immutable;
-    Lower => ["toLower", "lower"], "1", String, immutable;
-    CharLength => ["char_length", "charLength"], "1", String, immutable;
-    Left => ["left"], "2", String, immutable;
-    Right => ["right"], "2", String, immutable;
-    OctetLength => ["octet_length", "byte_length"], "1", String, immutable;
-    Normalize => ["normalize"], "1", String, immutable;
-    IsNormalized => ["isNormalized"], "1-2", String, immutable;
-    Abs => ["abs"], "1", Numeric, immutable;
-    Ceil => ["ceil", "ceiling"], "1", Numeric, immutable;
-    Floor => ["floor"], "1", Numeric, immutable;
-    Round => ["round"], "1", Numeric, immutable;
-    Sqrt => ["sqrt"], "1", Numeric, immutable;
-    Sign => ["sign"], "1", Numeric, immutable;
-    Power => ["power", "pow"], "2", Numeric, immutable;
-    Rand => ["rand", "random"], "0", Numeric, volatile;
-    Ln => ["log", "ln"], "1", Numeric, immutable;
-    Log10 => ["log10"], "1", Numeric, immutable;
-    Log2 => ["log2"], "1", Numeric, immutable;
-    Exp => ["exp"], "1", Numeric, immutable;
-    E => ["e"], "0", Numeric, immutable;
-    Pi => ["pi"], "0", Numeric, immutable;
-    Sin => ["sin"], "1", Numeric, immutable;
-    Cos => ["cos"], "1", Numeric, immutable;
-    Tan => ["tan"], "1", Numeric, immutable;
-    Asin => ["asin"], "1", Numeric, immutable;
-    Acos => ["acos"], "1", Numeric, immutable;
-    Atan => ["atan"], "1", Numeric, immutable;
-    Atan2 => ["atan2"], "2", Numeric, immutable;
-    Degrees => ["degrees"], "1", Numeric, immutable;
-    Radians => ["radians"], "1", Numeric, immutable;
-    Date => ["date", "toDate"], "0-1", Temporal, clock;
-    Time => ["time", "toTime", "local_time"], "0-1", Temporal, clock;
-    Datetime => ["datetime", "localdatetime", "local_datetime", "toDatetime"], "0-1", Temporal, clock;
-    Duration => ["duration", "toDuration"], "1", Temporal, immutable;
-    ZonedDatetime => ["toZonedDatetime", "zonedDatetime", "zoned_datetime"], "0-1", Temporal, clock;
-    ZonedTime => ["toZonedTime", "zonedTime"], "1", Temporal, immutable;
-    CurrentDate => ["current_date", "currentDate"], "0", Temporal, stable;
-    CurrentTime => ["current_time", "currentTime"], "0", Temporal, stable;
-    Now => ["now", "current_timestamp", "currentTimestamp"], "0", Temporal, stable;
-    Timestamp => ["timestamp"], "0", Temporal, stable;
-    Year => ["year"], "1", Temporal, immutable;
-    Month => ["month"], "1", Temporal, immutable;
-    Day => ["day"], "1", Temporal, immutable;
-    Hour => ["hour"], "1", Temporal, immutable;
-    Minute => ["minute"], "1", Temporal, immutable;
-    Second => ["second"], "1", Temporal, immutable;
-    DateTrunc => ["date_trunc", "truncate"], "2", Temporal, immutable;
-    Path => ["path"], "1+", Path, immutable;
-    PathLength => ["path_length"], "1", Path, immutable;
-    Nodes => ["nodes"], "1", Path, immutable;
-    Edges => ["edges", "relationships"], "1", Path, immutable;
-    IsAcyclic => ["isAcyclic"], "1", Path, immutable;
-    IsSimple => ["isSimple"], "1", Path, immutable;
-    IsTrail => ["isTrail"], "1", Path, immutable;
-    CosineSimilarity => ["cosine_similarity"], "2", Vector, immutable;
-    CosineDistance => ["cosine_distance"], "2", Vector, immutable;
-    EuclideanDistance => ["euclidean_distance"], "2", Vector, immutable;
-    DotProduct => ["dot_product"], "2", Vector, immutable;
-    ManhattanDistance => ["manhattan_distance"], "2", Vector, immutable;
-    TextScore => ["text_score"], "2", Text, immutable, feature = "text-index", cfg!(feature = "text-index");
-    TextMatch => ["text_match"], "2", Text, immutable, feature = "text-index", cfg!(feature = "text-index");
-    SessionUser => ["session_user"], "0", Session, stable;
-    CurrentSchema => ["current_schema"], "0", Session, stable;
-    CurrentGraph => ["current_graph"], "0", Session, stable;
-    HomeSchema => ["home_schema", "home_graph"], "0", Session, stable;
-    Info => ["info"], "0", Session, stable;
-    Schema => ["schema"], "0", Session, stable;
-    Nullif => ["nullif"], "2", Session, immutable;
-}
-
-impl BuiltinFunction {
-    /// The function a call names, in any case.
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|function| {
-            function
-                .aliases()
-                .iter()
-                .any(|alias| alias.eq_ignore_ascii_case(name))
-        })
-    }
-
-    /// The canonical name.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        self.aliases()[0]
-    }
-}
-
-/// The numbers of arguments a function takes, as the declaration of
-/// [`BuiltinFunction`] writes them: `2` (exactly 2), `0-1` (from 0 to 1),
-/// `1+` (1 or more) or `1,3` (1 or 3).
+/// The numbers of arguments a function takes, as the function table writes
+/// them after the name: `2` (exactly 2), `0-1` (from 0 to 1), `1+` (1 or
+/// more) or `1,3` (1 or 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Arity(&'static str);
 
@@ -333,6 +104,12 @@ impl std::fmt::Display for Arity {
     }
 }
 
+/// The name and the numbers of arguments of an entry of the function table.
+fn split_entry(entry: &'static str) -> (&'static str, Arity) {
+    let (name, arity) = entry.split_once('/').unwrap_or((entry, ""));
+    (name, Arity(arity))
+}
+
 /// Whether the evaluator can compute a call to a function (see
 /// [`function_support`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,21 +130,32 @@ pub enum FunctionSupport {
 /// evaluator matches them.
 #[must_use]
 pub fn function_support(name: &str) -> FunctionSupport {
-    match BuiltinFunction::from_name(name) {
-        None => FunctionSupport::Unknown,
-        Some(function) => match function.required_feature() {
-            Some((feature, false)) => FunctionSupport::NeedsFeature(feature),
-            _ => FunctionSupport::Available(function.arity()),
-        },
+    if let Some(&(entry, feature, enabled)) = FEATURE_FUNCTIONS
+        .iter()
+        .find(|(entry, _, _)| split_entry(entry).0.eq_ignore_ascii_case(name))
+    {
+        return if enabled {
+            FunctionSupport::Available(split_entry(entry).1)
+        } else {
+            FunctionSupport::NeedsFeature(feature)
+        };
     }
+    SCALAR_FUNCTIONS
+        .split_ascii_whitespace()
+        .map(split_entry)
+        .find(|(function, _)| function.eq_ignore_ascii_case(name))
+        .map_or(FunctionSupport::Unknown, |(_, arity)| {
+            FunctionSupport::Available(arity)
+        })
 }
 
 /// The names of the evaluator's scalar functions, including those this build
 /// lacks a feature for, for "did you mean" hints.
 pub fn function_names() -> impl Iterator<Item = &'static str> {
-    BuiltinFunction::ALL
-        .iter()
-        .flat_map(|function| function.aliases().iter().copied())
+    SCALAR_FUNCTIONS
+        .split_ascii_whitespace()
+        .chain(FEATURE_FUNCTIONS.iter().map(|&(entry, _, _)| entry))
+        .map(|entry| split_entry(entry).0)
 }
 
 /// Whether this build has regular expressions, which `=~` and LIKE need: the
@@ -402,37 +190,21 @@ pub fn regex_pattern_error(pattern: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
-    /// The variants in the `match function` arms of each `eval_*_fn` method
-    /// of `filter.rs`, by the method's group (`eval_graph_element_fn` is
-    /// `GraphElement`).
-    fn evaluator_arms() -> BTreeMap<String, BTreeSet<String>> {
+    /// The names in the `match name` arms of the evaluator's `eval_*_fn`
+    /// methods in `filter.rs`, lowercase: the functions it computes.
+    fn evaluator_function_names() -> BTreeSet<String> {
         let source = include_str!("filter.rs");
         let lines: Vec<&str> = source.lines().collect();
-        let mut arms: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut names = BTreeSet::new();
         let mut index = 0;
         while index < lines.len() {
             let line = lines[index];
             index += 1;
-            let Some(method) = line
-                .strip_prefix("    fn eval_")
-                .and_then(|rest| rest.split_once("_fn("))
-                .map(|(method, _)| method)
-            else {
+            if !(line.starts_with("    fn eval_") && line.contains("_fn(")) {
                 continue;
-            };
-            let group: String = method
-                .split('_')
-                .map(|part| {
-                    let mut chars = part.chars();
-                    chars
-                        .next()
-                        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
-                        .unwrap_or_default()
-                })
-                .collect();
-            let entry = arms.entry(group).or_default();
+            }
             // The method's body ends at the first line that closes it.
             let mut arm_indent = None;
             while index < lines.len() && lines[index] != "    }" {
@@ -440,109 +212,39 @@ mod tests {
                 index += 1;
                 let indent = body_line.len() - body_line.trim_start().len();
                 let text = body_line.trim_start();
-                if arm_indent.is_none() && text.starts_with("match function {") {
+                if arm_indent.is_none() && text.starts_with("match name {") {
                     arm_indent = Some(indent + 4);
                 } else if Some(indent) == arm_indent {
                     let pattern = text.strip_prefix("| ").unwrap_or(text);
-                    let before_arrow = pattern.split("=>").next().unwrap_or(pattern);
-                    for part in before_arrow.split('|') {
-                        if let Some(variant) = part.trim().strip_prefix("BuiltinFunction::") {
-                            entry.insert(variant.trim().to_string());
+                    if pattern.starts_with('"') {
+                        let before_arrow = pattern.split("=>").next().unwrap_or(pattern);
+                        for quoted in before_arrow.split('"').skip(1).step_by(2) {
+                            names.insert(quoted.to_string());
                         }
                     }
                 }
             }
         }
-        arms
+        names
     }
 
-    /// Each group method answers every function of its group: a function
-    /// without an arm would fall to the method's `_ => None` and be null for
-    /// every row.
     #[test]
-    fn every_function_has_an_arm_in_its_group_method() {
-        let arms = evaluator_arms();
-        let found: usize = arms.values().map(BTreeSet::len).sum();
+    fn the_table_lists_exactly_the_functions_the_evaluator_computes() {
+        let evaluator = evaluator_function_names();
         assert!(
-            found >= BuiltinFunction::ALL.len(),
-            "the scan of filter.rs found {found} arms: has the layout of its \
-             `eval_*_fn` methods changed?"
+            evaluator.len() > 100,
+            "the scan of filter.rs found only {} names: has the layout of its \
+             `eval_*_fn` methods changed?",
+            evaluator.len()
         );
-        for &function in BuiltinFunction::ALL {
-            let group = format!("{:?}", function.group());
-            let variant = format!("{function:?}");
-            assert!(
-                arms.get(&group)
-                    .is_some_and(|names| names.contains(&variant)),
-                "{variant} belongs to {group}, whose evaluator method has no arm for it"
-            );
-        }
-        for (group, names) in &arms {
-            for name in names {
-                let function = BuiltinFunction::ALL
-                    .iter()
-                    .find(|function| format!("{function:?}") == *name)
-                    .unwrap_or_else(|| panic!("{name} in {group} is no BuiltinFunction"));
-                assert_eq!(&format!("{:?}", function.group()), group, "{name}");
-            }
-        }
-    }
-
-    #[test]
-    fn every_alias_resolves_in_any_case() {
-        for &function in BuiltinFunction::ALL {
-            for alias in function.aliases() {
-                for spelling in [
-                    alias.to_string(),
-                    alias.to_uppercase(),
-                    alias.to_lowercase(),
-                ] {
-                    assert_eq!(
-                        BuiltinFunction::from_name(&spelling),
-                        Some(function),
-                        "{spelling}"
-                    );
-                }
-            }
-            assert_eq!(BuiltinFunction::from_name(function.name()), Some(function));
-        }
-        assert_eq!(BuiltinFunction::from_name("upperr"), None);
-        assert_eq!(BuiltinFunction::from_name("upper/1"), None);
-        assert_eq!(BuiltinFunction::from_name(""), None);
-    }
-
-    #[test]
-    fn no_alias_names_two_functions() {
-        let mut seen = std::collections::HashMap::new();
-        for &function in BuiltinFunction::ALL {
-            for alias in function.aliases() {
-                let previous = seen.insert(alias.to_lowercase(), function);
-                assert!(previous.is_none_or(|p| p == function), "{alias}");
-            }
-        }
-        assert_eq!(BuiltinFunction::ALL.len(), 108);
-    }
-
-    #[test]
-    fn volatility_of_the_clock_random_and_entity_functions() {
-        use Volatility::{Immutable, Stable, Volatile};
-        let of = |name: &str, arguments| {
-            BuiltinFunction::from_name(name)
-                .unwrap()
-                .volatility(arguments)
-        };
-        assert_eq!(of("rand", 0), Volatile);
-        assert_eq!(of("random", 0), Volatile);
-        assert_eq!(of("now", 0), Stable);
-        assert_eq!(of("current_date", 0), Stable);
-        assert_eq!(of("session_user", 0), Stable);
-        assert_eq!(of("date", 0), Stable);
-        assert_eq!(of("date", 1), Immutable);
-        assert_eq!(of("datetime", 0), Stable);
-        assert_eq!(of("datetime", 1), Immutable);
-        assert_eq!(of("upper", 1), Immutable);
-        assert_eq!(of("labels", 1), Immutable);
-        assert_eq!(of("properties", 1), Immutable);
+        let table: BTreeSet<String> = function_names().map(str::to_lowercase).collect();
+        let missing: Vec<&String> = evaluator.difference(&table).collect();
+        let extra: Vec<&String> = table.difference(&evaluator).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "SCALAR_FUNCTIONS (or FEATURE_FUNCTIONS) lacks {missing:?} and has {extra:?}, \
+             which the evaluator does not compute"
+        );
     }
 
     #[test]
@@ -605,12 +307,19 @@ mod tests {
     }
 
     #[test]
-    fn every_function_has_a_name_and_numbers_of_arguments() {
-        for &function in BuiltinFunction::ALL {
-            assert!(!function.name().is_empty(), "{function:?} has no name");
+    fn every_entry_of_the_table_has_a_name_and_numbers_of_arguments() {
+        let entries = SCALAR_FUNCTIONS
+            .split_ascii_whitespace()
+            .chain(FEATURE_FUNCTIONS.iter().map(|&(entry, _, _)| entry));
+        for entry in entries {
+            let (name, arity) = split_entry(entry);
             assert!(
-                (0..=8).any(|count| function.arity().accepts(count)),
-                "{function:?}: no number of arguments fits"
+                !name.is_empty() && entry.contains('/'),
+                "{entry:?} has no name or no numbers of arguments"
+            );
+            assert!(
+                (0..=8).any(|count| arity.accepts(count)),
+                "{entry:?}: no number of arguments fits"
             );
         }
     }

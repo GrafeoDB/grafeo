@@ -200,15 +200,17 @@ mod mvcc;
 mod prepared;
 #[cfg(feature = "triple-store")]
 mod rdf;
+#[cfg(feature = "wal")]
+pub(crate) mod v1_group;
 
+#[cfg(all(test, feature = "wal"))]
+pub(crate) use changes::STREAMED_RECORDS;
 #[cfg(feature = "lpg")]
 pub(crate) use changes::{BuiltIndex, StandaloneChange};
 pub(crate) use changes::{
     StreamingChanges, TransactionChanges, UndoFailure, is_kept_by_external_store,
     kept_by_external_store,
 };
-#[cfg(feature = "wal")]
-pub(crate) use manager::CommitGuard;
 pub(crate) use manager::CommitsHeld;
 pub use manager::{
     EntityId, GraphEntity, IsolationLevel, TransactionInfo, TransactionManager, TransactionState,
@@ -217,7 +219,7 @@ pub use manager::{
 pub use mvcc::{VersionChain, VersionInfo};
 #[cfg(feature = "lpg")]
 pub use prepared::{CommitInfo, PreparedCommit};
-#[cfg(all(feature = "triple-store", feature = "cdc"))]
+#[cfg(all(feature = "triple-store", any(feature = "wal", feature = "cdc")))]
 pub(crate) use rdf::ntriples_terms;
 #[cfg(feature = "triple-store")]
 pub(crate) use rdf::{RdfWriter, update_privately};

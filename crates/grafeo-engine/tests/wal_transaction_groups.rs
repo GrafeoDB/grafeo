@@ -291,7 +291,6 @@ mod tests {
                 std::mem::forget(open_tx);
             }
             "seed_alix" => insert(&db.session(), "Alix"),
-            "insert_torn" => insert(&db.session(), "Torn"),
             "insert_gus" => insert(&db.session(), "Gus"),
             other => panic!("unknown scenario {other}"),
         }
@@ -538,40 +537,27 @@ mod tests {
         );
     }
 
-    /// A group a crash cut off before its last frame is cut at open, so the
-    /// next commit, written after it, cannot pick it up.
+    /// Records left without a commit marker by a crash are sealed at open,
+    /// so the next commit cannot pick them up.
     #[test]
     fn torn_tail_is_not_committed_by_a_later_transaction() {
-        use grafeo_storage::file::v3::header::FileHeaderV3;
-        use grafeo_storage::wal::{SEGMENT_HEADER_BYTES, ScanOptions, WalScan, list_wal_directory};
-
         let dir = tempfile::tempdir().unwrap();
         let path = db_path(&dir);
         crash_after("seed_alix", &path);
-        crash_after("insert_torn", &path);
         {
-            // Cut Torn's group in its middle, as a crash while it was
-            // written would: what follows it (a sync marker) goes too.
-            let page = std::fs::read(&path).unwrap();
-            let database_id = FileHeaderV3::decode(&page[..4096]).unwrap().database_id;
-            let (first_lsn, segment) = list_wal_directory(&wal_dir(&path))
-                .unwrap()
-                .segments
-                .pop()
-                .unwrap();
-            let mut scan =
-                WalScan::open(wal_dir(&path), ScanOptions::new(database_id, first_lsn)).unwrap();
-            let mut last = None;
-            while let Some(group) = scan.next_group().unwrap() {
-                last = Some((group.start_lsn(), group.end_lsn()));
-            }
-            let (start, end) = last.expect("Torn's group");
-            let cut = SEGMENT_HEADER_BYTES as u64 + (start - first_lsn) + (end - start) / 2;
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&segment)
-                .unwrap();
-            file.set_len(cut).unwrap();
+            // A group cut off by a crash before its commit marker.
+            let wal = WalManager::open(wal_dir(&path)).unwrap();
+            wal.log(&WalRecord::CreateNode {
+                id: NodeId::new(9_000),
+                labels: vec!["Person".to_string()],
+            })
+            .unwrap();
+            wal.log(&WalRecord::SetNodeProperty {
+                id: NodeId::new(9_000),
+                key: "name".to_string(),
+                value: Value::from("Torn"),
+            })
+            .unwrap();
         }
         crash_after("insert_gus", &path);
         assert_eq!(names(&open(&path)), strings(&["Alix", "Gus"]));

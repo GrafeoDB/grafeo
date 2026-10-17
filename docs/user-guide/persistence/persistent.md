@@ -62,8 +62,6 @@ The sync mode decides when the WAL is flushed to disk (`fsync`). Every mode hand
 
 `Batch` checks its limits when a commit is written. The last commit before an idle period is therefore synced by the next write or by `close()`, not when the delay passes.
 
-A commit becomes visible to other sessions once the WAL holds it as the mode promises: in `Sync` mode after its sync. Commits of several sessions that wait for the disk at the same time share one sync. A transaction or direct call that starts while another commit is still in progress does not wait for it: it reads the last published commit, and a write to something that commit wrote fails with `GRAFEO-T001`, which can be retried. Work that starts after `commit()` returned sees the commit.
-
 The sync mode is set through the Rust `Config` builder; the Python constructor uses the default. Build the modes with settings with `DurabilityMode::batch(max_delay, max_records)` and `DurabilityMode::adaptive(interval)`, in whole milliseconds.
 
 ```rust
@@ -149,32 +147,6 @@ db = grafeo.GrafeoDB(path="my_graph.db")
 result = db.execute("MATCH (p:Person) RETURN p.name")
 # Returns 'Alix'
 ```
-
-### Stored Configuration
-
-A database file stores the settings it was created with that define or protect it: the graph model, backward edges, schema constraints, whether the WAL is on and its sync mode, the memory limit, the section tier overrides, and the spill path when it lies in the database's directory. The thread count and other paths belong to the machine and are not stored.
-
-`GrafeoDB::open(path)` and `Config::read_only(path)` apply the stored values to every setting they do not set themselves. A value set for an open, with a `Config` builder, applies to that open only: the file keeps its stored value. The graph model and the backward edges are fixed when the database is created, so an open that sets another value fails. `db.config()` reports the configuration the database opened with.
-
-```rust
-use grafeo::{Config, DurabilityMode, GrafeoDB};
-
-let db = GrafeoDB::with_config(
-    Config::persistent("berlin.grafeo")
-        .with_memory_limit(512 * 1024 * 1024)
-        .with_wal_durability(DurabilityMode::Sync),
-)?;
-db.close()?;
-
-// Reopened with the memory limit and the sync mode it was created with.
-let db = GrafeoDB::open("berlin.grafeo")?;
-assert_eq!(db.config().memory_limit(), Some(512 * 1024 * 1024));
-
-// Changes what the file stores, for the next open.
-db.set_stored_config(&Config::in_memory().with_memory_limit(1024 * 1024 * 1024))?;
-```
-
-A database written before 0.6.0 stores no configuration and opens with the defaults, as before.
 
 ## Snapshots
 

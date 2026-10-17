@@ -17,12 +17,10 @@
 //! inline.
 
 use super::{
-    BuiltinFunction, Direction, Error, ExpandDirection, FilterExpression, LogicalExpression,
-    LogicalOperator, Result, Value, convert_binary_op, convert_unary_op,
+    Direction, Error, ExpandDirection, FilterExpression, LogicalExpression, LogicalOperator,
+    Result, Value, convert_binary_op, convert_unary_op,
 };
-use crate::query::functions::check_pattern_match;
-use crate::query::plan::Callee;
-use grafeo_common::utils::error::QueryError;
+use crate::query::functions::{check_function_call, check_pattern_match};
 
 impl super::Planner {
     /// Converts a logical expression to a filter expression.
@@ -62,34 +60,19 @@ impl super::Planner {
                     operand: Box::new(operand_expr),
                 })
             }
-            LogicalExpression::FunctionCall {
-                callee, name, args, ..
-            } => {
-                // The translator resolved the call and checked its arguments.
+            LogicalExpression::FunctionCall { name, args, .. } => {
+                // The evaluator answers a call it cannot compute with a null
+                // for every row: refuse it here, before any row is read.
+                check_function_call(name, args.len())?;
                 let filter_args: Vec<FilterExpression> = args
                     .iter()
                     .map(|a| self.convert_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                match callee {
-                    Callee::Builtin(function) => Ok(FilterExpression::FunctionCall {
-                        function: *function,
-                        args: filter_args,
-                    }),
-                    // An aggregate the planner did not group (`WHERE count(p)
-                    // > 0` on a match): the evaluator has no value for it.
-                    Callee::Aggregate(_) => Err(Error::Query(QueryError::semantic(format!(
-                        "Aggregate function '{name}' cannot be used here: it needs a RETURN or WITH that groups rows"
-                    )))),
-                }
+                Ok(FilterExpression::FunctionCall {
+                    name: name.clone(),
+                    args: filter_args,
+                })
             }
-            // SPARQL calls reach only the RDF planner; here they have no value.
-            LogicalExpression::SparqlCall { name, args } => Ok(FilterExpression::SparqlCall {
-                name: name.clone(),
-                args: args
-                    .iter()
-                    .map(|a| self.convert_expression(a))
-                    .collect::<Result<Vec<_>>>()?,
-            }),
             LogicalExpression::Case {
                 operand,
                 when_clauses,
@@ -276,7 +259,7 @@ impl super::Planner {
                             Ok((
                                 "*".to_string(),
                                 FilterExpression::FunctionCall {
-                                    function: BuiltinFunction::Properties,
+                                    name: "properties".to_string(),
                                     args: vec![FilterExpression::Variable(base.clone())],
                                 },
                             ))
@@ -461,17 +444,15 @@ impl super::Planner {
     /// The variable and label of a `hasLabel(variable, 'Label')` predicate.
     fn label_condition<'a>(&self, predicate: &'a LogicalExpression) -> Option<(&'a str, String)> {
         match predicate {
-            LogicalExpression::FunctionCall {
-                callee: Callee::Builtin(BuiltinFunction::HasLabel),
-                args,
-                ..
-            } => match (args.first(), args.get(1)) {
-                (
-                    Some(LogicalExpression::Variable(variable)),
-                    Some(LogicalExpression::Literal(Value::String(label))),
-                ) => Some((variable, label.to_string())),
-                _ => None,
-            },
+            LogicalExpression::FunctionCall { name, args, .. } if name == "hasLabel" => {
+                match (args.first(), args.get(1)) {
+                    (
+                        Some(LogicalExpression::Variable(variable)),
+                        Some(LogicalExpression::Literal(Value::String(label))),
+                    ) => Some((variable, label.to_string())),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }

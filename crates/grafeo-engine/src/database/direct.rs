@@ -50,7 +50,7 @@ use grafeo_core::execution::operators::{
 };
 use grafeo_core::graph::apply::{ChangeTarget, Writer};
 use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
-use grafeo_core::graph::{Direction, GraphStoreMut, GraphStoreSearch};
+use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
 
 use super::GrafeoDB;
 use crate::catalog::CatalogConstraintValidator;
@@ -338,7 +338,7 @@ impl GrafeoDB {
         // what it wrote is committed and logged first.
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&call.writer)));
-        self.finish_immediate(call, store)?;
+        self.finish_immediate(call, store);
         match outcome {
             Ok(result) => result.map_err(crate::query::executor::convert_operator_error),
             Err(panic) => std::panic::resume_unwind(panic),
@@ -386,17 +386,7 @@ impl GrafeoDB {
 
     /// Finishes a direct call that commits at once: logs what it wrote,
     /// publishes its epoch, reports its changes to change data capture.
-    ///
-    /// # Errors
-    ///
-    /// [`TransactionError::CommitOutcomeUnknown`] when its WAL group is not
-    /// written or not made durable: its writes are applied and stamped at an
-    /// epoch nobody reads, and cannot be taken back, so the epoch is not
-    /// published and the database is poisoned; a reopen decides from the log
-    /// whether the call happened.
-    ///
-    /// [`TransactionError::CommitOutcomeUnknown`]: grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown
-    fn finish_immediate(&self, call: ImmediateCall<'_>, store: &Arc<LpgStore>) -> Result<()> {
+    fn finish_immediate(&self, call: ImmediateCall<'_>, store: &Arc<LpgStore>) {
         let ImmediateCall {
             commits,
             root,
@@ -409,16 +399,20 @@ impl GrafeoDB {
         #[cfg(feature = "wal")]
         if let Some(wal) = &self.wal
             && !changes.is_empty()
-            && let Err(error) = Self::log_immediate(wal, &changes, epoch)
         {
-            self.transaction_manager.poison(&format!(
-                "a direct write at epoch {epoch:?} is applied but not in the WAL: {error}"
-            ));
-            return Err(Error::Transaction(
-                grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown(
-                    error.to_string(),
-                ),
-            ));
+            use grafeo_storage::wal::WalRecord;
+            let group = crate::transaction::v1_group::build_group(
+                crate::transaction::v1_group::v1_records(&changes),
+                &[
+                    WalRecord::TransactionCommit {
+                        transaction_id: TransactionId::SYSTEM,
+                    },
+                    WalRecord::EpochAdvance { epoch },
+                ],
+            );
+            if let Err(e) = wal.log_batch(&group) {
+                grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
+            }
         }
         // Reported before the epoch is published, while commits are held
         // off: in epoch order, as a commit reports its changes.
@@ -432,34 +426,6 @@ impl GrafeoDB {
         self.transaction_manager.sync_epoch(epoch);
         drop(commits);
         self.prune_versions(&root, store);
-        Ok(())
-    }
-
-    /// Writes the WAL group of a direct call that committed at once at
-    /// `epoch`, which wrote `changes`.
-    ///
-    /// # Errors
-    ///
-    /// The group's error: it is cut back when it was not written.
-    #[cfg(feature = "wal")]
-    fn log_immediate(
-        wal: &grafeo_storage::wal::Wal,
-        changes: &grafeo_common::change::ChangeSet,
-        epoch: EpochId,
-    ) -> Result<()> {
-        let mut group = wal
-            .begin_group(TransactionId::SYSTEM)
-            .map_err(crate::database::wal_log::commit_error)?;
-        crate::database::wal_log::write_group(
-            &mut group,
-            changes,
-            epoch,
-            grafeo_common::storage::log_record::Origin::Direct,
-        )?;
-        group
-            .finish()
-            .map(|_| ())
-            .map_err(crate::database::wal_log::commit_error)
     }
 
     /// The writer of a direct call on `store` (the graph with storage key
@@ -480,7 +446,7 @@ impl GrafeoDB {
             .map(|(schema, _)| schema);
         let mut validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
             .with_store(Arc::clone(store) as Arc<dyn GraphStoreSearch>)
-            .with_max_property_size(self.config.max_property_size())
+            .with_max_property_size(self.config.max_property_size)
             .with_transaction_context(context.0, context.1)
             .with_schema(schema);
         if let Some(graph) = graph {
@@ -519,9 +485,9 @@ impl GrafeoDB {
     /// Every `gc_interval` commits, prunes the versions no reader needs, in
     /// the root store and `store`.
     fn prune_versions(&self, root: &Arc<LpgStore>, store: &Arc<LpgStore>) {
-        if self.config.gc_interval() > 0 {
+        if self.config.gc_interval > 0 {
             let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if count.is_multiple_of(self.config.gc_interval()) {
+            if count.is_multiple_of(self.config.gc_interval) {
                 let min_epoch = self.transaction_manager.min_active_epoch();
                 root.gc_versions(min_epoch);
                 if !Arc::ptr_eq(root, store) {
@@ -631,64 +597,46 @@ impl GrafeoDB {
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_held_change();
 
-        // The group is in the log before anything of the commit is stamped
-        // (#498): one that is not written takes the commit back, and the
-        // call is rolled back.
-        #[cfg(feature = "wal")]
-        let (commit, logged) = match &self.wal {
-            Some(wal) => match crate::database::wal_log::write_commit(
-                wal,
-                commit,
-                transaction,
-                changes,
-                grafeo_common::storage::log_record::Origin::Direct,
-            ) {
-                Ok(written) => written,
-                Err(error) => {
-                    if self.transaction_manager.state(transaction)
-                        == Some(crate::transaction::TransactionState::Active)
-                    {
-                        let _ = self.rollback_private(transaction, changes);
-                    }
-                    return Err(error);
-                }
-            },
-            None => (commit, None),
-        };
+        // A store that fails to stamp leaves the commit half done: the
+        // guard, dropped uncompleted, poisons the database.
+        changes.stamp(epoch).map_err(|error| {
+            Error::Internal(format!(
+                "the commit of a direct write could not stamp its changes: {error}"
+            ))
+        })?;
 
-        // As a session's commit: the commit lock goes once the group is
-        // written, the sync comes after it, then the ordered publish.
-        let publish = commit.written();
         #[cfg(feature = "wal")]
-        if let (Some(wal), Some(logged)) = (&self.wal, logged) {
-            crate::database::wal_log::sync_commit(wal, logged)?;
+        if let Some(wal) = &self.wal
+            && !changes.is_empty()
+        {
+            use grafeo_storage::wal::WalRecord;
+            let records = changes.read(crate::transaction::v1_group::v1_records);
+            let group = crate::transaction::v1_group::build_group(
+                records,
+                &[
+                    WalRecord::TransactionCommit {
+                        transaction_id: transaction,
+                    },
+                    WalRecord::EpochAdvance { epoch },
+                ],
+            );
+            if let Err(e) = wal.log_batch(&group) {
+                grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
+            }
         }
 
+        // Reported in the commit's ordered step, before its epoch is
+        // published.
+        #[cfg(feature = "cdc")]
+        if self.cdc_active() {
+            changes.read(|set| self.cdc_log.record_commit(set, epoch));
+        }
+
+        // The database has one epoch: the root store follows every commit
+        // (the stamp moved the written store's).
         let root = self.lpg_store();
-        let published = publish.complete_with(|| {
-            // A store that fails to stamp leaves the commit half done: it is
-            // not published, which poisons the database.
-            changes.stamp(epoch).map_err(|error| {
-                Error::Internal(format!(
-                    "the commit of a direct write could not stamp its changes: {error}"
-                ))
-            })?;
-
-            // Reported in epoch order, before the epoch is published.
-            #[cfg(feature = "cdc")]
-            if self.cdc_active() {
-                changes.read(|set| self.cdc_log.record_commit(set, epoch));
-            }
-
-            // The database has one epoch: the root store follows every
-            // commit (the stamp moved the written store's).
-            root.sync_epoch(epoch);
-            Ok(())
-        });
-        #[cfg(feature = "wal")]
-        let published = published
-            .map_err(|error| crate::database::wal_log::publish_error(error, logged.is_some()));
-        published?;
+        root.sync_epoch(epoch);
+        commit.complete()?;
 
         self.prune_versions(&root, store);
         Ok(())
@@ -810,10 +758,6 @@ impl DirectCalls<'_> {
         self.write(|writer| writer.delete_node(id, false))
     }
 
-    pub(crate) fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
-        self.write(|writer| writer.delete_node(id, true))
-    }
-
     pub(crate) fn delete_edge(&self, id: EdgeId) -> Result<bool> {
         self.write(|writer| writer.delete_edge(id))
     }
@@ -848,66 +792,6 @@ impl DirectCalls<'_> {
         let epoch = self.db.read_epoch();
         Ok(self.store()?.get_edge_at_epoch(id, epoch))
     }
-
-    pub(crate) fn get_node_edges(
-        &self,
-        node: NodeId,
-        direction: Direction,
-        edge_types: &[&str],
-    ) -> Result<Vec<(NodeId, EdgeId)>> {
-        let epoch = self.db.read_epoch();
-        let store = self.store()?;
-        let node_visible = store.is_node_visible_at_epoch(node, epoch);
-        Ok(node_edges(
-            &*store,
-            node,
-            direction,
-            edge_types,
-            node_visible,
-            |edge| store.is_edge_visible_at_epoch(edge, epoch),
-            |edge| store.edge_type(edge),
-        ))
-    }
-}
-
-/// The edges of `node` in `direction` that `edge_visible` lets through, as
-/// `(neighbor, edge)` pairs, only those whose `edge_type` is one of
-/// `edge_types` unless it is empty; none when the node is not visible.
-/// `Direction::Both` lists a self-loop once. The reader's `edge_type` must see
-/// what `edge_visible` lets through (a transaction's own edges included).
-pub(crate) fn node_edges(
-    store: &dyn GraphStoreSearch,
-    node: NodeId,
-    direction: Direction,
-    edge_types: &[&str],
-    node_visible: bool,
-    edge_visible: impl Fn(EdgeId) -> bool,
-    edge_type: impl Fn(EdgeId) -> Option<ArcStr>,
-) -> Vec<(NodeId, EdgeId)> {
-    if !node_visible {
-        return Vec::new();
-    }
-    let mut edges = match direction {
-        Direction::Both => {
-            let mut edges = store.edges_from(node, Direction::Outgoing);
-            // A self-loop is in both lists; keep its outgoing entry.
-            edges.extend(
-                store
-                    .edges_from(node, Direction::Incoming)
-                    .into_iter()
-                    .filter(|&(neighbor, _)| neighbor != node),
-            );
-            edges
-        }
-        _ => store.edges_from(node, direction),
-    };
-    edges.retain(|&(_, edge)| {
-        edge_visible(edge)
-            && (edge_types.is_empty()
-                || edge_type(edge)
-                    .is_some_and(|edge_type| edge_types.contains(&edge_type.as_str())))
-    });
-    edges
 }
 
 // === The writes of the direct API, shared with `Session` ===

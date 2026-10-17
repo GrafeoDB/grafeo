@@ -607,21 +607,11 @@ fn migrate_child() {
     }
 }
 
-/// The crash points of a read-write open after its migration: the WAL's first
-/// segment is created, its header written and the directory synced. The
-/// migration is over (its lock removed) when they are reached.
-#[cfg(feature = "testing-crash-injection")]
-const OPEN_WAL_POINTS: [&str; 3] = [
-    "wal:after_segment_create",
-    "wal:after_segment_header",
-    "wal:before_dir_sync",
-];
-
 /// For each crash point of a read-write open of the files `arrange` puts at a
 /// path, and once past the last: runs the open in a child process that crashes
 /// there, then checks that an open in this process finds the 0.5.x files of
 /// `kept` migrated ([`assert_migrated`]). Checks that the open reaches exactly
-/// `points`, then [`OPEN_WAL_POINTS`], in order, and then completes.
+/// `points`, in order, and then completes.
 ///
 /// A crash before the old database moved (`migrate:renamed:.pre-0.6`) may
 /// leave an empty `LOCK` in a directory that had none: the migration created
@@ -631,13 +621,8 @@ const OPEN_WAL_POINTS: [&str; 3] = [
 /// directory may hold it ([`assert_kept_with`]); one kept after a later
 /// crash, or after none, is the original exactly.
 #[cfg(feature = "testing-crash-injection")]
-fn sweep_crashes(arrange: impl Fn(&Path), migration_points: &[&str], kept: &Kept) {
+fn sweep_crashes(arrange: impl Fn(&Path), points: &[&str], kept: &Kept) {
     let expected = kept_contents(kept);
-    let points: Vec<&str> = migration_points
-        .iter()
-        .copied()
-        .chain(OPEN_WAL_POINTS)
-        .collect();
     // The last crash point (1-based) at which the lock is still held.
     let moved_at = points
         .iter()
@@ -654,7 +639,7 @@ fn sweep_crashes(arrange: impl Fn(&Path), migration_points: &[&str], kept: &Kept
             "crash_point={crash_point} ({})",
             crashed_at.as_deref().unwrap_or("no crash")
         );
-        if crashed_at.is_some() && crash_point <= migration_points.len() {
+        if crashed_at.is_some() {
             assert!(
                 with_suffix(&path, ".migrate.lock").exists(),
                 "{context}: a crash inside the migration leaves its lock file"

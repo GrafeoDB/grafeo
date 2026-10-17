@@ -56,11 +56,6 @@ func (db *Database) GetNode(id uint64) (*Node, error) {
 		return nil, err
 	}
 	runtime.UnlockOSThread()
-	return nodeFromC(cNode), nil
-}
-
-// nodeFromC copies and frees a node a C call handed out.
-func nodeFromC(cNode *C.GrafeoNode) *Node {
 	defer C.grafeo_free_node(cNode)
 
 	nodeID := uint64(C.grafeo_node_id(cNode))
@@ -80,27 +75,13 @@ func nodeFromC(cNode *C.GrafeoNode) *Node {
 		props = make(map[string]any)
 	}
 
-	return &Node{ID: nodeID, Labels: labels, Properties: props}
+	return &Node{ID: nodeID, Labels: labels, Properties: props}, nil
 }
 
 // DeleteNode deletes a node by ID. Returns true if the node existed.
 func (db *Database) DeleteNode(id uint64) (bool, error) {
 	runtime.LockOSThread()
 	result := int(C.grafeo_delete_node(db.handle, C.uint64_t(id)))
-	if result < 0 {
-		err := lastError()
-		runtime.UnlockOSThread()
-		return false, err
-	}
-	runtime.UnlockOSThread()
-	return result == 1, nil
-}
-
-// DetachDeleteNode deletes a node with all its edges, as DETACH DELETE does.
-// Returns true if the node existed; the node and its edges are one change.
-func (db *Database) DetachDeleteNode(id uint64) (bool, error) {
-	runtime.LockOSThread()
-	result := int(C.grafeo_detach_delete_node(db.handle, C.uint64_t(id)))
 	if result < 0 {
 		err := lastError()
 		runtime.UnlockOSThread()

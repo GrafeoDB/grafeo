@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // tempDbPath creates a temp directory and returns (dir, dbPath).
@@ -153,93 +152,6 @@ func TestMultipleReopenCycles(t *testing.T) {
 	}
 	if len(result.Rows) != 3 {
 		t.Fatalf("expected 3 rows, got %d", len(result.Rows))
-	}
-}
-
-func TestDetachDeleteNode(t *testing.T) {
-	db, err := OpenInMemory()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	for _, query := range []string{
-		"INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})",
-		"MATCH (a:Person {name: 'Alix'}) INSERT (a)-[:KNOWS]->(:Person {name: 'Vincent'})",
-	} {
-		if _, err := db.Execute(query); err != nil {
-			t.Fatal(err)
-		}
-	}
-	result, err := db.Execute("MATCH (a:Person {name: 'Alix'}) RETURN id(a) AS id")
-	if err != nil {
-		t.Fatal(err)
-	}
-	number, ok := result.Rows[0]["id"].(json.Number)
-	if !ok {
-		t.Fatalf("expected a number id, got %T", result.Rows[0]["id"])
-	}
-	id, err := number.Int64()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.DeleteNode(uint64(id)); err == nil {
-		t.Error("expected DeleteNode to refuse a node with edges")
-	}
-	deleted, err := db.DetachDeleteNode(uint64(id))
-	if err != nil || !deleted {
-		t.Fatalf("expected the detach delete to succeed, got %v, %v", deleted, err)
-	}
-	if db.NodeCount() != 2 || db.EdgeCount() != 0 {
-		t.Errorf("expected 2 nodes and no edges, got %d and %d", db.NodeCount(), db.EdgeCount())
-	}
-}
-
-func TestCheckpointTriggersReadBack(t *testing.T) {
-	_, dbPath := tempDbPath(t, "triggers.grafeo")
-
-	db, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	if err := db.SetCheckpointTriggers(300*time.Millisecond, 64<<20); err != nil {
-		t.Fatal(err)
-	}
-	status, err := db.CheckpointStatus()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status.IntervalMs == nil || *status.IntervalMs != 300 {
-		t.Errorf("expected an interval of 300 ms, got %v", status.IntervalMs)
-	}
-	if status.WalBytes == nil || *status.WalBytes != 64<<20 {
-		t.Errorf("expected a WAL size of 64 MiB, got %v", status.WalBytes)
-	}
-	if status.Failures != 0 || status.Stopped {
-		t.Errorf("expected no failures, got %+v", status)
-	}
-
-	if err := db.SetCheckpointTriggers(0, 0); err != nil {
-		t.Fatal(err)
-	}
-	status, err = db.CheckpointStatus()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status.IntervalMs != nil || status.WalBytes != nil {
-		t.Errorf("expected the triggers off, got %+v", status)
-	}
-}
-
-func TestCheckpointTriggersRefusedInMemory(t *testing.T) {
-	db, err := OpenInMemory()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := db.SetCheckpointTriggers(0, 1024); err == nil {
-		t.Error("expected an in-memory database to refuse checkpoint triggers")
 	}
 }
 

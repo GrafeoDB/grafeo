@@ -145,12 +145,8 @@ if [[ "$FEATURES" == *"full"* ]]; then
 else
     # Raised from 740 and 760 KB in 0.6.0, whose query fixes (clauses after a
     # write, refusing data a build cannot read) brought the build to 760 KB.
-    # TODO(wasm): the 0.6.0 native property-path execution (RDF path store and
-    # budget) grew the browser bundle to ~801 KB gzipped, just over the old
-    # 800 KB limit. Re-baseline after the release, or shrink the bundle (strip
-    # unused RDF path code paths) to get back under 800 KB.
-    WARN_THRESHOLD=829440    # 810 KB
-    FAIL_THRESHOLD=870400    # 850 KB
+    WARN_THRESHOLD=798720    # 780 KB
+    FAIL_THRESHOLD=819200    # 800 KB
     LABEL="browser profile"
 fi
 

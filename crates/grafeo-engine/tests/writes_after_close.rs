@@ -515,9 +515,10 @@ fn a_closed_handle_overwrites_nothing_a_later_handle_wrote() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("paris.grafeo");
     let config = || {
-        Config::persistent(&path)
-            .with_checkpoint_interval(std::time::Duration::from_millis(50))
-            .without_wal()
+        let mut config = Config::persistent(&path)
+            .with_checkpoint_interval(std::time::Duration::from_millis(50));
+        config.wal_enabled = false;
+        config
     };
 
     let first = GrafeoDB::with_config(config()).unwrap();

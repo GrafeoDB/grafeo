@@ -12,8 +12,6 @@ use super::{
 
 #[cfg(all(feature = "vector-index", feature = "text-index"))]
 use super::{FilterOp, HashJoinOperator, PhysicalJoinType};
-#[cfg(feature = "text-index")]
-use crate::query::plan::{BuiltinFunction, Callee};
 
 // ============================================================================
 // Text predicate extraction and pushdown
@@ -111,11 +109,8 @@ impl super::Planner {
         match expr {
             LogicalExpression::Binary { left, op, right } => {
                 // text_score(n.prop, "query") > threshold
-                if let LogicalExpression::FunctionCall {
-                    callee: Callee::Builtin(BuiltinFunction::TextScore),
-                    args,
-                    ..
-                } = left.as_ref()
+                if let LogicalExpression::FunctionCall { name, args, .. } = left.as_ref()
+                    && name == "text_score"
                     && matches!(op, BinaryOp::Gt | BinaryOp::Ge)
                     && let Some(extracted) = self.try_extract_text_fn(args, right)
                 {
@@ -151,11 +146,9 @@ impl super::Planner {
                 None
             }
             // text_match(n.prop, "query") — standalone boolean (score > 0.0)
-            LogicalExpression::FunctionCall {
-                callee: Callee::Builtin(BuiltinFunction::TextMatch),
-                args,
-                ..
-            } => self.try_extract_text_fn(args, &LogicalExpression::Literal(Value::Float64(0.0))),
+            LogicalExpression::FunctionCall { name, args, .. } if name == "text_match" => {
+                self.try_extract_text_fn(args, &LogicalExpression::Literal(Value::Float64(0.0)))
+            }
             _ => None,
         }
     }
@@ -520,7 +513,6 @@ mod text_extract_tests {
 
     fn text_score_call(var: &str, prop: &str, query: &str) -> LogicalExpression {
         LogicalExpression::FunctionCall {
-            callee: crate::query::plan::Callee::named("text_score"),
             name: "text_score".to_string(),
             args: vec![property(var, prop), literal_string(query)],
             distinct: false,
@@ -529,7 +521,6 @@ mod text_extract_tests {
 
     fn text_match_call(var: &str, prop: &str, query: &str) -> LogicalExpression {
         LogicalExpression::FunctionCall {
-            callee: crate::query::plan::Callee::named("text_match"),
             name: "text_match".to_string(),
             args: vec![property(var, prop), literal_string(query)],
             distinct: false,
@@ -558,7 +549,6 @@ mod text_extract_tests {
         // guard in try_extract_text_fn returns None.
         let planner = test_planner();
         let single_arg_call = LogicalExpression::FunctionCall {
-            callee: crate::query::plan::Callee::named("text_score"),
             name: "text_score".to_string(),
             args: vec![property("doc", "body")],
             distinct: false,
@@ -577,7 +567,6 @@ mod text_extract_tests {
         // let-else in try_extract_text_fn.
         let planner = test_planner();
         let call = LogicalExpression::FunctionCall {
-            callee: crate::query::plan::Callee::named("text_score"),
             name: "text_score".to_string(),
             args: vec![literal_string("not a property"), literal_string("query")],
             distinct: false,
@@ -913,7 +902,6 @@ mod compound_hybrid_tests {
 
     fn text_score_call(var: &str, prop: &str, query: &str) -> LogicalExpression {
         LogicalExpression::FunctionCall {
-            callee: crate::query::plan::Callee::named("text_score"),
             name: "text_score".to_string(),
             args: vec![property(var, prop), literal_string(query)],
             distinct: false,
@@ -922,7 +910,6 @@ mod compound_hybrid_tests {
 
     fn cosine_call(var: &str, prop: &str, query_vec: &[f32]) -> LogicalExpression {
         LogicalExpression::FunctionCall {
-            callee: crate::query::plan::Callee::named("cosine_similarity"),
             name: "cosine_similarity".to_string(),
             args: vec![property(var, prop), literal_vec(query_vec)],
             distinct: false,

@@ -947,8 +947,6 @@ for case_id, query, languages in [
 #     that parse as it and numbers within EPSILON equal; the lookups of an index found
 #     their exact value only, and a constant key on a label scan without an index used a
 #     stricter `=` of its own. AV1 to AV8 without an index, AV9 to AV16 with one
-#     An IN list in an AND chain takes the index too (#456): AV17 and AV18 without one, AV19
-#     and AV20 with one
 for case_id, query, fixture in [
     ("AV1", "MATCH (d:Doc) WHERE d.p = 42 RETURN d.n AS n", "mixed"),
     ("AV2", "MATCH (d:Doc) WHERE d.p = 42.0 RETURN d.n AS n", "mixed"),
@@ -966,10 +964,6 @@ for case_id, query, fixture in [
     ("AV14", "MATCH (o:Other) MATCH (d:Doc) WHERE d.p = 0.3 RETURN d.n AS n", "mixed_indexed"),
     ("AV15", "MATCH (d) WHERE d.p = 42 RETURN d.n AS n", "mixed_indexed"),
     ("AV16", "MATCH (a:Doc {n: 'int'}) MATCH (b:Doc) WHERE id(b) = toString(id(a)) RETURN b.n AS n", "mixed_indexed"),
-    ("AV17", "MATCH (d:Doc) WHERE d.p IN [42, 0.3, 'abc'] AND d.n <> 'float' RETURN d.n AS n", "mixed"),
-    ("AV18", "MATCH (d) WHERE d.n STARTS WITH 's' AND d.p IN ['42', 0.3] RETURN d.n AS n", "mixed"),
-    ("AV19", "MATCH (d:Doc) WHERE d.p IN [42, 0.3, 'abc'] AND d.n <> 'float' RETURN d.n AS n", "mixed_indexed"),
-    ("AV20", "MATCH (d) WHERE d.n STARTS WITH 's' AND d.p IN ['42', 0.3] RETURN d.n AS n", "mixed_indexed"),
 ]:
     case(case_id, query, BOTH, fixture)
 
@@ -1449,21 +1443,5 @@ for case_id, query, is_ordered in [
     ("BT8", "MATCH (p:Person) RETURN p.name AS name, count(*) + p.age AS n GROUP BY p.name", False),
 ]:
     case(case_id, query, GQL, "social", is_ordered)
-
-# BU: CREATE GRAPH ... AS COPY OF copies the source's nodes, edges, labels and properties
-#     (#423; it created an empty graph), on the `writes` fixture after the BS cases: the
-#     copy holds both people and their edge (BU6, BU7), then the session goes back to the
-#     default graph for the cases after it (BU8)
-for case_id, query in [
-    ("BU1", "CREATE GRAPH copy_src"),
-    ("BU2", "USE GRAPH copy_src"),
-    ("BU3", "INSERT (:Person {name: 'Mia', w: 106})-[:KNOWS {since: 2019, w: 6}]->(:Person {name: 'Butch', w: 107})"),
-    ("BU4", "CREATE GRAPH copy_dst AS COPY OF copy_src"),
-    ("BU5", "USE GRAPH copy_dst"),
-    ("BU6", "MATCH (p:Person) RETURN p.name, p.w"),
-    ("BU7", "MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN a.name, b.name, k.since, k.w"),
-    ("BU8", "USE GRAPH default"),
-]:
-    case(case_id, query, GQL, "writes")
 
 # fmt: on

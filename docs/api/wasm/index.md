@@ -36,7 +36,7 @@ const db = new Database();   // in-memory (all WASM databases are in-memory)
 
 ```javascript
 db.execute(gql);                              // GQL: returns array of row objects
-db.executeRaw(gql);                          // GQL: returns {columns, rows, executionTimeMs, counters}
+db.executeRaw(gql);                          // GQL: returns {columns, rows, executionTimeMs}
 db.executeWithParams(gql, params);           // GQL with parameter binding
 db.executeWithLanguage(query, language);     // "gql", "cypher", "graphql", etc.
 db.executeWithLanguageAndParams(query, language, params);  // language + params
@@ -50,13 +50,9 @@ db.executeRawWithParams(gql, params);        // raw result with parameter bindin
 db.executeRawWithLanguageAndParams(query, language, params);  // raw result, language + params
 ```
 
-A raw result's `counters` tell what a write changed: `nodesCreated`, `nodesDeleted`, `edgesCreated`,
-`edgesDeleted`, `propertiesSet`, `labelsAdded` and `labelsRemoved` (all zero for a read).
-
 ## Properties
 
 ```javascript
-db.getNodeEdges(id, { direction: "out", edgeTypes: ["KNOWS"] });  // [[neighborId, edgeId], ...]
 db.nodeCount();   // number of nodes
 db.edgeCount();   // number of edges
 db.schema();      // database schema as JSON
@@ -127,45 +123,6 @@ console.log(result); // { nodes: 2, edges: 1 }
 ```
 
 Edge `source` and `target` are zero-based indexes into the `nodes` array from the same call.
-
-### Batches and Upserts
-
-The batches, upserts and graph handles (below) need the `direct-api` feature, which the `lpg` and
-`full` builds include (`@grafeo-db/wasm`); the lite `edge` build leaves them out to keep its size.
-
-```javascript
-// One transaction each; IDs in input order
-const ids = db.batchCreateNodesWithProps(["Person"], [{ name: "Alix" }, { name: "Gus" }]);
-db.batchCreateEdges([{ src: ids[0], dst: ids[1], type: "KNOWS", properties: { since: 2020 } }]);
-
-// Create or update by a key property: {created, updated, skipped, skippedRows}
-db.upsertNodes(["File"], [{ path: "a.rs", size: 3 }], { key: "path" });
-db.upsertEdges("IMPORTS", [{ id: "a-b", src: "a.rs", dst: "b.rs" }],
-    { endpointKey: "path", endpointLabels: ["File"] });
-```
-
-An edge to a missing node fails the edge batch and writes nothing. A node row without the key is
-skipped, and so is an edge row whose endpoint matches no node or several; endpoints are never
-created. The upsert options are `key` and `replace`, and for edges also `endpointKey`,
-`endpointLabels`, `srcField` and `dstField`. Upserts run in the open transaction when there is one;
-the batches commit on their own, so they throw while a transaction is open.
-
-With the `vector-index` feature, `db.batchVectorSearch(label, property, queries, k, { ef, filters })`
-searches several query vectors at once and returns one `[{id, distance}]` array per query.
-
-### Named Graphs
-
-With the `direct-api` feature, `db.graph(name)` returns a `GraphHandle` that works in one named graph without switching the current
-graph: the `execute*` and `executeRaw*` methods, `batchCreateNodesWithProps`, `batchCreateEdges`,
-`upsertNodes`, `upsertEdges`, and its `name`. Each call runs on its own, so a call throws while the
-database has a transaction open, once the graph is dropped, and after `db.close()`.
-
-```javascript
-db.execute("CREATE GRAPH trips");
-const trips = db.graph("trips");
-trips.execute("INSERT (:City {name: 'Prague'})");
-trips.execute("MATCH (c:City) RETURN c.name");  // the default graph stays empty
-```
 
 ### RDF Import
 

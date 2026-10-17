@@ -526,7 +526,6 @@ impl ExternalTarget {
             dst: edge.dst,
             edge_type: edge.edge_type.clone(),
             properties: sorted(edge.properties.iter()),
-            deleted_with: None,
         };
         let deleted = match writer {
             Writer::Transaction {
@@ -906,7 +905,6 @@ mod tests {
                 dst: gus,
                 edge_type: ArcStr::from("KNOWS"),
                 properties: vec![(key("since"), Value::Int64(3))],
-                deleted_with: None,
             })))
         );
         let Ok(Applied::Changed {

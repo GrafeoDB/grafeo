@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use grafeo_common::types::Value;
-pub use grafeo_core::execution::operators::BuiltinFunction;
 
 /// A count expression for SKIP/LIMIT: either a resolved literal or an unresolved parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,9 +195,6 @@ pub enum LogicalOperator {
     /// Scan RDF triples matching a pattern.
     TripleScan(TripleScanOp),
 
-    /// Unbounded RDF endpoint reachability through a finite property path.
-    PropertyPath(PropertyPathOp),
-
     /// Union of multiple result sets.
     Union(UnionOp),
 
@@ -384,11 +380,9 @@ impl LogicalOperator {
             Self::ShortestPath(op) => op.input.has_mutations(),
 
             // Leaf operators (read-only)
-            Self::PropertyPath(_)
-            | Self::Empty
-            | Self::ParameterScan(_)
-            | Self::CallProcedure(_)
-            | Self::LoadData(_) => false,
+            Self::Empty | Self::ParameterScan(_) | Self::CallProcedure(_) | Self::LoadData(_) => {
+                false
+            }
             Self::Construct(op) => op.input.has_mutations(),
         }
     }
@@ -454,7 +448,6 @@ impl LogicalOperator {
 
             // Leaf operators
             Self::Empty
-            | Self::PropertyPath(_)
             | Self::ParameterScan(_)
             | Self::CallProcedure(_)
             | Self::ClearGraph(_)
@@ -667,7 +660,6 @@ impl LogicalOperator {
 
             // Leaf operators
             leaf @ (Self::Empty
-            | Self::PropertyPath(_)
             | Self::ParameterScan(_)
             | Self::CallProcedure(_)
             | Self::ClearGraph(_)
@@ -687,13 +679,6 @@ impl LogicalOperator {
     #[must_use]
     pub fn display_label(&self) -> String {
         match self {
-            Self::PropertyPath(op) => format!(
-                "{} {:?}{} {}",
-                fmt_triple_component(&op.subject),
-                op.path,
-                if op.zero_length { "*" } else { "+" },
-                fmt_triple_component(&op.object),
-            ),
             Self::NodeScan(op) => {
                 let label = op.label.as_deref().unwrap_or("*");
                 format!("{}:{}", op.variable, label)
@@ -1024,8 +1009,7 @@ impl LogicalOperator {
                 }
             }
             // RDF and graph management plans have no node patterns to close.
-            Self::PropertyPath(_)
-            | Self::TripleScan(_)
+            Self::TripleScan(_)
             | Self::Construct(_)
             | Self::InsertTriple(_)
             | Self::DeleteTriple(_)
@@ -1470,9 +1454,6 @@ impl LogicalOperator {
                     var = op.variable,
                 );
             }
-            Self::PropertyPath(_) => {
-                let _ = writeln!(out, "{indent}PropertyPath ({})", self.display_label());
-            }
             Self::TripleScan(op) => {
                 let _ = writeln!(
                     out,
@@ -1568,8 +1549,7 @@ fn fmt_expr(expr: &LogicalExpression) -> String {
         LogicalExpression::Unary { op, operand } => {
             format!("{op:?} {}", fmt_expr(operand))
         }
-        LogicalExpression::FunctionCall { name, args, .. }
-        | LogicalExpression::SparqlCall { name, args } => {
+        LogicalExpression::FunctionCall { name, args, .. } => {
             let arg_strs: Vec<String> = args.iter().map(fmt_expr).collect();
             format!("{name}({})", arg_strs.join(", "))
         }
@@ -1816,44 +1796,6 @@ pub struct AggregateExpr {
     pub separator: Option<String>,
 }
 
-/// What a call resolves to: a built-in function, or an aggregate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Callee {
-    /// A built-in function the expression evaluator computes.
-    Builtin(BuiltinFunction),
-    /// An aggregate, which groups rows.
-    Aggregate(AggregateFunction),
-}
-
-#[cfg(test)]
-impl Callee {
-    /// The callee `name` resolves to, for tests that build calls by hand.
-    ///
-    /// # Panics
-    ///
-    /// When `name` is neither an aggregate nor a built-in function.
-    pub(crate) fn named(name: &str) -> Self {
-        AggregateFunction::from_name(name)
-            .map(Self::Aggregate)
-            .or_else(|| BuiltinFunction::from_name(name).map(Self::Builtin))
-            .unwrap_or_else(|| panic!("{name} is no function"))
-    }
-}
-
-impl LogicalExpression {
-    /// A call of `function` the planner or a translator makes itself (a
-    /// label in a pattern becomes `hasLabel`), named by the function's name.
-    #[must_use]
-    pub fn builtin(function: BuiltinFunction, args: Vec<LogicalExpression>) -> Self {
-        Self::FunctionCall {
-            callee: Callee::Builtin(function),
-            name: function.name().to_string(),
-            args,
-            distinct: false,
-        }
-    }
-}
-
 /// Aggregate function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1912,71 +1854,6 @@ pub enum AggregateFunction {
     RegrAvgx,
     /// Regression average of y (REGR_AVGY(y, x)).
     RegrAvgy,
-}
-
-impl AggregateFunction {
-    /// Every spelling of an aggregate, with its function; case does not
-    /// matter. `count` is [`Count`](Self::Count): the translators turn
-    /// `count(x)` into [`CountNonNull`](Self::CountNonNull) themselves.
-    #[cfg(any(
-        test,
-        feature = "gql",
-        feature = "cypher",
-        feature = "sql-pgq",
-        feature = "sparql"
-    ))]
-    pub(crate) const ALIASES: &'static [(&'static str, AggregateFunction)] = &[
-        ("count", Self::Count),
-        ("sum", Self::Sum),
-        ("avg", Self::Avg),
-        ("min", Self::Min),
-        ("max", Self::Max),
-        ("collect", Self::Collect),
-        ("stdev", Self::StdDev),
-        ("stddev", Self::StdDev),
-        ("stddev_samp", Self::StdDev),
-        ("stdevp", Self::StdDevPop),
-        ("stddevp", Self::StdDevPop),
-        ("stddev_pop", Self::StdDevPop),
-        ("variance", Self::Variance),
-        ("var_samp", Self::Variance),
-        ("var_pop", Self::VariancePop),
-        ("percentile_disc", Self::PercentileDisc),
-        ("percentileDisc", Self::PercentileDisc),
-        ("percentile_cont", Self::PercentileCont),
-        ("percentileCont", Self::PercentileCont),
-        ("group_concat", Self::GroupConcat),
-        ("groupConcat", Self::GroupConcat),
-        ("listagg", Self::GroupConcat),
-        ("sample", Self::Sample),
-        ("covar_samp", Self::CovarSamp),
-        ("covar_pop", Self::CovarPop),
-        ("corr", Self::Corr),
-        ("regr_slope", Self::RegrSlope),
-        ("regr_intercept", Self::RegrIntercept),
-        ("regr_r2", Self::RegrR2),
-        ("regr_count", Self::RegrCount),
-        ("regr_sxx", Self::RegrSxx),
-        ("regr_syy", Self::RegrSyy),
-        ("regr_sxy", Self::RegrSxy),
-        ("regr_avgx", Self::RegrAvgx),
-        ("regr_avgy", Self::RegrAvgy),
-    ];
-
-    /// The aggregate a call names, in any case.
-    #[cfg(any(
-        test,
-        feature = "gql",
-        feature = "cypher",
-        feature = "sql-pgq",
-        feature = "sparql"
-    ))]
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
-        Self::ALIASES
-            .iter()
-            .find(|(alias, _)| alias.eq_ignore_ascii_case(name))
-            .map(|&(_, function)| function)
-    }
 }
 
 /// Hint about how a filter will be executed at the physical level.
@@ -2320,23 +2197,6 @@ pub struct DatasetRestriction {
     /// FROM NAMED IRIs: only these named graphs are available to GRAPH patterns.
     /// Empty means no FROM NAMED clause was specified (all named graphs visible).
     pub named_graphs: Vec<String>,
-}
-
-/// Endpoint reachability for an outer SPARQL `+` or `*` property path.
-#[derive(Debug, Clone)]
-pub struct PropertyPathOp {
-    /// Starting term or variable.
-    pub subject: TripleComponent,
-    /// Ending term or variable.
-    pub object: TripleComponent,
-    /// Finite path repeated by the outer quantifier.
-    pub path: grafeo_core::execution::operators::PathStep,
-    /// Whether the zero-length path is included (`*`).
-    pub zero_length: bool,
-    /// Active named graph or graph variable; absent for the default graph.
-    pub graph: Option<TripleComponent>,
-    /// Dataset restriction from FROM / FROM NAMED.
-    pub dataset: Option<DatasetRestriction>,
 }
 
 /// Scan RDF triples matching a pattern.
@@ -3082,25 +2942,14 @@ pub enum LogicalExpression {
         operand: Box<LogicalExpression>,
     },
 
-    /// A call of a built-in or an aggregate, resolved by the translator.
+    /// Function call.
     FunctionCall {
-        /// What the call resolves to.
-        callee: Callee,
-        /// The name as the query wrote it, for `EXPLAIN` and errors only:
-        /// decisions read `callee`.
+        /// Function name.
         name: String,
         /// Arguments.
         args: Vec<LogicalExpression>,
         /// Whether DISTINCT is applied (e.g., COUNT(DISTINCT x)).
         distinct: bool,
-    },
-
-    /// A call of a SPARQL function, by name: only the RDF planner computes it.
-    SparqlCall {
-        /// The function's name, as the query wrote it.
-        name: String,
-        /// Arguments.
-        args: Vec<LogicalExpression>,
     },
 
     /// List literal.
@@ -5358,7 +5207,6 @@ mod tests {
         assert!(s.contains("Not"));
 
         let fc = LogicalExpression::FunctionCall {
-            callee: Callee::named("toLower"),
             name: "toLower".into(),
             args: vec![var("name")],
             distinct: false,

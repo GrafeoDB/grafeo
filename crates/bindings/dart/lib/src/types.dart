@@ -81,9 +81,6 @@ class QueryResult {
   final double executionTimeMs;
   final int rowsScanned;
 
-  /// What a write statement changed (all zero for a read).
-  final WriteCounters counters;
-
   const QueryResult({
     required this.columns,
     required this.rows,
@@ -91,57 +88,12 @@ class QueryResult {
     required this.edges,
     required this.executionTimeMs,
     required this.rowsScanned,
-    this.counters = WriteCounters.none,
   });
 
   @override
   String toString() =>
       'QueryResult(${rows.length} rows, ${nodes.length} nodes, '
       '${edges.length} edges, ${executionTimeMs.toStringAsFixed(2)}ms)';
-}
-
-/// What a write statement changed.
-class WriteCounters {
-  final int nodesCreated;
-  final int nodesDeleted;
-  final int edgesCreated;
-  final int edgesDeleted;
-  final int propertiesSet;
-  final int labelsAdded;
-  final int labelsRemoved;
-
-  const WriteCounters({
-    this.nodesCreated = 0,
-    this.nodesDeleted = 0,
-    this.edgesCreated = 0,
-    this.edgesDeleted = 0,
-    this.propertiesSet = 0,
-    this.labelsAdded = 0,
-    this.labelsRemoved = 0,
-  });
-
-  /// No changes.
-  static const none = WriteCounters();
-
-  @override
-  bool operator ==(Object other) =>
-      other is WriteCounters &&
-      other.nodesCreated == nodesCreated &&
-      other.nodesDeleted == nodesDeleted &&
-      other.edgesCreated == edgesCreated &&
-      other.edgesDeleted == edgesDeleted &&
-      other.propertiesSet == propertiesSet &&
-      other.labelsAdded == labelsAdded &&
-      other.labelsRemoved == labelsRemoved;
-
-  @override
-  int get hashCode => Object.hash(nodesCreated, nodesDeleted, edgesCreated,
-      edgesDeleted, propertiesSet, labelsAdded, labelsRemoved);
-
-  @override
-  String toString() => 'WriteCounters(nodes +$nodesCreated -$nodesDeleted, '
-      'edges +$edgesCreated -$edgesDeleted, properties $propertiesSet, '
-      'labels +$labelsAdded -$labelsRemoved)';
 }
 
 /// A single vector search result with a node ID and distance score.

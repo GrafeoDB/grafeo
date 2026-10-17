@@ -907,7 +907,6 @@ impl LpgStore {
                 dst: record.dst,
                 edge_type,
                 properties,
-                deleted_with: None,
             })
         };
         let marked = self

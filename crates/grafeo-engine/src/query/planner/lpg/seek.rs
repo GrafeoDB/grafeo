@@ -13,6 +13,7 @@ use crate::query::optimizer::movable_variables;
 use crate::query::plan::BuiltinFunction;
 use crate::query::plan::Callee;
 use crate::query::plan::{BinaryOp, FilterOp, LogicalExpression, LogicalOperator, NodeScanOp};
+use grafeo_core::execution::operators::Volatility;
 
 /// The seek the planner makes of a filter over a node scan.
 pub(crate) struct SeekChoice<'a> {
@@ -205,73 +206,17 @@ pub(super) fn value_variables(expr: &LogicalExpression) -> Option<HashSet<String
     collect_value_variables(expr, &mut variables).then_some(variables)
 }
 
-/// Whether the function `name` called with `arity` arguments returns the same
+/// Whether a call of `callee` with `arguments` arguments returns the same
 /// value for the same arguments, so a seek can evaluate a key once and probe
-/// the index with it while the filter above it reads the same value.
-///
-/// An allowlist on purpose: a function not listed (every clock and random
-/// function among them) keeps the scan and its filter, so a missing name costs
-/// speed, never rows. The evaluator dispatches functions by name, so this list
-/// cannot come from it yet (#540). The reachability search of variable-length
-/// expands uses it too (see `reachability.rs`).
-pub(super) fn deterministic(name: &str, arity: usize) -> bool {
-    const PURE: [&str; 39] = [
-        "tostring",
-        "tostringornull",
-        "tointeger",
-        "toint",
-        "tointegerornull",
-        "tofloat",
-        "tofloatornull",
-        "toboolean",
-        "tobooleanornull",
-        "tolower",
-        "toupper",
-        "lower",
-        "upper",
-        "trim",
-        "ltrim",
-        "rtrim",
-        "btrim",
-        "substring",
-        "left",
-        "right",
-        "replace",
-        "split",
-        "reverse",
-        "size",
-        "length",
-        "char_length",
-        "character_length",
-        "abs",
-        "ceil",
-        "floor",
-        "round",
-        "sign",
-        "sqrt",
-        "coalesce",
-        "head",
-        "last",
-        "tail",
-        "keys",
-        "properties",
-    ];
-    // Temporal constructors: from their arguments (`date('2026-09-30')`), or
-    // from the clock without any.
-    const FROM_ARGUMENTS: [&str; 10] = [
-        "date",
-        "time",
-        "datetime",
-        "localdatetime",
-        "local_datetime",
-        "localtime",
-        "local_time",
-        "zoneddatetime",
-        "zoned_datetime",
-        "duration",
-    ];
-    PURE.iter().any(|f| name.eq_ignore_ascii_case(f))
-        || (arity > 0 && FROM_ARGUMENTS.iter().any(|f| name.eq_ignore_ascii_case(f)))
+/// the index with it while the filter above it reads the same value: the
+/// [`Immutable`](Volatility::Immutable) built-in functions. A function that is
+/// not Immutable (every clock, session and random function among them) keeps
+/// the scan and its filter, so a wrong class costs speed, never rows. The
+/// reachability search of variable-length expands uses it too (see
+/// `reachability.rs`).
+pub(super) fn deterministic(callee: Callee, arguments: usize) -> bool {
+    matches!(callee, Callee::Builtin(function)
+        if function.volatility(arguments) == Volatility::Immutable)
 }
 
 fn collect_value_variables(expr: &LogicalExpression, out: &mut HashSet<String>) -> bool {
@@ -299,8 +244,8 @@ fn collect_value_variables(expr: &LogicalExpression, out: &mut HashSet<String>) 
         LogicalExpression::Map(entries) => entries
             .iter()
             .all(|(_, value)| collect_value_variables(value, out)),
-        LogicalExpression::FunctionCall { name, args, .. } => {
-            deterministic(name, args.len())
+        LogicalExpression::FunctionCall { callee, args, .. } => {
+            deterministic(*callee, args.len())
                 && args.iter().all(|arg| collect_value_variables(arg, out))
         }
         _ => false,

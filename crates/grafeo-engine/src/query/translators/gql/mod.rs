@@ -2374,7 +2374,9 @@ impl GqlTranslator {
                 name,
                 args,
                 distinct,
-            } if name.eq_ignore_ascii_case("count") && args.len() <= 1 => {
+            } if AggregateFunction::from_name(name) == Some(AggregateFunction::Count)
+                && args.len() <= 1 =>
+            {
                 Some((args.first(), *distinct))
             }
             _ => None,

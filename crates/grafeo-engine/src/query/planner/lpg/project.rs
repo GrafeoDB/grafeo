@@ -1359,20 +1359,28 @@ impl super::Planner {
 
         #[cfg(any(feature = "vector-index", feature = "text-index"))]
         {
-            let LogicalExpression::FunctionCall { name, args, .. } = expr else {
+            let LogicalExpression::FunctionCall {
+                callee: Callee::Builtin(function),
+                args,
+                ..
+            } = expr
+            else {
                 return None;
             };
 
             #[cfg(feature = "vector-index")]
             let is_vector_fn = matches!(
-                name.as_str(),
-                "cosine_similarity" | "euclidean_distance" | "dot_product" | "manhattan_distance"
+                function,
+                BuiltinFunction::CosineSimilarity
+                    | BuiltinFunction::EuclideanDistance
+                    | BuiltinFunction::DotProduct
+                    | BuiltinFunction::ManhattanDistance
             );
             #[cfg(not(feature = "vector-index"))]
             let is_vector_fn = false;
 
             #[cfg(feature = "text-index")]
-            let is_text_fn = name == "text_score";
+            let is_text_fn = *function == BuiltinFunction::TextScore;
             #[cfg(not(feature = "text-index"))]
             let is_text_fn = false;
 
@@ -1400,11 +1408,10 @@ impl super::Planner {
 
             #[cfg(feature = "vector-index")]
             if is_vector_fn {
-                let metric_tag = match name.as_str() {
-                    "cosine_similarity" => "cos",
-                    "euclidean_distance" => "euc",
-                    "dot_product" => "dot",
-                    "manhattan_distance" => "man",
+                let metric_tag = match function {
+                    BuiltinFunction::EuclideanDistance => "euc",
+                    BuiltinFunction::DotProduct => "dot",
+                    BuiltinFunction::ManhattanDistance => "man",
                     _ => "cos",
                 };
                 let score_col = vector_score_column_name(metric_tag, property, variable, query);
@@ -1855,4 +1862,49 @@ pub(super) fn text_score_column_name(
         variable,
         score_query_hash(query)
     )
+}
+
+#[cfg(all(test, feature = "vector-index"))]
+mod tests {
+    use super::super::{Arc, GraphStoreSearch, LogicalExpression, Planner, Value};
+    use crate::query::plan::Callee;
+    use grafeo_core::graph::lpg::LpgStore;
+
+    /// The top-k rewrite takes a vector function in any spelling (it matches
+    /// the resolved function), so the score column it projects must be found
+    /// in any spelling too, or the score is computed a second time per row.
+    #[test]
+    fn a_projected_score_is_found_in_any_spelling() {
+        let planner = Planner::new(Arc::new(LpgStore::new().unwrap()) as Arc<dyn GraphStoreSearch>);
+        let query = LogicalExpression::List(vec![
+            LogicalExpression::Literal(Value::Float64(1.0)),
+            LogicalExpression::Literal(Value::Float64(0.0)),
+        ]);
+        for (spelling, tag) in [
+            ("cosine_similarity", "cos"),
+            ("COSINE_SIMILARITY", "cos"),
+            ("Euclidean_Distance", "euc"),
+            ("DOT_PRODUCT", "dot"),
+            ("manhattan_DISTANCE", "man"),
+        ] {
+            let call = LogicalExpression::FunctionCall {
+                callee: Callee::named(spelling),
+                name: spelling.to_string(),
+                args: vec![
+                    LogicalExpression::Property {
+                        variable: "d".to_string(),
+                        property: "embedding".to_string(),
+                    },
+                    query.clone(),
+                ],
+                distinct: false,
+            };
+            let column = super::vector_score_column_name(tag, "embedding", "d", &query);
+            assert_eq!(
+                planner.find_projected_score(&call, std::slice::from_ref(&column)),
+                Some(column),
+                "{spelling}"
+            );
+        }
+    }
 }

@@ -12,7 +12,7 @@ use super::common::{
 };
 use crate::query::functions::resolve_call;
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp,
+    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, BuiltinFunction, CallProcedureOp,
     CreatePropertyGraphOp, DistinctOp, ExceptOp, ExpandDirection, ExpandOp, IntersectOp,
     LeftJoinOp, ListPredicateKind, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
     PathMode, ProcedureYield, PropertyGraphEdgeTable, PropertyGraphNodeTable, ReturnItem, SortKey,
@@ -950,23 +950,16 @@ impl SqlPgqTranslator {
                 if args.len() == 1
                     && let ast::Expression::Variable(var_name) = &args[0]
                 {
-                    match name.to_uppercase().as_str() {
-                        "LENGTH" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_length_{var_name}"
-                            )));
-                        }
-                        "NODES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_nodes_{var_name}"
-                            )));
-                        }
-                        "EDGES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_edges_{var_name}"
-                            )));
-                        }
-                        _ => {}
+                    let column = match BuiltinFunction::from_name(name) {
+                        Some(BuiltinFunction::Size) => Some("length"),
+                        Some(BuiltinFunction::Nodes) => Some("nodes"),
+                        Some(BuiltinFunction::Edges) => Some("edges"),
+                        _ => None,
+                    };
+                    if let Some(column) = column {
+                        return Ok(LogicalExpression::Variable(format!(
+                            "_path_{column}_{var_name}"
+                        )));
                     }
                 }
 
@@ -1072,23 +1065,16 @@ impl SqlPgqTranslator {
                 if args.len() == 1
                     && let ast::Expression::Variable(var_name) = &args[0]
                 {
-                    match name.to_uppercase().as_str() {
-                        "LENGTH" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_length_{var_name}"
-                            )));
-                        }
-                        "NODES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_nodes_{var_name}"
-                            )));
-                        }
-                        "EDGES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_edges_{var_name}"
-                            )));
-                        }
-                        _ => {}
+                    let column = match BuiltinFunction::from_name(name) {
+                        Some(BuiltinFunction::Size) => Some("length"),
+                        Some(BuiltinFunction::Nodes) => Some("nodes"),
+                        Some(BuiltinFunction::Edges) => Some("edges"),
+                        _ => None,
+                    };
+                    if let Some(column) = column {
+                        return Ok(LogicalExpression::Variable(format!(
+                            "_path_{column}_{var_name}"
+                        )));
                     }
                 }
 

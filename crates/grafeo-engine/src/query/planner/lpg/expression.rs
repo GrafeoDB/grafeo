@@ -22,6 +22,7 @@ use super::{
 };
 use crate::query::functions::check_pattern_match;
 use crate::query::plan::Callee;
+use grafeo_common::utils::error::QueryError;
 
 impl super::Planner {
     /// Converts a logical expression to a filter expression.
@@ -69,18 +70,17 @@ impl super::Planner {
                     .iter()
                     .map(|a| self.convert_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(match callee {
-                    Callee::Builtin(function) => FilterExpression::FunctionCall {
+                match callee {
+                    Callee::Builtin(function) => Ok(FilterExpression::FunctionCall {
                         function: *function,
                         args: filter_args,
-                    },
-                    // An aggregate the planner did not group: the evaluator
-                    // answers it with no value, as it did by name.
-                    Callee::Aggregate(_) => FilterExpression::SparqlCall {
-                        name: name.clone(),
-                        args: filter_args,
-                    },
-                })
+                    }),
+                    // An aggregate the planner did not group (`WHERE count(p)
+                    // > 0` on a match): the evaluator has no value for it.
+                    Callee::Aggregate(_) => Err(Error::Query(QueryError::semantic(format!(
+                        "Aggregate function '{name}' cannot be used here: it needs a RETURN or WITH that groups rows"
+                    )))),
+                }
             }
             // SPARQL calls reach only the RDF planner; here they have no value.
             LogicalExpression::SparqlCall { name, args } => Ok(FilterExpression::SparqlCall {

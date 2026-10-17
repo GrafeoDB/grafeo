@@ -748,17 +748,16 @@ fn can_be_map(expr: &LogicalExpression) -> bool {
         LogicalExpression::IndexAccess { base, .. } => {
             matches!(**base, LogicalExpression::List(_)) || can_be_list(base) || can_be_map(base)
         }
-        LogicalExpression::FunctionCall { name, .. } => [
-            "properties",
-            "startnode",
-            "start_node",
-            "endnode",
-            "end_node",
-            "head",
-            "last",
-        ]
-        .iter()
-        .any(|function| name.eq_ignore_ascii_case(function)),
+        LogicalExpression::FunctionCall { callee, .. } => matches!(
+            callee,
+            Callee::Builtin(
+                BuiltinFunction::Properties
+                    | BuiltinFunction::StartNode
+                    | BuiltinFunction::EndNode
+                    | BuiltinFunction::Head
+                    | BuiltinFunction::Last
+            )
+        ),
         _ => false,
     }
 }

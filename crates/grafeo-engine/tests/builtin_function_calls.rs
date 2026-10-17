@@ -103,3 +103,23 @@ fn folding_skips_volatile_calls() {
         "[[Bool(true)]]"
     );
 }
+
+/// An aggregate where no rows are grouped (a `WHERE` on the match) is an
+/// error: the evaluator has no value for it, so the filter kept no rows.
+#[test]
+fn an_aggregate_outside_a_grouping_is_an_error() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})")
+        .unwrap();
+    for language in ["gql", "cypher"] {
+        let message = error(
+            &db,
+            language,
+            "MATCH (p:Person) WHERE count(p) > 0 RETURN p.name",
+        );
+        assert!(
+            message.contains("Aggregate function 'count'"),
+            "{language}: {message}"
+        );
+    }
+}

@@ -25,6 +25,24 @@ use super::Session;
 use super::SessionConfig;
 
 impl Session {
+    /// Plans native RDF paths with the session's pending writes and resource limits.
+    fn make_rdf_planner(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> crate::query::planner::rdf::RdfPlanner {
+        let budget = self.plan_options.path_search_budget;
+        #[cfg(feature = "spill")]
+        let budget = self
+            .buffer_manager
+            .as_ref()
+            .map_or(budget, |bm| budget.min(bm.available()));
+        crate::query::planner::rdf::RdfPlanner::new(Arc::clone(&self.rdf_store))
+            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
+            .with_writer(self.rdf_writer())
+            .with_path_search_budget(budget)
+            .with_deadline(deadline)
+    }
+
     /// Creates a session that reads and writes `store` and `rdf_store`.
     #[cfg(feature = "lpg")]
     pub(crate) fn with_rdf_store(
@@ -193,8 +211,6 @@ impl Session {
         optimized_plan: &crate::query::plan::LogicalPlan,
         language: &'static str,
     ) -> Result<QueryResult> {
-        use crate::query::planner::rdf::RdfPlanner;
-
         #[cfg(not(target_arch = "wasm32"))]
         let start_time = Instant::now();
 
@@ -218,13 +234,14 @@ impl Session {
             self.transaction_manager.check_open()?;
         }
 
+        let deadline = self.query_deadline();
         let result = self.in_statement_transaction(mutates, || {
-            let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
-                .with_shuffle_unordered(self.plan_options.shuffle_unordered)
-                .with_writer(self.rdf_writer());
+            let planner = self.make_rdf_planner(deadline);
             if optimized_plan.profile {
                 let (mut physical_plan, entries) = planner.plan_profiled(optimized_plan)?;
-                let executor = self.make_executor(physical_plan.columns.clone());
+                let executor = self
+                    .make_executor(physical_plan.columns.clone())
+                    .with_deadline(deadline);
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
                 #[cfg(not(target_arch = "wasm32"))]
                 let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
@@ -240,7 +257,9 @@ impl Session {
                 ));
             }
             let mut physical_plan = planner.plan(optimized_plan)?;
-            let executor = self.make_executor(physical_plan.columns.clone());
+            let executor = self
+                .make_executor(physical_plan.columns.clone())
+                .with_deadline(deadline);
             executor.execute(physical_plan.operator.as_mut())
         });
 

@@ -179,6 +179,74 @@ pub struct WalStatus {
     pub current_epoch: u64,
 }
 
+/// When a database checkpoints by itself (see
+/// [`GrafeoDB::set_checkpoint_triggers`](crate::GrafeoDB::set_checkpoint_triggers)):
+/// when the interval has passed since the last automatic checkpoint, or when
+/// the WAL holds more than the given bytes since the last checkpoint. Both
+/// are off by default, and a checkpoint then runs only when asked
+/// (`wal_checkpoint()`) and at `close()`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CheckpointTriggers {
+    /// Checkpoint when this long has passed since the last automatic one.
+    pub interval: Option<std::time::Duration>,
+    /// Checkpoint once the WAL holds this many bytes since the last
+    /// checkpoint (checked every 100 ms).
+    pub wal_bytes: Option<u64>,
+}
+
+impl CheckpointTriggers {
+    /// No automatic checkpoints.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// These triggers, also checkpointing when `interval` has passed.
+    #[must_use]
+    pub fn with_interval(mut self, interval: std::time::Duration) -> Self {
+        self.interval = Some(interval);
+        self
+    }
+
+    /// These triggers, also checkpointing once the WAL holds `bytes` since
+    /// the last checkpoint.
+    #[must_use]
+    pub fn with_wal_bytes(mut self, bytes: u64) -> Self {
+        self.wal_bytes = Some(bytes);
+        self
+    }
+
+    /// Whether any trigger is set.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.interval.is_some() || self.wal_bytes.is_some()
+    }
+}
+
+/// How the automatic checkpoints of a database fare (see
+/// [`GrafeoDB::checkpoint_status`](crate::GrafeoDB::checkpoint_status)).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CheckpointStatus {
+    /// The triggers in force.
+    pub triggers: CheckpointTriggers,
+    /// When the last checkpoint of any kind finished (Unix epoch seconds),
+    /// `None` before the first.
+    pub last_checkpoint: Option<u64>,
+    /// Automatic checkpoints that failed since the last one that succeeded.
+    /// A failed one is retried after a pause that doubles from one second
+    /// to five minutes; the WAL keeps the commits meanwhile.
+    pub failures: u64,
+    /// The error of the last failed automatic checkpoint.
+    pub last_error: Option<String>,
+    /// When that one failed (Unix epoch seconds).
+    pub last_failure: Option<u64>,
+    /// Whether automatic checkpoints have stopped: after a commit that did
+    /// not complete, none can succeed until the database is reopened.
+    pub stopped: bool,
+}
+
 /// Validation result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]

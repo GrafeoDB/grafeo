@@ -41,6 +41,9 @@ pub struct Catalog {
     indexes: IndexCatalog,
     /// Optional schema constraints.
     schema: Option<SchemaCatalog>,
+    /// The configuration the database file stores (#551), when it stores
+    /// one: the catalog section writes it and an open reads it.
+    stored_config: RwLock<Option<grafeo_common::storage::catalog_record::StoredConfigRecord>>,
 }
 
 impl Catalog {
@@ -53,7 +56,25 @@ impl Catalog {
             edge_types: EdgeTypeCatalog::new(),
             indexes: IndexCatalog::new(),
             schema: Some(SchemaCatalog::new()),
+            stored_config: RwLock::new(None),
         }
+    }
+
+    /// The configuration the database stores, when it stores one.
+    #[must_use]
+    pub(crate) fn stored_config(
+        &self,
+    ) -> Option<grafeo_common::storage::catalog_record::StoredConfigRecord> {
+        self.stored_config.read().clone()
+    }
+
+    /// Sets (or with `None` clears) the configuration the database stores,
+    /// written at the next checkpoint; returns the one it replaced.
+    pub(crate) fn set_stored_config(
+        &self,
+        config: Option<grafeo_common::storage::catalog_record::StoredConfigRecord>,
+    ) -> Option<grafeo_common::storage::catalog_record::StoredConfigRecord> {
+        std::mem::replace(&mut *self.stored_config.write(), config)
     }
 
     /// Creates a new catalog with schema constraints enabled.

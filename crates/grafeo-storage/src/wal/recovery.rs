@@ -5,7 +5,7 @@ use super::{CheckpointMetadata, WalCipher, WalManager, WalRecord};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::{grafeo_debug, grafeo_info, grafeo_warn};
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 #[cfg(feature = "encryption")]
 use std::sync::Arc;
@@ -24,6 +24,11 @@ pub struct RecoveredWal<R = WalRecord> {
     /// must be sealed (see `LpgWal::seal_torn_tail`) before anything new is
     /// logged, otherwise the next commit marker would commit the torn records.
     pub torn_tail: bool,
+    /// The damage a salvaging recovery ([`WalRecovery::with_salvage`])
+    /// stopped at, a [`Error::Corruption`] naming the file and offset: the
+    /// records are the commits before it, and the WAL holds more than they
+    /// do. `None` when the recovery read the whole log.
+    pub damage: Option<Error>,
 }
 
 /// Handles WAL recovery after a crash.
@@ -33,6 +38,8 @@ pub struct WalRecovery {
     /// Encryptor for decrypting WAL records (None = unencrypted).
     #[cfg(feature = "encryption")]
     encryptor: Option<Arc<grafeo_common::encryption::PageEncryptor>>,
+    /// Stop at damage, with the commits before it, instead of failing.
+    salvage: bool,
 }
 
 impl WalRecovery {
@@ -42,6 +49,7 @@ impl WalRecovery {
             dir: dir.as_ref().to_path_buf(),
             #[cfg(feature = "encryption")]
             encryptor: None,
+            salvage: false,
         }
     }
 
@@ -57,7 +65,17 @@ impl WalRecovery {
             dir: dir.as_ref().to_path_buf(),
             #[cfg(feature = "encryption")]
             encryptor: cipher.map(Arc::new),
+            salvage: false,
         }
+    }
+
+    /// This recovery, salvaging when `salvage` is true: a damaged record
+    /// ends the recovery with the commits before it (reported in
+    /// [`RecoveredWal::damage`]) instead of failing it.
+    #[must_use]
+    pub fn with_salvage(mut self, salvage: bool) -> Self {
+        self.salvage = salvage;
+        self
     }
 
     /// Sets the encryptor for decrypting WAL records during recovery.
@@ -74,6 +92,7 @@ impl WalRecovery {
             dir: wal.dir().to_path_buf(),
             #[cfg(feature = "encryption")]
             encryptor: wal.encryptor().cloned(),
+            salvage: false,
         }
     }
 
@@ -251,9 +270,11 @@ impl WalRecovery {
         }
 
         // Read log files in sequence, skipping those before checkpoint
-        for log_file in log_files {
+        let newest = log_files.len().saturating_sub(1);
+        let mut damage = None;
+        'files: for (index, log_file) in log_files.iter().enumerate() {
             // Extract sequence number from filename
-            let sequence = Self::sequence_from_path(&log_file).unwrap_or(0);
+            let sequence = Self::sequence_from_path(log_file).unwrap_or(0);
 
             // Skip files that are completely before the checkpoint
             // We include the checkpoint sequence file because it may contain
@@ -268,7 +289,7 @@ impl WalRecovery {
                 continue;
             }
 
-            let file = match File::open(&log_file) {
+            let file = match File::open(log_file) {
                 Ok(f) => f,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e.into()),
@@ -276,11 +297,12 @@ impl WalRecovery {
             let file_len = file.metadata()?.len();
             let mut reader = BufReader::new(file);
             let mut position = 0u64;
+            last_file_clean = true;
 
             // Read all records from this file
             loop {
-                match self.read_record_as::<R>(&mut reader) {
-                    Ok(Some((record, frame_len))) => {
+                match self.read_frame_as::<R>(&mut reader, file_len - position)? {
+                    Frame::Record(record, frame_len) => {
                         position += frame_len;
                         if record.is_commit() {
                             committed_records.append(&mut current_tx_records);
@@ -295,17 +317,40 @@ impl WalRecovery {
                             current_tx_records.push(record);
                         }
                     }
-                    Ok(None) => {
-                        // EOF, or a partial length prefix at the end.
-                        last_file_clean = position >= file_len;
-                        break;
-                    }
-                    Err(e) => {
-                        // Log corruption - stop reading this file but continue
-                        // with remaining files (best-effort recovery)
-                        grafeo_warn!("WAL corruption detected in {:?}: {}", log_file, e);
-                        last_file_clean = false;
-                        break;
+                    Frame::End => break,
+                    Frame::Bad { reason, kind } => {
+                        // Only the end of the newest file is written while
+                        // a crash can cut it: there, a frame that did not
+                        // finish with no frame behind it is a torn tail. An
+                        // older file ends torn only when the next one starts
+                        // with the abort marker that sealed it (see
+                        // `LpgWal::seal_torn_tail`, which 0.5.x and
+                        // 0.6.0-beta.1 called at open). Anywhere else the log
+                        // lost records that later commits build on.
+                        if kind != BadFrame::Undecodable
+                            && (index == newest
+                                || self.starts_with_abort::<R>(&log_files[index + 1])?)
+                            && !self.frames_follow::<R>(
+                                log_file,
+                                position,
+                                kind == BadFrame::Unchecked,
+                            )?
+                        {
+                            last_file_clean = false;
+                            break;
+                        }
+                        let error =
+                            Error::corruption_at(format!("damaged WAL record: {reason}"), position)
+                                .in_file(log_file);
+                        if !self.salvage {
+                            return Err(error);
+                        }
+                        grafeo_warn!(
+                            "salvaging the WAL: {error}; the commits after it are left out"
+                        );
+                        current_tx_records.clear();
+                        damage = Some(error);
+                        break 'files;
                     }
                 }
             }
@@ -329,6 +374,7 @@ impl WalRecovery {
         Ok(RecoveredWal {
             records: committed_records,
             torn_tail,
+            damage,
         })
     }
 
@@ -373,73 +419,207 @@ impl WalRecovery {
         Ok(files)
     }
 
-    /// Reads one record, returning it with its frame length in bytes.
-    fn read_record_as<R: WalEntry>(
+    /// The bytes a frame carries after its payload: the CRC32 of a
+    /// plaintext frame (an encrypted payload carries its own tag).
+    fn checksum_len(&self) -> u64 {
+        #[cfg(feature = "encryption")]
+        if self.encryptor.is_some() {
+            return 0;
+        }
+        4
+    }
+
+    /// Reads the frame at the reader's position, with `remaining` bytes left
+    /// in the file. A length is checked against them before anything is
+    /// allocated for it.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error of the read.
+    fn read_frame_as<R: WalEntry>(
         &self,
         reader: &mut BufReader<File>,
-    ) -> Result<Option<(R, u64)>> {
-        // Read length prefix
-        let mut len_buf = [0u8; 4];
-        match reader.read_exact(&mut len_buf) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e.into()),
+        remaining: u64,
+    ) -> Result<Frame<R>> {
+        if remaining == 0 {
+            return Ok(Frame::End);
         }
-        let len = u32::from_le_bytes(len_buf) as usize;
-
-        // Read payload (either encrypted or plaintext+checksum)
-        #[cfg(feature = "encryption")]
-        let data = if let Some(ref enc) = self.encryptor {
-            // Encrypted frame: payload is nonce(12) || ciphertext || tag(16)
-            let mut encrypted = vec![0u8; len];
-            reader.read_exact(&mut encrypted)?;
-            let aad = b"grafeo-wal";
-            enc.decrypt(&encrypted, aad).map_err(|_| {
-                Error::corruption("WAL decryption failed: wrong key or corrupted record")
-            })?
-        } else {
-            // Plaintext frame: data + crc32
-            let mut data = vec![0u8; len];
-            reader.read_exact(&mut data)?;
-
-            let mut checksum_buf = [0u8; 4];
-            reader.read_exact(&mut checksum_buf)?;
-            let stored_checksum = u32::from_le_bytes(checksum_buf);
-            let computed_checksum = crc32fast::hash(&data);
-            if stored_checksum != computed_checksum {
-                return Err(Error::corruption("WAL checksum mismatch"));
-            }
-            data
-        };
-
-        #[cfg(not(feature = "encryption"))]
-        let data = {
-            let mut data = vec![0u8; len];
-            reader.read_exact(&mut data)?;
-
-            let mut checksum_buf = [0u8; 4];
-            reader.read_exact(&mut checksum_buf)?;
-            let stored_checksum = u32::from_le_bytes(checksum_buf);
-            let computed_checksum = crc32fast::hash(&data);
-            if stored_checksum != computed_checksum {
-                return Err(Error::corruption("WAL checksum mismatch"));
-            }
-            data
-        };
-
-        // Deserialize
-        let (record, _): (R, _) =
-            bincode::serde::decode_from_slice(&data, bincode::config::standard())
-                .map_err(|e| Error::Serialization(e.to_string()))?;
-
-        // Length prefix + payload, plus the CRC32 for plaintext frames
-        // (an encrypted payload carries its own authentication tag).
-        #[cfg(feature = "encryption")]
-        let checksum_len = if self.encryptor.is_some() { 0 } else { 4 };
-        #[cfg(not(feature = "encryption"))]
-        let checksum_len = 4;
-        Ok(Some((record, 4 + len as u64 + checksum_len)))
+        if remaining < 4 {
+            return Ok(Frame::Bad {
+                reason: "a length prefix cut off by the end of the file".to_string(),
+                kind: BadFrame::CutOff,
+            });
+        }
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf)?;
+        let len = u64::from(u32::from_le_bytes(len_buf));
+        let frame_len = 4 + len + self.checksum_len();
+        if frame_len > remaining {
+            return Ok(Frame::Bad {
+                reason: format!(
+                    "a record of {len} bytes runs past the end of the file ({} bytes left)",
+                    remaining - 4
+                ),
+                kind: BadFrame::CutOff,
+            });
+        }
+        let payload_len = usize::try_from(frame_len - 4).map_err(|_| {
+            Error::corruption(format!(
+                "a WAL record of {len} bytes does not fit this platform"
+            ))
+        })?;
+        let mut payload = vec![0u8; payload_len];
+        reader.read_exact(&mut payload)?;
+        Ok(match self.decode_frame::<R>(&payload) {
+            Ok(record) => Frame::Record(record, frame_len),
+            Err((reason, kind)) => Frame::Bad { reason, kind },
+        })
     }
+
+    /// Whether the first record of `file` is an abort marker.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error of the read.
+    fn starts_with_abort<R: WalEntry>(&self, file: &Path) -> Result<bool> {
+        let file = File::open(file)?;
+        let length = file.metadata()?.len();
+        Ok(matches!(
+            self.read_frame_as::<R>(&mut BufReader::new(file), length)?,
+            Frame::Record(record, _) if record.is_abort()
+        ))
+    }
+
+    /// The record of a frame's payload (the bytes after its length prefix).
+    fn decode_frame<R: WalEntry>(
+        &self,
+        payload: &[u8],
+    ) -> std::result::Result<R, (String, BadFrame)> {
+        #[cfg(feature = "encryption")]
+        if let Some(ref enc) = self.encryptor {
+            let data = enc.decrypt(payload, b"grafeo-wal").map_err(|_| {
+                (
+                    "it does not decrypt: a wrong key, or damage".to_string(),
+                    BadFrame::Unchecked,
+                )
+            })?;
+            return decode_record(&data);
+        }
+        let Some((data, checksum)) = payload.split_last_chunk::<4>() else {
+            return Err((
+                "a frame shorter than its checksum".to_string(),
+                BadFrame::Unchecked,
+            ));
+        };
+        if crc32fast::hash(data) != u32::from_le_bytes(*checksum) {
+            return Err(("checksum mismatch".to_string(), BadFrame::Unchecked));
+        }
+        decode_record(data)
+    }
+
+    /// Whether whole frames lie behind the bad frame at `position` of `file`,
+    /// so that it is damage and not a torn tail: a frame whose record checks
+    /// starts anywhere after its first byte (also inside it, when its length
+    /// is what is damaged), or, for a bad frame that is `whole`, the lengths
+    /// after it chain to the end of the file (frames that do not check, as
+    /// with a wrong key). Zeros to the end of the file are a torn tail: a
+    /// crash can leave a file longer than what was written to it.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error of the read.
+    fn frames_follow<R: WalEntry>(&self, file: &Path, position: u64, whole: bool) -> Result<bool> {
+        let mut rest = Vec::new();
+        let mut reader = File::open(file)?;
+        reader.seek(SeekFrom::Start(position))?;
+        reader.read_to_end(&mut rest)?;
+        if rest.iter().all(|byte| *byte == 0) {
+            return Ok(false);
+        }
+        let checksum_len = usize::try_from(self.checksum_len()).unwrap_or(usize::MAX);
+        let frame_end = |at: usize| -> Option<usize> {
+            let len = u32::from_le_bytes(rest.get(at..at.checked_add(4)?)?.try_into().ok()?);
+            let end = at
+                .checked_add(4)?
+                .checked_add(usize::try_from(len).ok()?)?
+                .checked_add(checksum_len)?;
+            (end <= rest.len()).then_some(end)
+        };
+        // Checking a candidate hashes its payload: past this many bytes the
+        // search stops and the frame counts as damage, which a salvaging
+        // recovery can still stop at.
+        let mut budget: usize = 256 * 1024 * 1024;
+        for at in 1..rest.len() {
+            let Some(end) = frame_end(at) else {
+                continue;
+            };
+            let Some(left) = budget.checked_sub(end - at) else {
+                return Ok(true);
+            };
+            budget = left;
+            if self.decode_frame::<R>(&rest[at + 4..end]).is_ok() {
+                return Ok(true);
+            }
+        }
+        if whole && let Some(mut at) = frame_end(0) {
+            let mut frames = 0_usize;
+            while at < rest.len() {
+                let Some(end) = frame_end(at) else {
+                    return Ok(false);
+                };
+                at = end;
+                frames += 1;
+            }
+            return Ok(frames > 0);
+        }
+        Ok(false)
+    }
+}
+
+/// What reading one frame found.
+enum Frame<R> {
+    /// A record, with the length of its frame in bytes.
+    Record(R, u64),
+    /// The end of the file, at a frame boundary.
+    End,
+    /// A frame that does not hold a record.
+    Bad {
+        /// What is wrong with it.
+        reason: String,
+        /// How it is wrong.
+        kind: BadFrame,
+    },
+}
+
+/// How a frame fails to hold a record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BadFrame {
+    /// The end of the file cuts it off: a write that did not finish, or a
+    /// damaged length.
+    CutOff,
+    /// Whole, but its checksum or authentication fails, or it is zeros: a
+    /// write that did not finish, or damage.
+    Unchecked,
+    /// Whole and checked, but no record of this format: written as it is,
+    /// never torn.
+    Undecodable,
+}
+
+/// The record `data` encodes. Zeros are a frame that was never written
+/// (a crash can leave a file longer than its writes), not a record.
+fn decode_record<R: WalEntry>(data: &[u8]) -> std::result::Result<R, (String, BadFrame)> {
+    bincode::serde::decode_from_slice(data, bincode::config::standard())
+        .map(|(record, _)| record)
+        .map_err(|error| {
+            if data.iter().all(|byte| *byte == 0) {
+                ("zeros, not a record".to_string(), BadFrame::Unchecked)
+            } else {
+                (
+                    format!("the record does not decode: {error}"),
+                    BadFrame::Undecodable,
+                )
+            }
+        })
 }
 
 #[cfg(test)]
@@ -1088,19 +1268,14 @@ mod tests {
         }
         std::fs::write(&wal_files[0], &data).unwrap();
 
-        // Recovery should handle corruption gracefully (not panic)
+        // The commit marker after it is whole: the record is damage, not a
+        // torn tail, and the recovery fails (#425).
         let recovery = WalRecovery::new(dir.path());
         let result = recovery.recover();
-        // Should either succeed with fewer records or return an error
-        match result {
-            Ok(records) => {
-                // Best-effort: may have recovered 0 records due to corruption
-                assert!(records.len() <= 2);
-            }
-            Err(_) => {
-                // Also acceptable: corruption detection as error
-            }
-        }
+        assert!(
+            matches!(result, Err(Error::Corruption(_))),
+            "a damaged record fails the recovery: {result:?}"
+        );
     }
 
     #[test]
@@ -1233,6 +1408,215 @@ mod tests {
         let recovery = WalRecovery::new(dir.path());
         let records = recovery.recover_until_epoch(EpochId::new(100)).unwrap();
         assert!(records.is_empty());
+    }
+
+    // ── Damage and torn tails (#425) ───────────────────────────────
+
+    /// Writes `transactions` committed transactions of one `:Person` node
+    /// each (node and transaction ids from 1), starting a new log file after
+    /// each when `rotate` is set, and returns the log files in order.
+    fn write_transactions(dir: &Path, transactions: u64, rotate: bool) -> Vec<std::path::PathBuf> {
+        let wal = WalManager::open(dir).unwrap();
+        for id in 1..=transactions {
+            wal.log(&WalRecord::CreateNode {
+                id: NodeId::new(id),
+                labels: vec!["Person".to_string()],
+            })
+            .unwrap();
+            wal.log(&WalRecord::TransactionCommit {
+                transaction_id: TransactionId::new(id),
+            })
+            .unwrap();
+            if rotate && id < transactions {
+                wal.rotate().unwrap();
+            }
+        }
+        wal.sync().unwrap();
+        drop(wal);
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// The offset of every plaintext frame of `bytes`.
+    fn frame_offsets(bytes: &[u8]) -> Vec<usize> {
+        let mut offsets = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            offsets.push(at);
+            let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            at += 4 + usize::try_from(len).unwrap() + 4;
+        }
+        offsets
+    }
+
+    /// The ids of the nodes `records` create.
+    fn created(records: &[WalRecord]) -> Vec<u64> {
+        records
+            .iter()
+            .filter_map(|record| match record {
+                WalRecord::CreateNode { id, .. } => Some(id.as_u64()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The corruption `result` fails with: its file and offset.
+    fn corruption_of<T: std::fmt::Debug>(result: Result<T>) -> (std::path::PathBuf, u64) {
+        match result {
+            Err(Error::Corruption(corruption)) => {
+                (corruption.file.unwrap(), corruption.offset.unwrap())
+            }
+            other => panic!("expected a corruption, got {other:?}"),
+        }
+    }
+
+    /// The bug of #425: a damaged record stopped the reading of its file
+    /// with a warning, so the commits after it were lost, and the recovery
+    /// went on with the next file, on top of the missing ones.
+    #[test]
+    fn a_damaged_record_with_commits_after_it_fails_the_recovery() {
+        let dir = tempdir().unwrap();
+        let files = write_transactions(dir.path(), 3, false);
+        let mut bytes = std::fs::read(&files[0]).unwrap();
+        let second = frame_offsets(&bytes)[2];
+        bytes[second + 5] ^= 0x01;
+        std::fs::write(&files[0], &bytes).unwrap();
+
+        let (file, offset) = corruption_of(WalRecovery::new(dir.path()).recover());
+        assert_eq!((file, offset), (files[0].clone(), second as u64));
+    }
+
+    /// A damaged length makes a record run past the end of the file, as a
+    /// torn write does: the whole frames behind it make it damage.
+    #[test]
+    fn a_damaged_length_with_commits_after_it_fails_the_recovery() {
+        let dir = tempdir().unwrap();
+        let files = write_transactions(dir.path(), 2, false);
+        let mut bytes = std::fs::read(&files[0]).unwrap();
+        let commit = frame_offsets(&bytes)[1];
+        bytes[commit..commit + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&files[0], &bytes).unwrap();
+
+        let (file, offset) = corruption_of(WalRecovery::new(dir.path()).recover());
+        assert_eq!((file, offset), (files[0].clone(), commit as u64));
+    }
+
+    /// Only the newest file can end torn: the end of an older one is
+    /// damage, also when nothing follows it in that file.
+    #[test]
+    fn a_damaged_end_of_an_older_file_fails_the_recovery() {
+        let dir = tempdir().unwrap();
+        let files = write_transactions(dir.path(), 2, true);
+        assert_eq!(files.len(), 2);
+        let mut bytes = std::fs::read(&files[0]).unwrap();
+        let commit = frame_offsets(&bytes)[1];
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&files[0], &bytes).unwrap();
+
+        let (file, offset) = corruption_of(WalRecovery::new(dir.path()).recover());
+        assert_eq!((file, offset), (files[0].clone(), commit as u64));
+    }
+
+    /// What a crash can leave at the end of the newest file is a torn tail:
+    /// the recovery keeps every commit before it and reports it.
+    #[test]
+    fn a_torn_tail_keeps_every_commit_before_it() {
+        type Tear = fn(&mut Vec<u8>);
+        let cases: [(&str, Tear, Vec<u64>); 5] = [
+            (
+                "zeros past the last write",
+                |bytes| bytes.extend([0; 64]),
+                vec![1, 2],
+            ),
+            (
+                "a length prefix cut off",
+                |bytes| bytes.extend(&7u32.to_le_bytes()[..3]),
+                vec![1, 2],
+            ),
+            (
+                "a huge length with a few bytes",
+                |bytes| {
+                    bytes.extend(u32::MAX.to_le_bytes());
+                    bytes.extend([3, 19, 88]);
+                },
+                vec![1, 2],
+            ),
+            (
+                "the last frame cut in half",
+                |bytes| {
+                    let last = *frame_offsets(bytes).last().unwrap();
+                    bytes.truncate(last + 6);
+                },
+                vec![1],
+            ),
+            (
+                "the last frame's checksum wrong",
+                |bytes| {
+                    let last = bytes.len() - 1;
+                    bytes[last] ^= 0x01;
+                },
+                vec![1],
+            ),
+        ];
+        for (case, tear, kept) in cases {
+            let dir = tempdir().unwrap();
+            let files = write_transactions(dir.path(), 2, false);
+            let mut bytes = std::fs::read(&files[0]).unwrap();
+            tear(&mut bytes);
+            std::fs::write(&files[0], &bytes).unwrap();
+
+            let recovered = WalRecovery::new(dir.path())
+                .recover_with_tail()
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert_eq!(created(&recovered.records), kept, "{case}");
+            assert!(recovered.torn_tail, "{case}");
+            assert!(recovered.damage.is_none(), "{case}");
+        }
+    }
+
+    /// A whole frame whose checksum is right but whose bytes are no record
+    /// was written as it is: damage, also at the end of the newest file.
+    #[test]
+    fn an_undecodable_record_is_damage_also_at_the_end() {
+        let dir = tempdir().unwrap();
+        let files = write_transactions(dir.path(), 1, false);
+        let mut bytes = std::fs::read(&files[0]).unwrap();
+        let end = bytes.len() as u64;
+        let garbage = [0xFF_u8; 3];
+        bytes.extend(3u32.to_le_bytes());
+        bytes.extend(garbage);
+        bytes.extend(crc32fast::hash(&garbage).to_le_bytes());
+        std::fs::write(&files[0], &bytes).unwrap();
+
+        let (file, offset) = corruption_of(WalRecovery::new(dir.path()).recover());
+        assert_eq!((file, offset), (files[0].clone(), end));
+    }
+
+    /// A salvaging recovery stops at the damage with the commits before it
+    /// and names the damage, instead of failing.
+    #[test]
+    fn a_salvaging_recovery_stops_at_the_last_commit_before_the_damage() {
+        let dir = tempdir().unwrap();
+        let files = write_transactions(dir.path(), 3, true);
+        let mut bytes = std::fs::read(&files[1]).unwrap();
+        bytes[5] ^= 0x01;
+        std::fs::write(&files[1], &bytes).unwrap();
+
+        let recovered = WalRecovery::new(dir.path())
+            .with_salvage(true)
+            .recover_with_tail()
+            .unwrap();
+        assert_eq!(created(&recovered.records), vec![1]);
+        let (file, offset) = corruption_of::<()>(Err(recovered.damage.unwrap()));
+        assert_eq!((file, offset), (files[1].clone(), 0));
+        // Without salvage, the same log fails.
+        assert!(WalRecovery::new(dir.path()).recover().is_err());
     }
 }
 
@@ -1698,23 +2082,22 @@ mod crash_tests {
             wal.sync().unwrap();
         }
 
-        // Try recovery with wrong key B: decryption fails, treated as corruption,
-        // best-effort recovery returns no usable records
+        // Recovery with key B: no frame decrypts, and as whole frames follow
+        // the first one, that is damage (or the wrong key), never a torn
+        // tail that would lose the commits without a word (#425).
         let wrong_key = [99u8; KEY_SIZE];
         let wrong_chain = KeyChain::new(wrong_key);
         let mut recovery = WalRecovery::new(dir.path());
         recovery.set_encryptor(wrong_chain.encryptor_for("grafeo-wal", &0u64.to_be_bytes()));
 
         let result = recovery.recover();
+        let Err(Error::Corruption(corruption)) = result else {
+            panic!("a wrong key fails the recovery: {result:?}");
+        };
+        assert_eq!(corruption.offset, Some(0));
         assert!(
-            result.is_ok(),
-            "recovery should succeed (best-effort), got: {result:?}"
-        );
-        let records = result.unwrap();
-        assert!(
-            records.is_empty(),
-            "wrong key should produce no recoverable records, got {}",
-            records.len()
+            corruption.what.contains("does not decrypt"),
+            "{corruption:?}"
         );
     }
 }

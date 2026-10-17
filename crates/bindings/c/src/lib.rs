@@ -22,7 +22,14 @@
 
 #![allow(unsafe_code)]
 
+#[macro_use]
 mod database;
+mod batch;
+#[cfg(feature = "cdc")]
+mod cdc;
+mod edges;
 mod error;
+mod graph;
 mod stream;
 mod types;
+mod upsert;

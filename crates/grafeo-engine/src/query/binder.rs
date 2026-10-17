@@ -7,6 +7,7 @@
 //!
 //! Better to catch these errors early than waste time executing a broken query.
 
+use crate::query::plan::{AggregateFunction, BuiltinFunction, Callee};
 use crate::query::plan::{
     CreateElement, ExpandOp, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
     ReturnItem, ReturnOp, TripleScanOp,
@@ -420,6 +421,27 @@ impl Binder {
 
             // RDF/SPARQL operators
             LogicalOperator::TripleScan(scan) => self.bind_triple_scan(scan),
+            LogicalOperator::PropertyPath(path) => {
+                for component in [Some(&path.subject), Some(&path.object), path.graph.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(name) = component.as_variable()
+                        && !self.context.contains(name)
+                    {
+                        self.context.add_variable(
+                            name.to_string(),
+                            VariableInfo {
+                                name: name.to_string(),
+                                data_type: LogicalType::Any,
+                                is_node: false,
+                                is_edge: false,
+                            },
+                        );
+                    }
+                }
+                Ok(())
+            }
             LogicalOperator::Union(union) => self.bind_branches(&union.inputs),
             LogicalOperator::LeftJoin(lj) => {
                 self.bind_join_inputs(&lj.left, &lj.right)?;
@@ -1269,7 +1291,8 @@ impl Binder {
                 self.validate_expression(right)
             }
             LogicalExpression::Unary { operand, .. } => self.validate_expression(operand),
-            LogicalExpression::FunctionCall { args, .. } => {
+            LogicalExpression::FunctionCall { args, .. }
+            | LogicalExpression::SparqlCall { args, .. } => {
                 for arg in args {
                     self.validate_expression(arg)?;
                 }
@@ -1449,17 +1472,15 @@ impl Binder {
             }
             LogicalExpression::Binary { .. } => LogicalType::Any, // Could be bool or numeric
             LogicalExpression::Unary { .. } => LogicalType::Any,
-            LogicalExpression::FunctionCall { name, .. } => {
-                // Infer based on function name
-                match name.to_lowercase().as_str() {
-                    "count" | "sum" | "id" => LogicalType::Int64,
-                    "avg" => LogicalType::Float64,
-                    "type" => LogicalType::String,
-                    // List-returning functions use Any since we don't track element type
-                    "labels" | "collect" => LogicalType::Any,
-                    _ => LogicalType::Any,
-                }
-            }
+            LogicalExpression::FunctionCall { callee, .. } => match callee {
+                Callee::Aggregate(AggregateFunction::Count | AggregateFunction::Sum)
+                | Callee::Builtin(BuiltinFunction::Id) => LogicalType::Int64,
+                Callee::Aggregate(AggregateFunction::Avg) => LogicalType::Float64,
+                Callee::Builtin(BuiltinFunction::Type) => LogicalType::String,
+                // List-returning functions (labels, collect) use Any: the
+                // element type is not tracked.
+                _ => LogicalType::Any,
+            },
             LogicalExpression::List(_) => LogicalType::Any, // Complex type
             LogicalExpression::Map(_) => LogicalType::Any,  // Complex type
             _ => LogicalType::Any,
@@ -1898,6 +1919,7 @@ mod tests {
             items: vec![
                 ReturnItem {
                     expression: LogicalExpression::FunctionCall {
+                        callee: crate::query::plan::Callee::named("count"),
                         name: "count".to_string(),
                         args: vec![LogicalExpression::Variable("n".to_string())],
                         distinct: false,
@@ -2041,6 +2063,7 @@ mod tests {
         let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
             items: vec![ReturnItem {
                 expression: LogicalExpression::FunctionCall {
+                    callee: crate::query::plan::Callee::named("count"),
                     name: "count".to_string(),
                     args: vec![], // count() needs an argument
                     distinct: false,
@@ -4522,6 +4545,7 @@ mod tests {
             },
             Projection {
                 expression: LogicalExpression::FunctionCall {
+                    callee: crate::query::plan::Callee::named("count"),
                     name: "count".to_string(),
                     args: vec![LogicalExpression::Literal(Value::Int64(1))],
                     distinct: false,
@@ -4530,6 +4554,7 @@ mod tests {
             },
             Projection {
                 expression: LogicalExpression::FunctionCall {
+                    callee: crate::query::plan::Callee::named("AVG"),
                     name: "AVG".to_string(),
                     args: vec![LogicalExpression::Literal(Value::Int64(1))],
                     distinct: false,
@@ -4538,6 +4563,7 @@ mod tests {
             },
             Projection {
                 expression: LogicalExpression::FunctionCall {
+                    callee: crate::query::plan::Callee::named("type"),
                     name: "type".to_string(),
                     args: vec![],
                     distinct: false,
@@ -4546,6 +4572,7 @@ mod tests {
             },
             Projection {
                 expression: LogicalExpression::FunctionCall {
+                    callee: crate::query::plan::Callee::named("labels"),
                     name: "labels".to_string(),
                     args: vec![],
                     distinct: false,
@@ -4554,7 +4581,8 @@ mod tests {
             },
             Projection {
                 expression: LogicalExpression::FunctionCall {
-                    name: "unknown_fn".to_string(),
+                    callee: crate::query::plan::Callee::named("keys"),
+                    name: "keys".to_string(),
                     args: vec![],
                     distinct: false,
                 },

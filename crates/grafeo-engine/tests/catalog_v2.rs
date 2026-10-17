@@ -334,5 +334,7 @@ fn the_catalog_section_is_version_2_and_has_no_raw_chunk() {
     );
     let mut distinct = kinds.clone();
     distinct.dedup();
-    assert_eq!(distinct, (1..=9).collect::<Vec<u8>>(), "{kinds:?}");
+    // Kind 10, the stored configuration, which a database created as a
+    // file stores.
+    assert_eq!(distinct, (1..=10).collect::<Vec<u8>>(), "{kinds:?}");
 }

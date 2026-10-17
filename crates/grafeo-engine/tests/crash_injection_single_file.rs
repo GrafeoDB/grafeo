@@ -47,23 +47,33 @@ fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// The crash points of a checkpoint with the WAL enabled, in the order
-/// `wal_checkpoint()` and `close()` reach them: the flush rotates the WAL,
-/// the file manager writes the new image (its chunks, a sync, the header, the
-/// trim), then the flush marks the WAL.
-const CHECKPOINT_POINTS: [&str; 8] = [
+/// `wal_checkpoint()` and `close()` reach them: the flush starts a new WAL
+/// segment (created, its header written, the directory synced), the file
+/// manager writes the new image (its chunks, a sync, the header, the trim),
+/// then the flush removes the segment the image covers.
+const CHECKPOINT_POINTS: [&str; 13] = [
     "flush:before_serialize",
+    "wal:after_segment_create",
+    "wal:after_segment_header",
+    "wal:before_dir_sync",
     "flush:after_rotate",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
     "checkpoint:before_trim",
     "flush:after_write",
-    "flush:after_mark_checkpoint",
+    "flush:before_remove_segments",
+    "wal:before_remove_segment",
+    "wal:after_remove_segment",
 ];
 
-/// The crash points of `close()` with the WAL enabled: the checkpoint's, then
-/// the removal of the sidecar WAL.
-const CLOSE_POINTS: [&str; 9] = [
+/// The crash points of `close()` with the WAL enabled (in `NoSync` mode, so
+/// no background flusher syncs first): the sync of the WAL and its sync
+/// marker, the checkpoint's, then the removal of the sidecar WAL.
+const CLOSE_POINTS: [&str; 17] = [
+    "wal:before_sync",
+    "wal:after_sync",
+    "wal:after_frame",
     CHECKPOINT_POINTS[0],
     CHECKPOINT_POINTS[1],
     CHECKPOINT_POINTS[2],
@@ -72,6 +82,11 @@ const CLOSE_POINTS: [&str; 9] = [
     CHECKPOINT_POINTS[5],
     CHECKPOINT_POINTS[6],
     CHECKPOINT_POINTS[7],
+    CHECKPOINT_POINTS[8],
+    CHECKPOINT_POINTS[9],
+    CHECKPOINT_POINTS[10],
+    CHECKPOINT_POINTS[11],
+    CHECKPOINT_POINTS[12],
     "close:before_remove_sidecar_wal",
 ];
 
@@ -119,7 +134,11 @@ fn a_panic_at_each_point_of_close_leaves_a_usable_database() {
 
         // Phase 1: Create and populate
         {
-            let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+            let db = GrafeoDB::with_config(
+                Config::persistent(&path)
+                    .with_wal_durability(grafeo_engine::config::DurabilityMode::NoSync),
+            )
+            .unwrap();
             let session = db.session();
             session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
             session.execute("INSERT (:Person {name: 'Gus'})").unwrap();

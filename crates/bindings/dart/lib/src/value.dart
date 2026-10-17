@@ -124,8 +124,10 @@ List<String> extractColumns(List<Map<String, dynamic>> rows) {
 }
 
 /// Parse a JSON object string into a map with temporal decoding.
-Map<String, dynamic> parseObject(String json) {
-  final decoded = jsonDecode(json);
+Map<String, dynamic> parseObject(String json) => decodeObject(jsonDecode(json));
+
+/// Decode an already parsed JSON object into a map with temporal decoding.
+Map<String, dynamic> decodeObject(Object? decoded) {
   if (decoded is! Map) return {};
   return {
     for (final entry in decoded.entries)

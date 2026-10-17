@@ -264,7 +264,7 @@ pub struct Session {
     /// The WAL this session's commits write their groups to (`None`
     /// without a WAL).
     #[cfg(feature = "wal")]
-    wal: Option<Arc<grafeo_storage::wal::LpgWal>>,
+    wal: Option<Arc<grafeo_storage::wal::Wal>>,
     /// CDC log for change tracking.
     #[cfg(feature = "cdc")]
     cdc_log: Arc<crate::cdc::CdcLog>,
@@ -405,7 +405,7 @@ impl Session {
 
     /// The session's WAL, if it logs its writes.
     #[cfg(feature = "wal")]
-    fn wal(&self) -> Option<&Arc<grafeo_storage::wal::LpgWal>> {
+    fn wal(&self) -> Option<&Arc<grafeo_storage::wal::Wal>> {
         self.wal.as_ref()
     }
 
@@ -427,10 +427,40 @@ impl Session {
     /// Sets the WAL for this session (shared with the database).
     ///
     /// Each commit writes one group: the records of its change set (see
-    /// `transaction::v1_group`), its RDF triples included.
+    /// `database::wal_log`), its RDF triples included.
     #[cfg(all(feature = "wal", feature = "lpg"))]
-    pub(crate) fn set_wal(&mut self, wal: Arc<grafeo_storage::wal::LpgWal>) {
+    pub(crate) fn set_wal(&mut self, wal: Arc<grafeo_storage::wal::Wal>) {
         self.wal = Some(wal);
+    }
+
+    /// Writes the WAL group of the commit `commit` of `transaction_id` from
+    /// what it changed, when the session logs (see
+    /// [`wal_log::write_commit`](crate::database::wal_log::write_commit)).
+    ///
+    /// # Errors
+    ///
+    /// As `write_commit`: the commit is taken back, or ends without
+    /// completing when its outcome is unknown.
+    #[cfg(feature = "wal")]
+    fn write_commit_group<'a>(
+        &self,
+        commit: crate::transaction::CommitGuard<'a>,
+        transaction_id: TransactionId,
+        changes: Option<&crate::transaction::TransactionChanges>,
+    ) -> Result<(
+        crate::transaction::CommitGuard<'a>,
+        Option<crate::database::wal_log::Logged>,
+    )> {
+        match (self.wal(), changes) {
+            (Some(wal), Some(changes)) => crate::database::wal_log::write_commit(
+                wal,
+                commit,
+                transaction_id,
+                changes,
+                grafeo_common::storage::log_record::Origin::Transaction,
+            ),
+            _ => Ok((commit, None)),
+        }
     }
 
     /// Sets the CDC log for this session (shared with the database): each
@@ -1002,8 +1032,6 @@ impl Session {
                 change.push(StandaloneOp::CreateGraph {
                     name: storage_key.clone(),
                 });
-                // AS COPY OF copies no data yet: the store's graph copy only
-                // created the graph, so the graph is created empty, as before.
 
                 // Bind to graph type if specified.
                 // If the parser produced a '/' in the name it is already a qualified
@@ -1028,20 +1056,43 @@ impl Session {
                     )));
                 }
 
-                // LIKE: copy the source's graph type binding, when its graph
-                // type exists.
-                if let Some(ref src) = like_graph {
+                // LIKE and AS COPY OF: copy the source's graph type binding,
+                // when its graph type exists.
+                if let Some(src) = like_graph.as_ref().or(copy_of.as_ref()) {
                     let src_key = self.effective_graph_key(src);
                     if let Some(src_type) = self.catalog.get_graph_type_binding(&src_key)
                         && self.catalog.get_graph_type_def(&src_type).is_some()
                     {
                         change.push(StandaloneOp::PutCatalog(CatalogRecord::GraphBinding(
                             GraphBindingRecord {
-                                graph: storage_key,
+                                graph: storage_key.clone(),
                                 graph_type: src_type,
                             },
                         )));
                     }
+                }
+
+                // AS COPY OF: the new graph holds the source's data, logged
+                // and applied with the graph's creation (#423).
+                if let Some(ref src) = copy_of {
+                    let src_key = self.effective_graph_key(src);
+                    let source = self.root_store().graph(&src_key).ok_or_else(|| {
+                        Error::Query(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            format!("Source graph '{src}' does not exist"),
+                        ))
+                    })?;
+                    crate::database::standalone::commit_copy(
+                        change,
+                        &held,
+                        #[cfg(feature = "wal")]
+                        self.wal().map(|wal| &**wal),
+                        &self.root_store(),
+                        &self.catalog,
+                        &self.transaction_manager,
+                        (&source, &storage_key),
+                    )?;
+                    return Ok(QueryResult::empty());
                 }
 
                 self.commit_standalone(change, &held)?;
@@ -3988,90 +4039,105 @@ impl Session {
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_epoch();
 
-        // Stamp the changes with the commit epoch, per graph through the
-        // store each was applied to: the pending versions become visible at
-        // the epoch once it is published, and the stores' counters and
-        // epochs follow. A store that fails leaves the commit half stamped:
-        // dropping the commit guard uncompleted poisons the database.
-        if let Some(changes) = &changes
-            && let Err(error) = changes.stamp(commit_epoch)
-        {
-            return Err(grafeo_common::utils::error::Error::Internal(format!(
-                "the commit of transaction {transaction_id:?} could not stamp its changes: {error}"
-            )));
-        }
-
-        // Apply the RDF triples, in recorded order: the store holds only
-        // committed triples, so readers see them from now on. The ones that
-        // changed nothing (another transaction wrote them first) are dropped
-        // from the set, so the log and change data capture skip them.
-        #[cfg(feature = "triple-store")]
-        if let Some(changes) = &changes
-            && let Err(error) = changes.apply_triples(&self.rdf_store)
-        {
-            return Err(grafeo_common::utils::error::Error::Internal(format!(
-                "the commit of transaction {transaction_id:?} could not apply its RDF changes: \
-                 {error}"
-            )));
-        }
-
-        #[cfg(feature = "testing-statement-injection")]
-        grafeo_common::testing::commit_hook::run_after_commit_stamped();
-
-        // Report the changes to CDC at the commit epoch, in the commit's
-        // ordered step (no other commit runs until this one is complete), so
-        // the events' timestamps follow the commit epochs.
-        #[cfg(feature = "cdc")]
-        if self.records_cdc
-            && let Some(changes) = &changes
-        {
-            changes.read(|set| self.cdc_log.record_commit(set, commit_epoch));
-        }
-
-        // Write the transaction's records to the WAL as one group, closed by
-        // the commit marker and the epoch advance, so crash recovery can
-        // identify committed transactions and their epoch boundaries (#252)
-        // and no other session's records can land inside the group (#411):
-        // the records of its change set, written with one call.
+        // Write the transaction's group to the WAL before anything of it is
+        // stamped or reported (#498): a group that is not written leaves
+        // nothing behind, so the commit is taken back and the transaction
+        // rolled back.
         #[cfg(feature = "wal")]
-        if let Some(wal) = self.wal() {
-            use grafeo_storage::wal::WalRecord;
-            let records = changes
-                .as_ref()
-                .map(|changes| changes.read(crate::transaction::v1_group::v1_records))
-                .unwrap_or_default();
-            let group = crate::transaction::v1_group::build_group(
-                records,
-                &[
-                    WalRecord::TransactionCommit { transaction_id },
-                    WalRecord::EpochAdvance {
-                        epoch: commit_epoch,
-                    },
-                ],
-            );
-            if let Err(e) = wal.log_batch(&group) {
-                grafeo_common::grafeo_warn!("Failed to write transaction to WAL: {}", e);
-            }
-        }
-
-        #[cfg(feature = "testing-statement-injection")]
-        grafeo_common::testing::commit_hook::run_after_commit_logged();
-
-        // The stores the transaction wrote moved to the epoch when it was
-        // stamped, so a lookup at a store's own epoch sees the commit from
-        // then on; the database's direct reads and queries read at the
-        // published epoch, which moves only once the commit is complete. The
-        // database has one epoch: the root store follows every commit, also
-        // one that only wrote named graphs (a checkpoint saves the root's
-        // epoch for all of them).
-        self.root_store().sync_epoch(commit_epoch);
+        let (commit, logged) =
+            match self.write_commit_group(commit, transaction_id, changes.as_deref()) {
+                Ok(written) => written,
+                Err(error) => {
+                    // A taken-back commit left the transaction active: roll
+                    // it back, so the session can go on (and retry).
+                    if self.transaction_manager.state(transaction_id)
+                        == Some(crate::transaction::TransactionState::Active)
+                    {
+                        let _ = self.abort_transaction(transaction_id, changes.as_deref());
+                    }
+                    return Err(error);
+                }
+            };
 
         // Reset read-only flag and clear savepoints before completing the
-        // commit: a transaction this session begins next waits for the commit
-        // and sets its own flag after it.
+        // commit: the session's next transaction begins after it.
         *self.read_only_tx.lock() = self.db_read_only;
         self.savepoints.lock().clear();
-        commit.complete()?;
+
+        // The group is in the log: the commit lock goes, so the next commit
+        // writes its group while this one syncs and waits for its turn.
+        let publish = commit.written();
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_after_commit_written();
+
+        // Durable as the mode asks before anything is published (in `Sync`
+        // mode one fsync covers the groups of every commit waiting here). A
+        // group written but not made durable may survive, so the commit ends
+        // unpublished, which poisons the database until a reopen decides from
+        // the log.
+        #[cfg(feature = "wal")]
+        if let (Some(wal), Some(logged)) = (self.wal(), logged) {
+            crate::database::wal_log::sync_commit(wal, logged)?;
+        }
+
+        // In the commit's turn, after every commit below it is published:
+        // what must follow the epochs.
+        let published = publish.complete_with(|| {
+            // Stamp the changes with the commit epoch, per graph through the
+            // store each was applied to: the pending versions become visible
+            // at the epoch once it is published, and the stores' counters and
+            // epochs follow. A store that fails leaves the commit half
+            // stamped: it is not published, which poisons the database.
+            if let Some(changes) = &changes
+                && let Err(error) = changes.stamp(commit_epoch)
+            {
+                return Err(grafeo_common::utils::error::Error::Internal(format!(
+                    "the commit of transaction {transaction_id:?} could not stamp its changes: \
+                     {error}"
+                )));
+            }
+
+            // Apply the RDF triples, in recorded order: the store holds only
+            // committed triples, so readers see them from now on.
+            #[cfg(feature = "triple-store")]
+            if let Some(changes) = &changes
+                && let Err(error) = changes.apply_triples(&self.rdf_store)
+            {
+                return Err(grafeo_common::utils::error::Error::Internal(format!(
+                    "the commit of transaction {transaction_id:?} could not apply its RDF \
+                     changes: {error}"
+                )));
+            }
+
+            #[cfg(feature = "testing-statement-injection")]
+            grafeo_common::testing::commit_hook::run_after_commit_stamped();
+
+            // Report the changes to CDC at the commit epoch, in epoch order,
+            // so the events' timestamps follow the commit epochs.
+            #[cfg(feature = "cdc")]
+            if self.records_cdc
+                && let Some(changes) = &changes
+            {
+                changes.read(|set| self.cdc_log.record_commit(set, commit_epoch));
+            }
+
+            #[cfg(feature = "testing-statement-injection")]
+            grafeo_common::testing::commit_hook::run_after_commit_logged();
+
+            // The stores the transaction wrote moved to the epoch when it
+            // was stamped, so a lookup at a store's own epoch sees the commit
+            // from then on; the database's direct reads and queries read at
+            // the published epoch, which moves only once the commit is
+            // complete. The database has one epoch: the root store follows
+            // every commit, also one that only wrote named graphs (a
+            // checkpoint saves the root's epoch for all of them).
+            self.root_store().sync_epoch(commit_epoch);
+            Ok(())
+        });
+        #[cfg(feature = "wal")]
+        let published = published
+            .map_err(|error| crate::database::wal_log::publish_error(error, logged.is_some()));
+        published?;
         let written = changes
             .as_ref()
             .map(|changes| changes.written_graphs())
@@ -5268,6 +5334,21 @@ impl Session {
         self.write(|writer| writer.delete_node(id, false))
     }
 
+    /// Deletes a node with all its edges, as `DETACH DELETE` does, and
+    /// returns whether the node existed: one change of the write, so the
+    /// node and its edges commit, roll back and replay together. Change data
+    /// capture reports a Delete event per edge, each naming the node in
+    /// `deleted_with`, then the node's.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict with another transaction that writes the
+    /// node or one of its edges, or creates an edge to it.
+    #[cfg(feature = "lpg")]
+    pub fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
+        self.write(|writer| writer.delete_node(id, true))
+    }
+
     /// Deletes an edge and returns whether it existed.
     ///
     /// # Errors
@@ -5493,6 +5574,34 @@ impl Session {
             id,
             epoch,
             transaction_id.unwrap_or(TransactionId::SYSTEM),
+        )
+    }
+
+    /// The edges of a node in `direction` as `(neighbor, edge)` pairs, as the
+    /// session sees them (its open transaction's own changes included),
+    /// without a query: only those of `edge_types` unless it is empty.
+    /// `Direction::Both` lists a self-loop once; a node that does not exist
+    /// has none. See [`GrafeoDB::get_node_edges`](crate::GrafeoDB::get_node_edges).
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn get_node_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[&str],
+    ) -> Vec<(NodeId, EdgeId)> {
+        let (epoch, transaction_id) = self.get_transaction_context();
+        let transaction_id = transaction_id.unwrap_or(TransactionId::SYSTEM);
+        let store = self.active_store();
+        let node_visible = store.is_node_visible_versioned(node, epoch, transaction_id);
+        crate::database::direct::node_edges(
+            &*store,
+            node,
+            direction,
+            edge_types,
+            node_visible,
+            |edge| store.is_edge_visible_versioned(edge, epoch, transaction_id),
+            |edge| store.edge_type_versioned(edge, epoch, transaction_id),
         )
     }
 
@@ -7316,7 +7425,9 @@ mod tests {
     #[cfg(all(feature = "lpg", feature = "wal", feature = "grafeo-file"))]
     #[test]
     fn a_write_outside_a_transaction_never_lands_in_a_dropped_graph() {
-        use grafeo_storage::wal::{WalRecord, WalRecovery};
+        use grafeo_common::change::StandaloneOp;
+        use grafeo_common::storage::{LogRecord, read_log_records};
+        use grafeo_storage::wal::WalScan;
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dropped.grafeo");
@@ -7355,26 +7466,30 @@ mod tests {
             "nothing landed in the default graph instead"
         );
 
-        db.wal()
-            .expect("a persistent database logs")
-            .sync()
-            .unwrap();
-        let mut wal = path.clone().into_os_string();
-        wal.push(".wal");
-        let records = WalRecovery::new(std::path::PathBuf::from(wal))
-            .recover_with_tail()
-            .unwrap()
-            .records;
+        let wal = db.wal().expect("a persistent database logs");
+        wal.sync().unwrap();
+        let mut records = Vec::new();
+        let mut scan = WalScan::open(wal.dir(), wal.scan_options(0)).unwrap();
+        while let Some(mut group) = scan.next_group().unwrap() {
+            while let Some(payload) = group.next_payload().unwrap() {
+                read_log_records(payload, &mut |record| {
+                    records.push(record);
+                    Ok(())
+                })
+                .unwrap();
+            }
+        }
         let dropped_at = records
             .iter()
-            .position(
-                |record| matches!(record, WalRecord::DropNamedGraph { name } if name == "trips"),
-            )
+            .position(|record| {
+                matches!(record, LogRecord::Standalone(StandaloneOp::DropGraph { name, .. })
+                    if name == "trips")
+            })
             .expect("the drop is logged");
         assert!(
             !records[dropped_at..].iter().any(|record| matches!(
                 record,
-                WalRecord::SwitchGraph { name: Some(name) } if name == "trips"
+                LogRecord::Data { graph: Some(graph), .. } if graph.contains("trips")
             )),
             "a write into the dropped graph was logged: {records:?}"
         );

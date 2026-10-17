@@ -450,7 +450,9 @@ fn visit_subqueries(
             visit_subqueries(right, f)
         }
         LogicalExpression::Unary { operand, .. } => visit_subqueries(operand, f),
-        LogicalExpression::FunctionCall { args, .. } | LogicalExpression::List(args) => {
+        LogicalExpression::FunctionCall { args, .. }
+        | LogicalExpression::SparqlCall { args, .. }
+        | LogicalExpression::List(args) => {
             args.iter_mut().try_for_each(|arg| visit_subqueries(arg, f))
         }
         LogicalExpression::Map(entries) => entries
@@ -799,9 +801,9 @@ fn expression_names(expression: &LogicalExpression, names: &mut HashSet<String>)
             expression_names(left, names) && expression_names(right, names)
         }
         LogicalExpression::Unary { operand, .. } => expression_names(operand, names),
-        LogicalExpression::FunctionCall { args, .. } | LogicalExpression::List(args) => {
-            args.iter().all(|arg| expression_names(arg, names))
-        }
+        LogicalExpression::FunctionCall { args, .. }
+        | LogicalExpression::SparqlCall { args, .. }
+        | LogicalExpression::List(args) => args.iter().all(|arg| expression_names(arg, names)),
         LogicalExpression::Map(entries) => entries
             .iter()
             .all(|(_, value)| expression_names(value, names)),

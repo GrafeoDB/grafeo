@@ -17,8 +17,8 @@
 //! inline.
 
 use super::{
-    Direction, Error, ExpandDirection, FilterExpression, LogicalExpression, LogicalOperator,
-    Result, Value, convert_binary_op, convert_unary_op,
+    BuiltinFunction, Direction, Error, ExpandDirection, FilterExpression, LogicalExpression,
+    LogicalOperator, Result, Value, convert_binary_op, convert_unary_op,
 };
 use crate::query::functions::{check_function_call, check_pattern_match};
 
@@ -68,9 +68,17 @@ impl super::Planner {
                     .iter()
                     .map(|a| self.convert_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(FilterExpression::FunctionCall {
-                    name: name.clone(),
-                    args: filter_args,
+                Ok(match BuiltinFunction::from_name(name) {
+                    Some(function) => FilterExpression::FunctionCall {
+                        function,
+                        args: filter_args,
+                    },
+                    // An aggregate the planner did not group: the evaluator
+                    // answers it with no value, as it did by name.
+                    None => FilterExpression::SparqlCall {
+                        name: name.clone(),
+                        args: filter_args,
+                    },
                 })
             }
             LogicalExpression::Case {
@@ -259,7 +267,7 @@ impl super::Planner {
                             Ok((
                                 "*".to_string(),
                                 FilterExpression::FunctionCall {
-                                    name: "properties".to_string(),
+                                    function: BuiltinFunction::Properties,
                                     args: vec![FilterExpression::Variable(base.clone())],
                                 },
                             ))

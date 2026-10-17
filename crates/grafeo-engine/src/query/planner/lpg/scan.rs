@@ -292,7 +292,7 @@ impl super::Planner {
                         .map(|(i, name)| (name.clone(), i))
                         .collect();
                     let filter_expr = FilterExpression::FunctionCall {
-                        name: "hasLabel".to_string(),
+                        function: grafeo_core::execution::operators::BuiltinFunction::HasLabel,
                         args: vec![
                             FilterExpression::Variable(scan.variable.clone()),
                             FilterExpression::Literal(Value::String(label.as_str().into())),

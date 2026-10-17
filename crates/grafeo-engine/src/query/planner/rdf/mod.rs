@@ -3424,7 +3424,7 @@ impl RdfExpressionPredicate {
                 let col_idx = *self.variable_columns.get(var)?;
                 chunk.column(col_idx)?.get_value(row)
             }
-            FilterExpression::FunctionCall { name, args } => {
+            FilterExpression::SparqlCall { name, args } => {
                 self.eval_function_call(name, args, chunk, row)
             }
             FilterExpression::List(items) => {

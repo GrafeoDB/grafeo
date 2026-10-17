@@ -130,18 +130,18 @@ use grafeo_common::types::{EpochId, TransactionId};
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
-    AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, ConstraintValidator,
-    CreateOperator, CreateStep, DeleteEdgeOperator, DeleteNodeOperator, EagerOperator,
-    EmptyOperator, EntityKind, EntityValue, ExecutionPathMode, ExpandOperator, ExpandStep,
-    ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
-    FilterOperator, HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
-    JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LeapfrogJoinOperator,
-    LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator, MergeRelationshipConfig,
-    MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator, Operator,
-    ParameterScanOperator, ProjectExpr, ProjectOperator, PropertySource, RangeScanOperator,
-    RemoveLabelOperator, ScanOperator, SetPropertyOperator, ShortestPathOperator,
-    SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
-    UnwindOperator, VariableLengthExpandOperator,
+    AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, BuiltinFunction,
+    ConstraintValidator, CreateOperator, CreateStep, DeleteEdgeOperator, DeleteNodeOperator,
+    EagerOperator, EmptyOperator, EntityKind, EntityValue, ExecutionPathMode, ExpandOperator,
+    ExpandStep, ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator,
+    FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
+    HorizontalAggregateOperator, JoinType as PhysicalJoinType, LazyFactorizedChainOperator,
+    LeapfrogJoinOperator, LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator,
+    MergeRelationshipConfig, MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator,
+    Operator, ParameterScanOperator, ProjectExpr, ProjectOperator, PropertySource,
+    RangeScanOperator, RemoveLabelOperator, ScanOperator, SetPropertyOperator,
+    ShortestPathOperator, SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey,
+    SortOperator, UnwindOperator, VariableLengthExpandOperator,
 };
 use grafeo_core::graph::{Direction, GraphStoreMut, GraphStoreSearch};
 use std::collections::HashMap;

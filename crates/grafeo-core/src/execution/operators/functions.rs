@@ -402,21 +402,37 @@ pub fn regex_pattern_error(pattern: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
-    /// The names in the `match name` arms of the evaluator's `eval_*_fn`
-    /// methods in `filter.rs`, lowercase: the functions it computes.
-    fn evaluator_function_names() -> BTreeSet<String> {
+    /// The variants in the `match function` arms of each `eval_*_fn` method
+    /// of `filter.rs`, by the method's group (`eval_graph_element_fn` is
+    /// `GraphElement`).
+    fn evaluator_arms() -> BTreeMap<String, BTreeSet<String>> {
         let source = include_str!("filter.rs");
         let lines: Vec<&str> = source.lines().collect();
-        let mut names = BTreeSet::new();
+        let mut arms: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut index = 0;
         while index < lines.len() {
             let line = lines[index];
             index += 1;
-            if !(line.starts_with("    fn eval_") && line.contains("_fn(")) {
+            let Some(method) = line
+                .strip_prefix("    fn eval_")
+                .and_then(|rest| rest.split_once("_fn("))
+                .map(|(method, _)| method)
+            else {
                 continue;
-            }
+            };
+            let group: String = method
+                .split('_')
+                .map(|part| {
+                    let mut chars = part.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+                        .unwrap_or_default()
+                })
+                .collect();
+            let entry = arms.entry(group).or_default();
             // The method's body ends at the first line that closes it.
             let mut arm_indent = None;
             while index < lines.len() && lines[index] != "    }" {
@@ -424,39 +440,52 @@ mod tests {
                 index += 1;
                 let indent = body_line.len() - body_line.trim_start().len();
                 let text = body_line.trim_start();
-                if arm_indent.is_none() && text.starts_with("match name {") {
+                if arm_indent.is_none() && text.starts_with("match function {") {
                     arm_indent = Some(indent + 4);
                 } else if Some(indent) == arm_indent {
                     let pattern = text.strip_prefix("| ").unwrap_or(text);
-                    if pattern.starts_with('"') {
-                        let before_arrow = pattern.split("=>").next().unwrap_or(pattern);
-                        for quoted in before_arrow.split('"').skip(1).step_by(2) {
-                            names.insert(quoted.to_string());
+                    let before_arrow = pattern.split("=>").next().unwrap_or(pattern);
+                    for part in before_arrow.split('|') {
+                        if let Some(variant) = part.trim().strip_prefix("BuiltinFunction::") {
+                            entry.insert(variant.trim().to_string());
                         }
                     }
                 }
             }
         }
-        names
+        arms
     }
 
+    /// Each group method answers every function of its group: a function
+    /// without an arm would fall to the method's `_ => None` and be null for
+    /// every row.
     #[test]
-    fn the_table_lists_exactly_the_functions_the_evaluator_computes() {
-        let evaluator = evaluator_function_names();
+    fn every_function_has_an_arm_in_its_group_method() {
+        let arms = evaluator_arms();
+        let found: usize = arms.values().map(BTreeSet::len).sum();
         assert!(
-            evaluator.len() > 100,
-            "the scan of filter.rs found only {} names: has the layout of its \
-             `eval_*_fn` methods changed?",
-            evaluator.len()
+            found >= BuiltinFunction::ALL.len(),
+            "the scan of filter.rs found {found} arms: has the layout of its \
+             `eval_*_fn` methods changed?"
         );
-        let table: BTreeSet<String> = function_names().map(str::to_lowercase).collect();
-        let missing: Vec<&String> = evaluator.difference(&table).collect();
-        let extra: Vec<&String> = table.difference(&evaluator).collect();
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "BuiltinFunction lacks {missing:?} and has {extra:?}, \
-             which the evaluator does not compute"
-        );
+        for &function in BuiltinFunction::ALL {
+            let group = format!("{:?}", function.group());
+            let variant = format!("{function:?}");
+            assert!(
+                arms.get(&group)
+                    .is_some_and(|names| names.contains(&variant)),
+                "{variant} belongs to {group}, whose evaluator method has no arm for it"
+            );
+        }
+        for (group, names) in &arms {
+            for name in names {
+                let function = BuiltinFunction::ALL
+                    .iter()
+                    .find(|function| format!("{function:?}") == *name)
+                    .unwrap_or_else(|| panic!("{name} in {group} is no BuiltinFunction"));
+                assert_eq!(&format!("{:?}", function.group()), group, "{name}");
+            }
+        }
     }
 
     #[test]

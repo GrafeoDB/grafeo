@@ -1292,7 +1292,7 @@ mod tests {
         let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
 
         let coalesce = FilterExpression::FunctionCall {
-            name: "coalesce".to_string(),
+            function: crate::execution::operators::BuiltinFunction::Coalesce,
             args: vec![
                 FilterExpression::Property {
                     variable: "n".to_string(),
@@ -1467,7 +1467,7 @@ mod tests {
     fn coalesce_n_x_else(default: i64) -> super::super::filter::FilterExpression {
         use super::super::filter::FilterExpression;
         FilterExpression::FunctionCall {
-            name: "coalesce".to_string(),
+            function: crate::execution::operators::BuiltinFunction::Coalesce,
             args: vec![
                 FilterExpression::Property {
                     variable: "n".to_string(),
@@ -1634,7 +1634,7 @@ mod tests {
 
         // ON CREATE supplies NOT NULL property `x` via expression.
         let coalesce = FilterExpression::FunctionCall {
-            name: "coalesce".to_string(),
+            function: crate::execution::operators::BuiltinFunction::Coalesce,
             args: vec![
                 FilterExpression::Property {
                     variable: "r".to_string(),

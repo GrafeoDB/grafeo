@@ -433,8 +433,8 @@ BP15|gql 2ea289b2c7 The error starts with its code, GRAFEO-Q002 (#588); the mess
 BS1|cypher e7055daa61 An unknown procedure is a semantic error that names it (#588); it was GRAFEO-X001.
 BS1|gql e7055daa61 An unknown procedure is a semantic error that names it (#588); it was GRAFEO-X001.
 BS2|gql f8f0f8a302 An unknown YIELD column is a semantic error that names the procedure's columns (#588); it was GRAFEO-X001.
-BS3|cypher bd2e73aba0 A function called with too few arguments is a semantic error (#588); it was GRAFEO-X001.
-BS3|gql bd2e73aba0 A function called with too few arguments is a semantic error (#588); it was GRAFEO-X001.
+BS3|cypher dfd84e4596 A function called with too few arguments is a semantic error that names the function and the arguments it takes (#588, #540); it was GRAFEO-X001.
+BS3|gql dfd84e4596 A function called with too few arguments is a semantic error that names the function and the arguments it takes (#588, #540); it was GRAFEO-X001.
 BS4|cypher 0a88e3eae7 A Cypher DELETE of a variable nothing binds names that variable (#588); it said only "DELETE requires input".
 P3|cypher 36c8f2cf63 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
 P3|gql 36c8f2cf63 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.

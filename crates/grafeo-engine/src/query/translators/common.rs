@@ -169,8 +169,9 @@ pub(crate) fn unaliased_with_expression() -> Error {
     ))
 }
 
-// Whether a function name is an aggregate: one list with the planner's check
-// of function calls.
+// Whether a function name is an aggregate: one list with the translators'
+// check of function calls.
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 pub(crate) use crate::query::functions::is_aggregate_function;
 use crate::query::plan::BuiltinFunction;
 use crate::query::plan::Callee;

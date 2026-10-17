@@ -1,25 +1,32 @@
-//! The functions a query calls and the patterns it matches, checked when the
-//! query is planned.
+//! The functions a query calls and the patterns it matches, checked before
+//! any row is read.
 //!
-//! A call is to a scalar function of the expression evaluator (see
-//! [`function_support`]) or to an aggregate, which groups rows. The LPG
-//! planner checks every call and every `=~` and LIKE it plans, so a query
-//! that calls a function that does not exist (a misspelled `upperr`), passes
-//! a function a number of arguments it does not take (`toUpper('a', 'b')`),
-//! calls a function this build lacks a feature for, or matches a pattern this
-//! build cannot, fails before any row is read. The evaluator would answer
-//! each of these with a null for every row, and a WHERE would keep no rows.
+//! A call is to a built-in function of the expression evaluator or to an
+//! aggregate, which groups rows. The GQL, Cypher and SQL/PGQ translators
+//! resolve every call they translate ([`resolve_call`]), and the LPG planner
+//! checks every `=~` and LIKE it plans, so a query that calls a function that
+//! does not exist (a misspelled `upperr`), passes a function a number of
+//! arguments it does not take (`toUpper('a', 'b')`), calls a function this
+//! build lacks a feature for, or matches a pattern this build cannot, fails
+//! before any row is read. The evaluator would answer each of these with a
+//! null for every row, and a WHERE would keep no rows.
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 use grafeo_common::utils::strings::{find_similar, format_suggestion};
-use grafeo_core::execution::operators::{
-    FunctionSupport, REGEX_SUPPORT, function_names, function_support, regex_pattern_error,
-};
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+use grafeo_core::execution::operators::{FunctionSupport, function_names, function_support};
+use grafeo_core::execution::operators::{REGEX_SUPPORT, regex_pattern_error};
 
-use crate::query::plan::{AggregateFunction, BinaryOp, BuiltinFunction, Callee, LogicalExpression};
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+use crate::query::plan::AggregateFunction;
+use crate::query::plan::{BinaryOp, LogicalExpression};
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+use crate::query::plan::{BuiltinFunction, Callee};
 
 /// Whether `name` is an aggregate function (case does not matter).
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 pub(crate) fn is_aggregate_function(name: &str) -> bool {
     AggregateFunction::from_name(name).is_some()
 }
@@ -39,6 +46,7 @@ fn semantic(message: String) -> Error {
 /// one is close; `Function '<name>' takes <numbers>, got <arguments>` for a
 /// number of arguments the function does not take; or, for a function that
 /// needs a feature this build does not have, an error that names the feature.
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 pub(crate) fn check_function_call(name: &str, arguments: usize) -> Result<()> {
     if is_aggregate_function(name) {
         return Ok(());
@@ -75,6 +83,7 @@ pub(crate) fn check_function_call(name: &str, arguments: usize) -> Result<()> {
 /// The errors of [`check_function_call`], with the same texts: an unknown
 /// function, a number of arguments it does not take, or a feature this build
 /// lacks.
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 pub(crate) fn resolve_call(
     name: &str,
     args: Vec<LogicalExpression>,

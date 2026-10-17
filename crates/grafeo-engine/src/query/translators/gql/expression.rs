@@ -3,6 +3,7 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::query::functions::resolve_call;
+use crate::query::plan::BuiltinFunction;
 
 impl GqlTranslator {
     pub(super) fn translate_expression(&self, expr: &ast::Expression) -> Result<LogicalExpression> {
@@ -49,7 +50,7 @@ impl GqlTranslator {
                 // by a WITH, unwound from a list).
 
                 // NULLIF(a, b) desugars to CASE WHEN a = b THEN NULL ELSE a END
-                if name.eq_ignore_ascii_case("nullif") {
+                if BuiltinFunction::from_name(name) == Some(BuiltinFunction::Nullif) {
                     if args.len() != 2 {
                         return Err(Error::Query(QueryError::new(
                             QueryErrorKind::Semantic,

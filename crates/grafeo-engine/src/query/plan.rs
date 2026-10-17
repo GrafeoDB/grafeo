@@ -1918,6 +1918,13 @@ impl AggregateFunction {
     /// Every spelling of an aggregate, with its function; case does not
     /// matter. `count` is [`Count`](Self::Count): the translators turn
     /// `count(x)` into [`CountNonNull`](Self::CountNonNull) themselves.
+    #[cfg(any(
+        test,
+        feature = "gql",
+        feature = "cypher",
+        feature = "sql-pgq",
+        feature = "sparql"
+    ))]
     pub(crate) const ALIASES: &'static [(&'static str, AggregateFunction)] = &[
         ("count", Self::Count),
         ("sum", Self::Sum),
@@ -1957,6 +1964,13 @@ impl AggregateFunction {
     ];
 
     /// The aggregate a call names, in any case.
+    #[cfg(any(
+        test,
+        feature = "gql",
+        feature = "cypher",
+        feature = "sql-pgq",
+        feature = "sparql"
+    ))]
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         Self::ALIASES
             .iter()

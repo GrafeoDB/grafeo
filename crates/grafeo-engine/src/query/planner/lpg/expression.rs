@@ -20,7 +20,8 @@ use super::{
     BuiltinFunction, Direction, Error, ExpandDirection, FilterExpression, LogicalExpression,
     LogicalOperator, Result, Value, convert_binary_op, convert_unary_op,
 };
-use crate::query::functions::{check_function_call, check_pattern_match};
+use crate::query::functions::check_pattern_match;
+use crate::query::plan::Callee;
 
 impl super::Planner {
     /// Converts a logical expression to a filter expression.
@@ -60,27 +61,35 @@ impl super::Planner {
                     operand: Box::new(operand_expr),
                 })
             }
-            LogicalExpression::FunctionCall { name, args, .. } => {
-                // The evaluator answers a call it cannot compute with a null
-                // for every row: refuse it here, before any row is read.
-                check_function_call(name, args.len())?;
+            LogicalExpression::FunctionCall {
+                callee, name, args, ..
+            } => {
+                // The translator resolved the call and checked its arguments.
                 let filter_args: Vec<FilterExpression> = args
                     .iter()
                     .map(|a| self.convert_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(match BuiltinFunction::from_name(name) {
-                    Some(function) => FilterExpression::FunctionCall {
-                        function,
+                Ok(match callee {
+                    Callee::Builtin(function) => FilterExpression::FunctionCall {
+                        function: *function,
                         args: filter_args,
                     },
                     // An aggregate the planner did not group: the evaluator
                     // answers it with no value, as it did by name.
-                    None => FilterExpression::SparqlCall {
+                    Callee::Aggregate(_) => FilterExpression::SparqlCall {
                         name: name.clone(),
                         args: filter_args,
                     },
                 })
             }
+            // SPARQL calls reach only the RDF planner; here they have no value.
+            LogicalExpression::SparqlCall { name, args } => Ok(FilterExpression::SparqlCall {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| self.convert_expression(a))
+                    .collect::<Result<Vec<_>>>()?,
+            }),
             LogicalExpression::Case {
                 operand,
                 when_clauses,
@@ -452,15 +461,17 @@ impl super::Planner {
     /// The variable and label of a `hasLabel(variable, 'Label')` predicate.
     fn label_condition<'a>(&self, predicate: &'a LogicalExpression) -> Option<(&'a str, String)> {
         match predicate {
-            LogicalExpression::FunctionCall { name, args, .. } if name == "hasLabel" => {
-                match (args.first(), args.get(1)) {
-                    (
-                        Some(LogicalExpression::Variable(variable)),
-                        Some(LogicalExpression::Literal(Value::String(label))),
-                    ) => Some((variable, label.to_string())),
-                    _ => None,
-                }
-            }
+            LogicalExpression::FunctionCall {
+                callee: Callee::Builtin(BuiltinFunction::HasLabel),
+                args,
+                ..
+            } => match (args.first(), args.get(1)) {
+                (
+                    Some(LogicalExpression::Variable(variable)),
+                    Some(LogicalExpression::Literal(Value::String(label))),
+                ) => Some((variable, label.to_string())),
+                _ => None,
+            },
             _ => None,
         }
     }

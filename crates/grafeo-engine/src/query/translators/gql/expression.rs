@@ -2,6 +2,7 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::query::functions::resolve_call;
 
 impl GqlTranslator {
     pub(super) fn translate_expression(&self, expr: &ast::Expression) -> Result<LogicalExpression> {
@@ -75,11 +76,7 @@ impl GqlTranslator {
                     .iter()
                     .map(|a| self.translate_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args,
-                    distinct: *distinct,
-                })
+                resolve_call(name, args, *distinct)
             }
             ast::Expression::List(items) => {
                 let items = items
@@ -543,8 +540,8 @@ mod tests {
     }
 
     #[test]
-    fn test_length_with_multiple_args_is_regular_function() {
-        // length(a, b) should remain a regular function call (path optimization is single-arg only)
+    fn test_length_with_multiple_args_is_an_arity_error() {
+        // length(a, b) is no path length either: the translator refuses the call.
         let t = translator();
         let expr = ast::Expression::FunctionCall {
             name: "length".to_string(),
@@ -555,10 +552,7 @@ mod tests {
             distinct: false,
         };
 
-        let result = t.translate_expression(&expr).unwrap();
-        assert!(
-            matches!(&result, LogicalExpression::FunctionCall { name, .. } if name == "length"),
-            "length(a, b) should stay as FunctionCall, got: {result:?}"
-        );
+        let error = t.translate_expression(&expr).unwrap_err().to_string();
+        assert!(error.contains("length"), "{error}");
     }
 }

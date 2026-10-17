@@ -11,6 +11,8 @@ use super::common::{
     no_result, optional_join, push_set_property, with_imports, wrap_distinct, wrap_filter,
     wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
+use crate::query::functions::resolve_call;
+use crate::query::plan::BuiltinFunction;
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
     CountExpr, CreateElement, CreateOp, DeleteEdgeOp, DeleteNodeOp, ExpandDirection, ExpandOp,
@@ -1237,17 +1239,15 @@ impl CypherTranslator {
             wrap_filter(
                 expand,
                 LogicalExpression::Binary {
-                    left: Box::new(LogicalExpression::FunctionCall {
-                        name: "id".into(),
-                        args: vec![LogicalExpression::Variable(expand_target)],
-                        distinct: false,
-                    }),
+                    left: Box::new(LogicalExpression::builtin(
+                        BuiltinFunction::Id,
+                        vec![LogicalExpression::Variable(expand_target)],
+                    )),
                     op: BinaryOp::Eq,
-                    right: Box::new(LogicalExpression::FunctionCall {
-                        name: "id".into(),
-                        args: vec![LogicalExpression::Variable(to_variable.clone())],
-                        distinct: false,
-                    }),
+                    right: Box::new(LogicalExpression::builtin(
+                        BuiltinFunction::Id,
+                        vec![LogicalExpression::Variable(to_variable.clone())],
+                    )),
                 },
             )
         } else {
@@ -2158,11 +2158,7 @@ impl CypherTranslator {
                         translated_args.push(self.translate_expression(arg)?);
                     }
                 }
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: false,
-                })
+                resolve_call(name, translated_args, false)
             }
             ast::Expression::Binary { left, op, right } => {
                 let binary_op = self.translate_binary_op(*op)?;
@@ -2494,14 +2490,13 @@ impl CypherTranslator {
             ast::Expression::FunctionCall { name, args, .. }
                 if !is_aggregate_function(name) && args.iter().any(contains_aggregate) =>
             {
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: args
-                        .iter()
+                resolve_call(
+                    name,
+                    args.iter()
                         .map(|arg| self.translate_projected_sort_key(arg, columns, scope))
                         .collect::<Result<_>>()?,
-                    distinct: false,
-                })
+                    false,
+                )
             }
             other if contains_aggregate(other) => Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
@@ -2963,11 +2958,7 @@ impl CypherTranslator {
                     .map(|a| self.translate_expression(a))
                     .collect::<Result<_>>()?;
 
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: false,
-                })
+                resolve_call(name, translated_args, false)
             }
             ast::Expression::List(items) => {
                 let translated: Vec<LogicalExpression> = items
@@ -3805,6 +3796,7 @@ mod tests {
                 "{:?}",
                 key(
                     LogicalExpression::FunctionCall {
+                        callee: crate::query::plan::Callee::named("startNode"),
                         name: "startNode".to_string(),
                         args: vec![LogicalExpression::Variable("r".to_string())],
                         distinct: false,

@@ -1205,7 +1205,8 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) 
         LogicalExpression::Unary { operand, .. } => {
             substitute_in_expression(operand, params)?;
         }
-        LogicalExpression::FunctionCall { args, .. } => {
+        LogicalExpression::FunctionCall { args, .. }
+        | LogicalExpression::SparqlCall { args, .. } => {
             for arg in args {
                 substitute_in_expression(arg, params)?;
             }

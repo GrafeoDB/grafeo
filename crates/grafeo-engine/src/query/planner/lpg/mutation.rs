@@ -1676,11 +1676,11 @@ fn first_non_constant(
             first_non_constant(left, local).or_else(|| first_non_constant(right, local))
         }
         LogicalExpression::Unary { operand, .. } => first_non_constant(operand, local),
-        LogicalExpression::FunctionCall { args: items, .. } | LogicalExpression::List(items) => {
-            items
-                .iter()
-                .find_map(|item| first_non_constant(item, local))
-        }
+        LogicalExpression::FunctionCall { args: items, .. }
+        | LogicalExpression::SparqlCall { args: items, .. }
+        | LogicalExpression::List(items) => items
+            .iter()
+            .find_map(|item| first_non_constant(item, local)),
         LogicalExpression::Map(entries) => entries
             .iter()
             .find_map(|(_, value)| first_non_constant(value, local)),

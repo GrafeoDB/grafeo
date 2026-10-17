@@ -172,6 +172,8 @@ pub(crate) fn unaliased_with_expression() -> Error {
 // Whether a function name is an aggregate: one list with the planner's check
 // of function calls.
 pub(crate) use crate::query::functions::is_aggregate_function;
+use crate::query::plan::BuiltinFunction;
+use crate::query::plan::Callee;
 
 /// Returns true if the aggregate function is a binary set function (requires two arguments).
 pub(crate) fn is_binary_set_function(func: AggregateFunction) -> bool {
@@ -300,13 +302,14 @@ pub(crate) fn combine_with_and(predicates: Vec<LogicalExpression>) -> Result<Log
 /// when `labels` is empty. A node pattern with several labels requires all of
 /// them, wherever the node appears in a pattern.
 pub(crate) fn has_all_labels(variable: &str, labels: &[String]) -> Option<LogicalExpression> {
-    LogicalExpression::conjunction(labels.iter().map(|label| LogicalExpression::FunctionCall {
-        name: "hasLabel".into(),
-        args: vec![
-            LogicalExpression::Variable(variable.to_string()),
-            LogicalExpression::Literal(Value::String(label.clone().into())),
-        ],
-        distinct: false,
+    LogicalExpression::conjunction(labels.iter().map(|label| {
+        LogicalExpression::builtin(
+            BuiltinFunction::HasLabel,
+            vec![
+                LogicalExpression::Variable(variable.to_string()),
+                LogicalExpression::Literal(Value::String(label.clone().into())),
+            ],
+        )
     }))
 }
 
@@ -358,13 +361,12 @@ fn path_node_ids(source: &str, hops: &[PathHop]) -> LogicalExpression {
     for hop in hops {
         parts.push(match &hop.segment {
             // The first node of a segment is the last node of the hop before
-            Some(segment) => LogicalExpression::FunctionCall {
-                name: "tail".into(),
-                args: vec![LogicalExpression::Variable(format!(
+            Some(segment) => LogicalExpression::builtin(
+                BuiltinFunction::Tail,
+                vec![LogicalExpression::Variable(format!(
                     "_path_nodes_{segment}"
                 ))],
-                distinct: false,
-            },
+            ),
             None => id_list(&hop.target),
         });
     }
@@ -401,11 +403,10 @@ fn concatenation(parts: Vec<LogicalExpression>) -> LogicalExpression {
 /// The path that starts at `source` and takes `hops`, as one path value.
 #[cfg(any(feature = "gql", feature = "cypher"))]
 pub(crate) fn whole_path(source: &str, hops: &[PathHop]) -> LogicalExpression {
-    LogicalExpression::FunctionCall {
-        name: "path".into(),
-        args: vec![path_node_ids(source, hops), path_edge_ids(hops)],
-        distinct: false,
-    }
+    LogicalExpression::builtin(
+        BuiltinFunction::Path,
+        vec![path_node_ids(source, hops), path_edge_ids(hops)],
+    )
 }
 
 /// Binds the path variable `alias` to the whole path of a path pattern with
@@ -430,11 +431,7 @@ pub(crate) fn bind_whole_path(
             projection(path_node_ids(source, hops), format!("_path_nodes_{alias}")),
             projection(path_edge_ids(hops), format!("_path_edges_{alias}")),
             projection(
-                LogicalExpression::FunctionCall {
-                    name: "size".into(),
-                    args: vec![path_edge_ids(hops)],
-                    distinct: false,
-                },
+                LogicalExpression::builtin(BuiltinFunction::Size, vec![path_edge_ids(hops)]),
                 format!("_path_length_{alias}"),
             ),
             projection(whole_path(source, hops), alias.to_string()),
@@ -595,15 +592,16 @@ pub(crate) fn different_edges(
 ) -> Option<LogicalExpression> {
     let checks = groups
         .iter()
-        .map(|members| LogicalExpression::FunctionCall {
-            name: "all_different".into(),
-            args: vec![concatenation(
-                members
-                    .iter()
-                    .map(|&index| edges[index].edge_ids())
-                    .collect(),
-            )],
-            distinct: false,
+        .map(|members| {
+            LogicalExpression::builtin(
+                BuiltinFunction::AllDifferent,
+                vec![concatenation(
+                    members
+                        .iter()
+                        .map(|&index| edges[index].edge_ids())
+                        .collect(),
+                )],
+            )
         })
         .collect();
     join_and_conjuncts(checks)
@@ -687,11 +685,10 @@ pub(crate) fn every_edge_matches(
     LogicalExpression::ListPredicate {
         kind: crate::query::plan::ListPredicateKind::All,
         variable: hop,
-        list_expr: Box::new(LogicalExpression::FunctionCall {
-            name: "edges".into(),
-            args: vec![LogicalExpression::Variable(path)],
-            distinct: false,
-        }),
+        list_expr: Box::new(LogicalExpression::builtin(
+            BuiltinFunction::Edges,
+            vec![LogicalExpression::Variable(path)],
+        )),
         predicate: Box::new(predicate),
     }
 }
@@ -769,22 +766,26 @@ fn can_be_map(expr: &LogicalExpression) -> bool {
 /// be maps, nodes or edges (`nodes(p)`, `relationships(p)`, and `tail` or
 /// `reverse` of a list).
 fn can_be_list(expr: &LogicalExpression) -> bool {
-    match expr {
-        LogicalExpression::FunctionCall { name, .. } => {
-            ["nodes", "relationships", "edges", "tail", "reverse"]
-                .iter()
-                .any(|function| name.eq_ignore_ascii_case(function))
+    matches!(
+        expr,
+        LogicalExpression::FunctionCall {
+            callee: Callee::Builtin(
+                BuiltinFunction::Nodes
+                    | BuiltinFunction::Edges
+                    | BuiltinFunction::Tail
+                    | BuiltinFunction::Reverse
+            ),
+            ..
         }
-        _ => false,
-    }
+    )
 }
 
 /// Whether an expression calls an aggregate function in a function argument,
 /// an index or a key read (`head(collect(n))`, `collect(n)[0]`).
 fn calls_an_aggregate(expr: &LogicalExpression) -> bool {
     match expr {
-        LogicalExpression::FunctionCall { name, args, .. } => {
-            is_aggregate_function(name) || args.iter().any(calls_an_aggregate)
+        LogicalExpression::FunctionCall { callee, args, .. } => {
+            matches!(callee, Callee::Aggregate(_)) || args.iter().any(calls_an_aggregate)
         }
         LogicalExpression::IndexAccess { base, index } => {
             calls_an_aggregate(base) || calls_an_aggregate(index)
@@ -812,7 +813,8 @@ pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut 
         LogicalExpression::Unary { operand, .. } => {
             collect_expression_variables(operand, vars);
         }
-        LogicalExpression::FunctionCall { args, .. } => {
+        LogicalExpression::FunctionCall { args, .. }
+        | LogicalExpression::SparqlCall { args, .. } => {
             for arg in args {
                 collect_expression_variables(arg, vars);
             }
@@ -1044,7 +1046,9 @@ fn has_subquery(expr: &LogicalExpression) -> bool {
         | LogicalExpression::Id(_) => false,
         LogicalExpression::Binary { left, right, .. } => has_subquery(left) || has_subquery(right),
         LogicalExpression::Unary { operand, .. } => has_subquery(operand),
-        LogicalExpression::FunctionCall { args: items, .. } | LogicalExpression::List(items) => {
+        LogicalExpression::FunctionCall { args: items, .. }
+        | LogicalExpression::SparqlCall { args: items, .. }
+        | LogicalExpression::List(items) => {
             items.iter().any(has_subquery)
         }
         LogicalExpression::Map(pairs) => pairs.iter().any(|(_, value)| has_subquery(value)),
@@ -1724,7 +1728,8 @@ pub(crate) fn references_any(expr: &LogicalExpression, names: &[String]) -> bool
             references_any(left, names) || references_any(right, names)
         }
         LogicalExpression::Unary { operand, .. } => references_any(operand, names),
-        LogicalExpression::FunctionCall { args, .. } => {
+        LogicalExpression::FunctionCall { args, .. }
+        | LogicalExpression::SparqlCall { args, .. } => {
             args.iter().any(|a| references_any(a, names))
         }
         LogicalExpression::Case {
@@ -2481,11 +2486,10 @@ mod tests {
 
     #[test]
     fn collect_vars_from_function_call() {
-        let expr = LogicalExpression::FunctionCall {
-            name: "size".into(),
-            args: vec![LogicalExpression::Variable("list".into())],
-            distinct: false,
-        };
+        let expr = LogicalExpression::builtin(
+            BuiltinFunction::Size,
+            vec![LogicalExpression::Variable("list".into())],
+        );
         let mut vars = HashSet::new();
         collect_expression_variables(&expr, &mut vars);
         assert!(vars.contains("list"));

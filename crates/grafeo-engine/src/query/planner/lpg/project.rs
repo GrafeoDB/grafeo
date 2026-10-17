@@ -10,6 +10,7 @@ use super::{
     ReturnOp, SkipOp, SortDirection, SortOp, SortOperator, SortOrder, common, output_column_name,
     resolved_column_name, value_to_logical_type,
 };
+use crate::query::plan::{BuiltinFunction, Callee};
 
 impl super::Planner {
     /// Plans a RETURN clause.
@@ -147,10 +148,12 @@ impl super::Planner {
                         projections.push(ProjectExpr::Constant(value.clone()));
                         output_types.push(value_to_logical_type(value));
                     }
-                    LogicalExpression::FunctionCall { name, args, .. } => {
+                    LogicalExpression::FunctionCall {
+                        callee, name, args, ..
+                    } => {
                         // Handle built-in functions
-                        match name.to_lowercase().as_str() {
-                            "type" => {
+                        match callee {
+                            Callee::Builtin(BuiltinFunction::Type) => {
                                 // type(r) returns the edge type string
                                 if args.len() != 1 {
                                     return Err(grafeo_common::utils::error::Error::Query(
@@ -180,7 +183,8 @@ impl super::Planner {
                                     output_types.push(LogicalType::Any);
                                 }
                             }
-                            "length" => {
+                            // `length`, `size` and `cardinality` are one function.
+                            Callee::Builtin(BuiltinFunction::Size) => {
                                 // length(p) returns the path length for path variables,
                                 // or delegates to the expression evaluator for other
                                 // arguments (e.g. length(a.name) on strings/lists).
@@ -213,9 +217,8 @@ impl super::Planner {
                                     output_types.push(LogicalType::Any);
                                 }
                             }
-                            "nodes" | "edges" | "relationships" => {
+                            Callee::Builtin(BuiltinFunction::Nodes | BuiltinFunction::Edges) => {
                                 // nodes(p) / edges(p) / relationships(p) returns path components
-                                let func_name = name.to_lowercase();
                                 if args.len() != 1 {
                                     return Err(grafeo_common::utils::error::Error::Query(
                                         grafeo_common::utils::error::QueryError::semantic(format!(
@@ -226,11 +229,12 @@ impl super::Planner {
                                 if let LogicalExpression::Variable(var_name) = &args[0] {
                                     // Read the path's internal column, and return
                                     // its items as node or edge maps.
-                                    let (suffix, kind) = if func_name == "nodes" {
-                                        ("nodes", EntityValue::Nodes)
-                                    } else {
-                                        ("edges", EntityValue::Edges)
-                                    };
+                                    let (suffix, kind) =
+                                        if *callee == Callee::Builtin(BuiltinFunction::Nodes) {
+                                            ("nodes", EntityValue::Nodes)
+                                        } else {
+                                            ("edges", EntityValue::Edges)
+                                        };
                                     let path_col = format!("_path_{suffix}_{var_name}");
                                     let column = if variable_columns.contains_key(&path_col) {
                                         path_col
@@ -599,23 +603,25 @@ impl super::Planner {
                 .get(variable)
                 .and_then(|kind| kind.field(property)),
             LogicalExpression::MapAccess { base, key } => self.entity_value(base)?.field(key),
-            LogicalExpression::FunctionCall { name, args, .. } => {
-                match (name.to_lowercase().as_str(), args.as_slice()) {
-                    ("relationships" | "edges", [_]) => Some(EntityValue::Edges),
-                    ("nodes", [_]) => Some(EntityValue::Nodes),
-                    ("startnode" | "start_node" | "endnode" | "end_node", [_]) => {
-                        Some(EntityValue::Node)
-                    }
-                    // The path of a path pattern with more than one edge
-                    // pattern (see `translators::common::whole_path`).
-                    ("path", [_, _]) => Some(EntityValue::Nested(LogicalType::Path)),
-                    ("reverse", [inner]) => self.entity_value(inner)?.reversed(),
-                    ("tail", [inner]) => self.entity_value(inner)?.slice(1, None),
-                    ("head", [inner]) => self.entity_value(inner)?.item_at(0),
-                    ("last", [inner]) => self.entity_value(inner)?.item_at(-1),
-                    _ => None,
+            LogicalExpression::FunctionCall {
+                callee: Callee::Builtin(function),
+                args,
+                ..
+            } => match (function, args.as_slice()) {
+                (BuiltinFunction::Edges, [_]) => Some(EntityValue::Edges),
+                (BuiltinFunction::Nodes, [_]) => Some(EntityValue::Nodes),
+                (BuiltinFunction::StartNode | BuiltinFunction::EndNode, [_]) => {
+                    Some(EntityValue::Node)
                 }
-            }
+                // The path of a path pattern with more than one edge
+                // pattern (see `translators::common::whole_path`).
+                (BuiltinFunction::Path, [_, _]) => Some(EntityValue::Nested(LogicalType::Path)),
+                (BuiltinFunction::Reverse, [inner]) => self.entity_value(inner)?.reversed(),
+                (BuiltinFunction::Tail, [inner]) => self.entity_value(inner)?.slice(1, None),
+                (BuiltinFunction::Head, [inner]) => self.entity_value(inner)?.item_at(0),
+                (BuiltinFunction::Last, [inner]) => self.entity_value(inner)?.item_at(-1),
+                _ => None,
+            },
             LogicalExpression::IndexAccess { base, index } => {
                 let base = self.entity_value(base)?;
                 match index.as_ref() {
@@ -1181,14 +1187,22 @@ impl super::Planner {
             };
 
             match &sort_key.expression {
-                LogicalExpression::FunctionCall { name, args, .. } => match name.as_str() {
+                LogicalExpression::FunctionCall {
+                    callee: Callee::Builtin(function),
+                    args,
+                    ..
+                } => match function {
                     #[cfg(feature = "vector-index")]
-                    "cosine_similarity" | "euclidean_distance" | "dot_product"
-                    | "manhattan_distance" => {
-                        self.try_vector_topk(name, args, k, &scan_var, label, sort_key)
+                    BuiltinFunction::CosineSimilarity
+                    | BuiltinFunction::EuclideanDistance
+                    | BuiltinFunction::DotProduct
+                    | BuiltinFunction::ManhattanDistance => {
+                        self.try_vector_topk(*function, args, k, &scan_var, label, sort_key)
                     }
                     #[cfg(feature = "text-index")]
-                    "text_score" => self.try_text_topk(args, k, &scan_var, label, sort_key),
+                    BuiltinFunction::TextScore => {
+                        self.try_text_topk(args, k, &scan_var, label, sort_key)
+                    }
                     _ => Ok(None),
                 },
                 _ => Ok(None),
@@ -1205,7 +1219,7 @@ impl super::Planner {
     #[cfg(feature = "vector-index")]
     fn try_vector_topk(
         &self,
-        fn_name: &str,
+        function: BuiltinFunction,
         args: &[LogicalExpression],
         k: usize,
         scan_var: &str,
@@ -1217,11 +1231,11 @@ impl super::Planner {
         }
 
         // Determine metric and expected sort direction
-        let (metric, is_similarity) = match fn_name {
-            "cosine_similarity" => (super::VectorMetric::Cosine, true),
-            "dot_product" => (super::VectorMetric::DotProduct, true),
-            "euclidean_distance" => (super::VectorMetric::Euclidean, false),
-            "manhattan_distance" => (super::VectorMetric::Manhattan, false),
+        let (metric, is_similarity) = match function {
+            BuiltinFunction::CosineSimilarity => (super::VectorMetric::Cosine, true),
+            BuiltinFunction::DotProduct => (super::VectorMetric::DotProduct, true),
+            BuiltinFunction::EuclideanDistance => (super::VectorMetric::Euclidean, false),
+            BuiltinFunction::ManhattanDistance => (super::VectorMetric::Manhattan, false),
             _ => return Ok(None),
         };
 
@@ -1634,7 +1648,8 @@ pub(super) fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
         | LogicalExpression::Labels(v)
         | LogicalExpression::Type(v)
         | LogicalExpression::Id(v) => out.push(v.clone()),
-        LogicalExpression::FunctionCall { args, .. } => {
+        LogicalExpression::FunctionCall { args, .. }
+        | LogicalExpression::SparqlCall { args, .. } => {
             for a in args {
                 collect_vars(a, out);
             }

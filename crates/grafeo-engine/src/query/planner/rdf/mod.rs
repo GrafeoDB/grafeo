@@ -4796,13 +4796,14 @@ fn uses_lang_or_datatype(op: &LogicalOperator) -> bool {
 /// Checks whether a logical expression references LANG, LANGMATCHES, or DATATYPE.
 fn expr_uses_lang_or_datatype(expr: &LogicalExpression) -> bool {
     match expr {
-        LogicalExpression::FunctionCall { name, args, .. } => {
+        LogicalExpression::SparqlCall { name, args } => {
             let upper = name.to_uppercase();
             if upper == "LANG" || upper == "LANGMATCHES" || upper == "DATATYPE" {
                 return true;
             }
             args.iter().any(expr_uses_lang_or_datatype)
         }
+        LogicalExpression::FunctionCall { args, .. } => args.iter().any(expr_uses_lang_or_datatype),
         LogicalExpression::Binary { left, right, .. } => {
             expr_uses_lang_or_datatype(left) || expr_uses_lang_or_datatype(right)
         }
@@ -6291,12 +6292,11 @@ mod tests {
         let bind = LogicalOperator::Bind(BindOp {
             input: Box::new(scan),
             variable: "upper".to_string(),
-            expression: crate::query::plan::LogicalExpression::FunctionCall {
+            expression: crate::query::plan::LogicalExpression::SparqlCall {
                 name: "UCASE".to_string(),
                 args: vec![crate::query::plan::LogicalExpression::Variable(
                     "name".to_string(),
                 )],
-                distinct: false,
             },
         });
         let physical = planner.plan(&LogicalPlan::new(bind)).unwrap();

@@ -1609,6 +1609,7 @@ mod tests {
             input: Box::new(LogicalOperator::Filter(FilterOp {
                 predicate: LogicalExpression::Binary {
                     left: Box::new(LogicalExpression::FunctionCall {
+                        callee: crate::query::plan::Callee::named("size"),
                         name: "size".to_string(),
                         args: vec![LogicalExpression::Property {
                             variable: "n".to_string(),

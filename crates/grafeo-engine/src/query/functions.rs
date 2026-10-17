@@ -17,7 +17,7 @@ use grafeo_core::execution::operators::{
     FunctionSupport, REGEX_SUPPORT, function_names, function_support, regex_pattern_error,
 };
 
-use crate::query::plan::{AggregateFunction, BinaryOp, LogicalExpression};
+use crate::query::plan::{AggregateFunction, BinaryOp, BuiltinFunction, Callee, LogicalExpression};
 
 /// Whether `name` is an aggregate function (case does not matter).
 pub(crate) fn is_aggregate_function(name: &str) -> bool {
@@ -65,6 +65,36 @@ pub(crate) fn check_function_call(name: &str, arguments: usize) -> Result<()> {
             }))
         }
     }
+}
+
+/// The call a translator builds for `name(args)`: an aggregate, or a built-in
+/// this build computes with that many arguments.
+///
+/// # Errors
+///
+/// The errors of [`check_function_call`], with the same texts: an unknown
+/// function, a number of arguments it does not take, or a feature this build
+/// lacks.
+pub(crate) fn resolve_call(
+    name: &str,
+    args: Vec<LogicalExpression>,
+    distinct: bool,
+) -> Result<LogicalExpression> {
+    let callee = match AggregateFunction::from_name(name) {
+        Some(aggregate) => Callee::Aggregate(aggregate),
+        None => {
+            check_function_call(name, args.len())?;
+            let function = BuiltinFunction::from_name(name)
+                .ok_or_else(|| semantic(format!("Unknown function '{name}'")))?;
+            Callee::Builtin(function)
+        }
+    };
+    Ok(LogicalExpression::FunctionCall {
+        callee,
+        name: name.to_string(),
+        args,
+        distinct,
+    })
 }
 
 /// Checks a `=~` or LIKE whose pattern is `pattern`: the build must have

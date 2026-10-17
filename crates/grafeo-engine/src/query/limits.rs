@@ -255,7 +255,9 @@ fn expression_children<'a>(expression: &'a LogicalExpression, visit: &mut impl F
             expressions(&mut [&**left, &**right].into_iter());
         }
         LogicalExpression::Unary { operand, .. } => expressions(&mut std::iter::once(&**operand)),
-        LogicalExpression::FunctionCall { args, .. } | LogicalExpression::List(args) => {
+        LogicalExpression::FunctionCall { args, .. }
+        | LogicalExpression::SparqlCall { args, .. }
+        | LogicalExpression::List(args) => {
             expressions(&mut args.iter());
         }
         LogicalExpression::Map(entries) => expressions(&mut entries.iter().map(|(_, e)| e)),
@@ -454,7 +456,9 @@ fn take_expression_children(
             take(right);
         }
         LogicalExpression::Unary { operand, .. } => take(operand),
-        LogicalExpression::FunctionCall { args, .. } | LogicalExpression::List(args) => {
+        LogicalExpression::FunctionCall { args, .. }
+        | LogicalExpression::SparqlCall { args, .. }
+        | LogicalExpression::List(args) => {
             args.iter_mut().for_each(&mut take);
         }
         LogicalExpression::Map(entries) => entries.iter_mut().for_each(|(_, e)| take(e)),

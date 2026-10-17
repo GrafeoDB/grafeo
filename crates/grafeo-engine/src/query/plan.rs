@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use grafeo_common::types::Value;
+pub use grafeo_core::execution::operators::BuiltinFunction;
 
 /// A count expression for SKIP/LIMIT: either a resolved literal or an unresolved parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1567,7 +1568,8 @@ fn fmt_expr(expr: &LogicalExpression) -> String {
         LogicalExpression::Unary { op, operand } => {
             format!("{op:?} {}", fmt_expr(operand))
         }
-        LogicalExpression::FunctionCall { name, args, .. } => {
+        LogicalExpression::FunctionCall { name, args, .. }
+        | LogicalExpression::SparqlCall { name, args } => {
             let arg_strs: Vec<String> = args.iter().map(fmt_expr).collect();
             format!("{name}({})", arg_strs.join(", "))
         }
@@ -1812,6 +1814,44 @@ pub struct AggregateExpr {
     pub percentile: Option<f64>,
     /// Separator string for GROUP_CONCAT / LISTAGG (defaults to space for GROUP_CONCAT, comma for LISTAGG).
     pub separator: Option<String>,
+}
+
+/// What a call resolves to: a built-in function, or an aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Callee {
+    /// A built-in function the expression evaluator computes.
+    Builtin(BuiltinFunction),
+    /// An aggregate, which groups rows.
+    Aggregate(AggregateFunction),
+}
+
+#[cfg(test)]
+impl Callee {
+    /// The callee `name` resolves to, for tests that build calls by hand.
+    ///
+    /// # Panics
+    ///
+    /// When `name` is neither an aggregate nor a built-in function.
+    pub(crate) fn named(name: &str) -> Self {
+        AggregateFunction::from_name(name)
+            .map(Self::Aggregate)
+            .or_else(|| BuiltinFunction::from_name(name).map(Self::Builtin))
+            .unwrap_or_else(|| panic!("{name} is no function"))
+    }
+}
+
+impl LogicalExpression {
+    /// A call of `function` the planner or a translator makes itself (a
+    /// label in a pattern becomes `hasLabel`), named by the function's name.
+    #[must_use]
+    pub fn builtin(function: BuiltinFunction, args: Vec<LogicalExpression>) -> Self {
+        Self::FunctionCall {
+            callee: Callee::Builtin(function),
+            name: function.name().to_string(),
+            args,
+            distinct: false,
+        }
+    }
 }
 
 /// Aggregate function.
@@ -3028,14 +3068,25 @@ pub enum LogicalExpression {
         operand: Box<LogicalExpression>,
     },
 
-    /// Function call.
+    /// A call of a built-in or an aggregate, resolved by the translator.
     FunctionCall {
-        /// Function name.
+        /// What the call resolves to.
+        callee: Callee,
+        /// The name as the query wrote it, for `EXPLAIN` and errors only:
+        /// decisions read `callee`.
         name: String,
         /// Arguments.
         args: Vec<LogicalExpression>,
         /// Whether DISTINCT is applied (e.g., COUNT(DISTINCT x)).
         distinct: bool,
+    },
+
+    /// A call of a SPARQL function, by name: only the RDF planner computes it.
+    SparqlCall {
+        /// The function's name, as the query wrote it.
+        name: String,
+        /// Arguments.
+        args: Vec<LogicalExpression>,
     },
 
     /// List literal.
@@ -5293,6 +5344,7 @@ mod tests {
         assert!(s.contains("Not"));
 
         let fc = LogicalExpression::FunctionCall {
+            callee: Callee::named("toLower"),
             name: "toLower".into(),
             args: vec![var("name")],
             distinct: false,

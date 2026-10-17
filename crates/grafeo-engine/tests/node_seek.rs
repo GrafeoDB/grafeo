@@ -274,7 +274,7 @@ fn a_clock_key_is_not_looked_up() {
         "p + toString(zoneddatetime())",
         "p + toString(current_date())",
         "p + toString(timestamp())",
-        "p + toString(randomUUID())",
+        "p + toString(rand())",
     ] {
         let plan = lookup(changing);
         assert!(!plan.contains("[index"), "{changing}: {plan}");

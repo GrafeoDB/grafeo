@@ -1204,10 +1204,12 @@ impl GqlTranslator {
                 operand: Box::new(Self::substitute_let_bindings(*operand, bindings)),
             },
             LogicalExpression::FunctionCall {
+                callee,
                 name,
                 args,
                 distinct,
             } => LogicalExpression::FunctionCall {
+                callee,
                 name,
                 args: args
                     .into_iter()

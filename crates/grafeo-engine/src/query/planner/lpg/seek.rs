@@ -10,6 +10,8 @@ use grafeo_core::graph::GraphStoreSearch;
 
 use super::{Arc, HashMap, Result};
 use crate::query::optimizer::movable_variables;
+use crate::query::plan::BuiltinFunction;
+use crate::query::plan::Callee;
 use crate::query::plan::{BinaryOp, FilterOp, LogicalExpression, LogicalOperator, NodeScanOp};
 
 /// The seek the planner makes of a filter over a node scan.
@@ -158,10 +160,11 @@ fn seek_of<'a>(
     };
     let key = |side: &LogicalExpression| match side {
         LogicalExpression::Id(v) if v == variable => Some(SeekKey::Id),
-        LogicalExpression::FunctionCall { name, args, .. }
-            if name.eq_ignore_ascii_case("id")
-                && matches!(args.as_slice(), [LogicalExpression::Variable(v)] if v == variable) =>
-        {
+        LogicalExpression::FunctionCall {
+            callee: Callee::Builtin(BuiltinFunction::Id),
+            args,
+            ..
+        } if matches!(args.as_slice(), [LogicalExpression::Variable(v)] if v == variable) => {
             Some(SeekKey::Id)
         }
         LogicalExpression::Property {
@@ -387,17 +390,15 @@ impl super::Planner {
         if columns.contains(&scan.variable) {
             // The input binds the variable already (a correlated subquery):
             // no lookup, the filter checks the bound node, labels included.
-            let label = scan
-                .label
-                .as_ref()
-                .map(|label| LogicalExpression::FunctionCall {
-                    name: "hasLabel".to_string(),
-                    args: vec![
+            let label = scan.label.as_ref().map(|label| {
+                LogicalExpression::builtin(
+                    BuiltinFunction::HasLabel,
+                    vec![
                         LogicalExpression::Variable(scan.variable.clone()),
                         LogicalExpression::Literal(label.as_str().into()),
                     ],
-                    distinct: false,
-                });
+                )
+            });
             let predicate = expression(&checked(label), &columns)?;
             return Ok(Some((
                 Box::new(FilterOperator::new(input, Box::new(predicate))),
@@ -428,14 +429,13 @@ mod tests {
     use super::*;
 
     fn has_label(label: &str) -> LogicalExpression {
-        LogicalExpression::FunctionCall {
-            name: "hasLabel".to_string(),
-            args: vec![
+        LogicalExpression::builtin(
+            BuiltinFunction::HasLabel,
+            vec![
                 LogicalExpression::Variable("t".to_string()),
                 LogicalExpression::Literal(Value::from(label)),
             ],
-            distinct: false,
-        }
+        )
     }
 
     fn equals(left: LogicalExpression, right: LogicalExpression) -> LogicalExpression {
@@ -515,6 +515,7 @@ mod tests {
         let other_variable = equals(property("t", "owner"), property("f", "name"));
         let volatile = LogicalExpression::Binary {
             left: Box::new(LogicalExpression::FunctionCall {
+                callee: crate::query::plan::Callee::named("rand"),
                 name: "rand".to_string(),
                 args: Vec::new(),
                 distinct: false,

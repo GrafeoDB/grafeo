@@ -46,6 +46,8 @@ use super::{
     Result, TransactionId, UnaryOp, Value,
 };
 use crate::query::plan::PushdownHint;
+#[cfg(feature = "vector-index")]
+use crate::query::plan::{BuiltinFunction, Callee};
 
 impl super::Planner {
     /// Whether node `id` is visible to this query and, when `label` is given,
@@ -1425,8 +1427,11 @@ impl super::Planner {
         match expr {
             LogicalExpression::Binary { left, op, right } => {
                 // Try the left side as a vector function call
-                if let LogicalExpression::FunctionCall { name, args, .. } = left.as_ref()
-                    && let Some(extracted) = self.try_extract_vector_fn(name, args, *op, right)
+                if let LogicalExpression::FunctionCall {
+                    callee, name, args, ..
+                } = left.as_ref()
+                    && let Some(extracted) =
+                        self.try_extract_vector_fn(*callee, name, args, *op, right)
                 {
                     return Some(extracted);
                 }
@@ -1467,6 +1472,7 @@ impl super::Planner {
     /// and the distance variants: `euclidean_distance(n.prop, vec) < threshold`
     fn try_extract_vector_fn(
         &self,
+        callee: Callee,
         name: &str,
         args: &[LogicalExpression],
         op: BinaryOp,
@@ -1476,10 +1482,16 @@ impl super::Planner {
             return None;
         }
 
-        let (metric, is_similarity) = match name {
-            "cosine_similarity" => (super::VectorMetric::Cosine, true),
-            "euclidean_distance" => (super::VectorMetric::Euclidean, false),
-            "manhattan_distance" => (super::VectorMetric::Manhattan, false),
+        let (metric, is_similarity) = match callee {
+            Callee::Builtin(BuiltinFunction::CosineSimilarity) => {
+                (super::VectorMetric::Cosine, true)
+            }
+            Callee::Builtin(BuiltinFunction::EuclideanDistance) => {
+                (super::VectorMetric::Euclidean, false)
+            }
+            Callee::Builtin(BuiltinFunction::ManhattanDistance) => {
+                (super::VectorMetric::Manhattan, false)
+            }
             // dot_product is intentionally not pushed down: the physical
             // VectorScanOperator's apply_filters only honors min_similarity
             // when metric == Cosine, so a pushed DotProduct threshold would
@@ -1541,6 +1553,7 @@ impl super::Planner {
         if is_strict {
             let residual = LogicalExpression::Binary {
                 left: Box::new(LogicalExpression::FunctionCall {
+                    callee,
                     name: name.to_string(),
                     args: args.to_vec(),
                     distinct: false,

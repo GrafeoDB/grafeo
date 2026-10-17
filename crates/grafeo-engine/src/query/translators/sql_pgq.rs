@@ -10,6 +10,7 @@ use super::common::{
     VarGen, check_branch_columns, combine_with_and, has_all_labels, is_aggregate_function,
     is_binary_set_function, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
+use crate::query::functions::resolve_call;
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp,
     CreatePropertyGraphOp, DistinctOp, ExceptOp, ExpandDirection, ExpandOp, IntersectOp,
@@ -973,11 +974,7 @@ impl SqlPgqTranslator {
                     .iter()
                     .map(|a| self.translate_sql_expression(a, table_alias, column_map))
                     .collect::<Result<_>>()?;
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: *distinct,
-                })
+                resolve_call(name, translated_args, *distinct)
             }
             ast::Expression::Case {
                 input,
@@ -1100,11 +1097,7 @@ impl SqlPgqTranslator {
                     .map(|a| self.translate_expression(a, table_alias))
                     .collect::<Result<_>>()?;
 
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: *distinct,
-                })
+                resolve_call(name, translated_args, *distinct)
             }
             ast::Expression::List(items) => {
                 let translated: Vec<LogicalExpression> = items

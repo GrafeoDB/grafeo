@@ -170,7 +170,8 @@ pub fn convert_filter_expression(expr: &LogicalExpression) -> Result<FilterExpre
                 operand: Box::new(operand_expr),
             })
         }
-        LogicalExpression::FunctionCall { name, args, .. } => {
+        LogicalExpression::FunctionCall { name, args, .. }
+        | LogicalExpression::SparqlCall { name, args } => {
             let filter_args: Vec<FilterExpression> = args
                 .iter()
                 .map(convert_filter_expression)

@@ -875,3 +875,139 @@ fn a_projection_finds_the_nodes_of_a_label_outside_its_spec() {
         "the graph itself has four Admin nodes"
     );
 }
+
+/// A label in `WHERE` (`n:Repository`, `'Repository' IN labels(n)`), alone or
+/// in an `AND` chain, scans that label instead of every node; of several, the
+/// one with the fewest nodes. The rows are those of the label in the pattern.
+#[test]
+fn a_label_in_where_scans_the_label() {
+    let db = skewed(false);
+    let session = db.session();
+    for language in LANGUAGES {
+        for (query, same_as, scanned) in [
+            (
+                "MATCH (n) WHERE n:Repository RETURN n.id",
+                "MATCH (n:Repository) RETURN n.id",
+                "NodeScan (n:Repository)",
+            ),
+            (
+                "MATCH (n) WHERE 'Repository' IN labels(n) RETURN n.id",
+                "MATCH (n:Repository) RETURN n.id",
+                "NodeScan (n:Repository)",
+            ),
+            (
+                "MATCH (n) WHERE n:Repository AND n.n < 2 RETURN n.id",
+                "MATCH (n:Repository) WHERE n.n < 2 RETURN n.id",
+                "NodeScan (n:Repository)",
+            ),
+            (
+                "MATCH (n) WHERE n.n < 2 AND n:Repository RETURN n.id",
+                "MATCH (n:Repository) WHERE n.n < 2 RETURN n.id",
+                "NodeScan (n:Repository)",
+            ),
+            (
+                "MATCH (n) WHERE n:Graph AND n:Repository RETURN n.id",
+                "MATCH (n:Graph:Repository) RETURN n.id",
+                "NodeScan (n:Repository)",
+            ),
+            (
+                "MATCH (n) WHERE n:Missing RETURN n.id",
+                "MATCH (n:Missing) RETURN n.id",
+                "NodeScan (n:Missing)",
+            ),
+        ] {
+            assert_eq!(
+                sorted(&session, language, query, &[]),
+                sorted(&session, language, same_as, &[]),
+                "{language:?} `{query}`"
+            );
+            let plan = plan_text(&session, language, &format!("EXPLAIN {query}"));
+            assert_eq!(scans(&plan), [scanned], "{language:?} `{query}`:\n{plan}");
+        }
+        let profile = plan_text(
+            &session,
+            language,
+            "PROFILE MATCH (n) WHERE n:Repository RETURN n.id",
+        );
+        let scan = scans(&profile);
+        assert!(
+            scan.len() == 1
+                && scan[0].starts_with("Scan (n:Repository)")
+                && scan[0].contains(&format!("rows={} ", REPOSITORY_ONLY + BOTH)),
+            "{language:?} reads the {} Repository nodes, not every node:\n{profile}",
+            REPOSITORY_ONLY + BOTH,
+        );
+    }
+}
+
+/// A label the predicate does not require of every row keeps the scan of
+/// every node: under `NOT`, or in an `OR` with a branch that is not a label.
+#[test]
+fn a_label_the_predicate_does_not_require_keeps_the_full_scan() {
+    let db = skewed(false);
+    let session = db.session();
+    for language in LANGUAGES {
+        for query in [
+            "MATCH (n) WHERE NOT n:Graph RETURN n.id",
+            "MATCH (n) WHERE n:Repository OR n.id = 't1' RETURN n.id",
+        ] {
+            let plan = plan_text(&session, language, &format!("EXPLAIN {query}"));
+            assert_eq!(
+                scans(&plan),
+                ["NodeScan (n:*)"],
+                "{language:?} `{query}`:\n{plan}"
+            );
+        }
+        assert_eq!(
+            sorted(
+                &session,
+                language,
+                "MATCH (n) WHERE n:Repository OR n.id = 't1' RETURN n.id",
+                &[]
+            )
+            .len(),
+            REPOSITORY_ONLY + BOTH + 1,
+            "{language:?}"
+        );
+    }
+}
+
+/// A read of a past epoch keeps the scan of every node for a label in
+/// `WHERE`, and finds the nodes that had the label then: `r1` lost
+/// `Repository` after it.
+#[cfg(feature = "temporal")]
+#[test]
+fn a_past_epoch_keeps_the_full_scan_for_a_label_in_where() {
+    let db = skewed(false);
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.commit().unwrap();
+    let before = db.current_epoch();
+    session.begin_transaction().unwrap();
+    session
+        .execute_cypher("MATCH (n {id: 'r1'}) REMOVE n:Repository")
+        .unwrap();
+    session.commit().unwrap();
+    for language in LANGUAGES {
+        let query = "MATCH (n) WHERE n:Graph AND n:Repository RETURN n.id";
+        assert_eq!(
+            sorted(&session, language, query, &[]),
+            ids(&["r0", "r2"]),
+            "{language:?} now"
+        );
+        session.set_viewing_epoch(before);
+        let then = sorted(&session, language, query, &[]);
+        let then_plan = plan_text(&session, language, &format!("EXPLAIN {query}"));
+        session.clear_viewing_epoch();
+        assert_eq!(
+            then,
+            ids(&["r0", "r1", "r2"]),
+            "{language:?} at the epoch before"
+        );
+        assert_eq!(
+            scans(&then_plan),
+            ["NodeScan (n:*)"],
+            "{language:?} at the epoch before:\n{then_plan}"
+        );
+    }
+}

@@ -11,6 +11,11 @@ use crate::query::plan::{BuiltinFunction, Callee};
 /// The copy of `filter` whose node scan reads the label with the fewest
 /// nodes, or `None` when the scan reads that label already.
 ///
+/// A scan of every node below filters that require a label (`WHERE
+/// n:Repository`, `'Repository' IN labels(n)`, alone or in an `AND` chain)
+/// scans the label with the fewest nodes of those they require, and the
+/// filters still check every label they name.
+///
 /// A pattern like `(n:Graph:Repository)` is a scan of `Graph` below filters
 /// that require the other labels (`hasLabel(n, 'Repository')`), in a chain of
 /// filters over the scan. When one of the labels those filters require has
@@ -39,14 +44,12 @@ pub(crate) fn with_smallest_scan_label(
     let LogicalOperator::NodeScan(scan) = below else {
         return None;
     };
-    let scan_label = scan.label.as_deref()?;
     let mut checks = Vec::new();
     for predicate in &predicates {
         label_checks(predicate, &scan.variable, &mut checks);
     }
-    if checks.is_empty() {
-        return None;
-    }
+    let first = *checks.first()?;
+    let scan_label = scan.label.as_deref().unwrap_or(first);
     let mut smallest = scan_label;
     let mut fewest = store.nodes_by_label_count(scan_label);
     for label in checks {
@@ -59,7 +62,7 @@ pub(crate) fn with_smallest_scan_label(
             fewest = count;
         }
     }
-    if smallest == scan_label {
+    if scan.label.as_deref() == Some(smallest) {
         return None;
     }
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -69,16 +72,24 @@ pub(crate) fn with_smallest_scan_label(
         return None;
     }
     let variable = scan.variable.clone();
-    let (smallest, scan_label) = (smallest.to_string(), scan_label.to_string());
+    let (smallest, scan_label) = (smallest.to_string(), scan.label.clone());
     let mut reordered = filter.clone();
-    let checked = replace_label_check(&mut reordered.predicate, &variable, &smallest, &scan_label);
-    move_scan_label(
-        &mut reordered.input,
-        &variable,
-        &smallest,
-        &scan_label,
-        !checked,
-    );
+    match scan_label {
+        // The check of the label scanned now checks the label scanned before.
+        Some(scan_label) => {
+            let checked =
+                replace_label_check(&mut reordered.predicate, &variable, &smallest, &scan_label);
+            move_scan_label(
+                &mut reordered.input,
+                &variable,
+                &smallest,
+                &scan_label,
+                !checked,
+            );
+        }
+        // A scan of every node had no label to check: the checks stay.
+        None => move_scan_label(&mut reordered.input, &variable, &smallest, "", false),
+    }
     Some(reordered)
 }
 
@@ -98,21 +109,38 @@ pub(crate) fn may_choose_scan_label(
     transaction_id.is_some() || current_epoch.is_none_or(|current| viewing_epoch >= current)
 }
 
-/// The label of a `hasLabel(variable, 'Label')` check.
+/// The label of a `hasLabel(variable, 'Label')` check, or of its spelling
+/// `'Label' IN labels(variable)`.
 fn label_check<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<&'a str> {
-    let LogicalExpression::FunctionCall {
-        callee: Callee::Builtin(BuiltinFunction::HasLabel),
-        args,
-        ..
-    } = expression
-    else {
-        return None;
-    };
-    match args.as_slice() {
-        [
-            LogicalExpression::Variable(checked),
-            LogicalExpression::Literal(Value::String(label)),
-        ] if checked == variable => Some(label.as_str()),
+    match expression {
+        LogicalExpression::FunctionCall {
+            callee: Callee::Builtin(BuiltinFunction::HasLabel),
+            args,
+            ..
+        } => match args.as_slice() {
+            [
+                LogicalExpression::Variable(checked),
+                LogicalExpression::Literal(Value::String(label)),
+            ] if checked == variable => Some(label.as_str()),
+            _ => None,
+        },
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::In,
+            right,
+        } => match (left.as_ref(), right.as_ref()) {
+            (
+                LogicalExpression::Literal(Value::String(label)),
+                LogicalExpression::FunctionCall {
+                    callee: Callee::Builtin(BuiltinFunction::Labels),
+                    args,
+                    ..
+                },
+            ) if matches!(args.as_slice(), [LogicalExpression::Variable(checked)] if checked == variable) => {
+                Some(label.as_str())
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -142,9 +170,13 @@ fn replace_label_check(
     checked: &str,
 ) -> bool {
     if label_check(predicate, variable) == Some(label) {
-        if let LogicalExpression::FunctionCall { args, .. } = predicate {
-            args[1] = LogicalExpression::Literal(Value::String(checked.into()));
-        }
+        *predicate = LogicalExpression::builtin(
+            BuiltinFunction::HasLabel,
+            vec![
+                LogicalExpression::Variable(variable.to_string()),
+                LogicalExpression::Literal(Value::String(checked.into())),
+            ],
+        );
         return true;
     }
     match predicate {

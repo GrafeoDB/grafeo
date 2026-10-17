@@ -8,8 +8,7 @@ use std::collections::HashSet;
 
 use super::common::{
     VarGen, check_branch_columns, combine_with_and, has_all_labels, is_aggregate_function,
-    is_binary_set_function, to_aggregate_function, wrap_filter, wrap_limit, wrap_return, wrap_skip,
-    wrap_sort,
+    is_binary_set_function, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp,
@@ -306,7 +305,7 @@ impl SqlPgqTranslator {
                             args,
                             distinct,
                         } if is_aggregate_function(name) => {
-                            let agg_fn = to_aggregate_function(name).expect(
+                            let agg_fn = AggregateFunction::from_name(name).expect(
                                 "aggregate function validated by is_aggregate_function guard",
                             );
                             let mut aggregate = self.translate_aggregate(
@@ -840,7 +839,7 @@ impl SqlPgqTranslator {
             } if is_aggregate_function(name) => {
                 // This is an inline aggregate: extract it.
                 let agg_fn =
-                    to_aggregate_function(name).expect("validated by is_aggregate_function");
+                    AggregateFunction::from_name(name).expect("validated by is_aggregate_function");
                 let alias = format!("_having_agg_{}", aggregates.len());
                 aggregates.push(self.translate_aggregate(
                     name,

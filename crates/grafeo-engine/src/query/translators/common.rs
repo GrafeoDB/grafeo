@@ -173,39 +173,6 @@ pub(crate) fn unaliased_with_expression() -> Error {
 // of function calls.
 pub(crate) use crate::query::functions::is_aggregate_function;
 
-/// Converts a function name to an `AggregateFunction` enum variant.
-pub(crate) fn to_aggregate_function(name: &str) -> Option<AggregateFunction> {
-    match name.to_uppercase().as_str() {
-        "COUNT" => Some(AggregateFunction::Count),
-        "SUM" => Some(AggregateFunction::Sum),
-        "AVG" => Some(AggregateFunction::Avg),
-        "MIN" => Some(AggregateFunction::Min),
-        "MAX" => Some(AggregateFunction::Max),
-        "COLLECT" => Some(AggregateFunction::Collect),
-        "STDEV" | "STDDEV" | "STDDEV_SAMP" => Some(AggregateFunction::StdDev),
-        "STDEVP" | "STDDEVP" | "STDDEV_POP" => Some(AggregateFunction::StdDevPop),
-        "VARIANCE" | "VAR_SAMP" => Some(AggregateFunction::Variance),
-        "VAR_POP" => Some(AggregateFunction::VariancePop),
-        "PERCENTILE_DISC" | "PERCENTILEDISC" => Some(AggregateFunction::PercentileDisc),
-        "PERCENTILE_CONT" | "PERCENTILECONT" => Some(AggregateFunction::PercentileCont),
-        "GROUP_CONCAT" | "GROUPCONCAT" | "LISTAGG" => Some(AggregateFunction::GroupConcat),
-        "SAMPLE" => Some(AggregateFunction::Sample),
-        "COVAR_SAMP" => Some(AggregateFunction::CovarSamp),
-        "COVAR_POP" => Some(AggregateFunction::CovarPop),
-        "CORR" => Some(AggregateFunction::Corr),
-        "REGR_SLOPE" => Some(AggregateFunction::RegrSlope),
-        "REGR_INTERCEPT" => Some(AggregateFunction::RegrIntercept),
-        "REGR_R2" => Some(AggregateFunction::RegrR2),
-        "REGR_COUNT" => Some(AggregateFunction::RegrCount),
-        "REGR_SXX" => Some(AggregateFunction::RegrSxx),
-        "REGR_SYY" => Some(AggregateFunction::RegrSyy),
-        "REGR_SXY" => Some(AggregateFunction::RegrSxy),
-        "REGR_AVGX" => Some(AggregateFunction::RegrAvgx),
-        "REGR_AVGY" => Some(AggregateFunction::RegrAvgy),
-        _ => None,
-    }
-}
-
 /// Returns true if the aggregate function is a binary set function (requires two arguments).
 pub(crate) fn is_binary_set_function(func: AggregateFunction) -> bool {
     matches!(
@@ -2023,88 +1990,88 @@ mod tests {
     #[test]
     fn to_aggregate_all_variants() {
         assert!(matches!(
-            to_aggregate_function("count"),
+            AggregateFunction::from_name("count"),
             Some(AggregateFunction::Count)
         ));
         assert!(matches!(
-            to_aggregate_function("SUM"),
+            AggregateFunction::from_name("SUM"),
             Some(AggregateFunction::Sum)
         ));
         assert!(matches!(
-            to_aggregate_function("Avg"),
+            AggregateFunction::from_name("Avg"),
             Some(AggregateFunction::Avg)
         ));
         assert!(matches!(
-            to_aggregate_function("MIN"),
+            AggregateFunction::from_name("MIN"),
             Some(AggregateFunction::Min)
         ));
         assert!(matches!(
-            to_aggregate_function("max"),
+            AggregateFunction::from_name("max"),
             Some(AggregateFunction::Max)
         ));
         assert!(matches!(
-            to_aggregate_function("collect"),
+            AggregateFunction::from_name("collect"),
             Some(AggregateFunction::Collect)
         ));
         assert!(matches!(
-            to_aggregate_function("stdev"),
+            AggregateFunction::from_name("stdev"),
             Some(AggregateFunction::StdDev)
         ));
         assert!(matches!(
-            to_aggregate_function("stddev"),
+            AggregateFunction::from_name("stddev"),
             Some(AggregateFunction::StdDev)
         ));
         assert!(matches!(
-            to_aggregate_function("stdevp"),
+            AggregateFunction::from_name("stdevp"),
             Some(AggregateFunction::StdDevPop)
         ));
         assert!(matches!(
-            to_aggregate_function("stddevp"),
+            AggregateFunction::from_name("stddevp"),
             Some(AggregateFunction::StdDevPop)
         ));
         assert!(matches!(
-            to_aggregate_function("stddev_samp"),
+            AggregateFunction::from_name("stddev_samp"),
             Some(AggregateFunction::StdDev)
         ));
         assert!(matches!(
-            to_aggregate_function("STDDEV_POP"),
+            AggregateFunction::from_name("STDDEV_POP"),
             Some(AggregateFunction::StdDevPop)
         ));
         assert!(matches!(
-            to_aggregate_function("variance"),
+            AggregateFunction::from_name("variance"),
             Some(AggregateFunction::Variance)
         ));
         assert!(matches!(
-            to_aggregate_function("VAR_SAMP"),
+            AggregateFunction::from_name("VAR_SAMP"),
             Some(AggregateFunction::Variance)
         ));
         assert!(matches!(
-            to_aggregate_function("VAR_POP"),
+            AggregateFunction::from_name("VAR_POP"),
             Some(AggregateFunction::VariancePop)
         ));
         assert!(matches!(
-            to_aggregate_function("percentile_disc"),
+            AggregateFunction::from_name("percentile_disc"),
             Some(AggregateFunction::PercentileDisc)
         ));
         assert!(matches!(
-            to_aggregate_function("percentiledisc"),
+            AggregateFunction::from_name("percentiledisc"),
             Some(AggregateFunction::PercentileDisc)
         ));
         assert!(matches!(
-            to_aggregate_function("percentile_cont"),
+            AggregateFunction::from_name("percentile_cont"),
             Some(AggregateFunction::PercentileCont)
         ));
         assert!(matches!(
-            to_aggregate_function("percentilecont"),
+            AggregateFunction::from_name("percentilecont"),
             Some(AggregateFunction::PercentileCont)
         ));
     }
 
     #[test]
     fn to_aggregate_unknown_returns_none() {
-        assert!(to_aggregate_function("unknown").is_none());
-        assert!(to_aggregate_function("").is_none());
-        assert!(to_aggregate_function("size").is_none());
+        assert!(AggregateFunction::from_name("unknown").is_none());
+        assert!(AggregateFunction::from_name("").is_none());
+        assert!(AggregateFunction::from_name("size").is_none());
     }
 
     // --- is_aggregate_function: bivariate / concat / sample ---
@@ -2152,67 +2119,67 @@ mod tests {
     #[test]
     fn to_aggregate_bivariate_variants() {
         assert!(matches!(
-            to_aggregate_function("group_concat"),
+            AggregateFunction::from_name("group_concat"),
             Some(AggregateFunction::GroupConcat)
         ));
         assert!(matches!(
-            to_aggregate_function("GROUPCONCAT"),
+            AggregateFunction::from_name("GROUPCONCAT"),
             Some(AggregateFunction::GroupConcat)
         ));
         assert!(matches!(
-            to_aggregate_function("LISTAGG"),
+            AggregateFunction::from_name("LISTAGG"),
             Some(AggregateFunction::GroupConcat)
         ));
         assert!(matches!(
-            to_aggregate_function("sample"),
+            AggregateFunction::from_name("sample"),
             Some(AggregateFunction::Sample)
         ));
         assert!(matches!(
-            to_aggregate_function("COVAR_SAMP"),
+            AggregateFunction::from_name("COVAR_SAMP"),
             Some(AggregateFunction::CovarSamp)
         ));
         assert!(matches!(
-            to_aggregate_function("COVAR_POP"),
+            AggregateFunction::from_name("COVAR_POP"),
             Some(AggregateFunction::CovarPop)
         ));
         assert!(matches!(
-            to_aggregate_function("CORR"),
+            AggregateFunction::from_name("CORR"),
             Some(AggregateFunction::Corr)
         ));
         assert!(matches!(
-            to_aggregate_function("REGR_SLOPE"),
+            AggregateFunction::from_name("REGR_SLOPE"),
             Some(AggregateFunction::RegrSlope)
         ));
         assert!(matches!(
-            to_aggregate_function("REGR_INTERCEPT"),
+            AggregateFunction::from_name("REGR_INTERCEPT"),
             Some(AggregateFunction::RegrIntercept)
         ));
         assert!(matches!(
-            to_aggregate_function("REGR_R2"),
+            AggregateFunction::from_name("REGR_R2"),
             Some(AggregateFunction::RegrR2)
         ));
         assert!(matches!(
-            to_aggregate_function("REGR_COUNT"),
+            AggregateFunction::from_name("REGR_COUNT"),
             Some(AggregateFunction::RegrCount)
         ));
         assert!(matches!(
-            to_aggregate_function("REGR_SXX"),
+            AggregateFunction::from_name("REGR_SXX"),
             Some(AggregateFunction::RegrSxx)
         ));
         assert!(matches!(
-            to_aggregate_function("REGR_SYY"),
+            AggregateFunction::from_name("REGR_SYY"),
             Some(AggregateFunction::RegrSyy)
         ));
         assert!(matches!(
-            to_aggregate_function("REGR_SXY"),
+            AggregateFunction::from_name("REGR_SXY"),
             Some(AggregateFunction::RegrSxy)
         ));
         assert!(matches!(
-            to_aggregate_function("REGR_AVGX"),
+            AggregateFunction::from_name("REGR_AVGX"),
             Some(AggregateFunction::RegrAvgx)
         ));
         assert!(matches!(
-            to_aggregate_function("REGR_AVGY"),
+            AggregateFunction::from_name("REGR_AVGY"),
             Some(AggregateFunction::RegrAvgy)
         ));
     }

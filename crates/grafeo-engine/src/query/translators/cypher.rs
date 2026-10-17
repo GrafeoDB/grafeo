@@ -8,8 +8,8 @@ use super::common::{
     check_branch_columns, collect_expression_variables, combine_with_and,
     comma_part_join_variables, comma_part_reads_earlier_rows, different_edges, edges_to_compare,
     expand_subquery_return_star, has_all_labels, is_aggregate_function, is_binary_set_function,
-    no_result, optional_join, push_set_property, to_aggregate_function, with_imports,
-    wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    no_result, optional_join, push_set_property, with_imports, wrap_distinct, wrap_filter,
+    wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
@@ -2252,7 +2252,7 @@ impl CypherTranslator {
                 args,
                 distinct,
             } => {
-                if let Some(function) = to_aggregate_function(name) {
+                if let Some(function) = AggregateFunction::from_name(name) {
                     // count(*) is represented as FunctionCall with Variable("*") arg
                     let is_count_star = function == AggregateFunction::Count
                         && args.len() == 1

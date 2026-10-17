@@ -17,53 +17,11 @@ use grafeo_core::execution::operators::{
     FunctionSupport, REGEX_SUPPORT, function_names, function_support, regex_pattern_error,
 };
 
-use crate::query::plan::{BinaryOp, LogicalExpression};
-
-/// The aggregate functions: every spelling a query may use (case does not
-/// matter).
-const AGGREGATE_FUNCTIONS: &[&str] = &[
-    "count",
-    "sum",
-    "avg",
-    "min",
-    "max",
-    "collect",
-    "stdev",
-    "stddev",
-    "stddev_samp",
-    "stdevp",
-    "stddevp",
-    "stddev_pop",
-    "variance",
-    "var_samp",
-    "var_pop",
-    "percentile_disc",
-    "percentileDisc",
-    "percentile_cont",
-    "percentileCont",
-    "group_concat",
-    "groupConcat",
-    "listagg",
-    "sample",
-    "covar_samp",
-    "covar_pop",
-    "corr",
-    "regr_slope",
-    "regr_intercept",
-    "regr_r2",
-    "regr_count",
-    "regr_sxx",
-    "regr_syy",
-    "regr_sxy",
-    "regr_avgx",
-    "regr_avgy",
-];
+use crate::query::plan::{AggregateFunction, BinaryOp, LogicalExpression};
 
 /// Whether `name` is an aggregate function (case does not matter).
 pub(crate) fn is_aggregate_function(name: &str) -> bool {
-    AGGREGATE_FUNCTIONS
-        .iter()
-        .any(|aggregate| aggregate.eq_ignore_ascii_case(name))
+    AggregateFunction::from_name(name).is_some()
 }
 
 /// A semantic error with `message`.
@@ -95,7 +53,7 @@ pub(crate) fn check_function_call(name: &str, arguments: usize) -> Result<()> {
         ))),
         _ => {
             let known: Vec<&str> = function_names()
-                .chain(AGGREGATE_FUNCTIONS.iter().copied())
+                .chain(AggregateFunction::ALIASES.iter().map(|&(alias, _)| alias))
                 .collect();
             let error = QueryError::new(
                 QueryErrorKind::Semantic,

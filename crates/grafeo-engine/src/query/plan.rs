@@ -1874,6 +1874,57 @@ pub enum AggregateFunction {
     RegrAvgy,
 }
 
+impl AggregateFunction {
+    /// Every spelling of an aggregate, with its function; case does not
+    /// matter. `count` is [`Count`](Self::Count): the translators turn
+    /// `count(x)` into [`CountNonNull`](Self::CountNonNull) themselves.
+    pub(crate) const ALIASES: &'static [(&'static str, AggregateFunction)] = &[
+        ("count", Self::Count),
+        ("sum", Self::Sum),
+        ("avg", Self::Avg),
+        ("min", Self::Min),
+        ("max", Self::Max),
+        ("collect", Self::Collect),
+        ("stdev", Self::StdDev),
+        ("stddev", Self::StdDev),
+        ("stddev_samp", Self::StdDev),
+        ("stdevp", Self::StdDevPop),
+        ("stddevp", Self::StdDevPop),
+        ("stddev_pop", Self::StdDevPop),
+        ("variance", Self::Variance),
+        ("var_samp", Self::Variance),
+        ("var_pop", Self::VariancePop),
+        ("percentile_disc", Self::PercentileDisc),
+        ("percentileDisc", Self::PercentileDisc),
+        ("percentile_cont", Self::PercentileCont),
+        ("percentileCont", Self::PercentileCont),
+        ("group_concat", Self::GroupConcat),
+        ("groupConcat", Self::GroupConcat),
+        ("listagg", Self::GroupConcat),
+        ("sample", Self::Sample),
+        ("covar_samp", Self::CovarSamp),
+        ("covar_pop", Self::CovarPop),
+        ("corr", Self::Corr),
+        ("regr_slope", Self::RegrSlope),
+        ("regr_intercept", Self::RegrIntercept),
+        ("regr_r2", Self::RegrR2),
+        ("regr_count", Self::RegrCount),
+        ("regr_sxx", Self::RegrSxx),
+        ("regr_syy", Self::RegrSyy),
+        ("regr_sxy", Self::RegrSxy),
+        ("regr_avgx", Self::RegrAvgx),
+        ("regr_avgy", Self::RegrAvgy),
+    ];
+
+    /// The aggregate a call names, in any case.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        Self::ALIASES
+            .iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(name))
+            .map(|&(_, function)| function)
+    }
+}
+
 /// Hint about how a filter will be executed at the physical level.
 ///
 /// Set during EXPLAIN annotation to communicate pushdown decisions.

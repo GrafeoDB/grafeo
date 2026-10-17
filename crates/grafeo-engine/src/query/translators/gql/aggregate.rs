@@ -592,7 +592,7 @@ impl GqlTranslator {
                 args,
                 distinct,
             } => {
-                if let Some(func) = to_aggregate_function(name) {
+                if let Some(func) = AggregateFunction::from_name(name) {
                     let agg_expr = if args.is_empty() {
                         // COUNT(*) case
                         AggregateExpr {

@@ -1219,15 +1219,9 @@ impl Planner {
             LogicalExpression::Literal(Value::List(list)) => {
                 let mut vec = Vec::with_capacity(list.len());
                 for item in list.iter() {
-                    match item {
-                        Value::Float64(f) => vec.push(*f as f32),
-                        Value::Int64(i) => vec.push(*i as f32),
-                        _ => {
-                            return Err(Error::Internal(
-                                "Vector elements must be numeric".to_string(),
-                            ));
-                        }
-                    }
+                    vec.push(item.as_vector_component().ok_or_else(|| {
+                        Error::Internal("Vector elements must be numeric".to_string())
+                    })?);
                 }
                 Ok(vec)
             }
@@ -1236,15 +1230,13 @@ impl Planner {
             LogicalExpression::List(items) => {
                 let mut vec = Vec::with_capacity(items.len());
                 for item in items {
-                    match item {
-                        LogicalExpression::Literal(Value::Float64(f)) => vec.push(*f as f32),
-                        LogicalExpression::Literal(Value::Int64(i)) => vec.push(*i as f32),
-                        _ => {
-                            return Err(Error::Internal(
-                                "Vector elements must be numeric literals".to_string(),
-                            ));
-                        }
-                    }
+                    let component = match item {
+                        LogicalExpression::Literal(value) => value.as_vector_component(),
+                        _ => None,
+                    };
+                    vec.push(component.ok_or_else(|| {
+                        Error::Internal("Vector elements must be numeric literals".to_string())
+                    })?);
                 }
                 Ok(vec)
             }

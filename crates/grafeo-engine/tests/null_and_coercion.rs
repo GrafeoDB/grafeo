@@ -412,7 +412,7 @@ fn test_int_float_arithmetic() {
         .unwrap();
 
     let r = session
-        .execute("MATCH (n:Num) RETURN n.v + 0.5 AS result")
+        .execute("MATCH (n:Num) RETURN n.v + 0.5e0 AS result")
         .unwrap();
     assert_eq!(r.rows().len(), 1);
     // Int64(3) + Float64(0.5) should promote to Float64(3.5)

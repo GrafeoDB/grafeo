@@ -243,11 +243,13 @@ impl Operator for NodeSeekOperator {
 
 /// The node IDs `=` finds equal to a key, as the filter `id(n) = key`
 /// compares an ID (an integer) with it: the integer itself, a float within
-/// `f64::EPSILON` of it, or a string that parses as it.
+/// `f64::EPSILON` of it, a whole decimal of its value, or a string that
+/// parses as it.
 fn node_ids(key: &Value) -> Vec<NodeId> {
     let ids: Vec<i64> = match key {
         Value::Int64(id) => vec![*id],
         Value::Float64(f) => integers_near(*f),
+        Value::Decimal(d) if d.floor() == *d => d.trunc_to_i64().into_iter().collect(),
         Value::String(s) => s.parse::<i64>().ok().into_iter().collect(),
         _ => Vec::new(),
     };

@@ -178,6 +178,7 @@ impl super::Planner {
         let threshold = match threshold_expr {
             LogicalExpression::Literal(Value::Float64(v)) => *v,
             LogicalExpression::Literal(Value::Int64(v)) => *v as f64,
+            LogicalExpression::Literal(Value::Decimal(d)) => d.to_f64(),
             _ => return None,
         };
 

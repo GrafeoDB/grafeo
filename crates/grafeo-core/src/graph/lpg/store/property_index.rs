@@ -13,7 +13,7 @@
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
-use grafeo_common::types::{HashableValue, NodeId, Value};
+use grafeo_common::types::{Decimal, HashableValue, NodeId, Value};
 use grafeo_common::utils::hash::FxHashSet;
 
 use crate::execution::operators::HashKey;
@@ -119,13 +119,14 @@ impl PropertyIndex {
     }
 }
 
-/// The number `=` reads `value` as, if any: an integer or a float, or a
-/// string that parses as one (not NaN).
+/// The number `=` reads `value` as, if any: an integer, a float or a
+/// decimal, or a string that parses as one (not NaN).
 fn number(value: &Value) -> Option<f64> {
     match value {
         // `=` compares an integer with a float as this `f64`.
         Value::Int64(i) => Some(*i as f64),
         Value::Float64(f) => Some(*f),
+        Value::Decimal(d) => Some(d.to_f64()),
         Value::String(s) => s.parse::<f64>().ok().filter(|n| !n.is_nan()),
         _ => None,
     }
@@ -137,6 +138,38 @@ fn number(value: &Value) -> Option<f64> {
 /// decimal string.
 fn probes(key: &Value) -> Vec<HashableValue> {
     let mut probes = vec![HashableValue::new(key.clone())];
+    // A decimal equals an integer of its value and a float whose shortest
+    // text is its value (see `Value::compare_decimal`); a decimal probe
+    // finds a stored decimal at any scale.
+    match key {
+        Value::Int64(i) => probes.push(HashableValue::new(Value::Decimal(Decimal::from_i64(*i)))),
+        Value::Float64(f) => {
+            if let Ok(d) = Decimal::from_f64(*f) {
+                probes.push(HashableValue::new(Value::Decimal(d)));
+            }
+        }
+        Value::Decimal(d) => {
+            probes.push(HashableValue::new(Value::Float64(d.to_f64())));
+            if d.floor() == *d
+                && let Some(integer) = d.trunc_to_i64()
+            {
+                probes.push(HashableValue::new(Value::Int64(integer)));
+            }
+        }
+        // A numeric string equals the decimal of the number it reads as:
+        // decimal text exactly, other number text (`'4.2e1'`) as its float.
+        Value::String(s) => {
+            let decimal = Decimal::parse(s).ok().or_else(|| {
+                s.parse::<f64>()
+                    .ok()
+                    .and_then(|f| Decimal::from_f64(f).ok())
+            });
+            if let Some(d) = decimal {
+                probes.push(HashableValue::new(Value::Decimal(d)));
+            }
+        }
+        _ => {}
+    }
     if let Value::String(s) = key
         && let Ok(integer) = s.parse::<i64>()
     {
@@ -242,6 +275,17 @@ mod tests {
         assert_eq!(found(&index, Value::from("042")), all);
         assert_eq!(found(&index, Value::from("abc")), vec![6]);
         assert_eq!(found(&index, Value::Null), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_decimal_is_found_by_the_strings_that_read_as_it() {
+        let decimal = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
+        let index = index(&[decimal("42.0"), decimal("0.3"), Value::from("abc")]);
+        for key in ["42", "042", "+42", "42.00", "4.2e1"] {
+            assert_eq!(found(&index, Value::from(key)), vec![0], "{key}");
+        }
+        assert_eq!(found(&index, Value::from("0.30")), vec![1]);
+        assert_eq!(found(&index, Value::from("abc")), vec![2]);
     }
 
     #[test]

@@ -280,6 +280,7 @@ impl GqlTranslator {
             ast::Literal::Bool(b) => Value::Bool(*b),
             ast::Literal::Integer(i) => Value::Int64(*i),
             ast::Literal::Float(f) => Value::Float64(*f),
+            ast::Literal::Decimal(d) => Value::Decimal(*d),
             ast::Literal::String(s) => Value::String(s.clone().into()),
             ast::Literal::Date(s) => grafeo_common::types::Date::parse(s)
                 .map_or_else(|| Value::String(s.clone().into()), Value::Date),

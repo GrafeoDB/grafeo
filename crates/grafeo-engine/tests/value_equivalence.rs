@@ -57,9 +57,10 @@ fn a_float_grouping_key_stays_a_float() {
     let db = GrafeoDB::new_in_memory();
     for language in languages() {
         for query in [
-            "UNWIND [1.5, 1.5, 2.5] AS x RETURN x, count(*) AS c",
-            "UNWIND [1.5, 1.5, 2.5] AS x WITH x, count(*) AS c RETURN x, c",
-            "UNWIND [1.5, 1.5, 2.5] AS x WITH x, count(*) AS c RETURN x, c ORDER BY c",
+            // Floats: in GQL `1.5` is a decimal, `1.5e0` the float.
+            "UNWIND [1.5e0, 1.5e0, 2.5e0] AS x RETURN x, count(*) AS c",
+            "UNWIND [1.5e0, 1.5e0, 2.5e0] AS x WITH x, count(*) AS c RETURN x, c",
+            "UNWIND [1.5e0, 1.5e0, 2.5e0] AS x WITH x, count(*) AS c RETURN x, c ORDER BY c",
         ] {
             assert_eq!(
                 sorted(rows(&db, language, query)),
@@ -80,8 +81,8 @@ fn an_integer_and_a_float_of_one_value_are_one_group_that_keeps_the_first() {
     let db = GrafeoDB::new_in_memory();
     for language in languages() {
         for (list, first) in [
-            ("[3, 3.0]", Value::Int64(3)),
-            ("[3.0, 3]", Value::Float64(3.0)),
+            ("[3, 3.0e0]", Value::Int64(3)),
+            ("[3.0e0, 3]", Value::Float64(3.0)),
         ] {
             for query in [
                 format!("UNWIND {list} AS x RETURN x, count(*) AS c"),
@@ -108,8 +109,7 @@ fn equal_grouping_keys_are_one_group_with_a_spill_path_too() {
         GrafeoDB::with_config(grafeo_engine::Config::in_memory().with_spill_path(spill.path()))
             .unwrap();
     for language in languages() {
-        let query =
-            "UNWIND [3, 3.0, -0.0, 0.0, 19, 3] AS x RETURN x, count(*) AS c ORDER BY c DESC, x";
+        let query = "UNWIND [3, 3.0e0, -0.0e0, 0.0e0, 19, 3] AS x RETURN x, count(*) AS c ORDER BY c DESC, x";
         let result = rows(&db, language, query);
         assert_eq!(
             result,
@@ -177,7 +177,7 @@ fn a_vector_grouping_key_stays_a_vector() {
 fn lists_and_maps_of_equal_numbers_are_one_group() {
     let db = GrafeoDB::new_in_memory();
     for language in languages() {
-        let query = "UNWIND [[1.5, 3], [1.5, 3.0]] AS x WITH x, count(*) AS c RETURN x, c";
+        let query = "UNWIND [[1.5e0, 3], [1.5e0, 3.0e0]] AS x WITH x, count(*) AS c RETURN x, c";
         assert_eq!(
             rows(&db, language, query),
             [vec![
@@ -186,7 +186,7 @@ fn lists_and_maps_of_equal_numbers_are_one_group() {
             ]],
             "{language}: {query}"
         );
-        let query = "UNWIND [{k: 3.0}, {k: 3}] AS x WITH x, count(*) AS c RETURN x.k AS k, c";
+        let query = "UNWIND [{k: 3.0e0}, {k: 3}] AS x WITH x, count(*) AS c RETURN x.k AS k, c";
         assert_eq!(
             rows(&db, language, query),
             [vec![Value::Float64(3.0), Value::Int64(2)]],
@@ -392,7 +392,7 @@ fn min_and_max_over_mixed_types_do_not_depend_on_the_input_order() {
 fn max_of_numbers_with_nan_is_nan() {
     let db = GrafeoDB::new_in_memory();
     for language in languages() {
-        let query = "UNWIND [3, 0.0 / 0.0, 19, null] AS x RETURN min(x) AS lo, max(x) AS hi";
+        let query = "UNWIND [3, 0.0e0 / 0.0e0, 19, null] AS x RETURN min(x) AS lo, max(x) AS hi";
         let result = rows(&db, language, query);
         assert_eq!(result[0][0], Value::Int64(3), "{language}: {query}");
         assert!(

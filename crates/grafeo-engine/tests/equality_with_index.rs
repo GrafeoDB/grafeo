@@ -189,14 +189,14 @@ fn the_reported_rows_are_found_with_an_index() {
     // The reproduction of #535: '42.0' and 0.1 + 0.2, keys from the row.
     for indexed in [false, true] {
         let db = GrafeoDB::new_in_memory();
-        db.execute("INSERT (:Doc {k: 3, p: '42.0'}), (:Doc {k: 19, p: 0.1 + 0.2})")
+        db.execute("INSERT (:Doc {k: 3, p: '42.0'}), (:Doc {k: 19, p: 0.1e0 + 0.2e0})")
             .unwrap();
         if indexed {
             db.create_property_index("p").unwrap();
         }
         let found = keys(
             &db,
-            "UNWIND [42.0, 0.3] AS key MATCH (d:Doc) WHERE d.p = key RETURN d.k",
+            "UNWIND [42.0e0, 0.3e0] AS key MATCH (d:Doc) WHERE d.p = key RETURN d.k",
             None,
         );
         assert_eq!(found, BTreeSet::from([3, 19]), "indexed: {indexed}");

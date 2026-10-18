@@ -340,6 +340,7 @@ impl From<Value> for HashableValue {
     fn from(value: Value) -> Self {
         let representative = match value {
             Value::Float64(float) => representative_float(float),
+            Value::Decimal(decimal) => representative_decimal(decimal),
             Value::Vector(_)
             | Value::ZonedDatetime(_)
             | Value::Time(_)
@@ -423,6 +424,7 @@ impl RowKey {
 fn representative(value: &Value) -> Value {
     match value {
         Value::Float64(float) => representative_float(*float),
+        Value::Decimal(decimal) => representative_decimal(*decimal),
         Value::Vector(items) => {
             Value::Vector(items.iter().map(|&x| representative_f32(x)).collect())
         }
@@ -465,6 +467,23 @@ fn representative_float(float: f64) -> Value {
         return Value::Int64(integer);
     }
     Value::Float64(float)
+}
+
+/// A decimal's representative, as `=` compares it with the other numbers:
+/// the integer it equals when it is whole and fits an `i64` (`3.0` is `3`),
+/// the float whose shortest text it is (`1.5` is the float `1.5`), else the
+/// decimal itself (equal at every scale).
+fn representative_decimal(decimal: grafeo_common::types::Decimal) -> Value {
+    if decimal.floor() == decimal
+        && let Some(integer) = decimal.trunc_to_i64()
+    {
+        return Value::Int64(integer);
+    }
+    let float = decimal.to_f64();
+    if grafeo_common::types::Decimal::from_f64(float).is_ok_and(|back| back == decimal) {
+        return representative_float(float);
+    }
+    Value::Decimal(decimal)
 }
 
 /// A vector item's representative: one NaN for every NaN, and `0.0` for

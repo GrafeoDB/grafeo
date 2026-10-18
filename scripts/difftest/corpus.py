@@ -1480,4 +1480,26 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL, "writes")
 
+# BV: GQL number literals (#610). A number with a point is an exact decimal, one with an
+#     exponent or the suffix F or D a float, and the suffix M makes any number a decimal
+#     (BV1 to BV4); a decimal with an integer is a decimal, with a float a float, and
+#     division gives 16 digits (BV5, BV6); ceil keeps a decimal, sqrt gives a float (BV7);
+#     a decimal equals an integer and a numeric string of its value (BV8, BV9), also in a
+#     filter on a property (BV10); a decimal division by zero is null, a float one an
+#     infinity (BV11)
+for case_id, query in [
+    ("BV1", "RETURN 0.1 + 0.2 = 0.3 AS exact, 0.1e0 + 0.2e0 = 0.3e0 AS approximate"),
+    ("BV2", "RETURN 1.50 AS d, 1.5e0 AS f"),
+    ("BV3", "RETURN 2M AS m, 2.5F AS f, 2.5D AS d, 2.50m AS lower"),
+    ("BV4", "RETURN -0.25 AS d, 0.0 AS zero"),
+    ("BV5", "RETURN 1.5 + 1 AS di, 1.5 + 1.0e0 AS df, 1.25 * 4 AS product"),
+    ("BV6", "RETURN 1 / 3.0 AS third, 2.0 / 4 AS half"),
+    ("BV7", "RETURN ceil(2.3) AS c, floor(-2.3) AS f, round(2.5) AS r, sqrt(2.25) AS s"),
+    ("BV8", "RETURN 3.0 = 3 AS i, 1.5 = 1.5e0 AS f, 3.0 < 4 AS lt"),
+    ("BV9", "RETURN '5' = 5.0 AS s, '5.00' = 5.0 AS scale, 'five' = 5.0 AS word"),
+    ("BV10", "MATCH (p:Person) WHERE p.age = 30.0 RETURN p.name"),
+    ("BV11", "RETURN 1.0 / 0 AS d, 1.0e0 / 0.0e0 AS f"),
+]:
+    case(case_id, query, GQL)
+
 # fmt: on

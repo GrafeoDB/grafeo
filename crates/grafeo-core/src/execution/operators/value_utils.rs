@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{Decimal, Value};
 
 use super::sort::{NullOrder, SortDirection};
 
@@ -24,13 +24,34 @@ pub fn value_to_f64(value: &Value) -> Option<f64> {
     }
 }
 
+/// The order of two values when at least one is a decimal, by
+/// [`Value::compare_decimal`]. A string meeting a decimal compares as the
+/// number it reads as, as it does against an integer or a float (RDF stores
+/// numeric literals as strings): decimal text exactly, other number text
+/// (`'1e3'`) as its float.
+pub fn compare_with_decimal(a: &Value, b: &Value) -> Option<Ordering> {
+    let number = |text: &str| {
+        Decimal::parse(text).map(Value::Decimal).ok().or_else(|| {
+            text.parse::<f64>()
+                .ok()
+                .filter(|float| !float.is_nan())
+                .map(Value::Float64)
+        })
+    };
+    match (a, b) {
+        (Value::String(text), Value::Decimal(_)) => number(text)?.compare_decimal(b),
+        (Value::Decimal(_), Value::String(text)) => a.compare_decimal(&number(text)?),
+        _ => a.compare_decimal(b),
+    }
+}
+
 /// Compares two values with partial ordering (returns `None` for incomparable types).
 ///
 /// Handles cross-type comparisons between Int64/Float64/String, including
 /// RDF numeric strings that need parsing before comparison.
 pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
-        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => compare_with_decimal(a, b),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
         (Value::String(a), Value::String(b)) => {

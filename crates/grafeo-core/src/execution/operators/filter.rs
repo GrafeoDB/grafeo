@@ -1795,6 +1795,16 @@ impl ExpressionPredicate {
                     (Value::Float64(base), Value::Int64(exp)) => {
                         Some(Value::Float64(base.powf(*exp as f64)))
                     }
+                    // A decimal operand as its float: the power is a float.
+                    (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+                        let as_float = |value: &Value| match value {
+                            Value::Int64(i) => Some(*i as f64),
+                            Value::Float64(f) => Some(*f),
+                            Value::Decimal(d) => Some(d.to_f64()),
+                            _ => None,
+                        };
+                        Some(Value::Float64(as_float(left)?.powf(as_float(right)?)))
+                    }
                     _ => None, // Type mismatch
                 }
             }
@@ -2504,13 +2514,7 @@ impl ExpressionPredicate {
                     Value::List(items) => {
                         let floats: Vec<f32> = items
                             .iter()
-                            .filter_map(|v| match v {
-                                // reason: vector() intentionally converts f64 to f32 for storage
-                                #[allow(clippy::cast_possible_truncation)]
-                                Value::Float64(f) => Some(*f as f32),
-                                Value::Int64(i) => Some(*i as f32),
-                                _ => None,
-                            })
+                            .filter_map(Value::as_vector_component)
                             .collect();
                         if floats.len() == items.len() {
                             Some(Value::Vector(floats.into()))
@@ -2996,6 +3000,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).sqrt())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().sqrt())),
                     Value::Float64(f) => Some(Value::Float64(f.sqrt())),
                     _ => None,
                 }
@@ -3028,11 +3033,13 @@ impl ExpressionPredicate {
                 let exp_val = self.eval_expr(&args[1], chunk, row)?;
                 let base = match base_val {
                     Value::Int64(i) => i as f64,
+                    Value::Decimal(d) => d.to_f64(),
                     Value::Float64(f) => f,
                     _ => return None,
                 };
                 let exponent = match exp_val {
                     Value::Int64(i) => i as f64,
+                    Value::Decimal(d) => d.to_f64(),
                     Value::Float64(f) => f,
                     _ => return None,
                 };
@@ -3058,6 +3065,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).ln())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().ln())),
                     Value::Float64(f) => Some(Value::Float64(f.ln())),
                     _ => None,
                 }
@@ -3069,6 +3077,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).log10())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().log10())),
                     Value::Float64(f) => Some(Value::Float64(f.log10())),
                     _ => None,
                 }
@@ -3080,6 +3089,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).log2())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().log2())),
                     Value::Float64(f) => Some(Value::Float64(f.log2())),
                     _ => None,
                 }
@@ -3091,6 +3101,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).exp())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().exp())),
                     Value::Float64(f) => Some(Value::Float64(f.exp())),
                     _ => None,
                 }
@@ -3104,6 +3115,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).sin())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().sin())),
                     Value::Float64(f) => Some(Value::Float64(f.sin())),
                     _ => None,
                 }
@@ -3115,6 +3127,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).cos())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().cos())),
                     Value::Float64(f) => Some(Value::Float64(f.cos())),
                     _ => None,
                 }
@@ -3126,6 +3139,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).tan())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().tan())),
                     Value::Float64(f) => Some(Value::Float64(f.tan())),
                     _ => None,
                 }
@@ -3137,6 +3151,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).asin())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().asin())),
                     Value::Float64(f) => Some(Value::Float64(f.asin())),
                     _ => None,
                 }
@@ -3148,6 +3163,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).acos())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().acos())),
                     Value::Float64(f) => Some(Value::Float64(f.acos())),
                     _ => None,
                 }
@@ -3159,6 +3175,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).atan())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().atan())),
                     Value::Float64(f) => Some(Value::Float64(f.atan())),
                     _ => None,
                 }
@@ -3171,11 +3188,13 @@ impl ExpressionPredicate {
                 let x_val = self.eval_expr(&args[1], chunk, row)?;
                 let y = match y_val {
                     Value::Int64(i) => i as f64,
+                    Value::Decimal(d) => d.to_f64(),
                     Value::Float64(f) => f,
                     _ => return None,
                 };
                 let x = match x_val {
                     Value::Int64(i) => i as f64,
+                    Value::Decimal(d) => d.to_f64(),
                     Value::Float64(f) => f,
                     _ => return None,
                 };
@@ -3188,6 +3207,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).to_degrees())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().to_degrees())),
                     Value::Float64(f) => Some(Value::Float64(f.to_degrees())),
                     _ => None,
                 }
@@ -3199,6 +3219,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).to_radians())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().to_radians())),
                     Value::Float64(f) => Some(Value::Float64(f.to_radians())),
                     _ => None,
                 }
@@ -3626,21 +3647,14 @@ impl ExpressionPredicate {
     /// Coerces a `Value` to a borrowed or owned float slice for vector math.
     ///
     /// Handles both `Value::Vector` (native) and `Value::List` (GQL inline literal
-    /// form `[0.9, 0.1, 0.0]` which the parser translates to a list of Float64/Int64).
+    /// form `[0.9, 0.1, 0.0]`, a list of numbers: decimals in GQL, floats in Cypher).
     fn coerce_to_float_vec(val: &Value) -> Option<std::borrow::Cow<'_, [f32]>> {
         match val {
             Value::Vector(v) => Some(std::borrow::Cow::Borrowed(v.as_ref())),
             Value::List(list) => {
                 let mut vec = Vec::with_capacity(list.len());
                 for item in list.iter() {
-                    match item {
-                        // GQL numeric literals are Float64; f64→f32 precision loss is intentional
-                        // since all HNSW indexes store f32 components.
-                        #[allow(clippy::cast_possible_truncation)]
-                        Value::Float64(f) => vec.push(*f as f32),
-                        Value::Int64(i) => vec.push(*i as f32),
-                        _ => return None,
-                    }
+                    vec.push(item.as_vector_component()?);
                 }
                 Some(std::borrow::Cow::Owned(vec))
             }
@@ -3920,7 +3934,8 @@ impl ExpressionPredicate {
         match (left, right) {
             (Value::Null, Value::Null) => true,
             (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
-                left.compare_decimal(right) == Some(std::cmp::Ordering::Equal)
+                super::value_utils::compare_with_decimal(left, right)
+                    == Some(std::cmp::Ordering::Equal)
             }
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int64(a), Value::Int64(b)) => a == b,
@@ -4011,6 +4026,7 @@ impl ExpressionPredicate {
                 // reason: type coercion intentionally truncates float to int
                 #[allow(clippy::cast_possible_truncation)]
                 Value::Float64(f) => Some(Value::Int64(f as i64)),
+                Value::Decimal(d) => d.trunc_to_i64().map(Value::Int64),
                 Value::String(ref s) => s.parse::<i64>().ok().map(Value::Int64),
                 Value::Bool(b) => Some(Value::Int64(i64::from(b))),
                 _ => None,
@@ -4018,6 +4034,7 @@ impl ExpressionPredicate {
             "FLOAT" | "FLOAT64" | "DOUBLE" => match val {
                 Value::Float64(_) => Some(val),
                 Value::Int64(i) => Some(Value::Float64(i as f64)),
+                Value::Decimal(d) => Some(Value::Float64(d.to_f64())),
                 Value::String(ref s) => s.parse::<f64>().ok().map(Value::Float64),
                 _ => None,
             },
@@ -4048,7 +4065,7 @@ impl ExpressionPredicate {
     fn compare_values(&self, left: &Value, right: &Value) -> Option<i32> {
         match (left, right) {
             (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
-                left.compare_decimal(right).map(|o| o as i32)
+                super::value_utils::compare_with_decimal(left, right).map(|o| o as i32)
             }
             (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b) as i32),
             (Value::Float64(a), Value::Float64(b)) => {

@@ -171,8 +171,11 @@ pub enum TokenKind {
     // Literals
     /// Integer literal.
     Integer,
-    /// Float literal.
+    /// Approximate number literal: with an exponent or the suffix `F` or `D`.
     Float,
+    /// Exact number literal: common notation with a point (`1.5`), or the
+    /// suffix `M` (`1.5M`, `2M`).
+    Decimal,
     /// String literal.
     String,
 
@@ -615,24 +618,18 @@ impl<'a> Lexer<'a> {
         }
 
         // Only consume '.' if followed by a digit (to avoid consuming '..' as part of a number)
+        let mut point = false;
         if self.current_char() == '.' && self.peek_char().is_ascii_digit() {
+            point = true;
             self.advance();
             while self.position < self.input.len() && self.current_char().is_ascii_digit() {
                 self.advance();
             }
-            // Check for exponent after decimal
-            if self.current_char() == 'e' || self.current_char() == 'E' {
-                self.advance();
-                if self.current_char() == '+' || self.current_char() == '-' {
-                    self.advance();
-                }
-                while self.position < self.input.len() && self.current_char().is_ascii_digit() {
-                    self.advance();
-                }
-            }
-            TokenKind::Float
-        } else if self.current_char() == 'e' || self.current_char() == 'E' {
-            // Scientific notation without decimal: 1e10, 2E-3
+        }
+        // Scientific notation, with or without a point: 1.5e10, 2E-3
+        let mut exponent = false;
+        if self.current_char() == 'e' || self.current_char() == 'E' {
+            exponent = true;
             self.advance();
             if self.current_char() == '+' || self.current_char() == '-' {
                 self.advance();
@@ -640,7 +637,24 @@ impl<'a> Lexer<'a> {
             while self.position < self.input.len() && self.current_char().is_ascii_digit() {
                 self.advance();
             }
+        }
+        // ISO GQL number suffixes: `M` exact, `F` and `D` approximate; a
+        // letter, digit or `_` after it makes it the start of a name instead.
+        let suffix = self.current_char().to_ascii_uppercase();
+        let next = self.peek_char();
+        if matches!(suffix, 'M' | 'F' | 'D') && !(next.is_alphanumeric() || next == '_') {
+            self.advance();
+            return match (suffix, exponent) {
+                // An exponent is approximate notation: `1e3M` is no number.
+                ('M', true) => TokenKind::Error,
+                ('M', false) => TokenKind::Decimal,
+                _ => TokenKind::Float,
+            };
+        }
+        if exponent {
             TokenKind::Float
+        } else if point {
+            TokenKind::Decimal
         } else {
             TokenKind::Integer
         }
@@ -783,9 +797,10 @@ mod tests {
         assert_eq!(int_token.kind, TokenKind::Integer);
         assert_eq!(int_token.text, "42");
 
-        let float_token = lexer.next_token();
-        assert_eq!(float_token.kind, TokenKind::Float);
-        assert_eq!(float_token.text, "3.14");
+        // Common notation with a point is exact in ISO GQL (#610).
+        let decimal_token = lexer.next_token();
+        assert_eq!(decimal_token.kind, TokenKind::Decimal);
+        assert_eq!(decimal_token.text, "3.14");
     }
 
     #[test]
@@ -1140,6 +1155,40 @@ mod tests {
         assert_eq!(t4.text, "0b11001100");
 
         assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+    }
+
+    /// ISO GQL: a number in common notation with a point is exact, and so is
+    /// any number with the suffix `M`; a number with an exponent or the
+    /// suffix `F` or `D` is approximate (#610). A suffix is part of the number
+    /// only when no identifier character follows it.
+    #[test]
+    fn test_exact_and_approximate_number_literals() {
+        for (text, kind, expected) in [
+            ("1.5", TokenKind::Decimal, "1.5"),
+            ("0.000", TokenKind::Decimal, "0.000"),
+            ("1.5M", TokenKind::Decimal, "1.5M"),
+            ("2m", TokenKind::Decimal, "2m"),
+            ("1.5F", TokenKind::Float, "1.5F"),
+            ("1.5d", TokenKind::Float, "1.5d"),
+            ("3D", TokenKind::Float, "3D"),
+            ("1.5e3", TokenKind::Float, "1.5e3"),
+            ("1e5", TokenKind::Float, "1e5"),
+            ("1.5e3D", TokenKind::Float, "1.5e3D"),
+            ("7", TokenKind::Integer, "7"),
+        ] {
+            let mut lexer = Lexer::new(text);
+            let token = lexer.next_token();
+            assert_eq!(
+                (token.kind, token.text.as_str()),
+                (kind, expected),
+                "{text}"
+            );
+            assert_eq!(lexer.next_token().kind, TokenKind::Eof, "{text}");
+        }
+        // A letter after the suffix makes it an identifier, not a suffix.
+        let mut lexer = Lexer::new("1.5MB");
+        assert_eq!(lexer.next_token().kind, TokenKind::Decimal);
+        assert_eq!(lexer.next_token().text, "MB");
     }
 
     #[test]

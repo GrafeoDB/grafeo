@@ -100,7 +100,7 @@ tests:
   - name: positive_infinity
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN 1.0 / 0.0 AS val"
+    query: "MATCH (n:N) RETURN 1.0e0 / 0.0e0 AS val"
     expect:
       rows:
         - [Infinity]
@@ -108,7 +108,7 @@ tests:
   - name: negative_infinity
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN -1.0 / 0.0 AS val"
+    query: "MATCH (n:N) RETURN -1.0e0 / 0.0e0 AS val"
     expect:
       rows:
         - [-Infinity]
@@ -116,7 +116,7 @@ tests:
   - name: infinity_plus_number
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN (1.0 / 0.0) + 42 AS val"
+    query: "MATCH (n:N) RETURN (1.0e0 / 0.0e0) + 42 AS val"
     expect:
       rows:
         - [Infinity]
@@ -124,7 +124,7 @@ tests:
   - name: infinity_minus_infinity
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN (1.0 / 0.0) - (1.0 / 0.0) AS val"
+    query: "MATCH (n:N) RETURN (1.0e0 / 0.0e0) - (1.0e0 / 0.0e0) AS val"
     expect:
       rows:
         - [NaN]
@@ -132,7 +132,7 @@ tests:
   - name: infinity_times_zero
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN (1.0 / 0.0) * 0 AS val"
+    query: "MATCH (n:N) RETURN (1.0e0 / 0.0e0) * 0 AS val"
     expect:
       rows:
         - [NaN]
@@ -140,7 +140,7 @@ tests:
   - name: infinity_comparison
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) WHERE (1.0 / 0.0) > 999999999 RETURN true AS result"
+    query: "MATCH (n:N) WHERE (1.0e0 / 0.0e0) > 999999999 RETURN true AS result"
     expect:
       rows:
         - [true]
@@ -190,7 +190,7 @@ tests:
   - name: nan_from_zero_div_zero
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN 0.0 / 0.0 AS val"
+    query: "MATCH (n:N) RETURN 0.0e0 / 0.0e0 AS val"
     expect:
       rows:
         - [NaN]
@@ -198,14 +198,14 @@ tests:
   - name: nan_not_equal_to_itself
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) WHERE (0.0 / 0.0) = (0.0 / 0.0) RETURN true AS result"
+    query: "MATCH (n:N) WHERE (0.0e0 / 0.0e0) = (0.0e0 / 0.0e0) RETURN true AS result"
     expect:
       empty: true
 
   - name: nan_arithmetic
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN (0.0 / 0.0) + 1 AS val"
+    query: "MATCH (n:N) RETURN (0.0e0 / 0.0e0) + 1 AS val"
     expect:
       rows:
         - [NaN]

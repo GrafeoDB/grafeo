@@ -234,6 +234,24 @@ impl Value {
         }
     }
 
+    /// The value as a vector component: an integer, a float or a decimal as
+    /// the nearest `f32`, the type vectors and their indexes store. `None` for
+    /// any other value.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "a vector component is an f32: the nearest one is the value stored"
+    )]
+    pub fn as_vector_component(&self) -> Option<f32> {
+        match self {
+            Value::Float64(f) => Some(*f as f32),
+            Value::Int64(i) => Some(*i as f32),
+            Value::Decimal(d) => Some(d.to_f64() as f32),
+            _ => None,
+        }
+    }
+
     /// Returns the decimal if this is a Decimal, otherwise None.
     #[inline]
     #[must_use]

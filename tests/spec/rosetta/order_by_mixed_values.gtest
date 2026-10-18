@@ -90,7 +90,7 @@ tests:
   # function does not correctly implement a total order".
   - name: mixed_values_with_nan_sort_without_failing
     variants:
-      gql: "UNWIND [9, 0.0 / 0.0, false, 0.0 / 0.0, -3.8, 'e', -11, 19, -15, -2, -17, -8.2, 2, -13.5, -10, true, 18.5, 15, 6, -2, 'e'] AS x RETURN x ORDER BY x"
+      gql: "UNWIND [9, 0.0e0 / 0.0e0, false, 0.0e0 / 0.0e0, -3.8, 'e', -11, 19, -15, -2, -17, -8.2, 2, -13.5, -10, true, 18.5, 15, 6, -2, 'e'] AS x RETURN x ORDER BY x"
       cypher: "UNWIND [9, 0.0 / 0.0, false, 0.0 / 0.0, -3.8, 'e', -11, 19, -15, -2, -17, -8.2, 2, -13.5, -10, true, 18.5, 15, 6, -2, 'e'] AS x RETURN x ORDER BY x"
     expect:
       ordered: true
@@ -153,7 +153,7 @@ tests:
 
   - name: nan_sorts_after_infinity
     variants:
-      gql: "UNWIND [1, 0.0 / 0.0, -1, 1.0 / 0.0, -1.0 / 0.0] AS x RETURN x ORDER BY x"
+      gql: "UNWIND [1, 0.0e0 / 0.0e0, -1, 1.0e0 / 0.0e0, -1.0e0 / 0.0e0] AS x RETURN x ORDER BY x"
       cypher: "UNWIND [1, 0.0 / 0.0, -1, 1.0 / 0.0, -1.0 / 0.0] AS x RETURN x ORDER BY x"
     expect:
       ordered: true
@@ -168,7 +168,7 @@ tests:
   # equal to everything made the sort fail on this input.
   - name: percentiles_over_values_with_nan
     variants:
-      gql: "UNWIND [0.0 / 0.0, 0.0 / 0.0, 0.0 / 0.0, 2, -9, -6, -2, 6, 4, -0.7, 9, 0.0 / 0.0, 1, 0.0 / 0.0, 0.0 / 0.0, -7, -5.2, -7.6, 0.0 / 0.0, 4.8, -7.2] AS x RETURN percentileDisc(x, 0.25) AS d, percentileCont(x, 0.25) AS c"
+      gql: "UNWIND [0.0e0 / 0.0e0, 0.0e0 / 0.0e0, 0.0e0 / 0.0e0, 2, -9, -6, -2, 6, 4, -0.7, 9, 0.0e0 / 0.0e0, 1, 0.0e0 / 0.0e0, 0.0e0 / 0.0e0, -7, -5.2, -7.6, 0.0e0 / 0.0e0, 4.8, -7.2] AS x RETURN percentileDisc(x, 0.25) AS d, percentileCont(x, 0.25) AS c"
       cypher: "UNWIND [0.0 / 0.0, 0.0 / 0.0, 0.0 / 0.0, 2, -9, -6, -2, 6, 4, -0.7, 9, 0.0 / 0.0, 1, 0.0 / 0.0, 0.0 / 0.0, -7, -5.2, -7.6, 0.0 / 0.0, 4.8, -7.2] AS x RETURN percentileDisc(x, 0.25) AS d, percentileCont(x, 0.25) AS c"
     expect:
       rows:

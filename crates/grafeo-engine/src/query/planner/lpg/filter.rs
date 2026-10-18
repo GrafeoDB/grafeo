@@ -1594,11 +1594,9 @@ impl super::Planner {
                 return None;
             };
 
-        // Extract threshold value; f64→f32 precision loss is intentional (vectors are f32).
-        #[allow(clippy::cast_possible_truncation)]
+        // The threshold as vectors measure it, an f32.
         let threshold_val = match threshold {
-            LogicalExpression::Literal(Value::Float64(v)) => *v as f32,
-            LogicalExpression::Literal(Value::Int64(v)) => *v as f32,
+            LogicalExpression::Literal(value) => value.as_vector_component()?,
             _ => return None,
         };
 

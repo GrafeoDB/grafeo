@@ -6,6 +6,7 @@ use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
 use crate::query::limits::{Chain, Nesting, nesting_error_message};
 use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+use grafeo_common::types::{Decimal, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result, SourceSpan};
 
 /// A graph type body: the names of its node types and of its edge types, the
@@ -3860,10 +3861,17 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if self.current.kind == TokenKind::Float {
-                    let text = &self.current.text;
+                    let text = number_text(&self.current.text);
                     if let Ok(val) = format!("-{text}").parse::<f64>() {
                         self.advance();
                         return Ok(Expression::Literal(Literal::Float(val)));
+                    }
+                }
+                if self.current.kind == TokenKind::Decimal {
+                    let text = number_text(&self.current.text);
+                    if let Ok(val) = Decimal::parse(&format!("-{text}")) {
+                        self.advance();
+                        return Ok(Expression::Literal(Literal::Decimal(val)));
                     }
                 }
                 self.enter_nesting()?;
@@ -4155,13 +4163,21 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Literal(Literal::Integer(value)))
             }
             TokenKind::Float => {
-                let value = self
-                    .current
-                    .text
+                let value = number_text(&self.current.text)
                     .parse()
                     .map_err(|_| self.error("Invalid float"))?;
                 self.advance();
                 Ok(Expression::Literal(Literal::Float(value)))
+            }
+            TokenKind::Decimal => {
+                let text = &self.current.text;
+                let value = Decimal::parse(number_text(text)).map_err(|_| {
+                    self.error(&format!(
+                        "Decimal literal '{text}' has more than {MAX_DECIMAL_DIGITS} digits"
+                    ))
+                })?;
+                self.advance();
+                Ok(Expression::Literal(Literal::Decimal(value)))
             }
             TokenKind::String => {
                 let text = &self.current.text;
@@ -5364,12 +5380,13 @@ impl<'a> Parser<'a> {
         if negative {
             self.advance();
         }
-        if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Float) {
+        if !matches!(
+            self.current.kind,
+            TokenKind::Integer | TokenKind::Float | TokenKind::Decimal
+        ) {
             return Err(self.error(&format!("Expected a number for {name}")));
         }
-        let value: f64 = self
-            .current
-            .text
+        let value: f64 = number_text(&self.current.text)
             .parse()
             .map_err(|_| self.error(&format!("Invalid number for {name}")))?;
         self.advance();
@@ -6531,7 +6548,10 @@ impl<'a> Parser<'a> {
             TokenKind::Minus | TokenKind::Plus => {
                 let negative = self.current.kind == TokenKind::Minus;
                 self.advance();
-                if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Float) {
+                if !matches!(
+                    self.current.kind,
+                    TokenKind::Integer | TokenKind::Float | TokenKind::Decimal
+                ) {
                     return Err(self.error("Expected a number after the sign of a DEFAULT"));
                 }
                 Some(negative)
@@ -6589,11 +6609,9 @@ impl<'a> Parser<'a> {
                     _ => return Err(not_of_type(self)),
                 }
             }
-            TokenKind::Float => match kind {
+            TokenKind::Float | TokenKind::Decimal => match kind {
                 PropertyTypeKind::Float | PropertyTypeKind::Any => {
-                    let value: f64 = self
-                        .current
-                        .text
+                    let value: f64 = number_text(&self.current.text)
                         .parse()
                         .map_err(|_| self.error("Invalid float"))?;
                     let value = if negative == Some(true) {
@@ -7518,6 +7536,13 @@ type PropertyTypeKind = crate::query::schema::PropertyTypeKind;
 /// digits), negated when `negative`; `None` when it is out of the INT64
 /// range. The sign counts before the range check, so the smallest INT64,
 /// `-9223372036854775808`, is a literal.
+/// The digits of a number literal without its ISO GQL suffix (`M`, `F` or
+/// `D`, in either case).
+fn number_text(text: &str) -> &str {
+    text.strip_suffix(['M', 'm', 'F', 'f', 'D', 'd'])
+        .unwrap_or(text)
+}
+
 fn integer_literal(text: &str, negative: bool) -> Option<i64> {
     let (digits, radix) = match text.get(..2) {
         Some("0x" | "0X") => (&text[2..], 16),

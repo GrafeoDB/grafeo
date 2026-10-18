@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{Decimal, Value};
 use grafeo_engine::GrafeoDB;
 
 /// Helper: extract string values from single-column result rows.
@@ -226,7 +226,10 @@ async fn test_async_checkpoint_with_properties_and_labels() {
             .unwrap();
         assert_eq!(result.rows().len(), 1);
         assert_eq!(result.rows()[0][0], Value::Int64(30));
-        assert_eq!(result.rows()[0][1], Value::Float64(9.5));
+        assert_eq!(
+            result.rows()[0][1],
+            Value::Decimal(Decimal::parse("9.5").unwrap())
+        );
         assert_eq!(result.rows()[0][2], Value::Bool(true));
 
         // Verify Alix has both labels

@@ -618,6 +618,10 @@ impl GqlTranslator {
                             // Second argument is the percentile value
                             if let ast::Expression::Literal(ast::Literal::Float(p)) = &args[1] {
                                 Some((*p).clamp(0.0, 1.0))
+                            } else if let ast::Expression::Literal(ast::Literal::Decimal(p)) =
+                                &args[1]
+                            {
+                                Some(p.to_f64().clamp(0.0, 1.0))
                             } else if let ast::Expression::Literal(ast::Literal::Integer(p)) =
                                 &args[1]
                             {

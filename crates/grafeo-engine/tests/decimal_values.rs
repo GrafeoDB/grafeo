@@ -100,6 +100,14 @@ fn decimals_compare_with_every_number() {
             ("RETURN $a >= $b AS x", "Bool(true)"),
             ("RETURN $a IN [1, $b] AS x", "Bool(true)"),
             ("RETURN $a = null AS x", "Null"),
+            // A numeric string meets a decimal as it meets a float.
+            ("RETURN '1.5' = $a AS x", "Bool(true)"),
+            ("RETURN $c = '3' AS x", "Bool(true)"),
+            ("RETURN $c = '03.00' AS x", "Bool(true)"),
+            ("RETURN $a = '15e-1' AS x", "Bool(true)"),
+            ("RETURN '1.4' < $a AS x", "Bool(true)"),
+            ("RETURN $a = 'one' AS x", "Bool(false)"),
+            ("RETURN 1.5e0 = 'one' AS x", "Bool(false)"),
         ] {
             assert_eq!(
                 one(&db, language, query, &params),
@@ -264,4 +272,34 @@ fn a_stored_decimal_is_found_by_an_equal_value() {
             );
         }
     }
+}
+
+/// ISO GQL: `1.5` and `1.5M` are exact, `1.5e0`, `1.5F` and `1.5D` are
+/// floats. openCypher has no decimal type: there `1.5` stays a float.
+#[test]
+fn gql_number_literals_are_exact_or_approximate_as_written() {
+    let db = GrafeoDB::new_in_memory();
+    for (query, expected) in [
+        ("RETURN 0.1 + 0.2 AS x", "Decimal(0.3)"),
+        ("RETURN 1.50 AS x", "Decimal(1.50)"),
+        ("RETURN -1.5 AS x", "Decimal(-1.5)"),
+        ("RETURN 1.5M AS x", "Decimal(1.5)"),
+        ("RETURN 2M AS x", "Decimal(2)"),
+        ("RETURN 1.5e0 AS x", "Float64(1.5)"),
+        ("RETURN 1.5F AS x", "Float64(1.5)"),
+        ("RETURN 1.5D AS x", "Float64(1.5)"),
+        ("RETURN -2.5D AS x", "Float64(-2.5)"),
+        ("RETURN 1.5 * 2 AS x", "Decimal(3.0)"),
+        ("RETURN 1.5 + 0.5e0 AS x", "Float64(2)"),
+    ] {
+        assert_eq!(one(&db, "gql", query, &[]), expected, "`{query}`");
+    }
+    assert_eq!(
+        one(&db, "cypher", "RETURN 0.1 + 0.2 AS x", &[]),
+        "Float64(0.30000000000000004)"
+    );
+    let error = db
+        .execute("RETURN 1234567890123456789012345678901234567890.5 AS x")
+        .expect_err("39 digits is no decimal");
+    assert!(error.to_string().contains("38 digits"), "{error}");
 }

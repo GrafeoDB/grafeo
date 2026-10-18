@@ -66,6 +66,8 @@ export function valueToString(val) {
     if (val instanceof Date) return val.toISOString()
     // Duration: {months, days, nanos} -> ISO 8601
     const keys = Object.keys(val)
+    // Decimal: {$decimal: '1.50'} -> its text, as Rust prints it
+    if (keys.length === 1 && typeof val.$decimal === 'string') return val.$decimal
     if (keys.length === 3 && 'months' in val && 'days' in val && 'nanos' in val) {
       return durationToIso(val.months, val.days, val.nanos)
     }

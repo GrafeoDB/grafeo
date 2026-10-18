@@ -1190,6 +1190,7 @@ impl SqlPgqTranslator {
             ast::Literal::Bool(b) => Value::Bool(*b),
             ast::Literal::Integer(i) => Value::Int64(*i),
             ast::Literal::Float(f) => Value::Float64(*f),
+            ast::Literal::Decimal(d) => Value::Decimal(*d),
             ast::Literal::String(s) => Value::from(s.as_str()),
             ast::Literal::Date(s) => grafeo_common::types::Date::parse(s)
                 .map_or_else(|| Value::from(s.as_str()), Value::Date),

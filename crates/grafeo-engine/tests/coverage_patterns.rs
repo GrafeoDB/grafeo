@@ -6,7 +6,7 @@
 //! cargo test -p grafeo-engine --test coverage_patterns
 //! ```
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{Decimal, Value};
 use grafeo_engine::GrafeoDB;
 
 /// Creates a chain graph: 5 nodes (A-E), 4 LINK edges, 1 SHORTCUT edge.
@@ -365,6 +365,9 @@ fn test_set_multiple_properties() {
     let r = session
         .execute("MATCH (i:Item) RETURN i.price AS p, i.stock AS s")
         .unwrap();
-    assert_eq!(r.rows()[0][0], Value::Float64(9.99));
+    assert_eq!(
+        r.rows()[0][0],
+        Value::Decimal(Decimal::parse("9.99").unwrap())
+    );
     assert_eq!(r.rows()[0][1], Value::Int64(100));
 }

@@ -66,11 +66,11 @@ J7|gql 24270a78b4 Values beside a computed group key keep their kind; strings, f
 J8|cypher 57e2bbf68a A string group key beside a computed operand keeps its groups; the names became 0 and every group merged into one.
 J8|gql 57e2bbf68a A string group key beside a computed operand keeps its groups; the names became 0 and every group merged into one.
 J9|cypher 52df54130a Floats, booleans, lists and maps beside a literal group key keep their values; they became 0.
-J9|gql 52df54130a Floats, booleans, lists and maps beside a literal group key keep their values; they became 0.
+J9|gql 207833cf9c Floats, booleans, lists and maps beside a literal group key keep their values; they became 0. a.age / 16.0 is a decimal division now, with 16 digits (#610); the values are the same.
 J10|cypher d3f3f0f0d0 Values beside a computed aggregate operand keep their kind; count(DISTINCT name) counted one 0 and max(name) returned 0.
 J10|gql d3f3f0f0d0 Values beside a computed aggregate operand keep their kind; count(DISTINCT name) counted one 0 and max(name) returned 0.
 J11|cypher d6c3ec3163 Unwound floats beside a literal group key keep their values; collect and sum saw 0.
-J11|gql d6c3ec3163 Unwound floats beside a literal group key keep their values; collect and sum saw 0.
+J11|gql f8e821f604 Unwound floats beside a literal group key keep their values; collect and sum saw 0. Its GQL literals with a point are exact decimals now (#610); the values are the same.
 J12|cypher 24270a78b4 Values beside a computed key in an aggregating WITH keep their kind; the names became 0.
 J12|gql 24270a78b4 Values beside a computed key in an aggregating WITH keep their kind; the names became 0.
 AR1|cypher 8f576002e2 A path variable over two edge patterns holds the whole path; it held the last hop only.
@@ -149,7 +149,7 @@ AV11|gql 8473a132e5 With a property index, = finds the rows it finds without one
 AV12|cypher 50685503bb With a property index, IN finds the rows it finds without one (#535).
 AV12|gql 50685503bb With a property index, IN finds the rows it finds without one (#535).
 AV13|cypher 3d229beed7 With a property index, a key from the row finds every value = finds equal: '042', '42.0' and 0.1 + 0.2 were missed (#535).
-AV13|gql 3d229beed7 With a property index, a key from the row finds every value = finds equal: '042', '42.0' and 0.1 + 0.2 were missed (#535).
+AV13|gql 93dbb3268e With a property index, a key from the row finds every value = finds equal: '042', '42.0' and 0.1 + 0.2 were missed (#535). The GQL literals 42.0 and 0.3 are exact decimals now (#610); the same rows match.
 AV14|cypher 1faa763b50 With a property index, a constant key after a clause finds 0.1 + 0.2 for 0.3, as without one (#535).
 AV14|gql 1faa763b50 With a property index, a constant key after a clause finds 0.1 + 0.2 for 0.3, as without one (#535).
 AV15|cypher 5e7601f6ff With a property index, = finds the rows it finds without one; the lookup found the exact value only (#535).
@@ -219,7 +219,7 @@ BG13|cypher 662fd3d326 An aggregate in the ORDER BY of a RETURN that does not ag
 BG14|cypher f17b1e6cb7 After an aggregating RETURN, ORDER BY max(...) sorts by the returned aggregate; it sorted as if the key were not there.
 BG15|cypher 17b4de4b6b After an aggregating RETURN, a key that repeats a returned expression reads its column; it failed with an internal error.
 BH1|cypher b5c77d5148 A float grouping key keeps its value after a WITH; it came back as the integer of its bits.
-BH1|gql b5c77d5148 A float grouping key keeps its value after a WITH; it came back as the integer of its bits.
+BH1|gql 424c6fff4a A float grouping key keeps its value after a WITH; it came back as the integer of its bits. Its GQL literals with a point are exact decimals now (#610); the values are the same.
 BH2|cypher b5c77d5148 A float grouping key keeps its value; Cypher returned the integer of its bits.
 BH3|cypher 8d04bcd940 3 and 3.0 are one group, which keeps its first value; they were two groups.
 BH3|gql 8d04bcd940 3 and 3.0 are one group, which keeps its first value; they were two groups.
@@ -333,8 +333,8 @@ AU3|cypher 380f2c9d23 A call with a number of arguments the function does not ta
 AU3|gql 380f2c9d23 A call with a number of arguments the function does not take fails; it returned null. The error starts with its code (#588).
 AU4|cypher 7d3617d7d7 path_length(p) is the number of edges of p; it returned null.
 AU4|gql 7d3617d7d7 path_length(p) is the number of edges of p; it returned null.
-G2|gql 6dbd77cf15 GQL sorts nulls last by default in both directions; descending put them first.
-L2|gql d80e3904a1 GQL sorts nulls last by default in both directions; descending put them first.
+G2|gql 3f627ce469 GQL sorts nulls last by default in both directions; descending put them first. Its GQL literals with a point are exact decimals now (#610); the values are the same.
+L2|gql 349678c87b GQL sorts nulls last by default in both directions; descending put them first. Its GQL literals with a point are exact decimals now (#610); the values are the same.
 L4|gql 16a470385a GQL sorts nulls last by default in both directions; descending put them first.
 L13|gql 1d7265c1b1 GQL sorts nulls last by default in both directions; a descending top-K kept the nulls.
 L19|gql 71201aa33f GQL sorts nulls last by default in both directions; descending put them first.
@@ -448,3 +448,18 @@ P7|gql 4417410084 The error starts with its code, GRAFEO-Q002 (#588); the messag
 U1|cypher 3656e82c97 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
 U2|cypher df7c1f11d9 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
 V8|cypher e67908eb16 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
+AJ3|gql 1dc401e7f1 The GQL literal 100.0 is an exact decimal now (#610); the same rows match.
+AV5|gql 93dbb3268e The GQL literals 42.0 and 0.3 are exact decimals now (#610); the same rows match.
+BH2|gql 424c6fff4a Its GQL literals with a point are exact decimals now (#610); the values are the same.
+G1|gql 16514f4784 Its GQL literals with a point are exact decimals now (#610); the values are the same.
+G4|gql 14d27eb2c3 Its GQL literals with a point are exact decimals now (#610); the values are the same.
+L1|gql 57b189c00e Its GQL literals with a point are exact decimals now (#610); the values are the same.
+G12|gql 2868c5c0cb i * 1.5 is an exact decimal now (#610); the values are the same.
+L10|gql 259e5d6d7f 1.0 / 0.0 is a decimal division by zero now, which is null (#610); 1.0e0 / 0.0e0 gives the infinity.
+BV2|gql bc673ff0a9 1.50 is an exact decimal with its two digits (#610); it was the float 1.5.
+BV3|gql 960ece87e2 The ISO GQL suffixes M, F and D are read (#610); they were a syntax error.
+BV4|gql c22bedaa55 Literals with a point are exact decimals (#610); they were floats.
+BV5|gql 118ed67a07 A decimal with an integer is a decimal, with a float a float (#610); all were floats.
+BV6|gql cda598c773 A decimal division gives 16 digits (#610); it was a float division.
+BV7|gql ae96677ab7 ceil, floor and round keep a decimal, sqrt gives a float (#610); all were floats.
+BV11|gql d993b88255 1.0 / 0 is a decimal division by zero, null (#610); it was a float infinity.

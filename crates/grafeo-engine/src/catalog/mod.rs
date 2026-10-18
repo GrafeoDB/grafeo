@@ -1400,6 +1400,9 @@ impl PropertyDataType {
     ///
     /// - an `INT64` to `FLOAT64`, when the float is exactly the integer (every
     ///   integer up to 2^53 in magnitude, and the larger ones a float holds);
+    /// - a decimal to `FLOAT64`, as the nearest float: ISO/IEC 39075 assigns an
+    ///   exact number to an approximate type that way (`1.5` is stored as the
+    ///   float `1.5`);
     /// - a zoned datetime to its instant, for `TIMESTAMP` (`DATETIME`), which
     ///   compares with zoned values as an instant in UTC;
     /// - the items of a `LIST<...>`, each by these rules.
@@ -1412,6 +1415,7 @@ impl PropertyDataType {
     pub fn convert(&self, value: &Value) -> Option<Value> {
         match (self, value) {
             (Self::Float64, Value::Int64(int)) => exact_float(*int).map(Value::Float64),
+            (Self::Float64, Value::Decimal(decimal)) => Some(Value::Float64(decimal.to_f64())),
             (Self::Timestamp, Value::ZonedDatetime(zoned)) => {
                 Some(Value::Timestamp(zoned.as_timestamp()))
             }

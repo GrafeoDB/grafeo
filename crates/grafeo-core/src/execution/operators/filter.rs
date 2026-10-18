@@ -2246,6 +2246,26 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
+            BuiltinFunction::ToDecimal => {
+                // toDecimal(value) or toDecimal(value, precision, scale)
+                if args.len() != 1 && args.len() != 3 {
+                    return None;
+                }
+                let decimal = to_decimal(&self.eval_expr(&args[0], chunk, row)?)?;
+                if args.len() == 1 {
+                    return Some(Value::Decimal(decimal));
+                }
+                let digits = |value: Value| match value {
+                    Value::Int64(n) => u8::try_from(n).ok(),
+                    _ => None,
+                };
+                let precision = digits(self.eval_expr(&args[1], chunk, row)?)?;
+                let scale = digits(self.eval_expr(&args[2], chunk, row)?)?;
+                decimal
+                    .with_precision(precision, scale)
+                    .ok()
+                    .map(Value::Decimal)
+            }
             BuiltinFunction::ToBoolean => {
                 if args.len() != 1 {
                     return None;
@@ -4038,6 +4058,7 @@ impl ExpressionPredicate {
                 Value::String(ref s) => s.parse::<f64>().ok().map(Value::Float64),
                 _ => None,
             },
+            "DECIMAL" | "DEC" => to_decimal(&val).map(Value::Decimal),
             "STRING" => match val {
                 Value::String(_) => Some(val),
                 other => Some(Value::String(other.to_string().into())),
@@ -4145,6 +4166,25 @@ impl Bound<NodeId> {
             Self::To(node) => Some(node),
             Self::No | Self::Null => None,
         }
+    }
+}
+
+/// The decimal `toDecimal` and a cast to `DECIMAL` make of `value`: an
+/// integer or a decimal exactly, a float by its shortest text, a string that
+/// spells a decimal as it is written and one that spells another number
+/// (`'1e3'`) as that float. `None` for a NaN or infinite float, any other
+/// string or value, and a number past 38 digits.
+fn to_decimal(value: &Value) -> Option<Decimal> {
+    match value {
+        Value::Decimal(d) => Some(*d),
+        Value::Int64(i) => Some(Decimal::from_i64(*i)),
+        Value::Float64(f) => Decimal::from_f64(*f).ok(),
+        Value::String(s) => Decimal::parse(s).ok().or_else(|| {
+            s.parse::<f64>()
+                .ok()
+                .and_then(|f| Decimal::from_f64(f).ok())
+        }),
+        _ => None,
     }
 }
 

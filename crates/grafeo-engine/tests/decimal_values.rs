@@ -303,3 +303,70 @@ fn gql_number_literals_are_exact_or_approximate_as_written() {
         .expect_err("39 digits is no decimal");
     assert!(error.to_string().contains("38 digits"), "{error}");
 }
+
+/// `toDecimal(x)` makes a decimal of a number or a numeric string, a float by
+/// its shortest text; `toDecimal(x, precision, scale)` rounds it to the scale
+/// and gives null when it has more integer digits than the type holds.
+#[test]
+fn to_decimal_makes_decimals() {
+    let db = GrafeoDB::new_in_memory();
+    for language in LANGUAGES {
+        for (query, expected) in [
+            ("RETURN toDecimal(1.5e0) AS x", "Decimal(1.5)"),
+            ("RETURN toDecimal(3) AS x", "Decimal(3)"),
+            ("RETURN toDecimal($a) AS x", "Decimal(1.50)"),
+            ("RETURN toDecimal('2.50') AS x", "Decimal(2.50)"),
+            ("RETURN toDecimal('1e3') AS x", "Decimal(1000)"),
+            (
+                "RETURN toDecimal(0.1e0 + 0.2e0) AS x",
+                "Decimal(0.30000000000000004)",
+            ),
+            ("RETURN toDecimal('abc') AS x", "Null"),
+            ("RETURN toDecimal(true) AS x", "Null"),
+            ("RETURN toDecimal(null) AS x", "Null"),
+            // 1.005 is the shortest text of its float, so it rounds up.
+            ("RETURN toDecimal(1.005e0, 5, 2) AS x", "Decimal(1.01)"),
+            ("RETURN toDecimal($a, 5, 0) AS x", "Decimal(2)"),
+            ("RETURN toDecimal(1234.5e0, 5, 2) AS x", "Null"),
+            ("RETURN toDecimal(1, 0, 0) AS x", "Null"),
+            ("RETURN toDecimal(1, 5, 6) AS x", "Null"),
+        ] {
+            assert_eq!(
+                one(&db, language, query, &[("a", d("1.50"))]),
+                expected,
+                "{language} `{query}`"
+            );
+        }
+    }
+}
+
+/// GQL `CAST` to `DECIMAL` or `DEC`: bare it keeps the value's own scale,
+/// with a precision and scale it rounds as `toDecimal` does.
+#[test]
+fn gql_casts_to_decimal() {
+    let db = GrafeoDB::new_in_memory();
+    for (query, expected) in [
+        ("RETURN CAST('1.50' AS DECIMAL) AS x", "Decimal(1.50)"),
+        ("RETURN CAST(1.5e0 AS DEC) AS x", "Decimal(1.5)"),
+        ("RETURN CAST(2.345 AS DECIMAL(10, 2)) AS x", "Decimal(2.35)"),
+        ("RETURN CAST(2.5 AS dec(3)) AS x", "Decimal(3)"),
+        ("RETURN CAST(123.4 AS DECIMAL(4, 2)) AS x", "Null"),
+        (
+            "RETURN CAST([1, '2.5', 0.5e0] AS LIST<DECIMAL>) AS x",
+            "List([Decimal(1), Decimal(2.5), Decimal(0.5)])",
+        ),
+    ] {
+        assert_eq!(one(&db, "gql", query, &[]), expected, "`{query}`");
+    }
+    for query in [
+        "RETURN CAST(1 AS DECIMAL(0)) AS x",
+        "RETURN CAST(1 AS DECIMAL(39, 2)) AS x",
+        "RETURN CAST(1 AS DECIMAL(5, 6)) AS x",
+    ] {
+        let error = db.execute(query).expect_err(query);
+        assert!(
+            error.to_string().contains("precision"),
+            "`{query}`: {error}"
+        );
+    }
+}

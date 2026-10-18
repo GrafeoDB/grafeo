@@ -4628,10 +4628,30 @@ impl<'a> Parser<'a> {
                 } else {
                     return Err(self.error("Expected type name after AS"));
                 };
+                // DECIMAL(precision[, scale]): toDecimal(expr, precision, scale)
+                let decimal_type = if matches!(type_name.as_str(), "DECIMAL" | "DEC")
+                    && self.current.kind == TokenKind::LParen
+                {
+                    Some(self.parse_decimal_precision(&type_name)?)
+                } else {
+                    None
+                };
                 self.expect(TokenKind::RParen)?;
+                if let Some((precision, scale)) = decimal_type {
+                    return Ok(Expression::FunctionCall {
+                        name: "toDecimal".to_string(),
+                        args: vec![
+                            expr,
+                            Expression::Literal(Literal::Integer(i64::from(precision))),
+                            Expression::Literal(Literal::Integer(i64::from(scale))),
+                        ],
+                        distinct: false,
+                    });
+                }
                 let (func_name, extra_arg) = match type_name.as_str() {
                     "INTEGER" | "INT" | "INT64" | "BIGINT" => ("toInteger", None),
                     "FLOAT" | "DOUBLE" | "FLOAT64" | "REAL" => ("toFloat", None),
+                    "DECIMAL" | "DEC" => ("toDecimal", None),
                     "STRING" | "VARCHAR" | "TEXT" => ("toString", None),
                     "BOOLEAN" | "BOOL" => ("toBoolean", None),
                     "DATE" => ("toDate", None),
@@ -4658,6 +4678,34 @@ impl<'a> Parser<'a> {
                 })
             }
             _ => Err(self.error("Expected expression")),
+        }
+    }
+
+    /// The `(precision[, scale])` after `DECIMAL` or `DEC` (`name`): a
+    /// precision from 1 to 38 and a scale from 0 to it, 0 when left out.
+    fn parse_decimal_precision(&mut self, name: &str) -> Result<(u8, u8)> {
+        self.expect(TokenKind::LParen)?;
+        let number = |parser: &mut Self| -> Result<i64> {
+            if parser.current.kind != TokenKind::Integer {
+                return Err(parser.error(&format!("Expected an integer in {name}(...)")));
+            }
+            let value = parser.current.text.parse::<i64>().unwrap_or(i64::MAX);
+            parser.advance();
+            Ok(value)
+        };
+        let precision = number(self)?;
+        let scale = if self.current.kind == TokenKind::Comma {
+            self.advance();
+            number(self)?
+        } else {
+            0
+        };
+        self.expect(TokenKind::RParen)?;
+        match (u8::try_from(precision), u8::try_from(scale)) {
+            (Ok(p), Ok(s)) if (1..=MAX_DECIMAL_DIGITS).contains(&p) && s <= p => Ok((p, s)),
+            _ => Err(self.error(&format!(
+                "{name}({precision}, {scale}) is not a decimal type: a decimal type takes a                  precision from 1 to {MAX_DECIMAL_DIGITS} and a scale from 0 to its precision"
+            ))),
         }
     }
 

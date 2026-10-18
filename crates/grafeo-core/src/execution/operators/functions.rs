@@ -164,6 +164,7 @@ builtin_functions! {
     ToString => ["toString"], "1", Type, immutable;
     ToInteger => ["toInteger", "toInt"], "1", Type, immutable;
     ToFloat => ["toFloat"], "1", Type, immutable;
+    ToDecimal => ["toDecimal"], "1,3", Type, immutable;
     ToBoolean => ["toBoolean", "toBool"], "1", Type, immutable;
     ToList => ["toList"], "1", Type, immutable;
     ToTypedList => ["toTypedList"], "2", Type, immutable;

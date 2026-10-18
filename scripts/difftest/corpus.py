@@ -1502,4 +1502,17 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL)
 
+# BW: decimals by function and cast (#610). toDecimal makes a decimal of a number or a
+#     numeric string in GQL and Cypher, and with a precision and scale rounds or gives
+#     null (BW1, BW2); a GQL CAST to DECIMAL or DEC keeps the scale, to DECIMAL(p, s)
+#     rounds, to LIST<DECIMAL> converts each item (BW3 to BW5)
+for case_id, query, languages in [
+    ("BW1", "RETURN toDecimal(1.5e0) AS f, toDecimal('2.50') AS s, toDecimal(3) AS i, toDecimal('x') AS n", BOTH),
+    ("BW2", "RETURN toDecimal(1.005e0, 5, 2) AS r, toDecimal(1234.5e0, 5, 2) AS o", BOTH),
+    ("BW3", "RETURN CAST('1.50' AS DECIMAL) AS d, CAST(1.5e0 AS DEC) AS f", GQL),
+    ("BW4", "RETURN CAST(2.345 AS DECIMAL(10, 2)) AS r, CAST(123.4 AS DECIMAL(4, 2)) AS o", GQL),
+    ("BW5", "RETURN CAST([1, '2.5', 0.5e0] AS LIST<DECIMAL>) AS l", GQL),
+]:
+    case(case_id, query, languages)
+
 # fmt: on

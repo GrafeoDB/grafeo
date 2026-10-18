@@ -21,6 +21,10 @@ pub enum DecimalError {
     /// The text is not a decimal number.
     #[error("not a decimal number")]
     Invalid,
+    /// A decimal type whose precision is not from 1 to 38, or whose scale is
+    /// larger than its precision.
+    #[error("a decimal type takes a precision from 1 to 38 and a scale from 0 to its precision")]
+    InvalidPrecision,
 }
 
 /// An exact decimal number: `mantissa / 10^scale`, with at most 38 digits in
@@ -214,6 +218,26 @@ impl Decimal {
             round_off(magnitude, self.scale - scale)
         };
         Self::from_magnitude(rescaled, negative, scale)
+    }
+
+    /// The value as a `DECIMAL(precision, scale)` holds it: with `scale`
+    /// digits after the point, rounded half away from zero when digits go
+    /// ([`rescale`](Self::rescale)), and at most `precision - scale` before it.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::InvalidPrecision`] for a precision outside 1 to 38 or a
+    /// scale above it; [`DecimalError::Overflow`] when the value has more
+    /// integer digits than the type holds, also once its fraction rounds up.
+    pub fn with_precision(&self, precision: u8, scale: u8) -> Result<Self, DecimalError> {
+        if !(1..=MAX_DECIMAL_DIGITS).contains(&precision) || scale > precision {
+            return Err(DecimalError::InvalidPrecision);
+        }
+        let rescaled = self.rescale(scale)?;
+        if rescaled.mantissa().unsigned_abs() >= pow10(precision) {
+            return Err(DecimalError::Overflow);
+        }
+        Ok(rescaled)
     }
 
     /// The mantissas of `self` and `other` at the larger of their scales.
@@ -711,6 +735,55 @@ mod tests {
             DecimalError::Overflow
         );
         assert_eq!(d("99999999999999999999999999999999999999").scale(), 0);
+    }
+
+    #[test]
+    fn a_precision_and_scale_round_the_fraction_and_bound_the_integer_digits() {
+        for (text, precision, scale, expected) in [
+            ("1.5", 5, 2, "1.50"),
+            ("1.005", 5, 2, "1.01"),
+            ("-1.005", 5, 2, "-1.01"),
+            ("999.994", 5, 2, "999.99"),
+            ("12", 2, 0, "12"),
+            ("0.5", 1, 0, "1"),
+            ("-0.4", 1, 0, "0"),
+            (
+                "0.12345",
+                38,
+                38,
+                "0.12345000000000000000000000000000000000",
+            ),
+        ] {
+            assert_eq!(
+                d(text)
+                    .with_precision(precision, scale)
+                    .unwrap()
+                    .to_string(),
+                expected,
+                "{text} as DECIMAL({precision},{scale})"
+            );
+        }
+        // Too many integer digits, also once the fraction rounds up.
+        for (text, precision, scale) in [
+            ("1000", 5, 2),
+            ("999.995", 5, 2),
+            ("10", 1, 0),
+            ("1", 38, 38),
+        ] {
+            assert_eq!(
+                d(text).with_precision(precision, scale).unwrap_err(),
+                DecimalError::Overflow,
+                "{text} as DECIMAL({precision},{scale})"
+            );
+        }
+        // A precision from 1 to 38 and a scale up to the precision.
+        for (precision, scale) in [(0, 0), (39, 0), (5, 6)] {
+            assert_eq!(
+                d("1").with_precision(precision, scale).unwrap_err(),
+                DecimalError::InvalidPrecision,
+                "DECIMAL({precision},{scale})"
+            );
+        }
     }
 
     #[test]

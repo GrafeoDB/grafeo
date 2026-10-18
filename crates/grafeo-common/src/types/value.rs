@@ -6,6 +6,8 @@
 
 use arcstr::ArcStr;
 use serde::{Deserialize, Serialize};
+
+use super::Decimal;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -172,6 +174,10 @@ pub enum Value {
         /// magnitudes).
         neg: Arc<std::collections::HashMap<String, u64>>,
     },
+    /// Exact decimal number, at most 38 digits, with the scale it was written
+    /// with (`1.50`). The last variant: serde encodes the variant index, so
+    /// adding it here keeps the encodings of the others.
+    Decimal(Decimal),
 }
 
 impl Value {
@@ -208,6 +214,16 @@ impl Value {
     pub const fn as_float64(&self) -> Option<f64> {
         match self {
             Value::Float64(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Returns the decimal if this is a Decimal, otherwise None.
+    #[inline]
+    #[must_use]
+    pub const fn as_decimal(&self) -> Option<Decimal> {
+        match self {
+            Value::Decimal(d) => Some(*d),
             _ => None,
         }
     }
@@ -382,6 +398,7 @@ impl Value {
             Value::Path { .. } => "PATH",
             Value::GCounter(_) => "GCOUNTER",
             Value::OnCounter { .. } => "PNCOUNTER",
+            Value::Decimal(_) => "DECIMAL",
         }
     }
 
@@ -420,7 +437,8 @@ impl Value {
             | Value::Date(_)
             | Value::Time(_)
             | Value::Duration(_)
-            | Value::ZonedDatetime(_) => 0,
+            | Value::ZonedDatetime(_)
+            | Value::Decimal(_) => 0,
             Value::String(s) => s.len(),
             Value::Bytes(b) => b.len(),
             Value::Vector(v) => v.len() * size_of::<f32>(),
@@ -456,6 +474,7 @@ impl fmt::Debug for Value {
             Value::Bool(b) => write!(f, "Bool({b})"),
             Value::Int64(i) => write!(f, "Int64({i})"),
             Value::Float64(fl) => write!(f, "Float64({fl})"),
+            Value::Decimal(d) => write!(f, "Decimal({d})"),
             Value::String(s) => write!(f, "String({s:?})"),
             Value::Bytes(b) => write!(f, "Bytes([{}; {} bytes])", b.first().unwrap_or(&0), b.len()),
             Value::Timestamp(t) => write!(f, "Timestamp({t:?})"),
@@ -498,6 +517,7 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{b}"),
             Value::Int64(i) => write!(f, "{i}"),
             Value::Float64(fl) => write!(f, "{fl}"),
+            Value::Decimal(d) => write!(f, "{d}"),
             Value::String(s) => write!(f, "{s:?}"),
             Value::Bytes(b) => write!(f, "<bytes: {} bytes>", b.len()),
             Value::Timestamp(t) => write!(f, "{t}"),
@@ -591,6 +611,12 @@ impl From<i32> for Value {
 impl From<f64> for Value {
     fn from(f: f64) -> Self {
         Value::Float64(f)
+    }
+}
+
+impl From<Decimal> for Value {
+    fn from(d: Decimal) -> Self {
+        Value::Decimal(d)
     }
 }
 
@@ -847,7 +873,8 @@ impl TryFrom<&Value> for OrderableValue {
             | Value::Vector(_)
             | Value::Path { .. }
             | Value::GCounter(_)
-            | Value::OnCounter { .. } => Err(()),
+            | Value::OnCounter { .. }
+            | Value::Decimal(_) => Err(()),
         }
     }
 }
@@ -1005,6 +1032,7 @@ fn hash_value<H: Hasher>(value: &Value, state: &mut H) {
         Value::Bool(b) => b.hash(state),
         Value::Int64(i) => i.hash(state),
         Value::Float64(f) => f.to_bits().hash(state),
+        Value::Decimal(d) => d.hash(state),
         Value::String(s) => s.hash(state),
         Value::Bytes(b) => b.hash(state),
         Value::Timestamp(t) => t.hash(state),
@@ -1250,6 +1278,54 @@ mod tests {
         assert!(!Value::Int64(42).is_vector());
         assert_eq!(Value::Int64(42).as_vector(), None);
         assert_eq!(Value::Int64(42).vector_dimensions(), None);
+    }
+
+    /// A value is 40 bytes: a path holds two fat pointers, and a decimal (24
+    /// bytes) fits beside the tag.
+    #[test]
+    fn a_value_is_forty_bytes() {
+        assert_eq!(size_of::<Value>(), 40);
+    }
+
+    /// Decimals compare and hash by value, and keep the scale they were
+    /// written with for display.
+    #[test]
+    fn decimals_are_equal_across_scales() {
+        let written = Value::Decimal(Decimal::parse("1.50").unwrap());
+        let shorter = Value::Decimal(Decimal::parse("1.5").unwrap());
+        assert_eq!(written, shorter);
+        assert_eq!(
+            HashableValue::new(written.clone()),
+            HashableValue::new(shorter.clone())
+        );
+        let hash = |value: &Value| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            HashableValue::new(value.clone()).hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(&written), hash(&shorter));
+        assert_eq!(written.to_string(), "1.50");
+        assert_eq!(format!("{written:?}"), "Decimal(1.50)");
+        assert_eq!(written.type_name(), "DECIMAL");
+        assert_eq!(written.as_decimal().map(|d| d.scale()), Some(2));
+        assert_ne!(written, Value::Float64(1.5));
+        assert_eq!(
+            Value::from(Decimal::from_i64(3)),
+            Value::Decimal(Decimal::parse("3.0").unwrap())
+        );
+    }
+
+    /// A decimal serializes as its text with its scale, in every serde
+    /// format, and an older value's encoding is unchanged: the variant is
+    /// the last of `Value`.
+    #[test]
+    fn decimals_serialize_as_text_and_keep_older_encodings() {
+        let decimal = Value::Decimal(Decimal::parse("-0.050").unwrap());
+        let bytes = decimal.serialize().unwrap();
+        let back = Value::deserialize(&bytes).unwrap();
+        assert_eq!(back.to_string(), "-0.050");
+        // Int64 is variant 2 whatever variants come after it.
+        assert_eq!(Value::Int64(7).serialize().unwrap(), vec![2, 14]);
     }
 
     #[test]

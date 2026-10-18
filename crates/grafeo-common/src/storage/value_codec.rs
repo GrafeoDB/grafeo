@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use arcstr::ArcStr;
 
-use crate::types::{Date, Duration, PropertyKey, Time, Timestamp, Value, ZonedDatetime};
+use crate::types::{Date, Decimal, Duration, PropertyKey, Time, Timestamp, Value, ZonedDatetime};
 use crate::utils::error::{Error, Result};
 
 /// Deepest nesting of lists, maps and paths a decode accepts.
@@ -74,6 +74,7 @@ const TAG_VECTOR: u8 = 13;
 const TAG_PATH: u8 = 14;
 const TAG_GCOUNTER: u8 = 15;
 const TAG_ON_COUNTER: u8 = 16;
+const TAG_DECIMAL: u8 = 17;
 
 /// The fewest bytes a map entry takes: a key length and a value tag.
 const MIN_MAP_ENTRY_BYTES: usize = 5;
@@ -187,6 +188,11 @@ fn encode_nested(value: &Value, out: &mut Vec<u8>, depth: usize) -> Result<()> {
             out.push(TAG_ON_COUNTER);
             put_counter(pos, out)?;
             put_counter(neg, out)?;
+        }
+        Value::Decimal(decimal) => {
+            out.push(TAG_DECIMAL);
+            out.push(decimal.scale());
+            out.extend_from_slice(&decimal.mantissa().to_le_bytes());
         }
     }
     Ok(())
@@ -305,6 +311,7 @@ pub fn encoded_len(value: &Value) -> usize {
         Value::Path { nodes, edges } => values_len(nodes).saturating_add(values_len(edges)),
         Value::GCounter(counts) => counter_len(counts),
         Value::OnCounter { pos, neg } => counter_len(pos).saturating_add(counter_len(neg)),
+        Value::Decimal(_) => 1 + 16,
     };
     fields.saturating_add(1)
 }
@@ -558,6 +565,16 @@ impl<'a> Decoder<'a> {
                     neg: Arc::new(neg),
                 }
             }
+            TAG_DECIMAL => {
+                let scale = self.read_u8("decimal scale")?;
+                let mantissa = i128::from_le_bytes(self.array("decimal mantissa")?);
+                Value::Decimal(Decimal::new(mantissa, scale).map_err(|_| {
+                    Self::error(
+                        at,
+                        format_args!("decimal {mantissa} at scale {scale} has more than 38 digits"),
+                    )
+                })?)
+            }
             other => return Err(Self::error(at, format_args!("unknown value tag {other}"))),
         };
         Ok(value)
@@ -760,7 +777,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::types::{Date, Duration, PropertyKey, Time, Timestamp, Value, ZonedDatetime};
+    use crate::types::{
+        Date, Decimal, Duration, PropertyKey, Time, Timestamp, Value, ZonedDatetime,
+    };
 
     fn list(items: Vec<Value>) -> Value {
         Value::List(Arc::from(items))
@@ -840,6 +859,11 @@ mod tests {
             list(vec![Value::Null]),
             map(vec![("", Value::Null)]),
             Value::GCounter(counter(&[("", 0)])),
+            Value::Decimal(Decimal::parse("-12345.678").unwrap()),
+            // The scale is kept: 1.50 comes back as 1.50, not 1.5.
+            Value::Decimal(Decimal::parse("1.50").unwrap()),
+            Value::Decimal(Decimal::parse("99999999999999999999999999999999999999").unwrap()),
+            Value::Decimal(Decimal::new(-1, 38).unwrap()),
         ]
     }
 
@@ -854,6 +878,9 @@ mod tests {
     fn same(a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Float64(x), Value::Float64(y)) => x.to_bits() == y.to_bits(),
+            (Value::Decimal(x), Value::Decimal(y)) => {
+                (x.mantissa(), x.scale()) == (y.mantissa(), y.scale())
+            }
             (Value::Vector(x), Value::Vector(y)) => {
                 x.len() == y.len()
                     && x.iter()
@@ -909,6 +936,21 @@ mod tests {
             };
         }
         value
+    }
+
+    /// A decimal whose scale or mantissa is out of range is a decoding error,
+    /// not a value.
+    #[test]
+    fn a_decimal_out_of_range_does_not_decode() {
+        for (scale, mantissa) in [(39u8, 1i128), (0, 10i128.pow(38)), (2, -(10i128.pow(38)))] {
+            let mut bytes = vec![TAG_DECIMAL, scale];
+            bytes.extend_from_slice(&mantissa.to_le_bytes());
+            let mut pos = 0;
+            assert!(
+                decode_value(&bytes, &mut pos).is_err(),
+                "scale {scale}, mantissa {mantissa}"
+            );
+        }
     }
 
     #[test]
@@ -998,12 +1040,19 @@ mod tests {
             encoded(&Value::GCounter(Default::default())),
             [15, 0, 0, 0, 0]
         );
+        // A decimal: tag, scale, then the mantissa as 16 little-endian bytes.
+        let mut decimal = vec![17, 2, 150];
+        decimal.extend_from_slice(&[0; 15]);
+        assert_eq!(
+            encoded(&Value::Decimal(Decimal::parse("1.50").unwrap())),
+            decimal
+        );
         let tags: Vec<u8> = every_kind().iter().map(|value| encoded(value)[0]).collect();
         assert_eq!(
             tags,
             [
                 0, 1, 2, 2, 3, 3, 4, 4, 5, 6, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 7, 14, 11,
-                12, 15
+                12, 15, 17, 17, 17, 17
             ],
             "one tag per kind, in the order of every_kind"
         );

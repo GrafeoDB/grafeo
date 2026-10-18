@@ -1093,7 +1093,8 @@ fn payload_address(value: &Value) -> Option<usize> {
         | Value::Date(_)
         | Value::Time(_)
         | Value::Duration(_)
-        | Value::ZonedDatetime(_) => None,
+        | Value::ZonedDatetime(_)
+        | Value::Decimal(_) => None,
     }
 }
 

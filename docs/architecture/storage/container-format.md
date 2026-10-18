@@ -628,6 +628,10 @@ them:
 | 6 | `TIMESTAMP` | 14 | `EDGE` |
 | 7 | `LOCAL DATETIME` | 15 | `ANY` |
 
+Code 16 is `DECIMAL`, any decimal with its own scale. `DECIMAL(p, s)` is
+`0x0100_0000 | p << 8 | s`, with a precision `p` from 1 to 38 and a scale `s`
+from 0 to `p`; any other code with bit 24 set is refused.
+
 The records come in the order of their kinds, and the records of one kind in
 increasing order of their key, so the same catalog is written to the same
 bytes: schemas, types and procedures by name, bindings by graph, constraints

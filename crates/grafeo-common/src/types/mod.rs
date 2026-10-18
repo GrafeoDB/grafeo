@@ -23,7 +23,7 @@ mod value;
 mod zoned_datetime;
 
 pub use date::Date;
-pub use decimal::{Decimal, DecimalError, MAX_DECIMAL_DIGITS};
+pub use decimal::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 pub use duration::Duration;
 pub use hlc::{HlcClock, HlcTimestamp};
 pub use id::{EdgeId, EdgeTypeId, EpochId, IndexId, LabelId, NodeId, PropertyKeyId, TransactionId};

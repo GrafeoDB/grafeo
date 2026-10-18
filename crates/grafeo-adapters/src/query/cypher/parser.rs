@@ -2860,9 +2860,31 @@ impl<'a> Parser<'a> {
 
             // A type Grafeo supports, as in GQL's type DDL: any other name
             // used to declare an `ANY` property.
-            let data_type = self.expect_identifier()?;
+            let mut data_type = self.expect_identifier()?;
             if crate::query::schema::property_type_kind(&data_type).is_none() {
                 return Err(self.error(&crate::query::schema::unknown_property_type(&data_type)));
+            }
+            // DECIMAL(precision[, scale]), spelled as the catalog prints it
+            if self.current.kind == TokenKind::LParen
+                && grafeo_common::types::DecimalType::from_name(&data_type) == Some(None)
+            {
+                let mut written = format!("{data_type}(");
+                self.advance();
+                while !matches!(self.current.kind, TokenKind::RParen | TokenKind::Eof) {
+                    written.push_str(&self.current.text);
+                    self.advance();
+                }
+                self.expect(TokenKind::RParen)?;
+                written.push(')');
+                data_type = match grafeo_common::types::DecimalType::from_name(&written) {
+                    Some(Some(decimal)) => decimal.to_string(),
+                    _ => {
+                        return Err(self.error(&format!(
+                            "{written}: {}",
+                            grafeo_common::types::DecimalError::InvalidPrecision
+                        )));
+                    }
+                };
             }
 
             // Optional NOT NULL

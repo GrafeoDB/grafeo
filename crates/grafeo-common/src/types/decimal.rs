@@ -593,6 +593,107 @@ impl Hash for Decimal {
     }
 }
 
+/// The precision and scale of a `DECIMAL(precision, scale)` type: a
+/// precision from 1 to 38, the digits a value has in all, and a scale from 0
+/// to the precision, the digits after the point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DecimalType {
+    precision: u8,
+    scale: u8,
+}
+
+impl DecimalType {
+    /// `DECIMAL(precision, scale)`.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::InvalidPrecision`] for a precision outside 1 to 38 or a
+    /// scale above it.
+    pub fn new(precision: u8, scale: u8) -> Result<Self, DecimalError> {
+        if (1..=MAX_DECIMAL_DIGITS).contains(&precision) && scale <= precision {
+            Ok(Self { precision, scale })
+        } else {
+            Err(DecimalError::InvalidPrecision)
+        }
+    }
+
+    /// The digits a value of the type has in all.
+    #[must_use]
+    pub const fn precision(self) -> u8 {
+        self.precision
+    }
+
+    /// The digits after the point.
+    #[must_use]
+    pub const fn scale(self) -> u8 {
+        self.scale
+    }
+
+    /// `value` as the type holds it: see [`Decimal::with_precision`].
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::Overflow`] when `value` has more integer digits than
+    /// the type holds.
+    pub fn fit(self, value: &Decimal) -> Result<Decimal, DecimalError> {
+        value.with_precision(self.precision, self.scale)
+    }
+
+    /// Whether `value` is a value of the type as it is: at its scale, with no
+    /// more integer digits than the type holds.
+    #[must_use]
+    pub fn holds(self, value: &Decimal) -> bool {
+        value.scale == self.scale && value.mantissa().unsigned_abs() < pow10(self.precision)
+    }
+
+    /// Reads a decimal type name, in any case: `DECIMAL` or `DEC` alone is
+    /// `Some(None)`, any decimal; with `(precision)` or `(precision, scale)`
+    /// it is that type (a left-out scale is 0). `None` when `name` names no
+    /// decimal type, or one whose precision or scale is out of range.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Option<Self>> {
+        let name = name.trim();
+        let (base, arguments) = match name.split_once('(') {
+            Some((base, rest)) => (base.trim_end(), Some(rest.strip_suffix(')')?)),
+            None => (name, None),
+        };
+        if !base.eq_ignore_ascii_case("DECIMAL") && !base.eq_ignore_ascii_case("DEC") {
+            return None;
+        }
+        let Some(arguments) = arguments else {
+            return Some(None);
+        };
+        let number = |text: &str| text.trim().parse::<u8>().ok();
+        let (precision, scale) = match arguments.split_once(',') {
+            Some((precision, scale)) => (number(precision)?, number(scale)?),
+            None => (number(arguments)?, 0),
+        };
+        Self::new(precision, scale).ok().map(Some)
+    }
+}
+
+impl fmt::Display for DecimalType {
+    /// `DECIMAL(10,2)`: the spelling [`from_name`](Self::from_name) reads.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DECIMAL({},{})", self.precision, self.scale)
+    }
+}
+
+impl serde::Serialize for DecimalType {
+    /// The precision and the scale.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (self.precision, self.scale).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DecimalType {
+    /// Refuses a precision or scale out of range.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (precision, scale) = <(u8, u8)>::deserialize(deserializer)?;
+        Self::new(precision, scale).map_err(serde::de::Error::custom)
+    }
+}
+
 /// An unsigned 256-bit integer, enough for a 38-digit mantissa times `10^38`
 /// (the operands of a division at a common scale) and ten times its
 /// remainder.
@@ -784,6 +885,38 @@ mod tests {
                 "DECIMAL({precision},{scale})"
             );
         }
+    }
+
+    #[test]
+    fn decimal_type_names_read_back_as_they_print() {
+        let of = |precision, scale| Some(Some(DecimalType::new(precision, scale).unwrap()));
+        for (name, expected) in [
+            ("DECIMAL", Some(None)),
+            ("dec", Some(None)),
+            ("DECIMAL(10,2)", of(10, 2)),
+            ("decimal( 10 , 2 )", of(10, 2)),
+            ("DEC(3)", of(3, 0)),
+            ("DECIMAL (38, 38)", of(38, 38)),
+            ("DECIMAL(0)", None),
+            ("DECIMAL(39,0)", None),
+            ("DECIMAL(5,6)", None),
+            ("DECIMAL(5,", None),
+            ("DECIMAL(x)", None),
+            ("DECIMALS", None),
+            ("FLOAT64", None),
+        ] {
+            assert_eq!(DecimalType::from_name(name), expected, "{name}");
+        }
+        let money = DecimalType::new(6, 2).unwrap();
+        assert_eq!(money.to_string(), "DECIMAL(6,2)");
+        assert_eq!(
+            DecimalType::from_name(&money.to_string()),
+            Some(Some(money))
+        );
+        assert!(money.holds(&d("1234.50")));
+        assert!(!money.holds(&d("1234.5")), "another scale");
+        assert!(!money.holds(&d("12345.00")), "five integer digits");
+        assert_eq!(money.fit(&d("1234.5")).unwrap().to_string(), "1234.50");
     }
 
     #[test]

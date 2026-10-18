@@ -4024,6 +4024,7 @@ impl ExpressionPredicate {
             "BOOLEAN" | "BOOL" => matches!(val, Value::Bool(_)),
             "INTEGER" | "INT" | "INT64" => matches!(val, Value::Int64(_)),
             "FLOAT" | "FLOAT64" | "DOUBLE" => matches!(val, Value::Float64(_)),
+            "DECIMAL" | "DEC" => matches!(val, Value::Decimal(_)),
             "STRING" => matches!(val, Value::String(_)),
             "LIST" => matches!(val, Value::List(_)),
             "MAP" | "RECORD" => matches!(val, Value::Map(_)),

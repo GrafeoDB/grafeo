@@ -52,6 +52,10 @@
 //! | 6 | `TIMESTAMP` | 14 | `EDGE` |
 //! | 7 | `LOCAL DATETIME` | 15 | `ANY` |
 //!
+//! Code 16 is `DECIMAL` (any decimal), and `0x0100_0000 | precision << 8 |
+//! scale` is `DECIMAL(precision, scale)`, a precision from 1 to 38 and a
+//! scale up to it.
+//!
 //! A reader checks a payload's length against the maximum before it reads
 //! the payload, into a buffer that grows with the bytes present, and decodes
 //! it with a bincode limit of eight times the maximum. The limit counts what
@@ -103,7 +107,7 @@ use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::value_codec::{MAX_PROPERTY_VALUE_DEPTH, encoded_len, nests_too_deep_to_encode};
-use crate::types::Value;
+use crate::types::{DecimalType, Value};
 use crate::utils::error::{Error, Result};
 
 /// Flag bit 0 of a framed record: a reader that does not know the record's
@@ -208,7 +212,13 @@ pub enum PropertyTypeRecord {
     Edge,
     /// `ANY`: any value.
     Any,
+    /// `DECIMAL`, any decimal (`None`), or `DECIMAL(p, s)`.
+    Decimal(Option<DecimalType>),
 }
+
+/// The code of `DECIMAL(p, s)` is this flag with the precision in bits 8 to 15
+/// and the scale in bits 0 to 7.
+const DECIMAL_TYPE_FLAG: u32 = 0x0100_0000;
 
 impl PropertyTypeRecord {
     /// The `LIST<...>` levels around the type inside them, and that type's
@@ -239,6 +249,12 @@ impl PropertyTypeRecord {
                 Self::Node => 13,
                 Self::Edge => 14,
                 Self::Any => 15,
+                Self::Decimal(None) => 16,
+                Self::Decimal(Some(decimal)) => {
+                    DECIMAL_TYPE_FLAG
+                        | u32::from(decimal.precision()) << 8
+                        | u32::from(decimal.scale())
+                }
             };
             return (levels, code);
         }
@@ -263,6 +279,11 @@ impl PropertyTypeRecord {
             13 => Self::Node,
             14 => Self::Edge,
             15 => Self::Any,
+            16 => Self::Decimal(None),
+            code if code & 0xFFFF_0000 == DECIMAL_TYPE_FLAG => {
+                let [.., precision, scale] = code.to_be_bytes();
+                Self::Decimal(Some(DecimalType::new(precision, scale).ok()?))
+            }
             _ => return None,
         })
     }
@@ -1543,6 +1564,7 @@ mod tests {
             T::Node,
             T::Edge,
             T::Any,
+            T::Decimal(None),
         ]
     }
 
@@ -2051,7 +2073,7 @@ mod tests {
     #[test]
     fn every_variant_has_a_fixed_code() {
         let codes: Vec<Vec<u8>> = element_types().iter().map(bincode_of).collect();
-        let expected: Vec<Vec<u8>> = (0u8..16).map(|code| vec![0, code]).collect();
+        let expected: Vec<Vec<u8>> = (0u8..17).map(|code| vec![0, code]).collect();
         assert_eq!(codes, expected, "no LIST level, then the element code");
         assert_eq!(
             bincode_of(&list_of(2, PropertyTypeRecord::ZonedDatetime)),
@@ -2816,9 +2838,52 @@ mod tests {
         let mut bytes = framed(&node);
         let code_at = RECORD_HEADER_BYTES + (1 + "Event".len()) + 1 + (1 + "seen".len()) + 1;
         assert_eq!(bytes[code_at], 15, "the code of ANY");
-        bytes[code_at] = 16;
+        bytes[code_at] = 17;
         let error = read_error(&bytes);
-        assert!(error.contains("property type code 16"), "{error}");
+        assert!(error.contains("property type code 17"), "{error}");
+    }
+
+    /// `DECIMAL(p, s)` is the flag, the precision and the scale in one code;
+    /// a precision or scale out of range, or another bit set, is no code.
+    #[test]
+    fn decimal_types_have_codes_of_their_precision_and_scale() {
+        let money = PropertyTypeRecord::Decimal(Some(DecimalType::new(6, 2).unwrap()));
+        // bincode writes a u32 from 251 up as 252 and its four bytes.
+        assert_eq!(bincode_of(&money), [0, 252, 0x02, 0x06, 0x00, 0x01]);
+        assert_eq!(
+            PropertyTypeRecord::of_code(0x0100_0602),
+            Some(money.clone())
+        );
+        let widest = DecimalType::new(38, 38).unwrap();
+        assert_eq!(
+            PropertyTypeRecord::of_code(0x0100_2626),
+            Some(PropertyTypeRecord::Decimal(Some(widest)))
+        );
+        for code in [
+            0x0100_0000,
+            0x0100_2700,
+            0x0100_0506,
+            0x0101_0602,
+            0x0200_0602,
+        ] {
+            assert_eq!(PropertyTypeRecord::of_code(code), None, "{code:#x}");
+        }
+        let node = CatalogRecord::NodeType(NodeTypeRecord {
+            name: "Item".into(),
+            properties: vec![
+                property("price", money, true, None),
+                property(
+                    "tags",
+                    list_of(2, PropertyTypeRecord::Decimal(None)),
+                    true,
+                    None,
+                ),
+            ],
+            constraints: Vec::new(),
+            parent_types: Vec::new(),
+            key_labels: Vec::new(),
+        });
+        assert_eq!(read_all(&framed(&node)).unwrap(), [node]);
     }
 
     #[test]

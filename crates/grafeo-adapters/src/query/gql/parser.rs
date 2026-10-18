@@ -6,7 +6,7 @@ use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
 use crate::query::limits::{Chain, Nesting, nesting_error_message};
 use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
-use grafeo_common::types::{Decimal, MAX_DECIMAL_DIGITS};
+use grafeo_common::types::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result, SourceSpan};
 
 /// A graph type body: the names of its node types and of its edge types, the
@@ -4637,13 +4637,15 @@ impl<'a> Parser<'a> {
                     None
                 };
                 self.expect(TokenKind::RParen)?;
-                if let Some((precision, scale)) = decimal_type {
+                if let Some(decimal_type) = decimal_type {
                     return Ok(Expression::FunctionCall {
                         name: "toDecimal".to_string(),
                         args: vec![
                             expr,
-                            Expression::Literal(Literal::Integer(i64::from(precision))),
-                            Expression::Literal(Literal::Integer(i64::from(scale))),
+                            Expression::Literal(Literal::Integer(i64::from(
+                                decimal_type.precision(),
+                            ))),
+                            Expression::Literal(Literal::Integer(i64::from(decimal_type.scale()))),
                         ],
                         distinct: false,
                     });
@@ -4683,7 +4685,7 @@ impl<'a> Parser<'a> {
 
     /// The `(precision[, scale])` after `DECIMAL` or `DEC` (`name`): a
     /// precision from 1 to 38 and a scale from 0 to it, 0 when left out.
-    fn parse_decimal_precision(&mut self, name: &str) -> Result<(u8, u8)> {
+    fn parse_decimal_precision(&mut self, name: &str) -> Result<DecimalType> {
         self.expect(TokenKind::LParen)?;
         let number = |parser: &mut Self| -> Result<i64> {
             if parser.current.kind != TokenKind::Integer {
@@ -4702,11 +4704,10 @@ impl<'a> Parser<'a> {
         };
         self.expect(TokenKind::RParen)?;
         match (u8::try_from(precision), u8::try_from(scale)) {
-            (Ok(p), Ok(s)) if (1..=MAX_DECIMAL_DIGITS).contains(&p) && s <= p => Ok((p, s)),
-            _ => Err(self.error(&format!(
-                "{name}({precision}, {scale}) is not a decimal type: a decimal type takes a                  precision from 1 to {MAX_DECIMAL_DIGITS} and a scale from 0 to its precision"
-            ))),
+            (Ok(precision), Ok(scale)) => DecimalType::new(precision, scale),
+            _ => Err(DecimalError::InvalidPrecision),
         }
+        .map_err(|error| self.error(&format!("{name}({precision}, {scale}): {error}")))
     }
 
     /// Parses a CASE expression.
@@ -6517,6 +6518,14 @@ impl<'a> Parser<'a> {
                 return Err(self.error(&unknown_property_type(&name)));
             };
             self.advance();
+            // DECIMAL(precision[, scale]), spelled as the catalog prints it
+            if kind == PropertyTypeKind::Decimal(None) && self.current.kind == TokenKind::LParen {
+                let decimal = self.parse_decimal_precision(&name.to_ascii_uppercase())?;
+                break (
+                    decimal.to_string(),
+                    PropertyTypeKind::Decimal(Some(decimal)),
+                );
+            }
             break (name, kind);
         };
 
@@ -6580,7 +6589,9 @@ impl<'a> Parser<'a> {
     /// (taking literals of `kind`): a string, a signed number (ISO/IEC
     /// 39075:2024 21.2 `<signed numeric literal>`), `TRUE`, `FALSE` or
     /// `NULL`. Returns it as [`PropertyDefinition::default_value`] spells it:
-    /// an integer default of a `FLOAT64` property as the float.
+    /// an integer default of a `FLOAT64` property as the float, and an exact
+    /// number (or an integer) of a `DECIMAL` property as the decimal with the
+    /// suffix `M`, rounded to the scale of a `DECIMAL(p, s)`.
     ///
     /// A literal that is not a value of the type is refused, and so is `NULL`
     /// for a `NOT NULL` property: they used to be accepted, and then every
@@ -6616,6 +6627,22 @@ impl<'a> Parser<'a> {
                 "DEFAULT {written} is not a value of type {data_type}"
             ))
         };
+        // A decimal default, rounded to the scale of a DECIMAL(p, s) and
+        // spelled with the suffix M, which the session reads as a decimal.
+        let decimal_default =
+            |parser: &Self, value: Decimal, decimal_type: Option<DecimalType>| -> Result<String> {
+                match decimal_type {
+                    None => Ok(format!("{value}M")),
+                    Some(decimal_type) => decimal_type
+                        .fit(&value)
+                        .map(|value| format!("{value}M"))
+                        .map_err(|_| {
+                            parser.error(&format!(
+                                "DEFAULT {written} has more integer digits than {data_type} holds"
+                            ))
+                        }),
+                }
+            };
 
         let spelled = match self.current.kind {
             TokenKind::Null if nullable => "NULL".to_string(),
@@ -6654,8 +6681,28 @@ impl<'a> Parser<'a> {
                             )));
                         }
                     },
+                    PropertyTypeKind::Decimal(decimal_type) => {
+                        decimal_default(self, Decimal::from_i64(value), decimal_type)?
+                    }
                     _ => return Err(not_of_type(self)),
                 }
+            }
+            // An exact number: a decimal of a DECIMAL or ANY property.
+            TokenKind::Decimal
+                if matches!(kind, PropertyTypeKind::Decimal(_) | PropertyTypeKind::Any) =>
+            {
+                let digits = number_text(&self.current.text);
+                let value = if negative == Some(true) {
+                    Decimal::parse(&format!("-{digits}"))
+                } else {
+                    Decimal::parse(digits)
+                }
+                .map_err(|error| self.error(&format!("DEFAULT {written}: {error}")))?;
+                let decimal_type = match kind {
+                    PropertyTypeKind::Decimal(decimal_type) => decimal_type,
+                    _ => None,
+                };
+                decimal_default(self, value, decimal_type)?
             }
             TokenKind::Float | TokenKind::Decimal => match kind {
                 PropertyTypeKind::Float | PropertyTypeKind::Any => {

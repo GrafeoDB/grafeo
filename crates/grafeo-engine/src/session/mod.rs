@@ -78,7 +78,8 @@ enum AfterSchemaChange {
 /// Parses a DDL default-value literal string into a [`Value`].
 ///
 /// Handles string literals (single- or double-quoted), integers, floats,
-/// booleans (`true`/`false`), and `NULL`.
+/// decimals (spelled with the suffix `M`), booleans (`true`/`false`), and
+/// `NULL`.
 fn parse_default_literal(text: &str) -> Value {
     if text.eq_ignore_ascii_case("null") {
         return Value::Null;
@@ -94,6 +95,12 @@ fn parse_default_literal(text: &str) -> Value {
         || (text.starts_with('"') && text.ends_with('"'))
     {
         return Value::String(text[1..text.len() - 1].into());
+    }
+    if let Some(decimal) = text
+        .strip_suffix('M')
+        .and_then(|digits| grafeo_common::types::Decimal::parse(digits).ok())
+    {
+        return Value::Decimal(decimal);
     }
     // Try integer, then float
     if let Ok(i) = text.parse::<i64>() {

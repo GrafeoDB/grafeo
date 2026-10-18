@@ -240,6 +240,13 @@ pub enum SqlDataType {
     Double,
     /// TIMESTAMP.
     Timestamp,
+    /// DECIMAL, DEC or NUMERIC: any decimal (`None`), or with a precision
+    /// and scale.
+    Decimal(Option<grafeo_common::types::DecimalType>),
+    /// DATE.
+    Date,
+    /// TIME.
+    Time,
 }
 
 impl std::fmt::Display for SqlDataType {
@@ -253,6 +260,10 @@ impl std::fmt::Display for SqlDataType {
             Self::Float => write!(f, "FLOAT"),
             Self::Double => write!(f, "DOUBLE"),
             Self::Timestamp => write!(f, "TIMESTAMP"),
+            Self::Decimal(None) => write!(f, "DECIMAL"),
+            Self::Decimal(Some(decimal_type)) => write!(f, "{decimal_type}"),
+            Self::Date => write!(f, "DATE"),
+            Self::Time => write!(f, "TIME"),
         }
     }
 }

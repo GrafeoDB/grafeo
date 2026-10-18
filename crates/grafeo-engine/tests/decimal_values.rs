@@ -370,3 +370,54 @@ fn gql_casts_to_decimal() {
         );
     }
 }
+
+/// SQL/PGQ number literals and `CAST` (#610): a number with a point is an
+/// exact decimal and one with an exponent a float, as SQL specifies; `CAST`
+/// converts to every SQL type, `DECIMAL(p, s)` and `NUMERIC(p, s)` as
+/// `toDecimal` does and `VARCHAR(n)` to the first `n` characters.
+#[cfg(feature = "sql-pgq")]
+#[test]
+fn sql_pgq_literals_and_casts() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix', age: 30})")
+        .unwrap();
+    let query = |expression: &str| {
+        format!("SELECT * FROM GRAPH_TABLE (MATCH (n:Person) COLUMNS ({expression} AS x))")
+    };
+    for (expression, expected) in [
+        ("0.1 + 0.2", "Decimal(0.3)"),
+        ("1.50", "Decimal(1.50)"),
+        ("-1.5", "Decimal(-1.5)"),
+        ("1.5e0", "Float64(1.5)"),
+        ("CAST('2.345' AS DECIMAL(10, 2))", "Decimal(2.35)"),
+        ("CAST(2.5 AS NUMERIC)", "Decimal(2.5)"),
+        ("CAST(2.5 AS DEC(3))", "Decimal(3)"),
+        ("CAST(123.4 AS NUMERIC(4, 2))", "Null"),
+        ("CAST(1.5 AS DOUBLE)", "Float64(1.5)"),
+        ("CAST(1.5 AS DOUBLE PRECISION)", "Float64(1.5)"),
+        ("CAST(1.5 AS REAL)", "Float64(1.5)"),
+        ("CAST('42' AS INTEGER)", "Int64(42)"),
+        ("CAST(n.age AS BIGINT)", "Int64(30)"),
+        ("CAST(n.age AS VARCHAR)", "String(\"30\")"),
+        ("CAST(n.name AS VARCHAR(2))", "String(\"Al\")"),
+        ("CAST('true' AS BOOLEAN)", "Bool(true)"),
+        ("CAST('2024-03-15' AS DATE)", "Date(2024-03-15)"),
+    ] {
+        assert_eq!(
+            one(&db, "sql", &query(expression), &[]),
+            expected,
+            "`{expression}`"
+        );
+    }
+    for (expression, word) in [
+        ("CAST(1 AS DECIMAL(39))", "precision"),
+        ("CAST(1 AS WIDGET)", "WIDGET"),
+        ("CAST(1 DECIMAL)", "AS"),
+    ] {
+        let error = db
+            .execute_language(&query(expression), "sql", None)
+            .expect_err(expression)
+            .to_string();
+        assert!(error.contains(word), "`{expression}`: {error}");
+    }
+}

@@ -793,6 +793,7 @@ impl SqlPgqTranslator {
         )
         .then(|| match second {
             Some(ast::Expression::Literal(ast::Literal::Float(p))) => p.clamp(0.0, 1.0),
+            Some(ast::Expression::Literal(ast::Literal::Decimal(p))) => p.to_f64().clamp(0.0, 1.0),
             Some(ast::Expression::Literal(ast::Literal::Integer(p))) => (*p as f64).clamp(0.0, 1.0),
             _ => 0.5,
         });

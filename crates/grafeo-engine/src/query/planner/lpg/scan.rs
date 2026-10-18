@@ -6,7 +6,7 @@ use super::{
     NestedLoopJoinOperator, NodeScanOp, Operator, PhysicalJoinType, Result, ScanOperator,
     TransactionId, Value,
 };
-use crate::query::plan::{BuiltinFunction, Callee};
+use crate::query::plan::{BuiltinFunction, Callee, ListPredicateKind};
 
 /// The copy of `filter` whose node scan reads the label with the fewest
 /// nodes, or `None` when the scan reads that label already.
@@ -107,6 +107,132 @@ pub(crate) fn may_choose_scan_label(
     current_epoch: Option<EpochId>,
 ) -> bool {
     transaction_id.is_some() || current_epoch.is_none_or(|current| viewing_epoch >= current)
+}
+
+/// The labels of the `OR` of labels that `predicate` requires of the node a
+/// scan of every node reads (`n:Tag OR n:Topic`, `'Tag' IN labels(n) OR ...`,
+/// `any(l IN labels(n) WHERE l IN ['Tag', 'Topic'])`), when the scan may read
+/// only their nodes: it has no label and no input, and the labels hold at most
+/// half the nodes (a scan of every node is cheaper than larger lists). Of
+/// several such conjuncts of an `AND`, the one whose labels hold the fewest
+/// nodes. One label alone is the scan's label instead (see
+/// [`with_smallest_scan_label`]).
+pub(crate) fn label_union(
+    predicate: &LogicalExpression,
+    scan: &NodeScanOp,
+    store: &dyn GraphStoreSearch,
+) -> Option<Vec<String>> {
+    if scan.label.is_some() || scan.input.is_some() {
+        return None;
+    }
+    let mut conjuncts = Vec::new();
+    and_conjuncts(predicate, &mut conjuncts);
+    let mut best: Option<(usize, Vec<&str>)> = None;
+    for conjunct in conjuncts {
+        let Some(found) = any_label(conjunct, &scan.variable) else {
+            continue;
+        };
+        let mut labels: Vec<&str> = Vec::with_capacity(found.len());
+        for label in found {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        if labels.len() < 2 {
+            continue;
+        }
+        let nodes: usize = labels
+            .iter()
+            .map(|label| store.nodes_by_label_count(label))
+            .sum();
+        if best.as_ref().is_none_or(|(fewest, _)| nodes < *fewest) {
+            best = Some((nodes, labels));
+        }
+    }
+    let (nodes, labels) = best?;
+    (nodes.saturating_mul(2) <= store.node_count())
+        .then(|| labels.into_iter().map(str::to_string).collect())
+}
+
+/// The conjuncts of an `AND` chain.
+fn and_conjuncts<'a>(predicate: &'a LogicalExpression, out: &mut Vec<&'a LogicalExpression>) {
+    match predicate {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
+            and_conjuncts(left, out);
+            and_conjuncts(right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// The labels of which `expression` requires one of `variable`: label checks
+/// joined by `OR`, or `any(l IN labels(variable) WHERE ...)` over equalities
+/// of `l` and `IN` lists of label names.
+fn any_label<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<Vec<&'a str>> {
+    if let Some(label) = label_check(expression, variable) {
+        return Some(vec![label]);
+    }
+    match expression {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::Or,
+            right,
+        } => {
+            let mut labels = any_label(left, variable)?;
+            labels.extend(any_label(right, variable)?);
+            Some(labels)
+        }
+        LogicalExpression::ListPredicate {
+            kind: ListPredicateKind::Any,
+            variable: element,
+            list_expr,
+            predicate,
+        } if is_labels_of(list_expr, variable) => element_labels(predicate, element),
+        _ => None,
+    }
+}
+
+/// Whether `expression` is `labels(variable)`.
+fn is_labels_of(expression: &LogicalExpression, variable: &str) -> bool {
+    matches!(
+        expression,
+        LogicalExpression::FunctionCall {
+            callee: Callee::Builtin(BuiltinFunction::Labels),
+            args,
+            ..
+        } if matches!(args.as_slice(), [LogicalExpression::Variable(of)] if of == variable)
+    )
+}
+
+/// The label names of which `predicate` requires `element` to be one:
+/// `element = 'Tag'`, `element IN ['Tag', 'Topic']`, joined by `OR`.
+fn element_labels<'a>(predicate: &'a LogicalExpression, element: &str) -> Option<Vec<&'a str>> {
+    let LogicalExpression::Binary { left, op, right } = predicate else {
+        return None;
+    };
+    let is_element = |side: &LogicalExpression| matches!(side, LogicalExpression::Variable(name) if name == element);
+    let name = |side: &'a LogicalExpression| match side {
+        LogicalExpression::Literal(Value::String(label)) => Some(label.as_str()),
+        _ => None,
+    };
+    match op {
+        BinaryOp::Or => {
+            let mut labels = element_labels(left, element)?;
+            labels.extend(element_labels(right, element)?);
+            Some(labels)
+        }
+        BinaryOp::Eq if is_element(left) => name(right).map(|label| vec![label]),
+        BinaryOp::Eq if is_element(right) => name(left).map(|label| vec![label]),
+        BinaryOp::In if is_element(left) => match right.as_ref() {
+            LogicalExpression::List(items) => items.iter().map(name).collect(),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The label of a `hasLabel(variable, 'Label')` check, or of its spelling

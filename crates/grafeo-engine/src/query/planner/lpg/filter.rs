@@ -162,6 +162,11 @@ impl super::Planner {
             return Ok(result);
         }
 
+        // An `OR` of labels: the scan reads the nodes of those labels only
+        if let Some(result) = self.try_plan_filter_with_label_union(filter)? {
+            return Ok(result);
+        }
+
         // Plan the input operator first. A predicate that reads the graph
         // after a write (`... SET h.c = i WITH h WHERE h.c = 4`) reads what
         // the whole write left (see `after_write`).
@@ -727,6 +732,60 @@ impl super::Planner {
         Ok(Some((found, columns)))
     }
 
+    /// Plans a filter whose predicate requires one of several labels of the
+    /// node a scan of every node reads (see
+    /// [`label_union`](super::scan::label_union)) as a scan of the nodes of
+    /// those labels, each once and in ID order, below the whole predicate.
+    /// Only for a query that reads the store as it is now: the label index
+    /// holds the labels of now (see `reads_the_current_store`).
+    fn try_plan_filter_with_label_union(
+        &self,
+        filter: &FilterOp,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
+            return Ok(None);
+        };
+        if !self.reads_the_current_store() {
+            return Ok(None);
+        }
+        let Some(labels) = super::scan::label_union(&filter.predicate, scan, self.store.as_ref())
+        else {
+            return Ok(None);
+        };
+        let labels_read = labels.join("|");
+        let scan_op: Box<dyn Operator> = Box::new(
+            super::ScanOperator::with_any_label(
+                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                labels,
+            )
+            .with_transaction_context(self.viewing_epoch, self.transaction_id),
+        );
+        // PROFILE names the labels the scan reads.
+        let read = LogicalOperator::NodeScan(NodeScanOp {
+            variable: scan.variable.clone(),
+            label: Some(labels_read),
+            input: None,
+        });
+        let (scan_op, columns) =
+            self.maybe_profile(Ok((scan_op, vec![scan.variable.clone()])), &read)?;
+        let variable_columns: HashMap<String, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+        let predicate = ExpressionPredicate::new(
+            self.convert_expression(&filter.predicate)?,
+            variable_columns,
+            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+        )
+        .with_transaction_context(self.viewing_epoch, self.transaction_id)
+        .with_session_context(self.session_context.clone());
+        Ok(Some((
+            Box::new(FilterOperator::new(scan_op, Box::new(predicate))),
+            columns,
+        )))
+    }
+
     /// The nodes an index lookup found that meet `predicate`, as the single
     /// column `columns`: the lookup finds every node `=` may find equal, the
     /// predicate decides.
@@ -1250,6 +1309,9 @@ pub(crate) fn scan_hint(
         && super::scan::search_index_covers(predicate, variable, [label, label], store)
     {
         return None;
+    }
+    if current && let Some(labels) = super::scan::label_union(predicate, scan, store) {
+        return Some(PushdownHint::LabelUnion { labels });
     }
     scan.label.as_ref().map(|_| PushdownHint::LabelFirst)
 }

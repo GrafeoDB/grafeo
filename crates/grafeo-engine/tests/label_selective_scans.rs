@@ -1009,5 +1009,134 @@ fn a_past_epoch_keeps_the_full_scan_for_a_label_in_where() {
             ["NodeScan (n:*)"],
             "{language:?} at the epoch before:\n{then_plan}"
         );
+        session.set_viewing_epoch(before);
+        let or_plan = plan_text(
+            &session,
+            language,
+            "EXPLAIN MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id",
+        );
+        session.clear_viewing_epoch();
+        assert!(
+            !or_plan.contains("[labels:"),
+            "{language:?} an OR of labels at the epoch before:\n{or_plan}"
+        );
+    }
+}
+
+/// An `OR` of labels in `WHERE` (`n:Tag OR n:Topic`, `'Tag' IN labels(n) OR
+/// ...`, `any(l IN labels(n) WHERE l IN [...])`) reads the nodes of those
+/// labels, each once (`t0` has both), and `EXPLAIN` shows the labels. The rows
+/// are those of the predicate.
+#[test]
+fn an_or_of_labels_reads_the_nodes_of_those_labels() {
+    let db = skewed(false);
+    let session = db.session();
+    let tags_and_topics = ids(&["t0", "t1", "t2", "u1", "u2"]);
+    for language in LANGUAGES {
+        for (query, expected, hint) in [
+            (
+                "MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id",
+                tags_and_topics.clone(),
+                "[labels: Tag|Topic]",
+            ),
+            (
+                "MATCH (n) WHERE 'Tag' IN labels(n) OR 'Topic' IN labels(n) RETURN n.id",
+                tags_and_topics.clone(),
+                "[labels: Tag|Topic]",
+            ),
+            (
+                "MATCH (n) WHERE any(l IN labels(n) WHERE l IN ['Topic', 'Tag']) RETURN n.id",
+                tags_and_topics.clone(),
+                "[labels: Topic|Tag]",
+            ),
+            (
+                "MATCH (n) WHERE (n:Tag OR n:Topic) AND n.id <> 't1' RETURN n.id",
+                ids(&["t0", "t2", "u1", "u2"]),
+                "[labels: Tag|Topic]",
+            ),
+            (
+                "MATCH (n) WHERE n:Tag OR n:Missing OR n:Tag RETURN n.id",
+                ids(&["t0", "t1", "t2"]),
+                "[labels: Tag|Missing]",
+            ),
+        ] {
+            assert_eq!(
+                sorted(&session, language, query, &[]),
+                expected,
+                "{language:?} `{query}`"
+            );
+            let plan = plan_text(&session, language, &format!("EXPLAIN {query}"));
+            assert!(plan.contains(hint), "{language:?} `{query}`:\n{plan}");
+        }
+        assert_eq!(
+            sorted(
+                &session,
+                language,
+                "MATCH (n) WHERE n:Repository OR n:Tag RETURN n.id",
+                &[]
+            )
+            .len(),
+            REPOSITORY_ONLY + BOTH + 3,
+            "{language:?}"
+        );
+        let profile = plan_text(
+            &session,
+            language,
+            "PROFILE MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id",
+        );
+        let scan = scans(&profile);
+        assert!(
+            scan.len() == 1
+                && scan[0].starts_with("Scan (n:Tag|Topic)")
+                && scan[0].contains("rows=5 "),
+            "{language:?} reads the five Tag and Topic nodes, not every node:
+{profile}"
+        );
+    }
+}
+
+/// An `OR` of labels that hold more than half the nodes reads every node: a
+/// scan of all of them is cheaper than the labels' lists.
+#[test]
+fn an_or_of_large_labels_keeps_the_full_scan() {
+    let db = skewed(false);
+    let session = db.session();
+    for language in LANGUAGES {
+        let query = "MATCH (n) WHERE n:Graph OR n:Repository RETURN count(n)";
+        let plan = plan_text(&session, language, &format!("EXPLAIN {query}"));
+        assert!(!plan.contains("[labels:"), "{language:?}:\n{plan}");
+        assert_eq!(
+            run(&session, language, query, &[]),
+            [[Value::Int64(
+                i64::try_from(GRAPH_ONLY + BOTH + REPOSITORY_ONLY).unwrap()
+            )]],
+            "{language:?}"
+        );
+    }
+}
+
+/// An open transaction reads the labels it changed through an `OR` of labels:
+/// a node it gave `Tag` is found, one it took `Topic` from is not.
+#[test]
+fn an_or_of_labels_sees_the_labels_a_transaction_changed() {
+    let db = skewed(false);
+    for language in LANGUAGES {
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session.execute("INSERT (:Tag {id: 'new'})").unwrap();
+        session
+            .execute_cypher("MATCH (n {id: 'u1'}) REMOVE n:Topic")
+            .unwrap();
+        assert_eq!(
+            sorted(
+                &session,
+                language,
+                "MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id",
+                &[]
+            ),
+            ids(&["new", "t0", "t1", "t2", "u2"]),
+            "{language:?}"
+        );
+        session.rollback().unwrap();
     }
 }

@@ -223,6 +223,22 @@ pub trait GraphStore: Send + Sync {
     /// Returns node IDs with a specific label.
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId>;
 
+    /// Returns the IDs of the nodes with at least one of `labels`, in ID
+    /// order and each once, as [`nodes_by_label`](Self::nodes_by_label)
+    /// finds them.
+    ///
+    /// The default merges the label lists; a store that keeps labels as
+    /// bitmaps can answer it with their union.
+    fn nodes_with_any_label(&self, labels: &[&str]) -> Vec<NodeId> {
+        let mut ids: Vec<NodeId> = labels
+            .iter()
+            .flat_map(|label| self.nodes_by_label(label))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// Returns the number of non-deleted nodes with a specific label.
     ///
     /// Default falls back to `self.nodes_by_label(label).len()`; stores that

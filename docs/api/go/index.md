@@ -15,7 +15,7 @@ go get github.com/GrafeoDB/grafeo/crates/bindings/go
 
 - Go 1.22+
 - CGO enabled (`CGO_ENABLED=1`)
-- The `grafeo-c` shared library (`libgrafeo_c.so` / `libgrafeo_c.dylib` / `grafeo_c.dll`)
+- The `grafeo-c` shared library (`libgrafeo_c.so` / `libgrafeo_c.dylib` / `grafeo_c.dll`): download the `all` variant from a GitHub release (see [prebuilt libraries](../c/index.md#prebuilt-libraries)) or build it from source as below. The Go package calls every query language, so it does not link against the `default` variant
 
 ## Quick Start
 
@@ -182,7 +182,7 @@ batches, err := db.BatchVectorSearch("Doc", "emb", [][]float32{q1, q2}, 10, 0,
 ## Building the Shared Library
 
 ```bash
-cargo build --release -p grafeo-c --features full
+cargo build --release -p grafeo-c --features lpg,rdf,analytics,ai
 ```
 
 ## Links

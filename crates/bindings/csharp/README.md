@@ -33,9 +33,9 @@ tx.Commit(); // rolls back automatically if not reached
 
 ## Building from Source
 
-1. Build the Grafeo C library:
+1. Build the Grafeo C library with every profile, as the NuGet package has it (without `--features`, the Cypher, Gremlin, GraphQL, SPARQL and SQL/PGQ calls fail with `EntryPointNotFoundException`):
    ```bash
-   cargo build --release -p grafeo-c
+   cargo build --release -p grafeo-c --features lpg,rdf,analytics,ai
    ```
 
 2. Copy the native library to the test directory:

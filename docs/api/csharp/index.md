@@ -13,7 +13,7 @@ Complete reference for the `Grafeo` NuGet package, .NET 8 bindings that wrap the
 dotnet add package Grafeo
 ```
 
-The NuGet package bundles pre-built native libraries for Windows (x64), Linux (x64, arm64) and macOS (x64, arm64). No separate native install is required.
+The NuGet package bundles pre-built native libraries for Windows (x64), Linux (x64, arm64) and macOS (x64, arm64), built with every feature of the C binding (the `all` variant of the [prebuilt libraries](../c/index.md#prebuilt-libraries)), so every query language works. No separate native install is required.
 
 ## Quick Start
 

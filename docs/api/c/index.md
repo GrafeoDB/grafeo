@@ -7,11 +7,37 @@ description: API reference for the grafeo-c FFI bindings.
 
 C-compatible FFI layer for embedding Grafeo in any language. Used by the Go bindings via CGO, the C# bindings via P/Invoke, and the Dart bindings via dart:ffi.
 
+## Prebuilt Libraries
+
+Every [GitHub release](https://github.com/GrafeoDB/grafeo/releases) has the `grafeo-c` library for each platform in two feature variants:
+
+| Variant | Contents |
+| --- | --- |
+| `default` | The default features: GQL, vector, text and hybrid search, change data capture, graph algorithms, persistence |
+| `all` | Every profile of the C binding (`lpg`, `rdf`, `analytics`, `ai`): adds Cypher, Gremlin, SQL/PGQ, SPARQL, GraphQL, the RDF triple store and JSON Lines and Parquet import |
+
+The assets are named `grafeo-c-<tag>-<target>-<variant>.<ext>`:
+
+| Platform | Default | All features |
+| --- | --- | --- |
+| Linux x64 | `grafeo-c-<tag>-x86_64-unknown-linux-gnu-default.tar.gz` | `grafeo-c-<tag>-x86_64-unknown-linux-gnu-all.tar.gz` |
+| Linux arm64 | `grafeo-c-<tag>-aarch64-unknown-linux-gnu-default.tar.gz` | `grafeo-c-<tag>-aarch64-unknown-linux-gnu-all.tar.gz` |
+| macOS x64 | `grafeo-c-<tag>-x86_64-apple-darwin-default.tar.gz` | `grafeo-c-<tag>-x86_64-apple-darwin-all.tar.gz` |
+| macOS arm64 | `grafeo-c-<tag>-aarch64-apple-darwin-default.tar.gz` | `grafeo-c-<tag>-aarch64-apple-darwin-all.tar.gz` |
+| Windows x64 | `grafeo-c-<tag>-x86_64-pc-windows-msvc-default.zip` | `grafeo-c-<tag>-x86_64-pc-windows-msvc-all.zip` |
+
+`<tag>` is the release tag, for example `v0.6.0`. Each archive holds the shared library (`libgrafeo_c.so`, `libgrafeo_c.dylib`, or `grafeo_c.dll` with its import library `grafeo_c.dll.lib`), `grafeo.h`, the README, the license and `FEATURES.txt`, which lists the features the library was built with. `grafeo.h` declares every function, and the `all` library exports all of them. The `default` library lacks the Cypher, Gremlin, SQL/PGQ, SPARQL and GraphQL calls (`grafeo_execute_cypher` and the like, with their `_with_params` forms), so linking a program that calls them against it fails. Use the `all` variant when in doubt. `checksums.txt` in the release lists the SHA-256 of every archive.
+
+The `grafeo-<tag>-<target>` archives in the same release hold the CLI, `grafeo.h` and the `default` library. The C# NuGet package bundles the `all` library. No variant has in-process embedding generation (`embed`), which stays opt-in.
+
 ## Building
 
 ```bash
-cargo build --release -p grafeo-c --features full
+# All profiles of the C binding, like the `all` release variant
+cargo build --release -p grafeo-c --features lpg,rdf,analytics,ai
 ```
+
+Without `--features` the build has the default features, like the `default` variant.
 
 Output:
 

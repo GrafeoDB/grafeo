@@ -2,11 +2,15 @@
 
 C FFI bindings for [Grafeo](https://grafeo.dev), a high-performance, embeddable graph database with a Rust core.
 
+## Prebuilt Libraries
+
+Every [GitHub release](https://github.com/GrafeoDB/grafeo/releases) has the library with `grafeo.h` for Linux and macOS (x64 and arm64) and Windows (x64), in two variants: `grafeo-c-<tag>-<target>-default` (the default features) and `grafeo-c-<tag>-<target>-all` (every profile: `lpg`, `rdf`, `analytics`, `ai`, so every query language). `FEATURES.txt` in each archive lists the features of its library. A function that `grafeo.h` declares but whose feature the library lacks is not exported. See the [C API docs](https://grafeo.dev/api/c/#prebuilt-libraries).
+
 ## Building
 
 ```bash
-# From the Grafeo repository root:
-cargo build --release -p grafeo-c --features full
+# From the Grafeo repository root, with every profile of the C binding:
+cargo build --release -p grafeo-c --features lpg,rdf,analytics,ai
 
 # Output:
 #   target/release/libgrafeo_c.so      (Linux)

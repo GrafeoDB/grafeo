@@ -21,7 +21,7 @@ dependencies:
 dart pub get
 ```
 
-The package requires the `grafeo_c` shared library at runtime. Place `libgrafeo_c.so` (Linux), `libgrafeo_c.dylib` (macOS) or `grafeo_c.dll` (Windows) in a location visible to your application. You can also pass a custom path via the `libraryPath` parameter on factory constructors.
+The package requires the `grafeo_c` shared library at runtime. Place `libgrafeo_c.so` (Linux), `libgrafeo_c.dylib` (macOS) or `grafeo_c.dll` (Windows) in a location visible to your application. You can also pass a custom path via the `libraryPath` parameter on factory constructors. Every GitHub release has the library for each desktop platform, in a `default` and an `all` features variant (see [prebuilt libraries](../c/index.md#prebuilt-libraries)).
 
 ## Quick Start
 

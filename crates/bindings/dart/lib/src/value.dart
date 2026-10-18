@@ -1,7 +1,7 @@
 /// Bidirectional conversion between Dart types and Grafeo's JSON wire format.
 ///
-/// Follows the `grafeo-bindings-common` temporal markers:
-/// `$timestamp_us`, `$date`, `$time`, `$duration`.
+/// Follows the `grafeo-bindings-common` markers: `$timestamp_us`, `$date`,
+/// `$time`, `$duration` and `$decimal` ([GrafeoDecimal]).
 library;
 
 import 'dart:convert';
@@ -32,6 +32,7 @@ dynamic _encodeValue(dynamic value) {
     int i => i,
     double d => d,
     String s => s,
+    GrafeoDecimal d => {r'$decimal': d.text},
     DateTime dt => {r'$timestamp_us': dt.toUtc().microsecondsSinceEpoch},
     Duration dur => {r'$duration': _formatIsoDuration(dur)},
     Float32List vec => vec.toList(),
@@ -156,6 +157,10 @@ dynamic _decodeValue(dynamic value) {
 }
 
 dynamic _decodeMap(Map m) {
+  // An exact decimal: the `$decimal` tag as the map's only key
+  if (m.length == 1 && m[r'$decimal'] is String) {
+    return GrafeoDecimal(m[r'$decimal'] as String);
+  }
   // Check for temporal markers from grafeo-bindings-common
   if (m.containsKey(r'$timestamp_us')) {
     final us = m[r'$timestamp_us'];

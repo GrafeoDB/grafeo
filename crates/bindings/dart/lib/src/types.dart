@@ -154,3 +154,52 @@ class VectorResult {
   @override
   String toString() => 'VectorResult(nodeId: $nodeId, distance: $distance)';
 }
+
+/// An exact decimal from Grafeo: up to 38 digits, kept as its text with the
+/// scale it was written with (`1.50`).
+///
+/// Equal values are equal whatever their scale (`1.50` equals `1.5`). As a
+/// query parameter it is passed exactly; Dart has no decimal type of its own,
+/// so [toDouble] is the nearest double.
+final class GrafeoDecimal {
+  /// A decimal from its text: `[+-]digits[.digits]`.
+  ///
+  /// Throws a [FormatException] when [text] is not a decimal number.
+  GrafeoDecimal(this.text) {
+    if (!_pattern.hasMatch(text)) {
+      throw FormatException('not a decimal number', text);
+    }
+  }
+
+  /// The text with its scale, as Grafeo writes it.
+  final String text;
+
+  static final _pattern = RegExp(r'^[+-]?(\d+(\.\d*)?|\.\d+)$');
+
+  /// The nearest double.
+  double toDouble() => double.parse(text);
+
+  @override
+  String toString() => text;
+
+  @override
+  bool operator ==(Object other) =>
+      other is GrafeoDecimal && _normalized(other.text) == _normalized(text);
+
+  @override
+  int get hashCode => _normalized(text).hashCode;
+
+  /// The value without leading or trailing zeros: one text per value.
+  static String _normalized(String text) {
+    final negative = text.startsWith('-');
+    final body =
+        text.startsWith('-') || text.startsWith('+') ? text.substring(1) : text;
+    final point = body.indexOf('.');
+    final integer = (point < 0 ? body : body.substring(0, point))
+        .replaceFirst(RegExp('^0+'), '');
+    final fraction = (point < 0 ? '' : body.substring(point + 1))
+        .replaceFirst(RegExp(r'0+$'), '');
+    if (integer.isEmpty && fraction.isEmpty) return '0';
+    return '${negative ? '-' : ''}$integer.$fraction';
+  }
+}

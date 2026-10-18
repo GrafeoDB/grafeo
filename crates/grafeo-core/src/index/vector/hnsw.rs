@@ -1410,7 +1410,8 @@ impl HnswIndex {
                 distance: fc.distance,
             })
             .collect();
-        result_vec.sort_by_key(|a| OrderedFloat(a.distance));
+        // Equal distances by ascending id, not in the heap's order
+        result_vec.sort_by_key(|a| (OrderedFloat(a.distance), a.id));
         result_vec
     }
 
@@ -1525,7 +1526,8 @@ impl HnswIndex {
                 distance: fc.distance,
             })
             .collect();
-        result_vec.sort_by_key(|a| OrderedFloat(a.distance));
+        // Equal distances by ascending id, not in the heap's order
+        result_vec.sort_by_key(|a| (OrderedFloat(a.distance), a.id));
         result_vec
     }
 
@@ -2547,6 +2549,39 @@ mod tests {
         // k=10 but only 2 vectors
         let results = index.search(&[1.0, 0.0, 0.0], 10, &accessor);
         assert_eq!(results.len(), 2);
+    }
+
+    /// Nodes at the same distance rank by ascending id, with and without a
+    /// filter, so a cut inside the tie keeps the lowest ids of the beam
+    /// (#619: the order the result heap gave them decided it).
+    #[test]
+    fn tied_distances_rank_by_ascending_node_id() {
+        let config = HnswConfig::new(2, DistanceMetric::Euclidean);
+        let index = HnswIndex::with_seed(config, 42);
+        let mut map: HashMap<NodeId, Arc<[f32]>> = HashMap::new();
+        // 7 is coprime with 30: every id from 1 to 30 once, scrambled.
+        let ids: Vec<NodeId> = (0..30_u64).map(|i| NodeId::new((i * 7) % 30 + 1)).collect();
+        for id in &ids {
+            map.insert(*id, vec![1.0, 0.0].into());
+        }
+        let accessor = make_accessor(&map);
+        for id in &ids {
+            index.insert(*id, &[1.0, 0.0], &accessor);
+        }
+
+        let found = |results: Vec<(NodeId, f32)>| -> Vec<u64> {
+            results.into_iter().map(|(id, _)| id.as_u64()).collect()
+        };
+        // ef 64 holds all 30 nodes, so the beam holds the whole tie.
+        let results = index.search_with_ef(&[0.0, 0.0], 5, 64, &accessor);
+        assert_eq!(found(results), vec![1, 2, 3, 4, 5]);
+        let even: HashSet<NodeId> = ids
+            .iter()
+            .copied()
+            .filter(|id| id.as_u64() % 2 == 0)
+            .collect();
+        let results = index.search_with_ef_and_filter(&[0.0, 0.0], 3, 64, &even, &accessor);
+        assert_eq!(found(results), vec![2, 4, 6]);
     }
 
     #[test]

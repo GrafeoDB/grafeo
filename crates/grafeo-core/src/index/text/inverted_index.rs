@@ -2,6 +2,7 @@
 
 use super::options::{BM25Config, TextIndexOptions};
 use super::tokenizer::{OptionsTokenizer, Tokenizer};
+use crate::index::ranking::by_descending_score;
 use grafeo_common::types::NodeId;
 use grafeo_common::utils::error::{Error, Result};
 use std::collections::{HashMap, HashSet};
@@ -301,17 +302,20 @@ impl InvertedIndex {
         scores
     }
 
-    /// The `k` best of `scores`, by descending score.
+    /// The `k` best of `scores`, by descending score, equal scores by
+    /// ascending node id: a cut inside a tie keeps its lowest ids.
     fn top(scores: HashMap<NodeId, f64>, k: usize) -> Vec<(NodeId, f64)> {
         let mut results: Vec<(NodeId, f64)> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(by_descending_score);
         results.truncate(k);
         results
     }
 
     /// Searches the index using BM25 scoring.
     ///
-    /// Returns up to `k` results sorted by descending BM25 score.
+    /// Returns up to `k` results sorted by descending BM25 score, equal
+    /// scores by ascending node id: a cut at `k` inside a tie keeps its
+    /// lowest ids.
     pub fn search(&self, query: &str, k: usize) -> Vec<(NodeId, f64)> {
         Self::top(self.scores(query, |_| true), k)
     }
@@ -620,6 +624,40 @@ mod tests {
             "{:?}",
             result.map(|(length, _)| length)
         );
+    }
+
+    /// 200 identical documents, inserted in a scrambled id order, plus one
+    /// that scores higher (node 1000): every search ranks the tie group by
+    /// ascending id, and a cut inside it keeps the lowest ids, on every
+    /// call (#619: hash order decided both).
+    #[test]
+    fn tied_scores_rank_by_ascending_node_id() {
+        let mut index = InvertedIndex::new(BM25Config::default());
+        for i in 0..200_u64 {
+            // 7 is coprime with 200: every id from 1 to 200 once.
+            index.insert(NodeId::new((i * 7) % 200 + 1), "Amsterdam canals");
+        }
+        index.insert(NodeId::new(1000), "canals canals");
+        let ids = |results: Vec<(NodeId, f64)>| -> Vec<u64> {
+            results.into_iter().map(|(id, _)| id.as_u64()).collect()
+        };
+        let best_then = |tied: std::ops::RangeInclusive<u64>| -> Vec<u64> {
+            std::iter::once(1000).chain(tied).collect()
+        };
+
+        for _ in 0..10 {
+            assert_eq!(ids(index.search("canals", 6)), best_then(1..=5));
+            assert_eq!(ids(index.search("canals", usize::MAX)), best_then(1..=200));
+            assert_eq!(
+                ids(index.search_with_threshold("canals", 0.0)),
+                best_then(1..=200)
+            );
+            let even: HashSet<NodeId> = (1..=200).filter(|i| i % 2 == 0).map(NodeId::new).collect();
+            assert_eq!(
+                ids(index.search_with_filter("canals", 4, &even)),
+                vec![2, 4, 6, 8]
+            );
+        }
     }
 
     #[test]

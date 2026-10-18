@@ -290,7 +290,9 @@ impl super::GrafeoDB {
     /// Searches a text index using BM25 scoring.
     ///
     /// Returns up to `k` results as `(NodeId, score)` pairs sorted by
-    /// descending relevance score (higher = more relevant). BM25 scores
+    /// descending relevance score (higher = more relevant), equal scores
+    /// by ascending node id, so a cut at `k` inside a tie keeps its lowest
+    /// ids and identical calls return the same list. BM25 scores
     /// are unbounded positive floats whose magnitude depends on corpus
     /// statistics, so compare them only within a single query's results.
     ///
@@ -352,7 +354,8 @@ impl super::GrafeoDB {
     /// # Returns
     ///
     /// `(NodeId, score)` pairs sorted by fused score **descending**
-    /// (higher = more relevant). These are fusion scores, **not**
+    /// (higher = more relevant), equal scores by ascending node id, so
+    /// identical calls return the same list. These are fusion scores, **not**
     /// distances. With RRF, scores are `sum(1 / (k + rank))` across
     /// sources. With weighted fusion, scores are min-max normalized
     /// and combined with explicit weights.

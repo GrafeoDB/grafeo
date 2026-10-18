@@ -1515,4 +1515,10 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages)
 
+# BX: equal text search scores rank by ascending node id, so a cut at k inside a tie keeps
+#     the lowest id (#619; hash order decided it): 'graph database' (Amsterdam) and 'graph
+#     theory' (Paris) score the same for 'graph'
+ordered("BX1", "CALL grafeo.search.text('Doc', 'body', 'graph', 1) YIELD node_id RETURN node_id", BOTH, "search")
+ordered("BX2", "CALL grafeo.search.text('Doc', 'body', 'graph', 2) YIELD node_id RETURN node_id", BOTH, "search")
+
 # fmt: on

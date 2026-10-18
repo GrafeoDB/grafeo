@@ -517,6 +517,32 @@ mod text {
             .unwrap();
         assert!(!r2.is_empty(), "r2 is empty");
     }
+
+    /// 60 articles with the same title score the same: every call returns
+    /// the same list, the tie by ascending node id, and the cut at k keeps
+    /// the lowest ids (#619: hash order decided both).
+    #[test]
+    fn text_search_ties_keep_the_lowest_node_ids() {
+        let db = GrafeoDB::new_in_memory();
+        let mut ids = Vec::new();
+        for _ in 0..60 {
+            let id = db.create_node(&["Article"]).unwrap();
+            db.set_node_property(id, "title", Value::String("Amsterdam canals".into()))
+                .unwrap();
+            ids.push(id);
+        }
+        db.create_text_index("Article", "title")
+            .expect("create text index");
+        ids.sort_unstable();
+
+        for _ in 0..10 {
+            let results = db
+                .text_search("Article", "title", "canals", 7, None)
+                .unwrap();
+            let found: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+            assert_eq!(found, ids[..7]);
+        }
+    }
 }
 
 // ============================================================================
@@ -841,6 +867,62 @@ mod hybrid {
                 s.contains("Rust graph database"),
                 "with 70% vector weight, closest vector should rank first, got: {s}"
             );
+        }
+    }
+
+    /// Half the documents match the text query only, the other half are
+    /// the vector query's nearest only, all at the same score in their own
+    /// search. The node at rank r of the text list ties in RRF with the one
+    /// at rank r of the vector list: every call returns the same list, each
+    /// tie with the lower id first, and the cut at k keeps the lower id of
+    /// the tie it splits (#619: hash order decided both).
+    #[test]
+    fn hybrid_search_ties_keep_the_lowest_node_ids() {
+        let db = GrafeoDB::new_in_memory();
+        let mut text_ids = Vec::new();
+        let mut vector_ids = Vec::new();
+        for i in 0..60 {
+            let id = db.create_node(&["Doc"]).unwrap();
+            if i % 2 == 0 {
+                db.set_node_property(id, "content", Value::String("Berlin canals".into()))
+                    .unwrap();
+                text_ids.push(id);
+            } else {
+                db.set_node_property(id, "content", Value::String("Prague".into()))
+                    .unwrap();
+                db.set_node_property(id, "emb", vec3(1.0, 0.0, 0.0))
+                    .unwrap();
+                vector_ids.push(id);
+            }
+        }
+        db.create_text_index("Doc", "content")
+            .expect("create text index");
+        db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
+            .expect("create vector index");
+        text_ids.sort_unstable();
+        vector_ids.sort_unstable();
+        let expected: Vec<_> = text_ids
+            .iter()
+            .zip(&vector_ids)
+            .flat_map(|(t, v)| [(*t).min(*v), (*t).max(*v)])
+            .take(7)
+            .collect();
+
+        for _ in 0..10 {
+            let results = db
+                .hybrid_search(
+                    "Doc",
+                    "content",
+                    "emb",
+                    "canals",
+                    Some(&[1.0, 0.0, 0.0]),
+                    7,
+                    None,
+                    None,
+                )
+                .expect("hybrid search");
+            let found: Vec<_> = results.iter().map(|(id, _)| *id).collect();
+            assert_eq!(found, expected);
         }
     }
 }

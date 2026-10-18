@@ -521,7 +521,7 @@ mod tests {
                 assert!(previous.is_none_or(|p| p == function), "{alias}");
             }
         }
-        assert_eq!(BuiltinFunction::ALL.len(), 108);
+        assert_eq!(BuiltinFunction::ALL.len(), 109);
     }
 
     #[test]

@@ -463,3 +463,10 @@ BV5|gql 118ed67a07 A decimal with an integer is a decimal, with a float a float 
 BV6|gql cda598c773 A decimal division gives 16 digits (#610); it was a float division.
 BV7|gql ae96677ab7 ceil, floor and round keep a decimal, sqrt gives a float (#610); all were floats.
 BV11|gql d993b88255 1.0 / 0 is a decimal division by zero, null (#610); it was a float infinity.
+BW1|cypher d9cb9415ca toDecimal is a new function (#610); it was an unknown function.
+BW1|gql d9cb9415ca toDecimal is a new function (#610); it was an unknown function.
+BW2|cypher d00603bc87 toDecimal is a new function (#610); it was an unknown function.
+BW2|gql d00603bc87 toDecimal is a new function (#610); it was an unknown function.
+BW3|gql b0e004afd3 CAST to DECIMAL and DEC is new (#610); it was an unsupported CAST type.
+BW4|gql 0b8496a49f CAST to DECIMAL and DEC is new (#610); it was an unsupported CAST type.
+BW5|gql 8d69e57bee CAST to DECIMAL and DEC is new (#610); it was an unsupported CAST type.

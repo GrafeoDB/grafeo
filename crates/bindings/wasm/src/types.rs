@@ -105,6 +105,16 @@ pub fn value_to_js(value: &Value) -> JsValue {
             );
             wrapper.into()
         }
+        // `{ $decimal: "1.50" }`: the text with its scale, as parameters take it.
+        Value::Decimal(d) => {
+            let wrapper = Object::new();
+            let _ = Reflect::set(
+                &wrapper,
+                &JsValue::from_str("$decimal"),
+                &JsValue::from_str(&d.to_string()),
+            );
+            wrapper.into()
+        }
         _ => JsValue::from_str(&value.to_string()),
     }
 }

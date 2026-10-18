@@ -23,6 +23,26 @@ fn test_database_creation() {
     assert_eq!(db.edge_count(), 0);
 }
 
+/// A decimal parameter `{ "$decimal": "0.10" }` comes back from arithmetic as
+/// a tagged object with its scale.
+#[wasm_bindgen_test]
+fn test_decimals_round_trip_as_tagged_objects() {
+    let db = Database::new().expect("create db");
+    let params = to_js(&serde_json::json!({
+        "a": { "$decimal": "0.10" },
+        "b": { "$decimal": "0.2" },
+    }))
+    .unwrap();
+    let rows = db
+        .execute_with_params("RETURN $a + $b AS total", params)
+        .expect("query");
+    let rows: serde_json::Value = serde_wasm_bindgen::from_value(rows).unwrap();
+    assert_eq!(
+        rows,
+        serde_json::json!([{ "total": { "$decimal": "0.30" } }])
+    );
+}
+
 #[wasm_bindgen_test]
 fn test_insert_and_query() {
     let db = Database::new().expect("create db");

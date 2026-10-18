@@ -375,6 +375,21 @@ describe('GQL queries', () => {
     db.close()
   })
 
+  it('should pass decimals as { $decimal } both ways, keeping the scale', async () => {
+    const db = GrafeoDB.create()
+    const sum = await db.execute('RETURN $a + $b AS total', {
+      a: { $decimal: '0.10' },
+      b: { $decimal: '0.2' },
+    })
+    expect(sum.scalar()).toEqual({ $decimal: '0.30' })
+    const back = await db.execute('RETURN $d AS d', { d: sum.scalar() })
+    expect(back.scalar()).toEqual({ $decimal: '0.30' })
+    // An object with other keys is a map, not a decimal.
+    const map = await db.execute('RETURN $m AS m', { m: { $decimal: '1', other: 2 } })
+    expect(map.scalar()).toEqual({ $decimal: '1', other: 2 })
+    db.close()
+  })
+
   it('should return scalar value', async () => {
     const db = GrafeoDB.create()
     await db.execute("INSERT (:Person {name: 'Alix'})")

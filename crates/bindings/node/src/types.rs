@@ -20,7 +20,7 @@ use std::sync::Arc;
 use napi::bindgen_prelude::*;
 use napi::{JsDate, JsString, JsValue, ValueType, sys};
 
-use grafeo_common::types::{PropertyKey, Timestamp, Value};
+use grafeo_common::types::{Decimal, PropertyKey, Timestamp, Value};
 
 /// Converts a JavaScript value to a Grafeo Value.
 pub fn js_to_value(env: &Env, val: Unknown<'_>) -> Result<Value> {
@@ -143,6 +143,13 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
         let key_str = key.into_utf8()?.into_owned()?;
         let value: Unknown<'_> = obj.get_named_property(&key_str)?;
         map.insert(PropertyKey::new(key_str), js_to_value(env, value)?);
+    }
+    // `{ $decimal: "1.50" }` alone is a decimal, with its scale.
+    if map.len() == 1
+        && let Some(Value::String(text)) = map.get(&PropertyKey::new("$decimal"))
+        && let Ok(decimal) = Decimal::parse(text)
+    {
+        return Ok(Value::Decimal(decimal));
     }
     Ok(Value::Map(Arc::new(map)))
 }
@@ -333,6 +340,19 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             check_napi(unsafe {
                 sys::napi_set_named_property(env, obj, value_key.as_ptr(), total_val)
             })?;
+            Ok(obj)
+        }
+        // `{ $decimal: "1.50" }`: the text with its scale, as parameters take it.
+        Value::Decimal(d) => {
+            let mut obj = std::ptr::null_mut();
+            // SAFETY: env is valid; napi_create_object writes to our out-pointer
+            check_napi(unsafe { sys::napi_create_object(env, &raw mut obj) })?;
+            let text = d.to_string();
+            // SAFETY: env is a valid napi_env passed by the caller
+            let text_val = unsafe { <&str as ToNapiValue>::to_napi_value(env, &text) }?;
+            let key = CString::new("$decimal").expect("static string has no null bytes");
+            // SAFETY: env, obj, and text_val are valid
+            check_napi(unsafe { sys::napi_set_named_property(env, obj, key.as_ptr(), text_val) })?;
             Ok(obj)
         }
         Value::OnCounter { pos, neg } => {

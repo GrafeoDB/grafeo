@@ -19,7 +19,7 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDateTime, PyDict, PyFloat, PyList};
 
-use grafeo_common::types::{PropertyKey, Timestamp, Value};
+use grafeo_common::types::{Decimal, PropertyKey, Timestamp, Value};
 
 use crate::error::{PyGrafeoError, PyGrafeoResult};
 
@@ -132,6 +132,26 @@ impl PyValue {
 
         if let Ok(v) = obj.extract::<i64>() {
             return Ok(Value::Int64(v));
+        }
+
+        // decimal.Decimal before float: it converts to a float, which would
+        // lose its exact value. `format(d, 'f')` writes `1E+3` as `1000`.
+        let decimal_type = obj
+            .py()
+            .import("decimal")
+            .and_then(|module| module.getattr("Decimal"))
+            .map_err(|e| PyGrafeoError::Type(format!("decimal module unavailable: {e}")))?;
+        if obj.is_instance(&decimal_type).unwrap_or(false) {
+            let text: String = obj
+                .py()
+                .import("builtins")
+                .and_then(|builtins| builtins.getattr("format"))
+                .and_then(|format| format.call1((obj, "f")))
+                .and_then(|text| text.extract())
+                .map_err(|e| PyGrafeoError::Type(format!("cannot read decimal {obj}: {e}")))?;
+            return Decimal::parse(&text).map(Value::Decimal).map_err(|e| {
+                PyGrafeoError::Type(format!("decimal {obj} has no exact value here: {e}"))
+            });
         }
 
         if let Ok(v) = obj.extract::<f64>() {
@@ -253,6 +273,13 @@ impl PyValue {
             Value::Bytes(bytes) => PyBytes::new(py, bytes.as_ref()).unbind().into_any(),
             Value::Timestamp(ts) => utc_micros_to_datetime(py, ts.as_micros())
                 .map_or_else(|_| py.None(), |dt| dt.unbind().into_any()),
+            Value::Decimal(d) => {
+                let decimal_mod = py.import("decimal").expect("decimal module should exist");
+                decimal_mod
+                    .getattr("Decimal")
+                    .and_then(|class| class.call1((d.to_string(),)))
+                    .map_or_else(|_| py.None(), |value| value.unbind().into_any())
+            }
             Value::Date(d) => {
                 let datetime_mod = py.import("datetime").expect("datetime module should exist");
                 let date_class = datetime_mod

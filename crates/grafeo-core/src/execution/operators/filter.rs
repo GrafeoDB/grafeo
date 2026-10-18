@@ -10,8 +10,8 @@ use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
-    EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey, PropertyMap, TransactionId,
-    Value,
+    Decimal, DecimalError, EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey,
+    PropertyMap, TransactionId, Value,
 };
 #[cfg(feature = "regex")]
 use regex::Regex;
@@ -1642,6 +1642,7 @@ impl ExpressionPredicate {
                         let b = match other {
                             Value::Int64(i) => i.to_string(),
                             Value::Float64(f) => f.to_string(),
+                            Value::Decimal(d) => d.to_string(),
                             Value::Bool(b) => b.to_string(),
                             Value::Null => return Some(Value::Null),
                             _ => return None,
@@ -1671,7 +1672,13 @@ impl ExpressionPredicate {
                         combined.extend_from_slice(b);
                         Some(Value::List(combined.into()))
                     }
-                    _ => self.eval_arithmetic(left, right, i64::checked_add, |a, b| a + b),
+                    _ => self.eval_arithmetic(
+                        left,
+                        right,
+                        i64::checked_add,
+                        |a, b| a + b,
+                        Decimal::checked_add,
+                    ),
                 }
             }
             BinaryFilterOp::Sub => match (left, right) {
@@ -1704,19 +1711,37 @@ impl ExpressionPredicate {
                     )))
                 }
                 (Value::Duration(a), Value::Duration(b)) => Some(Value::Duration(a.sub(*b))),
-                _ => self.eval_arithmetic(left, right, i64::checked_sub, |a, b| a - b),
+                _ => self.eval_arithmetic(
+                    left,
+                    right,
+                    i64::checked_sub,
+                    |a, b| a - b,
+                    Decimal::checked_sub,
+                ),
             },
             BinaryFilterOp::Mul => match (left, right) {
                 (Value::Duration(d), Value::Int64(n)) | (Value::Int64(n), Value::Duration(d)) => {
                     Some(Value::Duration(d.mul(*n)))
                 }
-                _ => self.eval_arithmetic(left, right, i64::checked_mul, |a, b| a * b),
+                _ => self.eval_arithmetic(
+                    left,
+                    right,
+                    i64::checked_mul,
+                    |a, b| a * b,
+                    Decimal::checked_mul,
+                ),
             },
             BinaryFilterOp::Div => match (left, right) {
                 (Value::Duration(d), Value::Int64(n)) if *n != 0 => {
                     Some(Value::Duration(d.div(*n)))
                 }
-                _ => self.eval_arithmetic(left, right, i64::checked_div, |a, b| a / b),
+                _ => self.eval_arithmetic(
+                    left,
+                    right,
+                    i64::checked_div,
+                    |a, b| a / b,
+                    Decimal::checked_div,
+                ),
             },
             BinaryFilterOp::Mod => self.eval_modulo(left, right),
             // String operators
@@ -1833,18 +1858,36 @@ impl ExpressionPredicate {
         }
     }
 
+    /// An arithmetic operator on two numbers: integers give an integer
+    /// (`None` on overflow), a float makes it a float, and a decimal with a
+    /// decimal or an integer gives a decimal (`None` on overflow and division
+    /// by zero, as for integers).
     fn eval_arithmetic<F1, F2>(
         &self,
         left: &Value,
         right: &Value,
         int_op: F1,
         float_op: F2,
+        decimal_op: fn(&Decimal, &Decimal) -> Result<Decimal, DecimalError>,
     ) -> Option<Value>
     where
         F1: Fn(i64, i64) -> Option<i64>,
         F2: Fn(f64, f64) -> f64,
     {
         match (left, right) {
+            (Value::Decimal(a), Value::Decimal(b)) => decimal_op(a, b).ok().map(Value::Decimal),
+            (Value::Decimal(a), Value::Int64(b)) => decimal_op(a, &Decimal::from_i64(*b))
+                .ok()
+                .map(Value::Decimal),
+            (Value::Int64(a), Value::Decimal(b)) => decimal_op(&Decimal::from_i64(*a), b)
+                .ok()
+                .map(Value::Decimal),
+            (Value::Decimal(a), Value::Float64(b)) => {
+                Some(Value::Float64(float_op(a.to_f64(), *b)))
+            }
+            (Value::Float64(a), Value::Decimal(b)) => {
+                Some(Value::Float64(float_op(*a, b.to_f64())))
+            }
             (Value::Int64(a), Value::Int64(b)) => int_op(*a, *b).map(Value::Int64),
             (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a, *b))),
             (Value::Int64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a as f64, *b))),
@@ -1854,7 +1897,17 @@ impl ExpressionPredicate {
     }
 
     fn eval_modulo(&self, left: &Value, right: &Value) -> Option<Value> {
+        let decimal = |a: &Decimal, b: &Decimal| a.checked_rem(b).ok().map(Value::Decimal);
         match (left, right) {
+            (Value::Decimal(a), Value::Decimal(b)) => decimal(a, b),
+            (Value::Decimal(a), Value::Int64(b)) => decimal(a, &Decimal::from_i64(*b)),
+            (Value::Int64(a), Value::Decimal(b)) => decimal(&Decimal::from_i64(*a), b),
+            (Value::Decimal(a), Value::Float64(b)) if *b != 0.0 => {
+                Some(Value::Float64(a.to_f64() % b))
+            }
+            (Value::Float64(a), Value::Decimal(b)) if b.signum() != 0 => {
+                Some(Value::Float64(a % b.to_f64()))
+            }
             (Value::Int64(a), Value::Int64(b)) if *b != 0 => a.checked_rem(*b).map(Value::Int64),
             (Value::Float64(a), Value::Float64(b)) if *b != 0.0 => Some(Value::Float64(a % b)),
             (Value::Int64(a), Value::Float64(b)) if *b != 0.0 => {
@@ -2164,6 +2217,7 @@ impl ExpressionPredicate {
                     // reason: toInteger() intentionally truncates float to int per GQL spec
                     #[allow(clippy::cast_possible_truncation)]
                     Value::Float64(f) => Some(Value::Int64(f as i64)),
+                    Value::Decimal(d) => d.trunc_to_i64().map(Value::Int64),
                     Value::Bool(b) => Some(Value::Int64(i64::from(b))),
                     Value::String(s) => s.parse::<i64>().ok().map(Value::Int64),
                     _ => None,
@@ -2177,6 +2231,7 @@ impl ExpressionPredicate {
                 match val {
                     Value::Int64(i) => Some(Value::Float64(i as f64)),
                     Value::Float64(f) => Some(Value::Float64(f)),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64())),
                     Value::String(s) => s.parse::<f64>().ok().map(Value::Float64),
                     _ => None,
                 }
@@ -2894,6 +2949,7 @@ impl ExpressionPredicate {
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i.abs())),
                     Value::Float64(f) => Some(Value::Float64(f.abs())),
+                    Value::Decimal(d) => Some(Value::Decimal(d.abs())),
                     _ => None,
                 }
             }
@@ -2905,6 +2961,7 @@ impl ExpressionPredicate {
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i)),
                     Value::Float64(f) => Some(Value::Float64(f.ceil())),
+                    Value::Decimal(d) => Some(Value::Decimal(d.ceil())),
                     _ => None,
                 }
             }
@@ -2916,6 +2973,7 @@ impl ExpressionPredicate {
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i)),
                     Value::Float64(f) => Some(Value::Float64(f.floor())),
+                    Value::Decimal(d) => Some(Value::Decimal(d.floor())),
                     _ => None,
                 }
             }
@@ -2927,6 +2985,7 @@ impl ExpressionPredicate {
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i)),
                     Value::Float64(f) => Some(Value::Float64(f.round())),
+                    Value::Decimal(d) => Some(Value::Decimal(d.round())),
                     _ => None,
                 }
             }
@@ -2948,6 +3007,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i.signum())),
+                    Value::Decimal(d) => Some(Value::Int64(d.signum())),
                     Value::Float64(f) => {
                         if f > 0.0 {
                             Some(Value::Int64(1))
@@ -3845,6 +3905,7 @@ impl ExpressionPredicate {
             UnaryFilterOp::Neg => match val? {
                 Value::Int64(i) => i.checked_neg().map(Value::Int64),
                 Value::Float64(f) => Some(Value::Float64(-f)),
+                Value::Decimal(d) => Some(Value::Decimal(d.neg())),
                 _ => None,
             },
         }
@@ -3858,6 +3919,9 @@ impl ExpressionPredicate {
     fn values_equal(left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Null, Value::Null) => true,
+            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+                left.compare_decimal(right) == Some(std::cmp::Ordering::Equal)
+            }
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int64(a), Value::Int64(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => (a - b).abs() < f64::EPSILON,
@@ -3983,6 +4047,9 @@ impl ExpressionPredicate {
 
     fn compare_values(&self, left: &Value, right: &Value) -> Option<i32> {
         match (left, right) {
+            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+                left.compare_decimal(right).map(|o| o as i32)
+            }
             (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b) as i32),
             (Value::Float64(a), Value::Float64(b)) => {
                 if a < b {

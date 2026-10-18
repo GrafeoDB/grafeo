@@ -128,6 +128,9 @@ impl ColumnPredicate {
 
     fn compare_values(&self, left: &Value) -> bool {
         match (&left, &self.value) {
+            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => left
+                .compare_decimal(&self.value)
+                .is_some_and(|order| holds(self.op, order)),
             (Value::Int64(a), Value::Int64(b)) => match self.op {
                 CompareOp::Eq => a == b,
                 CompareOp::Ne => a != b,
@@ -283,6 +286,9 @@ impl PropertyPredicate {
 
     fn compare_values(&self, left: &Value) -> bool {
         match (left, &self.value) {
+            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => left
+                .compare_decimal(&self.value)
+                .is_some_and(|order| holds(self.op, order)),
             (Value::Int64(a), Value::Int64(b)) => match self.op {
                 CompareOp::Eq => a == b,
                 CompareOp::Ne => a != b,
@@ -1575,5 +1581,17 @@ mod tests {
             // Type mismatch should return false
             assert!(!pred.evaluate(&chunk, 0, 1));
         }
+    }
+}
+
+/// Whether `op` holds for two values in `order`.
+fn holds(op: CompareOp, order: std::cmp::Ordering) -> bool {
+    match op {
+        CompareOp::Eq => order.is_eq(),
+        CompareOp::Ne => order.is_ne(),
+        CompareOp::Lt => order.is_lt(),
+        CompareOp::Le => order.is_le(),
+        CompareOp::Gt => order.is_gt(),
+        CompareOp::Ge => order.is_ge(),
     }
 }

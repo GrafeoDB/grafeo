@@ -336,6 +336,109 @@ impl Decimal {
         Self::from_magnitude(magnitude, negative, scale)
     }
 
+    /// The remainder of the division toward zero, with the sign of `self`, at
+    /// the larger scale of the two: `7.5 % 2` is `1.5`.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::DivisionByZero`], or [`DecimalError::Overflow`] when
+    /// aligning the scales needs more than 38 digits.
+    pub fn checked_rem(&self, other: &Self) -> Result<Self, DecimalError> {
+        if other.mantissa() == 0 {
+            return Err(DecimalError::DivisionByZero);
+        }
+        let (left, right, scale) = self.aligned(other)?;
+        Self::new(left % right, scale)
+    }
+
+    /// The value with the opposite sign.
+    #[must_use]
+    pub fn neg(&self) -> Self {
+        // A mantissa below 10^38 in magnitude negates within range.
+        Self {
+            scale: self.scale,
+            mantissa: words(-self.mantissa()),
+        }
+    }
+
+    /// The absolute value.
+    #[must_use]
+    pub fn abs(&self) -> Self {
+        if self.mantissa() < 0 {
+            self.neg()
+        } else {
+            *self
+        }
+    }
+
+    /// -1, 0 or 1, as the sign of the value.
+    #[must_use]
+    pub fn signum(&self) -> i64 {
+        match self.mantissa().cmp(&0) {
+            Ordering::Less => -1,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        }
+    }
+
+    /// The integer part toward zero and whether a fraction was cut off, with
+    /// its sign: -1, 0 or 1.
+    fn truncated(&self) -> (i128, i128) {
+        let unit = pow10_signed(self.scale);
+        let mantissa = self.mantissa();
+        (mantissa / unit, (mantissa % unit).signum())
+    }
+
+    /// An integer at scale 0. With a fraction the integer part has at most
+    /// 37 digits, so one more stays within range.
+    fn whole(integer: i128) -> Self {
+        Self {
+            scale: 0,
+            mantissa: words(integer),
+        }
+    }
+
+    /// The greatest integer not above the value, at scale 0.
+    #[must_use]
+    pub fn floor(&self) -> Self {
+        let (integer, fraction) = self.truncated();
+        Self::whole(if fraction < 0 { integer - 1 } else { integer })
+    }
+
+    /// The least integer not below the value, at scale 0.
+    #[must_use]
+    pub fn ceil(&self) -> Self {
+        let (integer, fraction) = self.truncated();
+        Self::whole(if fraction > 0 { integer + 1 } else { integer })
+    }
+
+    /// The nearest integer, half away from zero, at scale 0.
+    #[must_use]
+    pub fn round(&self) -> Self {
+        let magnitude = round_off(self.mantissa().unsigned_abs(), self.scale);
+        let integer = magnitude.cast_signed();
+        Self::whole(if self.mantissa() < 0 {
+            -integer
+        } else {
+            integer
+        })
+    }
+
+    /// Compares with a float by the float's shortest round-trip text (the
+    /// float `1.5` equals `1.5`). NaN is greater than every decimal; the
+    /// infinities and floats past 38 digits order by their sign.
+    #[must_use]
+    pub fn cmp_f64(&self, value: f64) -> Ordering {
+        if value.is_nan() {
+            return Ordering::Less;
+        }
+        match Self::from_f64(value) {
+            Ok(other) => self.cmp(&other),
+            Err(_) if value > 0.0 => Ordering::Less,
+            Err(_) => Ordering::Greater,
+        }
+    }
+
     /// The decimal of an integer, at scale 0.
     #[must_use]
     pub fn from_i64(value: i64) -> Self {
@@ -783,6 +886,52 @@ mod tests {
         assert_eq!(d("-2.75").trunc_to_i64(), Some(-2));
         assert_eq!(d("2.75").trunc_to_i64(), Some(2));
         assert_eq!(d("99999999999999999999").trunc_to_i64(), None);
+    }
+
+    #[test]
+    fn signs_remainders_and_whole_numbers() {
+        assert_eq!(d("1.50").neg().to_string(), "-1.50");
+        assert_eq!(d("-2.345").abs().to_string(), "2.345");
+        assert_eq!(d("-2.345").signum(), -1);
+        assert_eq!(d("0.00").signum(), 0);
+        assert_eq!(d("7.5").checked_rem(&d("2")).unwrap().to_string(), "1.5");
+        assert_eq!(d("-7.5").checked_rem(&d("2")).unwrap().to_string(), "-1.5");
+        assert_eq!(d("1.50").checked_rem(&d("1")).unwrap().to_string(), "0.50");
+        assert_eq!(
+            d("1").checked_rem(&d("0")).unwrap_err(),
+            DecimalError::DivisionByZero
+        );
+        for (text, floor, ceil, round) in [
+            ("2.345", "2", "3", "2"),
+            ("-2.345", "-3", "-2", "-2"),
+            ("2.5", "2", "3", "3"),
+            ("-2.5", "-3", "-2", "-3"),
+            ("4", "4", "4", "4"),
+            ("4.00", "4", "4", "4"),
+        ] {
+            assert_eq!(d(text).floor().to_string(), floor, "floor {text}");
+            assert_eq!(d(text).ceil().to_string(), ceil, "ceil {text}");
+            assert_eq!(d(text).round().to_string(), round, "round {text}");
+        }
+    }
+
+    /// A float compares by its shortest round-trip text, so `1.5` equals the
+    /// float `1.5`; NaN comes after every decimal, and the infinities and
+    /// floats past 38 digits order by their sign.
+    #[test]
+    fn decimals_compare_with_floats() {
+        assert_eq!(d("1.5").cmp_f64(1.5), Ordering::Equal);
+        assert_eq!(d("0.1").cmp_f64(0.1), Ordering::Equal);
+        assert_eq!(d("1.49").cmp_f64(1.5), Ordering::Less);
+        assert_eq!(d("-1").cmp_f64(-1.5), Ordering::Greater);
+        assert_eq!(
+            d("99999999999999999999999999999999999999").cmp_f64(1e40),
+            Ordering::Less
+        );
+        assert_eq!(d("0").cmp_f64(-1e40), Ordering::Greater);
+        assert_eq!(d("0").cmp_f64(f64::NAN), Ordering::Less);
+        assert_eq!(d("0").cmp_f64(f64::INFINITY), Ordering::Less);
+        assert_eq!(d("0").cmp_f64(f64::NEG_INFINITY), Ordering::Greater);
     }
 
     #[test]

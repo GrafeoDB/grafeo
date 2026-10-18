@@ -218,6 +218,22 @@ impl Value {
         }
     }
 
+    /// The order of two numbers when at least one is a decimal: decimals
+    /// exactly, an integer as a decimal, a float by its shortest round-trip
+    /// text (see [`Decimal::cmp_f64`]). `None` when neither is a decimal, the
+    /// other is not a number, or the other is a NaN float.
+    #[must_use]
+    pub fn compare_decimal(&self, other: &Value) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Value::Decimal(a), Value::Decimal(b)) => Some(a.cmp(b)),
+            (Value::Decimal(a), Value::Int64(b)) => Some(a.cmp(&Decimal::from_i64(*b))),
+            (Value::Int64(a), Value::Decimal(b)) => Some(Decimal::from_i64(*a).cmp(b)),
+            (Value::Decimal(a), Value::Float64(b)) if !b.is_nan() => Some(a.cmp_f64(*b)),
+            (Value::Float64(a), Value::Decimal(b)) if !a.is_nan() => Some(b.cmp_f64(*a).reverse()),
+            _ => None,
+        }
+    }
+
     /// Returns the decimal if this is a Decimal, otherwise None.
     #[inline]
     #[must_use]

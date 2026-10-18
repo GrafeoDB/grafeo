@@ -267,7 +267,8 @@ impl super::Planner {
                     LogicalType::Int64
                 }
                 LogicalAggregateFunction::Sum => LogicalType::Any,
-                LogicalAggregateFunction::Avg => LogicalType::Float64,
+                // A float, or a decimal for decimals and integers.
+                LogicalAggregateFunction::Avg => LogicalType::Any,
                 LogicalAggregateFunction::Min | LogicalAggregateFunction::Max => {
                     // MIN/MAX preserve input type: the result can be any type
                     // (Int64, Float64, String, Date, etc.), so use Any/Generic

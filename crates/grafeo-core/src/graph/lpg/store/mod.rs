@@ -60,6 +60,7 @@ use grafeo_common::temporal::VersionLog;
 /// Compares two values for ordering (used for range checks).
 pub(super) fn compare_values_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
     match (a, b) {
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
         (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),

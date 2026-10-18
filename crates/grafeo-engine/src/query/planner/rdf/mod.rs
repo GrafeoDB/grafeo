@@ -962,7 +962,8 @@ impl RdfPlanner {
                     LogicalType::Int64
                 }
                 LogicalAggregateFunction::Sum => LogicalType::Float64,
-                LogicalAggregateFunction::Avg => LogicalType::Float64,
+                // A float, or a decimal for decimals and integers.
+                LogicalAggregateFunction::Avg => LogicalType::Any,
                 _ => LogicalType::String,
             };
             output_schema.push(result_type);

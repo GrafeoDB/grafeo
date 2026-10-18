@@ -10,8 +10,8 @@ use std::sync::Arc;
 pub struct ScanOperator {
     /// The store to scan from.
     store: Arc<dyn GraphStoreSearch>,
-    /// Label filter (None = all nodes).
-    label: Option<String>,
+    /// The labels a node needs one of (empty: every node).
+    labels: Vec<String>,
     /// Current position in the scan.
     position: usize,
     /// Batch of node IDs to scan.
@@ -31,7 +31,7 @@ impl ScanOperator {
     pub fn new(store: Arc<dyn GraphStoreSearch>) -> Self {
         Self {
             store,
-            label: None,
+            labels: Vec::new(),
             position: 0,
             batch: Vec::new(),
             exhausted: false,
@@ -43,9 +43,15 @@ impl ScanOperator {
 
     /// Creates a new scan operator for nodes with a specific label.
     pub fn with_label(store: Arc<dyn GraphStoreSearch>, label: impl Into<String>) -> Self {
+        Self::with_any_label(store, vec![label.into()])
+    }
+
+    /// Creates a new scan operator for the nodes with at least one of
+    /// `labels`, each once, in ID order.
+    pub fn with_any_label(store: Arc<dyn GraphStoreSearch>, labels: Vec<String>) -> Self {
         Self {
             store,
-            label: Some(label.into()),
+            labels,
             position: 0,
             batch: Vec::new(),
             exhausted: false,
@@ -83,10 +89,14 @@ impl ScanOperator {
         // to include uncommitted/PENDING versions (nodes_by_label already
         // returns unfiltered IDs from the label index, but node_ids()
         // pre-filters by epoch which excludes PENDING nodes).
-        let all_ids = match &self.label {
-            Some(label) => self.store.nodes_by_label(label),
-            None if self.viewing_epoch.is_some() => self.store.all_node_ids(),
-            None => self.store.node_ids(),
+        let all_ids = match self.labels.as_slice() {
+            [] if self.viewing_epoch.is_some() => self.store.all_node_ids(),
+            [] => self.store.node_ids(),
+            [label] => self.store.nodes_by_label(label),
+            labels => {
+                let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+                self.store.nodes_with_any_label(&labels)
+            }
         };
 
         // Filter by visibility if we have tx context.
@@ -178,6 +188,33 @@ mod tests {
         // Should be exhausted
         let next = scan.next().unwrap();
         assert!(next.is_none());
+    }
+
+    /// A scan of several labels returns each node once, in ID order: a node
+    /// with both labels once, a node with neither not at all.
+    #[test]
+    fn a_scan_of_several_labels_returns_each_node_once() {
+        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let director = store.create_node(&["Director"]);
+        store.create_node(&["City"]);
+        let both = store.create_node(&["Person", "Director"]);
+        let person = store.create_node(&["Person"]);
+
+        let mut scan = ScanOperator::with_any_label(
+            store.clone() as Arc<dyn GraphStoreSearch>,
+            vec![
+                "Person".to_string(),
+                "Director".to_string(),
+                "Missing".to_string(),
+            ],
+        );
+        let chunk = scan.next().unwrap().unwrap();
+        let column = chunk.column(0).unwrap();
+        let found: Vec<NodeId> = (0..chunk.row_count())
+            .map(|row| column.get_node_id(row).unwrap())
+            .collect();
+        assert_eq!(found, [director, both, person]);
+        assert!(scan.next().unwrap().is_none());
     }
 
     #[test]

@@ -742,7 +742,10 @@ for case_id, query in [
 # AG: node patterns with several labels (the label with the fewest nodes is scanned) and
 #     lookups of a labeled node by an indexed property, on skewed labels; AG101 to AG123
 #     are AG1 to AG23 with an index on `id`. AG21 to AG23: a label under NOT or OR is
-#     no requirement of the node, so the scan keeps the pattern's label
+#     no requirement of the node, so the scan keeps the pattern's label. AG24 to AG29: a
+#     label in WHERE on a node without one in the pattern (#457), scanned as that label
+#     unless NOT or an OR with another condition makes it no requirement. AG30 to AG34:
+#     an OR of labels reads the nodes of those labels, each once (t0 has both)
 for fixture, offset in [("labels", 0), ("labels_indexed", 100)]:
     for number, query, is_ordered in [
         (1, "MATCH (n:Graph:Repository) RETURN n.id AS id", False),
@@ -768,6 +771,17 @@ for fixture, offset in [("labels", 0), ("labels_indexed", 100)]:
         (21, "MATCH (n:Graph) WHERE NOT n:Repository RETURN count(n) AS c", False),
         (22, "MATCH (n:Graph) WHERE n:Repository OR n.n = 5 RETURN count(n) AS c", False),
         (23, "MATCH (n:Graph) WHERE NOT (n:Repository AND n.n = 1) RETURN count(n) AS c", False),
+        (24, "MATCH (n) WHERE n:Repository RETURN n.id AS id", False),
+        (25, "MATCH (n) WHERE 'Repository' IN labels(n) RETURN n.id AS id", False),
+        (26, "MATCH (n) WHERE n:Repository AND n.n < 2 RETURN n.id AS id", False),
+        (27, "MATCH (n) WHERE n:Graph AND n:Repository RETURN n.id AS id", False),
+        (28, "MATCH (n) WHERE NOT n:Graph RETURN count(n) AS c", False),
+        (29, "MATCH (n) WHERE n:Repository OR n.id = 't1' RETURN count(n) AS c", False),
+        (30, "MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id AS id", False),
+        (31, "MATCH (n) WHERE 'Tag' IN labels(n) OR 'Topic' IN labels(n) RETURN n.id AS id", False),
+        (32, "MATCH (n) WHERE any(l IN labels(n) WHERE l IN ['Topic', 'Tag']) RETURN n.id AS id", False),
+        (33, "MATCH (n) WHERE (n:Tag OR n:Topic) AND n.id <> 't1' RETURN n.id AS id", False),
+        (34, "MATCH (n) WHERE n:Graph OR n:Repository RETURN count(n) AS c", False),
     ]:
         case(f"AG{offset + number}", query, BOTH, fixture, is_ordered)
 

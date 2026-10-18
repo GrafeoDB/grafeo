@@ -6,10 +6,15 @@ use super::{
     NestedLoopJoinOperator, NodeScanOp, Operator, PhysicalJoinType, Result, ScanOperator,
     TransactionId, Value,
 };
-use crate::query::plan::{BuiltinFunction, Callee};
+use crate::query::plan::{BuiltinFunction, Callee, ListPredicateKind};
 
 /// The copy of `filter` whose node scan reads the label with the fewest
 /// nodes, or `None` when the scan reads that label already.
+///
+/// A scan of every node below filters that require a label (`WHERE
+/// n:Repository`, `'Repository' IN labels(n)`, alone or in an `AND` chain)
+/// scans the label with the fewest nodes of those they require, and the
+/// filters still check every label they name.
 ///
 /// A pattern like `(n:Graph:Repository)` is a scan of `Graph` below filters
 /// that require the other labels (`hasLabel(n, 'Repository')`), in a chain of
@@ -39,14 +44,12 @@ pub(crate) fn with_smallest_scan_label(
     let LogicalOperator::NodeScan(scan) = below else {
         return None;
     };
-    let scan_label = scan.label.as_deref()?;
     let mut checks = Vec::new();
     for predicate in &predicates {
         label_checks(predicate, &scan.variable, &mut checks);
     }
-    if checks.is_empty() {
-        return None;
-    }
+    let first = *checks.first()?;
+    let scan_label = scan.label.as_deref().unwrap_or(first);
     let mut smallest = scan_label;
     let mut fewest = store.nodes_by_label_count(scan_label);
     for label in checks {
@@ -59,7 +62,7 @@ pub(crate) fn with_smallest_scan_label(
             fewest = count;
         }
     }
-    if smallest == scan_label {
+    if scan.label.as_deref() == Some(smallest) {
         return None;
     }
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -69,16 +72,24 @@ pub(crate) fn with_smallest_scan_label(
         return None;
     }
     let variable = scan.variable.clone();
-    let (smallest, scan_label) = (smallest.to_string(), scan_label.to_string());
+    let (smallest, scan_label) = (smallest.to_string(), scan.label.clone());
     let mut reordered = filter.clone();
-    let checked = replace_label_check(&mut reordered.predicate, &variable, &smallest, &scan_label);
-    move_scan_label(
-        &mut reordered.input,
-        &variable,
-        &smallest,
-        &scan_label,
-        !checked,
-    );
+    match scan_label {
+        // The check of the label scanned now checks the label scanned before.
+        Some(scan_label) => {
+            let checked =
+                replace_label_check(&mut reordered.predicate, &variable, &smallest, &scan_label);
+            move_scan_label(
+                &mut reordered.input,
+                &variable,
+                &smallest,
+                &scan_label,
+                !checked,
+            );
+        }
+        // A scan of every node had no label to check: the checks stay.
+        None => move_scan_label(&mut reordered.input, &variable, &smallest, "", false),
+    }
     Some(reordered)
 }
 
@@ -98,21 +109,164 @@ pub(crate) fn may_choose_scan_label(
     transaction_id.is_some() || current_epoch.is_none_or(|current| viewing_epoch >= current)
 }
 
-/// The label of a `hasLabel(variable, 'Label')` check.
-fn label_check<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<&'a str> {
-    let LogicalExpression::FunctionCall {
-        callee: Callee::Builtin(BuiltinFunction::HasLabel),
-        args,
-        ..
-    } = expression
-    else {
+/// The labels of the `OR` of labels that `predicate` requires of the node a
+/// scan of every node reads (`n:Tag OR n:Topic`, `'Tag' IN labels(n) OR ...`,
+/// `any(l IN labels(n) WHERE l IN ['Tag', 'Topic'])`), when the scan may read
+/// only their nodes: it has no label and no input, and the labels hold at most
+/// half the nodes (a scan of every node is cheaper than larger lists). Of
+/// several such conjuncts of an `AND`, the one whose labels hold the fewest
+/// nodes. One label alone is the scan's label instead (see
+/// [`with_smallest_scan_label`]).
+pub(crate) fn label_union(
+    predicate: &LogicalExpression,
+    scan: &NodeScanOp,
+    store: &dyn GraphStoreSearch,
+) -> Option<Vec<String>> {
+    if scan.label.is_some() || scan.input.is_some() {
+        return None;
+    }
+    let mut conjuncts = Vec::new();
+    and_conjuncts(predicate, &mut conjuncts);
+    let mut best: Option<(usize, Vec<&str>)> = None;
+    for conjunct in conjuncts {
+        let Some(found) = any_label(conjunct, &scan.variable) else {
+            continue;
+        };
+        let mut labels: Vec<&str> = Vec::with_capacity(found.len());
+        for label in found {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        if labels.len() < 2 {
+            continue;
+        }
+        let nodes: usize = labels
+            .iter()
+            .map(|label| store.nodes_by_label_count(label))
+            .sum();
+        if best.as_ref().is_none_or(|(fewest, _)| nodes < *fewest) {
+            best = Some((nodes, labels));
+        }
+    }
+    let (nodes, labels) = best?;
+    (nodes.saturating_mul(2) <= store.node_count())
+        .then(|| labels.into_iter().map(str::to_string).collect())
+}
+
+/// The conjuncts of an `AND` chain.
+fn and_conjuncts<'a>(predicate: &'a LogicalExpression, out: &mut Vec<&'a LogicalExpression>) {
+    match predicate {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
+            and_conjuncts(left, out);
+            and_conjuncts(right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// The labels of which `expression` requires one of `variable`: label checks
+/// joined by `OR`, or `any(l IN labels(variable) WHERE ...)` over equalities
+/// of `l` and `IN` lists of label names.
+fn any_label<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<Vec<&'a str>> {
+    if let Some(label) = label_check(expression, variable) {
+        return Some(vec![label]);
+    }
+    match expression {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::Or,
+            right,
+        } => {
+            let mut labels = any_label(left, variable)?;
+            labels.extend(any_label(right, variable)?);
+            Some(labels)
+        }
+        LogicalExpression::ListPredicate {
+            kind: ListPredicateKind::Any,
+            variable: element,
+            list_expr,
+            predicate,
+        } if is_labels_of(list_expr, variable) => element_labels(predicate, element),
+        _ => None,
+    }
+}
+
+/// Whether `expression` is `labels(variable)`.
+fn is_labels_of(expression: &LogicalExpression, variable: &str) -> bool {
+    matches!(
+        expression,
+        LogicalExpression::FunctionCall {
+            callee: Callee::Builtin(BuiltinFunction::Labels),
+            args,
+            ..
+        } if matches!(args.as_slice(), [LogicalExpression::Variable(of)] if of == variable)
+    )
+}
+
+/// The label names of which `predicate` requires `element` to be one:
+/// `element = 'Tag'`, `element IN ['Tag', 'Topic']`, joined by `OR`.
+fn element_labels<'a>(predicate: &'a LogicalExpression, element: &str) -> Option<Vec<&'a str>> {
+    let LogicalExpression::Binary { left, op, right } = predicate else {
         return None;
     };
-    match args.as_slice() {
-        [
-            LogicalExpression::Variable(checked),
-            LogicalExpression::Literal(Value::String(label)),
-        ] if checked == variable => Some(label.as_str()),
+    let is_element = |side: &LogicalExpression| matches!(side, LogicalExpression::Variable(name) if name == element);
+    let name = |side: &'a LogicalExpression| match side {
+        LogicalExpression::Literal(Value::String(label)) => Some(label.as_str()),
+        _ => None,
+    };
+    match op {
+        BinaryOp::Or => {
+            let mut labels = element_labels(left, element)?;
+            labels.extend(element_labels(right, element)?);
+            Some(labels)
+        }
+        BinaryOp::Eq if is_element(left) => name(right).map(|label| vec![label]),
+        BinaryOp::Eq if is_element(right) => name(left).map(|label| vec![label]),
+        BinaryOp::In if is_element(left) => match right.as_ref() {
+            LogicalExpression::List(items) => items.iter().map(name).collect(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The label of a `hasLabel(variable, 'Label')` check, or of its spelling
+/// `'Label' IN labels(variable)`.
+fn label_check<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<&'a str> {
+    match expression {
+        LogicalExpression::FunctionCall {
+            callee: Callee::Builtin(BuiltinFunction::HasLabel),
+            args,
+            ..
+        } => match args.as_slice() {
+            [
+                LogicalExpression::Variable(checked),
+                LogicalExpression::Literal(Value::String(label)),
+            ] if checked == variable => Some(label.as_str()),
+            _ => None,
+        },
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::In,
+            right,
+        } => match (left.as_ref(), right.as_ref()) {
+            (
+                LogicalExpression::Literal(Value::String(label)),
+                LogicalExpression::FunctionCall {
+                    callee: Callee::Builtin(BuiltinFunction::Labels),
+                    args,
+                    ..
+                },
+            ) if matches!(args.as_slice(), [LogicalExpression::Variable(checked)] if checked == variable) => {
+                Some(label.as_str())
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -142,9 +296,13 @@ fn replace_label_check(
     checked: &str,
 ) -> bool {
     if label_check(predicate, variable) == Some(label) {
-        if let LogicalExpression::FunctionCall { args, .. } = predicate {
-            args[1] = LogicalExpression::Literal(Value::String(checked.into()));
-        }
+        *predicate = LogicalExpression::builtin(
+            BuiltinFunction::HasLabel,
+            vec![
+                LogicalExpression::Variable(variable.to_string()),
+                LogicalExpression::Literal(Value::String(checked.into())),
+            ],
+        );
         return true;
     }
     match predicate {

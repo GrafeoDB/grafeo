@@ -732,6 +732,9 @@ impl LogicalOperator {
                         format!(" [range: {property}]")
                     }
                     Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
+                    Some(PushdownHint::LabelUnion { labels }) => {
+                        format!(" [labels: {}]", labels.join("|"))
+                    }
                     Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
                     Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
                     None => String::new(),
@@ -1174,6 +1177,9 @@ impl LogicalOperator {
                         format!(" [range: {property}]")
                     }
                     Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
+                    Some(PushdownHint::LabelUnion { labels }) => {
+                        format!(" [labels: {}]", labels.join("|"))
+                    }
                     Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
                     Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
                     None => String::new(),
@@ -1997,6 +2003,12 @@ pub enum PushdownHint {
     },
     /// No index available, but label narrows the scan before filtering.
     LabelFirst,
+    /// The predicate requires one of several labels: the scan reads the
+    /// nodes of those labels, each once, instead of every node.
+    LabelUnion {
+        /// The labels, as the predicate names them.
+        labels: Vec<String>,
+    },
     /// The node is looked up by ID for each input row.
     IdSeek,
     /// The nodes are scanned once and joined to the input's rows by hash on

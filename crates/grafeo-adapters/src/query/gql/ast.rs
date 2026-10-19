@@ -928,8 +928,10 @@ pub enum Literal {
     Bool(bool),
     /// Integer literal.
     Integer(i64),
-    /// Float literal.
+    /// Approximate number literal (`1.5e0`, `1.5F`, `1.5D`).
     Float(f64),
+    /// Exact number literal (`1.5`, `1.5M`), with the scale it is written with.
+    Decimal(grafeo_common::types::Decimal),
     /// String literal.
     String(String),
     /// Typed date literal: `DATE '2024-01-15'`

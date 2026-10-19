@@ -30,6 +30,7 @@ const TAG_PATH: u8 = 13;
 const TAG_ZONED_DATETIME: u8 = 14;
 const TAG_GCOUNTER: u8 = 15;
 const TAG_PNCOUNTER: u8 = 16;
+const TAG_DECIMAL: u8 = 17;
 
 /// Serializes a Value to bytes.
 ///
@@ -177,6 +178,12 @@ pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::
                 }
             }
             Ok(total)
+        }
+        // Tag, scale, then the mantissa as 16 little-endian bytes.
+        Value::Decimal(d) => {
+            w.write_all(&[TAG_DECIMAL, d.scale()])?;
+            w.write_all(&d.mantissa().to_le_bytes())?;
+            Ok(2 + 16)
         }
         _ => {
             w.write_all(&[TAG_NULL])?;
@@ -420,6 +427,15 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
                 neg: Arc::new(neg),
             })
         }
+        TAG_DECIMAL => {
+            let mut scale = [0u8; 1];
+            r.read_exact(&mut scale)?;
+            let mut mantissa = [0u8; 16];
+            r.read_exact(&mut mantissa)?;
+            grafeo_common::types::Decimal::new(i128::from_le_bytes(mantissa), scale[0])
+                .map(Value::Decimal)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        }
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Unknown value tag: {}", tag[0]),
@@ -493,6 +509,18 @@ mod tests {
         serialize_value(&value, &mut buf).unwrap();
         let mut cursor = Cursor::new(buf);
         deserialize_value(&mut cursor).unwrap()
+    }
+
+    /// A spilled decimal comes back with its value and its scale.
+    #[test]
+    fn test_serialize_decimal() {
+        for text in ["1.50", "-0.001", "99999999999999999999999999999999999999"] {
+            let decimal = grafeo_common::types::Decimal::parse(text).unwrap();
+            match roundtrip_value(Value::Decimal(decimal)) {
+                Value::Decimal(back) => assert_eq!(back.to_string(), text),
+                other => panic!("{text} came back as {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@
 //! cargo test -p grafeo-engine --features full --test expression_and_projection
 //! ```
 
-use grafeo_common::types::{PropertyKey, Value};
+use grafeo_common::types::{Decimal, PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 
 // ============================================================================
@@ -2091,8 +2091,14 @@ fn test_min_max_float_properties() {
 
     eprintln!("min/max result: {:?}", result.rows());
     assert_eq!(result.rows().len(), 1);
-    assert_eq!(result.rows()[0][0], Value::Float64(39.99));
-    assert_eq!(result.rows()[0][1], Value::Float64(1299.99));
+    assert_eq!(
+        result.rows()[0][0],
+        Value::Decimal(Decimal::parse("39.99").unwrap())
+    );
+    assert_eq!(
+        result.rows()[0][1],
+        Value::Decimal(Decimal::parse("1299.99").unwrap())
+    );
 }
 
 #[test]

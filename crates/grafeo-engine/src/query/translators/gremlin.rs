@@ -3,6 +3,7 @@
 //! Translates Gremlin AST to the common logical plan representation.
 
 use super::common::{VarGen, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort};
+use crate::query::plan::BuiltinFunction;
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CreateEdgeOp, CreateNodeOp,
     DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, JoinOp, JoinType, LeftJoinOp,
@@ -893,11 +894,10 @@ impl GremlinTranslator {
                     let elem_alias = self.var_gen.next();
                     let plan = LogicalOperator::Project(ProjectOp {
                         projections: vec![Projection {
-                            expression: LogicalExpression::FunctionCall {
-                                name: "property_values".to_string(),
-                                args: vec![LogicalExpression::Variable(current_var.to_string())],
-                                distinct: false,
-                            },
+                            expression: LogicalExpression::builtin(
+                                BuiltinFunction::PropertyValues,
+                                vec![LogicalExpression::Variable(current_var.to_string())],
+                            ),
                             alias: Some(list_alias.clone()),
                         }],
                         input: Box::new(input),
@@ -1707,11 +1707,10 @@ impl GremlinTranslator {
                 let alias = self.var_gen.next();
                 let plan = LogicalOperator::Project(ProjectOp {
                     projections: vec![Projection {
-                        expression: LogicalExpression::FunctionCall {
-                            name: "properties".to_string(),
-                            args: vec![LogicalExpression::Variable(current_var.to_string())],
-                            distinct: false,
-                        },
+                        expression: LogicalExpression::builtin(
+                            BuiltinFunction::Properties,
+                            vec![LogicalExpression::Variable(current_var.to_string())],
+                        ),
                         alias: Some(alias.clone()),
                     }],
                     input: Box::new(input),
@@ -1763,13 +1762,10 @@ impl GremlinTranslator {
                             ),
                             (
                                 "*".to_string(),
-                                LogicalExpression::FunctionCall {
-                                    name: "properties".to_string(),
-                                    args: vec![LogicalExpression::Variable(
-                                        current_var.to_string(),
-                                    )],
-                                    distinct: false,
-                                },
+                                LogicalExpression::builtin(
+                                    BuiltinFunction::Properties,
+                                    vec![LogicalExpression::Variable(current_var.to_string())],
+                                ),
                             ),
                         ]),
                         alias: Some(alias.clone()),

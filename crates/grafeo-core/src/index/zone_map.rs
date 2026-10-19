@@ -582,6 +582,7 @@ fn value_hash(value: &Value) -> u64 {
 /// Compares two values.
 fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),

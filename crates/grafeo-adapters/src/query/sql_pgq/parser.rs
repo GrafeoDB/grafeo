@@ -8,6 +8,7 @@ use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
 use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use grafeo_common::types::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind, Result};
 
 /// SQL/PGQ query parser.
@@ -985,6 +986,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_primary_expression(&mut self) -> Result<Expression> {
+        if self.can_be_identifier()
+            && self.get_identifier_text().eq_ignore_ascii_case("CAST")
+            && self.peek_kind() == TokenKind::LParen
+        {
+            return self.parse_cast();
+        }
         match self.current.kind {
             // A CASE nests one level more than its operands: parsing and
             // planning one takes more stack.
@@ -1032,6 +1039,16 @@ impl<'a> Parser<'a> {
                 })?;
                 self.advance();
                 Ok(Expression::Literal(Literal::Float(value)))
+            }
+            TokenKind::Decimal => {
+                let text = &self.current.text;
+                let value = Decimal::parse(text).map_err(|_| {
+                    self.error(&format!(
+                        "Decimal literal '{text}' has more than {MAX_DECIMAL_DIGITS} digits"
+                    ))
+                })?;
+                self.advance();
+                Ok(Expression::Literal(Literal::Decimal(value)))
             }
             TokenKind::String => {
                 let text = &self.current.text;
@@ -1506,6 +1523,71 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `CAST(expr AS type)`: the call of the conversion function of `type`,
+    /// as GQL's `CAST` translates. `VARCHAR(n)` keeps the first `n`
+    /// characters, as an explicit SQL cast does.
+    fn parse_cast(&mut self) -> Result<Expression> {
+        self.advance(); // CAST
+        self.expect(TokenKind::LParen)?;
+        let expr = self.parse_expression()?;
+        self.expect(TokenKind::As)?;
+        let data_type = self.parse_data_type()?;
+        self.expect(TokenKind::RParen)?;
+        let call = |name: &str, args: Vec<Expression>| Expression::FunctionCall {
+            name: name.to_string(),
+            distinct: false,
+            args,
+        };
+        let integer = |value: u8| Expression::Literal(Literal::Integer(i64::from(value)));
+        Ok(match data_type {
+            SqlDataType::Bigint | SqlDataType::Int => call("toInteger", vec![expr]),
+            SqlDataType::Float | SqlDataType::Double => call("toFloat", vec![expr]),
+            SqlDataType::Decimal(None) => call("toDecimal", vec![expr]),
+            SqlDataType::Decimal(Some(decimal_type)) => call(
+                "toDecimal",
+                vec![
+                    expr,
+                    integer(decimal_type.precision()),
+                    integer(decimal_type.scale()),
+                ],
+            ),
+            SqlDataType::Varchar(None) => call("toString", vec![expr]),
+            SqlDataType::Varchar(Some(length)) => {
+                let length = i64::try_from(length).unwrap_or(i64::MAX);
+                call(
+                    "left",
+                    vec![
+                        call("toString", vec![expr]),
+                        Expression::Literal(Literal::Integer(length)),
+                    ],
+                )
+            }
+            SqlDataType::Boolean => call("toBoolean", vec![expr]),
+            SqlDataType::Date => call("toDate", vec![expr]),
+            SqlDataType::Time => call("toTime", vec![expr]),
+            SqlDataType::Timestamp => call("toDatetime", vec![expr]),
+        })
+    }
+
+    /// The `(precision[, scale])` after `DECIMAL`, `DEC` or `NUMERIC`
+    /// (`name`), a left-out scale being 0.
+    fn parse_decimal_type(&mut self, name: &str) -> Result<DecimalType> {
+        self.expect(TokenKind::LParen)?;
+        let precision = self.parse_integer_literal()?;
+        let scale = if self.current.kind == TokenKind::Comma {
+            self.advance();
+            self.parse_integer_literal()?
+        } else {
+            0
+        };
+        self.expect(TokenKind::RParen)?;
+        match (u8::try_from(precision), u8::try_from(scale)) {
+            (Ok(precision), Ok(scale)) => DecimalType::new(precision, scale),
+            _ => Err(DecimalError::InvalidPrecision),
+        }
+        .map_err(|error| self.error(&format!("{name}({precision}, {scale}): {error}")))
+    }
+
     fn parse_data_type(&mut self) -> Result<SqlDataType> {
         if !self.can_be_identifier() {
             return Err(self.error("Expected data type"));
@@ -1531,8 +1613,27 @@ impl<'a> Parser<'a> {
             }
             "BOOLEAN" | "BOOL" => Ok(SqlDataType::Boolean),
             "FLOAT" | "REAL" => Ok(SqlDataType::Float),
-            "DOUBLE" => Ok(SqlDataType::Double),
+            "DOUBLE" => {
+                // DOUBLE PRECISION
+                if self.can_be_identifier()
+                    && self.get_identifier_text().eq_ignore_ascii_case("PRECISION")
+                {
+                    self.advance();
+                }
+                Ok(SqlDataType::Double)
+            }
             "TIMESTAMP" => Ok(SqlDataType::Timestamp),
+            "DECIMAL" | "DEC" | "NUMERIC" => {
+                if self.current.kind == TokenKind::LParen {
+                    Ok(SqlDataType::Decimal(Some(
+                        self.parse_decimal_type(&type_name)?,
+                    )))
+                } else {
+                    Ok(SqlDataType::Decimal(None))
+                }
+            }
+            "DATE" => Ok(SqlDataType::Date),
+            "TIME" => Ok(SqlDataType::Time),
             _ => Err(self.error(&format!("Unknown data type: {type_name}"))),
         }
     }

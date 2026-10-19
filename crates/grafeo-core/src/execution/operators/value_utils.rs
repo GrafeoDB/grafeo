@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{Decimal, Value};
 
 use super::sort::{NullOrder, SortDirection};
 
@@ -17,9 +17,31 @@ pub fn value_to_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Int64(i) => Some(*i as f64),
         Value::Float64(f) => Some(*f),
+        Value::Decimal(d) => Some(d.to_f64()),
         // RDF stores numeric literals as strings - try to parse them
         Value::String(s) => s.parse::<f64>().ok(),
         _ => None,
+    }
+}
+
+/// The order of two values when at least one is a decimal, by
+/// [`Value::compare_decimal`]. A string meeting a decimal compares as the
+/// number it reads as, as it does against an integer or a float (RDF stores
+/// numeric literals as strings): decimal text exactly, other number text
+/// (`'1e3'`) as its float.
+pub fn compare_with_decimal(a: &Value, b: &Value) -> Option<Ordering> {
+    let number = |text: &str| {
+        Decimal::parse(text).map(Value::Decimal).ok().or_else(|| {
+            text.parse::<f64>()
+                .ok()
+                .filter(|float| !float.is_nan())
+                .map(Value::Float64)
+        })
+    };
+    match (a, b) {
+        (Value::String(text), Value::Decimal(_)) => number(text)?.compare_decimal(b),
+        (Value::Decimal(_), Value::String(text)) => a.compare_decimal(&number(text)?),
+        _ => a.compare_decimal(b),
     }
 }
 
@@ -29,6 +51,7 @@ pub fn value_to_f64(value: &Value) -> Option<f64> {
 /// RDF numeric strings that need parsing before comparison.
 pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => compare_with_decimal(a, b),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
         (Value::String(a), Value::String(b)) => {
@@ -65,7 +88,8 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
 /// `NULLS FIRST` / `NULLS LAST` says (see [`compare_sort_values`]); null
 /// inside a list or map is larger than any other value.
 ///
-/// Within a type: numbers numerically, integers and floats exactly, with NaN
+/// Within a type: numbers numerically, integers and floats exactly, decimals
+/// exactly with integers and by a float's shortest text with floats, with NaN
 /// after positive infinity; strings by code point; `false` before `true`;
 /// temporal values in time order; durations by months, then days, then
 /// nanoseconds; lists and paths element by element, a prefix first; maps by
@@ -79,6 +103,12 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
     }
     match (a, b) {
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        // A decimal among the numbers; NaN after every decimal.
+        (Value::Decimal(_), Value::Float64(f)) if f.is_nan() => Ordering::Less,
+        (Value::Float64(f), Value::Decimal(_)) if f.is_nan() => Ordering::Greater,
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+            a.compare_decimal(b).unwrap_or(Ordering::Equal)
+        }
         (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
         (Value::Float64(a), Value::Float64(b)) => compare_floats(*a, *b),
         (Value::Int64(a), Value::Float64(b)) => compare_int_float(*a, *b),
@@ -143,7 +173,7 @@ fn type_rank(value: &Value) -> u8 {
         Value::String(_) => 11,
         Value::Bool(_) => 12,
         Value::GCounter(_) | Value::OnCounter { .. } => 13,
-        Value::Int64(_) | Value::Float64(_) => 15,
+        Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => 15,
         Value::Null => 16,
         // A type added later goes before the numbers: openCypher keeps types
         // it does not define out from after them.

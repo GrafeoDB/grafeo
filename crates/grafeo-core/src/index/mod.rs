@@ -18,6 +18,7 @@
 
 pub mod adjacency;
 pub mod hash;
+mod ranking;
 #[cfg(feature = "ring-index")]
 pub mod ring;
 pub mod text;

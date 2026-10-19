@@ -466,10 +466,14 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
         }
         LogicalExpression::Literal(value) => literal_to_string(value),
         LogicalExpression::Parameter(name) => format!("${name}"),
+        LogicalExpression::SparqlCall { name, args } => {
+            format!("{name}({})", join_expressions(args))
+        }
         LogicalExpression::FunctionCall {
             name,
             args,
             distinct,
+            ..
         } => {
             let rendered = join_expressions(args);
             if *distinct {

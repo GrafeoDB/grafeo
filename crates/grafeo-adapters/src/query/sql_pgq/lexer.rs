@@ -143,8 +143,11 @@ pub enum TokenKind {
     // Literals
     /// Integer literal
     Integer,
-    /// Float literal
+    /// Approximate number literal: with an exponent (`1.5e0`).
     Float,
+    /// Exact number literal: with a point and no exponent (`1.5`), a SQL
+    /// exact numeric literal.
+    Decimal,
     /// String literal (single or double quoted)
     String,
 
@@ -469,8 +472,9 @@ impl<'a> Lexer<'a> {
                 while self.current_char().is_ascii_digit() {
                     self.advance();
                 }
+                return TokenKind::Float;
             }
-            return TokenKind::Float;
+            return TokenKind::Decimal;
         }
 
         // Check for exponent without decimal
@@ -648,7 +652,7 @@ mod tests {
     fn test_numbers() {
         let mut lexer = Lexer::new("42 3.14 1e10 2.5e-3");
         assert_eq!(lexer.next_token().kind, TokenKind::Integer);
-        assert_eq!(lexer.next_token().kind, TokenKind::Float);
+        assert_eq!(lexer.next_token().kind, TokenKind::Decimal);
         assert_eq!(lexer.next_token().kind, TokenKind::Float);
         assert_eq!(lexer.next_token().kind, TokenKind::Float);
     }

@@ -1,5 +1,6 @@
 //! Filter operator for applying predicates.
 
+use super::functions::{BuiltinFunction, FunctionGroup};
 use super::project::{
     field_type, holds_entities, item_type_at, list_type, reversed_type, slice_type, struct_type,
 };
@@ -9,8 +10,8 @@ use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
-    EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey, PropertyMap, TransactionId,
-    Value,
+    Decimal, DecimalError, EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey,
+    PropertyMap, TransactionId, Value,
 };
 #[cfg(feature = "regex")]
 use regex::Regex;
@@ -355,9 +356,17 @@ pub enum FilterExpression {
         /// Operand.
         operand: Box<FilterExpression>,
     },
-    /// Function call.
+    /// A call of a built-in function, resolved when the plan was made.
     FunctionCall {
-        /// Function name (e.g., "id", "labels", "type", "size", "coalesce", "exists").
+        /// The function.
+        function: BuiltinFunction,
+        /// Arguments.
+        args: Vec<FilterExpression>,
+    },
+    /// A call of a SPARQL function, by name: only the RDF planner's evaluator
+    /// computes it, and this evaluator answers it with no value.
+    SparqlCall {
+        /// The function's name, as the query wrote it.
         name: String,
         /// Arguments.
         args: Vec<FilterExpression>,
@@ -553,6 +562,22 @@ pub enum UnaryFilterOp {
     Neg,
 }
 
+/// What reading one property of a node or edge found.
+enum PropertyRead {
+    /// The entity is visible and has the property.
+    Value(Value),
+    /// The entity is visible without the property.
+    Absent,
+    /// The entity is not visible to the read.
+    NotVisible,
+}
+
+impl PropertyRead {
+    fn of(value: Option<&Value>) -> Self {
+        value.map_or(Self::Absent, |value| Self::Value(value.clone()))
+    }
+}
+
 impl ExpressionPredicate {
     /// Creates a new expression predicate.
     pub fn new(
@@ -586,6 +611,60 @@ impl ExpressionPredicate {
     pub fn with_session_context(mut self, context: SessionContext) -> Self {
         self.session_context = context;
         self
+    }
+
+    /// The value of `property` of node `id` as [`resolve_node`](Self::resolve_node)
+    /// sees the node, read without building it.
+    fn resolve_node_property(&self, id: NodeId, property: &str) -> PropertyRead {
+        let found = |value: Option<Value>, visible: &dyn Fn() -> bool| match value {
+            Some(value) => PropertyRead::Value(value),
+            None if visible() => PropertyRead::Absent,
+            None => PropertyRead::NotVisible,
+        };
+        match (self.viewing_epoch, self.transaction_id) {
+            (Some(ep), Some(tx)) => found(
+                self.store.node_property_versioned(id, property, ep, tx),
+                &|| self.store.is_node_visible_versioned(id, ep, tx),
+            ),
+            (Some(ep), None) => found(self.store.node_property_at_epoch(id, property, ep), &|| {
+                self.store.is_node_visible_at_epoch(id, ep)
+            }),
+            (None, _) => self
+                .store
+                .get_node(id)
+                .map_or(PropertyRead::NotVisible, |node| {
+                    PropertyRead::of(node.get_property(property))
+                }),
+        }
+    }
+
+    /// The value of `property` of edge `id` as [`resolve_edge`](Self::resolve_edge)
+    /// sees the edge (see [`resolve_node_property`](Self::resolve_node_property)).
+    fn resolve_edge_property(
+        &self,
+        id: grafeo_common::types::EdgeId,
+        property: &str,
+    ) -> PropertyRead {
+        let found = |value: Option<Value>, visible: &dyn Fn() -> bool| match value {
+            Some(value) => PropertyRead::Value(value),
+            None if visible() => PropertyRead::Absent,
+            None => PropertyRead::NotVisible,
+        };
+        match (self.viewing_epoch, self.transaction_id) {
+            (Some(ep), Some(tx)) => found(
+                self.store.edge_property_versioned(id, property, ep, tx),
+                &|| self.store.is_edge_visible_versioned(id, ep, tx),
+            ),
+            (Some(ep), None) => found(self.store.edge_property_at_epoch(id, property, ep), &|| {
+                self.store.is_edge_visible_at_epoch(id, ep)
+            }),
+            (None, _) => self
+                .store
+                .get_edge(id)
+                .map_or(PropertyRead::NotVisible, |edge| {
+                    PropertyRead::of(edge.get_property(property))
+                }),
+        }
     }
 
     /// Resolves a node using transaction-aware access when available.
@@ -985,17 +1064,21 @@ impl ExpressionPredicate {
             FilterExpression::Property { variable, property } => {
                 let col_idx = *self.variable_columns.get(variable)?;
                 let col = chunk.column(col_idx)?;
-                // Try as node first
-                if let Some(node_id) = col.get_node_id(row)
-                    && let Some(node) = self.resolve_node(node_id)
-                {
-                    return node.get_property(property).cloned();
+                // Try as node first, then as edge: an entity not visible to
+                // the read lets the next interpretation try.
+                if let Some(node_id) = col.get_node_id(row) {
+                    match self.resolve_node_property(node_id, property) {
+                        PropertyRead::Value(value) => return Some(value),
+                        PropertyRead::Absent => return None,
+                        PropertyRead::NotVisible => {}
+                    }
                 }
-                // Try as edge if node lookup failed
-                if let Some(edge_id) = col.get_edge_id(row)
-                    && let Some(edge) = self.resolve_edge(edge_id)
-                {
-                    return edge.get_property(property).cloned();
+                if let Some(edge_id) = col.get_edge_id(row) {
+                    match self.resolve_edge_property(edge_id, property) {
+                        PropertyRead::Value(value) => return Some(value),
+                        PropertyRead::Absent => return None,
+                        PropertyRead::NotVisible => {}
+                    }
                 }
                 match col.get_value(row)? {
                     // A key of a map value (e.g. from UNWIND with map elements)
@@ -1029,9 +1112,10 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(operand, chunk, row);
                 self.eval_unary_op(*op, val)
             }
-            FilterExpression::FunctionCall { name, args } => {
-                self.eval_function(name, args, chunk, row)
+            FilterExpression::FunctionCall { function, args } => {
+                self.eval_function(*function, args, chunk, row)
             }
+            FilterExpression::SparqlCall { .. } => None,
             // A list literal has one item per expression and a map literal one
             // entry per key: an expression without a value (a property of a
             // null entity, a property the entity does not have) is a null.
@@ -1462,19 +1546,19 @@ impl ExpressionPredicate {
                 };
                 slice_type(base, bound(start).unwrap_or(0), bound(end))
             }
-            FilterExpression::FunctionCall { name, args } => {
+            FilterExpression::FunctionCall { function, args } => {
                 let argument = || {
                     args.first()
                         .map_or(LogicalType::Any, |list| self.shape(list, chunk, row))
                 };
-                match name.to_lowercase().as_str() {
-                    "nodes" => LogicalType::List(Box::new(LogicalType::Node)),
-                    "edges" | "relationships" => LogicalType::List(Box::new(LogicalType::Edge)),
-                    "startnode" | "start_node" | "endnode" | "end_node" => LogicalType::Node,
-                    "head" => item_type_at(&argument(), 0),
-                    "last" => item_type_at(&argument(), -1),
-                    "tail" => slice_type(argument(), 1, None),
-                    "reverse" => reversed_type(argument()),
+                match function {
+                    BuiltinFunction::Nodes => LogicalType::List(Box::new(LogicalType::Node)),
+                    BuiltinFunction::Edges => LogicalType::List(Box::new(LogicalType::Edge)),
+                    BuiltinFunction::StartNode | BuiltinFunction::EndNode => LogicalType::Node,
+                    BuiltinFunction::Head => item_type_at(&argument(), 0),
+                    BuiltinFunction::Last => item_type_at(&argument(), -1),
+                    BuiltinFunction::Tail => slice_type(argument(), 1, None),
+                    BuiltinFunction::Reverse => reversed_type(argument()),
                     _ => LogicalType::Any,
                 }
             }
@@ -1558,6 +1642,7 @@ impl ExpressionPredicate {
                         let b = match other {
                             Value::Int64(i) => i.to_string(),
                             Value::Float64(f) => f.to_string(),
+                            Value::Decimal(d) => d.to_string(),
                             Value::Bool(b) => b.to_string(),
                             Value::Null => return Some(Value::Null),
                             _ => return None,
@@ -1587,7 +1672,13 @@ impl ExpressionPredicate {
                         combined.extend_from_slice(b);
                         Some(Value::List(combined.into()))
                     }
-                    _ => self.eval_arithmetic(left, right, i64::checked_add, |a, b| a + b),
+                    _ => self.eval_arithmetic(
+                        left,
+                        right,
+                        i64::checked_add,
+                        |a, b| a + b,
+                        Decimal::checked_add,
+                    ),
                 }
             }
             BinaryFilterOp::Sub => match (left, right) {
@@ -1620,19 +1711,37 @@ impl ExpressionPredicate {
                     )))
                 }
                 (Value::Duration(a), Value::Duration(b)) => Some(Value::Duration(a.sub(*b))),
-                _ => self.eval_arithmetic(left, right, i64::checked_sub, |a, b| a - b),
+                _ => self.eval_arithmetic(
+                    left,
+                    right,
+                    i64::checked_sub,
+                    |a, b| a - b,
+                    Decimal::checked_sub,
+                ),
             },
             BinaryFilterOp::Mul => match (left, right) {
                 (Value::Duration(d), Value::Int64(n)) | (Value::Int64(n), Value::Duration(d)) => {
                     Some(Value::Duration(d.mul(*n)))
                 }
-                _ => self.eval_arithmetic(left, right, i64::checked_mul, |a, b| a * b),
+                _ => self.eval_arithmetic(
+                    left,
+                    right,
+                    i64::checked_mul,
+                    |a, b| a * b,
+                    Decimal::checked_mul,
+                ),
             },
             BinaryFilterOp::Div => match (left, right) {
                 (Value::Duration(d), Value::Int64(n)) if *n != 0 => {
                     Some(Value::Duration(d.div(*n)))
                 }
-                _ => self.eval_arithmetic(left, right, i64::checked_div, |a, b| a / b),
+                _ => self.eval_arithmetic(
+                    left,
+                    right,
+                    i64::checked_div,
+                    |a, b| a / b,
+                    Decimal::checked_div,
+                ),
             },
             BinaryFilterOp::Mod => self.eval_modulo(left, right),
             // String operators
@@ -1685,6 +1794,16 @@ impl ExpressionPredicate {
                     }
                     (Value::Float64(base), Value::Int64(exp)) => {
                         Some(Value::Float64(base.powf(*exp as f64)))
+                    }
+                    // A decimal operand as its float: the power is a float.
+                    (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+                        let as_float = |value: &Value| match value {
+                            Value::Int64(i) => Some(*i as f64),
+                            Value::Float64(f) => Some(*f),
+                            Value::Decimal(d) => Some(d.to_f64()),
+                            _ => None,
+                        };
+                        Some(Value::Float64(as_float(left)?.powf(as_float(right)?)))
                     }
                     _ => None, // Type mismatch
                 }
@@ -1749,18 +1868,36 @@ impl ExpressionPredicate {
         }
     }
 
+    /// An arithmetic operator on two numbers: integers give an integer
+    /// (`None` on overflow), a float makes it a float, and a decimal with a
+    /// decimal or an integer gives a decimal (`None` on overflow and division
+    /// by zero, as for integers).
     fn eval_arithmetic<F1, F2>(
         &self,
         left: &Value,
         right: &Value,
         int_op: F1,
         float_op: F2,
+        decimal_op: fn(&Decimal, &Decimal) -> Result<Decimal, DecimalError>,
     ) -> Option<Value>
     where
         F1: Fn(i64, i64) -> Option<i64>,
         F2: Fn(f64, f64) -> f64,
     {
         match (left, right) {
+            (Value::Decimal(a), Value::Decimal(b)) => decimal_op(a, b).ok().map(Value::Decimal),
+            (Value::Decimal(a), Value::Int64(b)) => decimal_op(a, &Decimal::from_i64(*b))
+                .ok()
+                .map(Value::Decimal),
+            (Value::Int64(a), Value::Decimal(b)) => decimal_op(&Decimal::from_i64(*a), b)
+                .ok()
+                .map(Value::Decimal),
+            (Value::Decimal(a), Value::Float64(b)) => {
+                Some(Value::Float64(float_op(a.to_f64(), *b)))
+            }
+            (Value::Float64(a), Value::Decimal(b)) => {
+                Some(Value::Float64(float_op(*a, b.to_f64())))
+            }
             (Value::Int64(a), Value::Int64(b)) => int_op(*a, *b).map(Value::Int64),
             (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a, *b))),
             (Value::Int64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a as f64, *b))),
@@ -1770,7 +1907,17 @@ impl ExpressionPredicate {
     }
 
     fn eval_modulo(&self, left: &Value, right: &Value) -> Option<Value> {
+        let decimal = |a: &Decimal, b: &Decimal| a.checked_rem(b).ok().map(Value::Decimal);
         match (left, right) {
+            (Value::Decimal(a), Value::Decimal(b)) => decimal(a, b),
+            (Value::Decimal(a), Value::Int64(b)) => decimal(a, &Decimal::from_i64(*b)),
+            (Value::Int64(a), Value::Decimal(b)) => decimal(&Decimal::from_i64(*a), b),
+            (Value::Decimal(a), Value::Float64(b)) if *b != 0.0 => {
+                Some(Value::Float64(a.to_f64() % b))
+            }
+            (Value::Float64(a), Value::Decimal(b)) if b.signum() != 0 => {
+                Some(Value::Float64(a % b.to_f64()))
+            }
             (Value::Int64(a), Value::Int64(b)) if *b != 0 => a.checked_rem(*b).map(Value::Int64),
             (Value::Float64(a), Value::Float64(b)) if *b != 0.0 => Some(Value::Float64(a % b)),
             (Value::Int64(a), Value::Float64(b)) if *b != 0.0 => {
@@ -1820,34 +1967,34 @@ impl ExpressionPredicate {
 
     fn eval_function(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        let name_lower = name.to_lowercase();
-        let name = name_lower.as_str();
-        self.eval_graph_element_fn(name, args, chunk, row)
-            .or_else(|| self.eval_type_fn(name, args, chunk, row))
-            .or_else(|| self.eval_collection_fn(name, args, chunk, row))
-            .or_else(|| self.eval_string_fn(name, args, chunk, row))
-            .or_else(|| self.eval_numeric_fn(name, args, chunk, row))
-            .or_else(|| self.eval_temporal_fn(name, args, chunk, row))
-            .or_else(|| self.eval_path_fn(name, args, chunk, row))
-            .or_else(|| self.eval_vector_fn(name, args, chunk, row))
-            .or_else(|| self.eval_text_fn(name, args, chunk, row))
-            .or_else(|| self.eval_session_fn(name, args, chunk, row))
+        match function.group() {
+            FunctionGroup::GraphElement => self.eval_graph_element_fn(function, args, chunk, row),
+            FunctionGroup::Type => self.eval_type_fn(function, args, chunk, row),
+            FunctionGroup::Collection => self.eval_collection_fn(function, args, chunk, row),
+            FunctionGroup::String => self.eval_string_fn(function, args, chunk, row),
+            FunctionGroup::Numeric => self.eval_numeric_fn(function, args, chunk, row),
+            FunctionGroup::Temporal => self.eval_temporal_fn(function, args, chunk, row),
+            FunctionGroup::Path => self.eval_path_fn(function, args, chunk, row),
+            FunctionGroup::Vector => self.eval_vector_fn(function, args, chunk, row),
+            FunctionGroup::Text => self.eval_text_fn(function, args, chunk, row),
+            FunctionGroup::Session => self.eval_session_fn(function, args, chunk, row),
+        }
     }
 
     fn eval_graph_element_fn(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        match name {
-            "id" => {
+        match function {
+            BuiltinFunction::Id => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -1866,7 +2013,7 @@ impl ExpressionPredicate {
                 }
                 None
             }
-            "element_id" | "elementid" => {
+            BuiltinFunction::ElementId => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -1890,7 +2037,7 @@ impl ExpressionPredicate {
                 }
                 None
             }
-            "labels" => {
+            BuiltinFunction::Labels => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -1903,7 +2050,7 @@ impl ExpressionPredicate {
                     .collect();
                 Some(Value::List(labels.into()))
             }
-            "type" => {
+            BuiltinFunction::Type => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -1913,21 +2060,21 @@ impl ExpressionPredicate {
             // startNode(edge) and endNode(edge): the edge's source and
             // destination node, as the node's ID in a node column (RETURN
             // gives the node, and a property read reads the node's).
-            "startnode" | "start_node" => {
+            BuiltinFunction::StartNode => {
                 if args.len() != 1 {
                     return None;
                 }
                 let edge = self.edge_of(&args[0], chunk, row)?;
                 i64::try_from(edge.src.as_u64()).ok().map(Value::Int64)
             }
-            "endnode" | "end_node" => {
+            BuiltinFunction::EndNode => {
                 if args.len() != 1 {
                     return None;
                 }
                 let edge = self.edge_of(&args[0], chunk, row)?;
                 i64::try_from(edge.dst.as_u64()).ok().map(Value::Int64)
             }
-            "property_exists" => {
+            BuiltinFunction::PropertyExists => {
                 // property_exists(entity, key) - checks if a property key exists on an entity
                 if args.len() != 2 {
                     return None;
@@ -1960,7 +2107,7 @@ impl ExpressionPredicate {
                 }
                 Some(Value::Bool(false))
             }
-            "haslabel" => {
+            BuiltinFunction::HasLabel => {
                 // hasLabel(node, label) - checks if a node has a specific label
                 if args.len() != 2 {
                     return None;
@@ -1982,7 +2129,7 @@ impl ExpressionPredicate {
                 let has_label = node.labels.iter().any(|l| l.as_str() == label.as_str());
                 Some(Value::Bool(has_label))
             }
-            "issource" => {
+            BuiltinFunction::IsSource => {
                 // isSource(node, edge) - checks if node is the source of edge
                 if args.len() != 2 {
                     return None;
@@ -2004,7 +2151,7 @@ impl ExpressionPredicate {
                 let edge = self.resolve_edge(edge_id)?;
                 Some(Value::Bool(edge.src == node_id))
             }
-            "isdestination" => {
+            BuiltinFunction::IsDestination => {
                 // isDestination(node, edge) - checks if node is the destination of edge
                 if args.len() != 2 {
                     return None;
@@ -2026,7 +2173,7 @@ impl ExpressionPredicate {
                 let edge = self.resolve_edge(edge_id)?;
                 Some(Value::Bool(edge.dst == node_id))
             }
-            "isdirected" => {
+            BuiltinFunction::IsDirected => {
                 // isDirected(edge) - checks if an edge is directed (always true in LPG)
                 if args.len() != 1 {
                     return None;
@@ -2048,13 +2195,13 @@ impl ExpressionPredicate {
 
     fn eval_type_fn(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        match name {
-            "tostring" => {
+        match function {
+            BuiltinFunction::ToString => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2070,7 +2217,7 @@ impl ExpressionPredicate {
                 };
                 Some(Value::String(s.into()))
             }
-            "tointeger" | "toint" => {
+            BuiltinFunction::ToInteger => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2080,12 +2227,13 @@ impl ExpressionPredicate {
                     // reason: toInteger() intentionally truncates float to int per GQL spec
                     #[allow(clippy::cast_possible_truncation)]
                     Value::Float64(f) => Some(Value::Int64(f as i64)),
+                    Value::Decimal(d) => d.trunc_to_i64().map(Value::Int64),
                     Value::Bool(b) => Some(Value::Int64(i64::from(b))),
                     Value::String(s) => s.parse::<i64>().ok().map(Value::Int64),
                     _ => None,
                 }
             }
-            "tofloat" => {
+            BuiltinFunction::ToFloat => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2093,11 +2241,32 @@ impl ExpressionPredicate {
                 match val {
                     Value::Int64(i) => Some(Value::Float64(i as f64)),
                     Value::Float64(f) => Some(Value::Float64(f)),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64())),
                     Value::String(s) => s.parse::<f64>().ok().map(Value::Float64),
                     _ => None,
                 }
             }
-            "toboolean" | "tobool" => {
+            BuiltinFunction::ToDecimal => {
+                // toDecimal(value) or toDecimal(value, precision, scale)
+                if args.len() != 1 && args.len() != 3 {
+                    return None;
+                }
+                let decimal = to_decimal(&self.eval_expr(&args[0], chunk, row)?)?;
+                if args.len() == 1 {
+                    return Some(Value::Decimal(decimal));
+                }
+                let digits = |value: Value| match value {
+                    Value::Int64(n) => u8::try_from(n).ok(),
+                    _ => None,
+                };
+                let precision = digits(self.eval_expr(&args[1], chunk, row)?)?;
+                let scale = digits(self.eval_expr(&args[2], chunk, row)?)?;
+                decimal
+                    .with_precision(precision, scale)
+                    .ok()
+                    .map(Value::Decimal)
+            }
+            BuiltinFunction::ToBoolean => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2112,7 +2281,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "tolist" => {
+            BuiltinFunction::ToList => {
                 // toList(value) - wraps a scalar in a single-element list, or returns list as-is
                 if args.len() != 1 {
                     return None;
@@ -2124,7 +2293,7 @@ impl ExpressionPredicate {
                     other => Some(Value::List(vec![other].into())),
                 }
             }
-            "totypedlist" => {
+            BuiltinFunction::ToTypedList => {
                 // toTypedList(value, element_type) - coerces value to a list with typed elements
                 if args.len() != 2 {
                     return None;
@@ -2148,7 +2317,7 @@ impl ExpressionPredicate {
                     .collect();
                 coerced.map(|v| Value::List(v.into()))
             }
-            "istyped" => {
+            BuiltinFunction::IsTyped => {
                 // isTyped(value, type_name) - checks if a value has a specific GQL type
                 if args.len() != 2 {
                     return None;
@@ -2190,13 +2359,13 @@ impl ExpressionPredicate {
 
     fn eval_collection_fn(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        match name {
-            "size" | "length" | "cardinality" => {
+        match function {
+            BuiltinFunction::Size => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2217,7 +2386,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "coalesce" => {
+            BuiltinFunction::Coalesce => {
                 for arg in args {
                     if let Some(val) = self.eval_expr(arg, chunk, row)
                         && !matches!(val, Value::Null)
@@ -2227,7 +2396,7 @@ impl ExpressionPredicate {
                 }
                 Some(Value::Null)
             }
-            "exists" => {
+            BuiltinFunction::Exists => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2236,7 +2405,7 @@ impl ExpressionPredicate {
                     val.is_some() && !matches!(val, Some(Value::Null)),
                 ))
             }
-            "keys" => {
+            BuiltinFunction::Keys => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2266,7 +2435,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "properties" => {
+            BuiltinFunction::Properties => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2281,7 +2450,7 @@ impl ExpressionPredicate {
             }
             // property_values(n) returns all property values of a node or edge as a flat list.
             // Used by Gremlin values() with no keys.
-            "property_values" => {
+            BuiltinFunction::PropertyValues => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2298,7 +2467,7 @@ impl ExpressionPredicate {
                 }
                 None
             }
-            "head" => {
+            BuiltinFunction::Head => {
                 // head(list) - returns the first element of a list
                 if args.len() != 1 {
                     return None;
@@ -2309,7 +2478,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "tail" => {
+            BuiltinFunction::Tail => {
                 // tail(list) - returns all elements except the first
                 if args.len() != 1 {
                     return None;
@@ -2326,7 +2495,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "last" => {
+            BuiltinFunction::Last => {
                 // last(list) - returns the last element of a list
                 if args.len() != 1 {
                     return None;
@@ -2337,7 +2506,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "reverse" => {
+            BuiltinFunction::Reverse => {
                 // reverse(list) - returns the list in reverse order
                 if args.len() != 1 {
                     return None;
@@ -2356,7 +2525,7 @@ impl ExpressionPredicate {
                 }
             }
             // vector(list) - converts a list of numbers to a Vector
-            "vector" => {
+            BuiltinFunction::Vector => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2365,13 +2534,7 @@ impl ExpressionPredicate {
                     Value::List(items) => {
                         let floats: Vec<f32> = items
                             .iter()
-                            .filter_map(|v| match v {
-                                // reason: vector() intentionally converts f64 to f32 for storage
-                                #[allow(clippy::cast_possible_truncation)]
-                                Value::Float64(f) => Some(*f as f32),
-                                Value::Int64(i) => Some(*i as f32),
-                                _ => None,
-                            })
+                            .filter_map(Value::as_vector_component)
                             .collect();
                         if floats.len() == items.len() {
                             Some(Value::Vector(floats.into()))
@@ -2383,7 +2546,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "all_different" => {
+            BuiltinFunction::AllDifferent => {
                 // ALL_DIFFERENT - ISO GQL predicate (G113)
                 // Two calling conventions:
                 //   all_different(list)          - check list elements are distinct
@@ -2425,7 +2588,7 @@ impl ExpressionPredicate {
                 ids.dedup();
                 Some(Value::Bool(ids.len() == length))
             }
-            "same" => {
+            BuiltinFunction::Same => {
                 // SAME - ISO GQL predicate (G114)
                 // Two calling conventions:
                 //   same(list)          - check list elements are equal
@@ -2469,7 +2632,7 @@ impl ExpressionPredicate {
                 }
                 Some(Value::Bool(true))
             }
-            "range" => {
+            BuiltinFunction::Range => {
                 if args.len() < 2 || args.len() > 3 {
                     return None;
                 }
@@ -2508,7 +2671,7 @@ impl ExpressionPredicate {
                 }
                 Some(Value::List(result.into()))
             }
-            "string_join" => {
+            BuiltinFunction::StringJoin => {
                 // string_join(list, separator) - join list elements with separator
                 if args.len() != 2 {
                     return None;
@@ -2542,13 +2705,13 @@ impl ExpressionPredicate {
 
     fn eval_string_fn(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        match name {
-            "trim" => {
+        match function {
+            BuiltinFunction::Trim => {
                 if args.len() == 1 {
                     // Simple trim(string) - trim whitespace
                     let val = self.eval_expr(&args[0], chunk, row)?;
@@ -2581,7 +2744,7 @@ impl ExpressionPredicate {
                 }
                 None
             }
-            "ltrim" => {
+            BuiltinFunction::Ltrim => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2591,7 +2754,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "rtrim" => {
+            BuiltinFunction::Rtrim => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2601,7 +2764,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "replace" => {
+            BuiltinFunction::Replace => {
                 if args.len() != 3 {
                     return None;
                 }
@@ -2615,7 +2778,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "substring" => {
+            BuiltinFunction::Substring => {
                 if args.len() < 2 || args.len() > 3 {
                     return None;
                 }
@@ -2645,7 +2808,7 @@ impl ExpressionPredicate {
                     Some(Value::String(chars.into()))
                 }
             }
-            "split" => {
+            BuiltinFunction::Split => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -2662,7 +2825,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "toupper" | "upper" => {
+            BuiltinFunction::Upper => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2672,7 +2835,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "tolower" | "lower" => {
+            BuiltinFunction::Lower => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2682,7 +2845,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "char_length" | "charlength" => {
+            BuiltinFunction::CharLength => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2694,7 +2857,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "left" => {
+            BuiltinFunction::Left => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -2711,7 +2874,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "right" => {
+            BuiltinFunction::Right => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -2730,7 +2893,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "octet_length" | "byte_length" => {
+            BuiltinFunction::OctetLength => {
                 // octet_length(string) - byte length
                 if args.len() != 1 {
                     return None;
@@ -2744,7 +2907,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "normalize" => {
+            BuiltinFunction::Normalize => {
                 // normalize(string) - returns the string as-is (NFC normalization).
                 // Rust strings are valid UTF-8; full NFC normalization requires the
                 // unicode-normalization crate, which is deferred to Phase 2.
@@ -2758,7 +2921,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "isnormalized" => {
+            BuiltinFunction::IsNormalized => {
                 // IS [NFC|NFD|NFKC|NFKD] NORMALIZED - check Unicode normalization form.
                 // Args: (string_value) or (string_value, form_name)
                 // Default form is NFC when not specified.
@@ -2796,13 +2959,13 @@ impl ExpressionPredicate {
 
     fn eval_numeric_fn(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        match name {
-            "abs" => {
+        match function {
+            BuiltinFunction::Abs => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2810,10 +2973,11 @@ impl ExpressionPredicate {
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i.abs())),
                     Value::Float64(f) => Some(Value::Float64(f.abs())),
+                    Value::Decimal(d) => Some(Value::Decimal(d.abs())),
                     _ => None,
                 }
             }
-            "ceil" | "ceiling" => {
+            BuiltinFunction::Ceil => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2821,10 +2985,11 @@ impl ExpressionPredicate {
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i)),
                     Value::Float64(f) => Some(Value::Float64(f.ceil())),
+                    Value::Decimal(d) => Some(Value::Decimal(d.ceil())),
                     _ => None,
                 }
             }
-            "floor" => {
+            BuiltinFunction::Floor => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2832,10 +2997,11 @@ impl ExpressionPredicate {
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i)),
                     Value::Float64(f) => Some(Value::Float64(f.floor())),
+                    Value::Decimal(d) => Some(Value::Decimal(d.floor())),
                     _ => None,
                 }
             }
-            "round" => {
+            BuiltinFunction::Round => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -2843,27 +3009,30 @@ impl ExpressionPredicate {
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i)),
                     Value::Float64(f) => Some(Value::Float64(f.round())),
+                    Value::Decimal(d) => Some(Value::Decimal(d.round())),
                     _ => None,
                 }
             }
-            "sqrt" => {
+            BuiltinFunction::Sqrt => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).sqrt())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().sqrt())),
                     Value::Float64(f) => Some(Value::Float64(f.sqrt())),
                     _ => None,
                 }
             }
-            "sign" => {
+            BuiltinFunction::Sign => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i.signum())),
+                    Value::Decimal(d) => Some(Value::Int64(d.signum())),
                     Value::Float64(f) => {
                         if f > 0.0 {
                             Some(Value::Int64(1))
@@ -2876,7 +3045,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "power" | "pow" => {
+            BuiltinFunction::Power => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -2884,17 +3053,19 @@ impl ExpressionPredicate {
                 let exp_val = self.eval_expr(&args[1], chunk, row)?;
                 let base = match base_val {
                     Value::Int64(i) => i as f64,
+                    Value::Decimal(d) => d.to_f64(),
                     Value::Float64(f) => f,
                     _ => return None,
                 };
                 let exponent = match exp_val {
                     Value::Int64(i) => i as f64,
+                    Value::Decimal(d) => d.to_f64(),
                     Value::Float64(f) => f,
                     _ => return None,
                 };
                 Some(Value::Float64(base.powf(exponent)))
             }
-            "rand" | "random" => {
+            BuiltinFunction::Rand => {
                 use std::hash::{Hash, Hasher};
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 row.hash(&mut hasher);
@@ -2907,119 +3078,129 @@ impl ExpressionPredicate {
                 let random = (hash as f64) / (u64::MAX as f64);
                 Some(Value::Float64(random))
             }
-            "log" | "ln" => {
+            BuiltinFunction::Ln => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).ln())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().ln())),
                     Value::Float64(f) => Some(Value::Float64(f.ln())),
                     _ => None,
                 }
             }
-            "log10" => {
+            BuiltinFunction::Log10 => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).log10())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().log10())),
                     Value::Float64(f) => Some(Value::Float64(f.log10())),
                     _ => None,
                 }
             }
-            "log2" => {
+            BuiltinFunction::Log2 => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).log2())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().log2())),
                     Value::Float64(f) => Some(Value::Float64(f.log2())),
                     _ => None,
                 }
             }
-            "exp" => {
+            BuiltinFunction::Exp => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).exp())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().exp())),
                     Value::Float64(f) => Some(Value::Float64(f.exp())),
                     _ => None,
                 }
             }
-            "e" => Some(Value::Float64(std::f64::consts::E)),
-            "pi" => Some(Value::Float64(std::f64::consts::PI)),
-            "sin" => {
+            BuiltinFunction::E => Some(Value::Float64(std::f64::consts::E)),
+            BuiltinFunction::Pi => Some(Value::Float64(std::f64::consts::PI)),
+            BuiltinFunction::Sin => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).sin())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().sin())),
                     Value::Float64(f) => Some(Value::Float64(f.sin())),
                     _ => None,
                 }
             }
-            "cos" => {
+            BuiltinFunction::Cos => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).cos())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().cos())),
                     Value::Float64(f) => Some(Value::Float64(f.cos())),
                     _ => None,
                 }
             }
-            "tan" => {
+            BuiltinFunction::Tan => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).tan())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().tan())),
                     Value::Float64(f) => Some(Value::Float64(f.tan())),
                     _ => None,
                 }
             }
-            "asin" => {
+            BuiltinFunction::Asin => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).asin())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().asin())),
                     Value::Float64(f) => Some(Value::Float64(f.asin())),
                     _ => None,
                 }
             }
-            "acos" => {
+            BuiltinFunction::Acos => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).acos())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().acos())),
                     Value::Float64(f) => Some(Value::Float64(f.acos())),
                     _ => None,
                 }
             }
-            "atan" => {
+            BuiltinFunction::Atan => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).atan())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().atan())),
                     Value::Float64(f) => Some(Value::Float64(f.atan())),
                     _ => None,
                 }
             }
-            "atan2" => {
+            BuiltinFunction::Atan2 => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -3027,34 +3208,38 @@ impl ExpressionPredicate {
                 let x_val = self.eval_expr(&args[1], chunk, row)?;
                 let y = match y_val {
                     Value::Int64(i) => i as f64,
+                    Value::Decimal(d) => d.to_f64(),
                     Value::Float64(f) => f,
                     _ => return None,
                 };
                 let x = match x_val {
                     Value::Int64(i) => i as f64,
+                    Value::Decimal(d) => d.to_f64(),
                     Value::Float64(f) => f,
                     _ => return None,
                 };
                 Some(Value::Float64(y.atan2(x)))
             }
-            "degrees" => {
+            BuiltinFunction::Degrees => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).to_degrees())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().to_degrees())),
                     Value::Float64(f) => Some(Value::Float64(f.to_degrees())),
                     _ => None,
                 }
             }
-            "radians" => {
+            BuiltinFunction::Radians => {
                 if args.len() != 1 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Float64((i as f64).to_radians())),
+                    Value::Decimal(d) => Some(Value::Float64(d.to_f64().to_radians())),
                     Value::Float64(f) => Some(Value::Float64(f.to_radians())),
                     _ => None,
                 }
@@ -3065,13 +3250,13 @@ impl ExpressionPredicate {
 
     fn eval_temporal_fn(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        match name {
-            "date" | "todate" => {
+        match function {
+            BuiltinFunction::Date => {
                 if args.is_empty() {
                     return Some(Value::Date(grafeo_common::types::Date::today()));
                 }
@@ -3089,7 +3274,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "time" | "totime" | "local_time" => {
+            BuiltinFunction::Time => {
                 if args.is_empty() {
                     return Some(Value::Time(grafeo_common::types::Time::now()));
                 }
@@ -3109,7 +3294,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "datetime" | "localdatetime" | "local_datetime" | "todatetime" => {
+            BuiltinFunction::Datetime => {
                 if args.is_empty() {
                     return Some(Value::Timestamp(grafeo_common::types::Timestamp::now()));
                 }
@@ -3172,7 +3357,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "duration" | "toduration" => {
+            BuiltinFunction::Duration => {
                 if args.len() != 1 {
                     return None;
                 }
@@ -3206,7 +3391,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "tozoneddatetime" | "zoneddatetime" | "zoned_datetime" => {
+            BuiltinFunction::ZonedDatetime => {
                 if args.is_empty() {
                     return Some(Value::ZonedDatetime(
                         grafeo_common::types::ZonedDatetime::from_timestamp_offset(
@@ -3227,7 +3412,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "tozonedtime" | "zonedtime" => {
+            BuiltinFunction::ZonedTime => {
                 let val = self.eval_expr(args.first()?, chunk, row)?;
                 match val {
                     Value::String(s) => {
@@ -3242,22 +3427,23 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "current_date" | "currentdate" => {
-                Some(Value::Date(grafeo_common::types::Date::today()))
-            }
-            "current_time" | "currenttime" => Some(Value::Time(grafeo_common::types::Time::now())),
-            "now" | "current_timestamp" | "currenttimestamp" => {
-                Some(Value::Timestamp(grafeo_common::types::Timestamp::now()))
-            }
-            "timestamp" => Some(Value::Int64(
+            BuiltinFunction::CurrentDate => Some(Value::Date(grafeo_common::types::Date::today())),
+            BuiltinFunction::CurrentTime => Some(Value::Time(grafeo_common::types::Time::now())),
+            BuiltinFunction::Now => Some(Value::Timestamp(grafeo_common::types::Timestamp::now())),
+            BuiltinFunction::Timestamp => Some(Value::Int64(
                 grafeo_common::types::Timestamp::now().as_millis(),
             )),
             // The component functions read what the property form (`d.year`)
             // reads.
-            "year" | "month" | "day" | "hour" | "minute" | "second" => self
+            BuiltinFunction::Year
+            | BuiltinFunction::Month
+            | BuiltinFunction::Day
+            | BuiltinFunction::Hour
+            | BuiltinFunction::Minute
+            | BuiltinFunction::Second => self
                 .eval_expr(args.first()?, chunk, row)?
-                .temporal_component(name),
-            "date_trunc" | "truncate" => {
+                .temporal_component(function.name()),
+            BuiltinFunction::DateTrunc => {
                 if args.len() < 2 {
                     return None;
                 }
@@ -3280,13 +3466,13 @@ impl ExpressionPredicate {
 
     fn eval_path_fn(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        match name {
-            "path" => {
+        match function {
+            BuiltinFunction::Path => {
                 if args.len() == 2 {
                     // path(nodes_list, edges_list) - construct from component lists
                     let nodes_val = self.eval_expr(&args[0], chunk, row)?;
@@ -3325,7 +3511,7 @@ impl ExpressionPredicate {
                     })
                 }
             }
-            "path_length" => {
+            BuiltinFunction::PathLength => {
                 // PATH_LENGTH(path) (ISO/IEC 39075 20.21): the number of edges
                 // of a path value. A path variable reads its length column
                 // instead (see the translators).
@@ -3338,7 +3524,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "nodes" => {
+            BuiltinFunction::Nodes => {
                 // nodes(path) - extracts nodes from a path value
                 if args.len() != 1 {
                     return None;
@@ -3394,7 +3580,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "edges" | "relationships" => {
+            BuiltinFunction::Edges => {
                 // edges(path) / relationships(path) - extracts edges from a path value
                 if args.len() != 1 {
                     return None;
@@ -3411,7 +3597,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "isacyclic" => {
+            BuiltinFunction::IsAcyclic => {
                 // isAcyclic(path) - true if no node appears more than once
                 if args.len() != 1 {
                     return None;
@@ -3429,7 +3615,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "issimple" => {
+            BuiltinFunction::IsSimple => {
                 // isSimple(path) - true if no node repeats except possibly first == last
                 if args.len() != 1 {
                     return None;
@@ -3456,7 +3642,7 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            "istrail" => {
+            BuiltinFunction::IsTrail => {
                 // isTrail(path) - true if no edge repeats
                 if args.len() != 1 {
                     return None;
@@ -3481,21 +3667,14 @@ impl ExpressionPredicate {
     /// Coerces a `Value` to a borrowed or owned float slice for vector math.
     ///
     /// Handles both `Value::Vector` (native) and `Value::List` (GQL inline literal
-    /// form `[0.9, 0.1, 0.0]` which the parser translates to a list of Float64/Int64).
+    /// form `[0.9, 0.1, 0.0]`, a list of numbers: decimals in GQL, floats in Cypher).
     fn coerce_to_float_vec(val: &Value) -> Option<std::borrow::Cow<'_, [f32]>> {
         match val {
             Value::Vector(v) => Some(std::borrow::Cow::Borrowed(v.as_ref())),
             Value::List(list) => {
                 let mut vec = Vec::with_capacity(list.len());
                 for item in list.iter() {
-                    match item {
-                        // GQL numeric literals are Float64; f64→f32 precision loss is intentional
-                        // since all HNSW indexes store f32 components.
-                        #[allow(clippy::cast_possible_truncation)]
-                        Value::Float64(f) => vec.push(*f as f32),
-                        Value::Int64(i) => vec.push(*i as f32),
-                        _ => return None,
-                    }
+                    vec.push(item.as_vector_component()?);
                 }
                 Some(std::borrow::Cow::Owned(vec))
             }
@@ -3505,13 +3684,13 @@ impl ExpressionPredicate {
 
     fn eval_vector_fn(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        match name {
-            "cosine_similarity" => {
+        match function {
+            BuiltinFunction::CosineSimilarity => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -3526,7 +3705,7 @@ impl ExpressionPredicate {
                     crate::index::vector::cosine_similarity(&a, &b) as f64,
                 ))
             }
-            "cosine_distance" => {
+            BuiltinFunction::CosineDistance => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -3542,7 +3721,7 @@ impl ExpressionPredicate {
                     1.0 - crate::index::vector::cosine_similarity(&a, &b) as f64,
                 ))
             }
-            "euclidean_distance" => {
+            BuiltinFunction::EuclideanDistance => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -3557,7 +3736,7 @@ impl ExpressionPredicate {
                     crate::index::vector::euclidean_distance(&a, &b) as f64,
                 ))
             }
-            "dot_product" => {
+            BuiltinFunction::DotProduct => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -3572,7 +3751,7 @@ impl ExpressionPredicate {
                     crate::index::vector::dot_product(&a, &b) as f64
                 ))
             }
-            "manhattan_distance" => {
+            BuiltinFunction::ManhattanDistance => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -3594,13 +3773,13 @@ impl ExpressionPredicate {
     #[cfg(feature = "text-index")]
     fn eval_text_fn(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        match name {
-            "text_score" | "text_match" => {
+        match function {
+            BuiltinFunction::TextScore | BuiltinFunction::TextMatch => {
                 if args.len() != 2 {
                     return None;
                 }
@@ -3628,7 +3807,7 @@ impl ExpressionPredicate {
                     .iter()
                     .find_map(|label| self.store.score_text(node_id, label, property, query_str))?;
 
-                if name == "text_match" {
+                if function == BuiltinFunction::TextMatch {
                     Some(Value::Bool(score > 0.0))
                 } else {
                     Some(Value::Float64(score))
@@ -3641,7 +3820,7 @@ impl ExpressionPredicate {
     #[cfg(not(feature = "text-index"))]
     fn eval_text_fn(
         &self,
-        _name: &str,
+        _function: BuiltinFunction,
         _args: &[FilterExpression],
         _chunk: &DataChunk,
         _row: usize,
@@ -3651,35 +3830,39 @@ impl ExpressionPredicate {
 
     fn eval_session_fn(
         &self,
-        name: &str,
+        function: BuiltinFunction,
         args: &[FilterExpression],
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        match name {
-            "session_user" => {
+        match function {
+            BuiltinFunction::SessionUser => {
                 // session_user() - returns the current session user
                 // For embedded databases, returns a default user string
                 Some(Value::String("default".into()))
             }
             // ISO/IEC 39075 Section 17.1 / Section 21: session schema/graph references
-            "current_schema" => Some(self.session_context.current_schema.as_ref().map_or_else(
-                || Value::String("default".into()),
-                |s| Value::String(s.clone().into()),
-            )),
-            "current_graph" => Some(self.session_context.current_graph.as_ref().map_or_else(
-                || Value::String("default".into()),
-                |g| Value::String(g.clone().into()),
-            )),
-            "home_schema" | "home_graph" => {
+            BuiltinFunction::CurrentSchema => {
+                Some(self.session_context.current_schema.as_ref().map_or_else(
+                    || Value::String("default".into()),
+                    |s| Value::String(s.clone().into()),
+                ))
+            }
+            BuiltinFunction::CurrentGraph => {
+                Some(self.session_context.current_graph.as_ref().map_or_else(
+                    || Value::String("default".into()),
+                    |g| Value::String(g.clone().into()),
+                ))
+            }
+            BuiltinFunction::HomeSchema => {
                 // Home schema/graph: not configurable yet, returns null
                 Some(Value::Null)
             }
             // Grafeo extension: info() returns database metadata as a map
-            "info" => Some(self.session_context.db_info.get().clone()),
+            BuiltinFunction::Info => Some(self.session_context.db_info.get().clone()),
             // Grafeo extension: schema() returns schema metadata as a map
-            "schema" => Some(self.session_context.schema_info.get().clone()),
-            "nullif" => {
+            BuiltinFunction::Schema => Some(self.session_context.schema_info.get().clone()),
+            BuiltinFunction::Nullif => {
                 // NULLIF(expr1, expr2) - returns NULL if expr1 = expr2, else expr1
                 if args.len() != 2 {
                     return None;
@@ -3756,6 +3939,7 @@ impl ExpressionPredicate {
             UnaryFilterOp::Neg => match val? {
                 Value::Int64(i) => i.checked_neg().map(Value::Int64),
                 Value::Float64(f) => Some(Value::Float64(-f)),
+                Value::Decimal(d) => Some(Value::Decimal(d.neg())),
                 _ => None,
             },
         }
@@ -3769,6 +3953,10 @@ impl ExpressionPredicate {
     fn values_equal(left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Null, Value::Null) => true,
+            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+                super::value_utils::compare_with_decimal(left, right)
+                    == Some(std::cmp::Ordering::Equal)
+            }
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int64(a), Value::Int64(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => (a - b).abs() < f64::EPSILON,
@@ -3836,6 +4024,7 @@ impl ExpressionPredicate {
             "BOOLEAN" | "BOOL" => matches!(val, Value::Bool(_)),
             "INTEGER" | "INT" | "INT64" => matches!(val, Value::Int64(_)),
             "FLOAT" | "FLOAT64" | "DOUBLE" => matches!(val, Value::Float64(_)),
+            "DECIMAL" | "DEC" => matches!(val, Value::Decimal(_)),
             "STRING" => matches!(val, Value::String(_)),
             "LIST" => matches!(val, Value::List(_)),
             "MAP" | "RECORD" => matches!(val, Value::Map(_)),
@@ -3858,6 +4047,7 @@ impl ExpressionPredicate {
                 // reason: type coercion intentionally truncates float to int
                 #[allow(clippy::cast_possible_truncation)]
                 Value::Float64(f) => Some(Value::Int64(f as i64)),
+                Value::Decimal(d) => d.trunc_to_i64().map(Value::Int64),
                 Value::String(ref s) => s.parse::<i64>().ok().map(Value::Int64),
                 Value::Bool(b) => Some(Value::Int64(i64::from(b))),
                 _ => None,
@@ -3865,9 +4055,11 @@ impl ExpressionPredicate {
             "FLOAT" | "FLOAT64" | "DOUBLE" => match val {
                 Value::Float64(_) => Some(val),
                 Value::Int64(i) => Some(Value::Float64(i as f64)),
+                Value::Decimal(d) => Some(Value::Float64(d.to_f64())),
                 Value::String(ref s) => s.parse::<f64>().ok().map(Value::Float64),
                 _ => None,
             },
+            "DECIMAL" | "DEC" => to_decimal(&val).map(Value::Decimal),
             "STRING" => match val {
                 Value::String(_) => Some(val),
                 other => Some(Value::String(other.to_string().into())),
@@ -3894,6 +4086,9 @@ impl ExpressionPredicate {
 
     fn compare_values(&self, left: &Value, right: &Value) -> Option<i32> {
         match (left, right) {
+            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+                super::value_utils::compare_with_decimal(left, right).map(|o| o as i32)
+            }
             (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b) as i32),
             (Value::Float64(a), Value::Float64(b)) => {
                 if a < b {
@@ -3972,6 +4167,25 @@ impl Bound<NodeId> {
             Self::To(node) => Some(node),
             Self::No | Self::Null => None,
         }
+    }
+}
+
+/// The decimal `toDecimal` and a cast to `DECIMAL` make of `value`: an
+/// integer or a decimal exactly, a float by its shortest text, a string that
+/// spells a decimal as it is written and one that spells another number
+/// (`'1e3'`) as that float. `None` for a NaN or infinite float, any other
+/// string or value, and a number past 38 digits.
+fn to_decimal(value: &Value) -> Option<Decimal> {
+    match value {
+        Value::Decimal(d) => Some(*d),
+        Value::Int64(i) => Some(Decimal::from_i64(*i)),
+        Value::Float64(f) => Decimal::from_f64(*f).ok(),
+        Value::String(s) => Decimal::parse(s).ok().or_else(|| {
+            s.parse::<f64>()
+                .ok()
+                .and_then(|f| Decimal::from_f64(f).ok())
+        }),
+        _ => None,
     }
 }
 
@@ -5030,7 +5244,7 @@ mod tests {
         let pred_head = ExpressionPredicate::new(
             FilterExpression::Binary {
                 left: Box::new(FilterExpression::FunctionCall {
-                    name: "head".to_string(),
+                    function: BuiltinFunction::from_name("head").unwrap(),
                     args: vec![FilterExpression::List(vec![
                         FilterExpression::Literal(Value::Int64(1)),
                         FilterExpression::Literal(Value::Int64(2)),
@@ -5049,7 +5263,7 @@ mod tests {
         let pred_last = ExpressionPredicate::new(
             FilterExpression::Binary {
                 left: Box::new(FilterExpression::FunctionCall {
-                    name: "last".to_string(),
+                    function: BuiltinFunction::from_name("last").unwrap(),
                     args: vec![FilterExpression::List(vec![
                         FilterExpression::Literal(Value::Int64(1)),
                         FilterExpression::Literal(Value::Int64(2)),
@@ -5068,7 +5282,7 @@ mod tests {
         let pred_size = ExpressionPredicate::new(
             FilterExpression::Binary {
                 left: Box::new(FilterExpression::FunctionCall {
-                    name: "size".to_string(),
+                    function: BuiltinFunction::from_name("size").unwrap(),
                     args: vec![FilterExpression::List(vec![
                         FilterExpression::Literal(Value::Int64(1)),
                         FilterExpression::Literal(Value::Int64(2)),
@@ -5096,7 +5310,7 @@ mod tests {
         let pred_to_int = ExpressionPredicate::new(
             FilterExpression::Binary {
                 left: Box::new(FilterExpression::FunctionCall {
-                    name: "toInteger".to_string(),
+                    function: BuiltinFunction::from_name("toInteger").unwrap(),
                     args: vec![FilterExpression::Literal(Value::String("42".into()))],
                 }),
                 op: BinaryFilterOp::Eq,
@@ -5111,7 +5325,7 @@ mod tests {
         let pred_to_float = ExpressionPredicate::new(
             FilterExpression::Binary {
                 left: Box::new(FilterExpression::FunctionCall {
-                    name: "toFloat".to_string(),
+                    function: BuiltinFunction::from_name("toFloat").unwrap(),
                     args: vec![FilterExpression::Literal(Value::Int64(42))],
                 }),
                 op: BinaryFilterOp::Eq,
@@ -5126,7 +5340,7 @@ mod tests {
         let pred_to_bool = ExpressionPredicate::new(
             FilterExpression::Binary {
                 left: Box::new(FilterExpression::FunctionCall {
-                    name: "toBoolean".to_string(),
+                    function: BuiltinFunction::from_name("toBoolean").unwrap(),
                     args: vec![FilterExpression::Literal(Value::String("true".into()))],
                 }),
                 op: BinaryFilterOp::Eq,
@@ -5150,7 +5364,7 @@ mod tests {
         let pred_coalesce = ExpressionPredicate::new(
             FilterExpression::Binary {
                 left: Box::new(FilterExpression::FunctionCall {
-                    name: "coalesce".to_string(),
+                    function: BuiltinFunction::from_name("coalesce").unwrap(),
                     args: vec![
                         FilterExpression::Literal(Value::Null),
                         FilterExpression::Literal(Value::Null),
@@ -5385,7 +5599,7 @@ mod tests {
                 left: Box::new(FilterExpression::Literal(Value::String("Person".into()))),
                 op: BinaryFilterOp::In,
                 right: Box::new(FilterExpression::FunctionCall {
-                    name: "labels".to_string(),
+                    function: BuiltinFunction::from_name("labels").unwrap(),
                     args: vec![FilterExpression::Variable("n".to_string())],
                 }),
             },
@@ -6652,7 +6866,7 @@ mod tests {
         // Bool -> String
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "toString".to_string(),
+                function: BuiltinFunction::from_name("toString").unwrap(),
                 args: vec![FilterExpression::Literal(Value::Bool(true))],
             },
             vc.clone(),
@@ -6663,7 +6877,7 @@ mod tests {
         // Float -> String
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "toString".to_string(),
+                function: BuiltinFunction::from_name("toString").unwrap(),
                 args: vec![FilterExpression::Literal(Value::Float64(2.72))],
             },
             vc.clone(),
@@ -6674,7 +6888,7 @@ mod tests {
         // Null -> Null
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "toString".to_string(),
+                function: BuiltinFunction::from_name("toString").unwrap(),
                 args: vec![FilterExpression::Literal(Value::Null)],
             },
             vc,
@@ -6693,7 +6907,7 @@ mod tests {
 
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "toBoolean".to_string(),
+                function: BuiltinFunction::from_name("toBoolean").unwrap(),
                 args: vec![FilterExpression::Literal(Value::String("true".into()))],
             },
             vc.clone(),
@@ -6703,7 +6917,7 @@ mod tests {
 
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "toBoolean".to_string(),
+                function: BuiltinFunction::from_name("toBoolean").unwrap(),
                 args: vec![FilterExpression::Literal(Value::String("false".into()))],
             },
             vc.clone(),
@@ -6713,7 +6927,7 @@ mod tests {
 
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "toBoolean".to_string(),
+                function: BuiltinFunction::from_name("toBoolean").unwrap(),
                 args: vec![FilterExpression::Literal(Value::Bool(true))],
             },
             vc,
@@ -6732,7 +6946,7 @@ mod tests {
 
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "toFloat".to_string(),
+                function: BuiltinFunction::from_name("toFloat").unwrap(),
                 args: vec![FilterExpression::Literal(Value::String("2.72".into()))],
             },
             vc.clone(),
@@ -6746,7 +6960,7 @@ mod tests {
 
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "toFloat".to_string(),
+                function: BuiltinFunction::from_name("toFloat").unwrap(),
                 args: vec![FilterExpression::Literal(Value::Int64(42))],
             },
             vc,
@@ -6765,7 +6979,7 @@ mod tests {
 
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "toInteger".to_string(),
+                function: BuiltinFunction::from_name("toInteger").unwrap(),
                 args: vec![FilterExpression::Literal(Value::Float64(3.7))],
             },
             vc,
@@ -6777,7 +6991,7 @@ mod tests {
     #[test]
     fn test_eval_reverse_list() {
         let result = eval_literal_expr(FilterExpression::FunctionCall {
-            name: "reverse".to_string(),
+            function: BuiltinFunction::from_name("reverse").unwrap(),
             args: vec![FilterExpression::List(vec![
                 FilterExpression::Literal(Value::Int64(1)),
                 FilterExpression::Literal(Value::Int64(2)),
@@ -6795,7 +7009,7 @@ mod tests {
     #[test]
     fn test_eval_reverse_string() {
         let result = eval_literal_expr(FilterExpression::FunctionCall {
-            name: "reverse".to_string(),
+            function: BuiltinFunction::from_name("reverse").unwrap(),
             args: vec![FilterExpression::Literal(Value::String("abc".into()))],
         });
         assert_eq!(result, Some(Value::String("cba".into())));
@@ -6804,13 +7018,13 @@ mod tests {
     #[test]
     fn test_eval_exists_function() {
         let result = eval_literal_expr(FilterExpression::FunctionCall {
-            name: "exists".to_string(),
+            function: BuiltinFunction::from_name("exists").unwrap(),
             args: vec![FilterExpression::Literal(Value::Int64(42))],
         });
         assert_eq!(result, Some(Value::Bool(true)));
 
         let result = eval_literal_expr(FilterExpression::FunctionCall {
-            name: "exists".to_string(),
+            function: BuiltinFunction::from_name("exists").unwrap(),
             args: vec![FilterExpression::Literal(Value::Null)],
         });
         assert_eq!(result, Some(Value::Bool(false)));
@@ -6898,7 +7112,7 @@ mod text_fn_tests {
         let predicate = ExpressionPredicate::new(
             FilterExpression::Binary {
                 left: Box::new(FilterExpression::FunctionCall {
-                    name: "text_score".to_string(),
+                    function: BuiltinFunction::from_name("text_score").unwrap(),
                     args: vec![
                         FilterExpression::Property {
                             variable: "doc".to_string(),
@@ -6944,7 +7158,7 @@ mod text_fn_tests {
             column.push_node_id(alix);
             ExpressionPredicate::new(
                 FilterExpression::FunctionCall {
-                    name: function.to_string(),
+                    function: BuiltinFunction::from_name(function).unwrap(),
                     args: vec![FilterExpression::Variable("n".to_string())],
                 },
                 HashMap::from([("n".to_string(), 0)]),
@@ -6982,7 +7196,7 @@ mod text_fn_tests {
         let eval = |column: ValueVector, function: &str| {
             let predicate = ExpressionPredicate::new(
                 FilterExpression::FunctionCall {
-                    name: function.to_string(),
+                    function: BuiltinFunction::from_name(function).unwrap(),
                     args: vec![FilterExpression::Variable("r".to_string())],
                 },
                 HashMap::from([("r".to_string(), 0)]),
@@ -7043,7 +7257,7 @@ mod text_fn_tests {
         // text_match(doc.body, "rust") = true/false
         let predicate = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "text_match".to_string(),
+                function: BuiltinFunction::from_name("text_match").unwrap(),
                 args: vec![
                     FilterExpression::Property {
                         variable: "doc".to_string(),
@@ -7072,7 +7286,7 @@ mod text_fn_tests {
         // text_score with wrong number of args should return None (evaluate = false)
         let predicate = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "text_score".to_string(),
+                function: BuiltinFunction::from_name("text_score").unwrap(),
                 args: vec![FilterExpression::Literal(Value::String("only_one".into()))],
             },
             variable_columns,
@@ -7099,7 +7313,7 @@ mod text_fn_tests {
 
         let predicate = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
-                name: "text_score".to_string(),
+                function: BuiltinFunction::from_name("text_score").unwrap(),
                 args: vec![
                     FilterExpression::Property {
                         variable: "doc".to_string(),

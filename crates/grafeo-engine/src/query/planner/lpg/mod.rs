@@ -130,18 +130,18 @@ use grafeo_common::types::{EpochId, TransactionId};
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
-    AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, ConstraintValidator,
-    CreateOperator, CreateStep, DeleteEdgeOperator, DeleteNodeOperator, EagerOperator,
-    EmptyOperator, EntityKind, EntityValue, ExecutionPathMode, ExpandOperator, ExpandStep,
-    ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
-    FilterOperator, HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
-    JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LeapfrogJoinOperator,
-    LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator, MergeRelationshipConfig,
-    MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator, Operator,
-    ParameterScanOperator, ProjectExpr, ProjectOperator, PropertySource, RangeScanOperator,
-    RemoveLabelOperator, ScanOperator, SetPropertyOperator, ShortestPathOperator,
-    SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
-    UnwindOperator, VariableLengthExpandOperator,
+    AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, BuiltinFunction,
+    ConstraintValidator, CreateOperator, CreateStep, DeleteEdgeOperator, DeleteNodeOperator,
+    EagerOperator, EmptyOperator, EntityKind, EntityValue, ExecutionPathMode, ExpandOperator,
+    ExpandStep, ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator,
+    FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
+    HorizontalAggregateOperator, JoinType as PhysicalJoinType, LazyFactorizedChainOperator,
+    LeapfrogJoinOperator, LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator,
+    MergeRelationshipConfig, MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator,
+    Operator, ParameterScanOperator, ProjectExpr, ProjectOperator, PropertySource,
+    RangeScanOperator, RemoveLabelOperator, ScanOperator, SetPropertyOperator,
+    ShortestPathOperator, SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey,
+    SortOperator, UnwindOperator, VariableLengthExpandOperator,
 };
 use grafeo_core::graph::{Direction, GraphStoreMut, GraphStoreSearch};
 use std::collections::HashMap;
@@ -1219,15 +1219,9 @@ impl Planner {
             LogicalExpression::Literal(Value::List(list)) => {
                 let mut vec = Vec::with_capacity(list.len());
                 for item in list.iter() {
-                    match item {
-                        Value::Float64(f) => vec.push(*f as f32),
-                        Value::Int64(i) => vec.push(*i as f32),
-                        _ => {
-                            return Err(Error::Internal(
-                                "Vector elements must be numeric".to_string(),
-                            ));
-                        }
-                    }
+                    vec.push(item.as_vector_component().ok_or_else(|| {
+                        Error::Internal("Vector elements must be numeric".to_string())
+                    })?);
                 }
                 Ok(vec)
             }
@@ -1236,15 +1230,13 @@ impl Planner {
             LogicalExpression::List(items) => {
                 let mut vec = Vec::with_capacity(items.len());
                 for item in items {
-                    match item {
-                        LogicalExpression::Literal(Value::Float64(f)) => vec.push(*f as f32),
-                        LogicalExpression::Literal(Value::Int64(i)) => vec.push(*i as f32),
-                        _ => {
-                            return Err(Error::Internal(
-                                "Vector elements must be numeric literals".to_string(),
-                            ));
-                        }
-                    }
+                    let component = match item {
+                        LogicalExpression::Literal(value) => value.as_vector_component(),
+                        _ => None,
+                    };
+                    vec.push(component.ok_or_else(|| {
+                        Error::Internal("Vector elements must be numeric literals".to_string())
+                    })?);
                 }
                 Ok(vec)
             }
@@ -1609,6 +1601,7 @@ mod tests {
             input: Box::new(LogicalOperator::Filter(FilterOp {
                 predicate: LogicalExpression::Binary {
                     left: Box::new(LogicalExpression::FunctionCall {
+                        callee: crate::query::plan::Callee::named("size"),
                         name: "size".to_string(),
                         args: vec![LogicalExpression::Property {
                             variable: "n".to_string(),

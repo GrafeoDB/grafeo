@@ -58,6 +58,11 @@ func (db *Database) GetEdge(id uint64) (*Edge, error) {
 		return nil, err
 	}
 	runtime.UnlockOSThread()
+	return edgeFromC(cEdge), nil
+}
+
+// edgeFromC copies and frees an edge a C call handed out.
+func edgeFromC(cEdge *C.GrafeoEdge) *Edge {
 	defer C.grafeo_free_edge(cEdge)
 
 	edgeID := uint64(C.grafeo_edge_id(cEdge))
@@ -80,7 +85,7 @@ func (db *Database) GetEdge(id uint64) (*Edge, error) {
 		TargetID:   dstID,
 		Type:       edgeType,
 		Properties: props,
-	}, nil
+	}
 }
 
 // DeleteEdge deletes an edge by ID. Returns true if the edge existed.

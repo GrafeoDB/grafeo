@@ -41,6 +41,11 @@ internal static class ValueConverter
             float f => JsonValue.Create((double)f),
             double d => JsonValue.Create(d),
             string s => JsonValue.Create(s),
+            GrafeoDecimal g => new JsonObject { ["$decimal"] = g.Text },
+            decimal m => new JsonObject
+            {
+                ["$decimal"] = m.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            },
             DateTime dt => new JsonObject
             {
                 ["$timestamp_us"] = new DateTimeOffset(dt.ToUniversalTime())
@@ -190,6 +195,14 @@ internal static class ValueConverter
 
     private static object? ParseJsonObject(JsonElement element)
     {
+        // An exact decimal: the "$decimal" tag as the object's only key
+        if (element.TryGetProperty("$decimal", out var decimalElement)
+            && element.EnumerateObject().Count() == 1
+            && decimalElement.ValueKind == JsonValueKind.String)
+        {
+            return new GrafeoDecimal(decimalElement.GetString()!);
+        }
+
         // Check for temporal markers from grafeo-bindings-common
         if (element.TryGetProperty("$timestamp_us", out var tsElement))
         {

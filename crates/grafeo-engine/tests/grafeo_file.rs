@@ -2,7 +2,7 @@
 
 #![cfg(feature = "grafeo-file")]
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{Decimal, Value};
 use grafeo_engine::{Config, GrafeoDB};
 
 #[cfg(all(feature = "wal", feature = "lpg"))]
@@ -163,12 +163,13 @@ fn multiple_checkpoints_alternate_headers() {
     session.execute("INSERT (:Person {name: 'Jules'})").unwrap();
     db.wal_checkpoint().unwrap();
 
+    // The creation's own checkpoint (it stores the configuration) is 1.
     let fm = db.file_manager().unwrap();
-    assert_eq!(fm.active_header().iteration, 1);
+    assert_eq!(fm.active_header().iteration, 2);
 
     session.execute("INSERT (:Person {name: 'Mia'})").unwrap();
     db.wal_checkpoint().unwrap();
-    assert_eq!(fm.active_header().iteration, 2);
+    assert_eq!(fm.active_header().iteration, 3);
     assert_eq!(fm.active_header().node_count, 2);
 
     db.close().unwrap();
@@ -261,7 +262,8 @@ fn checkpoint_merges_incremental_writes() {
     let header = db.file_manager().unwrap().active_header();
     assert_eq!(header.node_count, 4);
     assert_eq!(header.edge_count, 1);
-    assert_eq!(header.iteration, 3); // 3 checkpoints = iteration 3
+    // The creation's checkpoint (it stores the configuration), then 3.
+    assert_eq!(header.iteration, 4);
 
     db.close().unwrap();
 
@@ -439,7 +441,8 @@ fn diverse_property_types_roundtrip() {
                 "INSERT (:Thing { \
                     str_val: 'hello', \
                     int_val: 42, \
-                    float_val: 3.14, \
+                    float_val: 3.14e0, \
+                    dec_val: 3.140, \
                     bool_val: true, \
                     list_val: [1, 2, 3] \
                  })",
@@ -453,7 +456,8 @@ fn diverse_property_types_roundtrip() {
         let session = db.session();
         let result = session
             .execute(
-                "MATCH (t:Thing) RETURN t.str_val, t.int_val, t.float_val, t.bool_val, t.list_val",
+                "MATCH (t:Thing) RETURN t.str_val, t.int_val, t.float_val, t.bool_val, t.list_val, \
+                 t.dec_val",
             )
             .unwrap();
         let row = &result.rows()[0];
@@ -462,6 +466,8 @@ fn diverse_property_types_roundtrip() {
         assert!(matches!(row[2], Value::Float64(_)));
         assert_eq!(row[3], Value::Bool(true));
         assert!(matches!(row[4], Value::List(_)));
+        // A decimal keeps its value and its scale through the file.
+        assert_eq!(format!("{:?}", row[5]), "Decimal(3.140)");
         db.close().unwrap();
     }
 }
@@ -723,7 +729,10 @@ fn edges_with_properties_persist() {
             .unwrap();
         assert_eq!(result.rows().len(), 1);
         assert_eq!(result.rows()[0][0], Value::Int64(2020));
-        assert!(matches!(result.rows()[0][1], Value::Float64(_)));
+        assert_eq!(
+            result.rows()[0][1],
+            Value::Decimal(Decimal::parse("0.95").unwrap())
+        );
         db.close().unwrap();
     }
 }

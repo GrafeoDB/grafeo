@@ -254,22 +254,15 @@ fn require_lpg_store<'a>(ctx: &ProcedureContext<'a>, proc_name: &str) -> Result<
 }
 
 #[cfg(all(feature = "lpg", feature = "vector-index"))]
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    reason = "vector indexes store f32; GQL list literals arrive as f64/i64 and must narrow"
-)]
 fn coerce_params_to_vector(params: &Parameters, key: &str) -> Result<Vec<f32>> {
     if let Some(list) = params.get_list(key) {
         let mut out = Vec::with_capacity(list.len());
         for v in list {
-            match v {
-                Value::Float64(f) => out.push(*f as f32),
-                Value::Int64(i) => out.push(*i as f32),
-                other => {
+            match v.as_vector_component() {
+                Some(component) => out.push(component),
+                None => {
                     return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
-                        "the vector parameter '{key}' must be a list of numbers, but holds \
-                         {other}"
+                        "the vector parameter '{key}' must be a list of numbers, but holds {v}"
                     )));
                 }
             }
@@ -956,6 +949,7 @@ fn set_parameter(
         (Some(Type::Integer | Type::NodeId) | None, Value::Int64(v)) => params.set_int(name, *v),
         (Some(Type::Float), Value::Int64(v)) => params.set_float(name, *v as f64),
         (Some(Type::Float) | None, Value::Float64(v)) => params.set_float(name, *v),
+        (Some(Type::Float) | None, Value::Decimal(d)) => params.set_float(name, d.to_f64()),
         (Some(Type::String) | None, Value::String(v)) => params.set_string(name, v.as_str()),
         (Some(Type::Boolean) | None, Value::Bool(v)) => params.set_bool(name, *v),
         (Some(Type::List) | None, Value::List(items)) => params.set_list(name, items.to_vec()),

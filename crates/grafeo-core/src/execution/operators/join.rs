@@ -182,6 +182,8 @@ impl HashKey {
             // `=` compares an integer with a float as this `f64`.
             Value::Int64(i) => Self::number_key(*i as f64),
             Value::Float64(f) => Self::number_key(*f),
+            // A decimal equals the integer and the float of its value.
+            Value::Decimal(d) => Self::number_key(d.to_f64()),
             // A string equals a float it parses as (`'5.0' = 5.0`) and an
             // integer it parses as (`'05' = 5`, and such a string parses as
             // the float of that integer too), and otherwise only itself.

@@ -60,6 +60,7 @@ use grafeo_common::temporal::VersionLog;
 /// Compares two values for ordering (used for range checks).
 pub(super) fn compare_values_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
     match (a, b) {
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
         (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
@@ -735,21 +736,22 @@ impl LpgStore {
         }
     }
 
-    /// Copies all data from the source graph to the destination graph.
-    /// Creates the destination graph if it does not exist.
+    /// Creates the graph `dest` when it does not exist. It copies no data:
+    /// the engine's `CREATE GRAPH dest AS COPY OF source` copies a graph, and
+    /// logs the copy.
     ///
     /// # Errors
     ///
     /// Returns [`AllocError`] if the destination store cannot be allocated.
+    #[deprecated(
+        since = "0.6.0",
+        note = "copies no data: use `CREATE GRAPH dest AS COPY OF source`; removed in 0.7.0"
+    )]
     pub fn copy_graph(&self, source: Option<&str>, dest: Option<&str>) -> Result<(), AllocError> {
-        let _src = match source {
-            Some(n) => self.graph(n),
-            None => None, // default graph
-        };
-        let _dest_graph = dest.map(|n| self.graph_or_create(n)).transpose()?;
-        // Full graph copy is complex (requires iterating all entities).
-        // For now, this creates the destination graph structure.
-        // Full entity-level copy will be implemented when needed.
+        let _ = source;
+        if let Some(name) = dest {
+            self.graph_or_create(name)?;
+        }
         Ok(())
     }
 

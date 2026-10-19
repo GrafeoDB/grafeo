@@ -467,12 +467,19 @@ fn an_old_spill_file_that_is_not_one_moves_to_kept() {
 fn a_refused_file_moves_to_kept_and_the_next_open_neither_rebuilds_nor_checkpoints() {
     use grafeo_common::testing::crash::{CrashResult, with_crash_at, with_failure_at};
 
+    // Without a WAL, whose first segment an open writes (a failure point and
+    // crash points of its own): the failure and the crash count only the
+    // rebuild's and the checkpoint's.
+    let open_without_wal = |path: &std::path::Path| {
+        GrafeoDB::with_config(grafeo_engine::Config::persistent(path).without_wal())
+    };
+
     let (_dir, path) = fixture("0.6");
     let old = spill_dir(&path).join(SPILL_FILE);
     write_old(&old, 2, &[(0, vec![3.0, 19.0])]);
     let bytes = std::fs::read(&old).unwrap();
     assert!(
-        with_failure_at(1, || GrafeoDB::open(&path)).is_err(),
+        with_failure_at(1, || open_without_wal(&path)).is_err(),
         "the first open writes a checkpoint"
     );
     assert_eq!(
@@ -481,7 +488,7 @@ fn a_refused_file_moves_to_kept_and_the_next_open_neither_rebuilds_nor_checkpoin
         "a failed checkpoint moves nothing"
     );
 
-    let db = GrafeoDB::open(&path).unwrap();
+    let db = open_without_wal(&path).unwrap();
     assert!(!old.exists(), "the file left the top level");
     assert_eq!(
         std::fs::read(kept_dir(&path).join(SPILL_FILE)).unwrap(),
@@ -491,14 +498,14 @@ fn a_refused_file_moves_to_kept_and_the_next_open_neither_rebuilds_nor_checkpoin
     db.close().unwrap();
     drop(db);
 
-    let reopened = with_failure_at(1, || GrafeoDB::open(&path));
+    let reopened = with_failure_at(1, || open_without_wal(&path));
     assert!(
         reopened.is_ok(),
         "the next open writes a checkpoint: {:?}",
         reopened.err()
     );
     drop(reopened);
-    let CrashResult::Completed(reopened) = with_crash_at(1, || GrafeoDB::open(&path)) else {
+    let CrashResult::Completed(reopened) = with_crash_at(1, || open_without_wal(&path)) else {
         panic!("the next open passed a crash point: a rebuild or a checkpoint");
     };
     let db = reopened.unwrap();

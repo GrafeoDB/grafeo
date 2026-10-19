@@ -12,11 +12,13 @@ use super::{
 };
 #[cfg(feature = "algos")]
 use super::{CallProcedureOp, StaticResultOperator};
-use crate::query::plan::{PathMode, PathSelection};
+use crate::query::plan::{Callee, PathMode, PathSelection};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
+use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
     ExecutionPathMode, ExecutionPathSelection, JoinCondition, JoinedRowCondition,
 };
+use grafeo_core::execution::operators::{FilterExpression, Volatility};
 
 impl super::Planner {
     /// Plans a CREATE NODE operator (Gremlin `addV`, a GraphQL mutation): a
@@ -1207,7 +1209,7 @@ impl super::Planner {
                 Err(_) => {
                     // Fallback: try constant folding for complex expressions
                     // (e.g., vector([1,2,3]), date('2024-01-01')).
-                    if let Some(v) = Self::try_fold_expression(expr) {
+                    if let Some(v) = self.try_fold_expression(expr) {
                         PropertySource::Constant(v)
                     } else {
                         // Complex runtime expression (e.g., c.value + 1): add a
@@ -1315,7 +1317,7 @@ impl super::Planner {
         if let Ok(source) = self.expression_to_property_source(expr, action_scope_columns) {
             return Ok(source);
         }
-        if let Some(value) = Self::try_fold_expression(expr) {
+        if let Some(value) = self.try_fold_expression(expr) {
             return Ok(PropertySource::Constant(value));
         }
         let filter_expr = self.convert_expression(expr)?;
@@ -1370,7 +1372,7 @@ impl super::Planner {
         if let Ok(source) = self.expression_to_property_source(expr, columns) {
             return Ok(source);
         }
-        if let Some(value) = Self::try_fold_expression(expr) {
+        if let Some(value) = self.try_fold_expression(expr) {
             return Ok(PropertySource::Constant(value));
         }
         let filter_expr = self.convert_expression(expr)?;
@@ -1431,7 +1433,7 @@ impl super::Planner {
                 ))
             }
             _ => {
-                if let Some(value) = Self::try_fold_expression(expr) {
+                if let Some(value) = self.try_fold_expression(expr) {
                     Ok(PropertySource::Constant(value))
                 } else {
                     Err(Error::Internal(format!(
@@ -1445,127 +1447,46 @@ impl super::Planner {
 
     /// Tries to evaluate a constant expression at plan time.
     ///
-    /// Recursively folds literals, unary operators, lists, and known function calls
-    /// (like `vector()`) into concrete values. Returns `None` if the expression
-    /// contains non-constant parts (variables, property accesses, etc.).
-    pub(super) fn try_fold_expression(expr: &LogicalExpression) -> Option<Value> {
+    /// Recursively folds literals, unary operators, lists, maps and calls of
+    /// built-in functions that are not Volatile (`vector([1, 2])`,
+    /// `date('2026-10-17')`, `date()`) into concrete values. Returns `None` if
+    /// the expression contains non-constant parts (variables, property
+    /// accesses, `rand()`, etc.).
+    pub(super) fn try_fold_expression(&self, expr: &LogicalExpression) -> Option<Value> {
         match expr {
             LogicalExpression::Literal(v) => Some(v.clone()),
             LogicalExpression::List(items) => {
-                let values: Option<Vec<Value>> =
-                    items.iter().map(Self::try_fold_expression).collect();
+                let values: Option<Vec<Value>> = items
+                    .iter()
+                    .map(|item| self.try_fold_expression(item))
+                    .collect();
                 Some(Value::List(values?.into()))
             }
-            LogicalExpression::FunctionCall { name, args, .. } => {
-                match name.to_lowercase().as_str() {
-                    "vector" => {
-                        if args.len() != 1 {
-                            return None;
-                        }
-                        let val = Self::try_fold_expression(&args[0])?;
-                        match val {
-                            Value::List(items) => {
-                                // reason: intentional lossy f64/i64 to f32 for vector elements
-                                #[allow(clippy::cast_possible_truncation)]
-                                let floats: Vec<f32> = items
-                                    .iter()
-                                    .filter_map(|v| match v {
-                                        Value::Float64(f) => Some(*f as f32),
-                                        Value::Int64(i) => Some(*i as f32),
-                                        _ => None,
-                                    })
-                                    .collect();
-                                if floats.len() == items.len() {
-                                    Some(Value::Vector(floats.into()))
-                                } else {
-                                    None
-                                }
-                            }
-                            // Already a vector (from all-numeric list folding)
-                            Value::Vector(v) => Some(Value::Vector(v)),
-                            _ => None,
-                        }
-                    }
-                    "timestamp" => {
-                        if !args.is_empty() {
-                            return None;
-                        }
-                        Some(Value::Int64(
-                            grafeo_common::types::Timestamp::now().as_millis(),
-                        ))
-                    }
-                    "now" | "current_timestamp" | "currenttimestamp" => {
-                        if !args.is_empty() {
-                            return None;
-                        }
-                        Some(Value::Timestamp(grafeo_common::types::Timestamp::now()))
-                    }
-                    "date" | "todate" | "current_date" | "currentdate" => {
-                        if args.is_empty() {
-                            return Some(Value::Date(grafeo_common::types::Date::today()));
-                        }
-                        if args.len() != 1 {
-                            return None;
-                        }
-                        let val = Self::try_fold_expression(&args[0])?;
-                        match val {
-                            Value::String(s) => {
-                                grafeo_common::types::Date::parse(&s).map(Value::Date)
-                            }
-                            _ => None,
-                        }
-                    }
-                    "time" | "totime" | "local_time" | "current_time" | "currenttime" => {
-                        if args.is_empty() {
-                            return Some(Value::Time(grafeo_common::types::Time::now()));
-                        }
-                        if args.len() != 1 {
-                            return None;
-                        }
-                        let val = Self::try_fold_expression(&args[0])?;
-                        match val {
-                            Value::String(s) => {
-                                grafeo_common::types::Time::parse(&s).map(Value::Time)
-                            }
-                            _ => None,
-                        }
-                    }
-                    "datetime" | "localdatetime" | "local_datetime" | "todatetime" => {
-                        if args.is_empty() {
-                            return Some(Value::Timestamp(grafeo_common::types::Timestamp::now()));
-                        }
-                        if args.len() != 1 {
-                            return None;
-                        }
-                        let val = Self::try_fold_expression(&args[0])?;
-                        match val {
-                            Value::String(s) => {
-                                if let Some(d) = grafeo_common::types::Date::parse(&s) {
-                                    return Some(Value::Timestamp(d.to_timestamp()));
-                                }
-                                if let Some(pos) = s.find('T') {
-                                    let (date_part, time_part) = (&s[..pos], &s[pos + 1..]);
-                                    if let (Some(d), Some(t)) = (
-                                        grafeo_common::types::Date::parse(date_part),
-                                        grafeo_common::types::Time::parse(time_part),
-                                    ) {
-                                        return Some(Value::Timestamp(
-                                            grafeo_common::types::Timestamp::from_date_time(d, t),
-                                        ));
-                                    }
-                                }
-                                None
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                }
+            // A call that is not Volatile, of constants: the evaluator computes
+            // it once, as it would for every row. A call it answers with no
+            // value stays a per-row expression.
+            LogicalExpression::FunctionCall {
+                callee: Callee::Builtin(function),
+                args,
+                ..
+            } if function.volatility(args.len()) != Volatility::Volatile => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.try_fold_expression(arg).map(FilterExpression::Literal))
+                    .collect::<Option<Vec<_>>>()?;
+                let call = FilterExpression::FunctionCall {
+                    function: *function,
+                    args,
+                };
+                ExpressionPredicate::new(call, HashMap::new(), Arc::clone(&self.store))
+                    .with_transaction_context(self.viewing_epoch, self.transaction_id)
+                    .with_session_context(self.session_context.clone())
+                    .eval_at(&DataChunk::empty(), 0)
             }
             LogicalExpression::Map(entries) => {
                 let folded: Option<Vec<(String, Value)>> = entries
                     .iter()
-                    .map(|(k, v)| Self::try_fold_expression(v).map(|val| (k.clone(), val)))
+                    .map(|(k, v)| self.try_fold_expression(v).map(|val| (k.clone(), val)))
                     .collect();
                 let folded = folded?;
                 let map: std::collections::BTreeMap<grafeo_common::types::PropertyKey, Value> =
@@ -1576,7 +1497,7 @@ impl super::Planner {
                 Some(Value::Map(std::sync::Arc::new(map)))
             }
             LogicalExpression::Unary { op, operand } => {
-                let value = Self::try_fold_expression(operand)?;
+                let value = self.try_fold_expression(operand)?;
                 match op {
                     UnaryOp::Neg => match value {
                         Value::Int64(n) => Some(Value::Int64(-n)),
@@ -1676,11 +1597,11 @@ fn first_non_constant(
             first_non_constant(left, local).or_else(|| first_non_constant(right, local))
         }
         LogicalExpression::Unary { operand, .. } => first_non_constant(operand, local),
-        LogicalExpression::FunctionCall { args: items, .. } | LogicalExpression::List(items) => {
-            items
-                .iter()
-                .find_map(|item| first_non_constant(item, local))
-        }
+        LogicalExpression::FunctionCall { args: items, .. }
+        | LogicalExpression::SparqlCall { args: items, .. }
+        | LogicalExpression::List(items) => items
+            .iter()
+            .find_map(|item| first_non_constant(item, local)),
         LogicalExpression::Map(entries) => entries
             .iter()
             .find_map(|(_, value)| first_non_constant(value, local)),

@@ -119,7 +119,7 @@ tests:
   - name: float_division_by_zero_infinity
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN 10.0 / 0.0"
+    query: "MATCH (n:N) RETURN 10.0e0 / 0.0e0"
     expect:
       rows:
         - [Infinity]
@@ -127,7 +127,7 @@ tests:
   - name: zero_divided_by_zero_float
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN 0.0 / 0.0"
+    query: "MATCH (n:N) RETURN 0.0e0 / 0.0e0"
     expect:
       rows:
         - [NaN]

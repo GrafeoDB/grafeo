@@ -578,6 +578,8 @@ if (!nativeBinding) {
 module.exports = nativeBinding
 module.exports.GrafeoDB = nativeBinding.GrafeoDB
 module.exports.JsGrafeoDB = nativeBinding.JsGrafeoDB
+module.exports.GraphHandle = nativeBinding.GraphHandle
+module.exports.JsGraphHandle = nativeBinding.JsGraphHandle
 module.exports.JsEdge = nativeBinding.JsEdge
 module.exports.JsNode = nativeBinding.JsNode
 module.exports.QueryResult = nativeBinding.QueryResult

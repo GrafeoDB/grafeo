@@ -10,7 +10,7 @@
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{Decimal, LogicalType, Value};
 
 use super::accumulator::{AggregateExpr, AggregateFunction, HashableValue, RowKey};
 use super::{Operator, OperatorError, OperatorResult};
@@ -38,8 +38,14 @@ pub enum AggregateState {
     SumFloat(f64, f64, i64),
     /// Sum distinct state (float sum, compensation, count, seen values).
     SumFloatDistinct(f64, f64, i64, HashSet<HashableValue>),
+    /// Exact sum of decimals and integers (`None` once it needs more than
+    /// 38 digits, which finalizes to null), count of values added.
+    SumDecimal(Option<Decimal>, i64),
     /// Average state (sum, count).
     Avg(f64, i64),
+    /// Exact average of decimals and integers: their sum (`None` once it
+    /// needs more than 38 digits) and count.
+    AvgDecimal(Option<Decimal>, i64),
     /// Average distinct state (sum, count, seen values).
     AvgDistinct(f64, i64, HashSet<HashableValue>),
     /// Min state: the least value, in the order of ORDER BY (openCypher
@@ -98,6 +104,17 @@ pub enum AggregateState {
         /// The state of the aggregate itself; never another `Distinct`.
         inner: Box<AggregateState>,
     },
+}
+
+/// The decimal of a float sum that holds a whole number exactly (a sum of
+/// integers, or no value yet): integers below 2^53 are exact in a float.
+fn exact_whole(sum: f64) -> Option<Decimal> {
+    const EXACT: f64 = 9_007_199_254_740_992.0;
+    if sum.fract() == 0.0 && sum.abs() < EXACT {
+        Decimal::from_f64(sum).ok()
+    } else {
+        None
+    }
 }
 
 impl AggregateState {
@@ -268,6 +285,9 @@ impl AggregateState {
                 if let Some(Value::Int64(v)) = value {
                     *sum += v;
                     *count += 1;
+                } else if let Some(Value::Decimal(d)) = value {
+                    let total = Decimal::from_i64(*sum).checked_add(&d).ok();
+                    *self = AggregateState::SumDecimal(total, *count + 1);
                 } else if let Some(Value::Float64(v)) = value {
                     // Convert to float sum, carrying count forward
                     *self = AggregateState::SumFloat(*sum as f64 + v, 0.0, *count + 1);
@@ -285,6 +305,12 @@ impl AggregateState {
                         if let Value::Int64(i) = v {
                             *sum += i;
                             *count += 1;
+                        } else if let Value::Decimal(d) = v {
+                            let total = Decimal::from_i64(*sum).checked_add(d).ok();
+                            *self = AggregateState::Distinct {
+                                seen: std::mem::take(seen),
+                                inner: Box::new(AggregateState::SumDecimal(total, *count + 1)),
+                            };
                         } else if let Value::Float64(f) = v {
                             // Convert to float distinct: move the seen set instead of cloning
                             let moved_seen = std::mem::take(seen);
@@ -307,6 +333,24 @@ impl AggregateState {
                     }
                 }
             }
+            AggregateState::SumDecimal(total, count) => match value {
+                Some(Value::Decimal(d)) => {
+                    *total = total.and_then(|t| t.checked_add(&d).ok());
+                    *count += 1;
+                }
+                Some(Value::Int64(i)) => {
+                    *total = total.and_then(|t| t.checked_add(&Decimal::from_i64(i)).ok());
+                    *count += 1;
+                }
+                // A float (or an RDF numeric string) makes the sum a float;
+                // a sum past 38 digits stays null.
+                Some(ref v) => {
+                    if let (Some(t), Some(num)) = (*total, value_to_f64(v)) {
+                        *self = AggregateState::SumFloat(t.to_f64() + num, 0.0, *count + 1);
+                    }
+                }
+                None => {}
+            },
             AggregateState::SumFloat(sum, comp, count) => {
                 if let Some(ref v) = value {
                     // Use value_to_f64 which now handles strings
@@ -334,6 +378,35 @@ impl AggregateState {
                     }
                 }
             }
+            AggregateState::Avg(sum, count) if matches!(value, Some(Value::Decimal(_))) => {
+                // A whole sum came from integers (or no value yet): the
+                // average becomes exact.
+                if let Some(Value::Decimal(d)) = value {
+                    if let Some(whole) = exact_whole(*sum) {
+                        let total = whole.checked_add(&d).ok();
+                        *self = AggregateState::AvgDecimal(total, *count + 1);
+                    } else {
+                        *sum += d.to_f64();
+                        *count += 1;
+                    }
+                }
+            }
+            AggregateState::AvgDecimal(total, count) => match value {
+                Some(Value::Decimal(d)) => {
+                    *total = total.and_then(|t| t.checked_add(&d).ok());
+                    *count += 1;
+                }
+                Some(Value::Int64(i)) => {
+                    *total = total.and_then(|t| t.checked_add(&Decimal::from_i64(i)).ok());
+                    *count += 1;
+                }
+                Some(ref v) => {
+                    if let (Some(t), Some(num)) = (*total, value_to_f64(v)) {
+                        *self = AggregateState::Avg(t.to_f64() + num, *count + 1);
+                    }
+                }
+                None => {}
+            },
             AggregateState::Avg(sum, count) => {
                 if let Some(ref v) = value
                     && let Some(num) = value_to_f64(v)
@@ -345,7 +418,17 @@ impl AggregateState {
             AggregateState::AvgDistinct(sum, count, seen) => {
                 if let Some(ref v) = value {
                     let hashable = HashableValue::from(v);
-                    if seen.insert(hashable)
+                    if let Value::Decimal(d) = v
+                        && let Some(whole) = exact_whole(*sum)
+                    {
+                        if seen.insert(hashable) {
+                            let total = whole.checked_add(d).ok();
+                            *self = AggregateState::Distinct {
+                                seen: std::mem::take(seen),
+                                inner: Box::new(AggregateState::AvgDecimal(total, *count + 1)),
+                            };
+                        }
+                    } else if seen.insert(hashable)
                         && let Some(num) = value_to_f64(v)
                     {
                         *sum += num;
@@ -547,6 +630,15 @@ impl AggregateState {
                     Value::Float64(*sum / *count as f64)
                 }
             }
+            AggregateState::SumDecimal(total, count) => match total {
+                Some(total) if *count > 0 => Value::Decimal(*total),
+                _ => Value::Null,
+            },
+            // The average of decimals by the rule of decimal division.
+            AggregateState::AvgDecimal(total, count) => total
+                .filter(|_| *count > 0)
+                .and_then(|total| total.checked_div(&Decimal::from_i64(*count)).ok())
+                .map_or(Value::Null, Value::Decimal),
             AggregateState::Min(extreme)
             | AggregateState::Max(extreme)
             | AggregateState::MinOfRdfLiterals(extreme)

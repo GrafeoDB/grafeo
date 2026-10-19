@@ -15,6 +15,8 @@ type QueryResult struct {
 	Rows            []Row
 	ExecutionTimeMs float64
 	RowsScanned     uint64
+	// Counters tells what the statement wrote.
+	Counters WriteCounters
 }
 
 // Row is a single result row, mapping column names to values.
@@ -103,7 +105,7 @@ func WithEf(ef int) SearchOption {
 func parseResult(r *C.GrafeoResult) (*QueryResult, error) {
 	jsonPtr := C.grafeo_result_json(r)
 	if jsonPtr == nil {
-		return &QueryResult{}, nil
+		return &QueryResult{Counters: countersOf(r)}, nil
 	}
 	jsonStr := C.GoString(jsonPtr)
 
@@ -124,6 +126,9 @@ func parseResult(r *C.GrafeoResult) (*QueryResult, error) {
 
 	rows := make([]Row, len(rawRows))
 	for i, raw := range rawRows {
+		for key, value := range raw {
+			raw[key] = decodeTags(value)
+		}
 		rows[i] = Row(raw)
 	}
 
@@ -132,6 +137,7 @@ func parseResult(r *C.GrafeoResult) (*QueryResult, error) {
 		Rows:            rows,
 		ExecutionTimeMs: float64(C.grafeo_result_execution_time_ms(r)),
 		RowsScanned:     uint64(C.grafeo_result_rows_scanned(r)),
+		Counters:        countersOf(r),
 	}, nil
 }
 

@@ -1012,6 +1012,7 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
             substitute_in_expression(&mut bind.expression, params)?;
             substitute_in_operator(&mut bind.input, params)?;
         }
+        LogicalOperator::PropertyPath(_) => {}
         LogicalOperator::TripleScan(scan) => {
             if let Some(input) = &mut scan.input {
                 substitute_in_operator(input, params)?;
@@ -1204,7 +1205,8 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) 
         LogicalExpression::Unary { operand, .. } => {
             substitute_in_expression(operand, params)?;
         }
-        LogicalExpression::FunctionCall { args, .. } => {
+        LogicalExpression::FunctionCall { args, .. }
+        | LogicalExpression::SparqlCall { args, .. } => {
             for arg in args {
                 substitute_in_expression(arg, params)?;
             }

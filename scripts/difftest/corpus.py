@@ -742,7 +742,10 @@ for case_id, query in [
 # AG: node patterns with several labels (the label with the fewest nodes is scanned) and
 #     lookups of a labeled node by an indexed property, on skewed labels; AG101 to AG123
 #     are AG1 to AG23 with an index on `id`. AG21 to AG23: a label under NOT or OR is
-#     no requirement of the node, so the scan keeps the pattern's label
+#     no requirement of the node, so the scan keeps the pattern's label. AG24 to AG29: a
+#     label in WHERE on a node without one in the pattern (#457), scanned as that label
+#     unless NOT or an OR with another condition makes it no requirement. AG30 to AG34:
+#     an OR of labels reads the nodes of those labels, each once (t0 has both)
 for fixture, offset in [("labels", 0), ("labels_indexed", 100)]:
     for number, query, is_ordered in [
         (1, "MATCH (n:Graph:Repository) RETURN n.id AS id", False),
@@ -768,6 +771,17 @@ for fixture, offset in [("labels", 0), ("labels_indexed", 100)]:
         (21, "MATCH (n:Graph) WHERE NOT n:Repository RETURN count(n) AS c", False),
         (22, "MATCH (n:Graph) WHERE n:Repository OR n.n = 5 RETURN count(n) AS c", False),
         (23, "MATCH (n:Graph) WHERE NOT (n:Repository AND n.n = 1) RETURN count(n) AS c", False),
+        (24, "MATCH (n) WHERE n:Repository RETURN n.id AS id", False),
+        (25, "MATCH (n) WHERE 'Repository' IN labels(n) RETURN n.id AS id", False),
+        (26, "MATCH (n) WHERE n:Repository AND n.n < 2 RETURN n.id AS id", False),
+        (27, "MATCH (n) WHERE n:Graph AND n:Repository RETURN n.id AS id", False),
+        (28, "MATCH (n) WHERE NOT n:Graph RETURN count(n) AS c", False),
+        (29, "MATCH (n) WHERE n:Repository OR n.id = 't1' RETURN count(n) AS c", False),
+        (30, "MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id AS id", False),
+        (31, "MATCH (n) WHERE 'Tag' IN labels(n) OR 'Topic' IN labels(n) RETURN n.id AS id", False),
+        (32, "MATCH (n) WHERE any(l IN labels(n) WHERE l IN ['Topic', 'Tag']) RETURN n.id AS id", False),
+        (33, "MATCH (n) WHERE (n:Tag OR n:Topic) AND n.id <> 't1' RETURN n.id AS id", False),
+        (34, "MATCH (n) WHERE n:Graph OR n:Repository RETURN count(n) AS c", False),
     ]:
         case(f"AG{offset + number}", query, BOTH, fixture, is_ordered)
 
@@ -947,6 +961,8 @@ for case_id, query, languages in [
 #     that parse as it and numbers within EPSILON equal; the lookups of an index found
 #     their exact value only, and a constant key on a label scan without an index used a
 #     stricter `=` of its own. AV1 to AV8 without an index, AV9 to AV16 with one
+#     An IN list in an AND chain takes the index too (#456): AV17 and AV18 without one, AV19
+#     and AV20 with one
 for case_id, query, fixture in [
     ("AV1", "MATCH (d:Doc) WHERE d.p = 42 RETURN d.n AS n", "mixed"),
     ("AV2", "MATCH (d:Doc) WHERE d.p = 42.0 RETURN d.n AS n", "mixed"),
@@ -964,6 +980,10 @@ for case_id, query, fixture in [
     ("AV14", "MATCH (o:Other) MATCH (d:Doc) WHERE d.p = 0.3 RETURN d.n AS n", "mixed_indexed"),
     ("AV15", "MATCH (d) WHERE d.p = 42 RETURN d.n AS n", "mixed_indexed"),
     ("AV16", "MATCH (a:Doc {n: 'int'}) MATCH (b:Doc) WHERE id(b) = toString(id(a)) RETURN b.n AS n", "mixed_indexed"),
+    ("AV17", "MATCH (d:Doc) WHERE d.p IN [42, 0.3, 'abc'] AND d.n <> 'float' RETURN d.n AS n", "mixed"),
+    ("AV18", "MATCH (d) WHERE d.n STARTS WITH 's' AND d.p IN ['42', 0.3] RETURN d.n AS n", "mixed"),
+    ("AV19", "MATCH (d:Doc) WHERE d.p IN [42, 0.3, 'abc'] AND d.n <> 'float' RETURN d.n AS n", "mixed_indexed"),
+    ("AV20", "MATCH (d) WHERE d.n STARTS WITH 's' AND d.p IN ['42', 0.3] RETURN d.n AS n", "mixed_indexed"),
 ]:
     case(case_id, query, BOTH, fixture)
 
@@ -1443,5 +1463,62 @@ for case_id, query, is_ordered in [
     ("BT8", "MATCH (p:Person) RETURN p.name AS name, count(*) + p.age AS n GROUP BY p.name", False),
 ]:
     case(case_id, query, GQL, "social", is_ordered)
+
+# BU: CREATE GRAPH ... AS COPY OF copies the source's nodes, edges, labels and properties
+#     (#423; it created an empty graph), on the `writes` fixture after the BS cases: the
+#     copy holds both people and their edge (BU6, BU7), then the session goes back to the
+#     default graph for the cases after it (BU8)
+for case_id, query in [
+    ("BU1", "CREATE GRAPH copy_src"),
+    ("BU2", "USE GRAPH copy_src"),
+    ("BU3", "INSERT (:Person {name: 'Mia', w: 106})-[:KNOWS {since: 2019, w: 6}]->(:Person {name: 'Butch', w: 107})"),
+    ("BU4", "CREATE GRAPH copy_dst AS COPY OF copy_src"),
+    ("BU5", "USE GRAPH copy_dst"),
+    ("BU6", "MATCH (p:Person) RETURN p.name, p.w"),
+    ("BU7", "MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN a.name, b.name, k.since, k.w"),
+    ("BU8", "USE GRAPH default"),
+]:
+    case(case_id, query, GQL, "writes")
+
+# BV: GQL number literals (#610). A number with a point is an exact decimal, one with an
+#     exponent or the suffix F or D a float, and the suffix M makes any number a decimal
+#     (BV1 to BV4); a decimal with an integer is a decimal, with a float a float, and
+#     division gives 16 digits (BV5, BV6); ceil keeps a decimal, sqrt gives a float (BV7);
+#     a decimal equals an integer and a numeric string of its value (BV8, BV9), also in a
+#     filter on a property (BV10); a decimal division by zero is null, a float one an
+#     infinity (BV11)
+for case_id, query in [
+    ("BV1", "RETURN 0.1 + 0.2 = 0.3 AS exact, 0.1e0 + 0.2e0 = 0.3e0 AS approximate"),
+    ("BV2", "RETURN 1.50 AS d, 1.5e0 AS f"),
+    ("BV3", "RETURN 2M AS m, 2.5F AS f, 2.5D AS d, 2.50m AS lower"),
+    ("BV4", "RETURN -0.25 AS d, 0.0 AS zero"),
+    ("BV5", "RETURN 1.5 + 1 AS di, 1.5 + 1.0e0 AS df, 1.25 * 4 AS product"),
+    ("BV6", "RETURN 1 / 3.0 AS third, 2.0 / 4 AS half"),
+    ("BV7", "RETURN ceil(2.3) AS c, floor(-2.3) AS f, round(2.5) AS r, sqrt(2.25) AS s"),
+    ("BV8", "RETURN 3.0 = 3 AS i, 1.5 = 1.5e0 AS f, 3.0 < 4 AS lt"),
+    ("BV9", "RETURN '5' = 5.0 AS s, '5.00' = 5.0 AS scale, 'five' = 5.0 AS word"),
+    ("BV10", "MATCH (p:Person) WHERE p.age = 30.0 RETURN p.name"),
+    ("BV11", "RETURN 1.0 / 0 AS d, 1.0e0 / 0.0e0 AS f"),
+]:
+    case(case_id, query, GQL)
+
+# BW: decimals by function and cast (#610). toDecimal makes a decimal of a number or a
+#     numeric string in GQL and Cypher, and with a precision and scale rounds or gives
+#     null (BW1, BW2); a GQL CAST to DECIMAL or DEC keeps the scale, to DECIMAL(p, s)
+#     rounds, to LIST<DECIMAL> converts each item (BW3 to BW5)
+for case_id, query, languages in [
+    ("BW1", "RETURN toDecimal(1.5e0) AS f, toDecimal('2.50') AS s, toDecimal(3) AS i, toDecimal('x') AS n", BOTH),
+    ("BW2", "RETURN toDecimal(1.005e0, 5, 2) AS r, toDecimal(1234.5e0, 5, 2) AS o", BOTH),
+    ("BW3", "RETURN CAST('1.50' AS DECIMAL) AS d, CAST(1.5e0 AS DEC) AS f", GQL),
+    ("BW4", "RETURN CAST(2.345 AS DECIMAL(10, 2)) AS r, CAST(123.4 AS DECIMAL(4, 2)) AS o", GQL),
+    ("BW5", "RETURN CAST([1, '2.5', 0.5e0] AS LIST<DECIMAL>) AS l", GQL),
+]:
+    case(case_id, query, languages)
+
+# BX: equal text search scores rank by ascending node id, so a cut at k inside a tie keeps
+#     the lowest id (#619; hash order decided it): 'graph database' (Amsterdam) and 'graph
+#     theory' (Paris) score the same for 'graph'
+ordered("BX1", "CALL grafeo.search.text('Doc', 'body', 'graph', 1) YIELD node_id RETURN node_id", BOTH, "search")
+ordered("BX2", "CALL grafeo.search.text('Doc', 'body', 'graph', 2) YIELD node_id RETURN node_id", BOTH, "search")
 
 # fmt: on

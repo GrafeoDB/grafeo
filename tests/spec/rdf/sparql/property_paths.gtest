@@ -577,7 +577,7 @@ tests:
 
   - name: one_or_more_cycle_terminates_and_dedups
     # O5: cycle a <-> b. ?s :p+ ?o -> {(a,a),(a,b),(b,a),(b,b)}, each once;
-    # terminates via the bounded depth-50 expansion.
+    # each reachable pair appears once even when walks can repeat the cycle.
     setup:
       - |
         INSERT DATA {
@@ -694,3 +694,515 @@ tests:
     expect:
       rows:
         - [http://ex.org/a]
+
+  # ---------------------------------------------------------------------------
+  # 9.10  Unbounded reachability regressions (#487)
+  # ---------------------------------------------------------------------------
+
+  - name: one_or_more_chain_51_edges
+    # A 51-edge chain must reach n51, beyond the former 50-hop bound.
+    # The fixed start has exactly n1 through n51 as its endpoints.
+    setup:
+      - |
+        PREFIX e: <http://ex.org/>
+        INSERT DATA {
+          e:n0 e:p e:n1 .
+          e:n1 e:p e:n2 .
+          e:n2 e:p e:n3 .
+          e:n3 e:p e:n4 .
+          e:n4 e:p e:n5 .
+          e:n5 e:p e:n6 .
+          e:n6 e:p e:n7 .
+          e:n7 e:p e:n8 .
+          e:n8 e:p e:n9 .
+          e:n9 e:p e:n10 .
+          e:n10 e:p e:n11 .
+          e:n11 e:p e:n12 .
+          e:n12 e:p e:n13 .
+          e:n13 e:p e:n14 .
+          e:n14 e:p e:n15 .
+          e:n15 e:p e:n16 .
+          e:n16 e:p e:n17 .
+          e:n17 e:p e:n18 .
+          e:n18 e:p e:n19 .
+          e:n19 e:p e:n20 .
+          e:n20 e:p e:n21 .
+          e:n21 e:p e:n22 .
+          e:n22 e:p e:n23 .
+          e:n23 e:p e:n24 .
+          e:n24 e:p e:n25 .
+          e:n25 e:p e:n26 .
+          e:n26 e:p e:n27 .
+          e:n27 e:p e:n28 .
+          e:n28 e:p e:n29 .
+          e:n29 e:p e:n30 .
+          e:n30 e:p e:n31 .
+          e:n31 e:p e:n32 .
+          e:n32 e:p e:n33 .
+          e:n33 e:p e:n34 .
+          e:n34 e:p e:n35 .
+          e:n35 e:p e:n36 .
+          e:n36 e:p e:n37 .
+          e:n37 e:p e:n38 .
+          e:n38 e:p e:n39 .
+          e:n39 e:p e:n40 .
+          e:n40 e:p e:n41 .
+          e:n41 e:p e:n42 .
+          e:n42 e:p e:n43 .
+          e:n43 e:p e:n44 .
+          e:n44 e:p e:n45 .
+          e:n45 e:p e:n46 .
+          e:n46 e:p e:n47 .
+          e:n47 e:p e:n48 .
+          e:n48 e:p e:n49 .
+          e:n49 e:p e:n50 .
+          e:n50 e:p e:n51 .
+        }
+    query: |
+      PREFIX e: <http://ex.org/>
+      SELECT ?o WHERE { e:n0 e:p+ ?o }
+    expect:
+      rows:
+        - [http://ex.org/n1]
+        - [http://ex.org/n2]
+        - [http://ex.org/n3]
+        - [http://ex.org/n4]
+        - [http://ex.org/n5]
+        - [http://ex.org/n6]
+        - [http://ex.org/n7]
+        - [http://ex.org/n8]
+        - [http://ex.org/n9]
+        - [http://ex.org/n10]
+        - [http://ex.org/n11]
+        - [http://ex.org/n12]
+        - [http://ex.org/n13]
+        - [http://ex.org/n14]
+        - [http://ex.org/n15]
+        - [http://ex.org/n16]
+        - [http://ex.org/n17]
+        - [http://ex.org/n18]
+        - [http://ex.org/n19]
+        - [http://ex.org/n20]
+        - [http://ex.org/n21]
+        - [http://ex.org/n22]
+        - [http://ex.org/n23]
+        - [http://ex.org/n24]
+        - [http://ex.org/n25]
+        - [http://ex.org/n26]
+        - [http://ex.org/n27]
+        - [http://ex.org/n28]
+        - [http://ex.org/n29]
+        - [http://ex.org/n30]
+        - [http://ex.org/n31]
+        - [http://ex.org/n32]
+        - [http://ex.org/n33]
+        - [http://ex.org/n34]
+        - [http://ex.org/n35]
+        - [http://ex.org/n36]
+        - [http://ex.org/n37]
+        - [http://ex.org/n38]
+        - [http://ex.org/n39]
+        - [http://ex.org/n40]
+        - [http://ex.org/n41]
+        - [http://ex.org/n42]
+        - [http://ex.org/n43]
+        - [http://ex.org/n44]
+        - [http://ex.org/n45]
+        - [http://ex.org/n46]
+        - [http://ex.org/n47]
+        - [http://ex.org/n48]
+        - [http://ex.org/n49]
+        - [http://ex.org/n50]
+        - [http://ex.org/n51]
+
+  - name: zero_or_more_chain_51_edges
+    # Zero-hop adds n0 to the same 51 positive-length endpoints.
+    setup:
+      - |
+        PREFIX e: <http://ex.org/>
+        INSERT DATA {
+          e:n0 e:p e:n1 .
+          e:n1 e:p e:n2 .
+          e:n2 e:p e:n3 .
+          e:n3 e:p e:n4 .
+          e:n4 e:p e:n5 .
+          e:n5 e:p e:n6 .
+          e:n6 e:p e:n7 .
+          e:n7 e:p e:n8 .
+          e:n8 e:p e:n9 .
+          e:n9 e:p e:n10 .
+          e:n10 e:p e:n11 .
+          e:n11 e:p e:n12 .
+          e:n12 e:p e:n13 .
+          e:n13 e:p e:n14 .
+          e:n14 e:p e:n15 .
+          e:n15 e:p e:n16 .
+          e:n16 e:p e:n17 .
+          e:n17 e:p e:n18 .
+          e:n18 e:p e:n19 .
+          e:n19 e:p e:n20 .
+          e:n20 e:p e:n21 .
+          e:n21 e:p e:n22 .
+          e:n22 e:p e:n23 .
+          e:n23 e:p e:n24 .
+          e:n24 e:p e:n25 .
+          e:n25 e:p e:n26 .
+          e:n26 e:p e:n27 .
+          e:n27 e:p e:n28 .
+          e:n28 e:p e:n29 .
+          e:n29 e:p e:n30 .
+          e:n30 e:p e:n31 .
+          e:n31 e:p e:n32 .
+          e:n32 e:p e:n33 .
+          e:n33 e:p e:n34 .
+          e:n34 e:p e:n35 .
+          e:n35 e:p e:n36 .
+          e:n36 e:p e:n37 .
+          e:n37 e:p e:n38 .
+          e:n38 e:p e:n39 .
+          e:n39 e:p e:n40 .
+          e:n40 e:p e:n41 .
+          e:n41 e:p e:n42 .
+          e:n42 e:p e:n43 .
+          e:n43 e:p e:n44 .
+          e:n44 e:p e:n45 .
+          e:n45 e:p e:n46 .
+          e:n46 e:p e:n47 .
+          e:n47 e:p e:n48 .
+          e:n48 e:p e:n49 .
+          e:n49 e:p e:n50 .
+          e:n50 e:p e:n51 .
+        }
+    query: |
+      PREFIX e: <http://ex.org/>
+      SELECT ?o WHERE { e:n0 e:p* ?o }
+    expect:
+      rows:
+        - [http://ex.org/n0]
+        - [http://ex.org/n1]
+        - [http://ex.org/n2]
+        - [http://ex.org/n3]
+        - [http://ex.org/n4]
+        - [http://ex.org/n5]
+        - [http://ex.org/n6]
+        - [http://ex.org/n7]
+        - [http://ex.org/n8]
+        - [http://ex.org/n9]
+        - [http://ex.org/n10]
+        - [http://ex.org/n11]
+        - [http://ex.org/n12]
+        - [http://ex.org/n13]
+        - [http://ex.org/n14]
+        - [http://ex.org/n15]
+        - [http://ex.org/n16]
+        - [http://ex.org/n17]
+        - [http://ex.org/n18]
+        - [http://ex.org/n19]
+        - [http://ex.org/n20]
+        - [http://ex.org/n21]
+        - [http://ex.org/n22]
+        - [http://ex.org/n23]
+        - [http://ex.org/n24]
+        - [http://ex.org/n25]
+        - [http://ex.org/n26]
+        - [http://ex.org/n27]
+        - [http://ex.org/n28]
+        - [http://ex.org/n29]
+        - [http://ex.org/n30]
+        - [http://ex.org/n31]
+        - [http://ex.org/n32]
+        - [http://ex.org/n33]
+        - [http://ex.org/n34]
+        - [http://ex.org/n35]
+        - [http://ex.org/n36]
+        - [http://ex.org/n37]
+        - [http://ex.org/n38]
+        - [http://ex.org/n39]
+        - [http://ex.org/n40]
+        - [http://ex.org/n41]
+        - [http://ex.org/n42]
+        - [http://ex.org/n43]
+        - [http://ex.org/n44]
+        - [http://ex.org/n45]
+        - [http://ex.org/n46]
+        - [http://ex.org/n47]
+        - [http://ex.org/n48]
+        - [http://ex.org/n49]
+        - [http://ex.org/n50]
+        - [http://ex.org/n51]
+
+  - name: one_or_more_chain_51_edges_free_endpoints
+    # Free endpoints yield each pair with start < end once:
+    # 52 * 51 / 2 = 1326 pairs, including n0 -> n51.
+    setup:
+      - |
+        PREFIX e: <http://ex.org/>
+        INSERT DATA {
+          e:n0 e:p e:n1 .
+          e:n1 e:p e:n2 .
+          e:n2 e:p e:n3 .
+          e:n3 e:p e:n4 .
+          e:n4 e:p e:n5 .
+          e:n5 e:p e:n6 .
+          e:n6 e:p e:n7 .
+          e:n7 e:p e:n8 .
+          e:n8 e:p e:n9 .
+          e:n9 e:p e:n10 .
+          e:n10 e:p e:n11 .
+          e:n11 e:p e:n12 .
+          e:n12 e:p e:n13 .
+          e:n13 e:p e:n14 .
+          e:n14 e:p e:n15 .
+          e:n15 e:p e:n16 .
+          e:n16 e:p e:n17 .
+          e:n17 e:p e:n18 .
+          e:n18 e:p e:n19 .
+          e:n19 e:p e:n20 .
+          e:n20 e:p e:n21 .
+          e:n21 e:p e:n22 .
+          e:n22 e:p e:n23 .
+          e:n23 e:p e:n24 .
+          e:n24 e:p e:n25 .
+          e:n25 e:p e:n26 .
+          e:n26 e:p e:n27 .
+          e:n27 e:p e:n28 .
+          e:n28 e:p e:n29 .
+          e:n29 e:p e:n30 .
+          e:n30 e:p e:n31 .
+          e:n31 e:p e:n32 .
+          e:n32 e:p e:n33 .
+          e:n33 e:p e:n34 .
+          e:n34 e:p e:n35 .
+          e:n35 e:p e:n36 .
+          e:n36 e:p e:n37 .
+          e:n37 e:p e:n38 .
+          e:n38 e:p e:n39 .
+          e:n39 e:p e:n40 .
+          e:n40 e:p e:n41 .
+          e:n41 e:p e:n42 .
+          e:n42 e:p e:n43 .
+          e:n43 e:p e:n44 .
+          e:n44 e:p e:n45 .
+          e:n45 e:p e:n46 .
+          e:n46 e:p e:n47 .
+          e:n47 e:p e:n48 .
+          e:n48 e:p e:n49 .
+          e:n49 e:p e:n50 .
+          e:n50 e:p e:n51 .
+        }
+    query: |
+      PREFIX e: <http://ex.org/>
+      SELECT ?s ?o WHERE { ?s e:p+ ?o }
+    expect:
+      count: 1326
+
+  - name: zero_or_more_chain_51_edges_free_endpoints
+    # Zero-hop adds the 52 diagonal pairs: 1326 + 52 = 1378.
+    setup:
+      - |
+        PREFIX e: <http://ex.org/>
+        INSERT DATA {
+          e:n0 e:p e:n1 .
+          e:n1 e:p e:n2 .
+          e:n2 e:p e:n3 .
+          e:n3 e:p e:n4 .
+          e:n4 e:p e:n5 .
+          e:n5 e:p e:n6 .
+          e:n6 e:p e:n7 .
+          e:n7 e:p e:n8 .
+          e:n8 e:p e:n9 .
+          e:n9 e:p e:n10 .
+          e:n10 e:p e:n11 .
+          e:n11 e:p e:n12 .
+          e:n12 e:p e:n13 .
+          e:n13 e:p e:n14 .
+          e:n14 e:p e:n15 .
+          e:n15 e:p e:n16 .
+          e:n16 e:p e:n17 .
+          e:n17 e:p e:n18 .
+          e:n18 e:p e:n19 .
+          e:n19 e:p e:n20 .
+          e:n20 e:p e:n21 .
+          e:n21 e:p e:n22 .
+          e:n22 e:p e:n23 .
+          e:n23 e:p e:n24 .
+          e:n24 e:p e:n25 .
+          e:n25 e:p e:n26 .
+          e:n26 e:p e:n27 .
+          e:n27 e:p e:n28 .
+          e:n28 e:p e:n29 .
+          e:n29 e:p e:n30 .
+          e:n30 e:p e:n31 .
+          e:n31 e:p e:n32 .
+          e:n32 e:p e:n33 .
+          e:n33 e:p e:n34 .
+          e:n34 e:p e:n35 .
+          e:n35 e:p e:n36 .
+          e:n36 e:p e:n37 .
+          e:n37 e:p e:n38 .
+          e:n38 e:p e:n39 .
+          e:n39 e:p e:n40 .
+          e:n40 e:p e:n41 .
+          e:n41 e:p e:n42 .
+          e:n42 e:p e:n43 .
+          e:n43 e:p e:n44 .
+          e:n44 e:p e:n45 .
+          e:n45 e:p e:n46 .
+          e:n46 e:p e:n47 .
+          e:n47 e:p e:n48 .
+          e:n48 e:p e:n49 .
+          e:n49 e:p e:n50 .
+          e:n50 e:p e:n51 .
+        }
+    query: |
+      PREFIX e: <http://ex.org/>
+      SELECT ?s ?o WHERE { ?s e:p* ?o }
+    expect:
+      count: 1378
+
+  - name: one_or_more_adversarial_free_endpoints
+    # Alternate routes to d, cycles at e/f and g, a duplicate OTHER
+    # triple and disconnected u -> v: exactly 26 distinct REL pairs.
+    setup:
+      - |
+        PREFIX e: <http://ex.org/>
+        INSERT DATA {
+          e:s e:REL e:a .
+          e:s e:REL e:b .
+          e:a e:REL e:d .
+          e:b e:REL e:d .
+          e:d e:REL e:e .
+          e:e e:REL e:f .
+          e:f e:REL e:e .
+          e:b e:REL e:g .
+          e:g e:REL e:g .
+          e:a e:REL e:h .
+          e:h e:REL e:d .
+          e:s e:OTHER e:x .
+          e:s e:OTHER e:x .
+          e:u e:REL e:v .
+        }
+    query: |
+      PREFIX e: <http://ex.org/>
+      SELECT ?s ?o WHERE { ?s e:REL+ ?o }
+    expect:
+      rows:
+        - [http://ex.org/s, http://ex.org/a]
+        - [http://ex.org/s, http://ex.org/b]
+        - [http://ex.org/s, http://ex.org/d]
+        - [http://ex.org/s, http://ex.org/e]
+        - [http://ex.org/s, http://ex.org/f]
+        - [http://ex.org/s, http://ex.org/g]
+        - [http://ex.org/s, http://ex.org/h]
+        - [http://ex.org/a, http://ex.org/d]
+        - [http://ex.org/a, http://ex.org/e]
+        - [http://ex.org/a, http://ex.org/f]
+        - [http://ex.org/a, http://ex.org/h]
+        - [http://ex.org/b, http://ex.org/d]
+        - [http://ex.org/b, http://ex.org/e]
+        - [http://ex.org/b, http://ex.org/f]
+        - [http://ex.org/b, http://ex.org/g]
+        - [http://ex.org/d, http://ex.org/e]
+        - [http://ex.org/d, http://ex.org/f]
+        - [http://ex.org/e, http://ex.org/e]
+        - [http://ex.org/e, http://ex.org/f]
+        - [http://ex.org/f, http://ex.org/e]
+        - [http://ex.org/f, http://ex.org/f]
+        - [http://ex.org/g, http://ex.org/g]
+        - [http://ex.org/h, http://ex.org/d]
+        - [http://ex.org/h, http://ex.org/e]
+        - [http://ex.org/h, http://ex.org/f]
+        - [http://ex.org/u, http://ex.org/v]
+
+  - name: zero_or_more_adversarial_free_endpoints
+    # The same graph adds eight zero-hop pairs for 34 in total.
+    # e, f and g already reach themselves; x appears only in OTHER.
+    setup:
+      - |
+        PREFIX e: <http://ex.org/>
+        INSERT DATA {
+          e:s e:REL e:a .
+          e:s e:REL e:b .
+          e:a e:REL e:d .
+          e:b e:REL e:d .
+          e:d e:REL e:e .
+          e:e e:REL e:f .
+          e:f e:REL e:e .
+          e:b e:REL e:g .
+          e:g e:REL e:g .
+          e:a e:REL e:h .
+          e:h e:REL e:d .
+          e:s e:OTHER e:x .
+          e:s e:OTHER e:x .
+          e:u e:REL e:v .
+        }
+    query: |
+      PREFIX e: <http://ex.org/>
+      SELECT ?s ?o WHERE { ?s e:REL* ?o }
+    expect:
+      rows:
+        - [http://ex.org/s, http://ex.org/a]
+        - [http://ex.org/s, http://ex.org/b]
+        - [http://ex.org/s, http://ex.org/d]
+        - [http://ex.org/s, http://ex.org/e]
+        - [http://ex.org/s, http://ex.org/f]
+        - [http://ex.org/s, http://ex.org/g]
+        - [http://ex.org/s, http://ex.org/h]
+        - [http://ex.org/a, http://ex.org/d]
+        - [http://ex.org/a, http://ex.org/e]
+        - [http://ex.org/a, http://ex.org/f]
+        - [http://ex.org/a, http://ex.org/h]
+        - [http://ex.org/b, http://ex.org/d]
+        - [http://ex.org/b, http://ex.org/e]
+        - [http://ex.org/b, http://ex.org/f]
+        - [http://ex.org/b, http://ex.org/g]
+        - [http://ex.org/d, http://ex.org/e]
+        - [http://ex.org/d, http://ex.org/f]
+        - [http://ex.org/e, http://ex.org/e]
+        - [http://ex.org/e, http://ex.org/f]
+        - [http://ex.org/f, http://ex.org/e]
+        - [http://ex.org/f, http://ex.org/f]
+        - [http://ex.org/g, http://ex.org/g]
+        - [http://ex.org/h, http://ex.org/d]
+        - [http://ex.org/h, http://ex.org/e]
+        - [http://ex.org/h, http://ex.org/f]
+        - [http://ex.org/u, http://ex.org/v]
+        - [http://ex.org/s, http://ex.org/s]
+        - [http://ex.org/a, http://ex.org/a]
+        - [http://ex.org/b, http://ex.org/b]
+        - [http://ex.org/d, http://ex.org/d]
+        - [http://ex.org/h, http://ex.org/h]
+        - [http://ex.org/u, http://ex.org/u]
+        - [http://ex.org/v, http://ex.org/v]
+        - [http://ex.org/x, http://ex.org/x]
+
+  - name: sequence_adversarial_preserves_route_multiplicity
+    # A finite sequence retains the two routes to d, alongside g and h.
+    setup:
+      - |
+        PREFIX e: <http://ex.org/>
+        INSERT DATA {
+          e:s e:REL e:a .
+          e:s e:REL e:b .
+          e:a e:REL e:d .
+          e:b e:REL e:d .
+          e:d e:REL e:e .
+          e:e e:REL e:f .
+          e:f e:REL e:e .
+          e:b e:REL e:g .
+          e:g e:REL e:g .
+          e:a e:REL e:h .
+          e:h e:REL e:d .
+          e:s e:OTHER e:x .
+          e:s e:OTHER e:x .
+          e:u e:REL e:v .
+        }
+    query: |
+      PREFIX e: <http://ex.org/>
+      SELECT ?o WHERE { e:s e:REL/e:REL ?o }
+    expect:
+      rows:
+        - [http://ex.org/d]
+        - [http://ex.org/d]
+        - [http://ex.org/g]
+        - [http://ex.org/h]

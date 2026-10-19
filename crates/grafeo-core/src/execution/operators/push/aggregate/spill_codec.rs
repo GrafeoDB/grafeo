@@ -44,6 +44,8 @@ mod tags {
     pub const DISTINCT: u8 = 24;
     pub const MIN_OF_RDF_LITERALS: u8 = 25;
     pub const MAX_OF_RDF_LITERALS: u8 = 26;
+    pub const SUM_DECIMAL: u8 = 27;
+    pub const AVG_DECIMAL: u8 = 28;
 }
 
 fn invalid(message: &str) -> std::io::Error {
@@ -191,6 +193,8 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
         AggregateState::SumFloat(..) => tags::SUM_FLOAT,
         AggregateState::SumFloatDistinct(..) => tags::SUM_FLOAT_DISTINCT,
         AggregateState::Avg(..) => tags::AVG,
+        AggregateState::SumDecimal(..) => tags::SUM_DECIMAL,
+        AggregateState::AvgDecimal(..) => tags::AVG_DECIMAL,
         AggregateState::AvgDistinct(..) => tags::AVG_DISTINCT,
         AggregateState::Min(_) => tags::MIN,
         AggregateState::Max(_) => tags::MAX,
@@ -229,6 +233,14 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
         }
         AggregateState::Avg(sum, count) | AggregateState::AvgDistinct(sum, count, _) => {
             w.write_all(&sum.to_le_bytes())?;
+            w.write_all(&count.to_le_bytes())?;
+        }
+        // The sum (absent once past 38 digits), then the count.
+        AggregateState::SumDecimal(total, count) | AggregateState::AvgDecimal(total, count) => {
+            w.write_all(&[u8::from(total.is_some())])?;
+            if let Some(total) = total {
+                serialize_value(&Value::Decimal(*total), w)?;
+            }
             w.write_all(&count.to_le_bytes())?;
         }
         AggregateState::Min(value)
@@ -362,6 +374,22 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
                 AggregateState::AvgDistinct(sum, count, read_seen(r)?)
             }
         }
+        tags::SUM_DECIMAL | tags::AVG_DECIMAL => {
+            let total = if read_flag(r)? {
+                match deserialize_value(r)? {
+                    Value::Decimal(total) => Some(total),
+                    _ => return Err(invalid("a decimal aggregate state holds another value")),
+                }
+            } else {
+                None
+            };
+            let count = read_i64(r)?;
+            if tag == tags::SUM_DECIMAL {
+                AggregateState::SumDecimal(total, count)
+            } else {
+                AggregateState::AvgDecimal(total, count)
+            }
+        }
         tags::MIN
         | tags::MAX
         | tags::MIN_OF_RDF_LITERALS
@@ -453,6 +481,42 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A decimal sum or average spills and comes back with its exact sum
+    /// (scale kept) or its overflow, and its count.
+    #[test]
+    fn decimal_states_round_trip() {
+        use grafeo_common::types::Decimal;
+        let total = Decimal::parse("-12.50").unwrap();
+        let group = GroupState {
+            key_values: Vec::new(),
+            accumulators: vec![
+                AggregateState::SumDecimal(Some(total), 3),
+                AggregateState::AvgDecimal(Some(total), 4),
+                AggregateState::SumDecimal(None, 7),
+            ],
+        };
+        let mut bytes = Vec::new();
+        serialize_group_state(&group, &mut bytes).unwrap();
+        let back = deserialize_group_state(&mut bytes.as_slice()).unwrap();
+        let described: Vec<String> = back
+            .accumulators
+            .iter()
+            .map(|state| match state {
+                AggregateState::SumDecimal(total, count) => format!("sum {total:?} {count}"),
+                AggregateState::AvgDecimal(total, count) => format!("avg {total:?} {count}"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            described,
+            [
+                "sum Some(Decimal(-12.50)) 3",
+                "avg Some(Decimal(-12.50)) 4",
+                "sum None 7"
+            ]
+        );
+    }
 
     /// A DISTINCT state wraps the state of the aggregate itself, never
     /// another DISTINCT state: a record that claims one is refused, without

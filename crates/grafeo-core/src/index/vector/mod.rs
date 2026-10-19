@@ -595,7 +595,8 @@ pub fn check_query_vector(
 ///
 /// # Returns
 ///
-/// Vector of (id, distance) pairs sorted by distance (ascending). A vector
+/// Vector of (id, distance) pairs sorted by distance (ascending), equal
+/// distances by ascending id and a NaN distance last. A vector
 /// with another number of values than `query` has no distance to it and is
 /// left out.
 ///
@@ -631,8 +632,8 @@ where
         .map(|(id, vec)| (id, compute_distance(query, vec, metric)))
         .collect();
 
-    // Sort by distance (ascending)
-    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Nearest first, equal distances by ascending id, NaN last
+    results.sort_by(crate::index::ranking::by_ascending_distance);
 
     // Truncate to k
     results.truncate(k);
@@ -653,7 +654,8 @@ where
 ///
 /// # Returns
 ///
-/// Vector of (id, distance) pairs sorted by distance (ascending). A vector
+/// Vector of (id, distance) pairs sorted by distance (ascending), equal
+/// distances by ascending id and a NaN distance last. A vector
 /// with another number of values than `query` is left out.
 pub fn brute_force_knn_filtered<'a, I, F>(
     vectors: I,
@@ -671,7 +673,7 @@ where
         .map(|(id, vec)| (id, compute_distance(query, vec, metric)))
         .collect();
 
-    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(crate::index::ranking::by_ascending_distance);
     results.truncate(k);
     results
 }
@@ -741,7 +743,7 @@ pub(crate) fn scan_within(
             (distance <= threshold).then_some((id, distance))
         })
         .collect();
-    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(crate::index::ranking::by_ascending_distance);
     results
 }
 
@@ -785,6 +787,61 @@ mod tests {
         let euclidean = VectorConfig::euclidean(1536);
         assert_eq!(euclidean.dimensions, 1536);
         assert_eq!(euclidean.metric, DistanceMetric::Euclidean);
+    }
+
+    /// Equal distances rank by ascending id whatever order the vectors come
+    /// in, so a cut inside the tie keeps the lowest ids (#619).
+    #[test]
+    fn brute_force_ties_rank_by_ascending_node_id() {
+        let same = [1.0f32, 0.0, 0.0];
+        let nearest = [0.5f32, 0.0, 0.0];
+        // 7 is coprime with 50: every id from 1 to 50 once, scrambled.
+        let mut vectors: Vec<(NodeId, &[f32])> = (0..50_u64)
+            .map(|i| (NodeId::new((i * 7) % 50 + 1), same.as_slice()))
+            .collect();
+        vectors.push((NodeId::new(99), nearest.as_slice()));
+        let query = [0.0f32, 0.0, 0.0];
+
+        let ids = |results: Vec<(NodeId, f32)>| -> Vec<u64> {
+            results.into_iter().map(|(id, _)| id.as_u64()).collect()
+        };
+        let results = brute_force_knn(
+            vectors.iter().copied(),
+            &query,
+            5,
+            DistanceMetric::Euclidean,
+        );
+        assert_eq!(ids(results), vec![99, 1, 2, 3, 4]);
+        let filtered = brute_force_knn_filtered(
+            vectors.iter().copied(),
+            &query,
+            3,
+            DistanceMetric::Euclidean,
+            |id| id.as_u64() % 2 == 0,
+        );
+        assert_eq!(ids(filtered), vec![2, 4, 6]);
+    }
+
+    /// A vector holding a NaN is at NaN distance from every query: it ranks
+    /// after every number, not wherever the sort leaves it.
+    #[test]
+    fn brute_force_ranks_nan_distances_last() {
+        let broken = [f32::NAN, 0.0, 0.0];
+        let far = [3.0f32, 0.0, 0.0];
+        let near = [1.0f32, 0.0, 0.0];
+        let vectors: Vec<(NodeId, &[f32])> = vec![
+            (NodeId::new(1), broken.as_slice()),
+            (NodeId::new(2), far.as_slice()),
+            (NodeId::new(3), near.as_slice()),
+        ];
+        let results = brute_force_knn(
+            vectors.into_iter(),
+            &[0.0, 0.0, 0.0],
+            3,
+            DistanceMetric::Euclidean,
+        );
+        let ids: Vec<u64> = results.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids, vec![3, 2, 1]);
     }
 
     #[test]

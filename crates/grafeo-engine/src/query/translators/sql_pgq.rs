@@ -8,11 +8,11 @@ use std::collections::HashSet;
 
 use super::common::{
     VarGen, check_branch_columns, combine_with_and, has_all_labels, is_aggregate_function,
-    is_binary_set_function, to_aggregate_function, wrap_filter, wrap_limit, wrap_return, wrap_skip,
-    wrap_sort,
+    is_binary_set_function, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
+use crate::query::functions::resolve_call;
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp,
+    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, BuiltinFunction, CallProcedureOp,
     CreatePropertyGraphOp, DistinctOp, ExceptOp, ExpandDirection, ExpandOp, IntersectOp,
     LeftJoinOp, ListPredicateKind, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
     PathMode, ProcedureYield, PropertyGraphEdgeTable, PropertyGraphNodeTable, ReturnItem, SortKey,
@@ -306,7 +306,7 @@ impl SqlPgqTranslator {
                             args,
                             distinct,
                         } if is_aggregate_function(name) => {
-                            let agg_fn = to_aggregate_function(name).expect(
+                            let agg_fn = AggregateFunction::from_name(name).expect(
                                 "aggregate function validated by is_aggregate_function guard",
                             );
                             let mut aggregate = self.translate_aggregate(
@@ -793,6 +793,7 @@ impl SqlPgqTranslator {
         )
         .then(|| match second {
             Some(ast::Expression::Literal(ast::Literal::Float(p))) => p.clamp(0.0, 1.0),
+            Some(ast::Expression::Literal(ast::Literal::Decimal(p))) => p.to_f64().clamp(0.0, 1.0),
             Some(ast::Expression::Literal(ast::Literal::Integer(p))) => (*p as f64).clamp(0.0, 1.0),
             _ => 0.5,
         });
@@ -840,7 +841,7 @@ impl SqlPgqTranslator {
             } if is_aggregate_function(name) => {
                 // This is an inline aggregate: extract it.
                 let agg_fn =
-                    to_aggregate_function(name).expect("validated by is_aggregate_function");
+                    AggregateFunction::from_name(name).expect("validated by is_aggregate_function");
                 let alias = format!("_having_agg_{}", aggregates.len());
                 aggregates.push(self.translate_aggregate(
                     name,
@@ -950,23 +951,16 @@ impl SqlPgqTranslator {
                 if args.len() == 1
                     && let ast::Expression::Variable(var_name) = &args[0]
                 {
-                    match name.to_uppercase().as_str() {
-                        "LENGTH" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_length_{var_name}"
-                            )));
-                        }
-                        "NODES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_nodes_{var_name}"
-                            )));
-                        }
-                        "EDGES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_edges_{var_name}"
-                            )));
-                        }
-                        _ => {}
+                    let column = match BuiltinFunction::from_name(name) {
+                        Some(BuiltinFunction::Size) => Some("length"),
+                        Some(BuiltinFunction::Nodes) => Some("nodes"),
+                        Some(BuiltinFunction::Edges) => Some("edges"),
+                        _ => None,
+                    };
+                    if let Some(column) = column {
+                        return Ok(LogicalExpression::Variable(format!(
+                            "_path_{column}_{var_name}"
+                        )));
                     }
                 }
 
@@ -974,11 +968,7 @@ impl SqlPgqTranslator {
                     .iter()
                     .map(|a| self.translate_sql_expression(a, table_alias, column_map))
                     .collect::<Result<_>>()?;
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: *distinct,
-                })
+                resolve_call(name, translated_args, *distinct)
             }
             ast::Expression::Case {
                 input,
@@ -1076,23 +1066,16 @@ impl SqlPgqTranslator {
                 if args.len() == 1
                     && let ast::Expression::Variable(var_name) = &args[0]
                 {
-                    match name.to_uppercase().as_str() {
-                        "LENGTH" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_length_{var_name}"
-                            )));
-                        }
-                        "NODES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_nodes_{var_name}"
-                            )));
-                        }
-                        "EDGES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_edges_{var_name}"
-                            )));
-                        }
-                        _ => {}
+                    let column = match BuiltinFunction::from_name(name) {
+                        Some(BuiltinFunction::Size) => Some("length"),
+                        Some(BuiltinFunction::Nodes) => Some("nodes"),
+                        Some(BuiltinFunction::Edges) => Some("edges"),
+                        _ => None,
+                    };
+                    if let Some(column) = column {
+                        return Ok(LogicalExpression::Variable(format!(
+                            "_path_{column}_{var_name}"
+                        )));
                     }
                 }
 
@@ -1101,11 +1084,7 @@ impl SqlPgqTranslator {
                     .map(|a| self.translate_expression(a, table_alias))
                     .collect::<Result<_>>()?;
 
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: *distinct,
-                })
+                resolve_call(name, translated_args, *distinct)
             }
             ast::Expression::List(items) => {
                 let translated: Vec<LogicalExpression> = items
@@ -1212,6 +1191,7 @@ impl SqlPgqTranslator {
             ast::Literal::Bool(b) => Value::Bool(*b),
             ast::Literal::Integer(i) => Value::Int64(*i),
             ast::Literal::Float(f) => Value::Float64(*f),
+            ast::Literal::Decimal(d) => Value::Decimal(*d),
             ast::Literal::String(s) => Value::from(s.as_str()),
             ast::Literal::Date(s) => grafeo_common::types::Date::parse(s)
                 .map_or_else(|| Value::from(s.as_str()), Value::Date),

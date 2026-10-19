@@ -24,7 +24,9 @@ use parking_lot::{Mutex, RwLock};
 use grafeo_common::collections::{GrafeoConcurrentMap, grafeo_concurrent_map};
 use grafeo_common::storage::catalog_record::MAX_LIST_LEVELS_PER_RECORD;
 use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
-use grafeo_common::types::{EdgeTypeId, IndexId, LabelId, PropertyKeyId, Value};
+use grafeo_common::types::{
+    Decimal, DecimalType, EdgeTypeId, IndexId, LabelId, PropertyKeyId, Value,
+};
 
 /// The database's schema dictionary - maps names to compact internal IDs.
 ///
@@ -41,6 +43,9 @@ pub struct Catalog {
     indexes: IndexCatalog,
     /// Optional schema constraints.
     schema: Option<SchemaCatalog>,
+    /// The configuration the database file stores (#551), when it stores
+    /// one: the catalog section writes it and an open reads it.
+    stored_config: RwLock<Option<grafeo_common::storage::catalog_record::StoredConfigRecord>>,
 }
 
 impl Catalog {
@@ -53,7 +58,25 @@ impl Catalog {
             edge_types: EdgeTypeCatalog::new(),
             indexes: IndexCatalog::new(),
             schema: Some(SchemaCatalog::new()),
+            stored_config: RwLock::new(None),
         }
+    }
+
+    /// The configuration the database stores, when it stores one.
+    #[must_use]
+    pub(crate) fn stored_config(
+        &self,
+    ) -> Option<grafeo_common::storage::catalog_record::StoredConfigRecord> {
+        self.stored_config.read().clone()
+    }
+
+    /// Sets (or with `None` clears) the configuration the database stores,
+    /// written at the next checkpoint; returns the one it replaced.
+    pub(crate) fn set_stored_config(
+        &self,
+        config: Option<grafeo_common::storage::catalog_record::StoredConfigRecord>,
+    ) -> Option<grafeo_common::storage::catalog_record::StoredConfigRecord> {
+        std::mem::replace(&mut *self.stored_config.write(), config)
     }
 
     /// Creates a new catalog with schema constraints enabled.
@@ -1254,6 +1277,9 @@ pub enum PropertyDataType {
     /// Datetime without a time zone (`LOCAL DATETIME`), matching
     /// [`Value::Timestamp`], which `local_datetime()` returns.
     LocalDatetime,
+    /// Exact decimal: `DECIMAL`, any decimal with its own scale (`None`), or
+    /// `DECIMAL(p, s)`, matching [`Value::Decimal`].
+    Decimal(Option<DecimalType>),
 }
 
 impl PropertyDataType {
@@ -1324,6 +1350,9 @@ impl PropertyDataType {
 
     /// The type a name without `LIST<...>` around it names (in capitals).
     fn from_element_name(upper: &str) -> Self {
+        if let Some(decimal) = DecimalType::from_name(upper) {
+            return Self::Decimal(decimal);
+        }
         match upper {
             "STRING" | "VARCHAR" | "TEXT" => Self::String,
             "INT" | "INT64" | "INTEGER" | "BIGINT" => Self::Int64,
@@ -1358,6 +1387,10 @@ impl PropertyDataType {
             (Self::Time, Value::Time(_)) => true,
             (Self::Timestamp | Self::LocalDatetime, Value::Timestamp(_)) => true,
             (Self::ZonedDatetime, Value::ZonedDatetime(_)) => true,
+            (Self::Decimal(None), Value::Decimal(_)) => true,
+            (Self::Decimal(Some(decimal_type)), Value::Decimal(decimal)) => {
+                decimal_type.holds(decimal)
+            }
             (Self::Duration, Value::Duration(_)) => true,
             (Self::List, Value::List(_)) => true,
             (Self::ListTyped(elem_type), Value::List(items)) => {
@@ -1379,6 +1412,13 @@ impl PropertyDataType {
     ///
     /// - an `INT64` to `FLOAT64`, when the float is exactly the integer (every
     ///   integer up to 2^53 in magnitude, and the larger ones a float holds);
+    /// - a decimal to `FLOAT64`, as the nearest float: ISO/IEC 39075 assigns an
+    ///   exact number to an approximate type that way (`1.5` is stored as the
+    ///   float `1.5`);
+    /// - an integer, a float (by its shortest text) or a decimal to `DECIMAL`,
+    ///   and to `DECIMAL(p, s)` rounded to `s` digits after the point, half
+    ///   away from zero, as SQL's store assignment rounds; not one with more
+    ///   than `p - s` digits before it, nor a NaN or an infinity;
     /// - a zoned datetime to its instant, for `TIMESTAMP` (`DATETIME`), which
     ///   compares with zoned values as an instant in UTC;
     /// - the items of a `LIST<...>`, each by these rules.
@@ -1391,6 +1431,19 @@ impl PropertyDataType {
     pub fn convert(&self, value: &Value) -> Option<Value> {
         match (self, value) {
             (Self::Float64, Value::Int64(int)) => exact_float(*int).map(Value::Float64),
+            (Self::Float64, Value::Decimal(decimal)) => Some(Value::Float64(decimal.to_f64())),
+            (Self::Decimal(decimal_type), _) if !self.matches(value) => {
+                let decimal = match value {
+                    Value::Decimal(decimal) => *decimal,
+                    Value::Int64(int) => Decimal::from_i64(*int),
+                    Value::Float64(float) => Decimal::from_f64(*float).ok()?,
+                    _ => return None,
+                };
+                match decimal_type {
+                    None => Some(Value::Decimal(decimal)),
+                    Some(decimal_type) => decimal_type.fit(&decimal).ok().map(Value::Decimal),
+                }
+            }
             (Self::Timestamp, Value::ZonedDatetime(zoned)) => {
                 Some(Value::Timestamp(zoned.as_timestamp()))
             }
@@ -1438,12 +1491,26 @@ fn type_mismatch(
 ) -> OperatorError {
     let detail = match (data_type, value) {
         (PropertyDataType::Float64, Value::Int64(int)) if exact_float(*int).is_none() => {
-            ", which has no exact Float64 value (an integer beyond 2^53)"
+            ", which has no exact Float64 value (an integer beyond 2^53)".to_string()
         }
-        _ => "",
+        (
+            PropertyDataType::Decimal(Some(decimal_type)),
+            Value::Int64(_) | Value::Float64(_) | Value::Decimal(_),
+        ) => format!(
+            ", which has more than {} digits before the point",
+            decimal_type.precision() - decimal_type.scale()
+        ),
+        _ => String::new(),
+    };
+    // A decimal type, also in a list, as type DDL spells it: its Debug form
+    // nests the precision and scale in a struct.
+    let expected = if data_type.to_string().contains("DECIMAL") {
+        data_type.to_string()
+    } else {
+        format!("{data_type:?}")
     };
     OperatorError::ConstraintViolation(format!(
-        "property '{key}' on :{owner} expects {data_type:?}, got {value:?}{detail}"
+        "property '{key}' on :{owner} expects {expected}, got {value:?}{detail}"
     ))
 }
 
@@ -1467,6 +1534,8 @@ impl std::fmt::Display for PropertyDataType {
             Self::Any => write!(f, "ANY"),
             Self::ZonedDatetime => write!(f, "ZONED DATETIME"),
             Self::LocalDatetime => write!(f, "LOCAL DATETIME"),
+            Self::Decimal(None) => write!(f, "DECIMAL"),
+            Self::Decimal(Some(decimal_type)) => write!(f, "{decimal_type}"),
         }
     }
 }
@@ -3995,6 +4064,7 @@ mod tests {
                 T::Int64 => K::Integer,
                 T::Float64 => K::Float,
                 T::Bool => K::Boolean,
+                T::Decimal(decimal) => K::Decimal(decimal),
                 T::Any => K::Any,
                 _ => K::Other,
             };
@@ -4017,6 +4087,8 @@ mod tests {
             T::Any,
             T::ZonedDatetime,
             T::LocalDatetime,
+            T::Decimal(None),
+            T::Decimal(Some(DecimalType::new(6, 2).unwrap())),
         ];
         for data_type in listed {
             assert!(

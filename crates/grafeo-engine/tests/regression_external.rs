@@ -6,7 +6,7 @@
 //! cargo test -p grafeo-engine --test regression_external -- --nocapture
 //! ```
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{Decimal, Value};
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::database::QueryResult;
 
@@ -570,7 +570,7 @@ mod where_filter_and_projection {
         // The returned value must be the actual reading, NOT boolean true
         assert_eq!(
             r.rows()[0][1],
-            Value::Float64(42.5),
+            Value::Decimal(Decimal::parse("42.5").unwrap()),
             "WHERE IS NOT NULL must not replace the returned value with boolean"
         );
     }
@@ -3318,7 +3318,7 @@ mod float_precision {
     fn float64_full_precision_roundtrip() {
         let db = db();
         let s = db.session();
-        s.execute("INSERT (:M {val: 0.123456789012345})").unwrap();
+        s.execute("INSERT (:M {val: 0.123456789012345e0})").unwrap();
 
         let r = s.execute("MATCH (m:M) RETURN m.val").unwrap();
         assert_eq!(r.row_count(), 1);
@@ -4404,7 +4404,7 @@ mod negative_numerics {
     fn insert_negative_float() {
         let db = db();
         let s = db.session();
-        s.execute("INSERT (:Location {lat: -33.8688, lon: 151.2093})")
+        s.execute("INSERT (:Location {lat: -33.8688e0, lon: 151.2093e0})")
             .unwrap();
 
         let r = s.execute("MATCH (l:Location) RETURN l.lat, l.lon").unwrap();

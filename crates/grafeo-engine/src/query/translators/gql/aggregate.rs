@@ -2,6 +2,7 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::query::functions::resolve_call;
 
 impl GqlTranslator {
     /// Takes the horizontal aggregates out of `items` (a RETURN or WITH list),
@@ -497,11 +498,7 @@ impl GqlTranslator {
                         translated_args.push(self.translate_expression(arg)?);
                     }
                 }
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: *distinct,
-                })
+                resolve_call(name, translated_args, *distinct)
             }
             ast::Expression::Binary { left, op, right } => {
                 let binary_op = self.translate_binary_op(*op);
@@ -592,7 +589,7 @@ impl GqlTranslator {
                 args,
                 distinct,
             } => {
-                if let Some(func) = to_aggregate_function(name) {
+                if let Some(func) = AggregateFunction::from_name(name) {
                     let agg_expr = if args.is_empty() {
                         // COUNT(*) case
                         AggregateExpr {
@@ -621,6 +618,10 @@ impl GqlTranslator {
                             // Second argument is the percentile value
                             if let ast::Expression::Literal(ast::Literal::Float(p)) = &args[1] {
                                 Some((*p).clamp(0.0, 1.0))
+                            } else if let ast::Expression::Literal(ast::Literal::Decimal(p)) =
+                                &args[1]
+                            {
+                                Some(p.to_f64().clamp(0.0, 1.0))
                             } else if let ast::Expression::Literal(ast::Literal::Integer(p)) =
                                 &args[1]
                             {
@@ -792,10 +793,12 @@ impl HavingScope {
                 operand: Box::new(self.resolve(*operand)),
             },
             LogicalExpression::FunctionCall {
+                callee,
                 name,
                 args,
                 distinct,
             } => LogicalExpression::FunctionCall {
+                callee,
                 name,
                 args: args.into_iter().map(|arg| self.resolve(arg)).collect(),
                 distinct,

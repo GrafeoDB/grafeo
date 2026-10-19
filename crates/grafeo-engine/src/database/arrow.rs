@@ -16,7 +16,11 @@
 //! - a duration is a `Struct` of `months`, `days` and `nanos` (`Int64`): an
 //!   Arrow `Duration` cannot hold months, and polars cannot read an Arrow
 //!   `Interval`;
-//! - a vector is a `FixedSizeList` of `Float32`.
+//! - a vector is a `FixedSizeList` of `Float32`;
+//! - decimals are `Decimal128(p, s)`: the largest scale of the column and
+//!   room for its largest integer part (an integer takes 19 digits); a column
+//!   that needs more than 38 digits is text, and a float among decimals makes
+//!   the column `Float64`.
 //!
 //! Nulls are null at every level. Values of different types in one column
 //! (or one list) are written as their GQL text in a `Utf8` column, except
@@ -27,8 +31,8 @@ use std::sync::Arc;
 
 use arrow_array::Array;
 use arrow_array::builder::{
-    BinaryBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int64Builder, NullBufferBuilder,
-    OffsetBufferBuilder, StringBuilder,
+    BinaryBuilder, BooleanBuilder, Decimal128Builder, Float32Builder, Float64Builder, Int64Builder,
+    NullBufferBuilder, OffsetBufferBuilder, StringBuilder,
 };
 use arrow_array::{ArrayRef, FixedSizeListArray, ListArray, RecordBatch, StructArray};
 use arrow_ipc::writer::StreamWriter;
@@ -76,6 +80,7 @@ fn value_type(value: &Value) -> Option<DataType> {
         Value::Bool(_) => DataType::Boolean,
         Value::Int64(_) => DataType::Int64,
         Value::Float64(_) => DataType::Float64,
+        Value::Decimal(d) => decimal_type(integer_digits(d), d.scale()),
         Value::String(_) => DataType::Utf8,
         Value::Bytes(_) => DataType::Binary,
         Value::Timestamp(_) | Value::ZonedDatetime(_) => {
@@ -100,6 +105,26 @@ fn value_type(value: &Value) -> Option<DataType> {
     })
 }
 
+/// The digits of `d` before the point (0 for a value below one).
+fn integer_digits(d: &grafeo_common::types::Decimal) -> u8 {
+    let digits = u8::try_from(d.mantissa().unsigned_abs().to_string().len()).unwrap_or(38);
+    digits.saturating_sub(d.scale())
+}
+
+/// The digits before the point that `Decimal128(precision, scale)` holds.
+fn whole_digits(precision: u8, scale: i8) -> u8 {
+    precision.saturating_sub(u8::try_from(scale).unwrap_or(0))
+}
+
+/// `Decimal128` with room for `whole` digits before the point and `scale`
+/// after it, or text when that needs more than 38 digits.
+fn decimal_type(whole: u8, scale: u8) -> DataType {
+    match (whole.saturating_add(scale).max(1), i8::try_from(scale)) {
+        (precision, Ok(scale)) if precision <= 38 => DataType::Decimal128(precision, scale),
+        _ => DataType::Utf8,
+    }
+}
+
 /// The one Arrow type that holds values of types `left` and `right` (see
 /// the module docs): `Utf8` text when there is none.
 fn unify(left: DataType, right: DataType) -> DataType {
@@ -109,6 +134,18 @@ fn unify(left: DataType, right: DataType) -> DataType {
         (DataType::Int64, DataType::Float64) | (DataType::Float64, DataType::Int64) => {
             DataType::Float64
         }
+        (DataType::Decimal128(pa, sa), DataType::Decimal128(pb, sb)) => decimal_type(
+            whole_digits(pa, sa).max(whole_digits(pb, sb)),
+            u8::try_from(sa.max(sb)).unwrap_or(0),
+        ),
+        // An integer has at most 19 digits.
+        (DataType::Decimal128(precision, scale), DataType::Int64)
+        | (DataType::Int64, DataType::Decimal128(precision, scale)) => decimal_type(
+            whole_digits(precision, scale).max(19),
+            u8::try_from(scale).unwrap_or(0),
+        ),
+        (DataType::Decimal128(..), DataType::Float64)
+        | (DataType::Float64, DataType::Decimal128(..)) => DataType::Float64,
         (DataType::List(left), DataType::List(right)) => {
             list_of(unify(left.data_type().clone(), right.data_type().clone()))
         }
@@ -239,11 +276,33 @@ fn build_array(column: &[&Value], target_type: &DataType) -> Result<ArrayRef, Ar
                 match value {
                     Value::Float64(f) => builder.append_value(*f),
                     Value::Int64(i) => builder.append_value(*i as f64),
+                    Value::Decimal(d) => builder.append_value(d.to_f64()),
                     Value::Null => builder.append_null(),
                     _ => builder.append_null(),
                 }
             }
             Ok(Arc::new(builder.finish()) as ArrayRef)
+        }
+        DataType::Decimal128(precision, scale) => {
+            // Every value at the column's scale; the precision has room for
+            // each (see `decimal_type`).
+            let target = u8::try_from(*scale).unwrap_or(0);
+            let mut builder = Decimal128Builder::with_capacity(len);
+            for value in column {
+                let decimal = match value {
+                    Value::Decimal(d) => Some(*d),
+                    Value::Int64(i) => Some(grafeo_common::types::Decimal::from_i64(*i)),
+                    _ => None,
+                };
+                match decimal.and_then(|d| d.rescale(target).ok()) {
+                    Some(d) => builder.append_value(d.mantissa()),
+                    None => builder.append_null(),
+                }
+            }
+            let array = builder
+                .finish()
+                .with_precision_and_scale(*precision, *scale)?;
+            Ok(Arc::new(array) as ArrayRef)
         }
         DataType::Utf8 => {
             let mut builder = StringBuilder::with_capacity(len, len * 32);
@@ -705,6 +764,82 @@ mod tests {
         rows: Vec<Vec<Value>>,
     ) -> (Vec<String>, Vec<LogicalType>, Vec<Vec<Value>>) {
         (columns.into_iter().map(String::from).collect(), types, rows)
+    }
+
+    /// Decimals export as `Decimal128(38, s)` at the largest scale of the
+    /// column, integers joining them; a float makes the column `Float64`.
+    #[test]
+    fn test_decimal_column() {
+        use grafeo_common::types::Decimal;
+        let d = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
+        let (cols, types, rows) = make_result(
+            vec!["price"],
+            vec![LogicalType::Any],
+            vec![
+                vec![d("1.5")],
+                vec![Value::Null],
+                vec![d("-2.25")],
+                vec![Value::Int64(3)],
+            ],
+        );
+        let batch = query_result_to_record_batch(&cols, &types, &rows).unwrap();
+        // Room for the integer's 19 digits and two after the point.
+        assert_eq!(
+            *batch.schema().field(0).data_type(),
+            DataType::Decimal128(21, 2)
+        );
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::Decimal128Array>()
+            .unwrap();
+        let texts: Vec<String> = (0..arr.len())
+            .map(|row| {
+                if arr.is_null(row) {
+                    "null".to_string()
+                } else {
+                    arr.value_as_string(row)
+                }
+            })
+            .collect();
+        assert_eq!(texts, ["1.50", "null", "-2.25", "3.00"]);
+
+        let (cols, types, rows) = make_result(
+            vec!["mixed"],
+            vec![LogicalType::Any],
+            vec![vec![d("1.5")], vec![Value::Float64(0.25)]],
+        );
+        let batch = query_result_to_record_batch(&cols, &types, &rows).unwrap();
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::Float64Array>()
+            .unwrap();
+        assert_eq!((arr.value(0), arr.value(1)), (1.5, 0.25));
+    }
+
+    /// A column whose decimals need more than 38 digits at the common scale
+    /// is their text instead.
+    #[test]
+    fn test_decimals_past_38_digits_at_one_scale_are_text() {
+        use grafeo_common::types::Decimal;
+        let d = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
+        let (cols, types, rows) = make_result(
+            vec!["wide"],
+            vec![LogicalType::Any],
+            vec![
+                vec![d("99999999999999999999999999999999999999")],
+                vec![d("0.5")],
+            ],
+        );
+        let batch = query_result_to_record_batch(&cols, &types, &rows).unwrap();
+        let arr = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .unwrap();
+        assert_eq!(arr.value(0), "99999999999999999999999999999999999999");
+        assert_eq!(arr.value(1), "0.5");
     }
 
     #[test]

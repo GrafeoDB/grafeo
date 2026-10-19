@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use grafeo_common::change::RdfGraphOp;
 use grafeo_common::storage::log_record::RdfGraphTarget;
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{Decimal, LogicalType, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
@@ -1427,32 +1427,8 @@ impl RdfPlanner {
         match component {
             TripleComponent::Iri(iri) => Ok(Term::Iri(iri.clone().into())),
             TripleComponent::Literal(value) => {
-                let lit = match value {
-                    Value::String(s) => Literal::simple(s.to_string()),
-                    Value::Int64(n) => Literal::integer(*n),
-                    Value::Float64(f) => {
-                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
-                    }
-                    Value::Bool(b) => {
-                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
-                    }
-                    Value::Date(d) => {
-                        Literal::typed(d.to_string(), "http://www.w3.org/2001/XMLSchema#date")
-                    }
-                    Value::Time(t) => {
-                        Literal::typed(t.to_string(), "http://www.w3.org/2001/XMLSchema#time")
-                    }
-                    Value::Timestamp(ts) => {
-                        Literal::typed(ts.to_string(), "http://www.w3.org/2001/XMLSchema#dateTime")
-                    }
-                    Value::ZonedDatetime(zdt) => {
-                        Literal::typed(zdt.to_string(), "http://www.w3.org/2001/XMLSchema#dateTime")
-                    }
-                    Value::Duration(dur) => {
-                        Literal::typed(dur.to_string(), "http://www.w3.org/2001/XMLSchema#duration")
-                    }
-                    _ => Literal::simple(format!("{:?}", value)),
-                };
+                let lit =
+                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
                 Ok(Term::Literal(lit))
             }
             TripleComponent::LangLiteral { value, lang } => {
@@ -1748,17 +1724,8 @@ impl RdfInsertPatternOperator {
             TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
             TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
             TripleComponent::Literal(value) => {
-                let lit = match value {
-                    Value::String(s) => Literal::simple(s.to_string()),
-                    Value::Int64(n) => Literal::integer(*n),
-                    Value::Float64(f) => {
-                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
-                    }
-                    Value::Bool(b) => {
-                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
-                    }
-                    _ => Literal::simple(format!("{:?}", value)),
-                };
+                let lit =
+                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
                 Some(Term::Literal(lit))
             }
             TripleComponent::LangLiteral { value, lang } => {
@@ -1771,32 +1738,10 @@ impl RdfInsertPatternOperator {
                     && let Some(col) = chunk.column(col_idx)
                     && let Some(value) = col.get_value(row)
                 {
-                    return Self::value_to_term(&value);
+                    return value_to_term(&value);
                 }
                 None
             }
-        }
-    }
-
-    fn value_to_term(value: &Value) -> Option<Term> {
-        match value {
-            Value::String(s) => {
-                if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") {
-                    Some(Term::Iri(s.to_string().into()))
-                } else {
-                    Some(Term::Literal(Literal::simple(s.to_string())))
-                }
-            }
-            Value::Int64(n) => Some(Term::Literal(Literal::integer(*n))),
-            Value::Float64(f) => Some(Term::Literal(Literal::typed(
-                f.to_string(),
-                "http://www.w3.org/2001/XMLSchema#double",
-            ))),
-            Value::Bool(b) => Some(Term::Literal(Literal::typed(
-                b.to_string(),
-                "http://www.w3.org/2001/XMLSchema#boolean",
-            ))),
-            _ => None,
         }
     }
 }
@@ -1942,17 +1887,8 @@ impl RdfDeletePatternOperator {
             TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
             TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
             TripleComponent::Literal(value) => {
-                let lit = match value {
-                    Value::String(s) => Literal::simple(s.to_string()),
-                    Value::Int64(n) => Literal::integer(*n),
-                    Value::Float64(f) => {
-                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
-                    }
-                    Value::Bool(b) => {
-                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
-                    }
-                    _ => Literal::simple(format!("{:?}", value)),
-                };
+                let lit =
+                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
                 Some(Term::Literal(lit))
             }
             TripleComponent::LangLiteral { value, lang } => {
@@ -1965,32 +1901,10 @@ impl RdfDeletePatternOperator {
                     && let Some(col) = chunk.column(col_idx)
                     && let Some(value) = col.get_value(row)
                 {
-                    return Self::value_to_term(&value);
+                    return value_to_term(&value);
                 }
                 None
             }
-        }
-    }
-
-    fn value_to_term(value: &Value) -> Option<Term> {
-        match value {
-            Value::String(s) => {
-                if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") {
-                    Some(Term::Iri(s.to_string().into()))
-                } else {
-                    Some(Term::Literal(Literal::simple(s.to_string())))
-                }
-            }
-            Value::Int64(n) => Some(Term::Literal(Literal::integer(*n))),
-            Value::Float64(f) => Some(Term::Literal(Literal::typed(
-                f.to_string(),
-                "http://www.w3.org/2001/XMLSchema#double",
-            ))),
-            Value::Bool(b) => Some(Term::Literal(Literal::typed(
-                b.to_string(),
-                "http://www.w3.org/2001/XMLSchema#boolean",
-            ))),
-            _ => None,
         }
     }
 }
@@ -2187,17 +2101,8 @@ impl RdfModifyOperator {
             TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
             TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
             TripleComponent::Literal(value) => {
-                let lit = match value {
-                    Value::String(s) => Literal::simple(s.to_string()),
-                    Value::Int64(n) => Literal::integer(*n),
-                    Value::Float64(f) => {
-                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
-                    }
-                    Value::Bool(b) => {
-                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
-                    }
-                    _ => Literal::simple(format!("{:?}", value)),
-                };
+                let lit =
+                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
                 Some(Term::Literal(lit))
             }
             TripleComponent::LangLiteral { value, lang } => {
@@ -2209,32 +2114,10 @@ impl RdfModifyOperator {
                     && let Some(col) = chunk.column(col_idx)
                     && let Some(value) = col.get_value(row)
                 {
-                    return Self::value_to_term(&value);
+                    return value_to_term(&value);
                 }
                 None
             }
-        }
-    }
-
-    fn value_to_term(value: &Value) -> Option<Term> {
-        match value {
-            Value::String(s) => {
-                if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") {
-                    Some(Term::Iri(s.to_string().into()))
-                } else {
-                    Some(Term::Literal(Literal::simple(s.to_string())))
-                }
-            }
-            Value::Int64(n) => Some(Term::Literal(Literal::integer(*n))),
-            Value::Float64(f) => Some(Term::Literal(Literal::typed(
-                f.to_string(),
-                "http://www.w3.org/2001/XMLSchema#double",
-            ))),
-            Value::Bool(b) => Some(Term::Literal(Literal::typed(
-                b.to_string(),
-                "http://www.w3.org/2001/XMLSchema#boolean",
-            ))),
-            _ => None,
         }
     }
 }
@@ -3460,102 +3343,10 @@ impl RdfExpressionPredicate {
             BinaryFilterOp::Le => compare_values(left, right, |o| o.is_le()),
             BinaryFilterOp::Gt => compare_values(left, right, |o| o.is_gt()),
             BinaryFilterOp::Ge => compare_values(left, right, |o| o.is_ge()),
-            BinaryFilterOp::Add => {
-                // Helper to convert to f64 for arithmetic
-                fn to_f64(v: &Value) -> Option<f64> {
-                    match v {
-                        Value::Int64(i) => Some(*i as f64),
-                        Value::Float64(f) => Some(*f),
-                        Value::String(s) => s.parse::<f64>().ok(),
-                        _ => None,
-                    }
-                }
-                match (left, right) {
-                    (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l + r)),
-                    (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l + r)),
-                    (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 + r)),
-                    (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l + *r as f64)),
-                    // Handle string-to-numeric conversion for RDF
-                    _ => {
-                        let l = to_f64(left)?;
-                        let r = to_f64(right)?;
-                        Some(Value::Float64(l + r))
-                    }
-                }
-            }
-            BinaryFilterOp::Sub => {
-                fn to_f64(v: &Value) -> Option<f64> {
-                    match v {
-                        Value::Int64(i) => Some(*i as f64),
-                        Value::Float64(f) => Some(*f),
-                        Value::String(s) => s.parse::<f64>().ok(),
-                        _ => None,
-                    }
-                }
-                match (left, right) {
-                    (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l - r)),
-                    (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l - r)),
-                    (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 - r)),
-                    (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l - *r as f64)),
-                    _ => {
-                        let l = to_f64(left)?;
-                        let r = to_f64(right)?;
-                        Some(Value::Float64(l - r))
-                    }
-                }
-            }
-            BinaryFilterOp::Mul => {
-                fn to_f64(v: &Value) -> Option<f64> {
-                    match v {
-                        Value::Int64(i) => Some(*i as f64),
-                        Value::Float64(f) => Some(*f),
-                        Value::String(s) => s.parse::<f64>().ok(),
-                        _ => None,
-                    }
-                }
-                match (left, right) {
-                    (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l * r)),
-                    (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l * r)),
-                    (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 * r)),
-                    (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l * *r as f64)),
-                    _ => {
-                        let l = to_f64(left)?;
-                        let r = to_f64(right)?;
-                        Some(Value::Float64(l * r))
-                    }
-                }
-            }
-            BinaryFilterOp::Div => {
-                fn to_f64(v: &Value) -> Option<f64> {
-                    match v {
-                        Value::Int64(i) => Some(*i as f64),
-                        Value::Float64(f) => Some(*f),
-                        Value::String(s) => s.parse::<f64>().ok(),
-                        _ => None,
-                    }
-                }
-                match (left, right) {
-                    (Value::Int64(l), Value::Int64(r)) if *r != 0 => Some(Value::Int64(l / r)),
-                    (Value::Float64(l), Value::Float64(r)) if *r != 0.0 => {
-                        Some(Value::Float64(l / r))
-                    }
-                    (Value::Int64(l), Value::Float64(r)) if *r != 0.0 => {
-                        Some(Value::Float64(*l as f64 / r))
-                    }
-                    (Value::Float64(l), Value::Int64(r)) if *r != 0 => {
-                        Some(Value::Float64(l / *r as f64))
-                    }
-                    _ => {
-                        let l = to_f64(left)?;
-                        let r = to_f64(right)?;
-                        if r != 0.0 {
-                            Some(Value::Float64(l / r))
-                        } else {
-                            None
-                        }
-                    }
-                }
-            }
+            BinaryFilterOp::Add
+            | BinaryFilterOp::Sub
+            | BinaryFilterOp::Mul
+            | BinaryFilterOp::Div => numeric_op(left, op, right),
             BinaryFilterOp::Mod => match (left, right) {
                 (Value::Int64(l), Value::Int64(r)) if *r != 0 => Some(Value::Int64(l % r)),
                 _ => None,
@@ -3686,8 +3477,13 @@ impl RdfExpressionPredicate {
             UnaryFilterOp::IsNull => Some(Value::Bool(val.is_none())),
             UnaryFilterOp::IsNotNull => Some(Value::Bool(val.is_some())),
             UnaryFilterOp::Neg => match val? {
-                Value::Int64(v) => Some(Value::Int64(-v)),
+                // -i64::MIN is past the i64 range: a decimal, as XPath integers have no limit.
+                Value::Int64(v) => Some(
+                    v.checked_neg()
+                        .map_or_else(|| Value::Decimal(Decimal::from_i64(v).neg()), Value::Int64),
+                ),
                 Value::Float64(v) => Some(Value::Float64(-v)),
+                Value::Decimal(v) => Some(Value::Decimal(v.neg())),
                 _ => None,
             },
             _ => None,
@@ -4046,8 +3842,9 @@ impl RdfExpressionPredicate {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
-                let is_numeric = matches!(val, Value::Int64(_) | Value::Float64(_))
-                    || matches!(&val, Value::String(s) if s.parse::<f64>().is_ok());
+                let is_numeric =
+                    matches!(val, Value::Int64(_) | Value::Float64(_) | Value::Decimal(_))
+                        || matches!(&val, Value::String(s) if s.parse::<f64>().is_ok());
                 Some(Value::Bool(is_numeric))
             }
 
@@ -4059,6 +3856,7 @@ impl RdfExpressionPredicate {
                 match self.eval_expr(&args[0], chunk, row)? {
                     Value::Int64(v) => Some(Value::Int64(v.abs())),
                     Value::Float64(v) => Some(Value::Float64(v.abs())),
+                    Value::Decimal(v) => Some(Value::Decimal(v.abs())),
                     _ => None,
                 }
             }
@@ -4071,6 +3869,7 @@ impl RdfExpressionPredicate {
                 match self.eval_expr(&args[0], chunk, row)? {
                     Value::Int64(v) => Some(Value::Int64(v)),
                     Value::Float64(v) => Some(Value::Float64(v.ceil())),
+                    Value::Decimal(v) => Some(Value::Decimal(v.ceil())),
                     _ => None,
                 }
             }
@@ -4083,6 +3882,7 @@ impl RdfExpressionPredicate {
                 match self.eval_expr(&args[0], chunk, row)? {
                     Value::Int64(v) => Some(Value::Int64(v)),
                     Value::Float64(v) => Some(Value::Float64(v.floor())),
+                    Value::Decimal(v) => Some(Value::Decimal(v.floor())),
                     _ => None,
                 }
             }
@@ -4095,6 +3895,7 @@ impl RdfExpressionPredicate {
                 match self.eval_expr(&args[0], chunk, row)? {
                     Value::Int64(v) => Some(Value::Int64(v)),
                     Value::Float64(v) => Some(Value::Float64(v.round())),
+                    Value::Decimal(v) => Some(Value::Decimal(v.round())),
                     _ => None,
                 }
             }
@@ -4442,6 +4243,7 @@ impl RdfExpressionPredicate {
                     Value::String(_) => "http://www.w3.org/2001/XMLSchema#string",
                     Value::Int64(_) => "http://www.w3.org/2001/XMLSchema#integer",
                     Value::Float64(_) => "http://www.w3.org/2001/XMLSchema#double",
+                    Value::Decimal(_) => "http://www.w3.org/2001/XMLSchema#decimal",
                     Value::Bool(_) => "http://www.w3.org/2001/XMLSchema#boolean",
                     Value::Date(_) => "http://www.w3.org/2001/XMLSchema#date",
                     Value::Time(_) => "http://www.w3.org/2001/XMLSchema#time",
@@ -4492,9 +4294,11 @@ impl RdfExpressionPredicate {
                         lex_str.parse::<i64>().ok().map(Value::Int64)
                     }
                     "http://www.w3.org/2001/XMLSchema#double"
-                    | "http://www.w3.org/2001/XMLSchema#float"
-                    | "http://www.w3.org/2001/XMLSchema#decimal" => {
+                    | "http://www.w3.org/2001/XMLSchema#float" => {
                         lex_str.parse::<f64>().ok().map(Value::Float64)
+                    }
+                    "http://www.w3.org/2001/XMLSchema#decimal" => {
+                        Decimal::parse(&lex_str).ok().map(Value::Decimal)
                     }
                     "http://www.w3.org/2001/XMLSchema#boolean" => match lex_str.as_str() {
                         "true" | "1" => Some(Value::Bool(true)),
@@ -4570,9 +4374,73 @@ impl RdfExpressionPredicate {
                 Some(Value::Float64(value))
             }
 
+            // XPath constructor functions (SPARQL 1.1, 17.5): `xsd:decimal(x)`
+            // and the others, called by their IRI.
+            iri if iri.starts_with("HTTP://WWW.W3.ORG/2001/XMLSCHEMA#") => {
+                let value = self.eval_expr(args.first()?, chunk, row)?;
+                xsd_cast(&iri["HTTP://WWW.W3.ORG/2001/XMLSCHEMA#".len()..], &value)
+            }
+
             // Unknown function
             _ => None,
         }
+    }
+}
+
+/// The XPath cast of `value` to the XSD type `name` (in capitals): `DECIMAL`,
+/// `DOUBLE`, `FLOAT`, `INTEGER` (and `INT`, `LONG`), `STRING` or `BOOLEAN`.
+/// A number casts to a number (a double by its shortest text to a decimal, a
+/// decimal or a double to an integer by truncation); a string casts as the
+/// lexical form of the type. `None` for another type, a value that does not
+/// cast, NaN or an infinity to a decimal or an integer.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "XPath casts an integer to the nearest double, and a double to an integer by \
+              truncation after the range check"
+)]
+fn xsd_cast(name: &str, value: &Value) -> Option<Value> {
+    match name {
+        "DECIMAL" => match value {
+            Value::Decimal(d) => Some(Value::Decimal(*d)),
+            Value::Int64(i) => Some(Value::Decimal(Decimal::from_i64(*i))),
+            Value::Float64(f) => Decimal::from_f64(*f).ok().map(Value::Decimal),
+            Value::Bool(b) => Some(Value::Decimal(Decimal::from_i64(i64::from(*b)))),
+            Value::String(s) => Decimal::parse(s.trim()).ok().map(Value::Decimal),
+            _ => None,
+        },
+        "DOUBLE" | "FLOAT" => match value {
+            Value::Float64(f) => Some(Value::Float64(*f)),
+            Value::Int64(i) => Some(Value::Float64(*i as f64)),
+            Value::Decimal(d) => Some(Value::Float64(d.to_f64())),
+            Value::Bool(b) => Some(Value::Float64(f64::from(u8::from(*b)))),
+            Value::String(s) => s.trim().parse::<f64>().ok().map(Value::Float64),
+            _ => None,
+        },
+        "INTEGER" | "INT" | "LONG" => match value {
+            Value::Int64(i) => Some(Value::Int64(*i)),
+            Value::Decimal(d) => d.trunc_to_i64().map(Value::Int64),
+            Value::Float64(f) if f.is_finite() && f.abs() < 9.223_372_036_854_775e18 => {
+                Some(Value::Int64(f.trunc() as i64))
+            }
+            Value::Bool(b) => Some(Value::Int64(i64::from(*b))),
+            Value::String(s) => s.trim().parse::<i64>().ok().map(Value::Int64),
+            _ => None,
+        },
+        "STRING" => Some(Value::String(value_to_string(value).into())),
+        "BOOLEAN" => match value {
+            Value::Bool(b) => Some(Value::Bool(*b)),
+            Value::Int64(i) => Some(Value::Bool(*i != 0)),
+            Value::Decimal(d) => Some(Value::Bool(d.signum() != 0)),
+            Value::Float64(f) => Some(Value::Bool(*f != 0.0 && !f.is_nan())),
+            Value::String(s) => match s.trim() {
+                "true" | "1" => Some(Value::Bool(true)),
+                "false" | "0" => Some(Value::Bool(false)),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -4692,6 +4560,41 @@ fn pad_union_branch(
     ))
 }
 
+/// The RDF literal a SPARQL statement writes or matches for `value`: a string
+/// as a simple literal; a number, boolean, date, time, datetime or duration as
+/// a literal of its XSD type (a decimal with its scale, `"1.50"^^xsd:decimal`).
+/// `None` for a value with no literal form, such as a list or a map.
+fn value_literal(value: &Value) -> Option<Literal> {
+    Some(match value {
+        Value::String(s) => Literal::simple(s.to_string()),
+        Value::Int64(n) => Literal::integer(*n),
+        Value::Float64(f) => Literal::typed(f.to_string(), Literal::XSD_DOUBLE),
+        Value::Decimal(d) => Literal::typed(d.to_string(), Literal::XSD_DECIMAL),
+        Value::Bool(b) => Literal::typed(b.to_string(), Literal::XSD_BOOLEAN),
+        Value::Date(d) => Literal::typed(d.to_string(), "http://www.w3.org/2001/XMLSchema#date"),
+        Value::Time(t) => Literal::typed(t.to_string(), "http://www.w3.org/2001/XMLSchema#time"),
+        Value::Timestamp(ts) => Literal::typed(ts.to_string(), Literal::XSD_DATETIME),
+        Value::ZonedDatetime(zdt) => Literal::typed(zdt.to_string(), Literal::XSD_DATETIME),
+        Value::Duration(dur) => {
+            Literal::typed(dur.to_string(), "http://www.w3.org/2001/XMLSchema#duration")
+        }
+        _ => return None,
+    })
+}
+
+/// The RDF term of a value bound in a template: a string that looks like an
+/// IRI as that IRI, any other value as its literal (see [`value_literal`]).
+fn value_to_term(value: &Value) -> Option<Term> {
+    match value {
+        Value::String(s)
+            if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") =>
+        {
+            Some(Term::Iri(s.to_string().into()))
+        }
+        _ => value_literal(value).map(Term::Literal),
+    }
+}
+
 /// Converts an RDF Term to a string for IRI/blank node representation.
 fn term_to_string(term: &Term) -> String {
     match term {
@@ -4726,13 +4629,9 @@ fn component_to_term(component: &TripleComponent) -> Option<Term> {
         TripleComponent::Variable(_) => None,
         TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
         TripleComponent::Iri(iri) => Some(Term::iri(iri.clone())),
-        TripleComponent::Literal(value) => match value {
-            Value::String(s) => Some(Term::literal(s.clone())),
-            Value::Int64(i) => Some(Term::typed_literal(i.to_string(), Literal::XSD_INTEGER)),
-            Value::Float64(f) => Some(Term::typed_literal(f.to_string(), Literal::XSD_DOUBLE)),
-            Value::Bool(b) => Some(Term::typed_literal(b.to_string(), Literal::XSD_BOOLEAN)),
-            _ => Some(Term::literal(value.to_string())),
-        },
+        TripleComponent::Literal(value) => Some(Term::Literal(
+            value_literal(value).unwrap_or_else(|| Literal::simple(value.to_string())),
+        )),
         TripleComponent::LangLiteral { value, lang } => {
             Some(Term::lang_literal(value.clone(), lang.clone()))
         }
@@ -4958,12 +4857,87 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
+/// A SPARQL numeric operand by its XPath type. A string, as a triple scan
+/// gives a literal, reads as the double its text is.
+enum Numeric {
+    Integer(i64),
+    Decimal(Decimal),
+    Double(f64),
+}
+
+fn numeric(value: &Value) -> Option<Numeric> {
+    match value {
+        Value::Int64(i) => Some(Numeric::Integer(*i)),
+        Value::Decimal(d) => Some(Numeric::Decimal(*d)),
+        Value::Float64(f) => Some(Numeric::Double(*f)),
+        Value::String(s) => s.parse::<f64>().ok().map(Numeric::Double),
+        _ => None,
+    }
+}
+
+/// `+`, `-`, `*` and `/` by the XPath numeric promotion of SPARQL 1.1
+/// (`op:numeric-add` and the others): a double makes a double; otherwise a
+/// decimal makes a decimal; two integers give an integer, except a division,
+/// which gives a decimal, and a result past the `i64` range, computed as
+/// decimals. Division by zero and decimal overflow give `None`.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "an integer meeting a double is promoted to that double, as XPath promotes it"
+)]
+fn numeric_op(left: &Value, op: BinaryFilterOp, right: &Value) -> Option<Value> {
+    let (l, r) = (numeric(left)?, numeric(right)?);
+    let as_double = |n: &Numeric| match n {
+        Numeric::Integer(i) => *i as f64,
+        Numeric::Decimal(d) => d.to_f64(),
+        Numeric::Double(f) => *f,
+    };
+    if matches!(l, Numeric::Double(_)) || matches!(r, Numeric::Double(_)) {
+        let (a, b) = (as_double(&l), as_double(&r));
+        return match op {
+            BinaryFilterOp::Add => Some(Value::Float64(a + b)),
+            BinaryFilterOp::Sub => Some(Value::Float64(a - b)),
+            BinaryFilterOp::Mul => Some(Value::Float64(a * b)),
+            BinaryFilterOp::Div if b != 0.0 => Some(Value::Float64(a / b)),
+            _ => None,
+        };
+    }
+    if let (Numeric::Integer(a), Numeric::Integer(b)) = (&l, &r) {
+        let integer = match op {
+            BinaryFilterOp::Add => a.checked_add(*b),
+            BinaryFilterOp::Sub => a.checked_sub(*b),
+            BinaryFilterOp::Mul => a.checked_mul(*b),
+            _ => None,
+        };
+        if let Some(integer) = integer {
+            return Some(Value::Int64(integer));
+        }
+    }
+    let as_decimal = |n: &Numeric| match n {
+        Numeric::Integer(i) => Some(Decimal::from_i64(*i)),
+        Numeric::Decimal(d) => Some(*d),
+        Numeric::Double(_) => None,
+    };
+    let (a, b) = (as_decimal(&l)?, as_decimal(&r)?);
+    match op {
+        BinaryFilterOp::Add => a.checked_add(&b),
+        BinaryFilterOp::Sub => a.checked_sub(&b),
+        BinaryFilterOp::Mul => a.checked_mul(&b),
+        BinaryFilterOp::Div => a.checked_div(&b),
+        _ => return None,
+    }
+    .ok()
+    .map(Value::Decimal)
+}
+
 /// Compares two values and returns a boolean result.
 fn compare_values<F>(left: &Value, right: &Value, cmp: F) -> Option<Value>
 where
     F: Fn(std::cmp::Ordering) -> bool,
 {
     let ordering = match (left, right) {
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+            grafeo_core::execution::operators::value_utils::compare_with_decimal(left, right)?
+        }
         (Value::Int64(l), Value::Int64(r)) => l.cmp(r),
         (Value::Float64(l), Value::Float64(r)) => l.partial_cmp(r)?,
         (Value::String(l), Value::String(r)) => {
@@ -5004,6 +4978,10 @@ where
 /// of the right-hand list.
 fn rdf_values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+            grafeo_core::execution::operators::value_utils::compare_with_decimal(left, right)
+                == Some(std::cmp::Ordering::Equal)
+        }
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Int64(a), Value::Int64(b)) => a == b,
         (Value::Float64(a), Value::Float64(b)) => (a - b).abs() < f64::EPSILON,

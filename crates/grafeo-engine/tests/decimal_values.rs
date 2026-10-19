@@ -421,3 +421,154 @@ fn sql_pgq_literals_and_casts() {
         assert!(error.contains(word), "`{expression}`: {error}");
     }
 }
+
+/// SPARQL numbers follow the XPath numeric promotion of SPARQL 1.1 (#610):
+/// `1.5` is an `xsd:decimal`, `1.5e0` an `xsd:double`; an integer with an
+/// integer is an integer except for division, which gives a decimal; a decimal
+/// with an integer or a decimal is a decimal; a double makes a double.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+#[test]
+fn sparql_numbers_follow_xsd_promotion() {
+    let db = GrafeoDB::new_in_memory();
+    for (expression, expected) in [
+        ("0.1 + 0.2", "Decimal(0.3)"),
+        ("1.50", "Decimal(1.50)"),
+        ("1.5e0", "Float64(1.5)"),
+        ("1.5 + 1", "Decimal(2.5)"),
+        ("1.5 * 2.0e0", "Float64(3)"),
+        ("7 - 2", "Int64(5)"),
+        ("5 / 2", "Decimal(2.500000000000000)"),
+        ("1 / 3", "Decimal(0.3333333333333333)"),
+        ("\"2.50\"^^xsd:decimal", "Decimal(2.50)"),
+        ("xsd:decimal(\"1.25\")", "Decimal(1.25)"),
+        ("xsd:decimal(1.5e0)", "Decimal(1.5)"),
+        ("xsd:decimal(3)", "Decimal(3)"),
+        ("STRDT(\"1.25\", xsd:decimal)", "Decimal(1.25)"),
+        ("xsd:double(1.5)", "Float64(1.5)"),
+        ("xsd:integer(2.5)", "Int64(2)"),
+        (
+            "DATATYPE(1.5)",
+            "String(\"http://www.w3.org/2001/XMLSchema#decimal\")",
+        ),
+        (
+            "DATATYPE(5 / 2)",
+            "String(\"http://www.w3.org/2001/XMLSchema#decimal\")",
+        ),
+        ("ISNUMERIC(1.5)", "Bool(true)"),
+        ("ABS(-1.5)", "Decimal(1.5)"),
+        ("ROUND(2.5)", "Decimal(3)"),
+        ("CEIL(2.1)", "Decimal(3)"),
+        ("FLOOR(-2.1)", "Decimal(-3)"),
+        ("STR(1.50)", "String(\"1.50\")"),
+        ("1.5 = 1.50", "Bool(true)"),
+        ("1.5 < 2", "Bool(true)"),
+        ("0.1 + 0.2 = 0.3", "Bool(true)"),
+        // An integer past the i64 range goes on as a decimal.
+        ("9223372036854775807 + 1", "Decimal(9223372036854775808)"),
+        ("-9223372036854775807 * 2", "Decimal(-18446744073709551614)"),
+        // A value that does not cast, or a lexical form of another type.
+        ("xsd:integer(\"abc\")", "Null"),
+        ("xsd:decimal(\"1e3\")", "Null"),
+        ("xsd:decimal(\"1e3\"^^xsd:double)", "Decimal(1000)"),
+        ("xsd:boolean(\"1\")", "Bool(true)"),
+        ("xsd:string(1.50)", "String(\"1.50\")"),
+    ] {
+        let query = format!(
+            "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+             SELECT ({expression} AS ?x) WHERE {{}}"
+        );
+        assert_eq!(one(&db, "sparql", &query, &[]), expected, "`{expression}`");
+    }
+}
+
+/// A stored `xsd:decimal` compares with a decimal of the query by value, also
+/// across scales (#610).
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+#[test]
+fn sparql_filters_stored_decimals_by_value() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute_sparql(
+        "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> INSERT DATA { \
+         <http://ex.org/tea> <http://ex.org/price> \"2.50\"^^xsd:decimal . \
+         <http://ex.org/cake> <http://ex.org/price> \"19.99\"^^xsd:decimal . \
+         <http://ex.org/water> <http://ex.org/price> \"0.5\"^^xsd:decimal . }",
+    )
+    .unwrap();
+    let names = |filter: &str| {
+        rows(
+            &db,
+            "sparql",
+            &format!(
+                "SELECT ?item WHERE {{ ?item <http://ex.org/price> ?p FILTER({filter}) }} \
+                 ORDER BY ?item"
+            ),
+            &[],
+        )
+    };
+    assert_eq!(
+        names("?p > 1.5"),
+        [
+            "String(\"http://ex.org/cake\")",
+            "String(\"http://ex.org/tea\")"
+        ]
+    );
+    assert_eq!(names("?p = 2.5"), ["String(\"http://ex.org/tea\")"]);
+    assert_eq!(names("?p <= 0.50"), ["String(\"http://ex.org/water\")"]);
+}
+
+/// A decimal written into the store is an `xsd:decimal` literal with its
+/// scale (#610).
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+#[test]
+fn sparql_writes_decimals_as_xsd_decimal_literals() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute_sparql(
+        "INSERT { <http://ex.org/fee> <http://ex.org/amount> ?x } WHERE { BIND(1.50 AS ?x) }",
+    )
+    .unwrap();
+    assert_eq!(
+        one(
+            &db,
+            "sparql",
+            "SELECT (DATATYPE(?o) AS ?d) (STR(?o) AS ?s) WHERE { ?f <http://ex.org/amount> ?o }",
+            &[]
+        ),
+        "String(\"http://www.w3.org/2001/XMLSchema#decimal\"), String(\"1.50\")"
+    );
+}
+
+/// `DELETE DATA` and `DELETE ... WHERE` remove the typed literals they are
+/// given: a date, a duration and a decimal, each through the one conversion
+/// from a value to its RDF literal.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+#[test]
+fn sparql_deletes_the_typed_literals_it_wrote() {
+    let count = |db: &GrafeoDB| {
+        one(
+            db,
+            "sparql",
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }",
+            &[],
+        )
+    };
+    let data = "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+                { <http://ex.org/trip> <http://ex.org/on> \"2024-03-15\"^^xsd:date . \
+                  <http://ex.org/trip> <http://ex.org/lasts> \"P1D\"^^xsd:duration . \
+                  <http://ex.org/trip> <http://ex.org/costs> 19.50 . }";
+    let db = GrafeoDB::new_in_memory();
+    db.execute_sparql(&data.replacen('{', "INSERT DATA {", 1))
+        .unwrap();
+    assert_eq!(count(&db), "Int64(3)");
+    db.execute_sparql(&data.replacen('{', "DELETE DATA {", 1))
+        .unwrap();
+    assert_eq!(count(&db), "Int64(0)", "DELETE DATA");
+
+    db.execute_sparql(&data.replacen('{', "INSERT DATA {", 1))
+        .unwrap();
+    db.execute_sparql(
+        "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+         DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }",
+    )
+    .unwrap();
+    assert_eq!(count(&db), "Int64(0)", "DELETE WHERE");
+}

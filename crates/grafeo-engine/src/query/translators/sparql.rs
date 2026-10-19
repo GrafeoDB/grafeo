@@ -1854,8 +1854,12 @@ impl SparqlTranslator {
                         return Value::Int64(n);
                     }
                 }
-                "http://www.w3.org/2001/XMLSchema#decimal"
-                | "http://www.w3.org/2001/XMLSchema#double"
+                "http://www.w3.org/2001/XMLSchema#decimal" => {
+                    if let Ok(d) = grafeo_common::types::Decimal::parse(&lit.value) {
+                        return Value::Decimal(d);
+                    }
+                }
+                "http://www.w3.org/2001/XMLSchema#double"
                 | "http://www.w3.org/2001/XMLSchema#float" => {
                     if let Ok(n) = lit.value.parse::<f64>() {
                         return Value::Float64(n);

@@ -93,6 +93,57 @@ mod tests {
         }
     }
 
+    /// The #361 query shapes on a 128 KB stack, as reported: a database
+    /// file reopened after a close, in the default graph and inside a named
+    /// `GRAPH`, with the reporter's literal and IRI shapes.
+    #[test]
+    fn optionals_with_a_limit_run_on_a_small_stack_in_a_reopened_file() {
+        const STACK: usize = 128 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kv.grafeo");
+        let triples = r#"<urn:substrate:kv1> <urn:substrate:version_public_key> "deadbeefcafe" .
+            <urn:substrate:kv1> <urn:substrate:version> "1" .
+            <urn:substrate:kv1> <urn:substrate:status> "active" .
+            <urn:substrate:kv1> <urn:substrate:valid_until> "2027-01-01" ."#;
+        {
+            let db = GrafeoDB::open(&path).unwrap();
+            db.execute_sparql(&format!(
+                "INSERT DATA {{ {triples} GRAPH <urn:substrate:keys> {{ {triples} }} }}"
+            ))
+            .unwrap();
+            db.close().unwrap();
+        }
+
+        let db = std::sync::Arc::new(GrafeoDB::open(&path).unwrap());
+        let pattern = r#"?kv <urn:substrate:version_public_key> "deadbeefcafe" .
+            OPTIONAL { ?kv <urn:substrate:version> ?version }
+            OPTIONAL { ?kv <urn:substrate:status> ?status }
+            OPTIONAL { ?kv <urn:substrate:valid_until> ?valid_until }"#;
+        for graph in [None, Some("urn:substrate:keys")] {
+            let body = match graph {
+                Some(name) => format!("GRAPH <{name}> {{ {pattern} }}"),
+                None => pattern.to_string(),
+            };
+            for tail in ["LIMIT 1", "", "ORDER BY ?version LIMIT 1"] {
+                let query =
+                    format!("SELECT ?version ?status ?valid_until WHERE {{ {body} }} {tail}");
+                let db = std::sync::Arc::clone(&db);
+                let rows = std::thread::Builder::new()
+                    .stack_size(STACK)
+                    .spawn(move || db.execute_sparql(&query).map(|r| r.rows().to_vec()))
+                    .unwrap()
+                    .join()
+                    .expect("the query thread does not panic")
+                    .unwrap();
+                assert_eq!(
+                    format!("{rows:?}"),
+                    r#"[[String("1"), String("active"), String("2027-01-01")]]"#,
+                    "{graph:?} {tail}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn multiple_optionals_preserve_results() {
         let db = rdf_db();

@@ -88,6 +88,17 @@ db.execute("""
 """)
 ```
 
+!!! tip "Writing many nodes or edges"
+    Each direct call is checked and committed on its own. To write many nodes or edges at once, pass them to one
+    batch call: `batch_create_nodes_with_props`, `batch_create_edges`, or `upsert_nodes` and `upsert_edges` to
+    insert or update by a key. A batch is checked, written and committed once for all its rows, and creates none of
+    them if one row fails.
+
+    ```python
+    ids = db.batch_create_nodes_with_props("Person", [{"name": "Alix"}, {"name": "Gus"}])
+    db.batch_create_edges([(ids[0], ids[1], "KNOWS", {"since": 2024})])
+    ```
+
 ## Label Management
 
 Manage node labels directly:

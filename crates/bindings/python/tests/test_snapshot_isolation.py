@@ -8,7 +8,6 @@ guarantees is ``crates/grafeo-engine/tests/snapshot_isolation.rs``.
 """
 
 import contextlib
-import sys
 import threading
 
 import grafeo
@@ -131,35 +130,77 @@ def increment(db):
                     tx.rollback()
 
 
+STEP_TIMEOUT = 10.0  # seconds a thread waits for a step of the other one
+
+
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=IN_PLACE)
 def test_concurrent_increments_lose_and_add_nothing():
-    """Four threads increment one counter 100 times each, in twenty rounds:
-    a single round of today's store can end at 400 by chance, twenty in a row
-    do not. A query holds the GIL, so the threads switch between statements
-    only with a short switch interval."""
-    finals = []
-    interval = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
-    try:
-        for _ in range(20):
-            db = counter()
-            errors = []
+    """Two threads increment one counter in a fixed order of their steps, so
+    the outcome does not depend on how the threads are scheduled (a free race
+    rarely interleaves under the GIL and passed by chance). In each round:
 
-            def run(db=db, errors=errors):
-                try:
-                    for _ in range(100):
-                        increment(db)
-                except Exception as error:  # noqa: BLE001 (raised below)
-                    errors.append(error)
+    1. the writer begins, reads the counter and writes it plus one;
+    2. the reader begins and reads the counter;
+    3. the writer gives its attempt up (rolls back, as a conflict does);
+    4. the reader writes what it read plus one, and commits;
+    5. the writer increments again.
 
-            threads = [threading.Thread(target=run) for _ in range(4)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-            if errors:
-                raise errors[0]
-            finals.append(read_counter(db))
-    finally:
-        sys.setswitchinterval(interval)
-    assert finals == [400] * 20
+    Each round commits two increments. Under snapshot isolation the reader
+    reads the committed value, so the counter ends at twice the rounds.
+    Today's store writes the writer's value in place and the reader reads it,
+    so each round adds three."""
+    rounds = 25
+    db = counter()
+    events = ("written", "read", "given_up", "committed", "incremented")
+    steps = [{name: threading.Event() for name in events} for _ in range(rounds)]
+    errors = []
+
+    def wait(step, name):
+        if not step[name].wait(STEP_TIMEOUT):
+            raise TimeoutError(f"the other thread did not reach `{name}`")
+
+    def fail(error):
+        errors.append(error)
+        for step in steps:
+            for event in step.values():
+                event.set()
+
+    def writer():
+        try:
+            for step in steps:
+                tx = db.begin_transaction()
+                n = read_counter(tx)
+                tx.execute(f"MATCH (c:Counter) SET c.n = {n + 1}")
+                step["written"].set()
+                wait(step, "read")
+                tx.rollback()
+                step["given_up"].set()
+                wait(step, "committed")
+                increment(db)
+                step["incremented"].set()
+        except Exception as error:  # noqa: BLE001 (raised below)
+            fail(error)
+
+    def reader():
+        try:
+            for step in steps:
+                wait(step, "written")
+                tx = db.begin_transaction()
+                n = read_counter(tx)
+                step["read"].set()
+                wait(step, "given_up")
+                tx.execute(f"MATCH (c:Counter) SET c.n = {n + 1}")
+                tx.commit()
+                step["committed"].set()
+                wait(step, "incremented")
+        except Exception as error:  # noqa: BLE001 (raised below)
+            fail(error)
+
+    threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+    assert read_counter(db) == 2 * rounds

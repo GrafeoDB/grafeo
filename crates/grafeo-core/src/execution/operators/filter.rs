@@ -13,7 +13,6 @@ use grafeo_common::types::{
     Decimal, DecimalError, EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey,
     PropertyMap, TransactionId, Value,
 };
-use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 #[cfg(feature = "regex")]
 use regex::Regex;
 #[cfg(all(feature = "regex-lite", not(feature = "regex")))]
@@ -308,24 +307,6 @@ fn binary_text(left: &Value, op: BinaryFilterOp, right: &Value) -> String {
     format!("{left} {symbol} {right}")
 }
 
-/// The error of an integer or decimal result that does not fit (22003).
-fn out_of_range(expression: &str) -> OperatorError {
-    Error::Query(QueryError::new(
-        QueryErrorKind::NumericOutOfRange,
-        expression,
-    ))
-    .into()
-}
-
-/// The error of an integer or decimal division by zero (22012).
-fn division_by_zero(left: &Value, op: BinaryFilterOp, right: &Value) -> OperatorError {
-    Error::Query(QueryError::new(
-        QueryErrorKind::DivisionByZero,
-        binary_text(left, op, right),
-    ))
-    .into()
-}
-
 /// The error of a decimal operation that failed with `error`.
 fn decimal_error(
     error: DecimalError,
@@ -334,10 +315,12 @@ fn decimal_error(
     right: &Value,
 ) -> OperatorError {
     match error {
-        DecimalError::DivisionByZero => division_by_zero(left, op, right),
+        DecimalError::DivisionByZero => {
+            OperatorError::division_by_zero(binary_text(left, op, right))
+        }
         // Arithmetic fails only past 38 digits or by zero.
         DecimalError::Overflow | DecimalError::Invalid | DecimalError::InvalidPrecision => {
-            out_of_range(&binary_text(left, op, right))
+            OperatorError::numeric_out_of_range(binary_text(left, op, right))
         }
     }
 }
@@ -2032,8 +2015,12 @@ impl ExpressionPredicate {
             }
             (Value::Int64(a), Value::Int64(b)) => match int_op(*a, *b) {
                 Some(result) => Some(Value::Int64(result)),
-                None if *b == 0 => self.fail(division_by_zero(left, op, right)),
-                None => self.fail(out_of_range(&binary_text(left, op, right))),
+                None if *b == 0 => self.fail(OperatorError::division_by_zero(binary_text(
+                    left, op, right,
+                ))),
+                None => self.fail(OperatorError::numeric_out_of_range(binary_text(
+                    left, op, right,
+                ))),
             },
             (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a, *b))),
             (Value::Int64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a as f64, *b))),
@@ -2052,7 +2039,9 @@ impl ExpressionPredicate {
             Err(error) => self.fail(decimal_error(error, left, op, right)),
         };
         match (left, right) {
-            (Value::Int64(_), Value::Int64(0)) => self.fail(division_by_zero(left, op, right)),
+            (Value::Int64(_), Value::Int64(0)) => self.fail(OperatorError::division_by_zero(
+                binary_text(left, op, right),
+            )),
             // The one quotient that does not fit (`i64::MIN / -1`) has the
             // remainder 0.
             (Value::Int64(a), Value::Int64(b)) => Some(Value::Int64(a.wrapping_rem(*b))),
@@ -4085,7 +4074,7 @@ impl ExpressionPredicate {
             UnaryFilterOp::Neg => match val? {
                 Value::Int64(i) => match i.checked_neg() {
                     Some(negated) => Some(Value::Int64(negated)),
-                    None => self.fail(out_of_range(&format!("-({i})"))),
+                    None => self.fail(OperatorError::numeric_out_of_range(format!("-({i})"))),
                 },
                 Value::Float64(f) => Some(Value::Float64(-f)),
                 Value::Decimal(d) => Some(Value::Decimal(d.neg())),

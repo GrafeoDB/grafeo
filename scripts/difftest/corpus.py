@@ -1524,7 +1524,8 @@ ordered("BX2", "CALL grafeo.search.text('Doc', 'body', 'graph', 2) YIELD node_id
 # BY: numeric errors (#639). An integer result that does not fit fails the query (22003),
 #     an integer or decimal division by zero too (22012), in a RETURN and a WHERE (BY1 to
 #     BY4); a float division keeps its IEEE result and a null operand gives null (BY5); a
-#     false left side decides an AND, so a guard before the division keeps its rows out (BY6)
+#     false left side decides an AND, so a guard before the division keeps its rows out (BY6);
+#     an integer sum fails only when its final value does not fit (BY7, BY8)
 for case_id, query, languages in [
     ("BY1", "RETURN 9223372036854775807 + 1 AS x", BOTH),
     ("BY2", "RETURN 1 % 0 AS x", BOTH),
@@ -1532,6 +1533,8 @@ for case_id, query, languages in [
     ("BY4", "MATCH (p:Person) WHERE 100 / (p.age - 30) > 1 RETURN p.name", BOTH),
     ("BY5", "RETURN toFloat(1) / 0 AS f, null / 0 AS n, -9223372036854775807 - 1 AS m", BOTH),
     ("BY6", "MATCH (p:Person) WHERE p.age <> 30 AND 100 / (p.age - 30) > 1 RETURN p.name", BOTH),
+    ("BY7", "UNWIND [9223372036854775807, 1] AS x RETURN sum(x) AS s", BOTH),
+    ("BY8", "UNWIND [9223372036854775807, 1, -1] AS x RETURN sum(x) AS s", BOTH),
 ]:
     case(case_id, query, languages)
 

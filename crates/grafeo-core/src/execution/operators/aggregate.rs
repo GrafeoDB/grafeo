@@ -30,16 +30,19 @@ pub enum AggregateState {
     Count(i64),
     /// Count distinct state (count, seen values).
     CountDistinct(i64, HashSet<HashableValue>),
-    /// Sum state (integer sum, count of values added).
-    SumInt(i64, i64),
-    /// Sum distinct state (integer sum, count, seen values).
-    SumIntDistinct(i64, i64, HashSet<HashableValue>),
+    /// Sum state (integer sum, count of values added). The sum is kept in
+    /// 128 bits, which no count of 64-bit values reaches the end of, and
+    /// checked once at [`finalize`](Self::finalize).
+    SumInt(i128, i64),
+    /// Sum distinct state (integer sum, count, seen values), as `SumInt`.
+    SumIntDistinct(i128, i64, HashSet<HashableValue>),
     /// Sum state (float sum, count of values added).
     SumFloat(f64, f64, i64),
     /// Sum distinct state (float sum, compensation, count, seen values).
     SumFloatDistinct(f64, f64, i64, HashSet<HashableValue>),
     /// Exact sum of decimals and integers (`None` once it needs more than
-    /// 38 digits, which finalizes to null), count of values added.
+    /// 38 digits, which fails at [`finalize`](Self::finalize)), count of
+    /// values added.
     SumDecimal(Option<Decimal>, i64),
     /// Average state (sum, count).
     Avg(f64, i64),
@@ -108,6 +111,16 @@ pub enum AggregateState {
 
 /// The decimal of a float sum that holds a whole number exactly (a sum of
 /// integers, or no value yet): integers below 2^53 are exact in a float.
+/// An integer sum as an exact decimal, `None` past 38 digits.
+fn exact_sum(sum: i128) -> Option<Decimal> {
+    Decimal::new(sum, 0).ok()
+}
+
+/// The error of a decimal sum past 38 digits.
+fn decimal_sum_out_of_range() -> OperatorError {
+    OperatorError::numeric_out_of_range("sum of more than 38 digits")
+}
+
 fn exact_whole(sum: f64) -> Option<Decimal> {
     const EXACT: f64 = 9_007_199_254_740_992.0;
     if sum.fract() == 0.0 && sum.abs() < EXACT {
@@ -283,10 +296,10 @@ impl AggregateState {
             }
             AggregateState::SumInt(sum, count) => {
                 if let Some(Value::Int64(v)) = value {
-                    *sum += v;
+                    *sum += i128::from(v);
                     *count += 1;
                 } else if let Some(Value::Decimal(d)) = value {
-                    let total = Decimal::from_i64(*sum).checked_add(&d).ok();
+                    let total = exact_sum(*sum).and_then(|whole| whole.checked_add(&d).ok());
                     *self = AggregateState::SumDecimal(total, *count + 1);
                 } else if let Some(Value::Float64(v)) = value {
                     // Convert to float sum, carrying count forward
@@ -303,10 +316,10 @@ impl AggregateState {
                     let hashable = HashableValue::from(v);
                     if seen.insert(hashable) {
                         if let Value::Int64(i) = v {
-                            *sum += i;
+                            *sum += i128::from(*i);
                             *count += 1;
                         } else if let Value::Decimal(d) = v {
-                            let total = Decimal::from_i64(*sum).checked_add(d).ok();
+                            let total = exact_sum(*sum).and_then(|whole| whole.checked_add(d).ok());
                             *self = AggregateState::Distinct {
                                 seen: std::mem::take(seen),
                                 inner: Box::new(AggregateState::SumDecimal(total, *count + 1)),
@@ -603,8 +616,13 @@ impl AggregateState {
     }
 
     /// Finalizes the state and returns the result value.
-    pub fn finalize(&self) -> Value {
-        match self {
+    ///
+    /// # Errors
+    ///
+    /// An integer sum outside the 64-bit range, and a decimal sum or average
+    /// whose sum needs more than 38 digits, are out of range (22003).
+    pub fn finalize(&self) -> Result<Value, OperatorError> {
+        Ok(match self {
             AggregateState::Count(count) | AggregateState::CountDistinct(count, _) => {
                 Value::Int64(*count)
             }
@@ -612,7 +630,11 @@ impl AggregateState {
                 if *count == 0 {
                     Value::Null
                 } else {
-                    Value::Int64(*sum)
+                    Value::Int64(
+                        i64::try_from(*sum).map_err(|_| {
+                            OperatorError::numeric_out_of_range(format!("sum {sum}"))
+                        })?,
+                    )
                 }
             }
             AggregateState::SumFloat(sum, _, count)
@@ -630,15 +652,19 @@ impl AggregateState {
                     Value::Float64(*sum / *count as f64)
                 }
             }
-            AggregateState::SumDecimal(total, count) => match total {
-                Some(total) if *count > 0 => Value::Decimal(*total),
-                _ => Value::Null,
-            },
+            AggregateState::SumDecimal(_, 0) | AggregateState::AvgDecimal(_, 0) => Value::Null,
+            AggregateState::SumDecimal(total, _) => {
+                Value::Decimal(total.ok_or_else(decimal_sum_out_of_range)?)
+            }
             // The average of decimals by the rule of decimal division.
-            AggregateState::AvgDecimal(total, count) => total
-                .filter(|_| *count > 0)
-                .and_then(|total| total.checked_div(&Decimal::from_i64(*count)).ok())
-                .map_or(Value::Null, Value::Decimal),
+            AggregateState::AvgDecimal(total, count) => {
+                let total = total.ok_or_else(decimal_sum_out_of_range)?;
+                Value::Decimal(
+                    total
+                        .checked_div(&Decimal::from_i64(*count))
+                        .map_err(|_| decimal_sum_out_of_range())?,
+                )
+            }
             AggregateState::Min(extreme)
             | AggregateState::Max(extreme)
             | AggregateState::MinOfRdfLiterals(extreme)
@@ -820,8 +846,8 @@ impl AggregateState {
                     _ => Value::Null, // non-bivariate functions never reach here
                 }
             }
-            AggregateState::Distinct { inner, .. } => inner.finalize(),
-        }
+            AggregateState::Distinct { inner, .. } => return inner.finalize(),
+        })
     }
 
     /// Whether this state takes `(y, x)` pairs through
@@ -1020,7 +1046,7 @@ impl Operator for HashAggregateOperator {
             let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
 
             for agg in &self.aggregates {
-                let value = AggregateState::for_expr(agg).finalize();
+                let value = AggregateState::for_expr(agg).finalize()?;
                 if let Some(col) = builder.column_mut(self.group_columns.len()) {
                     col.push_value(value);
                 }
@@ -1050,7 +1076,7 @@ impl Operator for HashAggregateOperator {
             for (i, state) in group.states.iter().enumerate() {
                 let col_idx = self.group_columns.len() + i;
                 if let Some(col) = builder.column_mut(col_idx) {
-                    col.push_value(state.finalize());
+                    col.push_value(state.finalize()?);
                 }
             }
 
@@ -1182,7 +1208,7 @@ impl Operator for SimpleAggregateOperator {
 
         for (i, state) in self.states.iter().enumerate() {
             if let Some(col) = builder.column_mut(i) {
-                col.push_value(state.finalize());
+                col.push_value(state.finalize()?);
             }
         }
         builder.advance_row();
@@ -1927,8 +1953,16 @@ mod tests {
                     update(&mut only_nulls, &Value::Null);
                 }
                 let case = format!("{function:?}, distinct: {distinct}");
-                assert_eq!(with_nulls.finalize(), without_nulls.finalize(), "{case}");
-                assert_eq!(only_nulls.finalize(), new_state().finalize(), "{case}");
+                assert_eq!(
+                    with_nulls.finalize().unwrap(),
+                    without_nulls.finalize().unwrap(),
+                    "{case}"
+                );
+                assert_eq!(
+                    only_nulls.finalize().unwrap(),
+                    new_state().finalize().unwrap(),
+                    "{case}"
+                );
             }
         }
     }
@@ -1969,7 +2003,7 @@ mod tests {
                         state.update(Some(Value::Int64(x)));
                     }
                 }
-                state.finalize()
+                state.finalize().unwrap()
             };
             let with_copies = [3, 3, 19, 3, 88];
             let once = [3, 19, 88];
@@ -1990,7 +2024,7 @@ mod tests {
         for (y, x) in [(19, 3), (19, 3), (88, 3), (19, 88)] {
             count.update_bivariate(Some(Value::Int64(y)), Some(Value::Int64(x)));
         }
-        assert_eq!(count.finalize(), Value::Int64(3));
+        assert_eq!(count.finalize().unwrap(), Value::Int64(3));
     }
 
     #[test]
@@ -2285,7 +2319,7 @@ mod tests {
             for value in values {
                 state.update(Some(value.clone()));
             }
-            state.finalize()
+            state.finalize().unwrap()
         })
     }
 
@@ -2364,9 +2398,9 @@ mod tests {
             count.update(Some(value.clone()));
             collect.update(Some(value));
         }
-        assert_eq!(count.finalize(), Value::Int64(3));
+        assert_eq!(count.finalize().unwrap(), Value::Int64(3));
         assert_eq!(
-            collect.finalize(),
+            collect.finalize().unwrap(),
             Value::List(vec![path(2), path(3), Value::Int64(3)].into())
         );
     }

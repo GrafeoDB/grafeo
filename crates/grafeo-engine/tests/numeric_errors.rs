@@ -391,3 +391,106 @@ fn sparql_leaves_an_error_unbound() {
     assert_eq!(rows.rows().len(), 1);
     assert_eq!(rows.rows()[0][0], Value::Null);
 }
+
+/// An integer sum adds without a limit and fails only when the final sum
+/// does not fit (22003): a running total outside the 64-bit range is fine, so
+/// the result does not depend on the order of the rows. DuckDB sums BIGINT
+/// into a 128-bit HUGEINT the same way.
+#[test]
+fn a_sum_that_does_not_fit_is_out_of_range() {
+    let db = GrafeoDB::new_in_memory();
+    for language in LANGUAGES {
+        for query in [
+            "UNWIND [$max, 1] AS x RETURN sum(x) AS s",
+            "UNWIND [$min, -1] AS x RETURN sum(x) AS s",
+            "UNWIND [$max, 1, 1] AS x RETURN sum(DISTINCT x) AS s",
+            "UNWIND [[1, $max], [1, 1], [2, 5]] AS r RETURN r[0] AS g, sum(r[1]) AS s",
+            // Decimals past 38 digits, in a sum and in an average.
+            "UNWIND [$big, $big] AS x RETURN sum(x) AS s",
+            "UNWIND [$big, $big] AS x RETURN avg(x) AS s",
+            "UNWIND [1, $big, $big] AS x RETURN sum(x) AS s",
+        ] {
+            out_of_range(&db, language, query, "numeric value out of range: sum");
+        }
+    }
+}
+
+#[test]
+fn a_sum_that_fits_keeps_its_running_total() {
+    let db = GrafeoDB::new_in_memory();
+    for language in LANGUAGES {
+        for (query, expected) in [
+            (
+                "UNWIND [$max, 1, -1] AS x RETURN sum(x) AS s",
+                Value::Int64(i64::MAX),
+            ),
+            (
+                "UNWIND [$max, $max, $min, $min] AS x RETURN sum(x) AS s",
+                Value::Int64(-2),
+            ),
+            (
+                "UNWIND [$min, -1, 1] AS x RETURN sum(x) AS s",
+                Value::Int64(i64::MIN),
+            ),
+            // A float sum keeps its IEEE result.
+            (
+                "UNWIND [$max, $max] AS x RETURN sum(toFloat(x)) AS s",
+                Value::Float64(i64::MAX as f64 * 2.0),
+            ),
+            // The integers before a decimal join the exact sum.
+            (
+                "UNWIND [$max, $max, $one] AS x RETURN sum(x) AS s",
+                d("18446744073709551615.5"),
+            ),
+        ] {
+            assert_eq!(
+                value(&db, language, query),
+                expected,
+                "{language} `{query}`"
+            );
+        }
+    }
+}
+
+/// The sum over stored values fails the same way, also with many rows and
+/// per group.
+#[test]
+fn a_sum_over_stored_values_that_does_not_fit_is_out_of_range() {
+    let db = GrafeoDB::new_in_memory();
+    let big = i64::MAX / 4 + 1;
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    for i in 0..5000 {
+        let label = if i % 2 == 0 { "Even" } else { "Odd" };
+        session
+            .execute(&format!(
+                "INSERT (:{label} {{v: {}}})",
+                if i < 8 { big } else { 0 }
+            ))
+            .unwrap();
+    }
+    session.commit().unwrap();
+    for language in LANGUAGES {
+        out_of_range(
+            &db,
+            language,
+            "MATCH (n) RETURN sum(n.v) AS s",
+            "numeric value out of range: sum",
+        );
+        out_of_range(
+            &db,
+            language,
+            "MATCH (n:Even) RETURN sum(n.v) AS s",
+            "numeric value out of range: sum",
+        );
+        assert_eq!(
+            value(
+                &db,
+                language,
+                "MATCH (n) WHERE n.v > 0 WITH n LIMIT 3 RETURN sum(n.v) AS s"
+            ),
+            Value::Int64(3 * big),
+            "{language}"
+        );
+    }
+}

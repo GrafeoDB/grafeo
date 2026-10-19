@@ -201,7 +201,7 @@ impl Operator for HorizontalAggregateOperator {
                         state.update(prop_val);
                     }
                 }
-                state.finalize()
+                state.finalize()?
             } else {
                 Value::Null
             };

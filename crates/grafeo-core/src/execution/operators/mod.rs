@@ -446,6 +446,38 @@ impl From<grafeo_common::utils::error::Error> for OperatorError {
     }
 }
 
+impl OperatorError {
+    /// An integer or decimal result that does not fit (GQLSTATUS 22003);
+    /// `operation` says which, such as `9223372036854775807 + 1`.
+    #[must_use]
+    pub fn numeric_out_of_range(operation: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::NumericOutOfRange,
+            operation,
+        )
+    }
+
+    /// An integer or decimal division by zero (GQLSTATUS 22012); `operation`
+    /// says which, such as `10 / 0`.
+    #[must_use]
+    pub fn division_by_zero(operation: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::DivisionByZero,
+            operation,
+        )
+    }
+
+    fn query_data(
+        kind: grafeo_common::utils::error::QueryErrorKind,
+        operation: impl Into<String>,
+    ) -> Self {
+        grafeo_common::utils::error::Error::Query(grafeo_common::utils::error::QueryError::new(
+            kind, operation,
+        ))
+        .into()
+    }
+}
+
 /// The core trait for pull-based operators.
 ///
 /// Call [`next()`](Self::next) repeatedly until it returns `None`. Each call

@@ -69,6 +69,12 @@ fn read_i64(r: &mut dyn Read) -> std::io::Result<i64> {
     Ok(i64::from_le_bytes(bytes))
 }
 
+fn read_i128(r: &mut dyn Read) -> std::io::Result<i128> {
+    let mut bytes = [0; 16];
+    r.read_exact(&mut bytes)?;
+    Ok(i128::from_le_bytes(bytes))
+}
+
 fn read_f64(r: &mut dyn Read) -> std::io::Result<f64> {
     let mut bytes = [0; 8];
     r.read_exact(&mut bytes)?;
@@ -347,7 +353,8 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
         tags::COUNT => AggregateState::Count(read_i64(r)?),
         tags::COUNT_DISTINCT => AggregateState::CountDistinct(read_i64(r)?, read_seen(r)?),
         tags::SUM_INT | tags::SUM_INT_DISTINCT => {
-            let sum = read_i64(r)?;
+            // The 128-bit sum (16 bytes), as the writer writes it.
+            let sum = read_i128(r)?;
             let count = read_i64(r)?;
             if tag == tags::SUM_INT {
                 AggregateState::SumInt(sum, count)

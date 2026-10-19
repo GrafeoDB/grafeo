@@ -478,3 +478,5 @@ BY3|cypher d1d652c243 An integer division by zero in a RETURN fails the query (2
 BY3|gql d1d652c243 An integer division by zero in a RETURN fails the query (22012, #639); it was null.
 BY4|cypher d1d652c243 An integer division by zero in a WHERE fails the query (22012, #639); the row was dropped as for a null.
 BY4|gql d1d652c243 An integer division by zero in a WHERE fails the query (22012, #639); the row was dropped as for a null.
+BY7|cypher 1c462b1c0a An integer sum past the 64-bit range fails the query (22003, #639); it wrapped around to -9223372036854775808.
+BY7|gql 1c462b1c0a An integer sum past the 64-bit range fails the query (22003, #639); it wrapped around to -9223372036854775808.

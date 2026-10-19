@@ -251,6 +251,22 @@ fn a_statement_without_parameters_looks_its_plan_up_once_per_call() {
         }
         assert_eq!(lookups(), (hits + 2, misses + 1), "Cypher");
     }
+
+    #[cfg(feature = "sql-pgq")]
+    {
+        let (hits, misses) = lookups();
+        for _ in 0..3 {
+            let rows = session
+                .execute_sql(
+                    "SELECT * FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.name AS name))",
+                )
+                .unwrap()
+                .rows()
+                .to_vec();
+            assert_eq!(rows, [vec![Value::from("Alix")]]);
+        }
+        assert_eq!(lookups(), (hits + 2, misses + 1), "SQL/PGQ");
+    }
 }
 
 #[test]

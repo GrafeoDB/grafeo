@@ -3712,55 +3712,67 @@ impl Session {
         #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let start_time = Instant::now();
 
-        // A parameterized statement reuses its parsed plan (see execute_gql).
+        // A statement without parameters whose optimized plan is cached
+        // skips the parse and translation (see execute_gql); DDL is never
+        // cached.
         let cache_key = CacheKey::with_graph(query, QueryLanguage::SqlPgq, self.current_graph());
-        let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
-        let mut logical_plan = match parsed {
-            Some(plan) => plan,
-            None => {
-                // Parse and translate (always needed to check for DDL)
-                let logical_plan = sql_pgq::translate(query)?;
-
-                // Handle DDL statements directly (they don't go through the query pipeline)
-                if let LogicalOperator::CreatePropertyGraph(ref cpg) = logical_plan.root {
-                    self.require_permission(crate::auth::StatementKind::Admin)?;
-                    return Ok(QueryResult {
-                        columns: vec!["status".into()],
-                        column_types: vec![grafeo_common::types::LogicalType::String],
-                        rows: vec![vec![Value::from(format!(
-                            "Property graph '{}' created ({} node tables, {} edge tables)",
-                            cpg.name,
-                            cpg.node_tables.len(),
-                            cpg.edge_tables.len()
-                        ))]],
-                        execution_time_ms: None,
-                        rows_scanned: None,
-                        status_message: None,
-                        gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
-                        counters: Default::default(),
-                    });
-                }
-                if params.is_some() {
-                    self.query_cache
-                        .put_parsed(cache_key.clone(), logical_plan.clone());
-                }
-                logical_plan
-            }
-        };
-
-        let params = params_to_fill(&mut logical_plan, params)?;
-        let optimized_plan = if let Some(params) = params {
-            self.optimize_with_params(logical_plan, params)?
-        } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
-            cached_plan
-        } else {
-            let mut binder = Binder::new();
-            let _binding_context = binder.bind(&logical_plan)?;
-            let active = self.active_store();
-            let optimizer = Optimizer::from_graph_store(&*active);
-            let plan = optimizer.optimize(logical_plan)?;
-            self.query_cache.put_optimized(cache_key, plan.clone());
+        let cached = params
+            .is_none()
+            .then(|| self.query_cache.get_optimized(&cache_key))
+            .flatten();
+        let optimized_plan = if let Some(plan) = cached {
             plan
+        } else {
+            // A parameterized statement reuses its parsed plan (see execute_gql).
+            let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+            let mut logical_plan = match parsed {
+                Some(plan) => plan,
+                None => {
+                    // Parse and translate
+                    let logical_plan = sql_pgq::translate(query)?;
+
+                    // Handle DDL statements directly (they don't go through the query pipeline)
+                    if let LogicalOperator::CreatePropertyGraph(ref cpg) = logical_plan.root {
+                        self.require_permission(crate::auth::StatementKind::Admin)?;
+                        return Ok(QueryResult {
+                            columns: vec!["status".into()],
+                            column_types: vec![grafeo_common::types::LogicalType::String],
+                            rows: vec![vec![Value::from(format!(
+                                "Property graph '{}' created ({} node tables, {} edge tables)",
+                                cpg.name,
+                                cpg.node_tables.len(),
+                                cpg.edge_tables.len()
+                            ))]],
+                            execution_time_ms: None,
+                            rows_scanned: None,
+                            status_message: None,
+                            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+                            counters: Default::default(),
+                        });
+                    }
+                    if params.is_some() {
+                        self.query_cache
+                            .put_parsed(cache_key.clone(), logical_plan.clone());
+                    }
+                    logical_plan
+                }
+            };
+
+            let given = params.is_some();
+            let params = params_to_fill(&mut logical_plan, params)?;
+            if let Some(params) = params {
+                self.optimize_with_params(logical_plan, params)?
+            } else if given && let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
+                cached_plan
+            } else {
+                let mut binder = Binder::new();
+                let _binding_context = binder.bind(&logical_plan)?;
+                let active = self.active_store();
+                let optimizer = Optimizer::from_graph_store(&*active);
+                let plan = optimizer.optimize(logical_plan)?;
+                self.query_cache.put_optimized(cache_key, plan.clone());
+                plan
+            }
         };
 
         let active = self.active_store();

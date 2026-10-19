@@ -456,3 +456,19 @@ fn a_read_only_role_cannot_run_a_cached_cypher_write() {
     assert_denied(reader.execute_cypher("MATCH (a:Person) SET a.w = 1"), "SET");
     assert_eq!(state(&db), seeded_state());
 }
+
+/// SQL/PGQ DDL is never served from the plan cache: a read-only role cannot
+/// run the `CREATE PROPERTY GRAPH` an admin ran before.
+#[cfg(feature = "sql-pgq")]
+#[test]
+fn a_read_only_role_cannot_repeat_sql_pgq_ddl() {
+    let (db, _) = seeded();
+    let ddl =
+        "CREATE PROPERTY GRAPH Social NODE TABLES (Person (id BIGINT PRIMARY KEY, name VARCHAR))";
+    db.session().execute_sql(ddl).unwrap();
+    db.session().execute_sql(ddl).unwrap();
+
+    let reader = db.session_with_role(Role::ReadOnly);
+    assert_denied(reader.execute_sql(ddl), "CREATE PROPERTY GRAPH");
+    assert_eq!(state(&db), seeded_state());
+}

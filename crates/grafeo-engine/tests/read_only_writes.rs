@@ -374,3 +374,85 @@ fn a_read_only_database_rejects_sparql_updates() {
         "queries still run"
     );
 }
+
+// A statement whose optimized plan is cached skips its parse and
+// translation, so the checks must hold on the cached plan too: the same
+// text ran once as a permitted write before the refused one.
+
+#[test]
+fn a_cached_gql_write_fails_in_a_read_only_transaction() {
+    let (db, _) = seeded();
+    let writer = db.session();
+    writer.execute("MATCH (a:Person) SET a.w = 1").unwrap();
+    writer.execute("MATCH (a:Person) SET a.w = 1").unwrap();
+
+    let session = read_only_transaction(&db);
+    assert_read_only(session.execute("MATCH (a:Person) SET a.w = 1"), "SET");
+    assert_eq!(state(&db), seeded_state());
+    ends_and_writes_again(&db, &session);
+}
+
+#[test]
+fn a_read_only_role_cannot_run_a_cached_gql_write() {
+    let (db, _) = seeded();
+    db.session()
+        .execute("INSERT (:Person {name: 'Gus', w: 2})")
+        .unwrap();
+    db.session()
+        .execute("MATCH (p:Person {name: 'Gus'}) DETACH DELETE p")
+        .unwrap();
+
+    let reader = db.session_with_role(Role::ReadOnly);
+    assert_denied(
+        reader.execute("INSERT (:Person {name: 'Gus', w: 2})"),
+        "INSERT",
+    );
+    assert_denied(
+        reader.execute("MATCH (p:Person {name: 'Gus'}) DETACH DELETE p"),
+        "DETACH DELETE",
+    );
+    assert_eq!(state(&db), seeded_state());
+    assert_eq!(
+        reader
+            .execute("MATCH (p:Person) RETURN p.name")
+            .unwrap()
+            .rows()
+            .len(),
+        1,
+        "reads still run"
+    );
+}
+
+#[cfg(feature = "cypher")]
+#[test]
+fn a_cached_cypher_write_fails_in_a_read_only_transaction() {
+    let (db, _) = seeded();
+    let writer = db.session();
+    writer
+        .execute_cypher("MATCH (a:Person) SET a.w = 1")
+        .unwrap();
+    writer
+        .execute_cypher("MATCH (a:Person) SET a.w = 1")
+        .unwrap();
+
+    let session = read_only_transaction(&db);
+    assert_read_only(
+        session.execute_cypher("MATCH (a:Person) SET a.w = 1"),
+        "SET",
+    );
+    assert_eq!(state(&db), seeded_state());
+    ends_and_writes_again(&db, &session);
+}
+
+#[cfg(feature = "cypher")]
+#[test]
+fn a_read_only_role_cannot_run_a_cached_cypher_write() {
+    let (db, _) = seeded();
+    db.session()
+        .execute_cypher("MATCH (a:Person) SET a.w = 1")
+        .unwrap();
+
+    let reader = db.session_with_role(Role::ReadOnly);
+    assert_denied(reader.execute_cypher("MATCH (a:Person) SET a.w = 1"), "SET");
+    assert_eq!(state(&db), seeded_state());
+}

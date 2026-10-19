@@ -214,6 +214,45 @@ fn an_empty_parameter_map_uses_the_cached_plan() {
     assert!(error.to_string().contains("$name"), "{error}");
 }
 
+/// A statement without parameters looks its optimized plan up once per call:
+/// the first call misses and caches it, every later call hits it, in GQL and
+/// in Cypher alike.
+#[test]
+fn a_statement_without_parameters_looks_its_plan_up_once_per_call() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    let session = db.session();
+    let lookups = || {
+        let stats = db.query_cache().stats();
+        (stats.optimized_hits, stats.optimized_misses)
+    };
+
+    let (hits, misses) = lookups();
+    for _ in 0..3 {
+        let rows = session
+            .execute("MATCH (p:Person) RETURN p.name")
+            .unwrap()
+            .rows()
+            .to_vec();
+        assert_eq!(rows, [vec![Value::from("Alix")]]);
+    }
+    assert_eq!(lookups(), (hits + 2, misses + 1), "GQL");
+
+    #[cfg(feature = "cypher")]
+    {
+        let (hits, misses) = lookups();
+        for _ in 0..3 {
+            let rows = session
+                .execute_cypher("MATCH (p:Person) RETURN p.name")
+                .unwrap()
+                .rows()
+                .to_vec();
+            assert_eq!(rows, [vec![Value::from("Alix")]]);
+        }
+        assert_eq!(lookups(), (hits + 2, misses + 1), "Cypher");
+    }
+}
+
 #[test]
 fn explain_and_profile_take_parameters() {
     let db = GrafeoDB::new_in_memory();

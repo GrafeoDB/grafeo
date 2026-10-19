@@ -2670,79 +2670,98 @@ impl Session {
         #[cfg(not(target_arch = "wasm32"))]
         let start_time = std::time::Instant::now();
 
-        // A parameterized statement reuses its parsed plan: the parameters
-        // are filled into a copy on every call, before optimizing, so the
-        // optimizer and planner see the values and no cached plan keeps them.
-        let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
-        let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
-        let mut logical_plan = match parsed {
-            Some(plan) => plan,
-            None => match gql::translate_full(query)? {
-                gql::GqlTranslationResult::SessionCommand(cmd) => {
-                    return self.execute_session_command(cmd);
-                }
-                #[cfg(feature = "lpg")]
-                gql::GqlTranslationResult::SchemaCommand(cmd) => {
-                    // All DDL requires Admin role
-                    self.require_permission(crate::auth::StatementKind::Admin)?;
-                    if *self.read_only_tx.lock() {
-                        return Err(grafeo_common::utils::error::Error::Transaction(
-                            grafeo_common::utils::error::TransactionError::ReadOnly,
-                        ));
-                    }
-                    return self.execute_schema_command(cmd);
-                }
-                #[cfg(not(feature = "lpg"))]
-                gql::GqlTranslationResult::SchemaCommand(_) => {
-                    return Err(grafeo_common::utils::error::Error::Query(
-                        grafeo_common::utils::error::QueryError::unsupported(
-                            "this build has no labeled property graph (the `lpg` feature)",
-                        ),
-                    ));
-                }
-                gql::GqlTranslationResult::Plan(plan) => {
-                    if params.is_some() {
-                        self.query_cache.put_parsed(cache_key.clone(), plan.clone());
-                    }
-                    plan
-                }
-            },
-        };
-
         // Only walk the operator tree when it matters: non-admin identities
         // need permission checks, read-only transactions need mutation
         // blocking. Admin sessions in auto-commit mode skip the tree walk.
-        let read_only = *self.read_only_tx.lock();
-        let need_check = read_only || !self.identity.can_admin();
-        let is_mutation = need_check && self.statement_writes(&logical_plan.root);
-        if is_mutation {
-            self.require_permission(crate::auth::StatementKind::Write)?;
-        }
-        if read_only && is_mutation {
-            return Err(grafeo_common::utils::error::Error::Transaction(
-                grafeo_common::utils::error::TransactionError::ReadOnly,
-            ));
-        }
+        let check_writes = |root: &crate::query::plan::LogicalOperator| -> Result<()> {
+            let read_only = *self.read_only_tx.lock();
+            let need_check = read_only || !self.identity.can_admin();
+            let is_mutation = need_check && self.statement_writes(root);
+            if is_mutation {
+                self.require_permission(crate::auth::StatementKind::Write)?;
+            }
+            if read_only && is_mutation {
+                return Err(grafeo_common::utils::error::Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::ReadOnly,
+                ));
+            }
+            Ok(())
+        };
 
-        let params = params_to_fill(&mut logical_plan, params)?;
-        let optimized_plan = if let Some(params) = params {
-            self.optimize_with_params(logical_plan, params)?
-        } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
-            cached_plan
-        } else {
-            // Semantic validation
-            let mut binder = Binder::new();
-            let _binding_context = binder.bind(&logical_plan)?;
-
-            // Optimize the plan
-            let active = self.active_store();
-            let optimizer = Optimizer::from_graph_store(&*active);
-            let plan = optimizer.optimize(logical_plan)?;
-
-            // Cache the optimized plan for future use
-            self.query_cache.put_optimized(cache_key, plan.clone());
-
+        // A statement without parameters whose optimized plan is cached
+        // skips the parse and translation: a translation depends on the text
+        // alone, and only plans are cached, never session or schema commands.
+        let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
+        let cached = params
+            .is_none()
+            .then(|| self.query_cache.get_optimized(&cache_key))
+            .flatten();
+        let optimized_plan = if let Some(plan) = cached {
+            check_writes(&plan.root)?;
             plan
+        } else {
+            // A parameterized statement reuses its parsed plan: the parameters
+            // are filled into a copy on every call, before optimizing, so the
+            // optimizer and planner see the values and no cached plan keeps them.
+            let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+            let mut logical_plan = match parsed {
+                Some(plan) => plan,
+                None => match gql::translate_full(query)? {
+                    gql::GqlTranslationResult::SessionCommand(cmd) => {
+                        return self.execute_session_command(cmd);
+                    }
+                    #[cfg(feature = "lpg")]
+                    gql::GqlTranslationResult::SchemaCommand(cmd) => {
+                        // All DDL requires Admin role
+                        self.require_permission(crate::auth::StatementKind::Admin)?;
+                        if *self.read_only_tx.lock() {
+                            return Err(grafeo_common::utils::error::Error::Transaction(
+                                grafeo_common::utils::error::TransactionError::ReadOnly,
+                            ));
+                        }
+                        return self.execute_schema_command(cmd);
+                    }
+                    #[cfg(not(feature = "lpg"))]
+                    gql::GqlTranslationResult::SchemaCommand(_) => {
+                        return Err(grafeo_common::utils::error::Error::Query(
+                            grafeo_common::utils::error::QueryError::unsupported(
+                                "this build has no labeled property graph (the `lpg` feature)",
+                            ),
+                        ));
+                    }
+                    gql::GqlTranslationResult::Plan(plan) => {
+                        if params.is_some() {
+                            self.query_cache.put_parsed(cache_key.clone(), plan.clone());
+                        }
+                        plan
+                    }
+                },
+            };
+            check_writes(&logical_plan.root)?;
+
+            // An empty parameter map fills in nothing and shares the plan of
+            // the same call without one; without a map, the lookup above missed.
+            let given = params.is_some();
+            let params = params_to_fill(&mut logical_plan, params)?;
+            if let Some(params) = params {
+                self.optimize_with_params(logical_plan, params)?
+            } else if given && let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
+                cached_plan
+            } else {
+                // Semantic validation
+                let mut binder = Binder::new();
+                let _binding_context = binder.bind(&logical_plan)?;
+
+                // Optimize the plan
+                let active = self.active_store();
+                let optimizer = Optimizer::from_graph_store(&*active);
+                let plan = optimizer.optimize(logical_plan)?;
+
+                // Cache the optimized plan for future use
+                self.query_cache.put_optimized(cache_key, plan.clone());
+
+                plan
+            }
         };
 
         // Resolve the active store for query execution
@@ -3194,72 +3213,83 @@ impl Session {
         #[cfg(not(target_arch = "wasm32"))]
         let start_time = std::time::Instant::now();
 
-        // A parameterized statement reuses its parsed plan (see execute_gql).
+        // A statement without parameters whose optimized plan is cached
+        // skips the parse and translation (see execute_gql).
         let cache_key = CacheKey::with_graph(query, QueryLanguage::Cypher, self.current_graph());
-        let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
-        let mut logical_plan = match parsed {
-            Some(plan) => plan,
-            // Schema DDL and SHOW commands run before the normal query path.
-            None => match cypher::translate_full(query)? {
-                #[cfg(feature = "lpg")]
-                cypher::CypherTranslationResult::SchemaCommand(cmd) => {
-                    use grafeo_common::utils::error::{
-                        Error as GrafeoError, QueryError, QueryErrorKind,
-                    };
-                    self.require_permission(crate::auth::StatementKind::Admin)?;
-                    if *self.read_only_tx.lock() {
-                        return Err(GrafeoError::Query(QueryError::new(
-                            QueryErrorKind::Semantic,
-                            "Cannot execute schema DDL in a read-only transaction",
-                        )));
-                    }
-                    return self.execute_schema_command(cmd);
-                }
-                #[cfg(not(feature = "lpg"))]
-                cypher::CypherTranslationResult::SchemaCommand(_) => {
-                    return Err(grafeo_common::utils::error::Error::Query(
-                        grafeo_common::utils::error::QueryError::unsupported(
-                            "this build has no labeled property graph (the `lpg` feature)",
-                        ),
-                    ));
-                }
-                cypher::CypherTranslationResult::ShowIndexes => {
-                    return self.execute_show_indexes();
-                }
-                cypher::CypherTranslationResult::ShowConstraints => {
-                    return self.execute_show_constraints();
-                }
-                cypher::CypherTranslationResult::ShowCurrentGraphType => {
-                    return self.execute_show_current_graph_type();
-                }
-                cypher::CypherTranslationResult::Plan(plan) => {
-                    if params.is_some() {
-                        self.query_cache.put_parsed(cache_key.clone(), plan.clone());
-                    }
-                    plan
-                }
-            },
-        };
-
-        let params = params_to_fill(&mut logical_plan, params)?;
-        let optimized_plan = if let Some(params) = params {
-            self.optimize_with_params(logical_plan, params)?
-        } else if let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
-            cached_plan
-        } else {
-            // Semantic validation
-            let mut binder = Binder::new();
-            let _binding_context = binder.bind(&logical_plan)?;
-
-            // Optimize the plan
-            let active = self.active_store();
-            let optimizer = Optimizer::from_graph_store(&*active);
-            let plan = optimizer.optimize(logical_plan)?;
-
-            // Cache the optimized plan
-            self.query_cache.put_optimized(cache_key, plan.clone());
-
+        let cached = params
+            .is_none()
+            .then(|| self.query_cache.get_optimized(&cache_key))
+            .flatten();
+        let optimized_plan = if let Some(plan) = cached {
             plan
+        } else {
+            // A parameterized statement reuses its parsed plan (see execute_gql).
+            let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+            let mut logical_plan = match parsed {
+                Some(plan) => plan,
+                // Schema DDL and SHOW commands run before the normal query path.
+                None => match cypher::translate_full(query)? {
+                    #[cfg(feature = "lpg")]
+                    cypher::CypherTranslationResult::SchemaCommand(cmd) => {
+                        use grafeo_common::utils::error::{
+                            Error as GrafeoError, QueryError, QueryErrorKind,
+                        };
+                        self.require_permission(crate::auth::StatementKind::Admin)?;
+                        if *self.read_only_tx.lock() {
+                            return Err(GrafeoError::Query(QueryError::new(
+                                QueryErrorKind::Semantic,
+                                "Cannot execute schema DDL in a read-only transaction",
+                            )));
+                        }
+                        return self.execute_schema_command(cmd);
+                    }
+                    #[cfg(not(feature = "lpg"))]
+                    cypher::CypherTranslationResult::SchemaCommand(_) => {
+                        return Err(grafeo_common::utils::error::Error::Query(
+                            grafeo_common::utils::error::QueryError::unsupported(
+                                "this build has no labeled property graph (the `lpg` feature)",
+                            ),
+                        ));
+                    }
+                    cypher::CypherTranslationResult::ShowIndexes => {
+                        return self.execute_show_indexes();
+                    }
+                    cypher::CypherTranslationResult::ShowConstraints => {
+                        return self.execute_show_constraints();
+                    }
+                    cypher::CypherTranslationResult::ShowCurrentGraphType => {
+                        return self.execute_show_current_graph_type();
+                    }
+                    cypher::CypherTranslationResult::Plan(plan) => {
+                        if params.is_some() {
+                            self.query_cache.put_parsed(cache_key.clone(), plan.clone());
+                        }
+                        plan
+                    }
+                },
+            };
+
+            let given = params.is_some();
+            let params = params_to_fill(&mut logical_plan, params)?;
+            if let Some(params) = params {
+                self.optimize_with_params(logical_plan, params)?
+            } else if given && let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
+                cached_plan
+            } else {
+                // Semantic validation
+                let mut binder = Binder::new();
+                let _binding_context = binder.bind(&logical_plan)?;
+
+                // Optimize the plan
+                let active = self.active_store();
+                let optimizer = Optimizer::from_graph_store(&*active);
+                let plan = optimizer.optimize(logical_plan)?;
+
+                // Cache the optimized plan
+                self.query_cache.put_optimized(cache_key, plan.clone());
+
+                plan
+            }
         };
 
         // Check role-based permission for mutations

@@ -98,7 +98,7 @@ impl Inner {
     /// A node's value now: `None` for a deleted node.
     fn node_value(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
         let (group, row) = self.node(id.as_u64())?;
-        if group.version(row).deleted != ABSENT {
+        if group.versions.deleted(row) != ABSENT {
             return None;
         }
         self.value_at(&group.columns, row, key.as_str())
@@ -110,7 +110,7 @@ impl Inner {
         keys: Option<&[PropertyKey]>,
     ) -> FxHashMap<PropertyKey, Value> {
         match self.node(id.as_u64()) {
-            Some((group, row)) if group.version(row).deleted == ABSENT => {
+            Some((group, row)) if group.versions.deleted(row) == ABSENT => {
                 self.values_of(&group.columns, row, keys)
             }
             _ => FxHashMap::default(),
@@ -283,7 +283,7 @@ impl GraphStore for RowGroupStore {
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
         let inner = self.inner.read();
         let (group, row) = inner.edge(id.as_u64())?;
-        if group.version(row).deleted != ABSENT {
+        if group.versions.deleted(row) != ABSENT {
             return None;
         }
         inner.value_at(&group.columns, row, key.as_str())
@@ -326,7 +326,7 @@ impl GraphStore for RowGroupStore {
         let inner = self.inner.read();
         ids.iter()
             .map(|id| match inner.edge(id.as_u64()) {
-                Some((group, row)) if group.version(row).deleted == ABSENT => {
+                Some((group, row)) if group.versions.deleted(row) == ABSENT => {
                     inner.values_of(&group.columns, row, Some(keys))
                 }
                 _ => FxHashMap::default(),
@@ -379,8 +379,9 @@ impl GraphStore for RowGroupStore {
         for (index, group) in &inner.nodes {
             if let Some(rows) = group.labels.get(&label) {
                 ids.extend(
-                    rows.rows()
-                        .filter(|row| group.version(*row).exists())
+                    group
+                        .versions
+                        .existing(rows)
                         .map(|row| NodeId::new(index * ROWS_PER_GROUP + row as u64)),
                 );
             }

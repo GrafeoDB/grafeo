@@ -105,6 +105,100 @@ fn collect_between_transactions_keeps_the_committed_image() {
     assert!(gone > 0, "the workloads delete rows that collect takes out");
 }
 
+/// Version info per vector as DuckDB keeps it: a vector whose rows one
+/// transaction created holds one constant insert stamp, open and once
+/// committed, also for a bulk range sharing a vector with a single create;
+/// a second writer's row turns the inserts into a stamp per row; a vector
+/// gets its delete stamps with its first delete, and holds none before.
+#[test]
+fn a_vector_filled_by_one_transaction_holds_one_constant_stamp() {
+    use grafeo_common::change::{DataOp, Table};
+
+    use crate::graph::apply::ChangeTarget;
+    use crate::graph::rowgroup::VECTOR_ROWS;
+
+    /// A stamp per row of a vector.
+    const ARRAY: usize = VECTOR_ROWS * std::mem::size_of::<u64>();
+
+    let store = RowGroupStore::new();
+    let mut tx = Tx::begin(&store, 10);
+    let nodes: Vec<NodeId> = (0..2 * VECTOR_ROWS)
+        .map(|_| tx.create_node(&["Person"], &[]).unwrap())
+        .collect();
+    for pair in nodes.windows(2).take(VECTOR_ROWS) {
+        tx.create_edge(pair[0], pair[1], "KNOWS", &[]).unwrap();
+    }
+    let open = store.version_bytes();
+    assert!(open < 2_048, "three vectors while open: {open} bytes");
+    tx.commit().unwrap();
+    let committed_bytes = store.version_bytes();
+    assert_eq!(
+        committed_bytes, open,
+        "committed per entry, still one constant stamp per vector"
+    );
+
+    // A bulk range, and a single create in the vector it ends in.
+    let mut tx = Tx::begin(&store, 11);
+    let ids = store.reserve_node_ids(3 * VECTOR_ROWS as u64 - 1).unwrap();
+    for raw in ids.clone() {
+        let op = DataOp::CreateNode {
+            id: NodeId::new(raw),
+            labels: super::labels(&["City"]),
+            properties: super::properties(&[]),
+        };
+        store.apply(&op, tx.writer()).unwrap();
+    }
+    tx.create_node(&["City", "Traveller"], &[]).unwrap();
+    tx.push_bulk(Table::Nodes, ids).unwrap();
+    tx.commit().unwrap();
+    let bulk = store.version_bytes() - committed_bytes;
+    assert!(
+        bulk < 2_048,
+        "three more vectors, a constant each: {bulk} bytes"
+    );
+    assert_eq!(store.node_count(), 5 * VECTOR_ROWS);
+    assert_eq!(store.nodes_by_label_count("City"), 3 * VECTOR_ROWS);
+    assert_eq!(store.nodes_by_label_count("Traveller"), 1);
+    assert_eq!(store.nodes_by_label_count("Person"), 2 * VECTOR_ROWS);
+    assert_eq!(store.edge_count(), VECTOR_ROWS);
+
+    // Jules opens a new vector; Mia, of another transaction, joins it.
+    let mut tx = Tx::begin(&store, 12);
+    let jules = tx.create_node(&["Person"], &[]).unwrap();
+    tx.commit().unwrap();
+    let before = store.version_bytes();
+    let mut tx = Tx::begin(&store, 13);
+    let mia = tx.create_node(&["Person"], &[]).unwrap();
+    let array = store.version_bytes() - before;
+    assert!(
+        (ARRAY..2 * ARRAY).contains(&array),
+        "a second writer's row turns the inserts into an array: {array} bytes"
+    );
+    let own = tx.view();
+    assert!(own.nodes.contains_key(&jules.as_u64()) && own.nodes.contains_key(&mia.as_u64()));
+    assert!(!committed(&store).nodes.contains_key(&mia.as_u64()));
+    tx.commit().unwrap();
+
+    let before = store.version_bytes();
+    let mut tx = Tx::begin(&store, 14);
+    tx.delete_node(jules).unwrap();
+    let deletes = store.version_bytes() - before;
+    assert!(
+        (ARRAY..2 * ARRAY).contains(&deletes),
+        "the first delete allocates the vector's delete stamps: {deletes} bytes"
+    );
+    let own = tx.view();
+    assert!(!own.nodes.contains_key(&jules.as_u64()) && own.nodes.contains_key(&mia.as_u64()));
+    assert!(
+        committed(&store).nodes.contains_key(&jules.as_u64()),
+        "others still see Jules"
+    );
+    tx.commit().unwrap();
+    assert_eq!(store.collect(store.current_epoch()), 1);
+    assert_eq!(store.stamped_vectors(), 0);
+    assert_eq!(store.node_count(), 5 * VECTOR_ROWS + 1);
+}
+
 /// While a transaction is open, `collect` leaves its vectors stamped: it
 /// still sees its own writes and no one else does. Once it commits, the
 /// rows it deleted go with their adjacency entries.

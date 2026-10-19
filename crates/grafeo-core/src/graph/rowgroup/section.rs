@@ -1490,10 +1490,9 @@ mod tests {
         for seed in 1..=10 {
             let store = workload(seed);
             let flat = read(&write(&store, ChunkCaps::DEFAULT)).version_bytes();
-            let stamped = store.version_bytes();
             assert!(
-                stamped >= super::super::VECTOR_ROWS * 16,
-                "seed {seed}: the workload stamped its vectors ({stamped} bytes)"
+                store.stamped_vectors() > 0,
+                "seed {seed}: the workload stamped its vectors"
             );
             store.collect(store.current_epoch());
             assert_eq!(store.version_bytes(), flat, "seed {seed}");

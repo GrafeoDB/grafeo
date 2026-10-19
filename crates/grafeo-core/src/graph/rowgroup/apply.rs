@@ -16,7 +16,7 @@ use grafeo_common::change::{
 };
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 
-use super::{ABSENT, Adjacent, Inner, PENDING, Read, RowGroupStore, RowVersion, locate};
+use super::{ABSENT, Adjacent, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, locate};
 use crate::graph::apply::{Applied, ApplyError, ChangeTarget, Writer};
 
 /// How a write is applied.
@@ -198,10 +198,7 @@ impl Inner {
         let values = self.key_ids_for(properties);
         let (group, row) = locate(raw);
         let group = self.nodes.entry(group).or_default();
-        *group.version_mut(row) = RowVersion {
-            created: mode.stamp,
-            deleted: ABSENT,
-        };
+        group.versions.set_created(row, mode.stamp);
         group.set_labels(row, &label_ids);
         for (key, value) in values {
             group.columns.set(key, row, value);
@@ -237,10 +234,7 @@ impl Inner {
         let values = self.key_ids_for(properties);
         let (group, row) = locate(raw);
         let group = self.edges.entry(group).or_default();
-        *group.version_mut(row) = RowVersion {
-            created: mode.stamp,
-            deleted: ABSENT,
-        };
+        group.versions.set_created(row, mode.stamp);
         group.set_ends(row, src.as_u64(), dst.as_u64(), type_id);
         for (key, value) in values {
             group.columns.set(key, row, value);
@@ -292,7 +286,7 @@ impl Inner {
         let (group, row) = self
             .node_mut(raw)
             .ok_or(ApplyError::Missing(Entity::Node(id)))?;
-        group.version_mut(row).deleted = mode.stamp;
+        group.versions.set_deleted(row, mode.stamp);
         if mode.stamped() {
             self.counts.nodes -= 1;
             for label in labels {
@@ -326,7 +320,7 @@ impl Inner {
         let (group, row) = self
             .edge_mut(raw)
             .ok_or(ApplyError::Missing(Entity::Edge(id)))?;
-        group.version_mut(row).deleted = mode.stamp;
+        group.versions.set_deleted(row, mode.stamp);
         if mode.stamped() {
             self.counts.edges -= 1;
             self.counts.edge_type(type_id, -1);
@@ -560,11 +554,13 @@ impl Inner {
                 let (group, row) = self
                     .node_mut(id.as_u64())
                     .ok_or_else(|| not_pending(Entity::Node(*id), "create"))?;
-                let version = group.version_mut(row);
-                if version.created != pending {
+                if group
+                    .versions
+                    .commit_created(row..row + 1, pending, at)
+                    .is_empty()
+                {
                     return Err(not_pending(Entity::Node(*id), "create"));
                 }
-                version.created = at;
                 self.counts.nodes += 1;
                 for label in label_ids {
                     self.counts.label(label, 1);
@@ -578,11 +574,10 @@ impl Inner {
                 let (group, row) = self
                     .node_mut(id.as_u64())
                     .ok_or_else(|| not_pending(Entity::Node(*id), "delete"))?;
-                let version = group.version_mut(row);
-                if version.deleted != pending {
+                if group.versions.deleted(row) != pending {
                     return Err(not_pending(Entity::Node(*id), "delete"));
                 }
-                version.deleted = at;
+                group.versions.set_deleted(row, at);
                 self.counts.nodes -= 1;
                 for label in label_ids {
                     self.counts.label(label, -1);
@@ -593,11 +588,13 @@ impl Inner {
                     .edge_mut(id.as_u64())
                     .ok_or_else(|| not_pending(Entity::Edge(*id), "create"))?;
                 let (_, _, type_id) = group.ends(row);
-                let version = group.version_mut(row);
-                if version.created != pending {
+                if group
+                    .versions
+                    .commit_created(row..row + 1, pending, at)
+                    .is_empty()
+                {
                     return Err(not_pending(Entity::Edge(*id), "create"));
                 }
-                version.created = at;
                 self.counts.edges += 1;
                 self.counts.edge_type(type_id, 1);
             }
@@ -606,11 +603,10 @@ impl Inner {
                     .edge_mut(id.as_u64())
                     .ok_or_else(|| not_pending(Entity::Edge(*id), "delete"))?;
                 let (_, _, type_id) = group.ends(row);
-                let version = group.version_mut(row);
-                if version.deleted != pending {
+                if group.versions.deleted(row) != pending {
                     return Err(not_pending(Entity::Edge(*id), "delete"));
                 }
-                version.deleted = at;
+                group.versions.set_deleted(row, at);
                 self.counts.edges -= 1;
                 self.counts.edge_type(type_id, -1);
             }
@@ -637,38 +633,50 @@ impl Inner {
         Ok(())
     }
 
-    /// Commits the rows transaction `pending` created in a bulk range;
-    /// absent ids are skipped.
+    /// Commits the rows transaction `pending` created in a bulk range, a
+    /// vector at a time (change target R7; one constant stamp for a vector
+    /// the transaction filled): the row groups the range has no rows in
+    /// cost nothing, absent ids are skipped.
     fn stamp_bulk(&mut self, range: &BulkRange, pending: u64, at: u64) {
-        for raw in range.ids.clone() {
-            match range.table {
-                Table::Nodes => {
-                    let Some((group, row)) = self.node_mut(raw) else {
-                        continue;
-                    };
-                    let version = group.version_mut(row);
-                    if version.created != pending {
-                        continue;
-                    }
-                    version.created = at;
-                    let labels = group.labels_of(row);
-                    self.counts.nodes += 1;
-                    for label in labels {
-                        self.counts.label(label, 1);
+        if range.ids.is_empty() {
+            return;
+        }
+        let (first, _) = locate(range.ids.start);
+        let (last, _) = locate(range.ids.end - 1);
+        // The rows of the range in group `index`.
+        let rows_in = |index: u64| {
+            let base = index * ROWS_PER_GROUP;
+            let start = range.ids.start.max(base) - base;
+            let end = range.ids.end.min(base + ROWS_PER_GROUP) - base;
+            usize::try_from(start).expect("a row below 65,536")
+                ..usize::try_from(end).expect("a row count up to 65,536")
+        };
+        match range.table {
+            Table::Nodes => {
+                for (index, group) in self.nodes.range_mut(first..=last) {
+                    let runs = group.versions.commit_created(rows_in(*index), pending, at);
+                    let rows: usize = runs.iter().map(ExactSizeIterator::len).sum();
+                    self.counts.nodes += i64::try_from(rows).expect("rows of a row group");
+                    for (label, members) in &group.labels {
+                        let labeled: usize =
+                            runs.iter().map(|run| members.count_in(run.clone())).sum();
+                        if labeled > 0 {
+                            self.counts.label(
+                                *label,
+                                i64::try_from(labeled).expect("rows of a row group"),
+                            );
+                        }
                     }
                 }
-                Table::Edges => {
-                    let Some((group, row)) = self.edge_mut(raw) else {
-                        continue;
-                    };
-                    let (_, _, type_id) = group.ends(row);
-                    let version = group.version_mut(row);
-                    if version.created != pending {
-                        continue;
+            }
+            Table::Edges => {
+                for (index, group) in self.edges.range_mut(first..=last) {
+                    for run in group.versions.commit_created(rows_in(*index), pending, at) {
+                        for row in run {
+                            self.counts.edges += 1;
+                            self.counts.edge_type(group.ends(row).2, 1);
+                        }
                     }
-                    version.created = at;
-                    self.counts.edges += 1;
-                    self.counts.edge_type(type_id, 1);
                 }
             }
         }
@@ -714,21 +722,19 @@ impl Inner {
                 let (group, row) = self
                     .node_mut(id.as_u64())
                     .ok_or_else(|| not_pending(Entity::Node(*id), "delete"))?;
-                let version = group.version_mut(row);
-                if version.deleted != pending {
+                if group.versions.deleted(row) != pending {
                     return Err(not_pending(Entity::Node(*id), "delete"));
                 }
-                version.deleted = ABSENT;
+                group.versions.set_deleted(row, ABSENT);
             }
             (DataOp::DeleteEdge { id }, Before::Edge(_)) => {
                 let (group, row) = self
                     .edge_mut(id.as_u64())
                     .ok_or_else(|| not_pending(Entity::Edge(*id), "delete"))?;
-                let version = group.version_mut(row);
-                if version.deleted != pending {
+                if group.versions.deleted(row) != pending {
                     return Err(not_pending(Entity::Edge(*id), "delete"));
                 }
-                version.deleted = ABSENT;
+                group.versions.set_deleted(row, ABSENT);
             }
             (
                 DataOp::SetNodeProperty { id, key, .. } | DataOp::RemoveNodeProperty { id, key },

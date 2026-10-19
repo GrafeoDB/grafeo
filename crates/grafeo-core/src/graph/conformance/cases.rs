@@ -891,6 +891,98 @@ pub(crate) fn bulk_ranges_are_stamped_and_undone_by_range<S: Store>(
     )
 }
 
+/// A bulk range across row groups, with rows at its ends, at the edges of
+/// the groups and nowhere else, commits each row it holds and counts it; a
+/// rolled-back range takes its rows out again.
+pub(crate) fn a_bulk_range_across_row_groups_commits_each_row<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    const GROUP: u64 = 65_536;
+    let store = make();
+    let people = people(&store)?;
+    let (nodes_before, edges_before, labels_before) = counts(&store, &LABELS);
+    let mut tx = Tx::begin(&store, 10);
+    let ids = store
+        .reserve_node_ids(3 * GROUP + 2)
+        .map_err(|error| format!("{error:?}"))?;
+    let base = ids.start;
+    let rows: Vec<u64> = [
+        0,
+        1,
+        GROUP - base - 1,
+        GROUP - base,
+        2 * GROUP + 7,
+        3 * GROUP + 1,
+    ]
+    .iter()
+    .map(|offset| base + offset)
+    .filter(|raw| ids.contains(raw))
+    .collect();
+    for (index, raw) in rows.iter().enumerate() {
+        let names: &[&str] = if index % 2 == 0 {
+            &["City"]
+        } else {
+            &["City", "Traveller"]
+        };
+        let op = DataOp::CreateNode {
+            id: NodeId::new(*raw),
+            labels: labels(names),
+            properties: properties(&[("name", Value::from("Berlin"))]),
+        };
+        store
+            .apply(&op, tx.writer())
+            .map_err(|error| format!("bulk row {raw}: {error:?}"))?;
+    }
+    tx.push_bulk(Table::Nodes, ids)?;
+    let epoch = tx.commit()?;
+    let after = image(&store, Reader::At(epoch));
+    after.consistent("after the bulk commit")?;
+    for raw in &rows {
+        ensure(after.nodes.contains_key(raw), || {
+            format!("bulk row {raw} is committed")
+        })?;
+    }
+    let mut expected_labels = labels_before.clone();
+    expected_labels[LABELS
+        .iter()
+        .position(|label| *label == "City")
+        .expect("City")] += rows.len();
+    expected_labels[LABELS
+        .iter()
+        .position(|label| *label == "Traveller")
+        .expect("Traveller")] += rows.len() / 2;
+    same(
+        &counts(&store, &LABELS),
+        &(nodes_before + rows.len(), edges_before, expected_labels),
+        "the bulk rows are counted, with their labels",
+    )?;
+
+    let before = committed(&store);
+    let mut tx = Tx::begin(&store, 11);
+    let edge_ids = store
+        .reserve_edge_ids(GROUP + 2)
+        .map_err(|error| format!("{error:?}"))?;
+    let ends = [
+        (rows[0], people.alix.as_u64()),
+        (people.gus.as_u64(), rows[rows.len() - 1]),
+    ];
+    for (raw, (src, dst)) in [edge_ids.start, edge_ids.end - 1].into_iter().zip(ends) {
+        let op = DataOp::CreateEdge {
+            id: EdgeId::new(raw),
+            src: NodeId::new(src),
+            dst: NodeId::new(dst),
+            edge_type: ArcStr::from("ROUTE"),
+            properties: properties(&[]),
+        };
+        store
+            .apply(&op, tx.writer())
+            .map_err(|error| format!("bulk edge {raw}: {error:?}"))?;
+    }
+    tx.push_bulk(Table::Edges, edge_ids)?;
+    tx.roll_back()?;
+    same_data(&committed(&store), &before, "after the bulk rollback")
+}
+
 /// The counts move when a transaction commits, by what it wrote, and not
 /// while it is open or when it rolls back.
 pub(crate) fn counts_move_at_commit_only<S: Store>(make: &dyn Fn() -> S) -> Outcome {

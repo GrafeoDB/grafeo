@@ -122,11 +122,6 @@ impl RowVersion {
         deleted: ABSENT,
     };
 
-    /// Whether the row exists (created, by anyone, and not undone).
-    fn exists(self) -> bool {
-        self.created != ABSENT
-    }
-
     /// Whether `read` sees the row: it sees the create and not the delete.
     fn visible(self, read: Read) -> bool {
         read.sees(self.created) && !read.sees(self.deleted)
@@ -156,10 +151,6 @@ struct NodeGroup {
 impl NodeGroup {
     fn version(&self, row: usize) -> RowVersion {
         self.versions.get(row)
-    }
-
-    fn version_mut(&mut self, row: usize) -> &mut RowVersion {
-        self.versions.get_mut(row)
     }
 
     /// The row's label ids, ascending.
@@ -239,10 +230,6 @@ impl EdgeGroup {
         self.versions.get(row)
     }
 
-    fn version_mut(&mut self, row: usize) -> &mut RowVersion {
-        self.versions.get_mut(row)
-    }
-
     /// The row's source, target and type id; the row exists.
     fn ends(&self, row: usize) -> (u64, u64, u32) {
         (self.src[row], self.dst[row], self.edge_type[row])
@@ -310,13 +297,13 @@ impl Inner {
     fn node(&self, id: u64) -> Option<(&NodeGroup, usize)> {
         let (group, row) = locate(id);
         let group = self.nodes.get(&group)?;
-        group.version(row).exists().then_some((group, row))
+        group.versions.exists(row).then_some((group, row))
     }
 
     fn node_mut(&mut self, id: u64) -> Option<(&mut NodeGroup, usize)> {
         let (group, row) = locate(id);
         let group = self.nodes.get_mut(&group)?;
-        if group.version(row).exists() {
+        if group.versions.exists(row) {
             Some((group, row))
         } else {
             None
@@ -326,13 +313,13 @@ impl Inner {
     fn edge(&self, id: u64) -> Option<(&EdgeGroup, usize)> {
         let (group, row) = locate(id);
         let group = self.edges.get(&group)?;
-        group.version(row).exists().then_some((group, row))
+        group.versions.exists(row).then_some((group, row))
     }
 
     fn edge_mut(&mut self, id: u64) -> Option<(&mut EdgeGroup, usize)> {
         let (group, row) = locate(id);
         let group = self.edges.get_mut(&group)?;
-        if group.version(row).exists() {
+        if group.versions.exists(row) {
             Some((group, row))
         } else {
             None
@@ -683,6 +670,6 @@ mod tests {
             deleting.visible(Read::At(3)),
             "a delete takes effect at its commit"
         );
-        assert!(!RowVersion::NONE.exists());
+        assert_eq!(RowVersion::NONE.created, ABSENT);
     }
 }

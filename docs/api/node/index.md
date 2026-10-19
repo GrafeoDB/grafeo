@@ -101,6 +101,7 @@ await db.executeSql(query, params?);      // SQL/PGQ
 | `boolean` | Bool | |
 | `number` (integer) | Int64 | No fractional part and within safe integer range |
 | `number` (float) | Float64 | |
+| `{ $decimal: '1.50' }` | Decimal | An exact decimal as its text with its scale, both ways: GQL `1.50` comes back as `{ $decimal: '1.50' }`. Only as an object's only key; with other keys it is a map |
 | `string` | String | |
 | `BigInt` | Int64 | |
 | `Array` | List | Elements converted recursively |

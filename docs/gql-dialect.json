@@ -1,20 +1,20 @@
 {
   "dialect": {
     "name": "GrafeoDB",
-    "version": "0.5.35",
+    "version": "0.6.0-beta.1",
     "language": "GQL",
     "standard": "ISO/IEC 39075:2024",
     "homepage": "https://grafeo.dev",
     "repository": "https://github.com/GrafeoDB/grafeo"
   },
-  "generated": "2026-04-11T01:16:15Z",
+  "generated": "2026-10-19T09:09:44Z",
   "summary": {
     "total_features": 228,
     "supported": 129,
-    "partial": 1,
-    "not_supported": 95,
+    "partial": 6,
+    "not_supported": 90,
     "inactive": 3,
-    "tested": 96
+    "tested": 111
   },
   "features": [
     {
@@ -39,21 +39,21 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 12
+      "test_count": 16
     },
     {
       "id": "G005",
       "name": "Path search prefix in path pattern",
       "category": "Pattern Features",
       "status": "supported",
-      "tested": false,
-      "test_count": 0
+      "tested": true,
+      "test_count": 20
     },
     {
       "id": "G006",
       "name": "KEEP clause: path mode prefix",
       "category": "Pattern Features",
-      "status": "supported",
+      "status": "not_supported",
       "tested": false,
       "test_count": 0
     },
@@ -61,7 +61,7 @@
       "id": "G007",
       "name": "KEEP clause: path search prefix",
       "category": "Pattern Features",
-      "status": "supported",
+      "status": "not_supported",
       "tested": false,
       "test_count": 0
     },
@@ -71,7 +71,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 10
+      "test_count": 27
     },
     {
       "id": "G011",
@@ -79,7 +79,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 10
+      "test_count": 27
     },
     {
       "id": "G012",
@@ -87,7 +87,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 10
+      "test_count": 27
     },
     {
       "id": "G013",
@@ -95,63 +95,63 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 10
+      "test_count": 27
     },
     {
       "id": "G014",
       "name": "Explicit PATH/PATHS keywords",
       "category": "Pattern Features",
       "status": "supported",
-      "tested": false,
-      "test_count": 0
+      "tested": true,
+      "test_count": 20
     },
     {
       "id": "G015",
       "name": "All path search: explicit ALL keyword",
       "category": "Pattern Features",
       "status": "supported",
-      "tested": false,
-      "test_count": 0
+      "tested": true,
+      "test_count": 20
     },
     {
       "id": "G016",
       "name": "Any path search",
       "category": "Pattern Features",
-      "status": "supported",
-      "tested": false,
-      "test_count": 0
+      "status": "partial",
+      "tested": true,
+      "test_count": 20
     },
     {
       "id": "G017",
       "name": "All shortest path search",
       "category": "Pattern Features",
-      "status": "supported",
-      "tested": false,
-      "test_count": 0
+      "status": "partial",
+      "tested": true,
+      "test_count": 20
     },
     {
       "id": "G018",
       "name": "Any shortest path search",
       "category": "Pattern Features",
-      "status": "supported",
-      "tested": false,
-      "test_count": 0
+      "status": "partial",
+      "tested": true,
+      "test_count": 20
     },
     {
       "id": "G019",
       "name": "Counted shortest path search",
       "category": "Pattern Features",
-      "status": "supported",
-      "tested": false,
-      "test_count": 0
+      "status": "partial",
+      "tested": true,
+      "test_count": 20
     },
     {
       "id": "G020",
       "name": "Counted shortest group search",
       "category": "Pattern Features",
-      "status": "supported",
-      "tested": false,
-      "test_count": 0
+      "status": "partial",
+      "tested": true,
+      "test_count": 20
     },
     {
       "id": "G030",
@@ -191,7 +191,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 28
+      "test_count": 35
     },
     {
       "id": "G036",
@@ -199,7 +199,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 28
+      "test_count": 35
     },
     {
       "id": "G037",
@@ -207,7 +207,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 13
+      "test_count": 20
     },
     {
       "id": "G038",
@@ -215,7 +215,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 13
+      "test_count": 20
     },
     {
       "id": "G039",
@@ -247,7 +247,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 41
+      "test_count": 48
     },
     {
       "id": "G045",
@@ -287,7 +287,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 12
+      "test_count": 29
     },
     {
       "id": "G050",
@@ -295,7 +295,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 12
+      "test_count": 29
     },
     {
       "id": "G051",
@@ -311,7 +311,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 28
+      "test_count": 35
     },
     {
       "id": "G061",
@@ -319,7 +319,7 @@
       "category": "Pattern Features",
       "status": "supported",
       "tested": true,
-      "test_count": 28
+      "test_count": 35
     },
     {
       "id": "G074",
@@ -366,8 +366,8 @@
       "name": "IS DIRECTED predicate",
       "category": "Predicate & Expression Features",
       "status": "supported",
-      "tested": true,
-      "test_count": 13
+      "tested": false,
+      "test_count": 0
     },
     {
       "id": "G111",
@@ -391,7 +391,7 @@
       "category": "Predicate & Expression Features",
       "status": "supported",
       "tested": true,
-      "test_count": 15
+      "test_count": 2
     },
     {
       "id": "G114",
@@ -399,7 +399,7 @@
       "category": "Predicate & Expression Features",
       "status": "supported",
       "tested": true,
-      "test_count": 15
+      "test_count": 2
     },
     {
       "id": "G115",
@@ -423,7 +423,7 @@
       "category": "Predicate & Expression Features",
       "status": "supported",
       "tested": true,
-      "test_count": 20
+      "test_count": 23
     },
     {
       "id": "GA04",
@@ -446,8 +446,8 @@
       "name": "Value type predicate",
       "category": "Predicate & Expression Features",
       "status": "supported",
-      "tested": false,
-      "test_count": 0
+      "tested": true,
+      "test_count": 13
     },
     {
       "id": "GA07",
@@ -503,7 +503,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 86
     },
     {
       "id": "GC02",
@@ -511,7 +511,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 86
     },
     {
       "id": "GC03",
@@ -519,7 +519,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 86
     },
     {
       "id": "GC04",
@@ -543,7 +543,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 37
+      "test_count": 89
     },
     {
       "id": "GD02",
@@ -551,7 +551,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 15
+      "test_count": 29
     },
     {
       "id": "GD03",
@@ -567,7 +567,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 9
+      "test_count": 17
     },
     {
       "id": "GE01",
@@ -591,7 +591,7 @@
       "category": "Predicate & Expression Features",
       "status": "supported",
       "tested": true,
-      "test_count": 28
+      "test_count": 29
     },
     {
       "id": "GE04",
@@ -623,7 +623,7 @@
       "category": "Predicate & Expression Features",
       "status": "supported",
       "tested": true,
-      "test_count": 28
+      "test_count": 29
     },
     {
       "id": "GE08",
@@ -647,7 +647,7 @@
       "category": "Function Features",
       "status": "supported",
       "tested": true,
-      "test_count": 28
+      "test_count": 29
     },
     {
       "id": "GF02",
@@ -671,7 +671,7 @@
       "category": "Function Features",
       "status": "supported",
       "tested": true,
-      "test_count": 49
+      "test_count": 53
     },
     {
       "id": "GF05",
@@ -679,7 +679,7 @@
       "category": "Function Features",
       "status": "supported",
       "tested": true,
-      "test_count": 19
+      "test_count": 22
     },
     {
       "id": "GF06",
@@ -687,7 +687,7 @@
       "category": "Function Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 19
     },
     {
       "id": "GF07",
@@ -703,7 +703,7 @@
       "category": "Function Features",
       "status": "supported",
       "tested": true,
-      "test_count": 46
+      "test_count": 57
     },
     {
       "id": "GF11",
@@ -711,7 +711,7 @@
       "category": "Function Features",
       "status": "supported",
       "tested": true,
-      "test_count": 47
+      "test_count": 54
     },
     {
       "id": "GF12",
@@ -735,7 +735,7 @@
       "category": "Function Features",
       "status": "supported",
       "tested": true,
-      "test_count": 27
+      "test_count": 34
     },
     {
       "id": "GG01",
@@ -743,7 +743,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 86
     },
     {
       "id": "GG02",
@@ -751,7 +751,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 86
     },
     {
       "id": "GG03",
@@ -759,7 +759,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 20
+      "test_count": 92
     },
     {
       "id": "GG04",
@@ -783,7 +783,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 86
     },
     {
       "id": "GG21",
@@ -791,7 +791,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 17
+      "test_count": 87
     },
     {
       "id": "GG22",
@@ -799,7 +799,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 17
+      "test_count": 87
     },
     {
       "id": "GG23",
@@ -877,17 +877,17 @@
       "id": "GL04",
       "name": "Exact number in common notation without suffix",
       "category": "Lexical Features",
-      "status": "not_supported",
-      "tested": false,
-      "test_count": 0
+      "status": "supported",
+      "tested": true,
+      "test_count": 1
     },
     {
       "id": "GL05",
       "name": "Exact number in common notation or as decimal integer with suffix",
       "category": "Lexical Features",
-      "status": "not_supported",
-      "tested": false,
-      "test_count": 0
+      "status": "supported",
+      "tested": true,
+      "test_count": 1
     },
     {
       "id": "GL06",
@@ -901,33 +901,33 @@
       "id": "GL07",
       "name": "Approximate number in common notation or as decimal integer with suffix",
       "category": "Lexical Features",
-      "status": "not_supported",
-      "tested": false,
-      "test_count": 0
+      "status": "supported",
+      "tested": true,
+      "test_count": 1
     },
     {
       "id": "GL08",
       "name": "Approximate number in scientific notation with suffix",
       "category": "Lexical Features",
-      "status": "not_supported",
-      "tested": false,
-      "test_count": 0
+      "status": "supported",
+      "tested": true,
+      "test_count": 1
     },
     {
       "id": "GL09",
       "name": "Optional float number suffix",
       "category": "Lexical Features",
-      "status": "not_supported",
-      "tested": false,
-      "test_count": 0
+      "status": "supported",
+      "tested": true,
+      "test_count": 1
     },
     {
       "id": "GL10",
       "name": "Optional double number suffix",
       "category": "Lexical Features",
-      "status": "not_supported",
-      "tested": false,
-      "test_count": 0
+      "status": "supported",
+      "tested": true,
+      "test_count": 1
     },
     {
       "id": "GL11",
@@ -951,7 +951,7 @@
       "category": "Procedure Features",
       "status": "supported",
       "tested": true,
-      "test_count": 15
+      "test_count": 24
     },
     {
       "id": "GP02",
@@ -959,7 +959,7 @@
       "category": "Procedure Features",
       "status": "supported",
       "tested": true,
-      "test_count": 8
+      "test_count": 15
     },
     {
       "id": "GP03",
@@ -975,7 +975,7 @@
       "category": "Procedure Features",
       "status": "supported",
       "tested": true,
-      "test_count": 7
+      "test_count": 9
     },
     {
       "id": "GP05",
@@ -1111,7 +1111,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 30
     },
     {
       "id": "GQ04",
@@ -1119,7 +1119,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 30
     },
     {
       "id": "GQ05",
@@ -1127,7 +1127,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 30
     },
     {
       "id": "GQ06",
@@ -1135,7 +1135,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 30
     },
     {
       "id": "GQ07",
@@ -1143,7 +1143,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 16
+      "test_count": 30
     },
     {
       "id": "GQ08",
@@ -1151,7 +1151,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 20
+      "test_count": 56
     },
     {
       "id": "GQ09",
@@ -1159,7 +1159,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 20
+      "test_count": 56
     },
     {
       "id": "GQ10",
@@ -1183,7 +1183,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 17
+      "test_count": 56
     },
     {
       "id": "GQ13",
@@ -1191,7 +1191,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 17
+      "test_count": 56
     },
     {
       "id": "GQ14",
@@ -1231,7 +1231,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 23
+      "test_count": 30
     },
     {
       "id": "GQ19",
@@ -1255,7 +1255,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 15
+      "test_count": 22
     },
     {
       "id": "GQ22",
@@ -1263,7 +1263,7 @@
       "category": "Query Composition Features",
       "status": "supported",
       "tested": true,
-      "test_count": 23
+      "test_count": 30
     },
     {
       "id": "GQ23",
@@ -1557,9 +1557,9 @@
       "id": "GV17",
       "name": "Decimal numbers",
       "category": "Value Type Features",
-      "status": "not_supported",
-      "tested": false,
-      "test_count": 0
+      "status": "supported",
+      "tested": true,
+      "test_count": 1
     },
     {
       "id": "GV18",
@@ -1759,7 +1759,7 @@
       "category": "Value Type Features",
       "status": "supported",
       "tested": true,
-      "test_count": 13
+      "test_count": 17
     },
     {
       "id": "GV60",

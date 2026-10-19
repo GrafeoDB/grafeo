@@ -15,7 +15,8 @@ GQL supports a rich type system with scalar, temporal, collection and graph elem
 | Type | Aliases | Example Literals |
 |------|---------|-----------------|
 | `INTEGER` | `INT`, `INT64` | `42`, `0xFF`, `0o77`, `0b1010` |
-| `FLOAT` | `FLOAT64` | `3.14`, `1.5e10` |
+| `DECIMAL` | `DEC` | `3.14`, `1.50`, `2M` |
+| `FLOAT` | `FLOAT64` | `1.5e10`, `3.14e0`, `3.14F`, `2D` |
 | `STRING` | | `'hello'`, `"world"` |
 | `BOOLEAN` | `BOOL` | `TRUE`, `FALSE` |
 | `NULL` | | `NULL` |
@@ -27,9 +28,15 @@ RETURN 0xFF        -- hexadecimal (255)
 RETURN 0o77        -- octal (63)
 RETURN 0b1010      -- binary (10)
 
--- Float literals
-RETURN 3.14        -- decimal
+-- Exact decimal literals: a number with a point, or the suffix M
+RETURN 3.14        -- 3.14, exact
+RETURN 1.50        -- 1.50, keeps its two digits after the point
+RETURN 2M          -- 2, a decimal
+
+-- Approximate (float) literals: an exponent, or the suffix F or D
 RETURN 1.5e10      -- scientific notation
+RETURN 3.14e0      -- the float 3.14
+RETURN 3.14F, 2D   -- floats
 
 -- String literals (single or double quotes)
 RETURN 'hello'
@@ -41,6 +48,24 @@ RETURN TRUE, FALSE
 -- Null
 RETURN NULL
 ```
+
+## Exact and Approximate Numbers
+
+A `DECIMAL` is an exact number of up to 38 digits that keeps its scale, the
+digits after the point: `0.1 + 0.2 = 0.3` holds, and `1.50` prints as `1.50`
+while it equals `1.5`. A `FLOAT` is a 64-bit binary floating point number:
+`0.1e0 + 0.2e0` is `0.30000000000000004`.
+
+| Operands | Result |
+|----------|--------|
+| decimal and decimal, decimal and integer | decimal; division gives at least 16 significant digits, rounded half away from zero |
+| decimal and float | float |
+| integer and integer | integer |
+
+`ceil`, `floor`, `round`, `abs` and `sign` keep a decimal; `sqrt`, `sin`, `log`
+and the other functions of floats return a float. A decimal division by zero,
+or a result past 38 digits, is `NULL`. A decimal equals the integer, the float
+and the numeric string of the same value, also through a property index.
 
 ## Temporal Types
 
@@ -129,6 +154,11 @@ RETURN p.name
 MATCH (p:Person)
 WHERE p.score IS NOT TYPED FLOAT
 RETURN p.name
+
+-- Decimals
+MATCH (i:Item)
+WHERE i.price IS TYPED DECIMAL
+RETURN i.name
 ```
 
 ### CAST
@@ -138,6 +168,8 @@ Convert between types explicitly:
 ```sql
 RETURN CAST('42' AS INTEGER)       -- 42
 RETURN CAST(42 AS FLOAT)           -- 42.0
+RETURN CAST('1.50' AS DECIMAL)     -- 1.50
+RETURN CAST(2.345 AS DECIMAL(10, 2)) -- 2.35
 RETURN CAST(42 AS STRING)          -- '42'
 RETURN CAST('true' AS BOOLEAN)     -- true
 RETURN CAST('2024-01-15' AS DATE)
@@ -152,6 +184,7 @@ See [Expressions](expressions.md#cast) for the complete list of supported CAST t
 |----------|-------------|
 | `toInteger(expr)` / `toInt(expr)` | INTEGER |
 | `toFloat(expr)` | FLOAT |
+| `toDecimal(expr)`, `toDecimal(expr, precision, scale)` | DECIMAL |
 | `toString(expr)` | STRING |
 | `toBoolean(expr)` | BOOLEAN |
 | `toDate(expr)` | DATE |

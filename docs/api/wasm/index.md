@@ -63,6 +63,18 @@ db.schema();      // database schema as JSON
 Database.version(); // Grafeo version string
 ```
 
+## Decimals
+
+An exact decimal (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
+`xsd:decimal`) comes back as `{ $decimal: '1.50' }`, its text with its scale,
+and such an object passed as a parameter is a decimal. With other keys beside
+`$decimal`, the object is a map.
+
+```javascript
+db.execute("RETURN 0.1 + 0.2 AS x");      // [{ x: { $decimal: '0.3' } }]
+db.executeWithParams("RETURN $p * 3 AS x", { p: { $decimal: '0.10' } });  // { $decimal: '0.30' }
+```
+
 ## Text Search
 
 Create BM25 text indexes and run full-text queries:

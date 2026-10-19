@@ -97,7 +97,18 @@ WHERE {
 
 ## Numeric Functions
 
+Numbers follow the type promotion of SPARQL 1.1: `1.5` is an exact
+`xsd:decimal` and `1.5e0` an `xsd:double`. An integer with an integer gives an
+integer, except a division, which gives a decimal (`5 / 2` is `2.5`); a
+decimal with an integer or a decimal gives a decimal; a double makes a double.
+Integer arithmetic past the 64-bit range goes on as decimals. A stored numeric
+literal reads as a number of its type (`"2.50"^^xsd:decimal` as the decimal
+`2.50`), so its arithmetic is exact too.
+
 ```sparql
+SELECT (0.1 + 0.2 AS ?exact)    # 0.3, an xsd:decimal
+SELECT (5 / 2 AS ?half)         # 2.5, an xsd:decimal
+
 # Absolute value
 SELECT (ABS(-42) AS ?result)  # 42
 
@@ -178,7 +189,18 @@ WHERE { ?s ex:prop ?value }
 # Get language tag
 SELECT ?label (LANG(?label) AS ?language)
 WHERE { ?s rdfs:label ?label }
+
+# XPath casts, by the type's IRI
+SELECT (xsd:decimal("2.50") AS ?d)   # 2.50
+SELECT (xsd:integer(2.9) AS ?i)      # 2, truncated
+SELECT (xsd:double("1.5") AS ?f)     # 1.5
+SELECT (xsd:string(1.50) AS ?s)      # "1.50"
+SELECT (xsd:boolean("1") AS ?b)      # true
 ```
+
+The casts are `xsd:decimal`, `xsd:double`, `xsd:float`, `xsd:integer` (and
+`xsd:int`, `xsd:long`), `xsd:string` and `xsd:boolean`; a value that does not
+cast gives no value.
 
 ### Constructing Literals
 
@@ -188,6 +210,7 @@ SELECT (STRLANG("Hello", "en") AS ?greeting)
 
 # Typed literal
 SELECT (STRDT("42", xsd:integer) AS ?number)
+SELECT (STRDT("19.99", xsd:decimal) AS ?price)   # an exact decimal
 ```
 
 ## Hash Functions

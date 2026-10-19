@@ -61,6 +61,20 @@ db.NodeCount()   // number of nodes
 db.EdgeCount()   // number of edges
 ```
 
+## Decimals
+
+An exact decimal (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
+`xsd:decimal`) comes back as a `grafeo.Decimal`: up to 38 digits, kept as its
+text with its scale (`String()` gives `"1.50"`). Compare decimals with
+`Equal`, which ignores the scale; `Rat()` gives the exact `*big.Rat`, and
+`grafeo.ParseDecimal("1.50")` makes one to pass as a parameter, exactly.
+
+```go
+result, _ := db.Execute("RETURN 19.99 AS price")
+price := result.Rows[0]["price"].(grafeo.Decimal)
+fmt.Println(price.String()) // 19.99
+```
+
 ## Query Languages
 
 ```go

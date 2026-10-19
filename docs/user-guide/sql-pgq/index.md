@@ -63,6 +63,20 @@ COLUMNS (
 )
 ```
 
+A number with a point is an exact `DECIMAL`, as SQL specifies (`0.1 + 0.2`
+is `0.3`); one with an exponent (`1.5e0`) is a `DOUBLE`. `CAST(expr AS type)`
+converts to `INTEGER`/`INT`/`BIGINT`, `DOUBLE`/`DOUBLE PRECISION`/`FLOAT`/
+`REAL`, `DECIMAL`/`NUMERIC`/`DEC` (bare, or with a precision and scale such as
+`DECIMAL(10, 2)`, rounded half away from zero), `VARCHAR` (`VARCHAR(n)` keeps
+the first `n` characters), `BOOLEAN`, `DATE`, `TIME` and `TIMESTAMP`:
+
+```sql
+COLUMNS (
+    CAST(a.balance AS DECIMAL(10, 2)) AS balance,
+    CAST(a.name AS VARCHAR(3)) AS short_name
+)
+```
+
 ## Examples
 
 ### Find friends of a person

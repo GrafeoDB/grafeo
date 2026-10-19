@@ -45,6 +45,7 @@ fn one(db: &GrafeoDB, language: &str, query: &str, params: &[(&str, Value)]) -> 
     rows[0].clone()
 }
 
+// ISO: GV17
 #[test]
 fn decimal_arithmetic_is_exact() {
     let db = GrafeoDB::new_in_memory();
@@ -276,6 +277,7 @@ fn a_stored_decimal_is_found_by_an_equal_value() {
 
 /// ISO GQL: `1.5` and `1.5M` are exact, `1.5e0`, `1.5F` and `1.5D` are
 /// floats. openCypher has no decimal type: there `1.5` stays a float.
+// ISO: GL04, GL05, GL07, GL08, GL09, GL10
 #[test]
 fn gql_number_literals_are_exact_or_approximate_as_written() {
     let db = GrafeoDB::new_in_memory();
@@ -289,6 +291,8 @@ fn gql_number_literals_are_exact_or_approximate_as_written() {
         ("RETURN 1.5F AS x", "Float64(1.5)"),
         ("RETURN 1.5D AS x", "Float64(1.5)"),
         ("RETURN -2.5D AS x", "Float64(-2.5)"),
+        ("RETURN 2F AS x", "Float64(2)"),
+        ("RETURN 1.5e0F AS x", "Float64(1.5)"),
         ("RETURN 1.5 * 2 AS x", "Decimal(3.0)"),
         ("RETURN 1.5 + 0.5e0 AS x", "Float64(2)"),
     ] {

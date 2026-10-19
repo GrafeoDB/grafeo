@@ -94,13 +94,15 @@ CREATE OR REPLACE NODE TYPE Person (
 
 ### Property Types
 
-Each property of a node or edge type has one of these types. A value written to the property (when a node or edge of the type is created, or with `SET`) must have the type, or the write fails; `NULL` is accepted unless the property is `NOT NULL`. Types match strictly, with two conversions that lose nothing: an integer written to a `FLOAT64` property is stored as a float (an integer beyond 2^53 that has no exact float fails), and a zoned datetime written to a `TIMESTAMP` property is stored as its instant in UTC. A float is not an `INT64`, and a zoned datetime is not a `LOCAL DATETIME`.
+Each property of a node or edge type has one of these types. A value written to the property (when a node or edge of the type is created, or with `SET`) must have the type, or the write fails; `NULL` is accepted unless the property is `NOT NULL`. Types match strictly, with the conversions of numbers and instants that ISO GQL makes on assignment: an integer written to a `FLOAT64` property is stored as a float (an integer beyond 2^53 that has no exact float fails), a decimal written to a `FLOAT64` property as the nearest float, an integer, float (by its shortest text) or decimal written to a `DECIMAL` property as a decimal, and a zoned datetime written to a `TIMESTAMP` property as its instant in UTC. A float is not an `INT64`, and a zoned datetime is not a `LOCAL DATETIME`.
 
 | Type | Also written | Values |
 |------|--------------|--------|
 | `STRING` | `VARCHAR`, `TEXT` | Strings |
 | `INT64` | `INT`, `INTEGER`, `BIGINT` | Integers |
 | `FLOAT64` | `FLOAT`, `DOUBLE`, `REAL` | Floats |
+| `DECIMAL` | `DEC` | Exact decimals, each with its own scale |
+| `DECIMAL(p, s)` | `DEC(p, s)`, `DECIMAL(p)` | Exact decimals of at most `p` digits, `s` of them after the point (`p` from 1 to 38, `s` up to `p`, 0 when left out): a value is rounded to `s` digits, half away from zero, and one with more than `p - s` digits before the point is refused |
 | `BOOLEAN` | `BOOL` | `TRUE` and `FALSE` |
 | `DATE` | | Dates, such as `date('2024-03-19')` |
 | `TIME` | | Times of day, such as `time('08:30:00')` |
@@ -116,7 +118,7 @@ Each property of a node or edge type has one of these types. A value written to 
 | `EDGE` | `RELATIONSHIP` | Edges |
 | `ANY` | | Any value |
 
-Any other type name is refused, a typo or a type of ISO GQL that Grafeo does not support (such as `INT32` or `DECIMAL`). A property name may be any name a property map takes, keywords such as `starts`, `ends` and `contains` included.
+Any other type name is refused, a typo or a type of ISO GQL that Grafeo does not support (such as `INT32`). A property name may be any name a property map takes, keywords such as `starts`, `ends` and `contains` included.
 
 ```sql
 CREATE NODE TYPE Event (

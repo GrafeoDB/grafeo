@@ -341,6 +341,22 @@ tx.Commit(); // if this line is not reached, the transaction auto-rolls back
 
 All entity types are immutable C# records.
 
+### GrafeoDecimal
+
+An exact decimal from Grafeo (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
+`xsd:decimal`): up to 38 digits, kept as its `Text` with its scale. Equal
+values are equal whatever their scale (`1.50` equals `1.5`). `ToDecimal()` and
+`TryToDecimal` give a .NET `decimal` (which holds 28 to 29 digits),
+`ToDouble()` the nearest double, and `GrafeoDecimal.FromDecimal(value)` or
+`new GrafeoDecimal("1.50")` make one to pass as a parameter, exactly.
+
+```csharp
+var result = db.Execute("RETURN 19.99 AS price");
+var price = (GrafeoDecimal)result.Rows[0]["price"];
+Console.WriteLine(price.Text);         // 19.99
+decimal exact = price.ToDecimal();     // 19.99m
+```
+
 ### Node
 
 ```csharp

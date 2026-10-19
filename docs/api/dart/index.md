@@ -866,6 +866,20 @@ enum IsolationLevel {
 
 ## Data Types
 
+### GrafeoDecimal
+
+An exact decimal from Grafeo (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
+`xsd:decimal`): up to 38 digits, kept as its `text` with its scale. Equal
+values are equal whatever their scale (`1.50` equals `1.5`). Dart has no
+decimal type of its own: `toDouble()` gives the nearest double, and
+`GrafeoDecimal('1.50')` passed as a parameter goes in exactly.
+
+```dart
+final result = db.execute('RETURN 19.99 AS price');
+final price = result.rows.first['price'] as GrafeoDecimal;
+print(price.text);  // 19.99
+```
+
 ### Node
 
 A graph node with an ID, labels and properties.

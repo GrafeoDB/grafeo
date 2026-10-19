@@ -11,6 +11,7 @@
 //! closed database raises `DatabaseClosedError`, and a damaged database file
 //! `GrafeoCorruptionError`, both subclasses of `GrafeoError`.
 
+use grafeo_common::utils::GqlStatus;
 use grafeo_common::utils::error::ErrorCode;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -21,7 +22,7 @@ create_exception!(
     grafeo,
     GrafeoError,
     PyRuntimeError,
-    "Grafeo-specific runtime error with machine-readable `error_code` and `is_retryable` attributes."
+    "Grafeo-specific runtime error with machine-readable `error_code`, `gql_status` (the ISO GQL status, such as `22012`) and `is_retryable` attributes."
 );
 
 create_exception!(
@@ -45,12 +46,14 @@ pub enum PyGrafeoError {
     Database {
         message: String,
         code: Option<ErrorCode>,
+        gql_status: Option<GqlStatus>,
     },
 
     #[error("Query error: {message}")]
     Query {
         message: String,
         code: Option<ErrorCode>,
+        gql_status: Option<GqlStatus>,
     },
 
     #[error("Type error: {0}")]
@@ -60,6 +63,7 @@ pub enum PyGrafeoError {
     Transaction {
         message: String,
         code: Option<ErrorCode>,
+        gql_status: Option<GqlStatus>,
     },
 
     #[error("Database closed: {message}")]
@@ -81,6 +85,7 @@ impl PyGrafeoError {
         Self::Database {
             message: message.into(),
             code: None,
+            gql_status: None,
         }
     }
 
@@ -89,6 +94,7 @@ impl PyGrafeoError {
         Self::Query {
             message: message.into(),
             code: None,
+            gql_status: None,
         }
     }
 
@@ -97,6 +103,7 @@ impl PyGrafeoError {
         Self::Transaction {
             message: message.into(),
             code: None,
+            gql_status: None,
         }
     }
 }
@@ -107,39 +114,73 @@ impl From<PyGrafeoError> for PyErr {
             PyGrafeoError::InvalidArgument(msg) | PyGrafeoError::Type(msg) => {
                 PyValueError::new_err(msg)
             }
-            PyGrafeoError::Database { message, code }
-            | PyGrafeoError::Query { message, code }
-            | PyGrafeoError::Transaction { message, code } => build_grafeo_error(message, code),
+            PyGrafeoError::Database {
+                message,
+                code,
+                gql_status,
+            }
+            | PyGrafeoError::Query {
+                message,
+                code,
+                gql_status,
+            }
+            | PyGrafeoError::Transaction {
+                message,
+                code,
+                gql_status,
+            } => build_grafeo_error(message, code, gql_status),
             PyGrafeoError::DatabaseClosed { message } => Python::attach(|py| {
                 let err = DatabaseClosedError::new_err(message);
-                set_code(&err, py, ErrorCode::DatabaseClosed);
+                set_code(
+                    &err,
+                    py,
+                    ErrorCode::DatabaseClosed,
+                    GqlStatus::INVALID_TX_STATE,
+                );
                 err
             }),
             PyGrafeoError::Corruption { message } => Python::attach(|py| {
                 let err = GrafeoCorruptionError::new_err(message);
-                set_code(&err, py, ErrorCode::StorageCorrupted);
+                set_code(
+                    &err,
+                    py,
+                    ErrorCode::StorageCorrupted,
+                    GqlStatus::DATA_EXCEPTION,
+                );
                 err
             }),
         }
     }
 }
 
-/// Builds a `GrafeoError` with `error_code` and `is_retryable` attributes
-/// always populated. If the upstream error did not carry a specific code,
-/// the generic `Internal` code is used so that callers can rely on both
-/// attributes being present on every `GrafeoError`.
-fn build_grafeo_error(message: String, code: Option<ErrorCode>) -> PyErr {
+/// Builds a `GrafeoError` with `error_code`, `gql_status` and `is_retryable`
+/// attributes always populated. If the upstream error did not carry a
+/// specific code, the generic `Internal` code and its status `22000` are used
+/// (as the database reports an internal error), so that callers can rely on
+/// the attributes being present on every `GrafeoError`.
+fn build_grafeo_error(
+    message: String,
+    code: Option<ErrorCode>,
+    gql_status: Option<GqlStatus>,
+) -> PyErr {
     Python::attach(|py| {
         let err = GrafeoError::new_err(message);
-        set_code(&err, py, code.unwrap_or(ErrorCode::Internal));
+        set_code(
+            &err,
+            py,
+            code.unwrap_or(ErrorCode::Internal),
+            gql_status.unwrap_or(GqlStatus::DATA_EXCEPTION),
+        );
         err
     })
 }
 
-/// Sets the `error_code` and `is_retryable` attributes of a `GrafeoError`.
-fn set_code(err: &PyErr, py: Python<'_>, code: ErrorCode) {
+/// Sets the `error_code`, `gql_status` and `is_retryable` attributes of a
+/// `GrafeoError`.
+fn set_code(err: &PyErr, py: Python<'_>, code: ErrorCode, gql_status: GqlStatus) {
     let inst = err.value(py);
     let _ = inst.setattr("error_code", code.as_str());
+    let _ = inst.setattr("gql_status", gql_status.as_str());
     let _ = inst.setattr("is_retryable", code.is_retryable());
 }
 
@@ -147,13 +188,26 @@ impl From<grafeo_common::utils::error::Error> for PyGrafeoError {
     fn from(err: grafeo_common::utils::error::Error) -> Self {
         use grafeo_bindings_common::error::{ErrorCategory, classify_error};
         let code = Some(err.error_code());
+        let gql_status = Some(GqlStatus::from(&err));
         let message = err.to_string();
         match classify_error(&err) {
-            ErrorCategory::Query => PyGrafeoError::Query { message, code },
-            ErrorCategory::Transaction => PyGrafeoError::Transaction { message, code },
+            ErrorCategory::Query => PyGrafeoError::Query {
+                message,
+                code,
+                gql_status,
+            },
+            ErrorCategory::Transaction => PyGrafeoError::Transaction {
+                message,
+                code,
+                gql_status,
+            },
             ErrorCategory::DatabaseClosed => PyGrafeoError::DatabaseClosed { message },
             ErrorCategory::Corruption => PyGrafeoError::Corruption { message },
-            _ => PyGrafeoError::Database { message, code },
+            _ => PyGrafeoError::Database {
+                message,
+                code,
+                gql_status,
+            },
         }
     }
 }

@@ -54,6 +54,7 @@ fn key_order(
         KeyOrderError::Read { source, .. } => PyGrafeoError::Database {
             message: error.to_string(),
             code: Some(source.error_code()),
+            gql_status: Some(grafeo_common::utils::GqlStatus::from(&**source)),
         }
         .into(),
         KeyOrderError::Missing { .. } | KeyOrderError::Repeated { .. } => {

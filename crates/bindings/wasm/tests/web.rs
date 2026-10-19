@@ -610,10 +610,8 @@ fn test_export_signed_requires_key() {
 }
 
 /// The message of an error a database method returned.
-fn error_message(error: wasm_bindgen::JsError) -> String {
-    js_sys::Error::from(wasm_bindgen::JsValue::from(error))
-        .message()
-        .into()
+fn error_message(error: impl Into<wasm_bindgen::JsValue>) -> String {
+    js_sys::Error::from(error.into()).message().into()
 }
 
 /// The statements of #573: a stack overflow used to trap the module, and
@@ -1145,4 +1143,39 @@ fn test_get_node_edges_by_direction_type_and_transaction() {
         neighbors(gus, serde_json::json!({ "edgeTypes": ["KNOWS"] })),
         Vec::<u64>::new()
     );
+}
+
+/// A database error carries its GQLSTATUS as `gqlStatus` next to its message
+/// (#639): `22012` for a division by zero, `22003` for a value out of range,
+/// `42001` for a syntax error.
+#[wasm_bindgen_test]
+fn test_errors_carry_their_gql_status() {
+    use wasm_bindgen::JsCast;
+
+    let db = Database::new().expect("create db");
+    for (query, status, message) in [
+        ("RETURN 1 / 0 AS x", "22012", "division by zero: 1 / 0"),
+        (
+            "RETURN 9223372036854775807 + 1 AS x",
+            "22003",
+            "numeric value out of range: 9223372036854775807 + 1",
+        ),
+        (
+            "UNWIND [9223372036854775807, 1] AS x RETURN sum(x) AS s",
+            "22003",
+            "numeric value out of range: sum",
+        ),
+        ("MATCH (n RETURN n", "42001", "GRAFEO-Q001"),
+    ] {
+        let error = wasm_bindgen::JsValue::from(db.execute(query).unwrap_err());
+        let get = |name: &str| {
+            js_sys::Reflect::get(&error, &wasm_bindgen::JsValue::from_str(name))
+                .unwrap()
+                .as_string()
+        };
+        assert_eq!(get("gqlStatus").as_deref(), Some(status), "{query}");
+        let text = get("message").unwrap_or_default();
+        assert!(text.contains(message), "{query}: {text}");
+        assert!(error.is_instance_of::<js_sys::Error>(), "{query}");
+    }
 }

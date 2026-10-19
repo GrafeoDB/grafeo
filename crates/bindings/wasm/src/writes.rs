@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
 
+use crate::{database_error, js_error};
+
 use grafeo_bindings_common::json::json_to_value;
 use grafeo_common::types::{NodeId, PropertyKey, Value};
 use grafeo_engine::database::{BatchEdge, EdgeUpsertOptions, UpsertSummary};
@@ -43,15 +45,15 @@ struct EdgeUpsertInput {
     replace: Option<bool>,
 }
 
-fn invalid(what: &str, error: impl std::fmt::Display) -> JsError {
-    JsError::new(&format!("{what}: {error}"))
+fn invalid(what: &str, error: impl std::fmt::Display) -> JsValue {
+    js_error(&format!("{what}: {error}"))
 }
 
 /// Options from a JS value; undefined or null means the defaults.
 fn options<T: Default + serde::de::DeserializeOwned>(
     value: JsValue,
     what: &str,
-) -> Result<T, JsError> {
+) -> Result<T, JsValue> {
     if value.is_undefined() || value.is_null() {
         return Ok(T::default());
     }
@@ -59,7 +61,7 @@ fn options<T: Default + serde::de::DeserializeOwned>(
 }
 
 /// A label or a list of labels, as a list.
-pub(crate) fn labels(value: JsValue) -> Result<Vec<String>, JsError> {
+pub(crate) fn labels(value: JsValue) -> Result<Vec<String>, JsValue> {
     let labels: ImportLabel =
         serde_wasm_bindgen::from_value(value).map_err(|e| invalid("labels", e))?;
     Ok(match labels {
@@ -69,7 +71,7 @@ pub(crate) fn labels(value: JsValue) -> Result<Vec<String>, JsError> {
 }
 
 /// Rows of properties from an array of objects.
-pub(crate) fn rows(value: JsValue) -> Result<Vec<HashMap<PropertyKey, Value>>, JsError> {
+pub(crate) fn rows(value: JsValue) -> Result<Vec<HashMap<PropertyKey, Value>>, JsValue> {
     let rows: Vec<serde_json::Map<String, serde_json::Value>> =
         serde_wasm_bindgen::from_value(value)
             .map_err(|e| invalid("rows must be an array of objects", e))?;
@@ -84,7 +86,7 @@ pub(crate) fn rows(value: JsValue) -> Result<Vec<HashMap<PropertyKey, Value>>, J
 }
 
 /// The engine edges of `batchCreateEdges`.
-pub(crate) fn edges(value: JsValue) -> Result<Vec<BatchEdge>, JsError> {
+pub(crate) fn edges(value: JsValue) -> Result<Vec<BatchEdge>, JsValue> {
     let edges: Vec<EdgeInput> = serde_wasm_bindgen::from_value(value)
         .map_err(|e| invalid("edges must be an array of {src, dst, type, properties}", e))?;
     edges
@@ -108,7 +110,7 @@ pub(crate) fn edges(value: JsValue) -> Result<Vec<BatchEdge>, JsError> {
 }
 
 /// The key and replace flag of `upsertNodes`, defaults filled in.
-pub(crate) fn node_options(value: JsValue) -> Result<(String, bool), JsError> {
+pub(crate) fn node_options(value: JsValue) -> Result<(String, bool), JsValue> {
     let input: NodeUpsertInput = options(value, "upsertNodes options")?;
     Ok((
         input.key.unwrap_or_else(|| "id".to_string()),
@@ -118,7 +120,7 @@ pub(crate) fn node_options(value: JsValue) -> Result<(String, bool), JsError> {
 
 /// The engine options of `upsertEdges`: each option given, the default for
 /// the rest.
-pub(crate) fn edge_options(value: JsValue) -> Result<EdgeUpsertOptions, JsError> {
+pub(crate) fn edge_options(value: JsValue) -> Result<EdgeUpsertOptions, JsValue> {
     let input: EdgeUpsertInput = options(value, "upsertEdges options")?;
     let mut options = EdgeUpsertOptions::new().with_replace(input.replace.unwrap_or(false));
     if let Some(key) = input.key {
@@ -143,11 +145,11 @@ pub(crate) fn edge_options(value: JsValue) -> Result<EdgeUpsertOptions, JsError>
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
 /// IDs as a JS array of numbers; an error for an ID a number cannot hold.
-pub(crate) fn ids_to_js(ids: impl ExactSizeIterator<Item = u64>) -> Result<JsValue, JsError> {
+pub(crate) fn ids_to_js(ids: impl ExactSizeIterator<Item = u64>) -> Result<JsValue, JsValue> {
     let array = Array::new_with_length(ids.len() as u32);
     for (i, id) in ids.enumerate() {
         if id > MAX_SAFE_INTEGER {
-            return Err(JsError::new(&format!(
+            return Err(js_error(&format!(
                 "ID {id} is larger than a JS number holds exactly"
             )));
         }
@@ -178,14 +180,14 @@ pub(crate) fn summary_to_js(summary: &UpsertSummary) -> JsValue {
 }
 
 /// An error for a call that would write around the open transaction.
-pub(crate) fn transaction_open(call: &str) -> JsError {
-    JsError::new(&format!(
+pub(crate) fn transaction_open(call: &str) -> JsValue {
+    js_error(&format!(
         "{call} commits on its own: commit or roll back the open transaction first"
     ))
 }
 
-fn js<T>(result: grafeo_common::utils::error::Result<T>) -> Result<T, JsError> {
-    result.map_err(|e| JsError::new(&e.to_string()))
+fn js<T>(result: grafeo_common::utils::error::Result<T>) -> Result<T, JsValue> {
+    result.map_err(database_error)
 }
 
 #[wasm_bindgen]
@@ -209,7 +211,7 @@ impl Database {
         &self,
         labels: JsValue,
         rows: JsValue,
-    ) -> Result<JsValue, JsError> {
+    ) -> Result<JsValue, JsValue> {
         self.check_open()?;
         let labels = self::labels(labels)?;
         let rows = self::rows(rows)?;
@@ -233,7 +235,7 @@ impl Database {
     /// Returns `JsError` if the edges are malformed, a transaction is open,
     /// or an edge cannot be created.
     #[wasm_bindgen(js_name = "batchCreateEdges")]
-    pub fn batch_create_edges(&self, edges: JsValue) -> Result<JsValue, JsError> {
+    pub fn batch_create_edges(&self, edges: JsValue) -> Result<JsValue, JsValue> {
         self.check_open()?;
         let edges = self::edges(edges)?;
         if self.tx.borrow().is_some() {
@@ -265,7 +267,7 @@ impl Database {
         labels: JsValue,
         rows: JsValue,
         options: JsValue,
-    ) -> Result<JsValue, JsError> {
+    ) -> Result<JsValue, JsValue> {
         self.check_open()?;
         let labels = self::labels(labels)?;
         let rows = self::rows(rows)?;
@@ -299,7 +301,7 @@ impl Database {
         edge_type: &str,
         rows: JsValue,
         options: JsValue,
-    ) -> Result<JsValue, JsError> {
+    ) -> Result<JsValue, JsValue> {
         self.check_open()?;
         let rows = self::rows(rows)?;
         let options = edge_options(options)?;

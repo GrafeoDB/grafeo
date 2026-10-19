@@ -319,13 +319,16 @@ Layout, little-endian:
 | 5 | `RawI64` | `Int64` | Count `u32`, then each `i64` |
 | 6 | `Float32Vector` | Vectors of one dimension count, 1 to 65,535 | Dimensions `u16`, component count `u32`, then each component's `f32` bits |
 | 7 | `Values` | Any | Count `u32`, then each value in the [value encoding](#value-encoding) |
+| 8 | `Decimal64` | `Decimal`s of one scale whose mantissas fit an `i64` | Scale `u8` (0 to 38), count `u32`, then each mantissa as an `i64` |
 
-A writer picks a typed codec (1 to 6) only when every value of the chunk has
-its kind, and `Values` otherwise, so every value reads back exactly as it was
-written: an `Int64` next to a `Float64` stays an `Int64`.
+A writer picks a typed codec (1 to 6, or 8) only when every value of the chunk
+has its kind, and `Values` otherwise, so every value reads back exactly as it
+was written: an `Int64` next to a `Float64` stays an `Int64`, and decimals of
+several scales go into a `Values` chunk, each keeping its own scale (`1.50`
+stays `1.50`).
 
-**Zone maps.** A chunk of the codecs `BitPacked`, `RawI64`, `Float64` and
-`Bitmap` carries the minimum and the maximum of its values, two values in the
+**Zone maps.** A chunk of the codecs `BitPacked`, `RawI64`, `Float64`,
+`Bitmap` and `Decimal64` carries the minimum and the maximum of its values, two values in the
 [value encoding](#value-encoding); NaN is left out (a chunk of NaN only has no
 zone map). Every `Dict` chunk carries a string zone map, by the strings' UTF-8
 bytes:
@@ -377,6 +380,7 @@ zoned datetimes with their offsets, counters with every replica.
 | 14 | Path | Node count `u32`, the nodes, edge count `u32`, the edges |
 | 15 | GCounter | Count `u32`, then per entry its replica (length `u32` and UTF-8) and its `u64` count, sorted by replica |
 | 16 | OnCounter | The positive entries, then the negative entries, each as in 15 |
+| 17 | Decimal | Scale `u8` (0 to 38), then the mantissa as a 16-byte little-endian `i128` (at most 38 digits); the value is the mantissa divided by 10 to the scale |
 
 A reader checks every length and count against the bytes left before it
 allocates, and refuses an unknown tag, a field the kind does not accept (such

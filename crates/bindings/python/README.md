@@ -177,6 +177,7 @@ results = db.vector_search("Document", "embedding", query_vector, k=10)
 ## Links
 
 - [Documentation](https://grafeo.dev)
+- [API Stability](https://grafeo.dev/stability/): which calls are stable and which are experimental; a call here has the level of the Rust call it wraps
 - [GitHub](https://github.com/GrafeoDB/grafeo)
 - [npm Package](https://www.npmjs.com/package/@grafeo-db/js)
 - [WASM Package](https://www.npmjs.com/package/@grafeo-db/wasm)

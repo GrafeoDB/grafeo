@@ -116,6 +116,12 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Stability
+//!
+//! The `grafeo` crate re-exports this module. Its items are stable unless
+//! their documentation has a `# Stability: Experimental` section: see
+//! <https://grafeo.dev/stability/>.
 
 use std::collections::HashMap;
 use std::sync::Arc;

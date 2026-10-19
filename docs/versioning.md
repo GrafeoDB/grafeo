@@ -37,6 +37,9 @@ option types, a field to a result type, or a key to a dict or object a binding r
 one. In Rust these types are `#[non_exhaustive]`: build options with their constructors and `with_*` methods, and
 name the fields of a result in a pattern with `..`. In the bindings, read the keys you need.
 
+An API marked experimental is the exception: it may change in any release, patch releases included. [API
+Stability](stability.md) lists the experimental APIs and how they are marked.
+
 `grafeo-common`, `grafeo-core`, `grafeo-storage`, `grafeo-adapters` and `grafeo-engine` are implementation crates.
 They are published so that `grafeo` can depend on them, and their APIs may change in any release. Depend on
 `grafeo` instead.

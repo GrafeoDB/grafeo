@@ -2,6 +2,12 @@
 //!
 //! Start here with [`GrafeoDB`] - it's your handle to everything.
 //!
+//! # Stability
+//!
+//! The `grafeo` crate re-exports this module. Its items are stable unless
+//! their documentation has a `# Stability: Experimental` section: see
+//! <https://grafeo.dev/stability/>.
+//!
 //! Operations are split across focused submodules:
 //! - `query` - Query execution (execute, execute_cypher, etc.)
 //! - `crud` - Node/edge CRUD operations

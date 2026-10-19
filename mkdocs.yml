@@ -193,6 +193,7 @@ nav:
     - Troubleshooting: getting-started/troubleshooting.md
     - Glossary: getting-started/glossary.md
     - Migration Guide: getting-started/migration.md
+    - Upgrading to 0.6: upgrading/0.6.md
     - Security: getting-started/security.md
 
   - User Guide:
@@ -412,4 +413,5 @@ nav:
       - anywidget-graph: ecosystem/anywidget-graph.md
       - Performance Baselines: ecosystem/performance.md
     - Versioning: versioning.md
+    - API Stability: stability.md
     - Roadmap: roadmap.md

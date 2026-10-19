@@ -12,9 +12,10 @@
 //!
 //! # Stability: Experimental
 //!
-//! This module is new in 0.5.40. Signatures may change before being promoted
-//! to Beta. Use from embedded callers that want first-row latency or bounded
-//! memory; use `Session::execute` when you want a fully materialized result.
+//! This module is new in 0.5.40. It may change or be removed in any release,
+//! with a CHANGELOG entry: see <https://grafeo.dev/stability/>. Use it from
+//! embedded callers that want first-row latency or bounded memory; use
+//! `Session::execute` when you want a fully materialized result.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;

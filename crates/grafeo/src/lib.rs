@@ -38,6 +38,13 @@
 //! # Ok::<(), grafeo::Error>(())
 //! ```
 //!
+//! ## Stability
+//!
+//! Everything this crate exports is stable unless its documentation has a
+//! `# Stability: Experimental` section: a stable item breaks only in a minor
+//! release (`0.6` to `0.7`), an experimental one may change in any release.
+//! See <https://grafeo.dev/stability/> and <https://grafeo.dev/versioning/>.
+//!
 #![forbid(unsafe_code)]
 
 //! ## Performance Features

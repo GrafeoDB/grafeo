@@ -27,7 +27,8 @@
 //!
 //! # Stability: Experimental
 //!
-//! New in 0.5.40. API may change before being promoted to Beta.
+//! New in 0.5.40. It may change or be removed in any release, with a
+//! CHANGELOG entry: see <https://grafeo.dev/stability/>.
 
 use std::sync::Arc;
 

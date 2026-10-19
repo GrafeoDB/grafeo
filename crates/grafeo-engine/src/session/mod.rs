@@ -3,6 +3,12 @@
 //! A session is your conversation with the database. Each session can have
 //! its own transaction state, so concurrent sessions don't interfere with
 //! each other. Sessions are cheap to create - spin up as many as you need.
+//!
+//! # Stability
+//!
+//! The `grafeo` crate re-exports this module. Its items are stable unless
+//! their documentation has a `# Stability: Experimental` section: see
+//! <https://grafeo.dev/stability/>.
 
 #[cfg(feature = "triple-store")]
 mod rdf;
@@ -2906,7 +2912,8 @@ impl Session {
     ///
     /// # Stability: Experimental
     ///
-    /// New in 0.5.40. Signature may change before being promoted to Beta.
+    /// New in 0.5.40. It may change or be removed in any release, with a
+    /// CHANGELOG entry: see <https://grafeo.dev/stability/>.
     ///
     /// # Errors
     ///

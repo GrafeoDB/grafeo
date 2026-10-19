@@ -5,6 +5,12 @@
 //!
 //! The result structs are read, not built: later releases may add fields, so
 //! they are `#[non_exhaustive]` and a pattern names their fields with `..`.
+//!
+//! # Stability
+//!
+//! The `grafeo` crate re-exports this module. Its items are stable unless
+//! their documentation has a `# Stability: Experimental` section: see
+//! <https://grafeo.dev/stability/>.
 
 use std::path::PathBuf;
 

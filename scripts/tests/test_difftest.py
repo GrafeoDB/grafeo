@@ -174,6 +174,35 @@ def test_compare_fails_when_a_reviewed_difference_is_gone(tmp_path, capsys):
     assert "A2|gql [NO LONGER DIFFERENT]" in capsys.readouterr().out
 
 
+def test_a_varying_case_passes_whether_or_not_it_differs(tmp_path, capsys):
+    """A `~` line: the old build's result varies, so the case may also not differ."""
+    digest = difftest.fingerprint(rows([2]))
+    varies = difftest.fingerprint(rows([5]))
+    old, new, reviewed = gate_files(
+        tmp_path,
+        [
+            f"A1|gql ~{digest} A1 now returns 2",
+            f"A2|gql ~{varies} A2 varies in the old build",
+        ],
+    )
+    assert difftest.compare(old, new, reviewed) == 0
+    out = capsys.readouterr().out
+    assert "=== A1|gql [reviewed]" in out
+    assert "A2|gql" not in out
+    assert "all reviewed" in out
+
+
+@pytest.mark.parametrize("key", ["A1|gql", "A2|gql"])  # A1 differs, A2 does not
+def test_a_varying_case_fails_when_its_new_result_changed(tmp_path, capsys, key):
+    """A `~` line still checks the new result, also when the old build agrees."""
+    reviewed_a1 = f"A1|gql {difftest.fingerprint(rows([2]))} A1 now returns 2"
+    varying = f"{key} ~{difftest.fingerprint(rows([3]))} returned 3 when reviewed"
+    lines = [varying] if key == "A1|gql" else [reviewed_a1, varying]
+    old, new, reviewed = gate_files(tmp_path, lines)
+    assert difftest.compare(old, new, reviewed) == 1
+    assert f"=== {key} [CHANGED SINCE THE REVIEW]" in capsys.readouterr().out
+
+
 def test_compare_without_a_reviewed_list_only_reports(tmp_path, capsys):
     old, new, _ = gate_files(tmp_path, [])
     assert difftest.compare(old, new) == 0

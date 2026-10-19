@@ -1,4 +1,5 @@
 # Reviewed differences between 0.5.44 and 0.6.0: case key, fingerprint of the reviewed result, why it changed.
+# A `~` before the fingerprint: the case's result in 0.5.44 varies from run to run, so it may also not differ.
 AM10|gql f3c6308779 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
 AM11|cypher 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
 AM11|gql 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
@@ -416,8 +417,8 @@ AH8|cypher 1f3fd599f8 A WITH * WHERE on variables of an OPTIONAL MATCH is checke
 AH14|cypher eb149d8bc8 A condition on a variable a WITH renamed no longer filters a later OPTIONAL MATCH variable of that name (#455); it came back with nulls.
 AH15|cypher ba3edbdb7b A condition on a variable a WITH renamed no longer filters a later OPTIONAL MATCH variable of that name (#455); it came back with nulls.
 AH17|cypher def6255edd A condition without variables filters the row; it failed with "Internal error: Empty plan".
-AJ6|cypher 2f8172869a A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); it timed out.
-AJ6|gql 2f8172869a A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); it timed out.
+AJ6|cypher ~2f8172869a A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); it timed out when the machine was busy (about 26 s of the 30 s limit).
+AJ6|gql ~2f8172869a A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); it timed out when the machine was busy (about 26 s of the 30 s limit).
 AO1|cypher ee2e439430 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
 AO1|gql ee2e439430 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
 AO2|cypher 238fe1bd37 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
@@ -480,3 +481,8 @@ BY4|cypher d1d652c243 An integer division by zero in a WHERE fails the query (22
 BY4|gql d1d652c243 An integer division by zero in a WHERE fails the query (22012, #639); the row was dropped as for a null.
 BY7|cypher 1c462b1c0a An integer sum past the 64-bit range fails the query (22003, #639); it wrapped around to -9223372036854775808.
 BY7|gql 1c462b1c0a An integer sum past the 64-bit range fails the query (22003, #639); it wrapped around to -9223372036854775808.
+BU3|gql 0197c21812 A GQL statement of one INSERT returns no rows and no columns, as ISO GQL defines it (#580); it returned the last node it created in a column `_anon_209`.
+BU6|gql af570eb864 CREATE GRAPH ... AS COPY OF copies the source's nodes with their labels and properties (#423); the copy was an empty graph.
+BU7|gql 35d071d9a8 CREATE GRAPH ... AS COPY OF copies the source's edges with their properties (#423); the copy was an empty graph.
+BX1|cypher ~dbc78da38d A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
+BX1|gql ~dbc78da38d A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.

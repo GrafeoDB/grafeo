@@ -1,15 +1,13 @@
 """Snapshot isolation of values and deletes through the Python binding (#412).
 
-The reproduction of issue #412 and its read-modify-write counter. On today's
-store values are written in place and a delete takes effect at the deleting
-transaction's start, so these fail: each is a strict ``xfail`` that fails as
-soon as it passes, and then moves out of ``xfail``. The engine's full set of
-guarantees is ``crates/grafeo-engine/tests/snapshot_isolation.rs``.
+The remaining issue #412 gaps are strict ``xfail`` tests: values are written
+in place and a delete takes effect at the deleting transaction's start.
+Overlapping increments already retry a conflicting write and are a regular
+regression test. The engine's full set of guarantees is
+``crates/grafeo-engine/tests/snapshot_isolation.rs``.
 """
 
 import contextlib
-import sys
-import threading
 
 import grafeo
 import pytest
@@ -114,52 +112,34 @@ def test_an_aborted_increment_is_not_counted():
     assert read_counter(db) == 1
 
 
-def increment(db):
+def increment(db, after_first_read=None):
     """Reads the counter and writes it plus one in a transaction, retried on a conflict."""
-    while True:
+    for _ in range(10):
         tx = db.begin_transaction()
         try:
             n = read_counter(tx)
+            hook, after_first_read = after_first_read, None
+            if hook is not None:
+                hook()
             tx.execute(f"MATCH (c:Counter) SET c.n = {n + 1}")
             tx.commit()
             return
         except grafeo.GrafeoError as error:
             if not error.is_retryable:
                 raise
+        finally:
             if tx.is_active:
                 with contextlib.suppress(grafeo.GrafeoError):
                     tx.rollback()
+    raise RuntimeError("increment did not commit after 10 attempts")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=IN_PLACE)
 def test_concurrent_increments_lose_and_add_nothing():
-    """Four threads increment one counter 100 times each, in twenty rounds:
-    a single round of today's store can end at 400 by chance, twenty in a row
-    do not. A query holds the GIL, so the threads switch between statements
-    only with a short switch interval."""
-    finals = []
-    interval = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
-    try:
-        for _ in range(20):
-            db = counter()
-            errors = []
+    """Two overlapping transactions read zero before either writes.
 
-            def run(db=db, errors=errors):
-                try:
-                    for _ in range(100):
-                        increment(db)
-                except Exception as error:  # noqa: BLE001 (raised below)
-                    errors.append(error)
-
-            threads = [threading.Thread(target=run) for _ in range(4)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-            if errors:
-                raise errors[0]
-            finals.append(read_counter(db))
-    finally:
-        sys.setswitchinterval(interval)
-    assert finals == [400] * 20
+    The inner increment commits first. The outer must retry its stale write
+    with a fresh read, so both committed increments count exactly once.
+    """
+    db = counter()
+    increment(db, after_first_read=lambda: increment(db))
+    assert read_counter(db) == 2

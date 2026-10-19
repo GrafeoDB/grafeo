@@ -25,6 +25,13 @@ final class GrafeoBindings {
     'grafeo_last_error',
   );
 
+  /// Returns the GQLSTATUS of the last error (thread-local), or null. Do NOT
+  /// free the pointer.
+  late final grafeoLastErrorGqlStatus = library
+      .lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>(
+    'grafeo_last_error_gql_status',
+  );
+
   /// Clears the thread-local error state.
   late final grafeoClearError =
       library.lookupFunction<Void Function(), void Function()>(

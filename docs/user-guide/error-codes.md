@@ -102,7 +102,9 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | `42001`   | syntax error                   | `MATCH (n RETURN n`                              |
 | `42002`   | invalid reference              | an unknown property or label                     |
 
-Python has it as `GrafeoError.gql_status` and WASM as the `gqlStatus` property of the thrown `Error`. A
+Python has it as `GrafeoError.gql_status`, WASM as the `gqlStatus` property of the thrown `Error`, C as
+`grafeo_last_error_gql_status()` (next to `grafeo_last_error()`), Go as the `GQLStatus` field of `*grafeo.Error`
+(get it with `errors.As`), C# as `GrafeoException.GqlStatus` and Dart as `GrafeoException.gqlStatus`. A
 float operation keeps its IEEE result (`toFloat(1) / 0` is infinity), and SPARQL leaves a variable unbound
 when its expression fails, as SPARQL 1.1 specifies, instead of raising one of these errors.
 

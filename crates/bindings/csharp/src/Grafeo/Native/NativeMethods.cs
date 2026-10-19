@@ -631,6 +631,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial nint grafeo_last_error();
 
+    /// <summary>Get the GQLSTATUS of the last error (five characters such as "22012"), or zero if none. Valid until next FFI call on this thread. Do NOT free.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_last_error_gql_status();
+
     /// <summary>Clear the last error.</summary>
     [LibraryImport(LibName)]
     internal static partial void grafeo_clear_error();

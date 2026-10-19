@@ -124,7 +124,8 @@ class Transaction implements Finalizable {
     _bindings.grafeoFreeTransaction(_handle);
     _handle = nullptr;
     if (status != GrafeoStatus.ok.code) {
-      throw classifyError(status, lastError(_bindings));
+      throw classifyError(status, lastError(_bindings),
+          gqlStatus: lastGqlStatus(_bindings));
     }
   }
 
@@ -137,7 +138,8 @@ class Transaction implements Finalizable {
     _bindings.grafeoFreeTransaction(_handle);
     _handle = nullptr;
     if (status != GrafeoStatus.ok.code) {
-      throw classifyError(status, lastError(_bindings));
+      throw classifyError(status, lastError(_bindings),
+          gqlStatus: lastGqlStatus(_bindings));
     }
   }
 

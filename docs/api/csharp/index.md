@@ -412,10 +412,10 @@ public sealed record VectorResult(long NodeId, double Distance);
 
 ## Exception Hierarchy
 
-All exceptions derive from `GrafeoException`, which carries a `GrafeoStatus` code from the native layer.
+All exceptions derive from `GrafeoException`, which carries a `GrafeoStatus` code from the native layer and the error's GQLSTATUS in `GqlStatus` (`"22012"` for a division by zero, see [Error Codes](../../user-guide/error-codes.md#gqlstatus)).
 
 ```
-GrafeoException             (base, Status property)
+GrafeoException             (base, Status and GqlStatus properties)
 ├── QueryException          (parse or execution errors)
 ├── TransactionException    (commit, rollback, isolation errors)
 ├── StorageException        (WAL, persistence, I/O errors)

@@ -109,7 +109,8 @@ class GrafeoDB implements Finalizable {
     _bindings.grafeoFreeDatabase(_handle);
     _handle = nullptr;
     if (status != GrafeoStatus.ok.code) {
-      throw classifyError(status, lastError(_bindings));
+      throw classifyError(status, lastError(_bindings),
+          gqlStatus: lastGqlStatus(_bindings));
     }
   }
 

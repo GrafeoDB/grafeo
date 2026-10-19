@@ -949,7 +949,7 @@ class VectorResult {
 
 ## Exception Hierarchy
 
-All Grafeo errors extend the `sealed` base class `GrafeoException`. Use pattern matching to handle specific error types:
+All Grafeo errors extend the `sealed` base class `GrafeoException`, which carries the error's GQLSTATUS in `gqlStatus` (`'22012'` for a division by zero, see [Error Codes](../../user-guide/error-codes.md#gqlstatus); null for an exception the binding raises itself). Use pattern matching to handle specific error types:
 
 ```dart
 try {

@@ -121,11 +121,12 @@ typedef enum {
 ### Error Functions
 
 ```c
-const char* grafeo_last_error(void);   /* thread-local error message, or NULL */
-void        grafeo_clear_error(void);  /* clear the last error */
+const char* grafeo_last_error(void);             /* thread-local error message, or NULL */
+const char* grafeo_last_error_gql_status(void);  /* its GQLSTATUS, such as "22012", or NULL */
+void        grafeo_clear_error(void);            /* clear the last error */
 ```
 
-The pointer from `grafeo_last_error()` is valid until the next FFI call on the same thread. Do NOT free it.
+The pointers from `grafeo_last_error()` and `grafeo_last_error_gql_status()` are valid until the next FFI call on the same thread. Do NOT free them. The GQLSTATUS is the five-character ISO GQL status of the condition (see [Error Codes](../../user-guide/error-codes.md#gqlstatus)); an error the binding raises itself, such as a null pointer, has `22000`.
 
 ## Lifecycle
 

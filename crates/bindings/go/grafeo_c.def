@@ -94,6 +94,7 @@ grafeo_has_property_index
 grafeo_info
 grafeo_is_cdc_enabled
 grafeo_last_error
+grafeo_last_error_gql_status
 grafeo_list_projections
 grafeo_mmr_search
 grafeo_node_count

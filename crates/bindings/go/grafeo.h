@@ -73,6 +73,10 @@ typedef struct GrafeoStream      GrafeoStream;
 /* ---- Error handling ------------------------------------------------------ */
 
 const char* grafeo_last_error(void);
+/* The GQLSTATUS of the last error, five characters such as "22012" (division
+ * by zero) or "42001" (syntax error); NULL if no error. Valid until the next
+ * call on this thread; do not free. */
+const char* grafeo_last_error_gql_status(void);
 void        grafeo_clear_error(void);
 
 /* Marks a function that a later release removes; compilers warn on its use. */

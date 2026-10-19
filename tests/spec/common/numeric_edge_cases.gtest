@@ -53,16 +53,14 @@ tests:
       - "INSERT (:N {v: 9223372036854775807})"
     query: "MATCH (n:N) RETURN n.v + 1 AS val"
     expect:
-      rows:
-        - [null]
+      error: "numeric value out of range"
 
   - name: int64_underflow_subtraction
     setup:
       - "INSERT (:N {v: -9223372036854775808})"
     query: "MATCH (n:N) RETURN n.v - 1 AS val"
     expect:
-      rows:
-        - [null]
+      error: "numeric value out of range"
 
   # ---------------------------------------------------------------------------
   # Float precision

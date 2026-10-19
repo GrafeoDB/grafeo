@@ -278,8 +278,8 @@ BK3|cypher 79f40f49e6 DFS depth is the depth in the DFS tree; it was the finish 
 BK3|gql 79f40f49e6 DFS depth is the depth in the DFS tree; it was the finish order.
 BK4|cypher f137fd2ed7 DFS reports depth, discovery and finish; depth was the finish order.
 BK4|gql f137fd2ed7 DFS reports depth, discovery and finish; depth was the finish order.
-BK5|cypher 880f1ecd08 A procedure argument without a value is an error; it ran with the default. The error starts with its code (#588).
-BK5|gql 880f1ecd08 A procedure argument without a value is an error; it ran with the default. The error starts with its code (#588).
+BK5|cypher a18d149ec5 A procedure argument whose evaluation fails fails the call with that error: 1 / 0 is a division by zero (22012, #639); it ran with the default.
+BK5|gql a18d149ec5 A procedure argument whose evaluation fails fails the call with that error: 1 / 0 is a division by zero (22012, #639); it ran with the default.
 BK6|cypher 92e11daab5 A procedure argument read from a row is an error that names it; it failed as a missing start parameter. The error starts with its code (#588).
 BK7|cypher ba288c8f3e A procedure argument of the wrong type is an error; it ran with the default. The error starts with its code (#588).
 BK7|gql ba288c8f3e A procedure argument of the wrong type is an error; it ran with the default. The error starts with its code (#588).
@@ -455,14 +455,14 @@ G1|gql 16514f4784 Its GQL literals with a point are exact decimals now (#610); t
 G4|gql 14d27eb2c3 Its GQL literals with a point are exact decimals now (#610); the values are the same.
 L1|gql 57b189c00e Its GQL literals with a point are exact decimals now (#610); the values are the same.
 G12|gql 2868c5c0cb i * 1.5 is an exact decimal now (#610); the values are the same.
-L10|gql 259e5d6d7f 1.0 / 0.0 is a decimal division by zero now, which is null (#610); 1.0e0 / 0.0e0 gives the infinity.
+L10|gql 280b9423de 0.0 / 0.0 is a decimal division by zero, an error (22012, #639); 1.0e0 / 0.0e0 gives the infinity.
 BV2|gql bc673ff0a9 1.50 is an exact decimal with its two digits (#610); it was the float 1.5.
 BV3|gql 960ece87e2 The ISO GQL suffixes M, F and D are read (#610); they were a syntax error.
 BV4|gql c22bedaa55 Literals with a point are exact decimals (#610); they were floats.
 BV5|gql 118ed67a07 A decimal with an integer is a decimal, with a float a float (#610); all were floats.
 BV6|gql cda598c773 A decimal division gives 16 digits (#610); it was a float division.
 BV7|gql ae96677ab7 ceil, floor and round keep a decimal, sqrt gives a float (#610); all were floats.
-BV11|gql d993b88255 1.0 / 0 is a decimal division by zero, null (#610); it was a float infinity.
+BV11|gql 0744ddf766 1.0 / 0 is a decimal division by zero, an error (22012, #639); it was a float infinity.
 BW1|cypher d9cb9415ca toDecimal is a new function (#610); it was an unknown function.
 BW1|gql d9cb9415ca toDecimal is a new function (#610); it was an unknown function.
 BW2|cypher d00603bc87 toDecimal is a new function (#610); it was an unknown function.
@@ -470,3 +470,11 @@ BW2|gql d00603bc87 toDecimal is a new function (#610); it was an unknown functio
 BW3|gql b0e004afd3 CAST to DECIMAL and DEC is new (#610); it was an unsupported CAST type.
 BW4|gql 0b8496a49f CAST to DECIMAL and DEC is new (#610); it was an unsupported CAST type.
 BW5|gql 8d69e57bee CAST to DECIMAL and DEC is new (#610); it was an unsupported CAST type.
+BY1|cypher 0d56f2402c An integer result past the 64-bit range fails the query (22003, #639); it was null.
+BY1|gql 0d56f2402c An integer result past the 64-bit range fails the query (22003, #639); it was null.
+BY2|cypher d18daed33c An integer remainder by zero fails the query (22012, #639); it was null.
+BY2|gql d18daed33c An integer remainder by zero fails the query (22012, #639); it was null.
+BY3|cypher d1d652c243 An integer division by zero in a RETURN fails the query (22012, #639); it was null.
+BY3|gql d1d652c243 An integer division by zero in a RETURN fails the query (22012, #639); it was null.
+BY4|cypher d1d652c243 An integer division by zero in a WHERE fails the query (22012, #639); the row was dropped as for a null.
+BY4|gql d1d652c243 An integer division by zero in a WHERE fails the query (22012, #639); the row was dropped as for a null.

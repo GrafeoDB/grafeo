@@ -109,7 +109,6 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: integer_division_by_zero_error
-    skip: "returns Infinity instead of error"
     setup:
       - "INSERT (:N {v: 1})"
     query: "MATCH (n:N) RETURN 10 / 0"

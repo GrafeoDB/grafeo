@@ -1036,18 +1036,16 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: i64_max_plus_one_overflows
-    # i64::MAX + 1 overflows: should return NULL.
+    # i64::MAX + 1 overflows: an error (22003), as in SQL.
     query: RETURN 9223372036854775807 + 1 AS r
     expect:
-      rows:
-        - [null]
+      error: "numeric value out of range: 9223372036854775807 + 1"
 
   - name: multiplication_intermediate_overflow
-    # 100 * 1e9 * 1e8 = 1e19 overflows i64.
+    # 100 * 1e9 * 1e8 = 1e19 overflows i64 at the second step.
     query: RETURN 100 * 1000000000 * 100000000 AS r
     expect:
-      rows:
-        - [null]
+      error: "numeric value out of range: 100000000000 * 100000000"
 
   # ---------------------------------------------------------------------------
   # Property key prefix overlap (inspired by JanusGraph #4401)

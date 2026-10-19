@@ -17,7 +17,6 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: division_by_zero_integer
-    skip: "returns Infinity instead of error"
     setup:
       - "INSERT (:N {v: 10})"
     query: "MATCH (n:N) RETURN n.v / 0 AS result"
@@ -33,7 +32,6 @@ tests:
         - [Infinity]
 
   - name: modulo_by_zero
-    skip: "returns Infinity instead of error"
     setup:
       - "INSERT (:N {v: 10})"
     query: "MATCH (n:N) RETURN n.v % 0 AS result"

@@ -907,13 +907,16 @@ mod tests {
         assert!(evaluate_check("name = 'oops", &p).is_err());
     }
 
-    /// An operator that does not apply has no value, as in a WHERE, which
-    /// drops the row: the check does not hold.
+    /// A division by zero fails the check's evaluation, as it fails a WHERE
+    /// (#639): the error names the expression and the cause.
     #[test]
-    fn test_division_by_zero_does_not_hold() {
+    fn test_division_by_zero_is_an_error() {
         let p = props(&[("x", Value::Int64(10))]);
-        assert_eq!(evaluate_check("x / 0 = 1", &p), Ok(false));
-        assert_eq!(evaluate_check("NOT (x / 0 = 1)", &p), Ok(false));
+        for expression in ["x / 0 = 1", "NOT (x / 0 = 1)"] {
+            let error = evaluate_check(expression, &p).unwrap_err();
+            assert!(error.contains(expression), "{error}");
+            assert!(error.contains("division by zero: 10 / 0"), "{error}");
+        }
     }
 
     #[test]
@@ -931,30 +934,37 @@ mod tests {
         assert!(evaluate_check("x + 1", &p).is_err());
     }
 
-    // -- Integer overflow / underflow --
+    // -- Integer overflow / underflow: an error, as in a query (#639) --
+
+    fn assert_out_of_range(expression: &str, x: i64, operation: &str) {
+        let p = props(&[("x", Value::Int64(x))]);
+        let error = evaluate_check(expression, &p).unwrap_err();
+        assert!(
+            error.contains(&format!("numeric value out of range: {operation}")),
+            "{error}"
+        );
+    }
 
     #[test]
     fn test_integer_overflow_add() {
-        let p = props(&[("x", Value::Int64(i64::MAX))]);
-        assert_eq!(evaluate_check("x + 1 > 0", &p), Ok(false));
+        assert_out_of_range("x + 1 > 0", i64::MAX, "9223372036854775807 + 1");
     }
 
     #[test]
     fn test_integer_underflow_sub() {
-        let p = props(&[("x", Value::Int64(i64::MIN))]);
-        assert_eq!(evaluate_check("x - 1 < 0", &p), Ok(false));
+        assert_out_of_range("x - 1 < 0", i64::MIN, "-9223372036854775808 - 1");
     }
 
     #[test]
     fn test_integer_overflow_mul() {
-        let p = props(&[("x", Value::Int64(i64::MAX))]);
-        assert_eq!(evaluate_check("x * 2 > 0", &p), Ok(false));
+        assert_out_of_range("x * 2 > 0", i64::MAX, "9223372036854775807 * 2");
     }
 
     #[test]
     fn test_modulo_by_zero() {
         let p = props(&[("x", Value::Int64(10))]);
-        assert_eq!(evaluate_check("x % 0 = 0", &p), Ok(false));
+        let error = evaluate_check("x % 0 = 0", &p).unwrap_err();
+        assert!(error.contains("division by zero: 10 % 0"), "{error}");
     }
 
     // -- Float arithmetic --

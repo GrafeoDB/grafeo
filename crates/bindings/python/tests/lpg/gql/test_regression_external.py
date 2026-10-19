@@ -502,27 +502,26 @@ class TestIssue187LabelsTypeAggregation:
 
 
 class TestIntegerOverflow:
-    """Arithmetic overflow must not silently wrap."""
+    """Arithmetic overflow fails the query (22003, #639), it does not wrap."""
 
-    @pytest.mark.skip(
-        reason="panics on overflow instead of returning error: needs checked arithmetic"
-    )
     def test_i64_max_plus_one(self, db):
-        """i64::MAX + 1 should error or not silently wrap."""
-        try:
-            result = list(db.execute("RETURN 9223372036854775807 + 1 AS r"))
-            # If it returns, must not be i64::MIN
-            assert result[0]["r"] != -9223372036854775808
-        except RuntimeError:
-            pass  # Overflow error is acceptable
+        """i64::MAX + 1 is out of range."""
+        with pytest.raises(
+            RuntimeError, match=r"numeric value out of range: 9223372036854775807 \+ 1"
+        ):
+            db.execute("RETURN 9223372036854775807 + 1 AS r")
 
     def test_i64_min_minus_one(self, db):
-        """i64::MIN - 1 should error or not silently wrap."""
-        try:
-            result = list(db.execute("RETURN -9223372036854775808 - 1 AS r"))
-            assert result[0]["r"] != 9223372036854775807
-        except RuntimeError:
-            pass  # Overflow error is acceptable
+        """i64::MIN - 1 is out of range."""
+        with pytest.raises(
+            RuntimeError, match=r"numeric value out of range: -9223372036854775808 - 1"
+        ):
+            db.execute("RETURN -9223372036854775808 - 1 AS r")
+
+    def test_division_by_zero(self, db):
+        """An integer division by zero fails the query (22012)."""
+        with pytest.raises(RuntimeError, match=r"division by zero: 10 / 0"):
+            db.execute("RETURN 10 / 0 AS r")
 
 
 # =============================================================================

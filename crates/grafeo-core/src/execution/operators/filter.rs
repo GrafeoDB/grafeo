@@ -13,6 +13,7 @@ use grafeo_common::types::{
     Decimal, DecimalError, EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey,
     PropertyMap, TransactionId, Value,
 };
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 #[cfg(feature = "regex")]
 use regex::Regex;
 #[cfg(all(feature = "regex-lite", not(feature = "regex")))]
@@ -291,6 +292,53 @@ impl ErrorSlot {
         self.failed
             .store(false, std::sync::atomic::Ordering::Release);
         error
+    }
+}
+
+/// An arithmetic operation as the error messages show it: `9223372036854775807 + 1`.
+fn binary_text(left: &Value, op: BinaryFilterOp, right: &Value) -> String {
+    let symbol = match op {
+        BinaryFilterOp::Add => "+",
+        BinaryFilterOp::Sub => "-",
+        BinaryFilterOp::Mul => "*",
+        BinaryFilterOp::Div => "/",
+        BinaryFilterOp::Mod => "%",
+        other => return format!("{other:?}({left}, {right})"),
+    };
+    format!("{left} {symbol} {right}")
+}
+
+/// The error of an integer or decimal result that does not fit (22003).
+fn out_of_range(expression: &str) -> OperatorError {
+    Error::Query(QueryError::new(
+        QueryErrorKind::NumericOutOfRange,
+        expression,
+    ))
+    .into()
+}
+
+/// The error of an integer or decimal division by zero (22012).
+fn division_by_zero(left: &Value, op: BinaryFilterOp, right: &Value) -> OperatorError {
+    Error::Query(QueryError::new(
+        QueryErrorKind::DivisionByZero,
+        binary_text(left, op, right),
+    ))
+    .into()
+}
+
+/// The error of a decimal operation that failed with `error`.
+fn decimal_error(
+    error: DecimalError,
+    left: &Value,
+    op: BinaryFilterOp,
+    right: &Value,
+) -> OperatorError {
+    match error {
+        DecimalError::DivisionByZero => division_by_zero(left, op, right),
+        // Arithmetic fails only past 38 digits or by zero.
+        DecimalError::Overflow | DecimalError::Invalid | DecimalError::InvalidPrecision => {
+            out_of_range(&binary_text(left, op, right))
+        }
     }
 }
 
@@ -1114,7 +1162,6 @@ impl ExpressionPredicate {
 
     /// Records `error`, which fails the query (see [`ErrorSlot`]), and gives
     /// the `None` evaluation goes on with.
-    #[allow(dead_code, reason = "the numeric errors of #639 record through it")]
     fn fail(&self, error: OperatorError) -> Option<Value> {
         self.errors.record(error);
         None
@@ -1172,6 +1219,14 @@ impl ExpressionPredicate {
                     BinaryFilterOp::And | BinaryFilterOp::Or | BinaryFilterOp::Xor
                 ) {
                     let left_val = self.eval_expr(left, chunk, row).unwrap_or(Value::Null);
+                    // A false left side decides an AND and a true one an OR:
+                    // the right side is not evaluated, so a guard such as
+                    // `n.v <> 0 AND 10 / n.v > 1` keeps its rows from failing.
+                    match (op, left_val.as_bool()) {
+                        (BinaryFilterOp::And, Some(false)) => return Some(Value::Bool(false)),
+                        (BinaryFilterOp::Or, Some(true)) => return Some(Value::Bool(true)),
+                        _ => {}
+                    }
                     let right_val = self.eval_expr(right, chunk, row).unwrap_or(Value::Null);
                     return self.eval_binary_op(&left_val, *op, &right_val);
                 }
@@ -1746,6 +1801,7 @@ impl ExpressionPredicate {
                     _ => self.eval_arithmetic(
                         left,
                         right,
+                        BinaryFilterOp::Add,
                         i64::checked_add,
                         |a, b| a + b,
                         Decimal::checked_add,
@@ -1785,6 +1841,7 @@ impl ExpressionPredicate {
                 _ => self.eval_arithmetic(
                     left,
                     right,
+                    BinaryFilterOp::Sub,
                     i64::checked_sub,
                     |a, b| a - b,
                     Decimal::checked_sub,
@@ -1797,6 +1854,7 @@ impl ExpressionPredicate {
                 _ => self.eval_arithmetic(
                     left,
                     right,
+                    BinaryFilterOp::Mul,
                     i64::checked_mul,
                     |a, b| a * b,
                     Decimal::checked_mul,
@@ -1809,6 +1867,7 @@ impl ExpressionPredicate {
                 _ => self.eval_arithmetic(
                     left,
                     right,
+                    BinaryFilterOp::Div,
                     i64::checked_div,
                     |a, b| a / b,
                     Decimal::checked_div,
@@ -1939,14 +1998,16 @@ impl ExpressionPredicate {
         }
     }
 
-    /// An arithmetic operator on two numbers: integers give an integer
-    /// (`None` on overflow), a float makes it a float, and a decimal with a
-    /// decimal or an integer gives a decimal (`None` on overflow and division
-    /// by zero, as for integers).
+    /// An arithmetic operator on two numbers: integers give an integer, a
+    /// float makes it a float (with its IEEE results), and a decimal with a
+    /// decimal or an integer gives a decimal. An integer or decimal result
+    /// that does not fit fails the query as out of range, a division by zero
+    /// as one (22003 and 22012).
     fn eval_arithmetic<F1, F2>(
         &self,
         left: &Value,
         right: &Value,
+        op: BinaryFilterOp,
         int_op: F1,
         float_op: F2,
         decimal_op: fn(&Decimal, &Decimal) -> Result<Decimal, DecimalError>,
@@ -1955,21 +2016,25 @@ impl ExpressionPredicate {
         F1: Fn(i64, i64) -> Option<i64>,
         F2: Fn(f64, f64) -> f64,
     {
+        let decimal = |a: &Decimal, b: &Decimal| match decimal_op(a, b) {
+            Ok(result) => Some(Value::Decimal(result)),
+            Err(error) => self.fail(decimal_error(error, left, op, right)),
+        };
         match (left, right) {
-            (Value::Decimal(a), Value::Decimal(b)) => decimal_op(a, b).ok().map(Value::Decimal),
-            (Value::Decimal(a), Value::Int64(b)) => decimal_op(a, &Decimal::from_i64(*b))
-                .ok()
-                .map(Value::Decimal),
-            (Value::Int64(a), Value::Decimal(b)) => decimal_op(&Decimal::from_i64(*a), b)
-                .ok()
-                .map(Value::Decimal),
+            (Value::Decimal(a), Value::Decimal(b)) => decimal(a, b),
+            (Value::Decimal(a), Value::Int64(b)) => decimal(a, &Decimal::from_i64(*b)),
+            (Value::Int64(a), Value::Decimal(b)) => decimal(&Decimal::from_i64(*a), b),
             (Value::Decimal(a), Value::Float64(b)) => {
                 Some(Value::Float64(float_op(a.to_f64(), *b)))
             }
             (Value::Float64(a), Value::Decimal(b)) => {
                 Some(Value::Float64(float_op(*a, b.to_f64())))
             }
-            (Value::Int64(a), Value::Int64(b)) => int_op(*a, *b).map(Value::Int64),
+            (Value::Int64(a), Value::Int64(b)) => match int_op(*a, *b) {
+                Some(result) => Some(Value::Int64(result)),
+                None if *b == 0 => self.fail(division_by_zero(left, op, right)),
+                None => self.fail(out_of_range(&binary_text(left, op, right))),
+            },
             (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a, *b))),
             (Value::Int64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a as f64, *b))),
             (Value::Float64(a), Value::Int64(b)) => Some(Value::Float64(float_op(*a, *b as f64))),
@@ -1977,9 +2042,20 @@ impl ExpressionPredicate {
         }
     }
 
+    /// `%` on two numbers, typed as [`eval_arithmetic`](Self::eval_arithmetic)
+    /// types its results. An integer or decimal remainder by zero fails the
+    /// query; a float one gives null.
     fn eval_modulo(&self, left: &Value, right: &Value) -> Option<Value> {
-        let decimal = |a: &Decimal, b: &Decimal| a.checked_rem(b).ok().map(Value::Decimal);
+        let op = BinaryFilterOp::Mod;
+        let decimal = |a: &Decimal, b: &Decimal| match a.checked_rem(b) {
+            Ok(result) => Some(Value::Decimal(result)),
+            Err(error) => self.fail(decimal_error(error, left, op, right)),
+        };
         match (left, right) {
+            (Value::Int64(_), Value::Int64(0)) => self.fail(division_by_zero(left, op, right)),
+            // The one quotient that does not fit (`i64::MIN / -1`) has the
+            // remainder 0.
+            (Value::Int64(a), Value::Int64(b)) => Some(Value::Int64(a.wrapping_rem(*b))),
             (Value::Decimal(a), Value::Decimal(b)) => decimal(a, b),
             (Value::Decimal(a), Value::Int64(b)) => decimal(a, &Decimal::from_i64(*b)),
             (Value::Int64(a), Value::Decimal(b)) => decimal(&Decimal::from_i64(*a), b),
@@ -1989,7 +2065,6 @@ impl ExpressionPredicate {
             (Value::Float64(a), Value::Decimal(b)) if b.signum() != 0 => {
                 Some(Value::Float64(a % b.to_f64()))
             }
-            (Value::Int64(a), Value::Int64(b)) if *b != 0 => a.checked_rem(*b).map(Value::Int64),
             (Value::Float64(a), Value::Float64(b)) if *b != 0.0 => Some(Value::Float64(a % b)),
             (Value::Int64(a), Value::Float64(b)) if *b != 0.0 => {
                 Some(Value::Float64(*a as f64 % b))
@@ -4008,7 +4083,10 @@ impl ExpressionPredicate {
                 val.is_some() && !matches!(val, Some(Value::Null)),
             )),
             UnaryFilterOp::Neg => match val? {
-                Value::Int64(i) => i.checked_neg().map(Value::Int64),
+                Value::Int64(i) => match i.checked_neg() {
+                    Some(negated) => Some(Value::Int64(negated)),
+                    None => self.fail(out_of_range(&format!("-({i})"))),
+                },
                 Value::Float64(f) => Some(Value::Float64(-f)),
                 Value::Decimal(d) => Some(Value::Decimal(d.neg())),
                 _ => None,
@@ -6845,12 +6923,16 @@ mod tests {
 
     #[test]
     fn test_eval_modulo_by_zero() {
-        let result = eval_literal_expr(binary(
-            Value::Int64(10),
-            BinaryFilterOp::Mod,
-            Value::Int64(0),
-        ));
-        assert_eq!(result, None);
+        let store: Arc<dyn GraphStoreSearch> =
+            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+        let pred = ExpressionPredicate::new(
+            binary(Value::Int64(10), BinaryFilterOp::Mod, Value::Int64(0)),
+            HashMap::new(),
+            store,
+        );
+        let chunk = DataChunkBuilder::new(&[LogicalType::Int64]).finish();
+        let error = pred.eval_at(&chunk, 0).unwrap_err();
+        assert_eq!(error.to_string(), "GRAFEO-Q006: division by zero: 10 % 0");
 
         let result = eval_literal_expr(binary(
             Value::Float64(10.0),

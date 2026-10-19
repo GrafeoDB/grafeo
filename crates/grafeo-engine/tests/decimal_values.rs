@@ -64,9 +64,8 @@ fn decimal_arithmetic_is_exact() {
             // With a float: a float.
             ("RETURN $a + 0.5e0 AS x", "Float64(0.6)"),
             ("RETURN 2.0e0 * $price AS x", "Float64(3)"),
-            // Division by zero and overflow give null, as for integers.
-            ("RETURN $one / 0 AS x", "Null"),
-            ("RETURN $max + 1 AS x", "Null"),
+            // Division by zero and overflow are errors (#639, in
+            // numeric_errors.rs); a null operand gives null.
             ("RETURN $a + null AS x", "Null"),
         ] {
             let params = [

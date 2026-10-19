@@ -9,7 +9,8 @@
 //! - each row's version: who created the row and who deleted it, each a
 //!   transaction not committed yet or a commit epoch, kept per vector of
 //!   2,048 rows and collapsed to one bit per row once no reader can tell
-//!   the rows' versions apart (`versions`, [`RowGroupStore::collect`]);
+//!   the rows' versions apart (`versions`,
+//!   [`RowGroupStore::collect`](crate::graph::rowgroup::RowGroupStore::collect));
 //! - one column per property key: a typed vector with presence bits
 //!   (`column`);
 //! - for nodes, one bitmap of rows per label (FD5 in memory) and the nodes'

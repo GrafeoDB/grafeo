@@ -7,7 +7,9 @@
 //! In a row group:
 //!
 //! - each row's version: who created the row and who deleted it, each a
-//!   transaction not committed yet or a commit epoch;
+//!   transaction not committed yet or a commit epoch, kept per vector of
+//!   2,048 rows and collapsed to one bit per row once no reader can tell
+//!   the rows' versions apart (`versions`, [`RowGroupStore::collect`]);
 //! - one column per property key: a typed vector with presence bits
 //!   (`column`);
 //! - for nodes, one bitmap of rows per label (FD5 in memory) and the nodes'
@@ -31,6 +33,7 @@ mod bitset;
 mod column;
 mod read;
 pub mod section;
+mod versions;
 mod write;
 
 use std::collections::BTreeMap;
@@ -44,6 +47,9 @@ use parking_lot::RwLock;
 use self::adjacency::{Adjacency, Adjacent};
 use self::bitset::Bitset;
 use self::column::Columns;
+#[cfg(test)]
+pub(crate) use self::versions::VECTOR_ROWS;
+use self::versions::Versions;
 use crate::graph::lpg::dictionary::NameDictionary;
 use crate::graph::lpg::{Edge, Node};
 
@@ -137,7 +143,7 @@ fn grow<T: Clone>(values: &mut Vec<T>, row: usize, filler: T) {
 /// A row group of the node table.
 #[derive(Debug, Default)]
 struct NodeGroup {
-    versions: Vec<RowVersion>,
+    versions: Versions,
     /// The rows of each label, by label id.
     labels: FxHashMap<u32, Bitset>,
     columns: Columns,
@@ -149,12 +155,11 @@ struct NodeGroup {
 
 impl NodeGroup {
     fn version(&self, row: usize) -> RowVersion {
-        self.versions.get(row).copied().unwrap_or(RowVersion::NONE)
+        self.versions.get(row)
     }
 
     fn version_mut(&mut self, row: usize) -> &mut RowVersion {
-        grow(&mut self.versions, row, RowVersion::NONE);
-        &mut self.versions[row]
+        self.versions.get_mut(row)
     }
 
     /// The row's label ids, ascending.
@@ -198,7 +203,12 @@ impl NodeGroup {
 
     /// Takes the row out whole: its version, labels, values and adjacency.
     fn remove(&mut self, row: usize) {
-        *self.version_mut(row) = RowVersion::NONE;
+        self.versions.remove(row);
+        self.clear(row);
+    }
+
+    /// Takes out what a row that is gone held: labels, values, adjacency.
+    fn clear(&mut self, row: usize) {
         self.set_labels(row, &[]);
         self.columns.clear_row(row);
         self.outgoing.clear(row);
@@ -206,7 +216,7 @@ impl NodeGroup {
     }
 
     fn heap_bytes(&self) -> usize {
-        self.versions.capacity() * std::mem::size_of::<RowVersion>()
+        self.versions.heap_bytes()
             + self.labels.values().map(Bitset::heap_bytes).sum::<usize>()
             + self.columns.heap_bytes()
             + self.outgoing.heap_bytes()
@@ -217,7 +227,7 @@ impl NodeGroup {
 /// A row group of the edge table.
 #[derive(Debug, Default)]
 struct EdgeGroup {
-    versions: Vec<RowVersion>,
+    versions: Versions,
     src: Vec<u64>,
     dst: Vec<u64>,
     edge_type: Vec<u32>,
@@ -226,12 +236,11 @@ struct EdgeGroup {
 
 impl EdgeGroup {
     fn version(&self, row: usize) -> RowVersion {
-        self.versions.get(row).copied().unwrap_or(RowVersion::NONE)
+        self.versions.get(row)
     }
 
     fn version_mut(&mut self, row: usize) -> &mut RowVersion {
-        grow(&mut self.versions, row, RowVersion::NONE);
-        &mut self.versions[row]
+        self.versions.get_mut(row)
     }
 
     /// The row's source, target and type id; the row exists.
@@ -249,12 +258,12 @@ impl EdgeGroup {
     }
 
     fn remove(&mut self, row: usize) {
-        *self.version_mut(row) = RowVersion::NONE;
+        self.versions.remove(row);
         self.columns.clear_row(row);
     }
 
     fn heap_bytes(&self) -> usize {
-        self.versions.capacity() * std::mem::size_of::<RowVersion>()
+        self.versions.heap_bytes()
             + (self.src.capacity() + self.dst.capacity()) * std::mem::size_of::<u64>()
             + self.edge_type.capacity() * std::mem::size_of::<u32>()
             + self.columns.heap_bytes()
@@ -489,6 +498,81 @@ impl RowGroupStore {
                 .sum::<usize>()
     }
 
+    /// Collects what no reader at `horizon` or later can see any more: the
+    /// version info of every vector of rows whose creates and deletes are
+    /// all committed at or before `horizon` collapses to one bit per row,
+    /// and the rows deleted by then are taken out with their values, labels
+    /// and adjacency entries; a row group left without rows goes whole.
+    /// `horizon` is the oldest epoch a reader still reads at (the oldest
+    /// open snapshot; H2c adds the retention window): a reader before it may
+    /// lose rows it saw. Returns the rows taken out.
+    pub fn collect(&self, horizon: EpochId) -> usize {
+        let horizon = horizon.as_u64();
+        let mut inner = self.inner.write();
+        let mut gone = 0;
+        let mut edges: Vec<u64> = Vec::new();
+        for (index, group) in &mut inner.edges {
+            for row in group.versions.collapse(horizon) {
+                group.columns.clear_row(row);
+                edges.push(index * ROWS_PER_GROUP + row as u64);
+            }
+        }
+        gone += edges.len();
+        for edge in edges {
+            let (group, row) = locate(edge);
+            let (src, dst, _) = inner.edges[&group].ends(row);
+            for (node, outgoing) in [(src, true), (dst, false)] {
+                let (group, row) = locate(node);
+                if let Some(group) = inner.nodes.get_mut(&group) {
+                    group.adjacency_mut(outgoing).remove(row, edge);
+                }
+            }
+        }
+        for group in inner.nodes.values_mut() {
+            for row in group.versions.collapse(horizon) {
+                group.clear(row);
+                gone += 1;
+            }
+        }
+        // A row group without rows goes whole, as a load would not make it.
+        inner.edges.retain(|_, group| !group.versions.is_empty());
+        inner.nodes.retain(|_, group| !group.versions.is_empty());
+        gone
+    }
+
+    /// The heap bytes its rows' version info takes.
+    #[must_use]
+    pub fn version_bytes(&self) -> usize {
+        let inner = self.inner.read();
+        inner
+            .nodes
+            .values()
+            .map(|group| group.versions.heap_bytes())
+            .sum::<usize>()
+            + inner
+                .edges
+                .values()
+                .map(|group| group.versions.heap_bytes())
+                .sum::<usize>()
+    }
+
+    /// The vectors of rows, nodes and edges, whose version info holds
+    /// stamps (the others hold one bit per row).
+    #[cfg(test)]
+    pub(crate) fn stamped_vectors(&self) -> usize {
+        let inner = self.inner.read();
+        inner
+            .nodes
+            .values()
+            .map(|group| group.versions.stamped())
+            .sum::<usize>()
+            + inner
+                .edges
+                .values()
+                .map(|group| group.versions.stamped())
+                .sum::<usize>()
+    }
+
     /// Moves the store's epoch to `epoch` if it is later.
     fn sync_epoch(&self, epoch: EpochId) {
         self.epoch.fetch_max(epoch.as_u64(), Ordering::AcqRel);
@@ -503,6 +587,53 @@ impl RowGroupStore {
 #[cfg(test)]
 mod tests {
     use super::{ABSENT, PENDING, Read, RowVersion, locate};
+
+    /// A row `collect` takes out leaves no label, value or adjacency entry
+    /// in its row group, nor does its edge.
+    #[test]
+    fn a_collected_row_leaves_nothing_behind() {
+        use crate::graph::conformance::{Tx, people};
+
+        let store = super::RowGroupStore::new();
+        let people = people(&store).unwrap();
+        let mut tx = Tx::begin(&store, 10);
+        tx.delete_edge(people.gus_mia).unwrap();
+        tx.delete_node(people.mia).unwrap();
+        let epoch = tx.commit().unwrap();
+        let (_, mia) = locate(people.mia.as_u64());
+        let (_, gus) = locate(people.gus.as_u64());
+        let (_, edge) = locate(people.gus_mia.as_u64());
+        {
+            let inner = store.inner.read();
+            let nodes = &inner.nodes[&0];
+            assert_eq!(
+                nodes.labels_of(mia).len(),
+                1,
+                "Mia is a Person until the collect"
+            );
+            assert_eq!(nodes.outgoing.of(gus).count(), 1);
+        }
+        assert_eq!(store.collect(epoch), 2);
+        let inner = store.inner.read();
+        let nodes = &inner.nodes[&0];
+        assert_eq!(nodes.labels_of(mia), Vec::<u32>::new());
+        assert_eq!(
+            nodes.columns.row(mia).count(),
+            0,
+            "no value of Mia's is left"
+        );
+        assert_eq!(nodes.incoming.of(mia).count(), 0);
+        assert_eq!(
+            nodes.outgoing.of(gus).count(),
+            0,
+            "nor Gus's entry of the edge"
+        );
+        assert_eq!(
+            inner.edges[&0].columns.row(edge).count(),
+            0,
+            "nor the edge's since"
+        );
+    }
 
     #[test]
     fn ids_map_to_their_row_group_and_row() {

@@ -39,7 +39,7 @@ use grafeo_common::utils::hash::FxHashMap;
 
 use super::adjacency::{Adjacency, Adjacent};
 use super::adjacency_chunk;
-use super::{ABSENT, Inner, ROWS_PER_GROUP, Read, RowGroupStore, RowVersion, locate};
+use super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore, locate};
 use crate::codec::column_chunk::{ChunkCodec, decode_column_chunk_bytes};
 use crate::codec::{ChunkColumn, RowsChunker};
 use crate::graph::lpg::dictionary::NameDictionary;
@@ -469,7 +469,7 @@ impl Inner {
         // The node table, a file row group at a time.
         let mut nodes: Vec<u64> = Vec::new();
         for (index, group) in &self.nodes {
-            for (row, version) in group.versions.iter().enumerate() {
+            for (row, version) in group.versions.rows() {
                 if version.visible(read) {
                     nodes.push(index * ROWS_PER_GROUP + row as u64);
                 }
@@ -546,7 +546,7 @@ impl Inner {
         // The edge table.
         let mut edges: Vec<u64> = Vec::new();
         for (index, group) in &self.edges {
-            for (row, version) in group.versions.iter().enumerate() {
+            for (row, version) in group.versions.rows() {
                 if version.visible(read) {
                     edges.push(index * ROWS_PER_GROUP + row as u64);
                 }
@@ -792,10 +792,6 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
     // and the pieces and entries of its list so far.
     let mut pieces: FxHashMap<(u32, u8), (u64, u32, u32, usize)> = FxHashMap::default();
     let mut order = (0_usize, 0_u8, 0_u64);
-    let loaded = RowVersion {
-        created: 0,
-        deleted: ABSENT,
-    };
 
     let mut index = 0;
     while index < data.len() {
@@ -892,7 +888,13 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
                     u32::try_from(rows.len()).unwrap_or(u32::MAX);
                 for id in rows {
                     let (group, row) = locate(id);
-                    *graph.inner.nodes.entry(group).or_default().version_mut(row) = loaded;
+                    graph
+                        .inner
+                        .nodes
+                        .entry(group)
+                        .or_default()
+                        .versions
+                        .set_always(row);
                 }
             }
             ChunkNamespace::NodeLabels => {
@@ -1060,7 +1062,7 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
                     }
                     let (group, row) = locate(*id);
                     let group = graph.inner.edges.entry(group).or_default();
-                    *group.version_mut(row) = loaded;
+                    group.versions.set_always(row);
                     group.set_ends(row, *src, dst, edge_type);
                 }
                 index += 2;
@@ -1221,9 +1223,7 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
                 .flat_map(|(index, group)| {
                     group
                         .versions
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, version)| version.exists())
+                        .rows()
                         .map(move |(row, _)| (index * ROWS_PER_GROUP + row as u64, group.ends(row)))
                 })
                 .collect();
@@ -1269,21 +1269,17 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
         // The counts of what was loaded.
         let mut counts = super::Counts::default();
         for group in graph.inner.nodes.values() {
-            for (row, version) in group.versions.iter().enumerate() {
-                if version.exists() {
-                    counts.nodes += 1;
-                    for label in group.labels_of(row) {
-                        counts.label(label, 1);
-                    }
+            for (row, _) in group.versions.rows() {
+                counts.nodes += 1;
+                for label in group.labels_of(row) {
+                    counts.label(label, 1);
                 }
             }
         }
         for group in graph.inner.edges.values() {
-            for (row, version) in group.versions.iter().enumerate() {
-                if version.exists() {
-                    counts.edges += 1;
-                    counts.edge_type(group.ends(row).2, 1);
-                }
+            for (row, _) in group.versions.rows() {
+                counts.edges += 1;
+                counts.edge_type(group.ends(row).2, 1);
             }
         }
         graph.inner.counts = counts;
@@ -1486,6 +1482,29 @@ mod tests {
         }
     }
 
+    /// After `collect` at the store's epoch, with no transaction open, the
+    /// version info costs what a store loaded from its checkpoint holds: one
+    /// bit per row, no stamps.
+    #[test]
+    fn after_collect_the_versions_cost_what_a_loaded_stores_do() {
+        for seed in 1..=10 {
+            let store = workload(seed);
+            let flat = read(&write(&store, ChunkCaps::DEFAULT)).version_bytes();
+            let stamped = store.version_bytes();
+            assert!(
+                stamped >= super::super::VECTOR_ROWS * 16,
+                "seed {seed}: the workload stamped its vectors ({stamped} bytes)"
+            );
+            store.collect(store.current_epoch());
+            assert_eq!(store.version_bytes(), flat, "seed {seed}");
+            assert_same(
+                &read(&write(&store, ChunkCaps::DEFAULT)),
+                &store,
+                "after it",
+            );
+        }
+    }
+
     /// A checkpoint writes the committed state: what an open transaction
     /// created is not in it, and what it deleted still is.
     #[test]
@@ -1682,6 +1701,7 @@ mod tests {
     fn delete_chunks_take_their_rows_out() {
         let (store, [alix, gus, _, vincent]) = four_people();
         let mut chunks = write(&store, ChunkCaps::DEFAULT);
+        let flat = read(&chunks).version_bytes();
         let at = first_edge_chunk(&chunks);
         let (meta, bytes) = bitmap(ChunkNamespace::NodeDeletes, 0, &[vincent.as_u64()]);
         chunks.insert(at, meta, bytes);
@@ -1697,6 +1717,11 @@ mod tests {
         assert_eq!(loaded.edges_from(alix, Direction::Outgoing), Vec::new());
         assert_eq!(loaded.edges_from(gus, Direction::Incoming), Vec::new());
         assert_eq!((loaded.node_count(), loaded.edge_count()), (3, 1));
+        assert_eq!(
+            loaded.version_bytes(),
+            flat,
+            "the deleted rows leave every vector flat, with one bit per row"
+        );
     }
 
     /// Every section a writer does not write is refused as corruption,

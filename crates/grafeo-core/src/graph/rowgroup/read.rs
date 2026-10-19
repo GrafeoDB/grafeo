@@ -124,9 +124,9 @@ impl Inner {
     ) -> Vec<NodeId> {
         let mut ids = Vec::new();
         for (index, group) in &self.nodes {
-            for (row, version) in group.versions.iter().enumerate() {
+            for (row, _) in group.versions.rows() {
                 let id = index * ROWS_PER_GROUP + row as u64;
-                if version.exists() && keep(id, group, row) {
+                if keep(id, group, row) {
                     ids.push(NodeId::new(id));
                 }
             }

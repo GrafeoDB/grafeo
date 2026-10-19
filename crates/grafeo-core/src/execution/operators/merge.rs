@@ -251,7 +251,7 @@ impl MergeOperator {
                         predicate =
                             predicate.with_transaction_context(epoch, self.writer.transaction_id());
                     }
-                    predicate.eval_at(&augmented, 0).unwrap_or(Value::Null)
+                    predicate.eval_at(&augmented, 0)?.unwrap_or(Value::Null)
                 }
                 _ => source.resolve(&augmented, 0, &self.writer),
             };
@@ -686,7 +686,7 @@ impl MergeRelationshipOperator {
                         predicate =
                             predicate.with_transaction_context(epoch, self.writer.transaction_id());
                     }
-                    predicate.eval_at(&augmented, 0).unwrap_or(Value::Null)
+                    predicate.eval_at(&augmented, 0)?.unwrap_or(Value::Null)
                 }
                 _ => source.resolve(&augmented, 0, &self.writer),
             };

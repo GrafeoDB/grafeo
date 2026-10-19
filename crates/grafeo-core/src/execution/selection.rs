@@ -65,6 +65,29 @@ impl SelectionVector {
         Self { indices }
     }
 
+    /// [`from_predicate`](Self::from_predicate) for a predicate that can
+    /// fail: the first error stops the selection and is returned.
+    ///
+    /// # Errors
+    ///
+    /// The predicate's first error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a selected index exceeds `SelectionVector::MAX_CAPACITY` (65535).
+    pub fn try_from_predicate<F, E>(count: usize, mut predicate: F) -> Result<Self, E>
+    where
+        F: FnMut(usize) -> Result<bool, E>,
+    {
+        let mut selection = Self::new_empty();
+        for i in 0..count {
+            if predicate(i)? {
+                selection.push(i);
+            }
+        }
+        Ok(selection)
+    }
+
     /// Returns the number of selected rows.
     #[must_use]
     pub fn len(&self) -> usize {

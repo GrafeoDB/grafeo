@@ -4494,8 +4494,14 @@ fn format_tz_offset(offset_secs: i32) -> String {
 }
 
 impl Predicate for RdfExpressionPredicate {
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
-        matches!(self.eval(chunk, row), Some(Value::Bool(true)))
+    /// SPARQL turns an expression error into an unbound value (SPARQL 1.1,
+    /// 17.3), so a filter never fails the query.
+    fn evaluate(
+        &self,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> std::result::Result<bool, grafeo_core::execution::operators::OperatorError> {
+        Ok(matches!(self.eval(chunk, row), Some(Value::Bool(true))))
     }
 }
 

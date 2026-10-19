@@ -750,23 +750,28 @@ impl Operator for HashJoinOperator {
 
                     // Handle semi/anti joins differently: a probe row has a match
                     // when a pair with the same key passes the residual condition.
-                    let has_match = || {
-                        candidates.is_some_and(|candidates| {
-                            self.residual.as_ref().is_none_or(|residual| {
-                                candidates.iter().any(|&(chunk_idx, row)| {
-                                    residual.evaluate(
-                                        probe_chunk,
-                                        probe_row,
-                                        &self.build_chunks[chunk_idx],
-                                        row,
-                                    )
-                                })
-                            })
-                        })
+                    let has_match = || -> Result<bool, OperatorError> {
+                        let Some(candidates) = candidates else {
+                            return Ok(false);
+                        };
+                        let Some(residual) = self.residual.as_ref() else {
+                            return Ok(true);
+                        };
+                        for &(chunk_idx, row) in candidates {
+                            if residual.evaluate(
+                                probe_chunk,
+                                probe_row,
+                                &self.build_chunks[chunk_idx],
+                                row,
+                            )? {
+                                return Ok(true);
+                            }
+                        }
+                        Ok(false)
                     };
                     match self.join_type {
                         JoinType::Semi => {
-                            if has_match() {
+                            if has_match()? {
                                 // Emit probe row only
                                 for col_idx in 0..probe_chunk.column_count() {
                                     if let (Some(src_col), Some(dst_col)) =
@@ -782,7 +787,7 @@ impl Operator for HashJoinOperator {
                             continue;
                         }
                         JoinType::Anti => {
-                            if !has_match() {
+                            if !has_match()? {
                                 // Emit probe row only
                                 for col_idx in 0..probe_chunk.column_count() {
                                     if let (Some(src_col), Some(dst_col)) =
@@ -820,7 +825,7 @@ impl Operator for HashJoinOperator {
                         let build_chunk = &self.build_chunks[build_chunk_idx];
 
                         if let Some(residual) = &self.residual
-                            && !residual.evaluate(probe_chunk, probe_row, build_chunk, build_row)
+                            && !residual.evaluate(probe_chunk, probe_row, build_chunk, build_row)?
                         {
                             self.current_match_position += 1;
                             continue;
@@ -958,14 +963,19 @@ pub struct NestedLoopJoinOperator {
 
 /// Trait for join conditions.
 pub trait JoinCondition: Send + Sync {
-    /// Evaluates the condition for a pair of rows.
+    /// Evaluates the condition for a pair of rows: whether the pair joins.
+    ///
+    /// # Errors
+    ///
+    /// An error of the evaluation that fails the query (see
+    /// [`Predicate::evaluate`](super::filter::Predicate::evaluate)).
     fn evaluate(
         &self,
         left_chunk: &DataChunk,
         left_row: usize,
         right_chunk: &DataChunk,
         right_row: usize,
-    ) -> bool;
+    ) -> Result<bool, OperatorError>;
 }
 
 /// A condition given by a predicate over the joined row: the left row's
@@ -995,7 +1005,7 @@ impl JoinCondition for JoinedRowCondition {
         left_row: usize,
         right_chunk: &DataChunk,
         right_row: usize,
-    ) -> bool {
+    ) -> Result<bool, OperatorError> {
         let sources: Vec<(&ValueVector, usize)> =
             [(left_chunk, left_row), (right_chunk, right_row)]
                 .into_iter()
@@ -1056,7 +1066,7 @@ impl JoinCondition for EqualityCondition {
         left_row: usize,
         right_chunk: &DataChunk,
         right_row: usize,
-    ) -> bool {
+    ) -> Result<bool, OperatorError> {
         let left_val = left_chunk
             .column(self.left_column)
             .and_then(|c| c.get_value(left_row));
@@ -1064,10 +1074,10 @@ impl JoinCondition for EqualityCondition {
             .column(self.right_column)
             .and_then(|c| c.get_value(right_row));
 
-        match (left_val, right_val) {
+        Ok(match (left_val, right_val) {
             (Some(l), Some(r)) => l == r,
             _ => false,
-        }
+        })
     }
 }
 
@@ -1291,7 +1301,7 @@ impl Operator for NestedLoopJoinOperator {
                         // Check condition
                         let matches = match &self.condition {
                             Some(cond) => {
-                                cond.evaluate(left_chunk, left_row, right_chunk, right_row)
+                                cond.evaluate(left_chunk, left_row, right_chunk, right_row)?
                             }
                             None => true, // Cross join
                         };
@@ -1502,13 +1512,13 @@ mod tests {
     fn test_hash_join_left_outer_with_a_residual() {
         struct LeftIsNot2;
         impl super::super::filter::Predicate for LeftIsNot2 {
-            fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
+            fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
                 assert_eq!(
                     chunk.column_count(),
                     2,
                     "the left column, then the right one"
                 );
-                chunk.column(0).unwrap().get_int64(row) != Some(2)
+                Ok(chunk.column(0).unwrap().get_int64(row) != Some(2))
             }
         }
 
@@ -2146,7 +2156,7 @@ mod tests {
                 store,
             );
             let chunk = DataChunkBuilder::new(&[LogicalType::Int64]).finish();
-            predicate.eval_at(&chunk, 0) == Some(Value::Bool(true))
+            predicate.eval_at(&chunk, 0).unwrap() == Some(Value::Bool(true))
         }
 
         #[test]

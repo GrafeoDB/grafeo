@@ -612,7 +612,7 @@ impl Operator for ProjectOperator {
                         LogicalType::Node | LogicalType::Edge
                     );
                     for row in input.selected_indices() {
-                        let value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
+                        let value = evaluator.eval_at(&input, row)?.unwrap_or(Value::Null);
                         let value = if entities { entity_id(value) } else { value };
                         output_col.push_value(value);
                     }
@@ -695,7 +695,7 @@ impl Operator for ProjectOperator {
 
                     let shape = kind.logical_type();
                     for row in input.selected_indices() {
-                        let value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
+                        let value = evaluator.eval_at(&input, row)?.unwrap_or(Value::Null);
                         output_col.push_value(self.resolve_entities(
                             store.as_ref(),
                             &value,

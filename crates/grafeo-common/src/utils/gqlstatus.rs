@@ -209,6 +209,8 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::Optimization => GqlStatus::SYNTAX_ERROR,
                 QueryErrorKind::Execution => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::Timeout => GqlStatus::DATA_EXCEPTION,
+                QueryErrorKind::NumericOutOfRange => GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
+                QueryErrorKind::DivisionByZero => GqlStatus::DATA_DIVISION_BY_ZERO,
                 // GQL defines no class for a feature an implementation lacks.
                 QueryErrorKind::Unsupported => GqlStatus::SYNTAX_ERROR,
             },
@@ -417,6 +419,32 @@ mod tests {
             GqlStatus::from(&type_err),
             GqlStatus::DATA_INVALID_VALUE_TYPE
         );
+    }
+
+    /// A computation that leaves its type's range or divides by zero is a
+    /// data exception of its own subclass (ISO GQL 22003 and 22012), under the
+    /// code of a statement that failed on its data (#639).
+    #[test]
+    fn numeric_errors_have_their_data_exception_subclass() {
+        use super::super::error::{Error, ErrorCode, QueryError, QueryErrorKind};
+
+        for (kind, status, shown) in [
+            (
+                QueryErrorKind::NumericOutOfRange,
+                GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
+                "numeric value out of range",
+            ),
+            (
+                QueryErrorKind::DivisionByZero,
+                GqlStatus::DATA_DIVISION_BY_ZERO,
+                "division by zero",
+            ),
+        ] {
+            let error = QueryError::new(kind, "integer overflow in 9223372036854775807 + 1");
+            assert_eq!(error.error_code(), ErrorCode::QueryExecution, "{kind}");
+            assert_eq!(kind.to_string(), shown);
+            assert_eq!(GqlStatus::from(&Error::Query(error)), status, "{kind}");
+        }
     }
 
     /// After a commit that did not complete, the database holds a commit

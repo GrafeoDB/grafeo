@@ -391,6 +391,7 @@ impl ShortestPathOperator {
         PathSearch {
             operator: self,
             condition_row,
+            condition_error: RefCell::new(None),
         }
     }
 }
@@ -402,6 +403,9 @@ struct PathSearch<'a> {
     operator: &'a ShortestPathOperator,
     /// The input row and, in its last column, the edge the condition checks.
     condition_row: Option<RefCell<DataChunk>>,
+    /// The first error of the edge condition, which fails the search (see
+    /// [`paths`](Self::paths)).
+    condition_error: RefCell<Option<OperatorError>>,
 }
 
 /// The steps that reach each node of a layer of a search: from which node,
@@ -438,7 +442,13 @@ impl PathSearch<'_> {
                 };
                 column.clear();
                 column.push_edge_id(edge);
-                condition.evaluate(&row, 0)
+                match condition.evaluate(&row, 0) {
+                    Ok(passes) => passes,
+                    Err(error) => {
+                        self.condition_error.borrow_mut().get_or_insert(error);
+                        false
+                    }
+                }
             });
         }
         edges
@@ -449,6 +459,20 @@ impl PathSearch<'_> {
     /// target; none when no path fits. Fails when the search would hold
     /// more than the operator's budget.
     fn paths(
+        &self,
+        source: NodeId,
+        target: Option<NodeId>,
+    ) -> Result<Vec<FoundPath>, OperatorError> {
+        let found = self.search_paths(source, target);
+        match self.condition_error.borrow_mut().take() {
+            Some(error) => Err(error),
+            None => found,
+        }
+    }
+
+    /// The paths of [`paths`](Self::paths), before an error of the edge
+    /// condition is checked.
+    fn search_paths(
         &self,
         source: NodeId,
         target: Option<NodeId>,
@@ -2295,12 +2319,12 @@ mod tests {
     struct AvoidEdges(Vec<EdgeId>);
 
     impl Predicate for AvoidEdges {
-        fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
+        fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
             let edge = chunk
                 .column(chunk.column_count() - 1)
                 .and_then(|column| column.get_edge_id(row))
                 .expect("the candidate edge is in the last column");
-            !self.0.contains(&edge)
+            Ok(!self.0.contains(&edge))
         }
     }
 
@@ -2335,9 +2359,9 @@ mod tests {
     struct RowEdge;
 
     impl Predicate for RowEdge {
-        fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
+        fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
             let edge = |column: usize| chunk.column(column).and_then(|c| c.get_edge_id(row));
-            edge(3).is_some() && edge(3) == edge(2)
+            Ok(edge(3).is_some() && edge(3) == edge(2))
         }
     }
 

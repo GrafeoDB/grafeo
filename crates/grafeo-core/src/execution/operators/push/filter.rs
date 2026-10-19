@@ -10,11 +10,20 @@ use grafeo_common::types::Value;
 /// Predicate for filtering rows.
 pub trait FilterPredicate: Send + Sync {
     /// Evaluate the predicate for a row, returning true if it passes.
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool;
+    ///
+    /// # Errors
+    ///
+    /// An error of the evaluation that fails the query (see
+    /// [`Predicate::evaluate`](crate::execution::operators::Predicate::evaluate)).
+    fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError>;
 
     /// Evaluate predicate for all rows, returning a selection vector.
-    fn evaluate_batch(&self, chunk: &DataChunk) -> SelectionVector {
-        SelectionVector::from_predicate(chunk.len(), |i| self.evaluate(chunk, i))
+    ///
+    /// # Errors
+    ///
+    /// The first error of [`evaluate`](Self::evaluate).
+    fn evaluate_batch(&self, chunk: &DataChunk) -> Result<SelectionVector, OperatorError> {
+        SelectionVector::try_from_predicate(chunk.len(), |i| self.evaluate(chunk, i))
     }
 }
 
@@ -47,16 +56,16 @@ pub enum CompareOp {
 }
 
 impl FilterPredicate for ColumnPredicate {
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
+    fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
         let Some(col) = chunk.column(self.column) else {
-            return false;
+            return Ok(false);
         };
 
         let Some(val) = col.get_value(row) else {
-            return false;
+            return Ok(false);
         };
 
-        match self.op {
+        Ok(match self.op {
             CompareOp::Eq => val == self.value,
             CompareOp::Ne => val != self.value,
             CompareOp::Lt => compare_values(&val, &self.value) == Some(std::cmp::Ordering::Less),
@@ -73,7 +82,7 @@ impl FilterPredicate for ColumnPredicate {
                     Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
                 )
             }
-        }
+        })
     }
 }
 
@@ -91,8 +100,8 @@ impl<L, R> AndPredicate<L, R> {
 }
 
 impl<L: FilterPredicate, R: FilterPredicate> FilterPredicate for AndPredicate<L, R> {
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
-        self.left.evaluate(chunk, row) && self.right.evaluate(chunk, row)
+    fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
+        Ok(self.left.evaluate(chunk, row)? && self.right.evaluate(chunk, row)?)
     }
 }
 
@@ -110,8 +119,8 @@ impl<L, R> OrPredicate<L, R> {
 }
 
 impl<L: FilterPredicate, R: FilterPredicate> FilterPredicate for OrPredicate<L, R> {
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
-        self.left.evaluate(chunk, row) || self.right.evaluate(chunk, row)
+    fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
+        Ok(self.left.evaluate(chunk, row)? || self.right.evaluate(chunk, row)?)
     }
 }
 
@@ -128,11 +137,11 @@ impl NotNullPredicate {
 }
 
 impl FilterPredicate for NotNullPredicate {
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
-        chunk
+    fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
+        Ok(chunk
             .column(self.column)
             .and_then(|c| c.get_value(row))
-            .is_some_and(|v| !matches!(v, Value::Null))
+            .is_some_and(|v| !matches!(v, Value::Null)))
     }
 }
 
@@ -162,7 +171,7 @@ impl PushOperator for FilterPushOperator {
         }
 
         // Evaluate predicate on all rows
-        let selection = self.predicate.evaluate_batch(&chunk);
+        let selection = self.predicate.evaluate_batch(&chunk)?;
 
         if selection.is_empty() {
             // No rows match, nothing to forward

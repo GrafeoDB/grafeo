@@ -937,6 +937,7 @@ impl super::Planner {
         .with_session_context(self.session_context.clone());
         evaluator
             .eval_at(&grafeo_core::execution::DataChunk::empty(), 0)
+            .map_err(crate::query::executor::convert_operator_error)?
             .ok_or_else(|| {
                 semantic(format!(
                     "Argument '{argument}' of {procedure} cannot be evaluated"
@@ -1478,10 +1479,14 @@ impl super::Planner {
                     function: *function,
                     args,
                 };
+                // A call that fails is left to run with the statement, which
+                // reports its error.
                 ExpressionPredicate::new(call, HashMap::new(), Arc::clone(&self.store))
                     .with_transaction_context(self.viewing_epoch, self.transaction_id)
                     .with_session_context(self.session_context.clone())
                     .eval_at(&DataChunk::empty(), 0)
+                    .ok()
+                    .flatten()
             }
             LogicalExpression::Map(entries) => {
                 let folded: Option<Vec<(String, Value)>> = entries

@@ -14,8 +14,8 @@ use super::operators::{
     SortPushOperator,
 };
 use super::operators::{
-    DistinctOperator, FilterOperator, HashAggregateOperator, LimitOperator, Operator, Predicate,
-    SortOperator,
+    DistinctOperator, FilterOperator, HashAggregateOperator, LimitOperator, Operator,
+    OperatorError, Predicate, SortOperator,
 };
 use super::pipeline::PushOperator;
 
@@ -27,7 +27,7 @@ use super::pipeline::PushOperator;
 pub struct PredicateAdapter(pub Box<dyn Predicate>);
 
 impl FilterPredicate for PredicateAdapter {
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
+    fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
         self.0.evaluate(chunk, row)
     }
 }
@@ -279,8 +279,8 @@ mod tests {
     struct AlwaysTruePredicate;
 
     impl Predicate for AlwaysTruePredicate {
-        fn evaluate(&self, _chunk: &DataChunk, _row: usize) -> bool {
-            true
+        fn evaluate(&self, _chunk: &DataChunk, _row: usize) -> Result<bool, OperatorError> {
+            Ok(true)
         }
     }
 
@@ -607,7 +607,7 @@ mod tests {
         let chunk = DataChunk::new(vec![col]);
 
         let adapter = PredicateAdapter(Box::new(AlwaysTruePredicate));
-        assert!(adapter.evaluate(&chunk, 0));
+        assert!(adapter.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]

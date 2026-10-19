@@ -675,7 +675,9 @@ impl QueryError {
             QueryErrorKind::Lexer | QueryErrorKind::Syntax => ErrorCode::QuerySyntax,
             QueryErrorKind::Semantic => ErrorCode::QuerySemantic,
             QueryErrorKind::Optimization => ErrorCode::QueryOptimization,
-            QueryErrorKind::Execution => ErrorCode::QueryExecution,
+            QueryErrorKind::Execution
+            | QueryErrorKind::NumericOutOfRange
+            | QueryErrorKind::DivisionByZero => ErrorCode::QueryExecution,
             QueryErrorKind::Timeout => ErrorCode::QueryTimeout,
             QueryErrorKind::Unsupported => ErrorCode::QueryUnsupported,
         }
@@ -761,6 +763,11 @@ pub enum QueryErrorKind {
     /// The database or the build cannot run the statement: a feature not
     /// built in, or a language of another graph model.
     Unsupported,
+    /// A computation left the range of its type: an integer overflow, or a
+    /// decimal of more than 38 digits (GQLSTATUS 22003).
+    NumericOutOfRange,
+    /// An integer or decimal division or modulo by zero (GQLSTATUS 22012).
+    DivisionByZero,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -773,6 +780,8 @@ impl fmt::Display for QueryErrorKind {
             QueryErrorKind::Execution => write!(f, "execution error"),
             QueryErrorKind::Timeout => write!(f, "timeout error"),
             QueryErrorKind::Unsupported => write!(f, "unsupported"),
+            QueryErrorKind::NumericOutOfRange => write!(f, "numeric value out of range"),
+            QueryErrorKind::DivisionByZero => write!(f, "division by zero"),
         }
     }
 }

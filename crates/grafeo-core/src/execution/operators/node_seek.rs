@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, LogicalType, NodeId, TransactionId, Value};
 
-use super::{ExpressionPredicate, Operator, OperatorResult};
+use super::{ExpressionPredicate, Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::GraphStoreSearch;
 
@@ -104,9 +104,9 @@ impl NodeSeekOperator {
 
     /// The visible nodes with the label that the key of `row` selects, in ID
     /// order.
-    fn find(&self, chunk: &DataChunk, row: usize) -> Vec<NodeId> {
-        let Some(key) = self.key_expression.eval_at(chunk, row) else {
-            return Vec::new();
+    fn find(&self, chunk: &DataChunk, row: usize) -> Result<Vec<NodeId>, OperatorError> {
+        let Some(key) = self.key_expression.eval_at(chunk, row)? else {
+            return Ok(Vec::new());
         };
         let keys = if self.list {
             match key {
@@ -133,7 +133,7 @@ impl NodeSeekOperator {
         found.sort_unstable();
         found.dedup();
         found.retain(|&id| self.visible_with_label(id));
-        found
+        Ok(found)
     }
 
     fn visible_with_label(&self, id: NodeId) -> bool {
@@ -153,7 +153,7 @@ impl NodeSeekOperator {
 
     /// Joins rows of `chunk`, from `next_row` on, with their matches until
     /// the output is full or the chunk is done.
-    fn fill(&mut self, chunk: &DataChunk) -> Option<DataChunk> {
+    fn fill(&mut self, chunk: &DataChunk) -> Result<Option<DataChunk>, OperatorError> {
         let columns = chunk.column_count();
         let mut schema: Vec<LogicalType> = (0..columns)
             .map(|i| {
@@ -172,7 +172,7 @@ impl NodeSeekOperator {
                 }
                 self.current_row = self.next_row;
                 self.next_row += 1;
-                self.matches = self.find(chunk, self.current_row);
+                self.matches = self.find(chunk, self.current_row)?;
                 self.next_match = 0;
                 continue;
             }
@@ -189,10 +189,10 @@ impl NodeSeekOperator {
             self.next_match += 1;
             count += 1;
         }
-        (count > 0).then(|| {
+        Ok((count > 0).then(|| {
             output.set_count(count);
             output
-        })
+        }))
     }
 }
 
@@ -212,7 +212,7 @@ impl Operator for NodeSeekOperator {
                     chunk
                 }
             };
-            let output = self.fill(&chunk);
+            let output = self.fill(&chunk)?;
             let done = self.next_row >= chunk.row_count() && self.next_match >= self.matches.len();
             if !done {
                 self.current_input = Some(chunk);

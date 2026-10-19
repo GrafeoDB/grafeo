@@ -112,7 +112,11 @@ impl CheckExpression {
                 ValueVector::from_values(&[value])
             })
             .collect();
-        match self.predicate.eval_at(&DataChunk::new(columns), 0) {
+        let value = self
+            .predicate
+            .eval_at(&DataChunk::new(columns), 0)
+            .map_err(|error| format!("({}): {error}", self.text))?;
+        match value {
             Some(Value::Bool(holds)) => Ok(holds),
             Some(Value::Null) | None => Ok(false),
             Some(other) => Err(format!("({}) gives {other:?}, not a boolean", self.text)),

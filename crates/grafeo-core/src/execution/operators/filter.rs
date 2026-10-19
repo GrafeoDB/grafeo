@@ -4,7 +4,7 @@ use super::functions::{BuiltinFunction, FunctionGroup};
 use super::project::{
     field_type, holds_entities, item_type_at, list_type, reversed_type, slice_type, struct_type,
 };
-use super::{Operator, OperatorResult};
+use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::{ChunkZoneHints, DataChunk, SelectionVector, ValueVector};
 use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
@@ -79,8 +79,13 @@ fn map_int_or(m: &BTreeMap<PropertyKey, Value>, key: &str, default: i64) -> Opti
 
 /// A predicate for filtering rows.
 pub trait Predicate: Send + Sync {
-    /// Evaluates the predicate for a single row.
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool;
+    /// Evaluates the predicate for a single row: whether the row passes.
+    ///
+    /// # Errors
+    ///
+    /// An error of the evaluation that fails the query, such as an integer
+    /// overflow or a division by zero.
+    fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError>;
 
     /// Returns `false` if zone map proves no rows in this chunk can match.
     ///
@@ -135,7 +140,19 @@ impl ComparisonPredicate {
 
 #[cfg(test)]
 impl Predicate for ComparisonPredicate {
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
+    fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
+        Ok(self.matches(chunk, row))
+    }
+
+    fn might_match_chunk(&self, hints: &ChunkZoneHints) -> bool {
+        self.might_match(hints)
+    }
+}
+
+#[cfg(test)]
+impl ComparisonPredicate {
+    /// Whether row `row` of `chunk` passes the comparison.
+    fn matches(&self, chunk: &DataChunk, row: usize) -> bool {
         let Some(col) = chunk.column(self.column) else {
             return false;
         };
@@ -201,7 +218,8 @@ impl Predicate for ComparisonPredicate {
         }
     }
 
-    fn might_match_chunk(&self, hints: &ChunkZoneHints) -> bool {
+    /// Whether a chunk with `hints` may hold a row that passes.
+    fn might_match(&self, hints: &ChunkZoneHints) -> bool {
         let Some(zone_map) = hints.column_hints.get(&self.column) else {
             return true; // No zone map for this column = conservative
         };
@@ -236,6 +254,44 @@ pub struct ExpressionPredicate {
     session_context: SessionContext,
     /// Compiled patterns of `=~` and `LIKE` (see [`PatternCache`]).
     patterns: Arc<PatternCache>,
+    /// The first error of an evaluation (see [`ErrorSlot`]), shared with the
+    /// list scopes the evaluator creates.
+    errors: Arc<ErrorSlot>,
+}
+
+/// Where an evaluation records the error that fails the query: evaluation
+/// goes on returning `None` (as for a null), and every public entry point
+/// ([`ExpressionPredicate::eval_at`], [`Predicate::evaluate`]) returns the
+/// error, so the calling operator stops the query with it.
+#[derive(Default)]
+struct ErrorSlot {
+    /// Whether an error is recorded: one load per evaluation on the path
+    /// without an error.
+    failed: std::sync::atomic::AtomicBool,
+    error: parking_lot::Mutex<Option<OperatorError>>,
+}
+
+impl ErrorSlot {
+    /// Records `error` unless one is already recorded (the first wins).
+    fn record(&self, error: OperatorError) {
+        let mut slot = self.error.lock();
+        if slot.is_none() {
+            *slot = Some(error);
+            self.failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// The recorded error, taken out, or `None`.
+    fn take(&self) -> Option<OperatorError> {
+        if !self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        let error = self.error.lock().take();
+        self.failed
+            .store(false, std::sync::atomic::Ordering::Release);
+        error
+    }
 }
 
 /// Compiled patterns of `=~` and `LIKE`, by their final regex text, shared by
@@ -593,6 +649,7 @@ impl ExpressionPredicate {
             viewing_epoch: None,
             session_context: SessionContext::default(),
             patterns: Arc::default(),
+            errors: Arc::default(),
         }
     }
 
@@ -1045,8 +1102,22 @@ impl ExpressionPredicate {
 
     /// Evaluates the expression for a specific row in a chunk, returning the result value.
     /// This is useful for evaluating expressions in contexts like RETURN clauses.
-    pub fn eval_at(&self, chunk: &DataChunk, row: usize) -> Option<Value> {
-        self.eval_expr(&self.expression, chunk, row)
+    ///
+    /// # Errors
+    ///
+    /// An error of the evaluation that fails the query, such as an integer
+    /// overflow or a division by zero.
+    pub fn eval_at(&self, chunk: &DataChunk, row: usize) -> Result<Option<Value>, OperatorError> {
+        let value = self.eval_expr(&self.expression, chunk, row);
+        self.errors.take().map_or(Ok(value), Err)
+    }
+
+    /// Records `error`, which fails the query (see [`ErrorSlot`]), and gives
+    /// the `None` evaluation goes on with.
+    #[allow(dead_code, reason = "the numeric errors of #639 record through it")]
+    fn fail(&self, error: OperatorError) -> Option<Value> {
+        self.errors.record(error);
+        None
     }
 
     /// Evaluates the expression for a row, returning the result value.
@@ -4260,6 +4331,7 @@ impl ItemScope {
                 viewing_epoch: outer.viewing_epoch,
                 session_context: outer.session_context.clone(),
                 patterns: Arc::clone(&outer.patterns),
+                errors: Arc::clone(&outer.errors),
             },
             chunk: DataChunk::new(columns),
             first,
@@ -4313,11 +4385,9 @@ impl ItemScope {
 }
 
 impl Predicate for ExpressionPredicate {
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
-        match self.eval(chunk, row) {
-            Some(Value::Bool(b)) => b,
-            _ => false,
-        }
+    fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
+        let passes = matches!(self.eval(chunk, row), Some(Value::Bool(true)));
+        self.errors.take().map_or(Ok(passes), Err)
     }
 }
 
@@ -4362,7 +4432,7 @@ impl Operator for FilterOperator {
                 let mut sel = SelectionVector::new_empty();
                 for pos in 0..existing.len() {
                     if let Some(row) = existing.get(pos)
-                        && self.predicate.evaluate(&chunk, row)
+                        && self.predicate.evaluate(&chunk, row)?
                     {
                         sel.push(row);
                     }
@@ -4370,7 +4440,9 @@ impl Operator for FilterOperator {
                 sel
             } else {
                 let count = chunk.total_row_count();
-                SelectionVector::from_predicate(count, |row| self.predicate.evaluate(&chunk, row))
+                SelectionVector::try_from_predicate(count, |row| {
+                    self.predicate.evaluate(&chunk, row)
+                })?
             };
 
             // If nothing passes, skip to next chunk
@@ -4503,7 +4575,7 @@ mod tests {
         let chunk = builder.finish();
 
         // Should match
-        assert!(predicate.evaluate(&chunk, 0));
+        assert!(predicate.evaluate(&chunk, 0).unwrap());
 
         // Test non-matching pattern
         let predicate_no_match = ExpressionPredicate::new(
@@ -4517,7 +4589,7 @@ mod tests {
         );
 
         // Should not match
-        assert!(!predicate_no_match.evaluate(&chunk, 0));
+        assert!(!predicate_no_match.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -4547,7 +4619,7 @@ mod tests {
         );
 
         // 2^3 should equal 8.0
-        assert!(predicate.evaluate(&chunk, 0));
+        assert!(predicate.evaluate(&chunk, 0).unwrap());
 
         // Test with floats: 2.5^2.0 = 6.25
         let predicate_float = ExpressionPredicate::new(
@@ -4564,7 +4636,7 @@ mod tests {
             store,
         );
 
-        assert!(predicate_float.evaluate(&chunk, 0));
+        assert!(predicate_float.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -4638,7 +4710,7 @@ mod tests {
             Arc::clone(&store),
         );
 
-        assert!(predicate.evaluate(&chunk, 0));
+        assert!(predicate.evaluate(&chunk, 0).unwrap());
 
         // Test negative indexing: [1, 2, 3][-1] = 3
         let predicate_neg = ExpressionPredicate::new(
@@ -4658,7 +4730,7 @@ mod tests {
             store,
         );
 
-        assert!(predicate_neg.evaluate(&chunk, 0));
+        assert!(predicate_neg.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -4817,17 +4889,17 @@ mod tests {
 
         // Test string equality
         let pred_eq = ComparisonPredicate::new(0, CompareOp::Eq, Value::String("banana".into()));
-        assert!(pred_eq.evaluate(&chunk, 0));
+        assert!(pred_eq.evaluate(&chunk, 0).unwrap());
 
         let pred_ne = ComparisonPredicate::new(0, CompareOp::Ne, Value::String("apple".into()));
-        assert!(pred_ne.evaluate(&chunk, 0));
+        assert!(pred_ne.evaluate(&chunk, 0).unwrap());
 
         // Test string ordering
         let pred_lt = ComparisonPredicate::new(0, CompareOp::Lt, Value::String("cherry".into()));
-        assert!(pred_lt.evaluate(&chunk, 0)); // "banana" < "cherry"
+        assert!(pred_lt.evaluate(&chunk, 0).unwrap()); // "banana" < "cherry"
 
         let pred_gt = ComparisonPredicate::new(0, CompareOp::Gt, Value::String("apple".into()));
-        assert!(pred_gt.evaluate(&chunk, 0)); // "banana" > "apple"
+        assert!(pred_gt.evaluate(&chunk, 0).unwrap()); // "banana" > "apple"
     }
 
     #[test]
@@ -4843,17 +4915,17 @@ mod tests {
         // Test float equality (within epsilon)
         let pred_eq =
             ComparisonPredicate::new(0, CompareOp::Eq, Value::Float64(std::f64::consts::PI));
-        assert!(pred_eq.evaluate(&chunk, 0));
+        assert!(pred_eq.evaluate(&chunk, 0).unwrap());
 
         let pred_ne = ComparisonPredicate::new(0, CompareOp::Ne, Value::Float64(2.71));
-        assert!(pred_ne.evaluate(&chunk, 0));
+        assert!(pred_ne.evaluate(&chunk, 0).unwrap());
 
         let pred_lt = ComparisonPredicate::new(0, CompareOp::Lt, Value::Float64(4.0));
-        assert!(pred_lt.evaluate(&chunk, 0));
+        assert!(pred_lt.evaluate(&chunk, 0).unwrap());
 
         let pred_ge =
             ComparisonPredicate::new(0, CompareOp::Ge, Value::Float64(std::f64::consts::PI));
-        assert!(pred_ge.evaluate(&chunk, 0));
+        assert!(pred_ge.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -4864,14 +4936,14 @@ mod tests {
         let chunk = builder.finish();
 
         let pred_eq = ComparisonPredicate::new(0, CompareOp::Eq, Value::Bool(true));
-        assert!(pred_eq.evaluate(&chunk, 0));
+        assert!(pred_eq.evaluate(&chunk, 0).unwrap());
 
         let pred_ne = ComparisonPredicate::new(0, CompareOp::Ne, Value::Bool(false));
-        assert!(pred_ne.evaluate(&chunk, 0));
+        assert!(pred_ne.evaluate(&chunk, 0).unwrap());
 
         // Ordering on booleans returns false
         let pred_lt = ComparisonPredicate::new(0, CompareOp::Lt, Value::Bool(false));
-        assert!(!pred_lt.evaluate(&chunk, 0));
+        assert!(!pred_lt.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -4891,7 +4963,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_not.evaluate(&chunk, 0));
+        assert!(pred_not.evaluate(&chunk, 0).unwrap());
 
         // Test IS NULL
         let pred_is_null = ExpressionPredicate::new(
@@ -4902,7 +4974,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_is_null.evaluate(&chunk, 0));
+        assert!(pred_is_null.evaluate(&chunk, 0).unwrap());
 
         // Test IS NOT NULL
         let pred_is_not_null = ExpressionPredicate::new(
@@ -4913,7 +4985,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_is_not_null.evaluate(&chunk, 0));
+        assert!(pred_is_not_null.evaluate(&chunk, 0).unwrap());
 
         // Test negation
         let pred_neg = ExpressionPredicate::new(
@@ -4928,7 +5000,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_neg.evaluate(&chunk, 0));
+        assert!(pred_neg.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -4953,7 +5025,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_add.evaluate(&chunk, 0));
+        assert!(pred_add.evaluate(&chunk, 0).unwrap());
 
         // Test Sub: 10 - 4 = 6
         let pred_sub = ExpressionPredicate::new(
@@ -4969,7 +5041,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_sub.evaluate(&chunk, 0));
+        assert!(pred_sub.evaluate(&chunk, 0).unwrap());
 
         // Test Mul: 3 * 4 = 12
         let pred_mul = ExpressionPredicate::new(
@@ -4985,7 +5057,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_mul.evaluate(&chunk, 0));
+        assert!(pred_mul.evaluate(&chunk, 0).unwrap());
 
         // Test Div: 20 / 4 = 5
         let pred_div = ExpressionPredicate::new(
@@ -5001,7 +5073,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_div.evaluate(&chunk, 0));
+        assert!(pred_div.evaluate(&chunk, 0).unwrap());
 
         // Test Mod: 17 % 5 = 2
         let pred_mod = ExpressionPredicate::new(
@@ -5017,7 +5089,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_mod.evaluate(&chunk, 0));
+        assert!(pred_mod.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5040,7 +5112,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_starts.evaluate(&chunk, 0));
+        assert!(pred_starts.evaluate(&chunk, 0).unwrap());
 
         // Test ENDS WITH
         let pred_ends = ExpressionPredicate::new(
@@ -5054,7 +5126,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_ends.evaluate(&chunk, 0));
+        assert!(pred_ends.evaluate(&chunk, 0).unwrap());
 
         // Test CONTAINS
         let pred_contains = ExpressionPredicate::new(
@@ -5068,7 +5140,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_contains.evaluate(&chunk, 0));
+        assert!(pred_contains.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5095,7 +5167,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_in.evaluate(&chunk, 0));
+        assert!(pred_in.evaluate(&chunk, 0).unwrap());
 
         // Test 10 NOT IN [1, 2, 3]
         let pred_not_in = ExpressionPredicate::new(
@@ -5114,7 +5186,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_not_in.evaluate(&chunk, 0));
+        assert!(pred_not_in.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5135,7 +5207,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_and.evaluate(&chunk, 0));
+        assert!(pred_and.evaluate(&chunk, 0).unwrap());
 
         // Test OR: false OR true = true
         let pred_or = ExpressionPredicate::new(
@@ -5147,7 +5219,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_or.evaluate(&chunk, 0));
+        assert!(pred_or.evaluate(&chunk, 0).unwrap());
 
         // Test XOR: true XOR false = true
         let pred_xor = ExpressionPredicate::new(
@@ -5159,7 +5231,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_xor.evaluate(&chunk, 0));
+        assert!(pred_xor.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5195,7 +5267,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_case.evaluate(&chunk, 0));
+        assert!(pred_case.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5229,7 +5301,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_case.evaluate(&chunk, 0));
+        assert!(pred_case.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5257,7 +5329,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_head.evaluate(&chunk, 0));
+        assert!(pred_head.evaluate(&chunk, 0).unwrap());
 
         // Test last([1, 2, 3]) = 3
         let pred_last = ExpressionPredicate::new(
@@ -5276,7 +5348,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_last.evaluate(&chunk, 0));
+        assert!(pred_last.evaluate(&chunk, 0).unwrap());
 
         // Test size([1, 2, 3]) = 3
         let pred_size = ExpressionPredicate::new(
@@ -5295,7 +5367,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_size.evaluate(&chunk, 0));
+        assert!(pred_size.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5319,7 +5391,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_to_int.evaluate(&chunk, 0));
+        assert!(pred_to_int.evaluate(&chunk, 0).unwrap());
 
         // Test toFloat(42) = 42.0
         let pred_to_float = ExpressionPredicate::new(
@@ -5334,7 +5406,7 @@ mod tests {
             variable_columns.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_to_float.evaluate(&chunk, 0));
+        assert!(pred_to_float.evaluate(&chunk, 0).unwrap());
 
         // Test toBoolean("true") = true
         let pred_to_bool = ExpressionPredicate::new(
@@ -5349,7 +5421,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_to_bool.evaluate(&chunk, 0));
+        assert!(pred_to_bool.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5377,7 +5449,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_coalesce.evaluate(&chunk, 0));
+        assert!(pred_coalesce.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5455,7 +5527,7 @@ mod tests {
             variable_columns,
             store,
         );
-        assert!(pred_mixed.evaluate(&chunk, 0));
+        assert!(pred_mixed.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5607,7 +5679,7 @@ mod tests {
             store.clone() as Arc<dyn GraphStoreSearch>,
         );
 
-        assert!(pred.evaluate(&chunk, 0));
+        assert!(pred.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -5624,15 +5696,15 @@ mod tests {
 
         // Test >= 0
         let pred_ge = ComparisonPredicate::new(0, CompareOp::Ge, Value::Int64(0));
-        assert!(pred_ge.evaluate(&chunk, 0)); // i64::MAX >= 0
-        assert!(!pred_ge.evaluate(&chunk, 1)); // i64::MIN >= 0 is false
-        assert!(pred_ge.evaluate(&chunk, 2)); // 0 >= 0
+        assert!(pred_ge.evaluate(&chunk, 0).unwrap()); // i64::MAX >= 0
+        assert!(!pred_ge.evaluate(&chunk, 1).unwrap()); // i64::MIN >= 0 is false
+        assert!(pred_ge.evaluate(&chunk, 2).unwrap()); // 0 >= 0
 
         // Test <= 0
         let pred_le = ComparisonPredicate::new(0, CompareOp::Le, Value::Int64(0));
-        assert!(!pred_le.evaluate(&chunk, 0)); // i64::MAX <= 0 is false
-        assert!(pred_le.evaluate(&chunk, 1)); // i64::MIN <= 0
-        assert!(pred_le.evaluate(&chunk, 2)); // 0 <= 0
+        assert!(!pred_le.evaluate(&chunk, 0).unwrap()); // i64::MAX <= 0 is false
+        assert!(pred_le.evaluate(&chunk, 1).unwrap()); // i64::MIN <= 0
+        assert!(pred_le.evaluate(&chunk, 2).unwrap()); // 0 <= 0
     }
 
     // ── Cross-type equality (String ↔ numeric) ──────────────────────────
@@ -5659,7 +5731,7 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        assert!(pred.evaluate(&chunk, 0));
+        assert!(pred.evaluate(&chunk, 0).unwrap());
 
         // String "42" != Int64(99)
         let pred_ne = ExpressionPredicate::new(
@@ -5671,7 +5743,7 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_ne.evaluate(&chunk, 0));
+        assert!(pred_ne.evaluate(&chunk, 0).unwrap());
 
         // Non-numeric string should NOT equal any integer
         let pred_bad = ExpressionPredicate::new(
@@ -5683,7 +5755,7 @@ mod tests {
             vc,
             store,
         );
-        assert!(!pred_bad.evaluate(&chunk, 0));
+        assert!(!pred_bad.evaluate(&chunk, 0).unwrap());
     }
 
     /// String ↔ Float64 equality: "7.25" == Float64(7.25)
@@ -5705,7 +5777,7 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        assert!(pred.evaluate(&chunk, 0));
+        assert!(pred.evaluate(&chunk, 0).unwrap());
 
         // "7.25" != 2.5
         let pred_ne = ExpressionPredicate::new(
@@ -5717,7 +5789,7 @@ mod tests {
             vc,
             store,
         );
-        assert!(pred_ne.evaluate(&chunk, 0));
+        assert!(pred_ne.evaluate(&chunk, 0).unwrap());
     }
 
     // ── Cross-type ordering (String ↔ numeric) ──────────────────────────
@@ -5743,7 +5815,7 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_gt.evaluate(&chunk, 0));
+        assert!(pred_gt.evaluate(&chunk, 0).unwrap());
 
         // Int64(10) < "20.5" (cross Float64 path)
         let pred_lt = ExpressionPredicate::new(
@@ -5755,7 +5827,7 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_lt.evaluate(&chunk, 0));
+        assert!(pred_lt.evaluate(&chunk, 0).unwrap());
 
         // "2.5" <= Float64(2.5)
         let pred_le = ExpressionPredicate::new(
@@ -5767,7 +5839,7 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        assert!(pred_le.evaluate(&chunk, 0));
+        assert!(pred_le.evaluate(&chunk, 0).unwrap());
 
         // Float64(100.0) >= "99.9"
         let pred_ge = ExpressionPredicate::new(
@@ -5779,7 +5851,7 @@ mod tests {
             vc,
             store,
         );
-        assert!(pred_ge.evaluate(&chunk, 0));
+        assert!(pred_ge.evaluate(&chunk, 0).unwrap());
     }
 
     // ── Stacked filter (selection vector preservation) ───────────────────
@@ -5832,7 +5904,7 @@ mod tests {
         let pred = ExpressionPredicate::new(expr, HashMap::new(), store);
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
-        pred.eval_at(&chunk, 0)
+        pred.eval_at(&chunk, 0).unwrap()
     }
 
     fn binary(left: Value, op: BinaryFilterOp, right: Value) -> FilterExpression {
@@ -6159,7 +6231,7 @@ mod tests {
         let pred = ExpressionPredicate::new(expr, HashMap::new(), store);
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
-        let result = pred.eval_at(&chunk, 0);
+        let result = pred.eval_at(&chunk, 0).unwrap();
         assert_eq!(result, Some(Value::Bool(true)));
     }
 
@@ -6237,7 +6309,7 @@ mod tests {
             ])),
         };
         let pred = ExpressionPredicate::new(expr, HashMap::new(), Arc::clone(&store));
-        let result = pred.eval_at(&chunk, 0);
+        let result = pred.eval_at(&chunk, 0).unwrap();
         assert_eq!(result, Some(Value::Bool(true)));
 
         // 5 IN [1, 2, 3] should be false
@@ -6251,7 +6323,7 @@ mod tests {
             ])),
         };
         let pred = ExpressionPredicate::new(expr, HashMap::new(), Arc::clone(&store));
-        let result = pred.eval_at(&chunk, 0);
+        let result = pred.eval_at(&chunk, 0).unwrap();
         assert_eq!(result, Some(Value::Bool(false)));
     }
 
@@ -6274,7 +6346,7 @@ mod tests {
             ])),
         };
         let pred = ExpressionPredicate::new(expr, HashMap::new(), store);
-        let result = pred.eval_at(&chunk, 0);
+        let result = pred.eval_at(&chunk, 0).unwrap();
         assert_eq!(result, Some(Value::Bool(true)));
     }
 
@@ -6872,7 +6944,10 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        assert_eq!(pred.eval_at(&chunk, 0), Some(Value::String("true".into())));
+        assert_eq!(
+            pred.eval_at(&chunk, 0).unwrap(),
+            Some(Value::String("true".into()))
+        );
 
         // Float -> String
         let pred = ExpressionPredicate::new(
@@ -6883,7 +6958,10 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        assert_eq!(pred.eval_at(&chunk, 0), Some(Value::String("2.72".into())));
+        assert_eq!(
+            pred.eval_at(&chunk, 0).unwrap(),
+            Some(Value::String("2.72".into()))
+        );
 
         // Null -> Null
         let pred = ExpressionPredicate::new(
@@ -6894,7 +6972,7 @@ mod tests {
             vc,
             store,
         );
-        assert_eq!(pred.eval_at(&chunk, 0), Some(Value::Null));
+        assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Null));
     }
 
     #[test]
@@ -6913,7 +6991,7 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        assert_eq!(pred.eval_at(&chunk, 0), Some(Value::Bool(true)));
+        assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Bool(true)));
 
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
@@ -6923,7 +7001,7 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        assert_eq!(pred.eval_at(&chunk, 0), Some(Value::Bool(false)));
+        assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Bool(false)));
 
         let pred = ExpressionPredicate::new(
             FilterExpression::FunctionCall {
@@ -6933,7 +7011,7 @@ mod tests {
             vc,
             store,
         );
-        assert_eq!(pred.eval_at(&chunk, 0), Some(Value::Bool(true)));
+        assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Bool(true)));
     }
 
     #[test]
@@ -6952,7 +7030,7 @@ mod tests {
             vc.clone(),
             Arc::clone(&store),
         );
-        if let Some(Value::Float64(v)) = pred.eval_at(&chunk, 0) {
+        if let Some(Value::Float64(v)) = pred.eval_at(&chunk, 0).unwrap() {
             assert!((v - 2.72).abs() < 0.001);
         } else {
             panic!("Expected Float64");
@@ -6966,7 +7044,7 @@ mod tests {
             vc,
             store,
         );
-        assert_eq!(pred.eval_at(&chunk, 0), Some(Value::Float64(42.0)));
+        assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Float64(42.0)));
     }
 
     #[test]
@@ -6985,7 +7063,7 @@ mod tests {
             vc,
             store,
         );
-        assert_eq!(pred.eval_at(&chunk, 0), Some(Value::Int64(3)));
+        assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Int64(3)));
     }
 
     #[test]
@@ -7130,12 +7208,12 @@ mod text_fn_tests {
 
         // n1 matches "rust database" — should pass
         assert!(
-            predicate.evaluate(&chunk, 0),
+            predicate.evaluate(&chunk, 0).unwrap(),
             "n1 should score > 0 for 'rust database'"
         );
         // n2 does not match — should fail
         assert!(
-            !predicate.evaluate(&chunk, 1),
+            !predicate.evaluate(&chunk, 1).unwrap(),
             "n2 should score 0 for 'rust database'"
         );
     }
@@ -7271,9 +7349,15 @@ mod text_fn_tests {
         );
 
         // n1 contains "rust" — text_match should return Bool(true) → evaluates to true
-        assert!(predicate.evaluate(&chunk, 0), "n1 should match 'rust'");
+        assert!(
+            predicate.evaluate(&chunk, 0).unwrap(),
+            "n1 should match 'rust'"
+        );
         // n2 does not contain "rust" — text_match should return Bool(false)
-        assert!(!predicate.evaluate(&chunk, 1), "n2 should not match 'rust'");
+        assert!(
+            !predicate.evaluate(&chunk, 1).unwrap(),
+            "n2 should not match 'rust'"
+        );
     }
 
     #[test]
@@ -7292,7 +7376,7 @@ mod text_fn_tests {
             variable_columns,
             store as Arc<dyn GraphStoreSearch>,
         );
-        assert!(!predicate.evaluate(&chunk, 0));
+        assert!(!predicate.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
@@ -7326,6 +7410,6 @@ mod text_fn_tests {
             store as Arc<dyn GraphStoreSearch>,
         );
         // No index → score_text returns None → eval returns None → evaluate returns false
-        assert!(!predicate.evaluate(&chunk, 0));
+        assert!(!predicate.evaluate(&chunk, 0).unwrap());
     }
 }

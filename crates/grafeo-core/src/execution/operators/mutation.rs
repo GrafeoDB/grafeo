@@ -311,17 +311,17 @@ impl PropertyExpressions {
             self.compiled = Some(compiled);
         }
         let compiled = self.compiled.as_deref().unwrap_or_default();
-        Ok(properties
+        properties
             .iter()
             .enumerate()
             .map(|(i, (name, source))| {
                 let value = match compiled.get(i).and_then(Option::as_ref) {
-                    Some(predicate) => predicate.eval_at(chunk, row).unwrap_or(Value::Null),
+                    Some(predicate) => predicate.eval_at(chunk, row)?.unwrap_or(Value::Null),
                     None => source.resolve(chunk, row, writer),
                 };
-                (name.clone(), value)
+                Ok((name.clone(), value))
             })
-            .collect())
+            .collect()
     }
 }
 

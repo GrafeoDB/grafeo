@@ -402,8 +402,8 @@ fn max_of_numbers_with_nan_is_nan() {
     }
 }
 
-/// SPARQL keeps comparing literals that read as numbers by their numbers:
-/// its rows hold RDF literals as text, and `9` is less than `10`.
+/// SPARQL compares numeric literals as numbers: a scan reads `10`, `9` and
+/// `88` as the integers they are (#610), and `9` is less than `10`.
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 #[test]
 fn sparql_min_and_max_compare_numeric_literals_as_numbers() {
@@ -418,8 +418,12 @@ fn sparql_min_and_max_compare_numeric_literals_as_numbers() {
             "SELECT (MIN(?v) AS ?lo) (MAX(?v) AS ?hi) WHERE { ?s <http://ex.org/v> ?v }",
         )
         .unwrap();
-    let values: Vec<String> = result.rows()[0].iter().map(ToString::to_string).collect();
-    assert_eq!(values, ["\"9\"", "\"88\""], "{:?}", result.rows());
+    assert_eq!(
+        result.rows()[0],
+        [Value::Int64(9), Value::Int64(88)],
+        "{:?}",
+        result.rows()
+    );
 }
 
 // ============================================================================

@@ -374,7 +374,7 @@ impl RdfPlanner {
         .with_deadline(self.deadline)
         .with_read_overlay(self.writer.as_ref().map(RdfWriter::path_overlay));
         let columns = operator.columns();
-        let types = vec![LogicalType::String; columns.len()];
+        let types = vec![LogicalType::Any; columns.len()];
         Ok((Box::new(operator), columns, types))
     }
 
@@ -459,7 +459,17 @@ impl RdfPlanner {
         let _ = &self.dictionary; // suppress unused warning
         let _ = &self.encoded_columns;
 
-        let types = vec![LogicalType::String; columns.len()];
+        // Text, except the object's column: a literal there may be a number.
+        let types = columns
+            .iter()
+            .map(|column| {
+                if object_var_name.as_ref() == Some(column) {
+                    LogicalType::Any
+                } else {
+                    LogicalType::String
+                }
+            })
+            .collect();
         Ok((Box::new(scan_op), columns, types))
     }
 
@@ -955,16 +965,14 @@ impl RdfPlanner {
         }
 
         for agg_expr in &agg.aggregates {
-            // For RDF, numeric values are strings that get converted to floats
-            // So SUM should also output Float64 (since SumFloat returns Float64)
+            // A scan gives numbers as numbers of their XSD type, so SUM, AVG,
+            // MIN, MAX and SAMPLE give an integer, a decimal, a float or a term.
             let result_type = match agg_expr.function {
                 LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
                     LogicalType::Int64
                 }
-                LogicalAggregateFunction::Sum => LogicalType::Float64,
-                // A float, or a decimal for decimals and integers.
-                LogicalAggregateFunction::Avg => LogicalType::Any,
-                _ => LogicalType::String,
+                LogicalAggregateFunction::GroupConcat => LogicalType::String,
+                _ => LogicalType::Any,
             };
             output_schema.push(result_type);
             output_columns.push(
@@ -1306,7 +1314,7 @@ impl RdfPlanner {
 
         // Build output columns and types
         let columns = all_vars.clone();
-        let types = vec![LogicalType::String; columns.len()];
+        let types = vec![LogicalType::Any; columns.len()];
 
         let operator = Box::new(RdfLeapfrogOperator::new(ring, annotated, columns.clone()));
         Some(Ok((operator, columns, types)))
@@ -2567,17 +2575,17 @@ impl RdfLeapfrogOperator {
     }
 
     /// Extracts the value for a variable from a set of matched triples.
-    fn resolve_variable(&self, var: &str, matched_triples: &[Triple]) -> Option<String> {
+    fn resolve_variable(&self, var: &str, matched_triples: &[Triple]) -> Option<Value> {
         for (i, ap) in self.annotated_patterns.iter().enumerate() {
             if let Some(triple) = matched_triples.get(i) {
                 if ap.subject_var.as_deref() == Some(var) {
-                    return Some(term_to_string(triple.subject()));
+                    return Some(triple.subject().query_value());
                 }
                 if ap.predicate_var.as_deref() == Some(var) {
-                    return Some(term_to_string(triple.predicate()));
+                    return Some(triple.predicate().query_value());
                 }
                 if ap.object_var.as_deref() == Some(var) {
-                    return Some(term_to_string(triple.object()));
+                    return Some(triple.object().query_value());
                 }
             }
         }
@@ -2598,7 +2606,7 @@ impl Operator for RdfLeapfrogOperator {
         let batch_size = end - self.position;
         let col_count = self.output_columns.len();
 
-        let schema = vec![LogicalType::String; col_count];
+        let schema = vec![LogicalType::Any; col_count];
         let mut chunk = DataChunk::with_capacity(&schema, batch_size);
 
         for i in self.position..end {
@@ -2606,7 +2614,7 @@ impl Operator for RdfLeapfrogOperator {
             for (col_idx, var_name) in self.output_columns.iter().enumerate() {
                 if let Some(col) = chunk.column_mut(col_idx) {
                     if let Some(val) = self.resolve_variable(var_name, matched) {
-                        col.push_string(val);
+                        col.push_value(val);
                     } else {
                         col.push_value(Value::Null);
                     }
@@ -2784,7 +2792,8 @@ impl Operator for ConstantOperator {
     }
 }
 
-/// Resolves dictionary-encoded Int64 term IDs back to String values.
+/// Resolves dictionary-encoded Int64 term IDs back to the values a query reads
+/// for their terms (see [`Term::query_value`]).
 ///
 /// Placed at the result boundary (just before output) so that all intermediate
 /// operators (joins, aggregates, sorts) work with compact Int64 keys.
@@ -2822,11 +2831,11 @@ impl Operator for DictResolveOperator {
         let row_count = chunk.row_count();
         let col_count = chunk.column_count();
 
-        // Build output schema: replace Int64 encoded columns with String
+        // Build output schema: an encoded column holds any value of a term
         let mut schema = Vec::with_capacity(col_count);
         for col_idx in 0..col_count {
             if self.encoded_col_indices.contains(&col_idx) {
-                schema.push(LogicalType::String);
+                schema.push(LogicalType::Any);
             } else if let Some(col) = chunk.column(col_idx) {
                 schema.push(col.data_type().clone());
             } else {
@@ -2854,7 +2863,7 @@ impl Operator for DictResolveOperator {
                         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         let tid = term_id as u32;
                         if let Some(term) = self.dictionary.get_term(tid) {
-                            out_col.push_string(term_to_string(term));
+                            out_col.push_value(term.query_value());
                         } else {
                             out_col.push_value(Value::Null);
                         }
@@ -3078,14 +3087,16 @@ impl RdfTripleScanOperator {
     /// Builds the output schema. In dictionary mode, S/P/O variable columns
     /// are Int64 (term IDs), companion and graph columns remain String.
     fn build_output_schema(&self, col_count: usize, dict_mode: bool) -> Vec<LogicalType> {
-        if !dict_mode {
-            return vec![LogicalType::String; col_count];
-        }
         let mut schema = Vec::with_capacity(col_count);
-        // S, P, O variable columns get Int64
+        // S, P, O variable columns: Int64 term IDs in dictionary mode; otherwise
+        // text, and any value for the object, where a literal is a number.
         for i in 0..3 {
             if self.output_mask[i] {
-                schema.push(LogicalType::Int64);
+                schema.push(match (dict_mode, i) {
+                    (true, _) => LogicalType::Int64,
+                    (false, 2) => LogicalType::Any,
+                    (false, _) => LogicalType::String,
+                });
             }
         }
         // Companion columns (lang, datatype) are always String
@@ -4605,22 +4616,11 @@ fn term_to_string(term: &Term) -> String {
     }
 }
 
-/// Pushes an RDF term value to a column.
-///
-/// For RDF columns (which use String type), we always push as string to avoid
-/// type mismatches. The typed literal's value is preserved as a string, and
-/// numeric comparisons are handled at the filter level.
+/// Pushes the value a query reads for an RDF term to a column (see
+/// [`Term::query_value`]): a numeric literal as its number, anything else as
+/// its text. A column a term goes into is an `Any` column.
 fn push_term_value(col: &mut grafeo_core::execution::ValueVector, term: &Term) {
-    match term {
-        Term::Iri(iri) => col.push_string(iri.as_str().to_string()),
-        Term::BlankNode(bnode) => col.push_string(format!("_:{}", bnode.id())),
-        Term::Literal(lit) => {
-            // Always push as string since RDF columns are String type
-            // Numeric operations are handled by the filter evaluation
-            col.push_string(lit.value().to_string());
-        }
-        _ => col.push_value(Value::Null),
-    }
+    col.push_value(term.query_value());
 }
 
 /// Converts a TripleComponent to an Option<Term> for pattern matching.
@@ -5242,7 +5242,9 @@ mod tests {
         assert!(execute_update(&store, &plan).is_ok());
     }
 
-    /// Triple scan propagates LogicalType::String for every output column.
+    /// Triple scan propagates LogicalType::String for the subject, predicate
+    /// and companion columns, and Any for the object, where a literal may be a
+    /// number of its XSD type.
     #[test]
     fn test_type_propagation_triple_scan() {
         let store = Arc::new(RdfStore::new());
@@ -5263,19 +5265,19 @@ mod tests {
         });
 
         let (_op, columns, types) = planner.plan_operator(&scan).unwrap();
-        // All RDF columns are String: s, p, o, plus __lang_o companion
+        // s, p and the __lang_o companion are String, o is Any
         assert_eq!(columns.len(), types.len());
         for (i, ty) in types.iter().enumerate() {
-            assert_eq!(
-                *ty,
-                LogicalType::String,
-                "column {i} ({}) should be String",
-                columns[i]
-            );
+            let expected = if columns[i] == "o" {
+                LogicalType::Any
+            } else {
+                LogicalType::String
+            };
+            assert_eq!(*ty, expected, "column {i} ({})", columns[i]);
         }
     }
 
-    /// Join of two triple scans propagates String types through to output.
+    /// Join of two triple scans propagates the types of both sides.
     #[test]
     fn test_type_propagation_join() {
         use crate::query::plan::JoinOp;
@@ -5320,14 +5322,14 @@ mod tests {
 
         let (_op, columns, types) = planner.plan_operator(&join).unwrap();
         assert_eq!(columns.len(), types.len());
-        // All output columns should be String (join preserves types from both sides)
+        // The objects (name, age) are Any, every other column String
         for (i, ty) in types.iter().enumerate() {
-            assert_eq!(
-                *ty,
-                LogicalType::String,
-                "join column {i} ({}) should be String",
-                columns[i]
-            );
+            let expected = if columns[i] == "name" || columns[i] == "age" {
+                LogicalType::Any
+            } else {
+                LogicalType::String
+            };
+            assert_eq!(*ty, expected, "join column {i} ({})", columns[i]);
         }
     }
 
@@ -5360,15 +5362,21 @@ mod tests {
 
         let (_op, columns, types) = planner.plan_operator(&bind).unwrap();
         assert_eq!(columns.last(), Some(&"label".to_string()));
-        // Input columns are String, BIND column is Any
+        // The input columns keep their types (the object, name, is Any), and
+        // the BIND column is Any
         let last_idx = types.len() - 1;
         assert_eq!(
             types[last_idx],
             LogicalType::Any,
             "BIND column should be Any"
         );
-        for ty in &types[..last_idx] {
-            assert_eq!(*ty, LogicalType::String, "input columns should be String");
+        for (column, ty) in columns.iter().zip(&types).take(last_idx) {
+            let expected = if column == "name" {
+                LogicalType::Any
+            } else {
+                LogicalType::String
+            };
+            assert_eq!(*ty, expected, "input column {column}");
         }
     }
 

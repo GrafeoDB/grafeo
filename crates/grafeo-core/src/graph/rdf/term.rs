@@ -107,6 +107,21 @@ impl Term {
 }
 
 impl Term {
+    /// The value a query reads for this term: an IRI as its text, a blank
+    /// node as `_:` and its label, a numeric literal as its number (see
+    /// [`Literal::numeric_value`]) and any other literal as its lexical form.
+    #[must_use]
+    pub fn query_value(&self) -> grafeo_common::types::Value {
+        use grafeo_common::types::Value;
+        match self {
+            Term::Iri(iri) => Value::from(iri.as_str()),
+            Term::BlankNode(node) => Value::from(format!("_:{}", node.id())),
+            Term::Literal(literal) => literal
+                .numeric_value()
+                .unwrap_or_else(|| Value::from(literal.value())),
+        }
+    }
+
     /// Reads a term from its N-Triples string, the inverse of the term's
     /// [`Display`](fmt::Display): `Term::from_ntriples(&term.to_string())`
     /// gives `term` back for every term.
@@ -519,6 +534,31 @@ impl Literal {
             _ => None,
         }
     }
+
+    /// The number a numeric literal stands for: an `xsd:integer`, or an
+    /// integer type XSD derives from it (`xsd:int`, `xsd:long`,
+    /// `xsd:nonNegativeInteger` and the others), as an `Int64` when it fits;
+    /// an `xsd:decimal` as a `Decimal` with its scale; an `xsd:double` or
+    /// `xsd:float` as a `Float64`. `None` for another datatype, and for a
+    /// lexical form that is not one of the type (`"abc"^^xsd:integer`).
+    #[must_use]
+    pub fn numeric_value(&self) -> Option<grafeo_common::types::Value> {
+        use grafeo_common::types::{Decimal, Value};
+        let name = self
+            .datatype
+            .strip_prefix("http://www.w3.org/2001/XMLSchema#")?;
+        let text = self.value.trim();
+        match name {
+            "integer" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
+            | "positiveInteger" | "negativeInteger" | "nonPositiveInteger" | "unsignedLong"
+            | "unsignedInt" | "unsignedShort" | "unsignedByte" => {
+                text.parse::<i64>().ok().map(Value::Int64)
+            }
+            "decimal" => Decimal::parse(text).ok().map(Value::Decimal),
+            "double" | "float" => text.parse::<f64>().ok().map(Value::Float64),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Literal {
@@ -626,6 +666,43 @@ pub(crate) fn unusual_terms() -> Vec<Term> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::{Decimal, Value};
+
+    #[test]
+    fn numeric_literals_read_as_numbers_of_their_type() {
+        const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+        let typed = |text: &str, name: &str| Term::typed_literal(text, format!("{XSD}{name}"));
+        for (term, expected) in [
+            (typed("30", "integer"), Value::Int64(30)),
+            (typed("-7", "int"), Value::Int64(-7)),
+            (typed("019", "long"), Value::Int64(19)),
+            (typed("5", "nonNegativeInteger"), Value::Int64(5)),
+            (typed("255", "unsignedByte"), Value::Int64(255)),
+            (
+                typed("2.50", "decimal"),
+                Value::Decimal(Decimal::parse("2.50").unwrap()),
+            ),
+            (typed("1.5E0", "double"), Value::Float64(1.5)),
+            (typed("0.25", "float"), Value::Float64(0.25)),
+            (typed("INF", "double"), Value::Float64(f64::INFINITY)),
+            // An ill-typed literal, and an integer past i64, keep their text.
+            (typed("abc", "integer"), Value::from("abc")),
+            (
+                typed("99999999999999999999", "integer"),
+                Value::from("99999999999999999999"),
+            ),
+            (typed("1e3", "decimal"), Value::from("1e3")),
+            // Other datatypes, plain literals, IRIs and blank nodes.
+            (typed("true", "boolean"), Value::from("true")),
+            (Term::literal("30"), Value::from("30")),
+            (Term::iri("http://ex.org/a"), Value::from("http://ex.org/a")),
+            (Term::blank("b0"), Value::from("_:b0")),
+        ] {
+            assert_eq!(term.query_value(), expected, "{term}");
+        }
+        let decimal = typed("2.50", "decimal").query_value();
+        assert_eq!(format!("{decimal:?}"), "Decimal(2.50)", "the scale is kept");
+    }
 
     #[test]
     fn test_iri_creation() {

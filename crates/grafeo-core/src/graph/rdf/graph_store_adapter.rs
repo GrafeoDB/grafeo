@@ -621,13 +621,10 @@ impl GraphStoreSearch for RdfGraphStoreAdapter {}
 
 /// Converts an RDF literal to a Grafeo [`Value`].
 fn literal_to_value(lit: &Literal) -> Value {
+    if let Some(number) = lit.numeric_value() {
+        return number;
+    }
     match lit.datatype() {
-        Literal::XSD_INTEGER => lit
-            .as_integer()
-            .map_or_else(|| Value::String(lit.value().into()), Value::Int64),
-        Literal::XSD_DOUBLE | Literal::XSD_DECIMAL => lit
-            .as_double()
-            .map_or_else(|| Value::String(lit.value().into()), Value::Float64),
         Literal::XSD_BOOLEAN => lit
             .as_boolean()
             .map_or_else(|| Value::String(lit.value().into()), Value::Bool),

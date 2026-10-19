@@ -246,7 +246,7 @@ mod physical {
                 .ok_or_else(output_allocation_error)?;
             state.budget.charge(base)?;
             let mut output_charge = base;
-            let mut chunk = DataChunk::with_capacity(&vec![LogicalType::String; count], capacity);
+            let mut chunk = DataChunk::with_capacity(&vec![LogicalType::Any; count], capacity);
             let mut rows = 0;
             while rows < capacity {
                 let Some((subject, object, graph)) = state.next_row(&self.config)? else {
@@ -1027,7 +1027,18 @@ mod physical {
         match term {
             Term::Iri(iri) => push_text(column, "", iri.as_str(), budget, output_charge),
             Term::BlankNode(node) => push_text(column, "_:", node.id(), budget, output_charge),
-            Term::Literal(literal) => push_text(column, "", literal.value(), budget, output_charge),
+            // A numeric literal as its number, as a triple scan reads it.
+            Term::Literal(literal) => match literal.numeric_value() {
+                Some(number) => {
+                    budget.charge(64)?;
+                    *output_charge = output_charge
+                        .checked_add(64)
+                        .ok_or_else(output_allocation_error)?;
+                    column.push_value(number);
+                    Ok(())
+                }
+                None => push_text(column, "", literal.value(), budget, output_charge),
+            },
         }
     }
 

@@ -572,3 +572,82 @@ fn sparql_deletes_the_typed_literals_it_wrote() {
     .unwrap();
     assert_eq!(count(&db), "Int64(0)", "DELETE WHERE");
 }
+
+/// A triple scan gives a numeric literal as a number of its XSD type (#610):
+/// `xsd:integer` and the integer types derived from it as integers, an
+/// `xsd:decimal` as an exact decimal with its scale, `xsd:double` and
+/// `xsd:float` as floats. A plain literal and an ill-typed one stay strings.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+#[test]
+fn sparql_scans_give_numbers_of_their_type() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute_sparql(
+        r#"PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA {
+            <http://ex.org/a> <http://ex.org/v> "30"^^xsd:integer .
+            <http://ex.org/b> <http://ex.org/v> "7"^^xsd:int .
+            <http://ex.org/c> <http://ex.org/v> "2.50"^^xsd:decimal .
+            <http://ex.org/d> <http://ex.org/v> "1.5E0"^^xsd:double .
+            <http://ex.org/e> <http://ex.org/v> "0.25"^^xsd:float .
+            <http://ex.org/f> <http://ex.org/v> "30" .
+            <http://ex.org/g> <http://ex.org/v> "abc"^^xsd:integer .
+        }"#,
+    )
+    .unwrap();
+    // The subject orders the rows; it is projected too, as an ORDER BY of a
+    // variable the SELECT leaves out fails (inbox), and dropped here.
+    let values = |projection: &str| {
+        rows(
+            &db,
+            "sparql",
+            &format!("SELECT ?s {projection} WHERE {{ ?s <http://ex.org/v> ?v }} ORDER BY ?s"),
+            &[],
+        )
+        .into_iter()
+        .map(|row| {
+            row.split_once(", ")
+                .map_or(row.clone(), |(_, rest)| rest.to_string())
+        })
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        values("?v"),
+        [
+            "Int64(30)",
+            "Int64(7)",
+            "Decimal(2.50)",
+            "Float64(1.5)",
+            "Float64(0.25)",
+            "String(\"30\")",
+            "String(\"abc\")",
+        ]
+    );
+    // Arithmetic on stored numbers follows their types.
+    assert_eq!(
+        values("(?v * 2 AS ?x)")[..5],
+        [
+            "Int64(60)",
+            "Int64(14)",
+            "Decimal(5.00)",
+            "Float64(3)",
+            "Float64(0.5)",
+        ]
+    );
+    // STR gives the lexical form, DATATYPE the type.
+    assert_eq!(
+        values("(STR(?v) AS ?t) (DATATYPE(?v) AS ?d)")[2],
+        "String(\"2.50\"), String(\"http://www.w3.org/2001/XMLSchema#decimal\")"
+    );
+    // A sum of stored decimals is exact.
+    assert_eq!(
+        one(
+            &db,
+            "sparql",
+            "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
+             SELECT (SUM(?v) AS ?total) WHERE { ?s <http://ex.org/v> ?v \
+             FILTER(DATATYPE(?v) = xsd:decimal) }",
+            &[]
+        ),
+        "Decimal(2.50)"
+    );
+}

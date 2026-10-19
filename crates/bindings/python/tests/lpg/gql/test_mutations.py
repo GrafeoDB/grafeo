@@ -3,6 +3,8 @@
 Tests CRUD operations using GQL (ISO standard) query language.
 """
 
+from decimal import Decimal
+
 from tests.bases.test_mutations import BaseMutationsTest
 
 
@@ -209,8 +211,8 @@ class TestGQLSpecificMutations:
         result = db.execute("MATCH (n:Point) RETURN n.lat, n.lon")
         rows = list(result)
         assert len(rows) == 1
-        assert rows[0]["n.lat"] == -6.248
-        assert rows[0]["n.lon"] == 106.845
+        assert rows[0]["n.lat"] == Decimal("-6.248")
+        assert rows[0]["n.lon"] == Decimal("106.845")
 
     def test_gql_insert_negative_integer(self, db):
         """Test INSERT with negative integer property (issue #160)."""
@@ -228,8 +230,8 @@ class TestGQLSpecificMutations:
         result = db.execute("MATCH (n:Point) RETURN n.lat, n.lon, n.alt")
         rows = list(result)
         assert len(rows) == 1
-        assert rows[0]["n.lat"] == -6.248
-        assert rows[0]["n.lon"] == -106.845
+        assert rows[0]["n.lat"] == Decimal("-6.248")
+        assert rows[0]["n.lon"] == Decimal("-106.845")
         assert rows[0]["n.alt"] == -42
 
     def test_gql_insert_geographic_coordinates(self, db):
@@ -239,8 +241,8 @@ class TestGQLSpecificMutations:
 
         result = db.execute("MATCH (n:City {name: 'Buenos Aires'}) RETURN n.lat, n.lon")
         rows = list(result)
-        assert rows[0]["n.lat"] == -34.604
-        assert rows[0]["n.lon"] == -58.382
+        assert rows[0]["n.lat"] == Decimal("-34.604")
+        assert rows[0]["n.lon"] == Decimal("-58.382")
 
     def test_gql_negative_edge_property_inline(self, db):
         """Test negative property on an inline edge (issue #160)."""

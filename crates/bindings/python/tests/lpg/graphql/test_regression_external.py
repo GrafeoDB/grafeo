@@ -148,7 +148,7 @@ class TestIntegerTypePreservation:
         assert result[0]["p.order"] == 3
 
     def test_float_not_confused_with_int(self, db):
-        db.execute("INSERT (:Product {price: 3.14})")
+        db.execute("INSERT (:Product {price: 3.14e0})")
         result = list(db.execute("MATCH (p:Product) RETURN p.price"))
         assert isinstance(result[0]["p.price"], float)
 

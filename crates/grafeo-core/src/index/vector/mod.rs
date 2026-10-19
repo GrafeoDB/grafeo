@@ -627,17 +627,12 @@ pub fn brute_force_knn<'a, I>(
 where
     I: Iterator<Item = (NodeId, &'a [f32])>,
 {
-    let mut results: Vec<(NodeId, f32)> = vectors
+    let results: Vec<(NodeId, f32)> = vectors
         .filter(|(_, vec)| vec.len() == query.len())
         .map(|(id, vec)| (id, compute_distance(query, vec, metric)))
         .collect();
 
-    // Nearest first, equal distances by ascending id, NaN last
-    results.sort_by(crate::index::ranking::by_ascending_distance);
-
-    // Truncate to k
-    results.truncate(k);
-    results
+    nearest(results, k)
 }
 
 /// Performs brute-force k-nearest neighbor search with a filter predicate.
@@ -668,13 +663,28 @@ where
     I: Iterator<Item = (NodeId, &'a [f32])>,
     F: Fn(NodeId) -> bool,
 {
-    let mut results: Vec<(NodeId, f32)> = vectors
+    let results: Vec<(NodeId, f32)> = vectors
         .filter(|(id, vec)| vec.len() == query.len() && predicate(*id))
         .map(|(id, vec)| (id, compute_distance(query, vec, metric)))
         .collect();
 
-    results.sort_by(crate::index::ranking::by_ascending_distance);
-    results.truncate(k);
+    nearest(results, k)
+}
+
+/// The `k` nearest of `results`, nearest first: equal distances by ascending
+/// id and a NaN distance last. The `k` are selected before they are sorted,
+/// and the order is total, so which `k` and their order do not depend on the
+/// order `results` came in.
+fn nearest(mut results: Vec<(NodeId, f32)>, k: usize) -> Vec<(NodeId, f32)> {
+    let order = crate::index::ranking::by_ascending_distance;
+    if k == 0 {
+        return Vec::new();
+    }
+    if results.len() > k {
+        results.select_nth_unstable_by(k - 1, order);
+        results.truncate(k);
+    }
+    results.sort_unstable_by(order);
     results
 }
 

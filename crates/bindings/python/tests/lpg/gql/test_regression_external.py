@@ -1318,7 +1318,7 @@ class TestFloatPrecision:
     """Full float64 precision must be preserved."""
 
     def test_float64_roundtrip(self, db):
-        db.execute("INSERT (:M {val: 0.123456789012345})")
+        db.execute("INSERT (:M {val: 0.123456789012345e0})")
         result = list(db.execute("MATCH (m:M) RETURN m.val"))
         assert abs(result[0]["m.val"] - 0.123456789012345) < 1e-15
 

@@ -149,8 +149,10 @@ else
     # budget) grew the browser bundle to ~801 KB gzipped, just over the old
     # 800 KB limit. Re-baseline after the release, or shrink the bundle (strip
     # unused RDF path code paths) to get back under 800 KB.
+    # Exact decimals (a core value type in every profile) brought it to 850.5 KB;
+    # the limit is 880 KB from then on.
     WARN_THRESHOLD=829440    # 810 KB
-    FAIL_THRESHOLD=870400    # 850 KB
+    FAIL_THRESHOLD=901120    # 880 KB
     LABEL="browser profile"
 fi
 

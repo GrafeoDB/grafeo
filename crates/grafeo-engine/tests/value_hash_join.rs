@@ -918,7 +918,9 @@ fn a_range_without_an_index_shows_the_range_scan() {
         assert!(
             lines(&profile)
                 .iter()
-                .any(|line| line.starts_with("RangeScan (t.line Gt 3)")),
+                // The scan the range scan replaces is named in its detail
+                // (#461).
+                .any(|line| line.starts_with("RangeScan (t.line Gt 3, NodeScan t:TypeDefinition)")),
             "{language:?}:\n{profile}"
         );
 

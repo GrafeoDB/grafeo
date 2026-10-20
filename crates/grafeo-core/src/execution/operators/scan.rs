@@ -1,6 +1,6 @@
 //! Scan operator for reading data from storage.
 
-use super::{Operator, OperatorResult};
+use super::{Operator, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::GraphStoreSearch;
 use grafeo_common::types::{EpochId, LogicalType, NodeId, ReadView, TransactionId};
@@ -24,6 +24,8 @@ pub struct ScanOperator {
     transaction_id: Option<TransactionId>,
     /// Epoch for version visibility.
     viewing_epoch: Option<EpochId>,
+    /// Counts the node IDs the scan reads.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl ScanOperator {
@@ -38,6 +40,7 @@ impl ScanOperator {
             chunk_capacity: 2048,
             transaction_id: None,
             viewing_epoch: None,
+            reads: None,
         }
     }
 
@@ -58,12 +61,20 @@ impl ScanOperator {
             chunk_capacity: 2048,
             transaction_id: None,
             viewing_epoch: None,
+            reads: None,
         }
     }
 
     /// Sets the chunk capacity.
     pub fn with_chunk_capacity(mut self, capacity: usize) -> Self {
         self.chunk_capacity = capacity;
+        self
+    }
+
+    /// Counts the node IDs the scan reads in `reads`.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
         self
     }
 
@@ -108,6 +119,7 @@ impl ScanOperator {
             },
         };
 
+        super::read_counter::count(self.reads.as_deref(), self.batch.len());
         if self.batch.is_empty() {
             self.exhausted = true;
         }

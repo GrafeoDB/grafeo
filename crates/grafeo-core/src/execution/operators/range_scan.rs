@@ -43,7 +43,7 @@ use std::sync::Arc;
 use grafeo_common::types::{EpochId, LogicalType, NodeId, ReadView, TransactionId, Value};
 use grafeo_common::utils::hash::FxHashSet;
 
-use super::{Operator, OperatorResult};
+use super::{Operator, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::GraphStoreSearch;
 
@@ -68,6 +68,8 @@ pub struct RangeScanOperator {
     materialized: Option<Vec<NodeId>>,
     /// Current cursor into `materialized`.
     position: usize,
+    /// Counts the node IDs the range index yields.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl RangeScanOperator {
@@ -98,7 +100,16 @@ impl RangeScanOperator {
             view: None,
             materialized: None,
             position: 0,
+            reads: None,
         }
+    }
+
+    /// Counts the node IDs the range index yields in `reads`, before the
+    /// label filter.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
+        self
     }
 
     /// Sets a row-count cap that bounds the materialization step.
@@ -187,7 +198,9 @@ impl RangeScanOperator {
         // *survive* the filter. Applying limit before filtering would
         // under-return rows when early range hits are filtered out.
         let mut collected: Vec<NodeId> = Vec::new();
+        let mut read = 0;
         for id in iter {
+            read += 1;
             if let Some(set) = label_set.as_ref()
                 && !set.contains(&id)
             {
@@ -201,6 +214,7 @@ impl RangeScanOperator {
             }
         }
 
+        super::read_counter::count(self.reads.as_deref(), read);
         self.materialized = Some(collected);
     }
 }

@@ -1,8 +1,8 @@
 //! Variable-length expand operator for multi-hop path traversal.
 
-use super::expand::visible_edges_from;
+use super::expand::{EdgeWalk, visible_edges_from};
 use super::filter::Predicate;
-use super::{Operator, OperatorError, OperatorResult};
+use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
@@ -99,6 +99,8 @@ pub struct VariableLengthExpandOperator {
     viewing_epoch: Option<EpochId>,
     /// When true, skip versioned MVCC lookups (fast path for read-only queries).
     read_only: bool,
+    /// Counts the edges the expansion reads.
+    reads: Option<Arc<ReadCounter>>,
     /// Materialized input rows.
     input_rows: Option<Vec<InputRow>>,
     /// The next input row to search from.
@@ -335,6 +337,7 @@ impl VariableLengthExpandOperator {
             transaction_id: None,
             viewing_epoch: None,
             read_only: false,
+            reads: None,
             input_rows: None,
             current_input_idx: 0,
             search: None,
@@ -497,6 +500,14 @@ impl VariableLengthExpandOperator {
         self
     }
 
+    /// Counts the edges the expansion reads in `reads`, before the type and
+    /// visibility checks.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
+        self
+    }
+
     /// Materializes all input rows.
     fn materialize_input(&mut self) -> Result<(), OperatorError> {
         let mut rows = Vec::new();
@@ -571,10 +582,13 @@ impl VariableLengthExpandOperator {
             self.store.as_ref(),
             node_id,
             self.direction,
-            &self.edge_types,
-            self.viewing_epoch,
-            self.transaction_id,
-            self.read_only,
+            &EdgeWalk {
+                edge_types: &self.edge_types,
+                epoch: self.viewing_epoch,
+                transaction_id: self.transaction_id,
+                read_only: self.read_only,
+                reads: self.reads.as_deref(),
+            },
         );
         if let (Some(condition), Some(row)) = (&self.edge_condition, condition_row) {
             let edge_column = row.column_count() - 1;

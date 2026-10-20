@@ -38,6 +38,51 @@ pub struct QueryResult {
     pub(crate) execution_time_ms: Option<f64>,
     pub(crate) rows_scanned: Option<u64>,
     pub(crate) counters: grafeo_engine::database::WriteCounters,
+    pub(crate) profile: Option<grafeo_engine::database::QueryProfile>,
+}
+
+/// The operators of a `PROFILE` statement as a tree. Experimental: the
+/// fields may still change (see https://grafeo.dev/stability/).
+#[napi(object)]
+pub struct QueryProfile {
+    /// The operator that produces the statement's result.
+    pub root: OperatorProfile,
+    /// The time of the profiled run, in milliseconds; `executionTimeMs`
+    /// adds parsing, planning and the commit.
+    pub total_time_ms: f64,
+}
+
+/// One operator of a `QueryProfile`.
+#[napi(object)]
+pub struct OperatorProfile {
+    /// The operator, for example `NodeScan`, `Filter` or `Expand`.
+    pub operator: String,
+    /// What it works on, for example `n:Person` or the index it reads.
+    pub detail: String,
+    /// The rows it produced.
+    pub rows: f64,
+    /// How often it was asked for a chunk of rows.
+    pub calls: f64,
+    /// Its own time, without the operators below it, in milliseconds.
+    pub self_time_ms: f64,
+    /// Its time with the operators below it, in milliseconds.
+    pub time_ms: f64,
+    /// The operators it reads from.
+    pub children: Vec<OperatorProfile>,
+}
+
+impl From<&grafeo_engine::database::OperatorProfile> for OperatorProfile {
+    fn from(operator: &grafeo_engine::database::OperatorProfile) -> Self {
+        Self {
+            operator: operator.operator.clone(),
+            detail: operator.detail.clone(),
+            rows: operator.rows as f64,
+            calls: operator.calls as f64,
+            self_time_ms: operator.self_time_ms,
+            time_ms: operator.time_ms,
+            children: operator.children.iter().map(Self::from).collect(),
+        }
+    }
 }
 
 #[napi]
@@ -63,7 +108,19 @@ impl QueryResult {
         self.execution_time_ms
     }
 
-    /// Number of rows scanned during execution (if available).
+    /// The operators of a `PROFILE` statement as a tree, or `null` for any
+    /// other statement.
+    #[napi(getter)]
+    pub fn profile(&self) -> Option<QueryProfile> {
+        self.profile.as_ref().map(|profile| QueryProfile {
+            root: OperatorProfile::from(&profile.root),
+            total_time_ms: profile.total_time_ms,
+        })
+    }
+
+    /// The rows the query read from storage before any filter: nodes its
+    /// scans and index lookups read, edges its expands read, search hits and
+    /// RDF triples (if available).
     #[napi(getter, js_name = "rowsScanned")]
     pub fn rows_scanned(&self) -> Option<f64> {
         self.rows_scanned.map(|r| r as f64)
@@ -251,6 +308,7 @@ impl QueryResult {
             execution_time_ms: None,
             rows_scanned: None,
             counters: grafeo_engine::database::WriteCounters::default(),
+            profile: None,
         }
     }
 
@@ -270,7 +328,18 @@ impl QueryResult {
             execution_time_ms,
             rows_scanned,
             counters: grafeo_engine::database::WriteCounters::default(),
+            profile: None,
         }
+    }
+
+    /// Sets the operator tree of a `PROFILE` statement.
+    #[must_use]
+    pub(crate) fn with_profile(
+        mut self,
+        profile: Option<grafeo_engine::database::QueryProfile>,
+    ) -> Self {
+        self.profile = profile;
+        self
     }
 
     /// Sets the counters of the query's writes.
@@ -292,6 +361,7 @@ impl QueryResult {
             execution_time_ms: None,
             rows_scanned: None,
             counters: grafeo_engine::database::WriteCounters::default(),
+            profile: None,
         }
     }
 }

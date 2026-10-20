@@ -2643,7 +2643,7 @@ impl Session {
     /// ```
     #[cfg(feature = "gql")]
     pub fn execute(&self, query: &str) -> Result<QueryResult> {
-        self.execute_gql(query, None)
+        self.timed(|| self.execute_gql(query, None))
     }
 
     /// Executes a GQL statement, with `params` filled in when given: a
@@ -2801,7 +2801,8 @@ impl Session {
 
                 let executor = self
                     .make_executor(physical_plan.columns.clone())
-                    .with_write_counter(planner.write_counter());
+                    .with_write_counter(planner.write_counter())
+                    .with_read_counter(planner.read_counter());
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
 
                 let total_time_ms;
@@ -2848,7 +2849,8 @@ impl Session {
             // Execute the plan via push-based pipeline when possible
             let executor = self
                 .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter());
+                .with_write_counter(planner.write_counter())
+                .with_read_counter(planner.read_counter());
             let (mut source, push_ops) = {
                 #[cfg(feature = "spill")]
                 {
@@ -2865,7 +2867,7 @@ impl Session {
                     )
                 }
             };
-            let mut result = if push_ops.is_empty() {
+            let result = if push_ops.is_empty() {
                 // Pure source query: use traditional pull-based execution
                 executor.execute(source.as_mut())?
             } else {
@@ -2873,14 +2875,13 @@ impl Session {
                 executor.execute_pipeline(source, push_ops)?
             };
 
-            // Add execution metrics
-            let rows_scanned = result.rows.len() as u64;
+            // Add execution metrics (the executor set `rows_scanned`). On
+            // wasm32 the engine has no clock, and the binding times the call.
             #[cfg(not(target_arch = "wasm32"))]
-            {
-                let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-                result.execution_time_ms = Some(elapsed_ms);
-            }
-            result.rows_scanned = Some(rows_scanned);
+            let result = QueryResult {
+                execution_time_ms: Some(start_time.elapsed().as_secs_f64() * 1000.0),
+                ..result
+            };
 
             Ok(result)
         });
@@ -3122,7 +3123,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        self.execute_gql(query, Some(&params))
+        self.timed(|| self.execute_gql(query, Some(&params)))
     }
 
     /// Fills `params` (over the plan's own defaults) into a parsed plan, then
@@ -3192,7 +3193,7 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "cypher")]
     pub fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
-        self.execute_cypher_inner(query, None)
+        self.timed(|| self.execute_cypher_inner(query, None))
     }
 
     /// Executes a Cypher query with parameters.
@@ -3206,7 +3207,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        self.execute_cypher_inner(query, Some(&params))
+        self.timed(|| self.execute_cypher_inner(query, Some(&params)))
     }
 
     /// Executes a Cypher statement, with `params` filled in when given (see
@@ -3340,7 +3341,8 @@ impl Session {
 
                 let executor = self
                     .make_executor(physical_plan.columns.clone())
-                    .with_write_counter(planner.write_counter());
+                    .with_write_counter(planner.write_counter())
+                    .with_read_counter(planner.read_counter());
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
 
                 let total_time_ms;
@@ -3378,7 +3380,8 @@ impl Session {
             // Execute the plan
             let executor = self
                 .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter());
+                .with_write_counter(planner.write_counter())
+                .with_read_counter(planner.read_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3419,6 +3422,12 @@ impl Session {
     /// ```
     #[cfg(feature = "gremlin")]
     pub fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
+        self.timed(|| self.execute_gremlin_untimed(query))
+    }
+
+    /// [`execute_gremlin`](Self::execute_gremlin) without the time of the whole call.
+    #[cfg(feature = "gremlin")]
+    fn execute_gremlin_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{
             binder::Binder, optimizer::Optimizer, processor::substitute_params,
             translators::gremlin,
@@ -3459,7 +3468,8 @@ impl Session {
             // Execute the plan
             let executor = self
                 .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter());
+                .with_write_counter(planner.write_counter())
+                .with_read_counter(planner.read_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3482,6 +3492,16 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "gremlin")]
     pub fn execute_gremlin_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.timed(|| self.execute_gremlin_with_params_untimed(query, params))
+    }
+
+    /// [`execute_gremlin_with_params`](Self::execute_gremlin_with_params) without the time of the whole call.
+    #[cfg(feature = "gremlin")]
+    fn execute_gremlin_with_params_untimed(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -3521,7 +3541,8 @@ impl Session {
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter());
+                .with_write_counter(planner.write_counter())
+                .with_read_counter(planner.read_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3562,6 +3583,12 @@ impl Session {
     /// ```
     #[cfg(feature = "graphql")]
     pub fn execute_graphql(&self, query: &str) -> Result<QueryResult> {
+        self.timed(|| self.execute_graphql_untimed(query))
+    }
+
+    /// [`execute_graphql`](Self::execute_graphql) without the time of the whole call.
+    #[cfg(feature = "graphql")]
+    fn execute_graphql_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{
             binder::Binder, optimizer::Optimizer, processor::substitute_params,
             translators::graphql,
@@ -3595,7 +3622,8 @@ impl Session {
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter());
+                .with_write_counter(planner.write_counter())
+                .with_read_counter(planner.read_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3618,6 +3646,16 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "graphql")]
     pub fn execute_graphql_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.timed(|| self.execute_graphql_with_params_untimed(query, params))
+    }
+
+    /// [`execute_graphql_with_params`](Self::execute_graphql_with_params) without the time of the whole call.
+    #[cfg(feature = "graphql")]
+    fn execute_graphql_with_params_untimed(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -3663,7 +3701,8 @@ impl Session {
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter());
+                .with_write_counter(planner.write_counter())
+                .with_read_counter(planner.read_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3705,7 +3744,7 @@ impl Session {
     /// ```
     #[cfg(feature = "sql-pgq")]
     pub fn execute_sql(&self, query: &str) -> Result<QueryResult> {
-        self.execute_sql_inner(query, None)
+        self.timed(|| self.execute_sql_inner(query, None))
     }
 
     /// Executes a SQL/PGQ statement, with `params` filled in when given (see
@@ -3760,6 +3799,7 @@ impl Session {
                             status_message: None,
                             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
                             counters: Default::default(),
+                            profile: None,
                         });
                     }
                     if params.is_some() {
@@ -3800,7 +3840,8 @@ impl Session {
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter());
+                .with_write_counter(planner.write_counter())
+                .with_read_counter(planner.read_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3827,7 +3868,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        self.execute_sql_inner(query, Some(&params))
+        self.timed(|| self.execute_sql_inner(query, Some(&params)))
     }
 
     /// Executes a query in the specified language by name.
@@ -4639,6 +4680,22 @@ impl Session {
     /// plan does not show. Such a statement is checked and runs as a write
     /// (in a transaction, see [`with_auto_commit`](Self::with_auto_commit)),
     /// so its writes are recorded, logged and undone like any other.
+    /// Runs one statement and gives its result the time of the whole call
+    /// (#461): parsing, planning, execution and, for a statement outside a
+    /// transaction, its commit. On wasm32 the engine has no clock, and the
+    /// binding times the call.
+    fn timed(&self, run: impl FnOnce() -> Result<QueryResult>) -> Result<QueryResult> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let start = Instant::now();
+        #[allow(unused_mut, reason = "only builds with a clock set the time")]
+        let mut result = run();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(result) = &mut result {
+            result.execution_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+        }
+        result
+    }
+
     fn statement_writes(&self, root: &crate::query::plan::LogicalOperator) -> bool {
         root.has_mutations() || self.calls_writing_procedure(root, 0)
     }

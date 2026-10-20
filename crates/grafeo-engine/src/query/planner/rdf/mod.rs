@@ -116,6 +116,9 @@ pub struct RdfPlanner {
     path_search_budget: usize,
     /// The same execution deadline used by the caller's executor.
     deadline: Option<std::time::Instant>,
+    /// Counts the triples the plan's scans read: the statement's
+    /// `rows_scanned`.
+    read_counter: Arc<grafeo_core::execution::operators::ReadCounter>,
 }
 
 impl RdfPlanner {
@@ -134,7 +137,15 @@ impl RdfPlanner {
             shuffle_unordered: false,
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
             deadline: None,
+            read_counter: Arc::default(),
         }
+    }
+
+    /// Counts the triples the plan's scans read, before any filter: the
+    /// statement's `rows_scanned`.
+    #[must_use]
+    pub fn read_counter(&self) -> Arc<grafeo_core::execution::operators::ReadCounter> {
+        Arc::clone(&self.read_counter)
     }
 
     /// Sets the chunk size for vectorized execution.
@@ -449,7 +460,8 @@ impl RdfPlanner {
             emit_companion_columns,
             emit_datatype_column,
         )
-        .with_writer(self.writer.clone());
+        .with_writer(self.writer.clone())
+        .with_read_counter(self.read_counter());
 
         // Dictionary encoding is available but not yet automatically enabled for
         // all queries. The infrastructure (TermDictionary, DictResolveOperator) is
@@ -2926,6 +2938,8 @@ struct RdfTripleScanOperator {
     dictionary: Option<Arc<grafeo_core::graph::rdf::TermDictionary>>,
     /// The writer of the scan's transaction, whose own writes it sees.
     writer: Option<RdfWriter>,
+    /// Counts the triples the scan reads.
+    reads: Option<Arc<grafeo_core::execution::operators::ReadCounter>>,
 }
 
 impl RdfTripleScanOperator {
@@ -2950,6 +2964,7 @@ impl RdfTripleScanOperator {
             position: 0,
             dictionary: None,
             writer: None,
+            reads: None,
         }
     }
 
@@ -2957,6 +2972,15 @@ impl RdfTripleScanOperator {
     /// (read-your-writes).
     fn with_writer(mut self, writer: Option<RdfWriter>) -> Self {
         self.writer = writer;
+        self
+    }
+
+    /// Counts the triples the scan reads in `reads`, before any filter.
+    fn with_read_counter(
+        mut self,
+        reads: Arc<grafeo_core::execution::operators::ReadCounter>,
+    ) -> Self {
+        self.reads = Some(reads);
         self
     }
 
@@ -3071,6 +3095,9 @@ impl RdfTripleScanOperator {
                     }
                 }
             });
+            if let (Some(reads), Some(triples)) = (&self.reads, &self.triples) {
+                reads.add(triples.len());
+            }
         }
     }
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, LogicalType, NodeId, ReadView, TransactionId, Value};
 
-use super::{ExpressionPredicate, Operator, OperatorError, OperatorResult};
+use super::{ExpressionPredicate, Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::GraphStoreSearch;
 
@@ -52,6 +52,8 @@ pub struct NodeSeekOperator {
     current_row: usize,
     matches: Vec<NodeId>,
     next_match: usize,
+    /// Counts the node IDs the lookups return.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl NodeSeekOperator {
@@ -80,6 +82,7 @@ impl NodeSeekOperator {
             current_row: 0,
             matches: Vec::new(),
             next_match: 0,
+            reads: None,
         }
     }
 
@@ -99,6 +102,14 @@ impl NodeSeekOperator {
     ) -> Self {
         self.viewing_epoch = Some(epoch);
         self.transaction_id = transaction_id;
+        self
+    }
+
+    /// Counts the node IDs the lookups return in `reads`, before the
+    /// visibility and label checks.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
         self
     }
 
@@ -134,6 +145,7 @@ impl NodeSeekOperator {
                 }
             }
         }
+        super::read_counter::count(self.reads.as_deref(), found.len());
         found.sort_unstable();
         found.dedup();
         found.retain(|&id| self.visible_with_label(id));

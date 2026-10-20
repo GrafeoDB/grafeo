@@ -32,6 +32,8 @@ pub struct PyQueryResult {
     pub(crate) rows_scanned: Option<u64>,
     /// What the query's writes changed.
     pub(crate) counters: grafeo_engine::database::WriteCounters,
+    /// The operator tree of a `PROFILE` statement.
+    pub(crate) profile: Option<grafeo_engine::database::QueryProfile>,
 }
 
 #[pymethods]
@@ -155,7 +157,32 @@ impl PyQueryResult {
         self.execution_time_ms
     }
 
-    /// Number of rows scanned during query execution (if available).
+    /// The operators of a `PROFILE` statement as a tree, or `None` for any
+    /// other statement: a dict with `total_time_ms` and `root`, where each
+    /// operator has `operator`, `detail`, `rows`, `calls`, `self_time_ms`,
+    /// `time_ms` and its `children`. Experimental: the fields may still
+    /// change (see https://grafeo.dev/stability/).
+    ///
+    /// Example:
+    /// ```python
+    /// result = db.execute("PROFILE MATCH (n:Person) RETURN n.name")
+    /// root = result.profile["root"]
+    /// print(root["operator"], root["rows"])
+    /// ```
+    #[getter]
+    fn profile(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        let Some(profile) = &self.profile else {
+            return Ok(None);
+        };
+        let dict = PyDict::new(py);
+        dict.set_item("total_time_ms", profile.total_time_ms)?;
+        dict.set_item("root", operator_profile(py, &profile.root)?)?;
+        Ok(Some(dict.unbind()))
+    }
+
+    /// The rows the query read from storage before any filter: nodes its
+    /// scans and index lookups read, edges its expands read, search hits and
+    /// RDF triples (if available).
     ///
     /// Example:
     /// ```python
@@ -437,6 +464,7 @@ impl PyQueryResult {
             execution_time_ms: None,
             rows_scanned: None,
             counters: grafeo_engine::database::WriteCounters::default(),
+            profile: None,
         }
     }
 
@@ -458,6 +486,7 @@ impl PyQueryResult {
             execution_time_ms,
             rows_scanned,
             counters: grafeo_engine::database::WriteCounters::default(),
+            profile: None,
         }
     }
 
@@ -489,6 +518,7 @@ impl PyQueryResult {
             execution_time_ms: None,
             rows_scanned: None,
             counters: grafeo_engine::database::WriteCounters::default(),
+            profile: None,
         }
     }
 
@@ -619,4 +649,25 @@ impl PyQueryBuilder {
     fn query(&self) -> &str {
         &self.query
     }
+}
+
+/// One operator of a `PROFILE` tree as a dict (see `QueryResult.profile`).
+fn operator_profile<'py>(
+    py: Python<'py>,
+    operator: &grafeo_engine::database::OperatorProfile,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("operator", &operator.operator)?;
+    dict.set_item("detail", &operator.detail)?;
+    dict.set_item("rows", operator.rows)?;
+    dict.set_item("calls", operator.calls)?;
+    dict.set_item("self_time_ms", operator.self_time_ms)?;
+    dict.set_item("time_ms", operator.time_ms)?;
+    let children = operator
+        .children
+        .iter()
+        .map(|child| operator_profile(py, child))
+        .collect::<PyResult<Vec<_>>>()?;
+    dict.set_item("children", pyo3::types::PyList::new(py, children)?)?;
+    Ok(dict)
 }

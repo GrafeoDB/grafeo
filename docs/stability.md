@@ -42,6 +42,7 @@ The implementation crates (`grafeo-common`, `grafeo-core`, `grafeo-storage`, `gr
 | --- | --- |
 | Streaming results: `Session::execute_streaming` and `GrafeoDB::execute_streaming` with `ResultStream`, `OwnedResultStream`, `RowIterator` and `OwnedRowIterator`; Python `execute_lazy()` and `ResultStream`; Node.js `executeStream()` and `ResultStream` | New in 0.5.40; the iterator and its lifetime rules may still change |
 | The numbers `memory_usage()` reports: the fields of `MemoryUsage` and its parts, and what each one counts | Memory accounting follows the storage engine, which changes within 0.6. The types are `#[non_exhaustive]`, so a field can be added; what a field counts can change too. The call `memory_usage()` itself is stable |
+| The operator tree of a `PROFILE` statement: `QueryResult::profile` and `QueryProfile`, the Python and Node.js `profile` and the WASM `profile` key | New in 0.6.0; its operators and fields may still change |
 
 ## Stable APIs
 

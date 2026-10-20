@@ -1775,6 +1775,7 @@ fn js_result(mut result: EngineQueryResult) -> QueryResult {
     let exec_time = result.execution_time_ms;
     let scanned = result.rows_scanned;
     let counters = result.counters;
+    let profile = result.profile.take();
     QueryResult::with_metrics(
         columns,
         result.into_rows(),
@@ -1784,6 +1785,7 @@ fn js_result(mut result: EngineQueryResult) -> QueryResult {
         scanned,
     )
     .with_counters(counters)
+    .with_profile(profile)
 }
 
 /// A node of the engine as a JavaScript node.

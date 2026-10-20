@@ -110,6 +110,12 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "graphql")]
     pub fn execute_graphql_rdf(&self, query: &str) -> Result<QueryResult> {
+        self.timed(|| self.execute_graphql_rdf_untimed(query))
+    }
+
+    /// [`execute_graphql_rdf`](Self::execute_graphql_rdf) without the time of the whole call.
+    #[cfg(feature = "graphql")]
+    fn execute_graphql_rdf_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::graphql_rdf};
 
         let logical_plan = graphql_rdf::translate(query, "http://example.org/")?;
@@ -126,6 +132,16 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "graphql")]
     pub fn execute_graphql_rdf_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.timed(|| self.execute_graphql_rdf_with_params_untimed(query, params))
+    }
+
+    /// [`execute_graphql_rdf_with_params`](Self::execute_graphql_rdf_with_params) without the time of the whole call.
+    #[cfg(feature = "graphql")]
+    fn execute_graphql_rdf_with_params_untimed(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -158,6 +174,12 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "sparql")]
     pub fn execute_sparql(&self, query: &str) -> Result<QueryResult> {
+        self.timed(|| self.execute_sparql_untimed(query))
+    }
+
+    /// [`execute_sparql`](Self::execute_sparql) without the time of the whole call.
+    #[cfg(feature = "sparql")]
+    fn execute_sparql_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::sparql};
 
         let logical_plan = sparql::translate(query)?;
@@ -174,6 +196,16 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "sparql")]
     pub fn execute_sparql_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.timed(|| self.execute_sparql_with_params_untimed(query, params))
+    }
+
+    /// [`execute_sparql_with_params`](Self::execute_sparql_with_params) without the time of the whole call.
+    #[cfg(feature = "sparql")]
+    fn execute_sparql_with_params_untimed(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -259,7 +291,8 @@ impl Session {
             let mut physical_plan = planner.plan(optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
-                .with_deadline(deadline);
+                .with_deadline(deadline)
+                .with_read_counter(planner.read_counter());
             executor.execute(physical_plan.operator.as_mut())
         });
 

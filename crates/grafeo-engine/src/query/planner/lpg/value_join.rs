@@ -211,7 +211,7 @@ impl super::Planner {
         let (probe, input_columns) = self.plan_operator(input)?;
         // PROFILE entries for the scan and the checks the join absorbs, in
         // the order the plan's tree lists them (children first).
-        self.record_absorbed_scan_entry("HashJoin", operator);
+        self.record_kept_entry("HashJoin", operator);
         for (check, _) in &checks {
             self.record_absorbed_scan_entry("Filter", check);
         }
@@ -226,7 +226,8 @@ impl super::Planner {
             Some(label) => ScanOperator::with_label(Arc::clone(&store), label),
             None => ScanOperator::new(Arc::clone(&store)),
         }
-        .with_transaction_context(self.viewing_epoch, self.transaction_id);
+        .with_transaction_context(self.viewing_epoch, self.transaction_id)
+        .with_read_counter(self.read_counter());
         let scan_columns = vec![scan.variable.clone()];
         let mut build: Box<dyn Operator> = Box::new(scan_op);
         let checks = checks.iter().map(|(_, predicate)| (*predicate).clone());

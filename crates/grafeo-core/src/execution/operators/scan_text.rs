@@ -3,7 +3,7 @@
 //! Performs full-text search using an inverted index with BM25 scoring.
 //! Supports top-k and score-threshold modes.
 
-use super::{Operator, OperatorError, OperatorResult};
+use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::traits::GraphStoreSearch;
 use grafeo_common::types::{LogicalType, NodeId, ReadView};
@@ -48,6 +48,8 @@ pub struct TextScanOperator {
     chunk_capacity: usize,
     /// The view the search reads at, if any.
     view: Option<ReadView>,
+    /// Counts the hits the search returns.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl TextScanOperator {
@@ -74,6 +76,7 @@ impl TextScanOperator {
             executed: false,
             chunk_capacity: 2048,
             view: None,
+            reads: None,
         }
     }
 
@@ -100,6 +103,7 @@ impl TextScanOperator {
             executed: false,
             chunk_capacity: 2048,
             view: None,
+            reads: None,
         }
     }
 
@@ -115,6 +119,13 @@ impl TextScanOperator {
     #[must_use]
     pub fn with_view(mut self, view: ReadView) -> Self {
         self.view = Some(view);
+        self
+    }
+
+    /// Counts the hits the search returns in `reads`.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
         self
     }
 
@@ -137,6 +148,7 @@ impl TextScanOperator {
                 .text_search_with_threshold(label, property, query, threshold),
             (None, None, _) => Vec::new(),
         };
+        super::read_counter::count(self.reads.as_deref(), self.results.len());
     }
 }
 

@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use super::expand::visible_edges_from;
-use super::{FactorizedOperator, Operator, OperatorError, OperatorResult};
+use super::expand::{EdgeWalk, visible_edges_from};
+use super::{FactorizedOperator, Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::execution::factorized_chunk::FactorizedChunk;
 use crate::execution::vector::ValueVector;
@@ -65,6 +65,8 @@ pub struct FactorizedExpandOperator {
     viewing_epoch: Option<EpochId>,
     /// When true, skip versioned MVCC lookups (fast path for read-only queries).
     read_only: bool,
+    /// Counts the edges the expansion reads.
+    reads: Option<Arc<ReadCounter>>,
     /// Whether the operator is exhausted.
     exhausted: bool,
     /// Column names for the input (for tracking).
@@ -89,6 +91,7 @@ impl FactorizedExpandOperator {
             transaction_id: None,
             viewing_epoch: None,
             read_only: false,
+            reads: None,
             exhausted: false,
             input_column_names: Vec::new(),
         }
@@ -111,6 +114,14 @@ impl FactorizedExpandOperator {
         self
     }
 
+    /// Counts the edges the expansion reads in `reads`, before the type and
+    /// visibility checks.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
+        self
+    }
+
     /// Sets the input column names for schema tracking.
     pub fn with_column_names(mut self, names: Vec<String>) -> Self {
         self.input_column_names = names;
@@ -124,10 +135,13 @@ impl FactorizedExpandOperator {
             self.store.as_ref(),
             source_id,
             self.direction,
-            &self.edge_types,
-            self.viewing_epoch,
-            self.transaction_id,
-            self.read_only,
+            &EdgeWalk {
+                edge_types: &self.edge_types,
+                epoch: self.viewing_epoch,
+                transaction_id: self.transaction_id,
+                read_only: self.read_only,
+                reads: self.reads.as_deref(),
+            },
         )
     }
 
@@ -266,6 +280,8 @@ pub struct FactorizedExpandChain {
     viewing_epoch: Option<EpochId>,
     /// When true, skip versioned MVCC lookups (fast path for read-only queries).
     read_only: bool,
+    /// Counts the edges the expansion reads.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl FactorizedExpandChain {
@@ -278,6 +294,7 @@ impl FactorizedExpandChain {
             transaction_id: None,
             viewing_epoch: None,
             read_only: false,
+            reads: None,
         }
     }
 
@@ -295,6 +312,14 @@ impl FactorizedExpandChain {
     /// Marks this chain as read-only, enabling fast-path lookups.
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Counts the edges the expansion reads in `reads`, before the type and
+    /// visibility checks.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
         self
     }
 
@@ -463,10 +488,13 @@ impl FactorizedExpandChain {
                     self.store.as_ref(),
                     source_id,
                     direction,
-                    &edge_types,
-                    self.viewing_epoch,
-                    self.transaction_id,
-                    self.read_only,
+                    &EdgeWalk {
+                        edge_types: &edge_types,
+                        epoch: self.viewing_epoch,
+                        transaction_id: self.transaction_id,
+                        read_only: self.read_only,
+                        reads: self.reads.as_deref(),
+                    },
                 )
             };
 
@@ -568,6 +596,8 @@ pub struct LazyFactorizedChainOperator {
     viewing_epoch: Option<EpochId>,
     /// When true, skip versioned MVCC lookups (fast path for read-only queries).
     read_only: bool,
+    /// Counts the edges the expansion reads.
+    reads: Option<Arc<ReadCounter>>,
     /// Cached flat result after execution.
     result: Option<DataChunk>,
     /// Cached factorized result after execution.
@@ -590,6 +620,7 @@ impl LazyFactorizedChainOperator {
             transaction_id: None,
             viewing_epoch: None,
             read_only: false,
+            reads: None,
             result: None,
             factorized_result: None,
             executed: false,
@@ -613,6 +644,14 @@ impl LazyFactorizedChainOperator {
         self
     }
 
+    /// Counts the edges the expansion reads in `reads`, before the type and
+    /// visibility checks.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
+        self
+    }
+
     /// Executes the chain and returns the factorized result.
     ///
     /// This is the key method for factorized aggregation - it returns the
@@ -632,6 +671,9 @@ impl LazyFactorizedChainOperator {
             Box::new(SingleChunkOperator::new(input)),
         )
         .with_read_only(self.read_only);
+        if let Some(reads) = &self.reads {
+            chain = chain.with_read_counter(Arc::clone(reads));
+        }
 
         if let Some(epoch) = self.viewing_epoch {
             chain = chain.with_transaction_context(epoch, self.transaction_id);

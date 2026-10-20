@@ -540,66 +540,61 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         serialize_row(key, &mut bytes).map_err(grouped_io_error)?;
         {
             let partition = self.get_partition_mut(idx).map_err(grouped_io_error)?;
-            if !partition.entries.contains_key(bytes.as_slice()) {
-                let needed = partition
-                    .entries
-                    .len()
-                    .checked_add(1)
-                    .ok_or_else(grouped_memory_limit)?;
-                if needed > partition.entries.capacity() {
-                    let new_bytes =
-                        grouped_hash_table_bytes::<(SerializedKey, PartitionEntry<V>)>(needed)?;
-                    let mut table_owner = match partition.table_owner.take() {
-                        Some(owner) => owner,
-                        None => key_owner.split(0)?,
-                    };
-                    let old_bytes = table_owner.size();
-                    // Old and new tables coexist while hashbrown rehashes.
-                    if let Err(error) = table_owner.try_grow(new_bytes) {
-                        partition.table_owner = Some(table_owner);
-                        return Err(error);
-                    }
-                    if partition.entries.try_reserve(1).is_err() {
-                        table_owner.try_resize(table_owner.size() - new_bytes)?;
-                        partition.table_owner = Some(table_owner);
-                        return Err(grouped_memory_limit());
-                    }
-                    table_owner.try_resize(new_bytes)?;
-                    partition.owned_bytes = partition.owned_bytes - old_bytes + new_bytes;
-                    partition.table_owner = Some(table_owner);
-                }
-                let value = default(&mut key_owner)?;
-                let before = key_owner.size();
-                partition.owned_bytes = partition
-                    .owned_bytes
-                    .checked_add(before)
-                    .ok_or_else(grouped_memory_limit)?;
-                let entry =
-                    partition
-                        .entries
-                        .entry(SerializedKey(bytes))
-                        .or_insert(PartitionEntry {
-                            num_key_columns: key.len(),
-                            value,
-                            owner: Some(key_owner),
-                        });
-                let owner = entry.owner.as_mut().expect("accounted group");
+            if let Some(entry) = partition.entries.get_mut(bytes.as_slice()) {
+                let owner = entry
+                    .owner
+                    .as_mut()
+                    .expect("accounted entry retains its admission");
+                let before = owner.size();
                 let outcome = update(&mut entry.value, owner);
                 partition.owned_bytes = partition.owned_bytes - before + owner.size();
-                self.partition_sizes[idx] += 1;
                 return outcome;
             }
+            let needed = partition
+                .entries
+                .len()
+                .checked_add(1)
+                .ok_or_else(grouped_memory_limit)?;
+            if needed > partition.entries.capacity() {
+                let new_bytes =
+                    grouped_hash_table_bytes::<(SerializedKey, PartitionEntry<V>)>(needed)?;
+                let mut table_owner = match partition.table_owner.take() {
+                    Some(owner) => owner,
+                    None => key_owner.split(0)?,
+                };
+                let old_bytes = table_owner.size();
+                // Old and new tables coexist while hashbrown rehashes.
+                if let Err(error) = table_owner.try_grow(new_bytes) {
+                    partition.table_owner = Some(table_owner);
+                    return Err(error);
+                }
+                if partition.entries.try_reserve(1).is_err() {
+                    table_owner.try_resize(table_owner.size() - new_bytes)?;
+                    partition.table_owner = Some(table_owner);
+                    return Err(grouped_memory_limit());
+                }
+                table_owner.try_resize(new_bytes)?;
+                partition.owned_bytes = partition.owned_bytes - old_bytes + new_bytes;
+                partition.table_owner = Some(table_owner);
+            }
+            let value = default(&mut key_owner)?;
+            let before = key_owner.size();
+            partition.owned_bytes = partition
+                .owned_bytes
+                .checked_add(before)
+                .ok_or_else(grouped_memory_limit)?;
             let entry = partition
                 .entries
-                .get_mut(bytes.as_slice())
-                .expect("group existence checked above");
-            let owner = entry
-                .owner
-                .as_mut()
-                .expect("accounted entry retains its admission");
-            let before = owner.size();
+                .entry(SerializedKey(bytes))
+                .or_insert(PartitionEntry {
+                    num_key_columns: key.len(),
+                    value,
+                    owner: Some(key_owner),
+                });
+            let owner = entry.owner.as_mut().expect("accounted group");
             let outcome = update(&mut entry.value, owner);
             partition.owned_bytes = partition.owned_bytes - before + owner.size();
+            self.partition_sizes[idx] += 1;
             outcome
         }
     }

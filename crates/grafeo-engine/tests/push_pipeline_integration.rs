@@ -1038,6 +1038,137 @@ fn grouped_distinct_keeps_later_rows_after_pressure_spill() {
 }
 
 #[cfg(feature = "spill")]
+fn grouped_result_fixture() -> (tempfile::TempDir, GrafeoDB) {
+    let root = tempfile::tempdir().unwrap();
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_memory_limit(32 * 1024 * 1024)
+            .with_spill_path(root.path())
+            .without_query_timeout(),
+    )
+    .unwrap();
+    (root, db)
+}
+
+#[cfg(feature = "spill")]
+fn assert_grouped_result_rows(result: &grafeo_engine::database::QueryResult) {
+    assert_eq!(result.row_count(), 2051);
+    let mut seen = vec![false; 2051];
+    for row in result.rows() {
+        let key = usize::try_from(row[0].as_int64().unwrap()).unwrap();
+        assert!(key < 2051);
+        assert!(!seen[key]);
+        seen[key] = true;
+        assert_eq!(row[1], Value::Int64(2));
+    }
+    assert!(seen.into_iter().all(|present| present));
+}
+
+#[cfg(feature = "spill")]
+#[test]
+fn grouped_result_retains_cold_and_cached_rows_until_drop_or_transfer() {
+    let (root, db) = grouped_result_fixture();
+    let manager = db.buffer_manager();
+    let session = db.session();
+    let query = "UNWIND range(0, 4101) AS x RETURN x % 2051 AS bucket, count(*) AS c";
+    let baseline = manager.allocated();
+    let first = session.execute(query).unwrap();
+    assert_grouped_result_rows(&first);
+    assert!(
+        manager.allocated() > baseline,
+        "cold grouped result owns its output buffers"
+    );
+    drop(first);
+    assert_eq!(manager.allocated(), baseline);
+    let cache = db.query_cache().stats();
+    let cached = session.execute(query).unwrap();
+    assert!(db.query_cache().stats().optimized_hits > cache.optimized_hits);
+    assert_grouped_result_rows(&cached);
+    assert!(
+        manager.allocated() > baseline,
+        "cached plan preserves result ownership"
+    );
+    let rows = cached.into_rows();
+    assert_eq!(rows.len(), 2051);
+    assert_eq!(
+        manager.allocated(),
+        baseline,
+        "caller-owned rows leave executor accounting"
+    );
+    assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+}
+
+#[cfg(feature = "spill")]
+#[test]
+fn grouped_result_denial_cleans_cold_and_cached_queries() {
+    use grafeo_common::memory::buffer::MemoryRegion;
+    let (root, db) = grouped_result_fixture();
+    let manager = db.buffer_manager();
+    let session = db.session();
+    let query = "UNWIND range(0, 4101) AS x RETURN x % 2051 AS bucket, count(*) AS c";
+    let baseline = manager.allocated();
+    // Config's default hard limit is 95% of the budget. Occupy that exact
+    // limit so even the first grouped workspace cannot be admitted.
+    let limit = manager.config().budget * 95 / 100;
+    let held = manager
+        .try_allocate(limit - baseline, MemoryRegion::ExecutionBuffers)
+        .unwrap();
+    for _ in 0..2 {
+        let Err(error) = session.execute(query) else {
+            panic!("no grouped workspace headroom remains");
+        };
+        assert!(error.to_string().contains("memory"), "{error}");
+        assert_eq!(manager.allocated(), baseline + held.size());
+        assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+    }
+    drop(held);
+    assert_eq!(manager.allocated(), baseline);
+    let result = session.execute(query).unwrap();
+    assert_grouped_result_rows(&result);
+    drop(result);
+    assert_eq!(manager.allocated(), baseline);
+}
+
+#[cfg(feature = "spill")]
+#[test]
+fn grouped_limit_retains_and_releases_results() {
+    let (root, db) = grouped_result_fixture();
+    let manager = db.buffer_manager();
+    let baseline = manager.allocated();
+    let session = db.session();
+    for limit in [0, 1, 2050] {
+        let query = format!(
+            "UNWIND range(0, 4101) AS x RETURN x % 2051 AS bucket, count(*) AS c LIMIT {limit}"
+        );
+        for _ in 0..2 {
+            let result = session.execute(&query).unwrap();
+            assert_eq!(result.row_count(), limit);
+            let mut seen = vec![false; 2051];
+            for row in result.rows() {
+                let key = usize::try_from(row[0].as_int64().unwrap()).unwrap();
+                assert!(!seen[key]);
+                seen[key] = true;
+                assert_eq!(row[1], Value::Int64(2));
+            }
+            if limit > 0 {
+                assert!(manager.allocated() > baseline);
+            }
+            drop(result);
+            assert_eq!(manager.allocated(), baseline);
+            assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+        }
+    }
+    let profile = session
+        .execute(
+            "PROFILE UNWIND range(0, 4101) AS x RETURN x % 2051 AS bucket, count(*) AS c LIMIT 1",
+        )
+        .unwrap();
+    assert_eq!(profile.row_count(), 1);
+    drop(profile);
+    assert_eq!(manager.allocated(), baseline);
+}
+
+#[cfg(feature = "spill")]
 #[test]
 fn grouped_decimal_identities_survive_chunks_and_pressure_spill() {
     use grafeo_common::memory::buffer::{MemoryRegion, PressureLevel};
@@ -1156,4 +1287,36 @@ fn grouped_decimal_identities_survive_chunks_and_pressure_spill() {
         drop(held);
         assert_eq!(manager.allocated(), baseline);
     }
+}
+
+#[cfg(feature = "spill")]
+#[test]
+fn profile_grouped_denial_preserves_headroom() {
+    use grafeo_common::memory::buffer::MemoryRegion;
+    let (root, db) = grouped_result_fixture();
+    let manager = db.buffer_manager();
+    let baseline = manager.allocated();
+    let held = manager
+        .try_allocate(
+            manager.hard_limit() - baseline,
+            MemoryRegion::ExecutionBuffers,
+        )
+        .unwrap();
+    let session = db.session();
+    let query = "PROFILE UNWIND range(0, 4101) AS x RETURN x % 2051 AS bucket, count(*) AS c";
+    for _ in 0..2 {
+        let Err(error) = session.execute(query) else {
+            panic!("PROFILE must not bypass grouped workspace admission");
+        };
+        assert!(error.to_string().contains("memory"), "{error}");
+        assert_eq!(manager.allocated(), baseline + held.size());
+        assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+    }
+    drop(held);
+    assert_eq!(manager.allocated(), baseline);
+    let result = session.execute(query).unwrap();
+    assert_profile_operator_rows(&result, "HashAggregate", 2051);
+    drop(result);
+    assert_eq!(manager.allocated(), baseline);
+    assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
 }

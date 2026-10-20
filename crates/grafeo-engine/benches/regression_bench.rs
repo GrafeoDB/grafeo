@@ -17,7 +17,9 @@
 use std::hint::black_box;
 use std::time::Duration;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(codspeed)]
+use criterion::criterion_main;
+use criterion::{Criterion, criterion_group};
 
 use grafeo_engine::GrafeoDB;
 
@@ -368,4 +370,206 @@ criterion_group!(
     bench_edge_filter_any,
 );
 
-criterion_main!(multihop_benches, repeated_benches, edge_filter_benches);
+/// Native grouped callers that borrow their results.
+fn bench_native_aggregate_resource(c: &mut Criterion) {
+    bench_aggregate_resource(c, false);
+}
+
+/// The same callers transferring rows through the existing public API.
+fn bench_native_owned_aggregate_resource(c: &mut Criterion) {
+    bench_aggregate_resource(c, true);
+}
+
+fn bench_aggregate_resource(c: &mut Criterion, owned: bool) {
+    #[cfg(all(feature = "lpg", feature = "gql", feature = "spill"))]
+    {
+        use criterion::BatchSize;
+        use grafeo_common::memory::buffer::MemoryRegion;
+        use grafeo_common::types::Value;
+        use grafeo_common::utils::error::Error;
+        use grafeo_engine::Config;
+
+        const GROUPS: usize = 1024;
+        const BUDGET: usize = 32 << 20;
+        const QUERY: &str = "MATCH (n:AggregateCost) RETURN n.bucket AS bucket, sum(n.value) AS total, count(*) AS count";
+        let validate = |result: &grafeo_engine::database::QueryResult| {
+            assert_eq!(result.row_count(), GROUPS);
+            let mut seen = [false; GROUPS];
+            for row in result.rows() {
+                let [
+                    Value::Int64(bucket),
+                    Value::Int64(total),
+                    Value::Int64(count),
+                ] = row.as_slice()
+                else {
+                    panic!("unexpected aggregate row: {row:?}");
+                };
+                let bucket = usize::try_from(*bucket).unwrap();
+                assert!(bucket < GROUPS && !seen[bucket]);
+                seen[bucket] = true;
+                assert_eq!((*total, *count), (10, 4));
+            }
+            assert!(seen.into_iter().all(|value| value));
+        };
+        let consume = |result: grafeo_engine::database::QueryResult| {
+            if owned {
+                let rows = result.into_rows();
+                black_box(&rows);
+                drop(rows);
+            } else {
+                black_box(&result);
+                drop(result);
+            }
+        };
+        let mut group = c.benchmark_group(if owned {
+            "native_owned_aggregate_resource"
+        } else {
+            "native_aggregate_resource"
+        });
+        group.sample_size(50);
+        group.measurement_time(Duration::from_secs(10));
+        group.warm_up_time(Duration::from_secs(3));
+        for (name, configured, pressure, cold) in [
+            ("groups_1024_rows_4096_ordinary_cold", false, false, true),
+            ("groups_1024_rows_4096_cached", false, false, false),
+            (
+                "groups_1024_rows_4096_configured_resident",
+                true,
+                false,
+                false,
+            ),
+            (
+                "groups_1024_rows_4096_pressure_90_percent",
+                true,
+                true,
+                false,
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let spill_path = directory.path().join("spill");
+            let mut config = Config::in_memory()
+                .with_memory_limit(BUDGET)
+                .without_query_timeout();
+            if configured {
+                config = config.with_spill_path(&spill_path);
+            }
+            let database = GrafeoDB::with_config(config).unwrap();
+            for value in 1..=4_i64 {
+                for bucket in 0..GROUPS {
+                    database
+                        .create_node_with_props(
+                            &["AggregateCost"],
+                            [
+                                ("bucket", Value::Int64(i64::try_from(bucket).unwrap())),
+                                ("value", Value::Int64(value)),
+                            ],
+                        )
+                        .expect("insert grouped benchmark fixture");
+                }
+            }
+            let manager = database.buffer_manager();
+            let baseline = manager.allocated();
+            let held = pressure.then(|| {
+                manager
+                    .try_allocate(
+                        (BUDGET * 9 / 10).checked_sub(baseline).unwrap(),
+                        MemoryRegion::ExecutionBuffers,
+                    )
+                    .unwrap()
+            });
+            let held_total = manager.allocated();
+            if pressure {
+                assert_eq!(held_total, BUDGET * 9 / 10);
+            }
+            let session = database.session();
+            if pressure {
+                // Spill directories are lazy. This error proves that this exact
+                // grouped workload reaches a filesystem spill, without a watcher.
+                std::fs::write(&spill_path, b"blocked spill directory").unwrap();
+                let error = session.execute(QUERY).unwrap_err();
+                assert!(matches!(error, Error::Io(_)), "{error}");
+                assert_eq!(manager.allocated(), held_total);
+                std::fs::remove_file(&spill_path).unwrap();
+            }
+            database.query_cache().clear();
+            let before = database.query_cache().stats();
+            let result = session.execute(QUERY).unwrap();
+            validate(&result);
+            drop(result);
+            assert_eq!(manager.allocated(), held_total);
+            let primed = database.query_cache().stats();
+            assert!(primed.optimized_misses > before.optimized_misses);
+            let result = session.execute(QUERY).unwrap();
+            validate(&result);
+            drop(result);
+            let warmed = database.query_cache().stats();
+            assert!(warmed.optimized_hits > primed.optimized_hits);
+            assert_eq!(manager.allocated(), held_total);
+            if configured && !pressure {
+                assert!(!spill_path.exists(), "resident control must not spill");
+            }
+
+            group.bench_function(name, |b| {
+                if cold {
+                    // PerIteration prevents Criterion from batching cache clears
+                    // ahead of several queries and accidentally timing warm calls.
+                    b.iter_batched(
+                        || database.query_cache().clear(),
+                        |()| {
+                            let result = session.execute(black_box(QUERY)).unwrap();
+                            consume(result);
+                        },
+                        BatchSize::PerIteration,
+                    );
+                } else {
+                    b.iter(|| {
+                        let result = session.execute(black_box(QUERY)).unwrap();
+                        consume(result);
+                    });
+                }
+            });
+            assert_eq!(manager.allocated(), held_total);
+            if spill_path.exists() {
+                assert_eq!(std::fs::read_dir(&spill_path).unwrap().count(), 0);
+            }
+            drop(held);
+            assert_eq!(manager.allocated(), baseline);
+        }
+        group.finish();
+    }
+    #[cfg(not(all(feature = "lpg", feature = "gql", feature = "spill")))]
+    let _ = (c, owned);
+}
+
+criterion_group!(
+    native_aggregate_benches,
+    bench_native_aggregate_resource,
+    bench_native_owned_aggregate_resource,
+);
+
+#[cfg(codspeed)]
+criterion_main!(
+    multihop_benches,
+    repeated_benches,
+    edge_filter_benches,
+    native_aggregate_benches
+);
+
+#[cfg(not(codspeed))]
+fn main() {
+    // The cost protocol supplies its positional filter first. Inspect only
+    // that argument so a baseline named after this group is not a filter.
+    if std::env::args().nth(1).is_some_and(|filter| {
+        filter.starts_with("native_aggregate_resource")
+            || filter.starts_with("native_owned_aggregate_resource")
+    }) {
+        native_aggregate_benches();
+    } else {
+        multihop_benches();
+        repeated_benches();
+        edge_filter_benches();
+        native_aggregate_benches();
+    }
+    // Match the pinned Criterion main macro's final configuration/summary.
+    Criterion::default().configure_from_args().final_summary();
+}

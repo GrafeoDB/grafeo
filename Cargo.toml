@@ -116,6 +116,7 @@ rand = "0.10.3"
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(codspeed)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

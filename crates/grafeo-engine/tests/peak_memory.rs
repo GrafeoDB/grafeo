@@ -173,6 +173,200 @@ mod counting {
 #[global_allocator]
 static COUNTING: counting::Counting = counting::Counting;
 
+/// Keep grouped-query measurements separate from checkpoint/open measurements.
+#[cfg(all(feature = "gql", feature = "spill"))]
+mod grouped_aggregation {
+    use super::{Config, GrafeoDB, Value, counting, measure, measuring};
+
+    const BUDGET: usize = 32 << 20;
+    const PROCESS_HEADROOM: usize = 32 << 20;
+    const QUERY: &str = "MATCH (n:AggregatePeak) RETURN n.bucket AS bucket, sum(n.value) AS total, count(*) AS count";
+    const CHILD: &str = "GRAFEO_GROUPED_PEAK_CHILD";
+
+    #[cfg(target_os = "linux")]
+    fn process_peak() -> usize {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let fields = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .unwrap();
+        let mut fields = fields.split_whitespace();
+        let kib: usize = fields.next().unwrap().parse().unwrap();
+        assert_eq!(fields.next(), Some("kB"));
+        kib.checked_mul(1024).unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn process_peak() -> usize {
+        // The parent obtains the lifetime peak with time -l; this is the
+        // seeded database's RSS used for that independent process envelope.
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let kib: usize = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        kib.checked_mul(1024).unwrap()
+    }
+
+    fn run(rows: usize, name: &str) {
+        if std::env::var(CHILD).as_deref() != Ok(name) {
+            #[cfg(not(target_os = "macos"))]
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            #[cfg(target_os = "macos")]
+            let mut command = {
+                let mut command = std::process::Command::new("/usr/bin/time");
+                command.arg("-l").arg(std::env::current_exe().unwrap());
+                command.env("LC_ALL", "C");
+                command
+            };
+            let output = command
+                .args([
+                    "--exact",
+                    &format!("grouped_aggregation::{name}"),
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, name)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(stdout.contains("grouped allocation peak:"), "{stdout}");
+            #[cfg(target_os = "macos")]
+            {
+                let baseline: usize = stdout
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once("grouped process baseline: ")
+                            .map(|(_, value)| value)
+                    })
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let peak: usize = stderr
+                    .lines()
+                    .find_map(|line| line.trim().strip_suffix("maximum resident set size"))
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                assert!(peak > 0 && peak <= baseline + PROCESS_HEADROOM);
+                println!("grouped process peak: rows={rows} peak={peak} baseline={baseline}");
+            }
+            print!("{stdout}");
+            return;
+        }
+
+        let _serial = measuring();
+        let directory = tempfile::tempdir().unwrap();
+        let spill_path = directory.path().join("spill");
+        let database = GrafeoDB::with_config(
+            Config::in_memory()
+                .with_memory_limit(BUDGET)
+                .with_spill_path(&spill_path)
+                .without_query_timeout(),
+        )
+        .unwrap();
+        let groups = rows / 4;
+        for value in 1..=4_i64 {
+            for bucket in 0..groups {
+                database
+                    .create_node_with_props(
+                        &["AggregatePeak"],
+                        [
+                            ("bucket", Value::Int64(i64::try_from(bucket).unwrap())),
+                            ("value", Value::Int64(value)),
+                        ],
+                    )
+                    .expect("insert grouped peak fixture");
+            }
+        }
+        let manager = database.buffer_manager();
+        let baseline = manager.allocated();
+        let session = database.session();
+        // The process envelope includes the first cold query as well as reuse.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let process_baseline = process_peak();
+        // Prime the logical-plan cache outside the allocation interval.
+        drop(session.execute(QUERY).unwrap());
+        assert_eq!(manager.allocated(), baseline);
+        let (result, measured) = measure(|| session.execute(QUERY).unwrap());
+        let retained = manager.allocated().checked_sub(baseline).unwrap();
+        assert!(retained > 0, "the retained result must own its admission");
+        assert!(manager.allocated() <= BUDGET);
+        assert!(measured.kept() > 0, "measure actual retained allocations");
+        assert!(measured.above_before() <= PROCESS_HEADROOM, "{measured:?}");
+        assert_eq!(result.row_count(), groups);
+        let mut seen = vec![false; groups];
+        for row in result.rows() {
+            let [
+                Value::Int64(bucket),
+                Value::Int64(total),
+                Value::Int64(count),
+            ] = row.as_slice()
+            else {
+                panic!("unexpected aggregate row: {row:?}");
+            };
+            let bucket = usize::try_from(*bucket).unwrap();
+            assert!(bucket < groups && !seen[bucket]);
+            seen[bucket] = true;
+            assert_eq!((*total, *count), (10, 4));
+        }
+        assert!(seen.iter().all(|&value| value));
+        drop(seen);
+        drop(result);
+        assert_eq!(manager.allocated(), baseline);
+        let after_drop = counting::current();
+        assert!(
+            after_drop < measured.after,
+            "dropping output must release its heap"
+        );
+        if spill_path.exists() {
+            assert_eq!(std::fs::read_dir(&spill_path).unwrap().count(), 0);
+        }
+        let follow_up = session.execute("RETURN 7 AS value").unwrap();
+        assert_eq!(follow_up.rows(), &[vec![Value::Int64(7)]]);
+        drop(follow_up);
+        assert_eq!(manager.allocated(), baseline);
+        #[cfg(target_os = "linux")]
+        {
+            let peak = process_peak();
+            assert!(peak > 0 && peak <= process_baseline + PROCESS_HEADROOM);
+            println!("grouped process peak: rows={rows} peak={peak} baseline={process_baseline}");
+        }
+        #[cfg(target_os = "macos")]
+        println!("grouped process baseline: {process_baseline}");
+        println!(
+            "grouped allocation peak: rows={rows} groups={groups} budget={BUDGET} extra_peak={} retained_heap={} released_heap={} retained_grant={retained} released_query_bytes=0",
+            measured.above_before(),
+            measured.kept(),
+            measured.after - after_drop,
+        );
+    }
+
+    #[test]
+    fn process_peak_4096() {
+        run(4096, "process_peak_4096");
+    }
+
+    #[test]
+    fn process_peak_8192() {
+        run(8192, "process_peak_8192");
+    }
+
+    #[test]
+    fn process_peak_16384() {
+        run(16384, "process_peak_16384");
+    }
+}
+
 /// The counters are global: the tests that measure take turns.
 static MEASURING: Mutex<()> = Mutex::new(());
 

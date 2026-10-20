@@ -266,8 +266,22 @@ fn bench_product_quantization(c: &mut Criterion) {
 
     let table = quantizer.build_distance_table(query);
 
-    group.bench_function("distance_with_table_pq8", |b| {
-        b.iter(|| black_box(quantizer.distance_with_table(&table, &codes)));
+    // One query against a thousand coded vectors, as a quantized search scans
+    // them: a single 3 ns call measures where its loop lands in the binary.
+    let coded: Vec<Vec<u8>> = generate_random_vectors(1_000, dims, 7)
+        .iter()
+        .map(|vector| quantizer.quantize(vector))
+        .collect();
+
+    group.bench_function("distance_with_table_1000_pq8", |b| {
+        b.iter(|| {
+            black_box(
+                coded
+                    .iter()
+                    .map(|codes| quantizer.distance_with_table(&table, codes))
+                    .fold(f32::INFINITY, f32::min),
+            )
+        });
     });
 
     group.finish();

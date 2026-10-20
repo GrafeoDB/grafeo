@@ -860,17 +860,33 @@ impl ProductQuantizer {
     /// Computes asymmetric squared distance using a precomputed distance table.
     ///
     /// This is O(M) - just M table lookups and additions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `table` has fewer than `codes.len() * num_centroids` entries
+    /// (one row per code), or a code is not below `num_centroids`.
     #[must_use]
     #[inline]
     pub fn distance_with_table(&self, table: &[f32], codes: &[u8]) -> f32 {
         debug_assert_eq!(codes.len(), self.num_subvectors);
-        debug_assert_eq!(table.len(), self.num_subvectors * self.num_centroids);
 
-        codes
-            .iter()
-            .enumerate()
-            .map(|(m, &code)| table[m * self.num_centroids + code as usize])
-            .sum()
+        let width = self.num_centroids;
+        // One table row per code. Slicing to the codes' rows first keeps a short
+        // table a panic, as indexing it was, never a sum over fewer rows.
+        let rows = table[..codes.len() * width].chunks_exact(width);
+        if width == 256 {
+            // A u8 code indexes a 256-entry row without a bounds check.
+            rows.zip(codes)
+                .map(|(row, &code)| {
+                    let row: &[f32; 256] = row.try_into().expect("rows are 256 wide");
+                    row[usize::from(code)]
+                })
+                .sum()
+        } else {
+            rows.zip(codes)
+                .map(|(row, &code)| row[usize::from(code)])
+                .sum()
+        }
     }
 
     /// Computes asymmetric squared distance from query to quantized vector.
@@ -1352,6 +1368,56 @@ mod tests {
         let dist_table = pq.distance_with_table(&table, &codes);
 
         assert!((dist_direct - dist_table).abs() < 0.001);
+    }
+
+    /// A quantizer of `num_subvectors` x `num_centroids` with one-wide subvectors
+    /// and a table whose entries all differ, so a wrong lookup changes the sum.
+    fn table_quantizer(
+        num_subvectors: usize,
+        num_centroids: usize,
+    ) -> (ProductQuantizer, Vec<f32>) {
+        let pq = ProductQuantizer::with_centroids(
+            num_subvectors,
+            num_centroids,
+            num_subvectors,
+            vec![0.0; num_subvectors * num_centroids],
+        );
+        let table = (0..num_subvectors * num_centroids)
+            .map(|i| 1.0 + (i as f32) * 0.37)
+            .collect();
+        (pq, table)
+    }
+
+    #[test]
+    fn distance_with_table_sums_one_entry_per_subvector_bit_for_bit() {
+        for (num_subvectors, num_centroids) in [(8, 256), (4, 8), (3, 200)] {
+            let (pq, table) = table_quantizer(num_subvectors, num_centroids);
+            for codes in [
+                vec![0_u8; num_subvectors],
+                (0..num_subvectors)
+                    .map(|m| u8::try_from((m * 37 + 11) % num_centroids).expect("a code"))
+                    .collect(),
+                vec![u8::try_from(num_centroids - 1).expect("a code"); num_subvectors],
+            ] {
+                let mut expected = 0.0_f32;
+                for (m, &code) in codes.iter().enumerate() {
+                    expected += table[m * num_centroids + code as usize];
+                }
+                assert_eq!(
+                    pq.distance_with_table(&table, &codes).to_bits(),
+                    expected.to_bits(),
+                    "{num_subvectors} x {num_centroids}, codes {codes:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "range end index")]
+    fn distance_with_table_panics_on_a_short_table() {
+        let (pq, mut table) = table_quantizer(8, 256);
+        table.pop();
+        let _ = pq.distance_with_table(&table, &[255; 8]);
     }
 
     #[test]

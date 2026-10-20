@@ -21,6 +21,8 @@ Changes since 0.6.0-beta.1.
 
 ### Changed
 
+- **Cold row-group scalar reads**: read integer, boolean, float and decimal properties directly from their encoded column chunks. Point reads keep the column encoded; writes and complex values retain the existing decode path. The file format is unchanged.
+
 - **Filters and projections read the one property they need** (performance): `WHERE n.prop = ...`, `{prop: ...}` in a pattern and `RETURN n.prop` read that value after a visibility check instead of building the whole node or edge, so a query that reads properties over many rows is about 2.5 to 3 times faster than in 0.6.0-beta.1 and 0.5.44 (which built it too, and 0.6.0-beta.1 paid more per row since a filter no longer runs at planning time). With the `temporal` feature the value is still read through the versioned node.
 - **`IN` lists use the property index inside an `AND` chain** ([#456](https://github.com/GrafeoDB/grafeo/issues/456), performance): `WHERE n.id IN $ids AND n.active = true` scanned every node once a conjunct was added (39.8 ms over 40,000 nodes); the indexed `IN` now finds the candidates and the rest of the predicate checks them (about 0.1 ms at any size), also after `WITH ... WHERE` and with the `IN` anywhere in the chain. `EXPLAIN` shows the index lookup.
 - **`schema()` counts labels without building nodes** ([#546](https://github.com/GrafeoDB/grafeo/issues/546), performance): to leave out uncommitted nodes it built every node of a label with its properties; it now checks each node's visibility and label set. A custom `GraphStore` can override the new `nodes_by_label_count_at_epoch` (the default keeps the old way).

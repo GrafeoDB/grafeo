@@ -15,7 +15,7 @@ use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::Mutex;
 
 use super::bitset::Bitset;
-use crate::codec::column_chunk::decode_column_chunk_bytes;
+use crate::codec::column_chunk::{PointView, decode_column_chunk_bytes};
 
 /// The values of a column's rows, by row.
 #[derive(Debug, Clone)]
@@ -169,20 +169,19 @@ struct ColdChunk {
     row_count: u32,
     codec: u8,
     bytes: Bytes,
+    point: Option<PointView>,
 }
 
 /// One property key's values in a row group.
 ///
-/// A column a load filled holds its chunks cold, as their encoded bytes,
-/// until its first use: a read or a write of any of its rows decodes them
-/// all into the hot form, once. The other columns of the row group stay
-/// cold.
+/// A loaded column holds its chunks cold, as their encoded bytes.
+/// Scalar reads use those bytes directly. A write, or a read of a
+/// chunk without a point view, decodes the column into the hot form once.
 #[derive(Debug)]
 pub(super) struct Column {
-    /// The chunks not decoded yet; emptied by the first use.
+    /// The chunks not decoded yet; emptied when the hot form is published.
     cold: Mutex<Vec<ColdChunk>>,
-    /// The decoded values, set by the first use (or by the first write of a
-    /// column no load filled).
+    /// The decoded values, set when a caller needs the hot form.
     hot: OnceLock<Hot>,
 }
 
@@ -206,14 +205,20 @@ impl Column {
         }
     }
 
-    /// The decoded values, decoding the cold chunks on the first use.
+    /// The decoded values, decoding the cold chunks when needed.
     fn hot(&self) -> &Hot {
+        if let Some(hot) = self.hot.get() {
+            return hot;
+        }
+        // Keep the chunks locked until OnceLock publishes the decoded form.
+        // Otherwise a concurrent point read could find neither form.
+        let mut cold = self.cold.lock();
         self.hot.get_or_init(|| {
             let mut hot = Hot {
                 present: Bitset::default(),
                 data: Data::Values(Vec::new()),
             };
-            for chunk in std::mem::take(&mut *self.cold.lock()) {
+            for chunk in std::mem::take(&mut *cold) {
                 // The load decoded each chunk once to check it.
                 let decoded = decode_column_chunk_bytes(&chunk.bytes, chunk.codec, chunk.row_count)
                     .expect("a chunk the load checked");
@@ -223,6 +228,27 @@ impl Column {
             }
             hot
         })
+    }
+
+    /// Reads a scalar from its chunk, decoding only for unsupported kinds.
+    fn get(&self, row: usize) -> Option<Value> {
+        if let Some(hot) = self.hot.get() {
+            return hot.get(row);
+        }
+        let cold = self.cold.lock();
+        if let Some(hot) = self.hot.get() {
+            return hot.get(row);
+        }
+        let chunk = cold.iter().find(|chunk| {
+            row.checked_sub(chunk.first_row)
+                .is_some_and(|offset| offset < chunk.row_count as usize)
+        })?;
+        if let Some(point) = &chunk.point {
+            let offset = u32::try_from(row - chunk.first_row).ok()?;
+            return point.get(offset);
+        }
+        drop(cold);
+        self.hot().get(row)
     }
 
     fn hot_mut(&mut self) -> &mut Hot {
@@ -236,11 +262,14 @@ impl Column {
     }
 
     fn heap_bytes(&self) -> usize {
-        self.cold
-            .lock()
-            .iter()
-            .map(|chunk| chunk.bytes.len())
-            .sum::<usize>()
+        let cold = self.cold.lock();
+        cold.capacity() * std::mem::size_of::<ColdChunk>()
+            + cold
+                .iter()
+                .map(|chunk| {
+                    chunk.bytes.len() + chunk.point.as_ref().map_or(0, PointView::index_heap_bytes)
+                })
+                .sum::<usize>()
             + self.hot.get().map_or(0, Hot::heap_bytes)
     }
 }
@@ -254,12 +283,11 @@ pub(super) struct Columns {
 impl Columns {
     /// The value of key `key` at `row`.
     pub(super) fn get(&self, key: u32, row: usize) -> Option<Value> {
-        self.by_key.get(&key)?.hot().get(row)
+        self.by_key.get(&key)?.get(row)
     }
 
     /// Adds a chunk of key `key` as the file holds it, for rows from
-    /// `first_row`: it stays encoded until the column's first use. The chunk
-    /// decodes (the load checked it).
+    /// `first_row`. The load has already decoded and validated the chunk.
     pub(super) fn add_cold(
         &mut self,
         key: u32,
@@ -270,11 +298,14 @@ impl Columns {
     ) {
         let column = self.by_key.entry(key).or_insert_with(Column::cold);
         if column.is_cold() {
+            let point = PointView::from_validated(&bytes, codec, row_count)
+                .expect("a chunk the load checked");
             column.cold.lock().push(ColdChunk {
                 first_row,
                 row_count,
                 codec,
                 bytes,
+                point,
             });
         } else {
             // Written to already: decode into the hot values.
@@ -313,7 +344,7 @@ impl Columns {
     pub(super) fn row(&self, row: usize) -> impl Iterator<Item = (u32, Value)> + '_ {
         self.by_key
             .iter()
-            .filter_map(move |(key, column)| column.hot().get(row).map(|value| (*key, value)))
+            .filter_map(move |(key, column)| column.get(row).map(|value| (*key, value)))
     }
 
     /// Takes every value at `row` out.
@@ -331,9 +362,146 @@ impl Columns {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use bytes::Bytes;
     use grafeo_common::types::Value;
 
     use super::Columns;
+    use crate::codec::column_chunk::{decode_column_chunk_bytes, encode_column_chunk};
+
+    fn add_chunk(columns: &mut Columns, first: usize, rows: u32, values: &[(u32, Value)]) {
+        let epochs = vec![17; values.len()];
+        let (codec, bytes) = encode_column_chunk(rows, values, Some(&epochs)).unwrap();
+        let bytes = Bytes::from(bytes);
+        decode_column_chunk_bytes(&bytes, codec.to_byte(), rows).unwrap();
+        columns.add_cold(7, first, rows, codec.to_byte(), bytes);
+    }
+
+    /// A point read must not inflate the column into an owned Value per row.
+    #[test]
+    fn point_reads_of_a_loaded_integer_column_keep_it_cold() {
+        let values: Vec<_> = (0..65_536)
+            .map(|row| (row, Value::Int64(i64::from(row))))
+            .collect();
+        let (codec, encoded) = encode_column_chunk(65_536, &values, None).unwrap();
+        let bytes = bytes::Bytes::from(encoded);
+        decode_column_chunk_bytes(&bytes, codec.to_byte(), 65_536).unwrap();
+        let mut columns = Columns::default();
+        columns.add_cold(7, 0, 65_536, codec.to_byte(), bytes);
+        let resident = columns.heap_bytes();
+
+        for (row, expected) in [(0, 0), (63, 63), (64, 64), (65_535, 65_535)] {
+            assert_eq!(columns.get(7, row), Some(Value::Int64(expected)));
+        }
+        assert_eq!(columns.get(7, 65_536), None);
+        assert_eq!(
+            columns.cold_count(),
+            1,
+            "point reads must retain the encoded column"
+        );
+        assert_eq!(
+            columns.heap_bytes(),
+            resident,
+            "point reads must not allocate a decoded column"
+        );
+    }
+
+    #[test]
+    fn sparse_point_reads_cross_words_and_chunks_without_decoding() {
+        let mut columns = Columns::default();
+        let values = [0, 63, 64, 127, 128, 255].map(|row| (row, Value::Int64(-i64::from(row) - 1)));
+        add_chunk(&mut columns, 300, 256, &values);
+        add_chunk(&mut columns, 0, 2, &[(1, Value::Bool(false))]);
+        let resident = columns.heap_bytes();
+        for row in 0..600 {
+            let expected = if row == 1 {
+                Some(Value::Bool(false))
+            } else {
+                values.iter().find_map(|(offset, value)| {
+                    (row == 300 + *offset as usize).then(|| value.clone())
+                })
+            };
+            assert_eq!(columns.get(7, row), expected, "row {row}");
+            assert_eq!(
+                columns.row(row).collect::<Vec<_>>(),
+                expected
+                    .into_iter()
+                    .map(|value| (7, value))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(columns.get(7, usize::MAX), None);
+        assert_eq!(columns.cold_count(), 1);
+        assert_eq!(columns.heap_bytes(), resident);
+    }
+
+    #[test]
+    fn writes_and_removals_preserve_other_cold_rows() {
+        let mut columns = Columns::default();
+        add_chunk(
+            &mut columns,
+            0,
+            65,
+            &[
+                (0, Value::Int64(11)),
+                (63, Value::Int64(22)),
+                (64, Value::Int64(33)),
+            ],
+        );
+        assert_eq!(columns.get(7, 63), Some(Value::Int64(22)));
+        assert_eq!(columns.cold_count(), 1);
+        columns.set(7, 63, &Value::from("changed type"));
+        assert_eq!(columns.cold_count(), 0);
+        assert_eq!(columns.get(7, 0), Some(Value::Int64(11)));
+        assert_eq!(columns.get(7, 63), Some(Value::from("changed type")));
+        assert_eq!(columns.take(7, 64), Some(Value::Int64(33)));
+        assert_eq!(columns.get(7, 64), None);
+
+        let mut columns = Columns::default();
+        add_chunk(
+            &mut columns,
+            0,
+            2,
+            &[(0, Value::Int64(11)), (1, Value::Int64(22))],
+        );
+        assert_eq!(columns.take(7, 0), Some(Value::Int64(11)));
+        assert_eq!(columns.get(7, 1), Some(Value::Int64(22)));
+        columns.clear_row(1);
+        assert_eq!(columns.get(7, 1), None);
+    }
+
+    #[test]
+    fn concurrent_point_reads_and_fallback_reads_keep_every_value() {
+        for _ in 0..16 {
+            let mut columns = Columns::default();
+            let values = (0..4096)
+                .map(|row| (row, Value::Int64(i64::from(row))))
+                .collect::<Vec<_>>();
+            add_chunk(&mut columns, 0, 4096, &values);
+            add_chunk(&mut columns, 4096, 1, &[(0, Value::from("fallback"))]);
+            let columns = Arc::new(columns);
+            let start = Arc::new(Barrier::new(4));
+            std::thread::scope(|scope| {
+                for reader in 0..4 {
+                    let columns = Arc::clone(&columns);
+                    let start = Arc::clone(&start);
+                    scope.spawn(move || {
+                        start.wait();
+                        for _ in 0..32 {
+                            let (row, expected) = if reader == 0 {
+                                (4096, Value::from("fallback"))
+                            } else {
+                                (4095, Value::Int64(4095))
+                            };
+                            assert_eq!(columns.get(7, row), Some(expected));
+                        }
+                    });
+                }
+            });
+            assert_eq!(columns.cold_count(), 0);
+        }
+    }
 
     #[test]
     fn a_column_keeps_typed_values_and_turns_into_any_values_on_another_type() {

@@ -17,6 +17,7 @@ use grafeo_core::graph::Direction;
 use grafeo_engine::database::GrafeoDB;
 
 use crate::error::PyGrafeoError;
+use crate::gil::without_gil;
 
 /// Work with your Grafeo graph using NetworkX conventions.
 ///
@@ -42,6 +43,15 @@ impl PyNetworkXAdapter {
     /// Creates a new NetworkX adapter for the given database.
     pub fn new(db: Arc<RwLock<GrafeoDB>>, directed: bool) -> Self {
         Self { db, directed }
+    }
+
+    /// Runs `compute` on the database with the GIL released.
+    fn compute<T: Send>(
+        &self,
+        py: Python<'_>,
+        compute: impl FnOnce(&GrafeoDB) -> T + Send,
+    ) -> PyResult<T> {
+        without_gil(py, || Ok(compute(&self.db.read())))
     }
 }
 
@@ -385,45 +395,57 @@ impl PyNetworkXAdapter {
     /// (`as_networkx(directed=False)`) walks each pair of connected nodes once,
     /// in both directions.
     #[pyo3(signature = (alpha=0.85, max_iter=100, tol=1e-6))]
-    fn pagerank(&self, alpha: f64, max_iter: usize, tol: f64) -> PyResult<BTreeMap<u64, f64>> {
+    fn pagerank(
+        &self,
+        alpha: f64,
+        max_iter: usize,
+        tol: f64,
+        py: Python<'_>,
+    ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::pagerank(&*store, alpha, max_iter, tol, self.directed);
+        let result = self.compute(py, |db| {
+            algorithms::pagerank(&*db.store(), alpha, max_iter, tol, self.directed)
+        })?;
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
     /// Compute betweenness centrality (NetworkX-compatible).
     #[pyo3(signature = (normalized=true))]
-    fn betweenness_centrality(&self, normalized: bool) -> PyResult<BTreeMap<u64, f64>> {
+    fn betweenness_centrality(
+        &self,
+        normalized: bool,
+        py: Python<'_>,
+    ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::betweenness_centrality(&*store, normalized);
+        let result = self.compute(py, |db| {
+            algorithms::betweenness_centrality(&*db.store(), normalized)
+        })?;
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
     /// Compute closeness centrality (NetworkX-compatible).
     #[pyo3(signature = (wf_improved=false))]
-    fn closeness_centrality(&self, wf_improved: bool) -> PyResult<BTreeMap<u64, f64>> {
+    fn closeness_centrality(
+        &self,
+        wf_improved: bool,
+        py: Python<'_>,
+    ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::closeness_centrality(&*store, wf_improved);
+        let result = self.compute(py, |db| {
+            algorithms::closeness_centrality(&*db.store(), wf_improved)
+        })?;
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
     /// Find connected components (NetworkX-compatible), each a list of node
     /// IDs in node-id order.
-    fn connected_components(&self) -> PyResult<Vec<Vec<u64>>> {
+    fn connected_components(&self, py: Python<'_>) -> PyResult<Vec<Vec<u64>>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let components = algorithms::connected_components(&*store);
+        let components = self.compute(py, |db| algorithms::connected_components(&*db.store()))?;
 
         // Group by component, each in node-id order (the result is a hash map,
         // whose order changes from call to call).
@@ -452,16 +474,16 @@ impl PyNetworkXAdapter {
     ) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-
         if let Some(target_id) = target {
-            match algorithms::dijkstra_path(
-                &*store,
-                NodeId::new(source),
-                NodeId::new(target_id),
-                weight,
-            ) {
+            let path = self.compute(py, |db| {
+                algorithms::dijkstra_path(
+                    &*db.store(),
+                    NodeId::new(source),
+                    NodeId::new(target_id),
+                    weight,
+                )
+            })?;
+            match path {
                 Some((_, path)) => {
                     let path_list: Vec<u64> = path.into_iter().map(|n| n.0).collect();
                     Ok(path_list.into_pyobject(py)?.into_any().unbind())
@@ -470,7 +492,9 @@ impl PyNetworkXAdapter {
             }
         } else {
             // Return paths to all reachable nodes
-            let result = algorithms::dijkstra(&*store, NodeId::new(source), weight);
+            let result = self.compute(py, |db| {
+                algorithms::dijkstra(&*db.store(), NodeId::new(source), weight)
+            })?;
             let dict = PyDict::new(py);
 
             for (target_node, _) in &result.distances {
@@ -495,21 +519,23 @@ impl PyNetworkXAdapter {
     ) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-
         if let Some(target_id) = target {
-            match algorithms::dijkstra_path(
-                &*store,
-                NodeId::new(source),
-                NodeId::new(target_id),
-                weight,
-            ) {
+            let path = self.compute(py, |db| {
+                algorithms::dijkstra_path(
+                    &*db.store(),
+                    NodeId::new(source),
+                    NodeId::new(target_id),
+                    weight,
+                )
+            })?;
+            match path {
                 Some((dist, _)) => Ok(dist.into_pyobject(py)?.into_any().unbind()),
                 None => Err(PyGrafeoError::InvalidArgument("No path found".into()).into()),
             }
         } else {
-            let result = algorithms::dijkstra(&*store, NodeId::new(source), weight);
+            let result = self.compute(py, |db| {
+                algorithms::dijkstra(&*db.store(), NodeId::new(source), weight)
+            })?;
             let distances: BTreeMap<u64, f64> = result
                 .distances
                 .into_iter()

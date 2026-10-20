@@ -286,6 +286,7 @@ nav:
       - Database Setup: user-guide/rust/database.md
       - Graph Operations: user-guide/rust/operations.md
       - Sessions: user-guide/rust/sessions.md
+      - Choosing an Allocator: user-guide/rust/allocator.md
     - Transactions: user-guide/transactions.md
     - Named Graphs: user-guide/named-graphs.md
     - Catalog, Schemas & Graphs: user-guide/catalog-hierarchy.md

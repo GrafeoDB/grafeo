@@ -115,6 +115,14 @@ result = tx1.execute("MATCH (p:Person) RETURN count(p)")
 tx1.commit()
 ```
 
+## Threads
+
+A transaction is used from one thread at a time. Its queries, `commit()` and
+`rollback()` release the GIL, so other threads keep working while they run, but
+a `commit()` or `rollback()` while another thread runs one of the
+transaction's queries raises `RuntimeError` at once. Give each thread its own
+transaction.
+
 ## Best Practices
 
 1. **Keep transactions short** - Long transactions hold resources and increase conflict potential

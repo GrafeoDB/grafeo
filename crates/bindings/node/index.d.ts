@@ -510,7 +510,7 @@ export declare class ResultStream {
    * and `null` map directly; temporal and complex types use the tagged
    * form documented in `grafeo-bindings-common::json` (e.g. `{ "$date": ... }`).
    */
-  next(): Promise<JsonValue | null>
+  next(): Promise<Record<string, unknown> | null>
   /**
    * Explicitly releases the underlying operator tree. After calling this,
    * `next()` returns `null`. Useful when you want to break out of iteration

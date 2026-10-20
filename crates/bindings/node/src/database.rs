@@ -768,7 +768,7 @@ impl JsGrafeoDB {
         self.inner
             .read()
             .set_current_schema(Some(&name))
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+            .map_err(|e| napi::Error::from(NodeGrafeoError::from(e)))
     }
 
     /// Clears the current schema context.

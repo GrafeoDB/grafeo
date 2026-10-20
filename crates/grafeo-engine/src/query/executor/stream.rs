@@ -21,7 +21,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use grafeo_common::types::{LogicalType, Value};
-use grafeo_common::utils::error::{Error, QueryError, Result};
+use grafeo_common::utils::error::Result;
+#[cfg(not(target_arch = "wasm32"))]
+use grafeo_common::utils::error::{Error, QueryError};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::Operator;
 

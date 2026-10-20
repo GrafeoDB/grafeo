@@ -32,6 +32,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 use crate::query::plan::LogicalPlan;
@@ -491,11 +492,20 @@ mod tests {
 
     #[cfg(not(feature = "gql"))]
     fn test_language() -> QueryLanguage {
-        // Fallback for tests without gql feature
-        #[cfg(feature = "cypher")]
-        return QueryLanguage::Cypher;
-        #[cfg(feature = "sparql")]
-        return QueryLanguage::Sparql;
+        // Without gql, the first language the build has.
+        let languages: &[QueryLanguage] = &[
+            #[cfg(feature = "cypher")]
+            QueryLanguage::Cypher,
+            #[cfg(feature = "gremlin")]
+            QueryLanguage::Gremlin,
+            #[cfg(feature = "graphql")]
+            QueryLanguage::GraphQL,
+            #[cfg(feature = "sql-pgq")]
+            QueryLanguage::SqlPgq,
+            #[cfg(feature = "sparql")]
+            QueryLanguage::Sparql,
+        ];
+        languages[0]
     }
 
     #[test]

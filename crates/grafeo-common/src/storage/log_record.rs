@@ -1020,8 +1020,10 @@ const _: () = assert!(
 );
 
 /// The bytes bincode's standard configuration takes for a length: one below
-/// 251, then a marker and 2, 4 or 8 bytes.
+/// 251, then a marker and 2, 4 or 8 bytes. The length is compared as a `u64`,
+/// so the 4-byte case is decided the same way where `usize` has 32 bits.
 const fn varint_bytes(length: usize) -> usize {
+    let length = length as u64;
     if length < 251 {
         1
     } else if length <= 0xFFFF {

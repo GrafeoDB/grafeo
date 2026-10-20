@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { GrafeoDB, version, simdSupport } from '../index.js'
+import { GrafeoDB, version, simdSupport } from '../grafeo.js'
 
 const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 

@@ -44,6 +44,7 @@ mod bridges;
 mod database;
 mod direct;
 mod error;
+mod gil;
 mod graph;
 mod graph_handle;
 mod quantization;

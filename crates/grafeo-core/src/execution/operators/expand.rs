@@ -4,7 +4,7 @@ use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
-use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, TransactionId};
+use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, ReadView, TransactionId};
 use std::sync::Arc;
 
 /// An expand operator that traverses edges from source nodes.
@@ -187,9 +187,22 @@ pub(super) fn visible_edges_from(
     } else {
         epoch.zip(transaction_id)
     };
-    let mut edges = store.edges_from(node, direction);
+    // The reader: its transaction, or a committed reader at its epoch.
+    let view = match (versioned, epoch) {
+        (Some((epoch, transaction_id)), _) => Some(ReadView::transaction(transaction_id, epoch)),
+        (None, Some(epoch)) => Some(ReadView::committed(epoch)),
+        (None, None) => None,
+    };
+    // Without types the store lists the edges the view sees; with types the
+    // type check comes first, as it drops most edges, then the edge's
+    // visibility at the view.
+    let typed = !edge_types.is_empty();
+    let mut edges = match view {
+        Some(view) if !typed => store.edges_from_at(node, direction, view),
+        _ => store.edges_from(node, direction),
+    };
     edges.retain(|&(other, edge)| {
-        if !edge_types.is_empty() {
+        if typed {
             let actual = match versioned {
                 Some((epoch, transaction_id)) => {
                     store.edge_type_versioned(edge, epoch, transaction_id)
@@ -205,17 +218,10 @@ pub(super) fn visible_edges_from(
                 return false;
             }
         }
-        match (versioned, epoch) {
-            (Some((epoch, transaction_id)), _) => {
-                store.is_edge_visible_versioned(edge, epoch, transaction_id)
-                    && store.is_node_visible_versioned(other, epoch, transaction_id)
-            }
-            (None, Some(epoch)) => {
-                store.is_edge_visible_at_epoch(edge, epoch)
-                    && store.is_node_visible_at_epoch(other, epoch)
-            }
-            (None, None) => true,
-        }
+        view.is_none_or(|view| {
+            (!typed || store.is_edge_visible_at(edge, view))
+                && store.is_node_visible_at(other, view)
+        })
     });
     edges
 }

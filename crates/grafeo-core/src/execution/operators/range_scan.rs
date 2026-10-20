@@ -34,14 +34,13 @@
 //!
 //! The planner used to filter the eager `Vec<NodeId>` after the range
 //! lookup. The operator absorbs both filters via
-//! [`with_label_filter`](Self::with_label_filter) and
-//! [`with_transaction_context`](Self::with_transaction_context), preserving
-//! the existing semantics while keeping the `RangeScanOperator` as the
-//! single entry point.
+//! [`with_label_filter`](RangeScanOperator::with_label_filter) and
+//! [`with_view`](RangeScanOperator::with_view): with a view, the store's
+//! range lookup at the view returns only the nodes it sees.
 
 use std::sync::Arc;
 
-use grafeo_common::types::{EpochId, LogicalType, NodeId, TransactionId, Value};
+use grafeo_common::types::{EpochId, LogicalType, NodeId, ReadView, TransactionId, Value};
 use grafeo_common::utils::hash::FxHashSet;
 
 use super::{Operator, OperatorResult};
@@ -62,8 +61,8 @@ pub struct RangeScanOperator {
     limit: Option<usize>,
     /// Optional label filter (only nodes of this label survive).
     label_filter: Option<String>,
-    /// Optional MVCC transaction context (epoch + tx).
-    transaction_context: Option<(EpochId, TransactionId)>,
+    /// The view the scan reads at, if any.
+    view: Option<ReadView>,
 
     /// Materialized result, lazily built on first `next()`.
     materialized: Option<Vec<NodeId>>,
@@ -96,7 +95,7 @@ impl RangeScanOperator {
             chunk_capacity,
             limit: None,
             label_filter: None,
-            transaction_context: None,
+            view: None,
             materialized: None,
             position: 0,
         }
@@ -124,28 +123,28 @@ impl RangeScanOperator {
     /// Restricts the result to nodes carrying `label`.
     ///
     /// Applied during materialization by intersecting the iterator's
-    /// output with `store.nodes_by_label(label)`. Mirrors the eager
-    /// `find_nodes_in_range` + `nodes_by_label` retain pattern that the
-    /// planner used pre-Phase-4d.
+    /// output with the nodes of the label (as the view sees them, with
+    /// one).
     #[must_use]
     pub fn with_label_filter(mut self, label: impl Into<String>) -> Self {
         self.label_filter = Some(label.into());
         self
     }
 
-    /// Filters results by MVCC visibility at the given epoch and tx.
-    ///
-    /// Applied during materialization via `store.get_node_versioned`.
-    /// Required for any planner-emitted scan: the existing `plan_range_filter`
-    /// always applies this filter, and the operator preserves that.
+    /// Reads at `view`: the store's range lookup at the view
+    /// ([`find_nodes_in_range_iter_at`](GraphStoreSearch::find_nodes_in_range_iter_at))
+    /// returns only the nodes it sees. Required for any planner-emitted scan.
     #[must_use]
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Self {
-        self.transaction_context = Some((epoch, transaction_id));
+    pub fn with_view(mut self, view: ReadView) -> Self {
+        self.view = Some(view);
         self
+    }
+
+    /// Reads as transaction `transaction_id` at `epoch` (see
+    /// [`with_view`](Self::with_view)).
+    #[must_use]
+    pub fn with_transaction_context(self, epoch: EpochId, transaction_id: TransactionId) -> Self {
+        self.with_view(ReadView::transaction(transaction_id, epoch))
     }
 
     fn ensure_materialized(&mut self) {
@@ -155,32 +154,42 @@ impl RangeScanOperator {
 
         // Pre-compute the label set once (avoids repeated lookups in the
         // hot path).
-        let label_set: Option<FxHashSet<NodeId>> = self
-            .label_filter
-            .as_ref()
-            .map(|label| self.store.nodes_by_label(label).into_iter().collect());
-        let tx_ctx = self.transaction_context;
+        let view = self.view;
+        let label_set: Option<FxHashSet<NodeId>> = self.label_filter.as_ref().map(|label| {
+            match view {
+                Some(view) => self.store.nodes_by_label_at(label, view),
+                None => self.store.nodes_by_label(label),
+            }
+            .into_iter()
+            .collect()
+        });
 
-        let iter = self.store.find_nodes_in_range_iter(
-            &self.property,
-            self.min.as_ref(),
-            self.max.as_ref(),
-            self.min_inclusive,
-            self.max_inclusive,
-        );
+        let (min, max) = (self.min.as_ref(), self.max.as_ref());
+        let iter = match view {
+            Some(view) => self.store.find_nodes_in_range_iter_at(
+                &self.property,
+                min,
+                max,
+                self.min_inclusive,
+                self.max_inclusive,
+                view,
+            ),
+            None => self.store.find_nodes_in_range_iter(
+                &self.property,
+                min,
+                max,
+                self.min_inclusive,
+                self.max_inclusive,
+            ),
+        };
 
-        // Filter inline (label + MVCC) and stop only after `limit` matches
-        // *survive* the filters. Applying limit before filtering would
+        // Filter inline by label and stop only after `limit` matches
+        // *survive* the filter. Applying limit before filtering would
         // under-return rows when early range hits are filtered out.
         let mut collected: Vec<NodeId> = Vec::new();
         for id in iter {
             if let Some(set) = label_set.as_ref()
                 && !set.contains(&id)
-            {
-                continue;
-            }
-            if let Some((epoch, tx)) = tx_ctx
-                && self.store.get_node_versioned(id, epoch, tx).is_none()
             {
                 continue;
             }

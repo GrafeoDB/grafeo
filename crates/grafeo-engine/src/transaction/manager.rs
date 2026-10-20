@@ -330,6 +330,64 @@ pub struct TransactionManager {
     /// Signalled when an epoch is published, and when a commit does not
     /// complete.
     published: Condvar,
+    /// The reads outside any transaction that run now, by the epoch each
+    /// pinned (see [`pin_read`](Self::pin_read)): with the open and
+    /// committing transactions, they hold the read horizon back.
+    ///
+    /// Lock order: after the `transactions` lock (the read horizon takes
+    /// both); a pin and its drop take this one alone.
+    reads: Arc<ReadPins>,
+}
+
+/// The epochs the reads outside any transaction pinned, each with how many
+/// such reads run at it.
+#[derive(Debug, Default)]
+struct ReadPins {
+    epochs: Mutex<std::collections::BTreeMap<u64, usize>>,
+}
+
+/// A read outside any transaction, pinned at the epoch it reads at from
+/// [`TransactionManager::pin_read`] until it is dropped (also by the unwind
+/// of a panic in the read): the read horizon stays at that epoch or before,
+/// so garbage collection keeps every version the read may still need (#412
+/// decision Q6: every read statement outside a transaction pins its epoch
+/// for its run).
+#[must_use = "a read is pinned only while the pin lives"]
+pub(crate) struct ReadPin {
+    pins: Arc<ReadPins>,
+    epoch: EpochId,
+}
+
+impl ReadPin {
+    /// The epoch the read is pinned at: the published epoch when it was
+    /// pinned.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn epoch(&self) -> EpochId {
+        self.epoch
+    }
+}
+
+impl std::fmt::Debug for ReadPin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadPin")
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ReadPin {
+    fn drop(&mut self) {
+        let mut epochs = self.pins.epochs.lock();
+        if let std::collections::btree_map::Entry::Occupied(mut reads) =
+            epochs.entry(self.epoch.as_u64())
+        {
+            *reads.get_mut() -= 1;
+            if *reads.get() == 0 {
+                reads.remove();
+            }
+        }
+    }
 }
 
 /// Commits held off (see [`TransactionManager::hold_commits`]): while this
@@ -578,6 +636,7 @@ impl TransactionManager {
             unpublishable_from: AtomicU64::new(u64::MAX),
             publish_turn: Mutex::new(()),
             published: Condvar::new(),
+            reads: Arc::new(ReadPins::default()),
         }
     }
 
@@ -650,14 +709,16 @@ impl TransactionManager {
     ) -> (TransactionId, Arc<TransactionChanges>) {
         let transaction_id =
             TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
-        let epoch = self.current_epoch();
-        let changes = Arc::new(TransactionChanges::new(transaction_id, epoch));
-        let info = TransactionInfo::new(epoch, isolation_level, Arc::clone(&changes), private);
         // Counted while the `transactions` lock is held: a commit that
         // publishes meanwhile sees this transaction or does not, never half
         // (it drops a private transaction's claims only when no other is
-        // counted, see `Publish::complete`).
+        // counted, see `Publish::complete`). The snapshot is read under the
+        // lock too, so the read horizon, which reads the published epoch
+        // under it, never passes a snapshot it has not seen yet.
         let mut transactions = self.transactions.write();
+        let epoch = self.current_epoch();
+        let changes = Arc::new(TransactionChanges::new(transaction_id, epoch));
+        let info = TransactionInfo::new(epoch, isolation_level, Arc::clone(&changes), private);
         transactions.insert(transaction_id, info);
         self.active_count.fetch_add(1, Ordering::Release);
         drop(transactions);
@@ -1358,18 +1419,62 @@ impl TransactionManager {
         self.wake_publish_waiters();
     }
 
-    /// Returns the minimum epoch that must be preserved for active transactions.
+    /// The read horizon: the oldest epoch any reader may still read at, now
+    /// or from now on. Garbage collection keeps every version a reader at
+    /// the horizon or later can see (`gc_versions`, `collect`).
     ///
-    /// This is used for garbage collection - versions visible at this epoch
-    /// must be preserved.
+    /// It is the oldest of: the snapshot of every open transaction and of
+    /// every committing one (a commit whose publish has not come, or never
+    /// comes after an unknown outcome, still reads at its snapshot and its
+    /// versions stay pending), the epoch of every read pinned outside a
+    /// transaction (`pin_read`: every read statement outside a transaction
+    /// pins for its run), and the published epoch, at which every reader
+    /// that starts from now on reads.
+    ///
+    /// A transaction's snapshot and a pin's epoch are read under the locks
+    /// this reads them under, so a reader that starts meanwhile is either
+    /// counted or reads at the published epoch read here or a later one.
     #[must_use]
-    pub fn min_active_epoch(&self) -> EpochId {
-        let txns = self.transactions.read();
-        txns.values()
-            .filter(|info| info.state == TransactionState::Active)
-            .map(|info| info.start_epoch)
-            .min()
-            .unwrap_or_else(|| self.current_epoch())
+    pub fn read_horizon(&self) -> EpochId {
+        let transactions = self.transactions.read();
+        let pins = self.reads.epochs.lock();
+        let published = self.published_epoch.load(Ordering::Acquire);
+        let oldest_transaction = transactions
+            .values()
+            .filter(|info| {
+                matches!(
+                    info.state,
+                    TransactionState::Active | TransactionState::Committing
+                )
+            })
+            .map(|info| info.start_epoch.as_u64())
+            .min();
+        let oldest_read = pins.keys().next().copied();
+        EpochId::new(
+            [oldest_transaction, oldest_read]
+                .into_iter()
+                .flatten()
+                .fold(published, u64::min),
+        )
+    }
+
+    /// Pins a read outside any transaction at the published epoch, for as
+    /// long as the returned pin lives: the [read horizon](Self::read_horizon)
+    /// stays at its epoch or before. The read may read at that epoch or at
+    /// any later one it loads after the pin (the published epoch only moves
+    /// forward). Read statements outside a transaction pin for their run
+    /// (#412 decision Q6), so collecting at the horizon never takes a version
+    /// such a statement still reads.
+    pub(crate) fn pin_read(&self) -> ReadPin {
+        let mut epochs = self.reads.epochs.lock();
+        // Read under the lock: the read horizon reads it under the same one.
+        let epoch = self.published_epoch.load(Ordering::Acquire);
+        *epochs.entry(epoch).or_insert(0) += 1;
+        drop(epochs);
+        ReadPin {
+            pins: Arc::clone(&self.reads),
+            epoch: EpochId::new(epoch),
+        }
     }
 
     /// Returns the number of active transactions.
@@ -1595,25 +1700,118 @@ mod tests {
         assert!(mgr.commit(tx).is_ok());
     }
 
+    /// With no reader the horizon is the published epoch; with open
+    /// transactions, the oldest snapshot, until it ends.
     #[test]
-    fn test_min_active_epoch() {
+    fn the_read_horizon_is_the_oldest_open_snapshot() {
         let mgr = TransactionManager::new();
+        assert_eq!(
+            mgr.read_horizon(),
+            mgr.current_epoch(),
+            "no reader: the published epoch"
+        );
 
-        // No active transactions - should return current epoch
-        assert_eq!(mgr.min_active_epoch(), mgr.current_epoch());
-
-        // Start some transactions
         let tx1 = mgr.begin();
         let epoch1 = mgr.start_epoch(tx1).unwrap();
-
-        // Advance epoch
         let tx2 = mgr.begin();
         mgr.commit(tx2).unwrap();
-
         let _tx3 = mgr.begin();
+        assert_eq!(mgr.read_horizon(), epoch1, "the earliest open snapshot");
 
-        // min_active_epoch should be tx1's start epoch (earliest active)
-        assert_eq!(mgr.min_active_epoch(), epoch1);
+        mgr.abort(tx1).unwrap();
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+    }
+
+    /// A read outside any transaction holds the horizon at the epoch it
+    /// pinned while later commits publish; two reads pinned at one epoch
+    /// hold it until both end, and then it moves to the published epoch.
+    #[test]
+    fn a_pinned_read_holds_the_read_horizon_back() {
+        let mgr = TransactionManager::new();
+        let first = mgr.begin();
+        let committed = mgr.commit(first).unwrap();
+        let read = mgr.pin_read();
+        let again = mgr.pin_read();
+        assert_eq!((read.epoch(), again.epoch()), (committed, committed));
+        for _ in 0..2 {
+            let tx = mgr.begin();
+            mgr.commit(tx).unwrap();
+        }
+        assert_eq!(mgr.current_epoch(), EpochId::new(committed.as_u64() + 2));
+        assert_eq!(mgr.read_horizon(), committed, "the pinned read");
+        drop(read);
+        assert_eq!(mgr.read_horizon(), committed, "the second read");
+        let later = mgr.pin_read();
+        drop(again);
+        assert_eq!(mgr.read_horizon(), later.epoch(), "the later read");
+        drop(later);
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+    }
+
+    /// A pin dropped by the unwind of a panic in its read unpins it.
+    #[test]
+    fn a_read_that_panics_unpins() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        let pinned = mgr.commit(tx).unwrap();
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _pin = mgr.pin_read();
+            let tx = mgr.begin();
+            mgr.commit(tx).unwrap();
+            assert_eq!(mgr.read_horizon(), pinned);
+            panic!("the read fails");
+        }));
+        assert!(read.is_err());
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+        assert!(mgr.current_epoch() > pinned);
+    }
+
+    /// A committing transaction (its epoch assigned, its publish not come)
+    /// still reads at its snapshot, which holds the horizon back after a
+    /// later snapshot's commit published; the horizon never passes the
+    /// published epoch for an epoch assigned but not published, and moves
+    /// once the commit publishes.
+    #[test]
+    fn a_committing_transaction_holds_the_read_horizon_back() {
+        let mgr = TransactionManager::new();
+        let slow = mgr.begin();
+        let snapshot = mgr.start_epoch(slow).unwrap();
+        let fast = mgr.begin();
+        mgr.commit(fast).unwrap();
+        let published = mgr.current_epoch();
+        assert!(published > snapshot);
+
+        let publish = mgr.start_commit(slow).unwrap().written();
+        assert_eq!(mgr.state(slow), Some(TransactionState::Committing));
+        assert_eq!(mgr.read_horizon(), snapshot, "the committing snapshot");
+        let reader = mgr.begin();
+        assert_eq!(mgr.start_epoch(reader), Some(published));
+        mgr.abort(reader).unwrap();
+        assert_eq!(mgr.read_horizon(), snapshot);
+
+        let epoch = publish.epoch();
+        publish.complete().unwrap();
+        assert_eq!(mgr.read_horizon(), epoch, "published: no reader before it");
+    }
+
+    /// While a commit is written and not published, the horizon stays at
+    /// the published epoch: a reader that starts meanwhile reads there.
+    #[test]
+    fn the_read_horizon_stays_at_the_published_epoch_during_a_commit() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        let published = mgr.current_epoch();
+        let publish = mgr.start_commit(tx).unwrap().written();
+        // The committing transaction's snapshot is the published epoch; the
+        // horizon does not reach the epoch it was assigned.
+        assert!(publish.epoch() > published);
+        assert_eq!(mgr.read_horizon(), published);
+        let read = mgr.pin_read();
+        assert_eq!(read.epoch(), published, "a read reads what is published");
+        publish.complete().unwrap();
+        assert_eq!(mgr.read_horizon(), published, "the read is pinned");
+        drop(read);
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
     }
 
     #[test]

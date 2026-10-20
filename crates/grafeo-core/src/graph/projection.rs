@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use arcstr::ArcStr;
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value};
 use grafeo_common::utils::hash::FxHashMap;
 
 use super::Direction;
@@ -579,6 +579,145 @@ impl GraphStore for GraphProjection {
     fn all_property_keys(&self) -> Vec<String> {
         self.inner.all_property_keys()
     }
+
+    // --- Reads at a view: the inner store's, filtered by the spec ---
+
+    // Exact when the inner store is: the label filter reads the labels at
+    // the view (`node_id_matches_at`).
+    fn answers_at_view(&self) -> bool {
+        self.inner.answers_at_view()
+    }
+
+    fn edges_from_at(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        view: ReadView,
+    ) -> Vec<(NodeId, EdgeId)> {
+        if !self.node_id_matches_at(node, view) {
+            return Vec::new();
+        }
+        self.inner
+            .edges_from_at(node, direction, view)
+            .into_iter()
+            .filter(|&(target, edge_id)| {
+                // A transaction reads the types of the edges it created too.
+                let edge_type = match view.transaction {
+                    Some(transaction_id) => {
+                        self.inner
+                            .edge_type_versioned(edge_id, view.epoch, transaction_id)
+                    }
+                    None => self.inner.edge_type(edge_id),
+                };
+                self.node_id_matches_at(target, view)
+                    && edge_type.is_some_and(|t| self.edge_type_matches(&t))
+            })
+            .collect()
+    }
+
+    fn neighbors_at(&self, node: NodeId, direction: Direction, view: ReadView) -> Vec<NodeId> {
+        self.edges_from_at(node, direction, view)
+            .into_iter()
+            .map(|(target, _)| target)
+            .collect()
+    }
+
+    fn nodes_by_label_at(&self, label: &str, view: ReadView) -> Vec<NodeId> {
+        let ids = self.inner.nodes_by_label_at(label, view);
+        if self.label_is_projected(label) {
+            return ids;
+        }
+        self.projected(ids, view)
+    }
+
+    fn nodes_with_any_label_at(&self, labels: &[&str], view: ReadView) -> Vec<NodeId> {
+        let ids = self.inner.nodes_with_any_label_at(labels, view);
+        if labels.iter().all(|label| self.label_is_projected(label)) {
+            return ids;
+        }
+        self.projected(ids, view)
+    }
+
+    fn find_nodes_by_property_at(
+        &self,
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Vec<NodeId> {
+        self.projected(
+            self.inner.find_nodes_by_property_at(property, value, view),
+            view,
+        )
+    }
+
+    fn find_nodes_by_properties_at(
+        &self,
+        conditions: &[(&str, Value)],
+        view: ReadView,
+    ) -> Vec<NodeId> {
+        self.projected(
+            self.inner.find_nodes_by_properties_at(conditions, view),
+            view,
+        )
+    }
+
+    fn find_nodes_maybe_equal_at(
+        &self,
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Option<Vec<NodeId>> {
+        self.inner
+            .find_nodes_maybe_equal_at(property, value, view)
+            .map(|nodes| self.projected(nodes, view))
+    }
+
+    fn find_nodes_in_range_at(
+        &self,
+        property: &str,
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+        view: ReadView,
+    ) -> Vec<NodeId> {
+        self.projected(
+            self.inner.find_nodes_in_range_at(
+                property,
+                min,
+                max,
+                min_inclusive,
+                max_inclusive,
+                view,
+            ),
+            view,
+        )
+    }
+}
+
+impl GraphProjection {
+    /// Whether node `id` passes the label filter with the labels `view`
+    /// sees.
+    fn node_id_matches_at(&self, id: NodeId, view: ReadView) -> bool {
+        if !self.spec.filters_labels() {
+            return true;
+        }
+        self.inner.node_labels_at(id, view).is_some_and(|labels| {
+            labels
+                .iter()
+                .any(|label| self.spec.node_labels.contains(label.as_str()))
+        })
+    }
+
+    /// The nodes of `ids` in the projection at `view`, in their order.
+    fn projected(&self, ids: Vec<NodeId>, view: ReadView) -> Vec<NodeId> {
+        if !self.spec.filters_labels() {
+            return ids;
+        }
+        ids.into_iter()
+            .filter(|&id| self.node_id_matches_at(id, view))
+            .collect()
+    }
 }
 
 impl GraphStoreSearch for GraphProjection {}
@@ -914,6 +1053,77 @@ mod tests {
         assert!(proj.get_edge_at_epoch(edges[1], epoch).is_some());
         // KNOWS edge filtered out
         assert!(proj.get_edge_at_epoch(edges[0], epoch).is_none());
+    }
+
+    /// The reads at a view go to the inner store's, filtered by the spec: a
+    /// transaction finds its own new node through every lookup, another
+    /// reader finds none of it; the label filter reads the labels at the
+    /// view, so the projection answers exactly when the inner store does.
+    #[test]
+    fn reads_at_a_view_forward_to_the_inner_store() {
+        use crate::graph::conformance::{Tx, people};
+        use crate::graph::rowgroup::RowGroupStore;
+
+        let store = Arc::new(RowGroupStore::new());
+        let people = people(store.as_ref()).unwrap();
+        let mut tx = Tx::begin(store.as_ref(), 10);
+        let jules = tx
+            .create_node(
+                &["Person"],
+                &[("name", Value::from("Jules")), ("age", Value::Int64(40))],
+            )
+            .unwrap();
+        tx.create_edge(jules, people.alix, "KNOWS", &[]).unwrap();
+        let own = ReadView::transaction(tx.id, tx.snapshot);
+        let committed = ReadView::committed(store.current_epoch());
+        let all = GraphProjection::new(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            ProjectionSpec::new(),
+        );
+        let persons = GraphProjection::new(
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            ProjectionSpec::new().with_node_labels(["Person"]),
+        );
+        assert!(all.answers_at_view() && persons.answers_at_view());
+
+        let name = Value::from("Jules");
+        let age = Value::Int64(40);
+        for proj in [&all, &persons] {
+            assert_eq!(proj.nodes_by_label_at("Person", own).last(), Some(&jules));
+            assert!(!proj.nodes_by_label_at("Person", committed).contains(&jules));
+            assert_eq!(
+                proj.nodes_with_any_label_at(&["Person", "City"], own)
+                    .last(),
+                Some(&jules)
+            );
+            assert_eq!(proj.find_nodes_by_property_at("name", &name, own), [jules]);
+            assert!(
+                proj.find_nodes_by_property_at("name", &name, committed)
+                    .is_empty(),
+                "another reader does not find Jules"
+            );
+            assert_eq!(
+                proj.find_nodes_by_properties_at(
+                    &[("name", name.clone()), ("age", age.clone())],
+                    own
+                ),
+                [jules]
+            );
+            assert_eq!(
+                proj.find_nodes_in_range_at("age", Some(&age), None, true, false, own),
+                [jules]
+            );
+            assert_eq!(proj.edges_from_at(jules, Direction::Outgoing, own).len(), 1);
+            assert_eq!(
+                proj.neighbors_at(people.alix, Direction::Incoming, own),
+                [jules]
+            );
+            assert!(
+                proj.neighbors_at(people.alix, Direction::Incoming, committed)
+                    .is_empty(),
+                "another reader sees no edge to Alix"
+            );
+        }
     }
 
     #[test]

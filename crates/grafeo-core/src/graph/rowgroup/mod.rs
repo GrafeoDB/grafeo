@@ -12,42 +12,67 @@
 //!   the rows' versions apart (`versions`,
 //!   [`RowGroupStore::collect`](crate::graph::rowgroup::RowGroupStore::collect));
 //! - one column per property key: a typed vector with presence bits
-//!   (`column`);
+//!   (`column`), holding each row's newest value;
 //! - for nodes, one bitmap of rows per label (FD5 in memory) and the nodes'
 //!   outgoing and incoming edges, each node's sorted by edge type and other
 //!   node, with a hot delta for the edges added since (FD6 in memory,
 //!   `adjacency`);
-//! - for edges, the source, target and type of each row.
+//! - for edges, the source, target and type of each row;
+//! - per column, and for the nodes' labels, update chains per vector of
+//!   2,048 rows: what the rows held before the writes some readers must not
+//!   see yet (`updates`, H2b).
 //!
-//! Creates and deletes are versioned: a create is seen by its transaction
-//! alone until the commit, a delete takes effect at its commit epoch, and a
-//! reader at an earlier epoch keeps what a later commit deleted. Values and
-//! labels are written in place, as `LpgStore`'s default build does, so every
-//! reader sees an open transaction's values and labels (#412) until H2b's
-//! update chains. Writes go through [`ChangeTarget`](crate::graph::apply::ChangeTarget) (`apply`), the read
+//! Every write is versioned: a create is seen by its transaction alone
+//! until the commit, a delete takes effect at its commit epoch, and a reader
+//! at an earlier epoch keeps what a later commit deleted. A value or label
+//! write puts the newest value in place and keeps the one it replaced in an
+//! undo node of its vector, stamped as a create is, so a reader that does
+//! not see the write reads the kept value (#412, DuckDB's update chains).
+//! Writes go through [`ChangeTarget`](crate::graph::apply::ChangeTarget) (`apply`), the read
 //! traits read; one lock guards the store (H1a).
+//!
+//! A store is also a root of named graphs, each a store of its own, as
+//! `LpgStore` holds them (`graphs`), each with its own property, text and
+//! vector indexes, which the writes keep and the reads at a view recheck
+//! (`index`). What the engine reads to report on a store, its memory by part
+//! and every node and edge, is in `diagnostics`; the store's epoch and its
+//! garbage collection over the named graphs in `epochs`, the collect itself
+//! over the list of vectors with versions in `collect`. The rows the readers
+//! of earlier formats, the snapshots and the copies of graph data load come
+//! in through the replay writer (`load`, a
+//! [`LoadTarget`](crate::graph::load::LoadTarget)), so the section reader
+//! migrates the LPG sections of 0.5.x and of version 3 into a root.
 
 mod adjacency;
 mod adjacency_chunk;
 mod apply;
 mod bitset;
+mod collect;
 mod column;
+mod diagnostics;
+mod epochs;
+mod graphs;
+mod index;
+mod load;
 mod read;
 pub mod section;
+mod updates;
 mod versions;
 mod write;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use grafeo_common::change::{EdgeImage, Labels, NodeImage, Properties};
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, PropertyMap};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, ReadView, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::RwLock;
 
 use self::adjacency::{Adjacency, Adjacent};
 use self::bitset::Bitset;
 use self::column::Columns;
+pub use self::diagnostics::RowGroupMemory;
+use self::updates::Updates;
 #[cfg(test)]
 pub(crate) use self::versions::VECTOR_ROWS;
 use self::versions::Versions;
@@ -107,6 +132,14 @@ impl Read {
     fn at(epoch: EpochId) -> Self {
         Self::At(epoch.as_u64())
     }
+
+    /// The reader of a view.
+    fn view(view: ReadView) -> Self {
+        match view.transaction {
+            Some(id) => Self::transaction(id, view.epoch),
+            None => Self::at(view.epoch),
+        }
+    }
 }
 
 /// A row's version: who created it and who deleted it.
@@ -136,17 +169,33 @@ fn grow<T: Clone>(values: &mut Vec<T>, row: usize, filler: T) {
     }
 }
 
+/// The ids of the labels whose bitmaps hold `row`, ascending.
+fn label_ids(labels: &FxHashMap<u32, Bitset>, row: usize) -> Vec<u32> {
+    let mut ids: Vec<u32> = labels
+        .iter()
+        .filter(|(_, rows)| rows.get(row))
+        .map(|(id, _)| *id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
 /// A row group of the node table.
 #[derive(Debug, Default)]
 struct NodeGroup {
     versions: Versions,
-    /// The rows of each label, by label id.
+    /// The rows of each label, by label id: the rows' newest labels.
     labels: FxHashMap<u32, Bitset>,
+    /// The label ids rows had before the label writes some readers must not
+    /// see, ascending.
+    label_updates: Updates<Box<[u32]>>,
     columns: Columns,
     /// The rows' outgoing edges.
     outgoing: Adjacency,
     /// The rows' incoming edges.
     incoming: Adjacency,
+    /// The vectors the store lists, a bit each (`collect`).
+    listed: u32,
 }
 
 impl NodeGroup {
@@ -154,16 +203,29 @@ impl NodeGroup {
         self.versions.get(row)
     }
 
-    /// The row's label ids, ascending.
+    /// The row's newest label ids, ascending.
     fn labels_of(&self, row: usize) -> Vec<u32> {
-        let mut ids: Vec<u32> = self
-            .labels
-            .iter()
-            .filter(|(_, rows)| rows.get(row))
-            .map(|(id, _)| *id)
-            .collect();
-        ids.sort_unstable();
-        ids
+        label_ids(&self.labels, row)
+    }
+
+    /// The row's label ids as `read` sees them, ascending.
+    fn labels_at(&self, row: usize, read: Read) -> Vec<u32> {
+        if !self.label_updates.is_empty()
+            && let Some(kept) = self.label_updates.saved(row, read)
+        {
+            return kept.to_vec();
+        }
+        self.labels_of(row)
+    }
+
+    /// Whether the row has label id `label` as `read` sees it.
+    fn has_label_at(&self, row: usize, label: u32, read: Read) -> bool {
+        if !self.label_updates.is_empty()
+            && let Some(kept) = self.label_updates.saved(row, read)
+        {
+            return kept.binary_search(&label).is_ok();
+        }
+        self.labels.get(&label).is_some_and(|rows| rows.get(row))
     }
 
     /// Gives the row exactly the labels `ids`.
@@ -199,20 +261,16 @@ impl NodeGroup {
         self.clear(row);
     }
 
-    /// Takes out what a row that is gone held: labels, values, adjacency.
+    /// Takes out what a row that is gone held: labels, values, adjacency,
+    /// and what the chains kept of them.
     fn clear(&mut self, row: usize) {
         self.set_labels(row, &[]);
+        if !self.label_updates.is_empty() {
+            self.label_updates.remove_row(row);
+        }
         self.columns.clear_row(row);
         self.outgoing.clear(row);
         self.incoming.clear(row);
-    }
-
-    fn heap_bytes(&self) -> usize {
-        self.versions.heap_bytes()
-            + self.labels.values().map(Bitset::heap_bytes).sum::<usize>()
-            + self.columns.heap_bytes()
-            + self.outgoing.heap_bytes()
-            + self.incoming.heap_bytes()
     }
 }
 
@@ -224,6 +282,8 @@ struct EdgeGroup {
     dst: Vec<u64>,
     edge_type: Vec<u32>,
     columns: Columns,
+    /// The vectors the store lists, a bit each (`collect`).
+    listed: u32,
 }
 
 impl EdgeGroup {
@@ -248,13 +308,6 @@ impl EdgeGroup {
     fn remove(&mut self, row: usize) {
         self.versions.remove(row);
         self.columns.clear_row(row);
-    }
-
-    fn heap_bytes(&self) -> usize {
-        self.versions.heap_bytes()
-            + (self.src.capacity() + self.dst.capacity()) * std::mem::size_of::<u64>()
-            + self.edge_type.capacity() * std::mem::size_of::<u32>()
-            + self.columns.heap_bytes()
     }
 }
 
@@ -291,6 +344,10 @@ struct Inner {
     edge_types: NameDictionary,
     keys: NameDictionary,
     counts: Counts,
+    /// The property, text and vector indexes (`index`).
+    indexes: index::Indexes,
+    /// The row groups with a listed vector (`collect`).
+    listed: collect::Listed,
 }
 
 impl Inner {
@@ -344,10 +401,20 @@ impl Inner {
             .collect()
     }
 
-    /// The values of a row's columns, sorted by key name.
+    /// The newest values of a row's columns, sorted by key name.
     fn values(&self, columns: &Columns, row: usize) -> Properties {
-        let mut values: Properties = columns
-            .row(row)
+        self.named(columns.row(row))
+    }
+
+    /// The values of a row's columns as `read` sees them, sorted by key
+    /// name.
+    fn values_at(&self, columns: &Columns, row: usize, read: Read) -> Properties {
+        self.named(columns.row_at(row, read))
+    }
+
+    /// Values by key id as values by key name, sorted by it.
+    fn named(&self, values: impl Iterator<Item = (u32, Value)>) -> Properties {
+        let mut values: Properties = values
             .filter_map(|(key, value)| {
                 self.keys
                     .get_name(key)
@@ -388,9 +455,9 @@ impl Inner {
         }
         Some(Node {
             id: NodeId::new(id),
-            labels: self.label_names(&group.labels_of(row)),
+            labels: self.label_names(&group.labels_at(row, read)),
             properties: self
-                .values(&group.columns, row)
+                .values_at(&group.columns, row, read)
                 .into_iter()
                 .collect::<PropertyMap>(),
         })
@@ -409,7 +476,7 @@ impl Inner {
             dst: NodeId::new(dst),
             edge_type: self.edge_types.get_name(edge_type)?.clone(),
             properties: self
-                .values(&group.columns, row)
+                .values_at(&group.columns, row, read)
                 .into_iter()
                 .collect::<PropertyMap>(),
         })
@@ -441,6 +508,19 @@ pub struct RowGroupStore {
     next_edge_id: AtomicU64,
     /// The latest epoch a write was stamped at.
     epoch: AtomicU64,
+    /// Whether the store lists a vector (`collect`): a collect while it
+    /// lists none returns at once, without taking the lock.
+    has_listed: AtomicBool,
+    /// Its named graphs, its graph id, and whether it was dropped (`graphs`).
+    graphs: graphs::Graphs,
+}
+
+/// What a collect took out: rows, and the values and label sets kept for
+/// older readers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Collected {
+    rows: usize,
+    values: usize,
 }
 
 impl RowGroupStore {
@@ -448,100 +528,6 @@ impl RowGroupStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// The heap bytes its row groups and dictionaries hold (an estimate).
-    #[must_use]
-    pub fn heap_bytes(&self) -> usize {
-        let inner = self.inner.read();
-        inner
-            .nodes
-            .values()
-            .map(NodeGroup::heap_bytes)
-            .sum::<usize>()
-            + inner
-                .edges
-                .values()
-                .map(EdgeGroup::heap_bytes)
-                .sum::<usize>()
-            + inner.labels.heap_bytes()
-            + inner.edge_types.heap_bytes()
-            + inner.keys.heap_bytes()
-    }
-
-    /// The property columns of its row groups that still hold their chunks
-    /// as a load left them, encoded: a column decodes on its first use.
-    #[must_use]
-    pub fn cold_columns(&self) -> usize {
-        let inner = self.inner.read();
-        inner
-            .nodes
-            .values()
-            .map(|group| group.columns.cold_count())
-            .sum::<usize>()
-            + inner
-                .edges
-                .values()
-                .map(|group| group.columns.cold_count())
-                .sum::<usize>()
-    }
-
-    /// Collects what no reader at `horizon` or later can see any more: the
-    /// version info of every vector of rows whose creates and deletes are
-    /// all committed at or before `horizon` collapses to one bit per row,
-    /// and the rows deleted by then are taken out with their values, labels
-    /// and adjacency entries; a row group left without rows goes whole.
-    /// `horizon` is the oldest epoch a reader still reads at (the oldest
-    /// open snapshot; H2c adds the retention window): a reader before it may
-    /// lose rows it saw. Returns the rows taken out.
-    pub fn collect(&self, horizon: EpochId) -> usize {
-        let horizon = horizon.as_u64();
-        let mut inner = self.inner.write();
-        let mut gone = 0;
-        let mut edges: Vec<u64> = Vec::new();
-        for (index, group) in &mut inner.edges {
-            for row in group.versions.collapse(horizon) {
-                group.columns.clear_row(row);
-                edges.push(index * ROWS_PER_GROUP + row as u64);
-            }
-        }
-        gone += edges.len();
-        for edge in edges {
-            let (group, row) = locate(edge);
-            let (src, dst, _) = inner.edges[&group].ends(row);
-            for (node, outgoing) in [(src, true), (dst, false)] {
-                let (group, row) = locate(node);
-                if let Some(group) = inner.nodes.get_mut(&group) {
-                    group.adjacency_mut(outgoing).remove(row, edge);
-                }
-            }
-        }
-        for group in inner.nodes.values_mut() {
-            for row in group.versions.collapse(horizon) {
-                group.clear(row);
-                gone += 1;
-            }
-        }
-        // A row group without rows goes whole, as a load would not make it.
-        inner.edges.retain(|_, group| !group.versions.is_empty());
-        inner.nodes.retain(|_, group| !group.versions.is_empty());
-        gone
-    }
-
-    /// The heap bytes its rows' version info takes.
-    #[must_use]
-    pub fn version_bytes(&self) -> usize {
-        let inner = self.inner.read();
-        inner
-            .nodes
-            .values()
-            .map(|group| group.versions.heap_bytes())
-            .sum::<usize>()
-            + inner
-                .edges
-                .values()
-                .map(|group| group.versions.heap_bytes())
-                .sum::<usize>()
     }
 
     /// The vectors of rows, nodes and edges, whose version info holds
@@ -561,14 +547,30 @@ impl RowGroupStore {
                 .sum::<usize>()
     }
 
-    /// Moves the store's epoch to `epoch` if it is later.
-    fn sync_epoch(&self, epoch: EpochId) {
-        self.epoch.fetch_max(epoch.as_u64(), Ordering::AcqRel);
+    /// The undo nodes of the value and label chains, nodes and edges.
+    #[cfg(test)]
+    pub(crate) fn update_nodes(&self) -> usize {
+        let inner = self.inner.read();
+        inner
+            .nodes
+            .values()
+            .map(|group| group.columns.update_nodes() + group.label_updates.nodes())
+            .sum::<usize>()
+            + inner
+                .edges
+                .values()
+                .map(|group| group.columns.update_nodes())
+                .sum::<usize>()
     }
 
     /// The reader at the store's current epoch.
     fn now(&self) -> Read {
         Read::At(self.epoch.load(Ordering::Acquire))
+    }
+
+    /// The view of a committed reader at the store's current epoch.
+    fn now_view(&self) -> ReadView {
+        ReadView::committed(EpochId::new(self.epoch.load(Ordering::Acquire)))
     }
 }
 

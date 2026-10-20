@@ -31,6 +31,8 @@ pub(crate) mod catalog_records;
 pub(crate) mod catalog_section;
 #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
 mod checkpoint_timer;
+// What runs after each immediate call and commit: the version collect.
+pub(crate) mod collect;
 #[cfg(feature = "lpg")]
 mod crud;
 #[cfg(feature = "lpg")]
@@ -72,9 +74,15 @@ mod schema_replay;
 mod search;
 pub(crate) mod section_consumer;
 mod sections;
+// Checkpoint and load of the row-group store, which the engine switches to
+// at #412 H2d: built for tests until then.
+#[cfg(all(test, feature = "lpg"))]
+mod row_group_sections;
 // Replay of the WAL v2 groups at open.
 #[cfg(all(feature = "wal", feature = "lpg"))]
 mod replay;
+#[cfg(feature = "lpg")]
+pub(crate) mod root_store;
 // The commit's WAL v2 group, written from its change set. Built for tests
 // only until the commit path writes it (the switch from the v1 records).
 mod spill_directory;
@@ -1464,22 +1472,21 @@ impl GrafeoDB {
     /// without the `triple-store` feature, a vector or text index without
     /// its feature): it would be lost (see [`sections::FeatureData`]).
     #[cfg(all(feature = "wal", feature = "lpg"))]
-    fn apply_wal_records(
+    fn apply_wal_records<S: root_store::RootStore>(
         wal: &std::path::Path,
-        store: &Arc<LpgStore>,
+        store: &Arc<S>,
         catalog: &Catalog,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         records: &[WalRecord],
         unbuilt: &mut Vec<catalog_section::GraphIndexes>,
     ) -> Result<()> {
-        use grafeo_common::change::StandaloneOp;
-        use grafeo_common::utils::error::Error;
+        use grafeo_common::change::{Entity, StandaloneOp};
         use standalone::Applying;
 
         // Graph cursor: tracks which named graph receives data mutations.
         // `None` means the default graph.
         let mut current_graph: Option<String> = None;
-        let mut target_store: Arc<LpgStore> = Arc::clone(store);
+        let mut target_store: Arc<S> = Arc::clone(store);
 
         for record in records {
             match record {
@@ -1513,9 +1520,7 @@ impl GrafeoDB {
                     current_graph.clone_from(name);
                     target_store = match &current_graph {
                         None => Arc::clone(store),
-                        Some(graph_name) => store
-                            .graph_or_create(graph_name)
-                            .map_err(|e| Error::Internal(e.to_string()))?,
+                        Some(graph_name) => store.graph_or_create(graph_name)?,
                     };
                 }
 
@@ -1529,11 +1534,11 @@ impl GrafeoDB {
                 WalRecord::CreateNode { id, labels } => {
                     if target_store.get_node(*id).is_none() {
                         let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-                        target_store.create_node_with_id(*id, &label_refs)?;
+                        target_store.load_node(*id, &label_refs)?;
                     }
                 }
                 WalRecord::DeleteNode { id } => {
-                    target_store.delete_node(*id);
+                    target_store.load_delete(Entity::Node(*id))?;
                 }
                 WalRecord::CreateEdge {
                     id,
@@ -1541,30 +1546,36 @@ impl GrafeoDB {
                     dst,
                     edge_type,
                 } => {
-                    if target_store.get_edge(*id).is_none() {
-                        target_store.create_edge_with_id(*id, *src, *dst, edge_type)?;
+                    if target_store.get_edge(*id).is_none()
+                        && !target_store.load_edge(*id, *src, *dst, edge_type)?
+                    {
+                        grafeo_common::grafeo_warn!(
+                            "left out edge {} of the WAL {}: its graph holds no node at one of                              its ends",
+                            id.as_u64(),
+                            wal.display()
+                        );
                     }
                 }
                 WalRecord::DeleteEdge { id } => {
-                    target_store.delete_edge(*id);
+                    target_store.load_delete(Entity::Edge(*id))?;
                 }
                 WalRecord::SetNodeProperty { id, key, value } => {
-                    target_store.set_node_property(*id, key, value.clone());
+                    target_store.load_value(Entity::Node(*id), key, value.clone(), None)?;
                 }
                 WalRecord::SetEdgeProperty { id, key, value } => {
-                    target_store.set_edge_property(*id, key, value.clone());
+                    target_store.load_value(Entity::Edge(*id), key, value.clone(), None)?;
                 }
                 WalRecord::AddNodeLabel { id, label } => {
-                    target_store.add_label(*id, label);
+                    target_store.load_label(*id, label, true)?;
                 }
                 WalRecord::RemoveNodeLabel { id, label } => {
-                    target_store.remove_label(*id, label);
+                    target_store.load_label(*id, label, false)?;
                 }
                 WalRecord::RemoveNodeProperty { id, key } => {
-                    target_store.remove_node_property(*id, key)?;
+                    target_store.load_remove_value(Entity::Node(*id), key)?;
                 }
                 WalRecord::RemoveEdgeProperty { id, key } => {
-                    target_store.remove_edge_property(*id, key)?;
+                    target_store.load_remove_value(Entity::Edge(*id), key)?;
                 }
 
                 // --- Schema DDL replay (always on root catalog) ---
@@ -1618,10 +1629,7 @@ impl GrafeoDB {
                     // In temporal mode, advance the store epoch on each committed
                     // transaction so that subsequent property/label operations
                     // are recorded at the correct epoch in their VersionLogs.
-                    #[cfg(feature = "temporal")]
-                    {
-                        target_store.new_epoch();
-                    }
+                    target_store.replayed_commit();
                 }
                 WalRecord::TransactionAbort { .. } | WalRecord::Checkpoint { .. } => {
                     // Transaction control records don't need replay action
@@ -1798,9 +1806,9 @@ impl GrafeoDB {
     /// `triple-store` feature); in a build without the `wal` feature, always
     /// (it cannot replay a WAL).
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    fn load_legacy_directory(
+    fn load_legacy_directory<S: root_store::RootStore>(
         path: &std::path::Path,
-        store: &Arc<LpgStore>,
+        store: &Arc<S>,
         catalog: &Arc<Catalog>,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         salvage: bool,
@@ -1876,9 +1884,9 @@ impl GrafeoDB {
     /// (see [`sections::FeatureData`]); in a build without the `wal`
     /// feature, also if the sidecar WAL holds files.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    fn load_legacy_file(
+    fn load_legacy_file<S: root_store::RootStore>(
         path: &std::path::Path,
-        store: &Arc<LpgStore>,
+        store: &Arc<S>,
         catalog: &Arc<Catalog>,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         loaded: &mut sections::LoadedSections,
@@ -1910,10 +1918,10 @@ impl GrafeoDB {
                 // A file with data this build cannot read (a compacted
                 // base, triples, vector or text indexes) is neither read
                 // nor migrated.
-                *loaded = sections::load_sections(
+                *loaded = S::load_image(
+                    store,
                     &ServedOnce::new(MemoryImage::from_raw(stored)?),
                     Some(path),
-                    store,
                     catalog,
                     #[cfg(feature = "triple-store")]
                     rdf_store,
@@ -1958,9 +1966,9 @@ impl GrafeoDB {
     /// Applies the snapshot blob of the 0.5.x container v1 file `path` to
     /// restore the store and catalog.
     #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
-    fn apply_snapshot_data(
+    fn apply_snapshot_data<S: root_store::RootStore>(
         path: &std::path::Path,
-        store: &Arc<LpgStore>,
+        store: &Arc<S>,
         catalog: &Arc<crate::catalog::Catalog>,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         data: &[u8],
@@ -2569,7 +2577,7 @@ impl GrafeoDB {
     fn collect_garbage(&self) -> usize {
         #[cfg(feature = "lpg")]
         let versions = self.root_store().map_or(0, |store| {
-            let min_epoch = self.transaction_manager.min_active_epoch();
+            let min_epoch = self.transaction_manager.read_horizon();
             let named: usize = store
                 .graph_names()
                 .iter()
@@ -3140,7 +3148,7 @@ impl GrafeoDB {
     fn checkpoint_sources(&self) -> sections::CheckpointSources {
         sections::CheckpointSources {
             #[cfg(feature = "lpg")]
-            store: self.store.clone(),
+            store: self.store.clone().map(sections::LpgRoot::Lpg),
             #[cfg(feature = "lpg")]
             catalog: Arc::clone(&self.catalog),
             transaction_manager: Arc::clone(&self.transaction_manager),
@@ -4095,7 +4103,7 @@ mod tests {
         let after_default_only = {
             // The default graph alone, as `gc()` collected before 0.6.0.
             let store = db.lpg_store();
-            store.gc_versions(db.transaction_manager.min_active_epoch())
+            store.gc_versions(db.transaction_manager.read_horizon())
         };
         assert!(after_default_only > 0, "Alix's older ages are collectable");
 

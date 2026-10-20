@@ -26,6 +26,7 @@ use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::Operator;
 
 use crate::database::QueryResult;
+use crate::transaction::ReadPin;
 
 /// RAII guard that increments/decrements a session's active-stream counter.
 ///
@@ -62,6 +63,8 @@ pub struct ResultStream<'session> {
     deadline: Option<Instant>,
     exhausted: bool,
     _guard: StreamGuard<'session>,
+    /// The pin of a stream read outside a transaction, held while it lives.
+    _pin: Option<ReadPin>,
 }
 
 impl<'s> ResultStream<'s> {
@@ -76,6 +79,7 @@ impl<'s> ResultStream<'s> {
         columns: Vec<String>,
         deadline: Option<Instant>,
         guard: StreamGuard<'s>,
+        pin: Option<ReadPin>,
     ) -> Result<Self> {
         QueryResult::validate_unique_columns(&columns)?;
         let len = columns.len();
@@ -86,6 +90,7 @@ impl<'s> ResultStream<'s> {
             deadline,
             exhausted: false,
             _guard: guard,
+            _pin: pin,
         })
     }
 
@@ -222,6 +227,8 @@ pub struct OwnedResultStream {
     column_types: Vec<LogicalType>,
     deadline: Option<Instant>,
     exhausted: bool,
+    /// The pin of a stream read outside a transaction, held while it lives.
+    _pin: Option<ReadPin>,
 }
 
 impl std::fmt::Debug for OwnedResultStream {
@@ -247,6 +254,7 @@ impl OwnedResultStream {
         operator: Box<dyn Operator>,
         columns: Vec<String>,
         deadline: Option<Instant>,
+        pin: Option<ReadPin>,
     ) -> Result<Self> {
         QueryResult::validate_unique_columns(&columns)?;
         let len = columns.len();
@@ -256,6 +264,7 @@ impl OwnedResultStream {
             column_types: vec![LogicalType::Any; len],
             deadline,
             exhausted: false,
+            _pin: pin,
         })
     }
 

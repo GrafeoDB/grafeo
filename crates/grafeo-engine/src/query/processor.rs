@@ -378,6 +378,7 @@ impl QueryProcessor {
                 epoch,
                 transaction_id,
                 Some(self.transaction_manager.current_epoch()),
+                self.graph_store.answers_at_view(),
             );
             annotate_pushdown_hints(&mut plan.root, self.graph_store.as_ref(), choose_labels);
             return Ok(explain_result(&plan));
@@ -388,6 +389,12 @@ impl QueryProcessor {
         // (an active transaction may have prior uncommitted writes from earlier statements)
         let is_read_only =
             !optimized_plan.root.has_mutations() && self.transaction_context.is_none();
+        // Outside a transaction the statement reads at the published epoch,
+        // pinned for its run (#412 decision Q6); dropped when it returns.
+        let _pin = self
+            .transaction_context
+            .is_none()
+            .then(|| self.transaction_manager.pin_read());
         let planner = if let Some((epoch, transaction_id)) = self.transaction_context {
             Planner::with_context(
                 Arc::clone(&self.graph_store),

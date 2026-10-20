@@ -516,20 +516,14 @@ impl GrafeoDB {
         })
     }
 
-    /// Every `gc_interval` commits, prunes the versions no reader needs, in
-    /// the root store and `store`.
+    /// After a direct call that wrote `store`, collects the versions no
+    /// reader needs any more in the root store and `store`, at the read
+    /// horizon: after every call on a store that collects after every
+    /// write, every `gc_interval` commits on `LpgStore` (see
+    /// [`AfterWrite`](crate::database::collect::AfterWrite)).
     fn prune_versions(&self, root: &Arc<LpgStore>, store: &Arc<LpgStore>) {
-        if self.config.gc_interval() > 0 {
-            let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if count.is_multiple_of(self.config.gc_interval()) {
-                let min_epoch = self.transaction_manager.min_active_epoch();
-                root.gc_versions(min_epoch);
-                if !Arc::ptr_eq(root, store) {
-                    store.gc_versions(min_epoch);
-                }
-                self.transaction_manager.gc();
-            }
-        }
+        crate::database::collect::AfterWrite::next(&self.commit_counter, self.config.gc_interval())
+            .run(&self.transaction_manager, &[&**root, &**store]);
     }
 
     /// Runs one direct call on `store` (the graph with storage key `graph`)

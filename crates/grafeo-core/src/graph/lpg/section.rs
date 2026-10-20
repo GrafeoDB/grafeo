@@ -21,7 +21,9 @@ use grafeo_common::utils::error::Result;
 use super::block::{self, BlockEdge, BlockNamedGraph, BlockNode};
 use super::chunked::{LPG_SECTION_VERSION, read_lpg_chunks, write_lpg_chunks};
 use super::store::OpenChangeSource;
+use crate::graph::load::LoadTarget;
 use crate::graph::lpg::{LpgStore, OpenChangesByGraph};
+use grafeo_common::change::Entity;
 
 // ── Collection helpers ──────────────────────────────────────────────
 
@@ -102,35 +104,75 @@ fn collect_block_edges(store: &LpgStore) -> Vec<BlockEdge> {
     edges
 }
 
-fn populate_store(store: &LpgStore, nodes: &[BlockNode], edges: &[BlockEdge]) -> Result<()> {
-    for node in nodes {
-        let label_refs: Vec<&str> = node.labels.iter().map(|s| s.as_str()).collect();
-        store.create_node_with_id(node.id, &label_refs)?;
-        for (key, entries) in &node.properties {
-            #[cfg(feature = "temporal")]
-            for (epoch, value) in entries {
-                store.set_node_property_at_epoch(node.id, key, value.clone(), *epoch);
+/// Loads the properties of a node or edge of a 0.5.x section, or of a
+/// snapshot: each property's versions, oldest first, the last its current
+/// value.
+///
+/// # Errors
+///
+/// The error of a value the store refuses.
+pub fn load_versions<S: LoadTarget>(
+    store: &S,
+    entity: Entity,
+    properties: &[(String, Vec<(EpochId, Value)>)],
+) -> Result<()> {
+    for (key, entries) in properties {
+        if let Some(((epoch, value), older)) = entries.split_last() {
+            for (epoch, value) in older {
+                store.load_old_value(entity, key, value.clone(), *epoch);
             }
-            #[cfg(not(feature = "temporal"))]
-            if let Some((_, value)) = entries.last() {
-                store.set_node_property(node.id, key, value.clone());
-            }
-        }
-    }
-    for edge in edges {
-        store.create_edge_with_id(edge.id, edge.src, edge.dst, &edge.edge_type)?;
-        for (key, entries) in &edge.properties {
-            #[cfg(feature = "temporal")]
-            for (epoch, value) in entries {
-                store.set_edge_property_at_epoch(edge.id, key, value.clone(), *epoch);
-            }
-            #[cfg(not(feature = "temporal"))]
-            if let Some((_, value)) = entries.last() {
-                store.set_edge_property(edge.id, key, value.clone());
-            }
+            store.load_value(entity, key, value.clone(), Some(*epoch))?;
         }
     }
     Ok(())
+}
+
+fn populate_store<S: LoadTarget>(
+    store: &S,
+    nodes: &[BlockNode],
+    edges: &[BlockEdge],
+) -> Result<()> {
+    for node in nodes {
+        let label_refs: Vec<&str> = node.labels.iter().map(|s| s.as_str()).collect();
+        store.load_node(node.id, &label_refs)?;
+        load_versions(store, Entity::Node(node.id), &node.properties)?;
+    }
+    for edge in edges {
+        // A store that leaves out an edge whose end it lacks (see
+        // `LoadTarget::load_edge`) changes nothing for its values either.
+        store.load_edge(edge.id, edge.src, edge.dst, &edge.edge_type)?;
+        load_versions(store, Entity::Edge(edge.id), &edge.properties)?;
+    }
+    Ok(())
+}
+
+/// Loads the LPG section of 0.5.x, the block layout `data`, into `store`
+/// and its named graphs (each created, as a 0.5.x file names each once).
+///
+/// # Errors
+///
+/// The errors of the block reader, and of a node, edge or graph the store
+/// refuses.
+pub(crate) fn load_blocks<S: LoadTarget>(store: &S, data: &[u8]) -> Result<()> {
+    block::read_blocks(data, &mut |nodes, edges, named_graphs, epoch| {
+        populate_store(store, &nodes, &edges)?;
+        store.load_section_epoch(EpochId::new(epoch));
+        store.load_finish();
+
+        for graph in &named_graphs {
+            let graph_store = store.load_named_graph(&graph.name).map_err(|e| {
+                grafeo_common::utils::error::Error::corruption(format!(
+                    "LPG section (0.5.x): graph {:?}: {e}",
+                    graph.name
+                ))
+            })?;
+            populate_store(&*graph_store, &graph.nodes, &graph.edges)?;
+            graph_store.load_section_epoch(EpochId::new(epoch));
+            graph_store.load_finish();
+        }
+
+        Ok(())
+    })
 }
 
 // ── Section implementation ──────────────────────────────────────────
@@ -253,37 +295,11 @@ impl Section for LpgStoreSection {
             return self.deserialize(&bytes);
         }
         check_version(SectionType::LpgStore, source, LPG_SECTION_VERSION)?;
-        read_lpg_chunks(&self.store, source)
+        read_lpg_chunks(&*self.store, source)
     }
 
     fn deserialize(&mut self, data: &[u8]) -> Result<()> {
-        let store = &self.store;
-
-        block::read_blocks(data, &mut |nodes, edges, named_graphs, epoch| {
-            populate_store(store, &nodes, &edges)?;
-
-            #[cfg(feature = "temporal")]
-            store.sync_epoch(EpochId::new(epoch));
-            #[cfg(not(feature = "temporal"))]
-            let _ = epoch;
-
-            for graph in &named_graphs {
-                // A 0.5.x file names each graph once.
-                store.create_graph(&graph.name).map_err(|e| {
-                    grafeo_common::utils::error::Error::corruption(format!(
-                        "LPG section (0.5.x): graph {:?}: {e}",
-                        graph.name
-                    ))
-                })?;
-                if let Some(graph_store) = store.graph(&graph.name) {
-                    populate_store(&graph_store, &graph.nodes, &graph.edges)?;
-                    #[cfg(feature = "temporal")]
-                    graph_store.sync_epoch(EpochId::new(epoch));
-                }
-            }
-
-            Ok(())
-        })
+        load_blocks(&*self.store, data)
     }
 
     fn is_dirty(&self) -> bool {

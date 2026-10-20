@@ -13,14 +13,22 @@
 //! store stands.
 
 mod cases;
+mod epochs;
+mod graphs;
+mod indexes;
 mod lpg;
 mod rowgroup;
+#[cfg(any(feature = "text-index", feature = "vector-index"))]
+mod searches;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use grafeo_common::change::{ChangeMark, ChangeSet, DataModel, DataOp, GraphRef, GraphSlot};
-use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{
+    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
+};
+use grafeo_common::utils::hash::FxHashMap;
 
 use crate::graph::Direction;
 use crate::graph::apply::{Applied, ApplyError, ChangeTarget, Writer};
@@ -33,6 +41,7 @@ pub(crate) trait Store: GraphStoreMut + ChangeTarget {}
 impl<T: GraphStoreMut + ChangeTarget> Store for T {}
 
 /// A case a store is known to fail, and why.
+#[derive(Clone, Copy)]
 pub(crate) struct KnownGap {
     /// The case's name.
     pub case: &'static str,
@@ -104,6 +113,15 @@ macro_rules! conformance_suite {
             a_reader_at_an_earlier_epoch_keeps_its_values_and_labels,
             a_reader_at_an_earlier_epoch_keeps_deleted_entities,
             a_delete_is_marked_at_its_commit_epoch,
+            every_read_path_sees_the_transactions_own_writes,
+            every_read_path_hides_an_open_transactions_creates_and_deletes,
+            every_read_path_hides_an_open_transactions_values_and_labels,
+            every_read_path_at_an_earlier_epoch_keeps_creates_and_deletes,
+            every_read_path_at_an_earlier_epoch_keeps_values_and_labels,
+            every_read_path_at_the_commit_epoch_sees_the_commit,
+            an_immediate_write_is_seen_at_its_epoch_through_every_read_path,
+            an_immediate_write_keeps_the_old_value_for_an_older_reader,
+            a_property_set_to_null_is_removed,
         );
     };
     (@cases $store:ty, $make:expr, $gaps:expr; $($case:ident),* $(,)?) => {
@@ -598,8 +616,10 @@ pub(crate) fn image<S: Store + ?Sized>(store: &S, reader: Reader) -> Image {
         label_names.extend(names.iter().cloned());
     }
     for label in label_names {
+        // At the reader's view: the labels a scan finds are those of the
+        // view, as the point reads' are.
         let scanned: BTreeSet<u64> = store
-            .nodes_by_label(&label)
+            .nodes_by_label_at(&label, read_view(reader))
             .into_iter()
             .map(|id| id.as_u64())
             .filter(|id| nodes.contains_key(id))
@@ -687,6 +707,512 @@ pub(crate) fn counts_of(image: &Image, labels: &[&str]) -> (usize, usize, Vec<us
             })
             .collect(),
     )
+}
+
+// ── Reading at a view ───────────────────────────────────────────────
+
+/// The keys the reads at a view probe.
+const KEYS: [&str; 3] = ["name", "age", "city"];
+
+/// The label sets the label unions read.
+const UNIONS: [&[&str]; 3] = [&["Employee", "Traveller"], &["Person", "City"], &LABELS];
+
+/// The ranges of `age` the range lookups read: (min, max, min inclusive,
+/// max inclusive).
+const AGE_RANGES: [(Option<i64>, Option<i64>, bool, bool); 4] = [
+    (Some(10), Some(50), true, false),
+    (None, Some(19), false, true),
+    (Some(3), None, true, true),
+    (Some(3), Some(88), false, false),
+];
+
+/// The view of `reader`.
+pub(crate) fn read_view(reader: Reader) -> ReadView {
+    match reader {
+        Reader::Transaction(transaction, snapshot) => ReadView::transaction(transaction, snapshot),
+        Reader::At(epoch) => ReadView::committed(epoch),
+    }
+}
+
+impl Image {
+    /// Gives node `id` the value `value` of `key` (`None`: no value).
+    pub fn set_value(&mut self, id: NodeId, key: &str, value: Option<Value>) {
+        if let Some((_, values)) = self.nodes.get_mut(&id.as_u64()) {
+            set_sorted(values, key, value);
+        }
+    }
+
+    /// Gives node `id` exactly the labels `names`.
+    pub fn set_labels(&mut self, id: NodeId, names: &[&str]) {
+        if let Some((labels, _)) = self.nodes.get_mut(&id.as_u64()) {
+            *labels = names.iter().map(|name| (*name).to_string()).collect();
+            labels.sort();
+        }
+    }
+
+    /// Gives edge `id` the value `value` of `key` (`None`: no value).
+    pub fn set_edge_value(&mut self, id: EdgeId, key: &str, value: Option<Value>) {
+        if let Some((_, _, _, values)) = self.edges.get_mut(&id.as_u64()) {
+            set_sorted(values, key, value);
+        }
+    }
+}
+
+/// Sets `key` to `value` in a list of values sorted by key.
+fn set_sorted(values: &mut Vec<(String, Value)>, key: &str, value: Option<Value>) {
+    values.retain(|(name, _)| name != key);
+    if let Some(value) = value {
+        values.push((key.to_string(), value));
+        values.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+}
+
+/// The node ids of an answer, as a set, with a problem when one repeats.
+fn id_set(ids: &[NodeId], what: &str, problems: &mut Vec<String>) -> BTreeSet<u64> {
+    let set: BTreeSet<u64> = ids.iter().map(|id| id.as_u64()).collect();
+    if set.len() != ids.len() {
+        problems.push(format!("{what} lists a node twice: {ids:?}"));
+    }
+    set
+}
+
+/// The values of a batch read, sorted by key.
+fn sorted_map(map: &FxHashMap<PropertyKey, Value>) -> Vec<(String, Value)> {
+    let mut values: Vec<(String, Value)> = map
+        .iter()
+        .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+        .collect();
+    values.sort_by(|a, b| a.0.cmp(&b.0));
+    values
+}
+
+/// Every view-taking read of `store` at `reader`'s view, each checked
+/// against `expected`, what the reader must see: point reads of nodes and
+/// edges (whole, one value, visibility), labels and label checks, the
+/// batch and selective batch reads, adjacency each way, label scans and
+/// unions, equality lookups (one key, two keys, maybe-equal through an
+/// index) and range lookups (eager and lazy). The lookups probe the values
+/// of `expected` and of `others` (images the reader must not see), so a
+/// value written by someone the reader does not see finds nothing.
+///
+/// # Errors
+///
+/// Every read that disagrees with `expected`, one per line.
+pub(crate) fn paths_at<S: Store + ?Sized>(
+    store: &S,
+    reader: Reader,
+    expected: &Image,
+    others: &[&Image],
+) -> Outcome {
+    let view = read_view(reader);
+    let mut problems = Vec::new();
+    let mut node_ids: BTreeSet<u64> = store
+        .all_node_ids()
+        .into_iter()
+        .map(|id| id.as_u64())
+        .collect();
+    let mut edge_ids: BTreeSet<u64> = BTreeSet::new();
+    for image in std::iter::once(expected).chain(others.iter().copied()) {
+        node_ids.extend(image.nodes.keys().copied());
+        edge_ids.extend(image.edges.keys().copied());
+    }
+    let nodes: Vec<NodeId> = node_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let edges: Vec<EdgeId> = edge_ids.iter().map(|id| EdgeId::new(*id)).collect();
+
+    // Nodes, one at a time.
+    for &node in &nodes {
+        let raw = node.as_u64();
+        let want = expected.nodes.get(&raw);
+        if store.is_node_visible_at(node, view) != want.is_some() {
+            problems.push(format!(
+                "is_node_visible_at({raw}) is {}, expected {}",
+                want.is_none(),
+                want.is_some()
+            ));
+        }
+        let found = store.get_node_at(node, view).map(|node| {
+            let mut names: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
+            names.sort();
+            (names, sorted_values(&node.properties))
+        });
+        if found.as_ref() != want {
+            problems.push(format!(
+                "get_node_at({raw}) is {found:?}, expected {want:?}"
+            ));
+        }
+        let labels = store.node_labels_at(node, view).map(|labels| {
+            let mut names: Vec<String> = labels.iter().map(ToString::to_string).collect();
+            names.sort();
+            names
+        });
+        if labels.as_ref() != want.map(|(names, _)| names) {
+            problems.push(format!(
+                "node_labels_at({raw}) is {labels:?}, expected {:?}",
+                want.map(|(names, _)| names)
+            ));
+        }
+        for label in LABELS {
+            let has = store.node_has_label_at(node, label, view);
+            let expected_has = want.map(|(names, _)| names.iter().any(|name| name == label));
+            if has != expected_has {
+                problems.push(format!(
+                    "node_has_label_at({raw}, {label}) is {has:?}, expected {expected_has:?}"
+                ));
+            }
+        }
+        for key in KEYS {
+            let value = store.node_property_at(node, key, view);
+            let expected_value = want.and_then(|(_, values)| {
+                values
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+            });
+            if value != expected_value {
+                problems.push(format!(
+                    "node_property_at({raw}, {key}) is {value:?}, expected {expected_value:?}"
+                ));
+            }
+        }
+    }
+
+    // Nodes, in batches.
+    let expected_values = |node: &NodeId, keys: Option<&[&str]>| -> Vec<(String, Value)> {
+        expected
+            .nodes
+            .get(&node.as_u64())
+            .map(|(_, values)| {
+                values
+                    .iter()
+                    .filter(|(key, _)| keys.is_none_or(|keys| keys.contains(&key.as_str())))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for key in KEYS {
+        let found = store.get_node_property_batch_at(&nodes, &PropertyKey::new(key), view);
+        for (node, value) in nodes.iter().zip(&found) {
+            let expected_value = expected_values(node, Some(&[key])).pop().map(|(_, v)| v);
+            if *value != expected_value {
+                problems.push(format!(
+                    "get_node_property_batch_at: node {}'s {key} is {value:?}, expected {expected_value:?}",
+                    node.as_u64()
+                ));
+            }
+        }
+    }
+    let all = store.get_nodes_properties_batch_at(&nodes, view);
+    let selected = store.get_nodes_properties_selective_batch_at(
+        &nodes,
+        &[PropertyKey::new("name"), PropertyKey::new("age")],
+        view,
+    );
+    for (index, node) in nodes.iter().enumerate() {
+        let (found, wanted) = (
+            all.get(index).map(sorted_map),
+            Some(expected_values(node, None)),
+        );
+        if found != wanted {
+            problems.push(format!(
+                "get_nodes_properties_batch_at: node {} has {found:?}, expected {wanted:?}",
+                node.as_u64()
+            ));
+        }
+        let (found, wanted) = (
+            selected.get(index).map(sorted_map),
+            Some(expected_values(node, Some(&["name", "age"]))),
+        );
+        if found != wanted {
+            problems.push(format!(
+                "get_nodes_properties_selective_batch_at: node {} has {found:?}, expected {wanted:?}",
+                node.as_u64()
+            ));
+        }
+    }
+
+    // Edges.
+    for &edge in &edges {
+        let raw = edge.as_u64();
+        let want = expected.edges.get(&raw);
+        if store.is_edge_visible_at(edge, view) != want.is_some() {
+            problems.push(format!(
+                "is_edge_visible_at({raw}) is {}, expected {}",
+                want.is_none(),
+                want.is_some()
+            ));
+        }
+        let found = store.get_edge_at(edge, view).map(|edge| {
+            (
+                edge.src.as_u64(),
+                edge.dst.as_u64(),
+                edge.edge_type.to_string(),
+                sorted_values(&edge.properties),
+            )
+        });
+        if found.as_ref() != want {
+            problems.push(format!(
+                "get_edge_at({raw}) is {found:?}, expected {want:?}"
+            ));
+        }
+        let since = store.edge_property_at(edge, "since", view);
+        let expected_since = want.and_then(|(_, _, _, values)| {
+            values
+                .iter()
+                .find(|(key, _)| key == "since")
+                .map(|(_, value)| value.clone())
+        });
+        if since != expected_since {
+            problems.push(format!(
+                "edge_property_at({raw}, since) is {since:?}, expected {expected_since:?}"
+            ));
+        }
+    }
+    let found =
+        store.get_edges_properties_selective_batch_at(&edges, &[PropertyKey::new("since")], view);
+    for (index, edge) in edges.iter().enumerate() {
+        let wanted: Vec<(String, Value)> = expected
+            .edges
+            .get(&edge.as_u64())
+            .map(|(_, _, _, values)| {
+                values
+                    .iter()
+                    .filter(|(key, _)| key == "since")
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let found = found.get(index).map(sorted_map);
+        if found.as_ref() != Some(&wanted) {
+            problems.push(format!(
+                "get_edges_properties_selective_batch_at: edge {} has {found:?}, expected {wanted:?}",
+                edge.as_u64()
+            ));
+        }
+    }
+
+    // Adjacency.
+    let mut directions = vec![Direction::Outgoing];
+    if store.has_backward_adjacency() {
+        directions.extend([Direction::Incoming, Direction::Both]);
+    }
+    for &raw in expected.nodes.keys() {
+        for &direction in &directions {
+            let mut wanted: Vec<(u64, u64)> = expected
+                .edges
+                .iter()
+                .flat_map(|(edge, (src, dst, _, _))| {
+                    let out =
+                        (*src == raw && direction != Direction::Incoming).then_some((*dst, *edge));
+                    let into =
+                        (*dst == raw && direction != Direction::Outgoing).then_some((*src, *edge));
+                    // `Both` lists a self-loop from each side.
+                    out.into_iter().chain(into)
+                })
+                .collect();
+            wanted.sort_unstable();
+            let mut found: Vec<(u64, u64)> = store
+                .edges_from_at(NodeId::new(raw), direction, view)
+                .into_iter()
+                .map(|(other, edge)| (other.as_u64(), edge.as_u64()))
+                .collect();
+            found.sort_unstable();
+            if found != wanted {
+                problems.push(format!(
+                    "edges_from_at({raw}, {direction:?}) is {found:?}, expected {wanted:?}"
+                ));
+            }
+            let mut neighbors: Vec<u64> = store
+                .neighbors_at(NodeId::new(raw), direction, view)
+                .into_iter()
+                .map(|id| id.as_u64())
+                .collect();
+            neighbors.sort_unstable();
+            let wanted: Vec<u64> = wanted.iter().map(|(other, _)| *other).collect();
+            let mut wanted = wanted;
+            wanted.sort_unstable();
+            if neighbors != wanted {
+                problems.push(format!(
+                    "neighbors_at({raw}, {direction:?}) is {neighbors:?}, expected {wanted:?}"
+                ));
+            }
+        }
+    }
+
+    // Label scans and unions.
+    let with_any = |labels: &[&str]| -> BTreeSet<u64> {
+        expected
+            .nodes
+            .iter()
+            .filter(|(_, (names, _))| names.iter().any(|name| labels.contains(&name.as_str())))
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    let mut label_names: BTreeSet<String> = store.all_labels().into_iter().collect();
+    label_names.extend(LABELS.iter().map(|label| (*label).to_string()));
+    for label in &label_names {
+        let what = format!("nodes_by_label_at({label})");
+        let found = id_set(&store.nodes_by_label_at(label, view), &what, &mut problems);
+        let wanted = with_any(&[label.as_str()]);
+        if found != wanted {
+            problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
+        }
+    }
+    for labels in UNIONS {
+        let what = format!("nodes_with_any_label_at({labels:?})");
+        let found = id_set(
+            &store.nodes_with_any_label_at(labels, view),
+            &what,
+            &mut problems,
+        );
+        let wanted = with_any(labels);
+        if found != wanted {
+            problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
+        }
+    }
+
+    // Equality lookups, probing every value of the images.
+    let mut probes: Vec<(&str, Value)> = Vec::new();
+    for image in std::iter::once(expected).chain(others.iter().copied()) {
+        for (_, values) in image.nodes.values() {
+            for (key, value) in values {
+                if let Some(key) = KEYS.iter().find(|name| **name == key.as_str())
+                    && !probes.iter().any(|(k, v)| k == key && v == value)
+                {
+                    probes.push((key, value.clone()));
+                }
+            }
+        }
+    }
+    let equal = |key: &str, value: &Value| -> BTreeSet<u64> {
+        expected
+            .nodes
+            .iter()
+            .filter(|(_, (_, values))| values.iter().any(|(k, v)| k == key && v == value))
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    for (key, value) in &probes {
+        let what = format!("find_nodes_by_property_at({key}, {value:?})");
+        let found = id_set(
+            &store.find_nodes_by_property_at(key, value, view),
+            &what,
+            &mut problems,
+        );
+        let wanted = equal(key, value);
+        if found != wanted {
+            problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
+        }
+        match store.find_nodes_maybe_equal_at(key, value, view) {
+            None if store.has_property_index(key) => problems.push(format!(
+                "find_nodes_maybe_equal_at({key}, {value:?}) gives no answer with an index"
+            )),
+            None => {}
+            Some(found) => {
+                let what = format!("find_nodes_maybe_equal_at({key}, {value:?})");
+                let found = id_set(&found, &what, &mut problems);
+                let missed: Vec<&u64> = wanted.difference(&found).collect();
+                let unseen: Vec<&u64> = found
+                    .iter()
+                    .filter(|id| !expected.nodes.contains_key(id))
+                    .collect();
+                if !missed.is_empty() || !unseen.is_empty() {
+                    problems.push(format!(
+                        "{what} misses {missed:?} and lists {unseen:?}, which the view does not see"
+                    ));
+                }
+            }
+        }
+    }
+    let names: Vec<&Value> = probes
+        .iter()
+        .filter(|(key, _)| *key == "name")
+        .map(|(_, value)| value)
+        .collect();
+    let ages: Vec<&Value> = probes
+        .iter()
+        .filter(|(key, _)| *key == "age")
+        .map(|(_, value)| value)
+        .collect();
+    for name in &names {
+        for age in &ages {
+            let conditions = [("name", (*name).clone()), ("age", (*age).clone())];
+            let what = format!("find_nodes_by_properties_at({conditions:?})");
+            let found = id_set(
+                &store.find_nodes_by_properties_at(&conditions, view),
+                &what,
+                &mut problems,
+            );
+            let wanted: BTreeSet<u64> = equal("name", name)
+                .intersection(&equal("age", age))
+                .copied()
+                .collect();
+            if found != wanted {
+                problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
+            }
+        }
+    }
+
+    // Range lookups of `age`.
+    for (min, max, min_inclusive, max_inclusive) in AGE_RANGES {
+        let (min, max) = (min.map(Value::Int64), max.map(Value::Int64));
+        let wanted: BTreeSet<u64> = expected
+            .nodes
+            .iter()
+            .filter(|(_, (_, values))| {
+                values.iter().any(|(key, value)| {
+                    key == "age"
+                        && matches!(value, Value::Int64(age)
+                        if min.as_ref().is_none_or(|min| match min {
+                            Value::Int64(min) => if min_inclusive { age >= min } else { age > min },
+                            _ => false,
+                        })
+                        && max.as_ref().is_none_or(|max| match max {
+                            Value::Int64(max) => if max_inclusive { age <= max } else { age < max },
+                            _ => false,
+                        }))
+                })
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let what = format!("find_nodes_in_range_at(age, {min:?}, {max:?})");
+        let found = id_set(
+            &store.find_nodes_in_range_at(
+                "age",
+                min.as_ref(),
+                max.as_ref(),
+                min_inclusive,
+                max_inclusive,
+                view,
+            ),
+            &what,
+            &mut problems,
+        );
+        if found != wanted {
+            problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
+        }
+        let lazy: Vec<NodeId> = store
+            .find_nodes_in_range_iter_at(
+                "age",
+                min.as_ref(),
+                max.as_ref(),
+                min_inclusive,
+                max_inclusive,
+                view,
+            )
+            .collect();
+        let what = format!("find_nodes_in_range_iter_at(age, {min:?}, {max:?})");
+        let found = id_set(&lazy, &what, &mut problems);
+        if found != wanted {
+            problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("at {reader:?}:\n  {}", problems.join("\n  ")))
+    }
 }
 
 // ── Data ─────────────────────────────────────────────────────────────

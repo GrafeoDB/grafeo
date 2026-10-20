@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use grafeo_adapters::plugins::{AlgorithmResult, Parameters};
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{LogicalType, ReadView, Value};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{Operator, OperatorError, OperatorResult};
 use grafeo_core::graph::GraphStoreSearch;
@@ -28,6 +28,8 @@ pub struct ProcedureCallOperator {
     /// the HNSW / BM25 indexes rather than the raw graph store.
     #[cfg(feature = "lpg")]
     lpg_store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
+    /// The view the calling query reads at, for the search procedures.
+    view: Option<ReadView>,
     /// YIELD items: (original_column, alias). `None` means yield all columns.
     yield_columns: Option<Vec<(String, Option<String>)>>,
     /// Canonical column names from the procedure registry (e.g., `["node_id", "score"]`
@@ -62,6 +64,7 @@ impl ProcedureCallOperator {
             params,
             #[cfg(feature = "lpg")]
             lpg_store: None,
+            view: None,
             yield_columns,
             canonical_columns,
             result: None,
@@ -80,6 +83,14 @@ impl ProcedureCallOperator {
         self
     }
 
+    /// Runs the procedure as the calling query reads, at `view`: the search
+    /// procedures return only the nodes it sees.
+    #[must_use]
+    pub fn with_view(mut self, view: ReadView) -> Self {
+        self.view = Some(view);
+        self
+    }
+
     /// Executes the procedure and resolves YIELD column mapping.
     fn execute_algorithm(&mut self) -> Result<(), OperatorError> {
         #[cfg(feature = "lpg")]
@@ -89,6 +100,7 @@ impl ProcedureCallOperator {
         };
         #[cfg(not(feature = "lpg"))]
         let ctx = ProcedureContext::new(&*self.store);
+        let ctx = ctx.with_view(self.view);
         let result = self
             .procedure
             .execute(&ctx, &self.params)

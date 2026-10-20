@@ -9,13 +9,14 @@
 //! with the other 0.5.x readers.
 
 use arcstr::ArcStr;
+use grafeo_common::change::Entity;
 use grafeo_common::storage::SectionSource;
 use grafeo_common::types::{EdgeId, NodeId};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashSet;
 
 use super::{CompactStore, labels_of_unescaped_key};
-use crate::graph::lpg::LpgStore;
+use crate::graph::load::LoadTarget;
 
 /// What [`fold_0_5_base`] created.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -60,10 +61,10 @@ pub struct Folded {
 /// not the 0.5.x layout (see [`Error::Serialization`]), a corruption error
 /// when a base without ids meets an overlay that holds data, or the error
 /// of a record the store cannot allocate.
-pub fn fold_0_5_base(
+pub fn fold_0_5_base<S: LoadTarget>(
     base: &dyn SectionSource,
     deletions: Option<&dyn SectionSource>,
-    store: &LpgStore,
+    store: &S,
 ) -> Result<Folded> {
     let base = super::section::read_base(base)?;
     let (deleted_nodes, deleted_edges) = match deletions {
@@ -81,9 +82,9 @@ pub fn fold_0_5_base(
 /// A base that does not keep the ids of its nodes and edges names them by
 /// their table and row; it folds under those ids into an empty store only,
 /// since an overlay's ids could name other entities.
-fn fold_into(
+fn fold_into<S: LoadTarget>(
     base: &CompactStore,
-    store: &LpgStore,
+    store: &S,
     deleted_nodes: &[NodeId],
     deleted_edges: &[EdgeId],
 ) -> Result<Folded> {
@@ -105,7 +106,7 @@ fn fold_into(
     let mut joined_names: FxHashSet<ArcStr> = FxHashSet::default();
     for &id in &base_nodes {
         if live.contains(&id) {
-            if split_joined_labels(base, store, id, &mut joined_names) {
+            if split_joined_labels(base, store, id, &mut joined_names)? {
                 folded.relabeled += 1;
             }
             continue;
@@ -117,9 +118,9 @@ fn fold_into(
             continue;
         };
         let labels: Vec<&str> = node.labels.iter().map(|label| label.as_str()).collect();
-        store.create_node_with_id(id, &labels)?;
+        store.load_node(id, &labels)?;
         for (key, value) in node.properties {
-            store.set_node_property(id, key.as_str(), value);
+            store.load_value(Entity::Node(id), key.as_str(), value, None)?;
         }
         live.insert(id);
         folded.nodes += 1;
@@ -127,7 +128,7 @@ fn fold_into(
     // Nobody wrote these names, so the store does not list them once no
     // node has them; one a node still has (a label written since) stays.
     for name in &joined_names {
-        store.drop_unused_label(name);
+        store.load_forget_label(name);
     }
 
     // Every base edge once: from its source, as the outgoing edges of the
@@ -144,9 +145,12 @@ fn fold_into(
                 folded.dangling_edges += 1;
                 continue;
             }
-            store.create_edge_with_id(id, edge.src, edge.dst, edge.edge_type.as_str())?;
+            if !store.load_edge(id, edge.src, edge.dst, edge.edge_type.as_str())? {
+                folded.dangling_edges += 1;
+                continue;
+            }
             for (key, value) in edge.properties {
-                store.set_edge_property(id, key.as_str(), value);
+                store.load_value(Entity::Edge(id), key.as_str(), value, None)?;
             }
             folded.edges += 1;
         }
@@ -164,25 +168,27 @@ fn fold_into(
 /// overlay with that label. The reader splits the key into the table's
 /// labels, so a label of the copy that splits into exactly them is the key.
 /// Every other label stays, one with a `|` written since included.
-fn split_joined_labels(
+fn split_joined_labels<S: LoadTarget>(
     base: &CompactStore,
-    store: &LpgStore,
+    store: &S,
     id: NodeId,
     joined_names: &mut FxHashSet<ArcStr>,
-) -> bool {
+) -> Result<bool> {
     let Some((table_id, _)) = base.resolve_node(id) else {
-        return false;
+        return Ok(false);
     };
     let labels = base.labels_of_table(table_id);
     if labels.len() < 2 {
-        return false;
+        return Ok(false);
     }
     let Some(copy) = store.get_node(id) else {
-        return false;
+        return Ok(false);
     };
     let mut joined = false;
     for label in &copy.labels {
-        if labels_of_unescaped_key(label.as_str()) == labels && store.remove_label(id, label) {
+        if labels_of_unescaped_key(label.as_str()) == labels
+            && store.load_label(id, label, false)?
+        {
             joined_names.insert(label.clone());
             joined = true;
         }
@@ -190,10 +196,10 @@ fn split_joined_labels(
     if joined {
         for label in labels {
             // False when the copy has the label already: a write since set it.
-            store.add_label(id, label);
+            store.load_label(id, label, true)?;
         }
     }
-    joined
+    Ok(joined)
 }
 
 #[cfg(test)]
@@ -205,6 +211,7 @@ mod tests {
     use grafeo_common::types::{PropertyKey, Value};
 
     use super::*;
+    use crate::graph::lpg::LpgStore;
 
     const BASE: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -248,7 +255,7 @@ mod tests {
         }
         let base = image.section_source(SectionType::CompactStore).unwrap();
         let deletions = image.section_source(SectionType::OverlayDeletions);
-        let folded = fold_0_5_base(&*base, deletions.as_deref(), &store);
+        let folded = fold_0_5_base(&*base, deletions.as_deref(), &*store);
         (store, folded)
     }
 
@@ -350,6 +357,74 @@ mod tests {
         assert!(store.create_node(&["Person"]) > highest);
     }
 
+    /// The fold writes the row-group store as it writes `LpgStore`: the
+    /// overlay migrated into a root, the base folded into it, the same rows,
+    /// labels and ids (#412 P5).
+    #[test]
+    fn the_0_5_44_base_folds_into_a_row_group_store_as_into_an_lpg_store() {
+        use crate::graph::load::testing::assert_same_rows;
+        use crate::graph::rowgroup::RowGroupStore;
+        use crate::graph::rowgroup::section::RowGroupStoreSection;
+
+        let image = image(BASE, Some(DELETIONS), Some(OVERLAY));
+        let (lpg, folded) = fold(&image);
+        let root = Arc::new(RowGroupStore::new());
+        RowGroupStoreSection::new(Arc::clone(&root))
+            .read_from(&*image.section_source(SectionType::LpgStore).unwrap())
+            .unwrap();
+        let base = image.section_source(SectionType::CompactStore).unwrap();
+        let deletions = image.section_source(SectionType::OverlayDeletions);
+        let rows = fold_0_5_base(&*base, deletions.as_deref(), &*root).unwrap();
+        assert_eq!(rows, folded.unwrap());
+        assert_same_rows(&*lpg, &*root, "the folded store");
+        let highest = lpg.node_ids().into_iter().max().unwrap();
+        assert!(root.next_node_id() > highest.as_u64());
+    }
+
+    /// A copy with the joined labels gets each label in the row-group store
+    /// too, and the store forgets the joined name no node has (see
+    /// `an_overlay_copy_with_the_joined_labels_gets_each_label`); a joined
+    /// name another node has stays.
+    #[test]
+    fn the_joined_labels_split_in_the_row_group_store_as_in_an_lpg_store() {
+        use crate::graph::GraphStore;
+        use crate::graph::load::testing::assert_same_rows;
+        use crate::graph::rowgroup::RowGroupStore;
+
+        let base = fixture_base();
+        let gus = base_id(&base, "Gus");
+        let jules = NodeId(base.node_ids().into_iter().max().unwrap().0 + 3);
+        let copies = |store: &dyn Fn(NodeId, &[&str])| {
+            store(gus, &["Employee|Person", "Manager"]);
+            store(jules, &["Employee|Person"]);
+        };
+        let lpg = LpgStore::new().unwrap();
+        copies(&|id, labels| lpg.create_node_with_id(id, labels).unwrap());
+        lpg.set_node_property(gus, "age", Value::Int64(26));
+        let rows = RowGroupStore::new();
+        copies(&|id, labels| rows.load_node(id, labels).unwrap());
+        rows.load_value(
+            grafeo_common::change::Entity::Node(gus),
+            "age",
+            Value::Int64(26),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(fold_base_into(&rows), fold_base_into(&lpg));
+        assert_same_rows(&lpg, &rows, "the folded stores");
+        assert_eq!(rows.nodes_by_label("Employee|Person"), [jules]);
+        let mut labels = rows.all_labels();
+        labels.sort();
+        assert_eq!(labels, sorted_labels(&lpg));
+
+        // Without Jules, the joined name goes.
+        let rows = RowGroupStore::new();
+        rows.load_node(gus, &["Employee|Person"]).unwrap();
+        fold_base_into(&rows);
+        assert!(!rows.all_labels().contains(&"Employee|Person".to_string()));
+    }
+
     #[test]
     fn without_the_deletion_log_the_deleted_node_comes_back() {
         let (store, folded) = fold(&image(BASE, None, Some(OVERLAY)));
@@ -395,7 +470,7 @@ mod tests {
     }
 
     /// Folds the fixture's base, without its deletion log, into `store`.
-    fn fold_base_into(store: &LpgStore) -> Folded {
+    fn fold_base_into<S: LoadTarget>(store: &S) -> Folded {
         let image = image(BASE, None, None);
         let base = image.section_source(SectionType::CompactStore).unwrap();
         fold_0_5_base(&*base, None, store).unwrap()

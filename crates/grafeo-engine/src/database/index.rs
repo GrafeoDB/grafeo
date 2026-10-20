@@ -410,8 +410,11 @@ impl super::GrafeoDB {
         let Ok(store) = self.read_store(super::direct::DirectTarget::Current) else {
             return Vec::new();
         };
-        let candidates = store.find_nodes_by_property(property, value);
-        store.filter_visible_node_ids(&candidates, epoch)
+        store.find_nodes_by_property_at(
+            property,
+            value,
+            grafeo_common::types::ReadView::committed(epoch),
+        )
     }
 
     // =========================================================================

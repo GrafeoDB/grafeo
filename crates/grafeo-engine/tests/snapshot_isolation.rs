@@ -207,13 +207,6 @@ const GAPS: &[KnownGap] = &[
         reason: NEWEST_IN_A_TRANSACTION,
     },
     KnownGap {
-        reads: stamped!(
-            "node value|edge value|labels / api / other session / * / get_node|get_edge"
-        ),
-        builds: Builds::Temporal,
-        reason: NEWEST_IN_A_TRANSACTION,
-    },
-    KnownGap {
         reads: stamped!("node delete|edge delete / * / * / * / *"),
         builds: Builds::Temporal,
         reason: DELETE_AT_START,
@@ -2418,4 +2411,81 @@ fn g12_a_replayed_delete_takes_effect_at_its_commit_epoch() {
     drop(other);
     graph.db.close().unwrap();
     report.finish();
+}
+
+// ── An open transaction's creates (G6, G8) ──────────────────────────
+
+/// The node ids in the first column of `query`'s rows, sorted.
+fn first_ids(session: &Session, query: &str) -> Vec<i64> {
+    let mut ids: Vec<i64> = session
+        .execute(query)
+        .unwrap_or_else(|error| panic!("{query}: {error}"))
+        .rows()
+        .iter()
+        .filter_map(|row| match row.first() {
+            Some(Value::Int64(id)) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// The node's id as a query returns it.
+fn raw(node: NodeId) -> i64 {
+    i64::try_from(node.as_u64()).unwrap()
+}
+
+/// A node another session created and has not committed is in the text and
+/// vector indexes, but no search procedure of another session finds it; its
+/// own transaction finds it (the procedures read at the caller's view).
+#[cfg(all(feature = "text-index", feature = "vector-index"))]
+#[test]
+fn search_procedures_skip_an_open_transactions_creates() {
+    let graph = people(Index::Text);
+    Index::Vector.create(&graph.db);
+    let mut writer = graph.db.session();
+    writer.begin_transaction().unwrap();
+    writer
+        .execute("INSERT (:Person {name: 'Jules', bio: 'lives in Prague', emb: vector([1.0, 0.0, 0.0])})")
+        .unwrap();
+    let jules = first_ids(&writer, "MATCH (n:Person {name: 'Jules'}) RETURN id(n)");
+    assert_eq!(jules.len(), 1, "the writer sees Jules");
+    let other = graph.db.session();
+    let text = "CALL grafeo.search.text('Person', 'bio', 'Prague', 5)";
+    let vector = "CALL grafeo.search.vector('Person', 'emb', [1.0, 0.0, 0.0], 5)";
+    let mut with_jules = vec![raw(graph.alix), jules[0]];
+    with_jules.sort_unstable();
+    assert_eq!(first_ids(&other, text), [raw(graph.alix)], "{text}");
+    assert_eq!(first_ids(&writer, text), with_jules, "{text} in the writer");
+    let mut everyone = vec![raw(graph.alix), raw(graph.gus)];
+    everyone.sort_unstable();
+    assert_eq!(first_ids(&other, vector), everyone, "{vector}");
+    everyone.push(jules[0]);
+    everyone.sort_unstable();
+    assert_eq!(
+        first_ids(&writer, vector),
+        everyone,
+        "{vector} in the writer"
+    );
+    writer.rollback().unwrap();
+    graph.db.close().unwrap();
+}
+
+/// A `MERGE` without a label or an index finds the node its transaction
+/// created before (the candidates are the nodes the transaction sees).
+#[test]
+fn a_merge_finds_its_transactions_own_node_without_a_label_or_index() {
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.execute("INSERT ({city: 'Amsterdam'})").unwrap();
+    session.execute("MERGE ({city: 'Amsterdam'})").unwrap();
+    let count = session
+        .execute("MATCH (n {city: 'Amsterdam'}) RETURN count(n)")
+        .unwrap()
+        .rows()[0][0]
+        .clone();
+    assert_eq!(count, Value::Int64(1));
+    session.commit().unwrap();
 }

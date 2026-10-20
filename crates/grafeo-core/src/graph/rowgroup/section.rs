@@ -17,9 +17,12 @@
 //! written; no writer writes one before chunk reuse (H3), every reader
 //! applies them.
 //!
-//! A checkpoint writes the committed state at the store's epoch: the rows
-//! visible then, with their values and labels as they are. A null value is
-//! not written. The metadata chunk (layout 2) holds the caps, the epoch, and
+//! A checkpoint writes the committed state at an epoch E: the rows, values
+//! and labels a reader at E sees, read in place through the update chains,
+//! so nothing a transaction still open wrote and nothing committed after E
+//! is in it, and no version other than the one at E is written (time
+//! travel's `History` chunks come with P6, H2c). A null value is not
+//! written. The metadata chunk (layout 2) holds the caps, the epoch E, and
 //! per graph its name, next ids, dictionaries, whether adjacency was written
 //! and each row group's node and edge counts, which the reader checks.
 //!
@@ -27,13 +30,15 @@
 //! `Error::Corruption`, and a section of another version as such.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use grafeo_common::storage::{
-    ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, SectionSink, SectionSource,
+    ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, Section, SectionSink, SectionSource,
+    SectionType, legacy_bytes,
 };
-use grafeo_common::types::Value;
+use grafeo_common::types::{EpochId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashMap;
 
@@ -484,10 +489,10 @@ impl Inner {
                 Vec::with_capacity(rows.len());
             for &id in rows {
                 let (group, row) = self.node(id).expect("a row it listed");
-                let row_labels = group.labels_of(row);
+                let row_labels = group.labels_at(row, read);
                 let values: FxHashMap<u32, Value> = group
                     .columns
-                    .row(row)
+                    .row_at(row, read)
                     .filter(|(_, value)| !value.is_null())
                     .collect();
                 labels.extend(&row_labels);
@@ -561,7 +566,7 @@ impl Inner {
                 let (group, row) = self.edge(id).expect("a row it listed");
                 let values: FxHashMap<u32, Value> = group
                     .columns
-                    .row(row)
+                    .row_at(row, read)
                     .filter(|(_, value)| !value.is_null())
                     .collect();
                 keys.extend(values.keys());
@@ -602,7 +607,14 @@ impl Inner {
 }
 
 /// Writes the `LPG_STORE` section, version 4, of `graphs` (ids ascending):
-/// each graph's committed state at its store's epoch.
+/// each graph's committed state at `epoch`, as a reader at it sees the
+/// rows, their values and their labels. What a transaction still open wrote
+/// is not in it, nor what a commit after `epoch` wrote; the section's epoch
+/// is `epoch`.
+///
+/// `epoch` is at or after the epoch the graphs were last collected at (see
+/// [`RowGroupStore::collect`]): a collect drops the versions a reader before
+/// its horizon would read.
 ///
 /// # Errors
 ///
@@ -612,6 +624,7 @@ impl Inner {
 pub fn write_lpg_section(
     graphs: &[GraphToWrite<'_>],
     next_graph_id: u32,
+    epoch: EpochId,
     caps: ChunkCaps,
     sink: &mut dyn SectionSink,
 ) -> Result<()> {
@@ -626,16 +639,14 @@ pub fn write_lpg_section(
     }
     let mut meta = Meta {
         caps,
-        epoch: 0,
+        epoch: epoch.as_u64(),
         next_graph_id,
         graphs: Vec::with_capacity(graphs.len()),
     };
     for graph in graphs {
         let inner = graph.store.inner.read();
-        let epoch = graph.store.epoch.load(Ordering::Acquire);
-        meta.epoch = meta.epoch.max(epoch);
         meta.graphs
-            .push(inner.write_graph(graph, Read::At(epoch), caps, sink)?);
+            .push(inner.write_graph(graph, Read::at(epoch), caps, sink)?);
     }
     sink.write_chunk(ChunkMeta::meta(), &encode_meta(&meta)?)
 }
@@ -1302,13 +1313,142 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
     Ok((meta.next_graph_id, graphs))
 }
 
+// ── The section of a database file ──────────────────────────────────
+
+/// The row-group store's `LPG_STORE` section (version 4) in a `.grafeo`
+/// container, the part `LpgStoreSection` plays for `LpgStore`: it writes a
+/// root and its named graphs (see [`RowGroupStore::write_section_at`]) and
+/// reads them back into its root ([`RowGroupStore::read_section`]).
+///
+/// A checkpoint builds it with the epoch it records ([`at`](Self::at)) while
+/// it holds commits off: every commit it holds is stamped at or before that
+/// epoch, and the section holds the committed state at it, with nothing a
+/// transaction still open wrote. No committed copy and no change sets of
+/// open transactions are needed, as the writer reads each row as a reader
+/// at the epoch does.
+///
+/// The section holds data only: the indexes are the catalog's, which the
+/// loader builds from the rows once the section is read.
+pub struct RowGroupStoreSection {
+    store: Arc<RowGroupStore>,
+    /// The epoch to write at; `None`: the latest any graph reached.
+    epoch: Option<EpochId>,
+    caps: ChunkCaps,
+    dirty: AtomicBool,
+}
+
+impl RowGroupStoreSection {
+    /// The section of `store`, a root, writing chunks of at most
+    /// [`ChunkCaps::current`] (the caps a test set on this thread, or the
+    /// default ones) at the latest epoch any of its graphs reached.
+    #[must_use]
+    pub fn new(store: Arc<RowGroupStore>) -> Self {
+        Self::with_caps(store, ChunkCaps::current())
+    }
+
+    /// The section of `store`, a root, writing chunks of at most `caps`.
+    #[must_use]
+    pub fn with_caps(store: Arc<RowGroupStore>, caps: ChunkCaps) -> Self {
+        Self {
+            store,
+            epoch: None,
+            caps,
+            dirty: AtomicBool::new(false),
+        }
+    }
+
+    /// Writes the committed state at `epoch` (see
+    /// [`RowGroupStore::write_section_at`]).
+    #[must_use]
+    pub fn at(mut self, epoch: EpochId) -> Self {
+        self.epoch = Some(epoch);
+        self
+    }
+
+    /// The root store it writes and reads into.
+    #[must_use]
+    pub fn store(&self) -> &Arc<RowGroupStore> {
+        &self.store
+    }
+}
+
+impl Section for RowGroupStoreSection {
+    fn section_type(&self) -> SectionType {
+        SectionType::LpgStore
+    }
+
+    fn version(&self) -> u8 {
+        LPG_SECTION_VERSION
+    }
+
+    /// Version 4 has no form as one blob: it is written as chunks
+    /// ([`write_to`](Section::write_to)).
+    fn serialize(&self) -> Result<Vec<u8>> {
+        Err(Error::Internal(
+            "the row-group LPG section (version 4) is written as chunks, not as one blob"
+                .to_string(),
+        ))
+    }
+
+    /// Migrates the LPG section of 0.5.x, the block layout `data`, into the
+    /// root and its named graphs, every row through the replay writer (see
+    /// [`LoadTarget`](crate::graph::load::LoadTarget)).
+    fn deserialize(&mut self, data: &[u8]) -> Result<()> {
+        crate::graph::lpg::load_0_5_blocks(&*self.store, data)
+    }
+
+    fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+        match self.epoch {
+            Some(epoch) => self.store.write_section_at(epoch, self.caps, sink),
+            None => self.store.write_section(self.caps, sink),
+        }
+    }
+
+    /// Reads the chunks of version 4 into the root (see
+    /// [`RowGroupStore::read_section`]), and migrates the sections earlier
+    /// releases wrote: the chunks of version 3 (0.6.0-beta), read by
+    /// `LpgStoreSection`'s reader, and the one raw chunk of 0.5.x
+    /// ([`deserialize`](Section::deserialize)). A migrated section's rows
+    /// come in through the replay writer, its dictionaries and ids as the
+    /// file holds them, and the versions they were stamped with collapse
+    /// once each graph is in, so the root holds what a section of version 4
+    /// with the same rows would load; the older versions a temporal file
+    /// keeps are dropped (the store keeps no history before H2c).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialization`] for a section of another version;
+    /// [`Error::Corruption`] for chunks the reader refuses.
+    fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+        if let Some(bytes) = legacy_bytes(source)? {
+            return self.deserialize(&bytes);
+        }
+        if source.section_version() == crate::graph::lpg::LPG_SECTION_VERSION_3 {
+            return crate::graph::lpg::read_version_3_chunks(&*self.store, source);
+        }
+        self.store.read_section(source)
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    fn mark_clean(&self) {
+        self.dirty.store(false, Ordering::Release);
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.store.heap_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
     use grafeo_common::storage::{
         ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, SectionSink, SectionSource,
     };
-    use grafeo_common::types::{NodeId, Value};
+    use grafeo_common::types::{EdgeId, NodeId, Value};
     use grafeo_common::utils::error::{Error, Result};
 
     use super::{
@@ -1383,7 +1523,7 @@ mod tests {
             name: "",
             store,
         }];
-        write_lpg_section(&graphs, 1, caps, &mut chunks).unwrap();
+        write_lpg_section(&graphs, 1, store.current_epoch(), caps, &mut chunks).unwrap();
         chunks
     }
 
@@ -1524,6 +1664,181 @@ mod tests {
         assert_eq!((&found.nodes, &found.edges), (&before.nodes, &before.edges));
     }
 
+    /// The labels and property keys of the section's label and property
+    /// columns, by name.
+    fn written_names(chunks: &Chunks) -> (Vec<String>, Vec<String>) {
+        let meta = decode_meta(chunks.bytes.last().unwrap()).unwrap();
+        let name = |names: &[(u32, String)], id: u32| {
+            names
+                .iter()
+                .find(|(named, _)| *named == id)
+                .map(|(_, name)| name.clone())
+                .unwrap()
+        };
+        let mut labels = Vec::new();
+        let mut keys = Vec::new();
+        for chunk in &chunks.metas {
+            match chunk.namespace {
+                ChunkNamespace::NodeLabels => {
+                    labels.push(name(&meta.graphs[0].labels.names, chunk.column_id));
+                }
+                ChunkNamespace::NodeProperties | ChunkNamespace::EdgeProperties => {
+                    keys.push(name(&meta.graphs[0].keys.names, chunk.column_id));
+                }
+                _ => {}
+            }
+        }
+        labels.sort();
+        labels.dedup();
+        keys.sort();
+        keys.dedup();
+        (labels, keys)
+    }
+
+    /// A checkpoint during an open write writes values and labels as they
+    /// were committed: what the open transaction set, removed, added or took
+    /// away is not in the section, on nodes and edges, nor a label or key
+    /// only it wrote; after its commit the next checkpoint holds it all.
+    #[test]
+    fn an_open_transactions_values_and_labels_are_not_in_the_section() {
+        let (store, [alix, gus, mia, vincent]) = four_people();
+        let before = committed(&store);
+        let mut tx = Tx::begin(&store, 20);
+        tx.set_node(alix, "age", Value::Int64(88)).unwrap();
+        tx.set_node(vincent, "nickname", Value::from("Vince"))
+            .unwrap();
+        tx.remove_node_value(gus, "name").unwrap();
+        tx.add_label(mia, "Traveller").unwrap();
+        tx.remove_label(gus, "Employee").unwrap();
+        tx.set_edge(EdgeId::new(0), "since", Value::Int64(2030))
+            .unwrap();
+        tx.remove_edge_value(EdgeId::new(1), "since").unwrap();
+
+        let chunks = write(&store, ChunkCaps::DEFAULT);
+        let loaded = read(&chunks);
+        let found = committed(&loaded);
+        found.consistent("the loaded store").unwrap();
+        assert_eq!((&found.nodes, &found.edges), (&before.nodes, &before.edges));
+        let (labels, keys) = written_names(&chunks);
+        assert_eq!(labels, ["Employee", "Person"], "no Traveller column");
+        assert_eq!(keys, ["age", "city", "name", "since"], "no nickname column");
+        assert_eq!(
+            counts(&loaded, &LABELS),
+            counts(&store, &LABELS),
+            "the counts of the committed state"
+        );
+
+        tx.commit().unwrap();
+        assert_same(
+            &read(&write(&store, ChunkCaps::DEFAULT)),
+            &store,
+            "after the commit",
+        );
+    }
+
+    /// A checkpoint at an epoch before the last commit writes what a reader
+    /// at that epoch sees: the creates, deletes, values and labels of the
+    /// later commit are not in it, though its versions are still chained.
+    #[test]
+    fn a_checkpoint_at_an_earlier_epoch_writes_what_a_reader_then_saw() {
+        use crate::graph::conformance::{Reader, image};
+
+        let (store, [alix, gus, mia, _]) = four_people();
+        let earlier = store.current_epoch();
+        let then = image(&store, Reader::At(earlier));
+        let mut tx = Tx::begin(&store, 20);
+        tx.set_node(alix, "age", Value::Int64(88)).unwrap();
+        tx.add_label(alix, "Traveller").unwrap();
+        tx.remove_label(gus, "Employee").unwrap();
+        tx.delete_edge(EdgeId::new(1)).unwrap();
+        tx.delete_node(mia).unwrap();
+        let jules = tx
+            .create_node(&["Person"], &[("name", Value::from("Jules"))])
+            .unwrap();
+        tx.create_edge(jules, alix, "KNOWS", &[]).unwrap();
+        tx.commit().unwrap();
+        assert!(
+            store.update_nodes() > 0,
+            "the commit's versions are chained"
+        );
+
+        let mut chunks = Chunks {
+            version: LPG_SECTION_VERSION,
+            ..Chunks::default()
+        };
+        let graphs = [GraphToWrite {
+            id: 0,
+            name: "",
+            store: &store,
+        }];
+        write_lpg_section(&graphs, 1, earlier, ChunkCaps::DEFAULT, &mut chunks).unwrap();
+        let loaded = read(&chunks);
+        let found = committed(&loaded);
+        found.consistent("the loaded store").unwrap();
+        assert_eq!((&found.nodes, &found.edges), (&then.nodes, &then.edges));
+        assert_eq!(loaded.current_epoch(), earlier, "the section's epoch");
+        assert_eq!(
+            (loaded.node_count(), loaded.edge_count()),
+            (then.nodes.len(), then.edges.len())
+        );
+    }
+
+    /// The section of a database file writes its root at the epoch it was
+    /// given, as the container holds sections, and reads it back into a
+    /// root; it refuses bytes that are no 0.5.x section and has no form as
+    /// one blob.
+    #[test]
+    fn the_file_section_writes_at_its_epoch_and_reads_into_a_root() {
+        use std::sync::Arc;
+
+        use grafeo_common::storage::{ImageSource, MemoryImage, Section, SectionType};
+        use grafeo_common::types::ReadView;
+
+        use super::RowGroupStoreSection;
+
+        let (store, [alix, ..]) = four_people();
+        let store = Arc::new(store);
+        let earlier = store.current_epoch();
+        let mut tx = Tx::begin(&*store, 20);
+        tx.set_node(alix, "age", Value::Int64(88)).unwrap();
+        tx.commit().unwrap();
+
+        let section =
+            RowGroupStoreSection::with_caps(Arc::clone(&store), ChunkCaps::DEFAULT).at(earlier);
+        assert_eq!(
+            (section.section_type(), section.version()),
+            (SectionType::LpgStore, LPG_SECTION_VERSION)
+        );
+        let mut image = MemoryImage::new();
+        image
+            .begin_section(section.section_type(), section.version())
+            .unwrap();
+        section.write_to(&mut image).unwrap();
+        let root = Arc::new(RowGroupStore::new());
+        RowGroupStoreSection::new(Arc::clone(&root))
+            .read_from(&*image.section_source(SectionType::LpgStore).unwrap())
+            .unwrap();
+        assert_eq!(root.current_epoch(), earlier);
+        assert_eq!(
+            root.node_property_at(alix, "age", ReadView::committed(earlier)),
+            Some(Value::Int64(19)),
+            "Alix's age before the later commit"
+        );
+        assert_eq!(root.node_count(), 4);
+
+        // A 0.5.x blob is migrated (see `load`); bytes that are none are
+        // refused as damage, and load nothing.
+        let legacy =
+            MemoryImage::from_raw(vec![(SectionType::LpgStore, vec![1, 9, 8, 8])]).unwrap();
+        let empty = Arc::new(RowGroupStore::new());
+        let error = RowGroupStoreSection::new(Arc::clone(&empty))
+            .read_from(&*legacy.section_source(SectionType::LpgStore).unwrap())
+            .unwrap_err();
+        assert!(matches!(error, Error::Corruption(_)), "{error}");
+        assert_eq!(empty.node_count(), 0);
+        assert!(section.serialize().is_err(), "no blob form");
+    }
+
     /// A node whose list fills a chunk alone is written in pieces with
     /// their own column ids, and reads back whole and sorted.
     #[test]
@@ -1660,6 +1975,56 @@ mod tests {
             loaded.heap_bytes() != cold_bytes,
             "the decoded columns are counted"
         );
+    }
+
+    /// A transaction's write to a cold column thaws it (#412 decision Q9)
+    /// and keeps the loaded value for every other reader until its commit,
+    /// and for readers before the commit until a collect at its epoch.
+    #[test]
+    fn a_write_to_a_cold_column_keeps_the_loaded_value_for_other_readers() {
+        use grafeo_common::types::{PropertyKey, ReadView};
+
+        let (store, [alix, gus, ..]) = four_people();
+        let age = PropertyKey::new("age");
+        let (alix_age, gus_age) = (
+            store.get_node_property(alix, &age),
+            store.get_node_property(gus, &age),
+        );
+        assert!(alix_age.is_some());
+        let loaded = read(&write(&store, ChunkCaps::DEFAULT));
+        let before = ReadView::committed(loaded.current_epoch());
+        let cold = loaded.cold_columns();
+
+        let mut tx = Tx::begin(&loaded, 20);
+        tx.set_node(alix, "age", Value::Int64(88)).unwrap();
+        assert_eq!(
+            loaded.cold_columns(),
+            cold - 1,
+            "the write thawed the column"
+        );
+        let own = ReadView::transaction(tx.id, tx.snapshot);
+        assert_eq!(
+            loaded.node_property_at(alix, "age", own),
+            Some(Value::Int64(88))
+        );
+        assert_eq!(loaded.node_property_at(alix, "age", before), alix_age);
+        assert_eq!(loaded.node_property_at(gus, "age", before), gus_age);
+
+        let epoch = tx.commit().unwrap();
+        let after = ReadView::committed(epoch);
+        assert_eq!(loaded.node_property_at(alix, "age", before), alix_age);
+        assert_eq!(
+            loaded.node_property_at(alix, "age", after),
+            Some(Value::Int64(88))
+        );
+        assert_eq!(loaded.update_nodes(), 1);
+        loaded.collect(epoch);
+        assert_eq!(loaded.update_nodes(), 0);
+        assert_eq!(
+            loaded.node_property_at(alix, "age", after),
+            Some(Value::Int64(88))
+        );
+        assert_eq!(loaded.node_property_at(gus, "age", after), gus_age);
     }
 
     /// A bitmap chunk of `rows` (ids) in `namespace`, column `column`.

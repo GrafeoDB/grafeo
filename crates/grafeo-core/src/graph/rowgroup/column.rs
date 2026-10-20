@@ -6,15 +6,22 @@
 //! any values when a row gets a value of another type. Property columns are
 //! not typed per graph (change target R11): no value is refused for its
 //! type.
+//!
+//! A column holds the newest value of each row; what a row held before the
+//! writes some readers must not see is in the column's update chains
+//! (`updates`), which the reads at a version consult.
 
 use std::sync::OnceLock;
 
 use bytes::Bytes;
+use grafeo_common::change::PendingVersion;
 use grafeo_common::types::{ArcStr, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::Mutex;
 
+use super::Read;
 use super::bitset::Bitset;
+use super::updates::Updates;
 use crate::codec::column_chunk::decode_column_chunk_bytes;
 
 /// The values of a column's rows, by row.
@@ -117,6 +124,9 @@ struct Hot {
     /// The rows with a value.
     present: Bitset,
     data: Data,
+    /// What rows held before the writes some readers must not see: a
+    /// column with update chains is hot (a write thaws a cold column).
+    updates: Updates<Option<Value>>,
 }
 
 impl Hot {
@@ -156,6 +166,18 @@ impl Hot {
         Some(value)
     }
 
+    /// The value at `row` as `read` sees it: the newest, unless a write
+    /// `read` does not see replaced what it reads. A column without chains,
+    /// the common case, reads in place after one test.
+    fn get_at(&self, row: usize, read: Read) -> Option<Value> {
+        if !self.updates.is_empty()
+            && let Some(saved) = self.updates.saved(row, read)
+        {
+            return saved.clone();
+        }
+        self.get(row)
+    }
+
     fn heap_bytes(&self) -> usize {
         self.present.heap_bytes() + self.data.heap_bytes()
     }
@@ -176,7 +198,8 @@ struct ColdChunk {
 /// A column a load filled holds its chunks cold, as their encoded bytes,
 /// until its first use: a read or a write of any of its rows decodes them
 /// all into the hot form, once. The other columns of the row group stay
-/// cold.
+/// cold. A write thaws a cold column (#412 decision Q9), so the update
+/// chains of a column live with its decoded values.
 #[derive(Debug)]
 pub(super) struct Column {
     /// The chunks not decoded yet; emptied by the first use.
@@ -194,6 +217,7 @@ impl Column {
             hot: OnceLock::from(Hot {
                 present: Bitset::default(),
                 data: Data::for_value(value),
+                updates: Updates::default(),
             }),
         }
     }
@@ -206,12 +230,45 @@ impl Column {
         }
     }
 
+    /// The value at `row` as `read` sees it.
+    fn value_at(&self, row: usize, read: Read) -> Option<Value> {
+        self.hot().get_at(row, read)
+    }
+
+    /// The update chains, `None` while the column is cold (it has none).
+    fn updates(&self) -> Option<&Updates<Option<Value>>> {
+        self.hot.get().map(|hot| &hot.updates)
+    }
+
+    /// The update chains, thawing the column.
+    fn updates_mut(&mut self) -> &mut Updates<Option<Value>> {
+        &mut self.hot_mut().updates
+    }
+
+    /// Keeps the value at `row` for the readers that must not see what
+    /// `keep` (the writer's stamp and the epoch it reads at) writes next;
+    /// `None` keeps nothing. Returns what the write does to the writer's
+    /// version of the value.
+    fn keep(&mut self, row: usize, keep: Option<(u64, u64)>) -> PendingVersion {
+        let Some((stamp, snapshot)) = keep else {
+            return PendingVersion::Created;
+        };
+        let hot = self.hot_mut();
+        let current = hot.get(row);
+        if hot.updates.keep(row, stamp, snapshot, || current) {
+            PendingVersion::Created
+        } else {
+            PendingVersion::Replaced
+        }
+    }
+
     /// The decoded values, decoding the cold chunks on the first use.
     fn hot(&self) -> &Hot {
         self.hot.get_or_init(|| {
             let mut hot = Hot {
                 present: Bitset::default(),
                 data: Data::Values(Vec::new()),
+                updates: Updates::default(),
             };
             for chunk in std::mem::take(&mut *self.cold.lock()) {
                 // The load decoded each chunk once to check it.
@@ -235,13 +292,18 @@ impl Column {
         self.hot.get().is_none()
     }
 
-    fn heap_bytes(&self) -> usize {
+    /// The bytes of the chunks it still holds encoded.
+    fn cold_bytes(&self) -> usize {
         self.cold
             .lock()
             .iter()
             .map(|chunk| chunk.bytes.len())
             .sum::<usize>()
-            + self.hot.get().map_or(0, Hot::heap_bytes)
+    }
+
+    /// The heap bytes of its decoded values, none while it is cold.
+    fn hot_bytes(&self) -> usize {
+        self.hot.get().map_or(0, Hot::heap_bytes)
     }
 }
 
@@ -309,6 +371,120 @@ impl Columns {
         self.by_key.get_mut(&key)?.hot_mut().take(row)
     }
 
+    /// The value of key `key` at `row` as `read` sees it.
+    pub(super) fn get_at(&self, key: u32, row: usize, read: Read) -> Option<Value> {
+        self.by_key.get(&key)?.value_at(row, read)
+    }
+
+    /// Writes the value of key `key` at `row` (`None` takes it out), first
+    /// keeping the value it replaces for the readers that must not see the
+    /// write (`keep`: the writer's stamp and the epoch it reads at; `None`
+    /// keeps nothing). Returns what the write does to the writer's version
+    /// of the value.
+    pub(super) fn write(
+        &mut self,
+        key: u32,
+        row: usize,
+        value: Option<&Value>,
+        keep: Option<(u64, u64)>,
+    ) -> PendingVersion {
+        let column = match value {
+            Some(value) => self
+                .by_key
+                .entry(key)
+                .or_insert_with(|| Column::for_value(value)),
+            None => match self.by_key.get_mut(&key) {
+                Some(column) => column,
+                None => return PendingVersion::Created,
+            },
+        };
+        let version = column.keep(row, keep);
+        let hot = column.hot_mut();
+        match value {
+            Some(value) => hot.set(row, value),
+            None => {
+                hot.take(row);
+            }
+        }
+        version
+    }
+
+    /// Writes `value` back at `row` of key `key` (`None` takes the value
+    /// out), keeping nothing: an undo.
+    pub(super) fn restore(&mut self, key: u32, row: usize, value: Option<&Value>) {
+        match value {
+            Some(value) => self.set(key, row, value),
+            None => {
+                self.take(key, row);
+            }
+        }
+    }
+
+    /// Commits the newest kept value of key `key` at `row` at `at`, if
+    /// transaction stamp `pending` kept it (see [`Updates::stamp`]).
+    pub(super) fn stamp(&mut self, key: u32, row: usize, pending: u64, at: u64) -> Option<u64> {
+        self.by_key
+            .get_mut(&key)?
+            .updates_mut()
+            .stamp(row, pending, at)
+    }
+
+    /// Rolls back transaction stamp `pending`'s first write of key `key` at
+    /// `row`: writes back what its undo node kept, what the row held before
+    /// the transaction wrote it, and takes it out of the node (see
+    /// [`Updates::undo`]). Returns `false`, changing nothing, when no node
+    /// of the transaction holds the row.
+    pub(super) fn undo(&mut self, key: u32, row: usize, pending: u64) -> bool {
+        let Some(column) = self.by_key.get_mut(&key) else {
+            return false;
+        };
+        let Some(kept) = column.updates_mut().undo(row, pending) else {
+            return false;
+        };
+        let hot = column.hot_mut();
+        match kept {
+            Some(value) => hot.set(row, &value),
+            None => {
+                hot.take(row);
+            }
+        }
+        true
+    }
+
+    /// Drops the kept values every reader at `horizon` or later sees past;
+    /// returns how many it dropped.
+    pub(super) fn collect(&mut self, horizon: u64) -> usize {
+        let mut dropped = 0;
+        for column in self.by_key.values_mut() {
+            if column.updates().is_some_and(|updates| !updates.is_empty()) {
+                dropped += column.updates_mut().collect(horizon);
+            }
+        }
+        dropped
+    }
+
+    /// [`collect`](Self::collect) of the rows of vector `vector` alone.
+    pub(super) fn collect_vector(&mut self, vector: usize, horizon: u64) -> usize {
+        let mut dropped = 0;
+        for column in self.by_key.values_mut() {
+            if column
+                .updates()
+                .is_some_and(|updates| updates.has_chain(vector))
+            {
+                dropped += column.updates_mut().collect_vector(vector, horizon);
+            }
+        }
+        dropped
+    }
+
+    /// Whether a column has a chain in vector `vector`.
+    pub(super) fn has_chain(&self, vector: usize) -> bool {
+        self.by_key
+            .values()
+            .filter_map(Column::updates)
+            .any(|updates| updates.has_chain(vector))
+    }
+
     /// Every value at `row`, by key id.
     pub(super) fn row(&self, row: usize) -> impl Iterator<Item = (u32, Value)> + '_ {
         self.by_key
@@ -316,16 +492,89 @@ impl Columns {
             .filter_map(move |(key, column)| column.hot().get(row).map(|value| (*key, value)))
     }
 
-    /// Takes every value at `row` out.
+    /// Every value at `row` as `read` sees it, by key id.
+    pub(super) fn row_at(&self, row: usize, read: Read) -> impl Iterator<Item = (u32, Value)> + '_ {
+        self.by_key
+            .iter()
+            .filter_map(move |(key, column)| column.value_at(row, read).map(|value| (*key, value)))
+    }
+
+    /// Takes every value at `row` out, with what any chain kept of it.
     pub(super) fn clear_row(&mut self, row: usize) {
         for column in self.by_key.values_mut() {
-            column.hot_mut().take(row);
+            let hot = column.hot_mut();
+            hot.take(row);
+            if !hot.updates.is_empty() {
+                hot.updates.remove_row(row);
+            }
         }
     }
 
-    pub(super) fn heap_bytes(&self) -> usize {
-        self.by_key.values().map(Column::heap_bytes).sum::<usize>()
+    /// The heap bytes of the update chains.
+    pub(super) fn updates_bytes(&self) -> usize {
+        self.by_key
+            .values()
+            .filter_map(Column::updates)
+            .map(|updates| updates.heap_bytes(|_| 0))
+            .sum()
+    }
+
+    /// The undo nodes of the update chains.
+    #[cfg(test)]
+    pub(super) fn update_nodes(&self) -> usize {
+        self.by_key
+            .values()
+            .filter_map(Column::updates)
+            .map(Updates::nodes)
+            .sum()
+    }
+
+    /// What the update chains of key `key` kept of `row`, oldest first, each
+    /// with the stamp of the write over it (see [`Updates::kept_stamped`]).
+    pub(super) fn kept(
+        &self,
+        key: u32,
+        row: usize,
+    ) -> impl Iterator<Item = (u64, &Option<Value>)> + '_ {
+        self.by_key
+            .get(&key)
+            .and_then(Column::updates)
+            .into_iter()
+            .flat_map(move |updates| updates.kept_stamped(row))
+    }
+
+    /// The rows the update chains of key `key` hold, `None` when they hold
+    /// none.
+    pub(super) fn chained_rows(&self, key: u32) -> Option<Bitset> {
+        self.by_key.get(&key)?.updates()?.rows()
+    }
+
+    /// Each column written out, by key id ascending.
+    #[cfg(test)]
+    pub(super) fn canonical(&self) -> Vec<(u32, String)> {
+        let mut columns: Vec<(u32, String)> = self
+            .by_key
+            .iter()
+            .map(|(key, column)| (*key, format!("{column:?}")))
+            .collect();
+        columns.sort_unstable();
+        columns
+    }
+
+    /// The key ids it has a column of.
+    pub(super) fn keys(&self) -> impl Iterator<Item = u32> + '_ {
+        self.by_key.keys().copied()
+    }
+
+    /// The heap bytes of the decoded values and of the columns themselves.
+    pub(super) fn hot_bytes(&self) -> usize {
+        self.by_key.values().map(Column::hot_bytes).sum::<usize>()
             + self.by_key.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<Column>())
+    }
+
+    /// The bytes of the chunks its columns still hold encoded.
+    pub(super) fn cold_bytes(&self) -> usize {
+        self.by_key.values().map(Column::cold_bytes).sum::<usize>()
     }
 }
 

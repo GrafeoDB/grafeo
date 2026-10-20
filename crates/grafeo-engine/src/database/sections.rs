@@ -22,9 +22,64 @@ use grafeo_common::utils::error::Result;
 use crate::transaction::CommitsHeld;
 
 #[cfg(feature = "lpg")]
-use super::catalog_section::{CatalogSection, GraphIndexes};
+use super::catalog_section::{CatalogSection, CatalogStore, GraphIndexes};
 #[cfg(feature = "lpg")]
 use grafeo_core::graph::lpg::LpgStore;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
+
+/// The LPG store a database checkpoints and opens, with its named graphs.
+///
+/// The engine holds an `LpgStore` until it switches to the row-group store
+/// (#412 H2d). Until then only tests build checkpoint sources over a
+/// row-group root ([`RowGroups`](Self::RowGroups), built in tests only), and
+/// checkpoint and open it through the same sections, flush and file as a
+/// database (`row_group_sections`); the switch makes it the only kind, for
+/// every build.
+#[cfg(feature = "lpg")]
+#[derive(Clone)]
+pub(super) enum LpgRoot {
+    /// `LpgStore`, which writes the LPG section of version 3.
+    Lpg(Arc<LpgStore>),
+    /// The row-group store, which writes the LPG section of version 4 at
+    /// the checkpoint's epoch.
+    #[cfg(test)]
+    RowGroups(Arc<RowGroupStore>),
+}
+
+#[cfg(feature = "lpg")]
+impl LpgRoot {
+    /// The `LpgStore`, `None` for the row-group store.
+    fn as_lpg(&self) -> Option<&Arc<LpgStore>> {
+        match self {
+            Self::Lpg(store) => Some(store),
+            #[cfg(test)]
+            Self::RowGroups(_) => None,
+        }
+    }
+
+    /// The root store's epoch.
+    fn current_epoch(&self) -> grafeo_common::types::EpochId {
+        match self {
+            Self::Lpg(store) => store.current_epoch(),
+            #[cfg(test)]
+            Self::RowGroups(store) => store.current_epoch(),
+        }
+    }
+
+    /// The default graph's committed nodes and edges, for the header.
+    #[cfg(feature = "grafeo-file")]
+    pub(super) fn counts(&self) -> (usize, usize) {
+        match self {
+            Self::Lpg(store) => (store.node_count(), store.edge_count()),
+            #[cfg(test)]
+            Self::RowGroups(store) => {
+                use grafeo_core::graph::GraphStore;
+                (store.node_count(), store.edge_count())
+            }
+        }
+    }
+}
 
 /// Everything a checkpoint writes: the database's complete state.
 ///
@@ -36,7 +91,7 @@ use grafeo_core::graph::lpg::LpgStore;
 pub(super) struct CheckpointSources {
     /// The LPG store, `None` with an external store.
     #[cfg(feature = "lpg")]
-    pub store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
+    pub store: Option<LpgRoot>,
     #[cfg(feature = "lpg")]
     pub catalog: Arc<crate::catalog::Catalog>,
     pub transaction_manager: Arc<crate::transaction::TransactionManager>,
@@ -53,10 +108,11 @@ pub(super) struct CheckpointSources {
 }
 
 impl CheckpointSources {
-    /// The LPG store, `None` with an external store.
+    /// The LPG store when it is an `LpgStore`; `None` with an external
+    /// store or the row-group store.
     #[cfg(feature = "lpg")]
     pub fn root_store(&self) -> Option<Arc<grafeo_core::graph::lpg::LpgStore>> {
-        self.store.clone()
+        self.store.as_ref().and_then(LpgRoot::as_lpg).cloned()
     }
 
     /// The epoch a checkpoint or copy of the database records, which a
@@ -70,7 +126,7 @@ impl CheckpointSources {
     pub fn epoch(&self) -> u64 {
         let published = self.transaction_manager.current_epoch();
         #[cfg(feature = "lpg")]
-        if let Some(store) = &self.root_store() {
+        if let Some(store) = &self.store {
             return store.current_epoch().max(published).as_u64();
         }
         published.as_u64()
@@ -102,6 +158,10 @@ impl CheckpointSources {
         )]
         let mut sections: Vec<Box<dyn Section>> = Vec::new();
 
+        #[cfg(all(test, feature = "lpg"))]
+        if let Some(LpgRoot::RowGroups(root)) = &self.store {
+            self.row_group_sections(root, &mut sections);
+        }
         #[cfg(feature = "lpg")]
         if let Some(store) = &self.root_store() {
             let transaction_manager = Arc::clone(&self.transaction_manager);
@@ -171,6 +231,27 @@ impl CheckpointSources {
         sections
     }
 
+    /// The catalog and LPG sections of a row-group root: the LPG section
+    /// writes every graph's committed state at the checkpoint's epoch, as a
+    /// reader at it sees the rows, so it needs neither the open transactions'
+    /// change sets nor a committed copy. No vector or text index section is
+    /// written: the indexes take what transactions write as they write it,
+    /// and the load builds them from the rows (see
+    /// `row_group_sections::load_row_group_sections`).
+    #[cfg(all(test, feature = "lpg"))]
+    fn row_group_sections(&self, root: &Arc<RowGroupStore>, sections: &mut Vec<Box<dyn Section>>) {
+        let transaction_manager = Arc::clone(&self.transaction_manager);
+        sections.push(Box::new(CatalogSection::new(
+            Arc::clone(&self.catalog),
+            Arc::clone(root),
+            move || transaction_manager.current_epoch().as_u64(),
+        )));
+        sections.push(Box::new(
+            grafeo_core::graph::rowgroup::section::RowGroupStoreSection::new(Arc::clone(root))
+                .at(grafeo_common::types::EpochId::new(self.epoch())),
+        ));
+    }
+
     /// Whether a transaction still open has changed the LPG store or one of
     /// its named graphs: the stores then hold what it wrote, which a copy
     /// must leave out. The caller holds commits off (`commits`), which also
@@ -214,6 +295,13 @@ impl CheckpointSources {
     /// be read for the copy.
     #[cfg(feature = "lpg")]
     pub fn committed(&self, commits: &CommitsHeld<'_>) -> Result<Option<CommittedLpg>> {
+        #[cfg(test)]
+        if let Some(LpgRoot::RowGroups(_)) = &self.store {
+            return Err(grafeo_common::utils::error::Error::Internal(
+                "a copy of the committed LPG data reads an LpgStore, not the row-group store"
+                    .to_string(),
+            ));
+        }
         let Some(store) = &self.root_store() else {
             return Ok(None);
         };
@@ -239,7 +327,7 @@ pub(super) struct CommittedLpg {
 /// once the database is built.
 #[cfg(feature = "lpg")]
 #[derive(Default)]
-pub(super) struct LoadedSections {
+pub(crate) struct LoadedSections {
     /// Vector and text indexes the sections did not hold, built from the
     /// data once the database is built.
     unbuilt: Vec<GraphIndexes>,
@@ -498,6 +586,47 @@ pub(super) fn load_sections(
     let mut loaded = LoadedSections::default();
 
     // The catalog first: the schema is needed before the data.
+    let (indexes, catalog_epoch) = read_catalog(image, file, store, catalog)?;
+
+    // With a compacted base, this is the overlay, which the base is folded
+    // into below.
+    if let Some(source) = image.section_source(SectionType::LpgStore) {
+        grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(store)).read_from(&*source)?;
+    }
+
+    #[cfg(feature = "triple-store")]
+    load_triples(image, rdf_store)?;
+
+    // Before the indexes: they are built from all the data. Only a database
+    // file holds a compacted base: a copy (`to_memory`) never does.
+    #[cfg(feature = "grafeo-file")]
+    fold_compacted_base(image, &**store)?;
+
+    // The epoch a 0.5.x catalog names, once the data is in (with `temporal`
+    // the data keeps the epochs it was loaded at).
+    store.sync_epoch(grafeo_common::types::EpochId::new(catalog_epoch));
+
+    loaded.unbuilt = restore_indexes(image, store, indexes)?;
+    Ok(loaded)
+}
+
+/// Reads the catalog section of `image`, the database file `file` (`None`
+/// for a copy in memory), into `catalog`, creating the schemas' graphs in
+/// `store`, and refuses the image of a file when it holds data this build
+/// cannot read (see [`FeatureData`]). Returns the index definitions it read,
+/// for the loader to build once the data is in, and the epoch a 0.5.x
+/// catalog names (0 for a 0.6 one).
+///
+/// # Errors
+///
+/// The section's errors, and the refusal.
+#[cfg(feature = "lpg")]
+pub(super) fn read_catalog<S: CatalogStore>(
+    image: &dyn ImageSource,
+    file: Option<&std::path::Path>,
+    store: &Arc<S>,
+    catalog: &Arc<crate::catalog::Catalog>,
+) -> Result<(Vec<GraphIndexes>, u64)> {
     let mut indexes = Vec::new();
     let mut catalog_epoch = 0;
     if let Some(source) = image.section_source(SectionType::Catalog) {
@@ -512,14 +641,21 @@ pub(super) fn load_sections(
     if let Some(path) = file {
         refuse_unreadable(image, &indexes, path)?;
     }
+    Ok((indexes, catalog_epoch))
+}
 
-    // With a compacted base, this is the overlay, which the base is folded
-    // into below.
-    if let Some(source) = image.section_source(SectionType::LpgStore) {
-        grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(store)).read_from(&*source)?;
-    }
-
-    #[cfg(feature = "triple-store")]
+/// Loads the RDF triples of `image` into `rdf_store`, and the Ring index
+/// over them.
+///
+/// # Errors
+///
+/// The errors of the triples' section, and of a ring section whose chunks
+/// cannot be read.
+#[cfg(all(feature = "lpg", feature = "triple-store"))]
+pub(super) fn load_triples(
+    image: &dyn ImageSource,
+    rdf_store: &Arc<grafeo_core::graph::rdf::RdfStore>,
+) -> Result<()> {
     if let Some(source) = image.section_source(SectionType::RdfStore) {
         grafeo_core::graph::rdf::RdfStoreSection::new(Arc::clone(rdf_store)).read_from(&*source)?;
     }
@@ -536,18 +672,7 @@ pub(super) fn load_sections(
         grafeo_common::grafeo_warn!("rebuilding the RDF ring from the triples: {err}");
         rdf_store.rebuild_ring();
     }
-
-    // Before the indexes: they are built from all the data. Only a database
-    // file holds a compacted base: a copy (`to_memory`) never does.
-    #[cfg(feature = "grafeo-file")]
-    fold_compacted_base(image, store)?;
-
-    // The epoch a 0.5.x catalog names, once the data is in (with `temporal`
-    // the data keeps the epochs it was loaded at).
-    store.sync_epoch(grafeo_common::types::EpochId::new(catalog_epoch));
-
-    loaded.unbuilt = restore_indexes(image, store, indexes)?;
-    Ok(loaded)
+    Ok(())
 }
 
 /// Folds the compacted base of a 0.5.x image (one `compact()` wrote) into
@@ -562,7 +687,10 @@ pub(super) fn load_sections(
 /// Returns an error if a section cannot be read or is not the 0.5.x layout,
 /// or if the base cannot be folded.
 #[cfg(all(feature = "lpg", feature = "grafeo-file"))]
-fn fold_compacted_base(image: &dyn ImageSource, store: &LpgStore) -> Result<()> {
+pub(super) fn fold_compacted_base<S: grafeo_core::graph::load::LoadTarget>(
+    image: &dyn ImageSource,
+    store: &S,
+) -> Result<()> {
     let Some(base) = image.section_source(SectionType::CompactStore) else {
         return Ok(());
     };

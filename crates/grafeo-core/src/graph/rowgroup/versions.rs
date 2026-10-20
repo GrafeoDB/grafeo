@@ -385,25 +385,46 @@ impl Versions {
     /// caller takes their data out.
     pub(super) fn collapse(&mut self, horizon: u64) -> Vec<usize> {
         let mut gone = Vec::new();
-        for (index, vector) in self.vectors.iter_mut().enumerate() {
-            let Vector::Stamped(stamped) = vector else {
-                continue;
-            };
-            if !stamped.settled_by(horizon) {
-                continue;
-            }
-            // Built anew, so it holds what a load would.
-            let mut exists = Bitset::default();
-            for row in stamped.exists.rows() {
-                if stamped.deleter(row) == ABSENT {
-                    exists.set(row);
-                } else {
-                    gone.push(index * VECTOR_ROWS + row);
-                }
-            }
-            *vector = Vector::Flat(exists);
+        for index in 0..self.vectors.len() {
+            self.collapse_into(index, horizon, &mut gone);
         }
         gone
+    }
+
+    /// [`collapse`](Self::collapse) of vector `index` alone.
+    pub(super) fn collapse_vector(&mut self, index: usize, horizon: u64) -> Vec<usize> {
+        let mut gone = Vec::new();
+        self.collapse_into(index, horizon, &mut gone);
+        gone
+    }
+
+    /// Collapses vector `index` if its stamps are all committed at or before
+    /// `horizon`, pushing its rows that are gone onto `gone`.
+    fn collapse_into(&mut self, index: usize, horizon: u64, gone: &mut Vec<usize>) {
+        let Some(vector) = self.vectors.get_mut(index) else {
+            return;
+        };
+        let Vector::Stamped(stamped) = vector else {
+            return;
+        };
+        if !stamped.settled_by(horizon) {
+            return;
+        }
+        // Built anew, so it holds what a load would.
+        let mut exists = Bitset::default();
+        for row in stamped.exists.rows() {
+            if stamped.deleter(row) == ABSENT {
+                exists.set(row);
+            } else {
+                gone.push(index * VECTOR_ROWS + row);
+            }
+        }
+        *vector = Vector::Flat(exists);
+    }
+
+    /// Whether vector `index` holds stamps.
+    pub(super) fn is_stamped(&self, index: usize) -> bool {
+        matches!(self.vectors.get(index), Some(Vector::Stamped(_)))
     }
 
     /// Whether no row exists in any version: every vector is flat and
@@ -434,6 +455,43 @@ impl Versions {
                     Vector::Stamped(stamped) => stamped.heap_bytes(),
                 })
                 .sum::<usize>()
+    }
+
+    /// The rows of the vectors that hold stamps, ascending: the rows whose
+    /// versions some readers may tell apart (the others every reader sees
+    /// alike). The text and vector indexes bring an index they take in
+    /// line with them.
+    #[cfg(any(feature = "text-index", feature = "vector-index"))]
+    pub(super) fn stamped_rows(&self) -> impl Iterator<Item = usize> + '_ {
+        self.stamped_vectors()
+            .flat_map(|(base, stamped)| stamped.exists.rows().map(move |row| base + row))
+    }
+
+    /// The rows a delete committed at or before `horizon` took out of every
+    /// view at the horizon or later, ascending, whether or not their vector
+    /// collapses yet: what an index keeps for them no reader there needs.
+    pub(super) fn deleted_by(&self, horizon: u64) -> impl Iterator<Item = usize> + '_ {
+        self.stamped_vectors().flat_map(move |(base, stamped)| {
+            stamped
+                .exists
+                .rows()
+                .filter(move |row| {
+                    let deleter = stamped.deleter(*row);
+                    deleter != ABSENT && deleter & PENDING == 0 && deleter <= horizon
+                })
+                .map(move |row| base + row)
+        })
+    }
+
+    /// The vectors that hold stamps, with their first row.
+    fn stamped_vectors(&self) -> impl Iterator<Item = (usize, &Stamped)> + '_ {
+        self.vectors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, vector)| match vector {
+                Vector::Stamped(stamped) => Some((index * VECTOR_ROWS, &**stamped)),
+                Vector::Flat(_) => None,
+            })
     }
 }
 

@@ -63,13 +63,13 @@ impl super::GrafeoDB {
     ) -> Result<crate::query::executor::stream::OwnedResultStream> {
         use crate::query::executor::stream::OwnedResultStream;
         let session = self.session();
-        let (source, columns, deadline) = session.build_streaming_plan(query)?;
+        let (source, columns, deadline, pin) = session.build_streaming_plan(query)?;
         // Sync graph/schema state back (parser may have changed the session's
         // view, although streaming rejects session commands so this is a
         // defensive no-op today).
         *self.current_graph.write() = session.current_graph();
         *self.current_schema.write() = session.current_schema();
-        OwnedResultStream::new(source, columns, deadline)
+        OwnedResultStream::new(source, columns, deadline, pin)
     }
 
     /// Executes a GQL query with visibility at the specified epoch.

@@ -45,6 +45,47 @@ const GAPS: &[KnownGap] = &[
         case: "counts_move_at_commit_only",
         reason: "the counts read the labels written in place and the deletes marked at the start epoch",
     },
+    KnownGap {
+        case: "every_read_path_hides_an_open_transactions_values_and_labels",
+        reason: IN_PLACE,
+    },
+    KnownGap {
+        case: "every_read_path_at_an_earlier_epoch_keeps_values_and_labels",
+        reason: IN_PLACE,
+    },
+    KnownGap {
+        case: "an_immediate_write_keeps_the_old_value_for_an_older_reader",
+        reason: IN_PLACE,
+    },
+    KnownGap {
+        case: "every_read_path_hides_an_open_transactions_creates_and_deletes",
+        reason: DELETE_AT_START,
+    },
+    KnownGap {
+        case: "every_read_path_at_an_earlier_epoch_keeps_creates_and_deletes",
+        reason: DELETE_AT_START,
+    },
+    KnownGap {
+        case: "every_read_path_sees_the_transactions_own_writes",
+        reason: "a lookup of a key without an index and a range lookup scan the nodes \
+                 committed now, without the transaction's own creates: the reads at a view \
+                 keep LpgStore's lookups of now (#412 decision Q2, no interim fix)",
+    },
 ];
 
-conformance_suite!(LpgStore, lpg_store, GAPS);
+/// The known gaps of this build: [`GAPS`], and without `temporal` a value
+/// set to null, which the property storage keeps as a stored null (the
+/// version logs of `temporal` read it as no value).
+fn gaps() -> Vec<KnownGap> {
+    let mut gaps = GAPS.to_vec();
+    if !cfg!(feature = "temporal") {
+        gaps.push(KnownGap {
+            case: "a_property_set_to_null_is_removed",
+            reason: "without `temporal` a value set to null is stored as a null (#412 decision \
+                     Q8: SET to null removes the property)",
+        });
+    }
+    gaps
+}
+
+conformance_suite!(LpgStore, lpg_store, &gaps());

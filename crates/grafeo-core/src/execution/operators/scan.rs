@@ -3,7 +3,7 @@
 use super::{Operator, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::GraphStoreSearch;
-use grafeo_common::types::{EpochId, LogicalType, NodeId, TransactionId};
+use grafeo_common::types::{EpochId, LogicalType, NodeId, ReadView, TransactionId};
 use std::sync::Arc;
 
 /// A scan operator that reads nodes from storage.
@@ -85,32 +85,27 @@ impl ScanOperator {
             return;
         }
 
-        // Get nodes. When we have transaction context, use all_node_ids()
-        // to include uncommitted/PENDING versions (nodes_by_label already
-        // returns unfiltered IDs from the label index, but node_ids()
-        // pre-filters by epoch which excludes PENDING nodes).
-        let all_ids = match self.labels.as_slice() {
-            [] if self.viewing_epoch.is_some() => self.store.all_node_ids(),
-            [] => self.store.node_ids(),
-            [label] => self.store.nodes_by_label(label),
-            labels => {
-                let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-                self.store.nodes_with_any_label(&labels)
+        // With a transaction context the store answers at the view: every
+        // node the view sees (its own pending ones included), or the nodes
+        // with the label as the view sees them. Without one, the nodes of
+        // now.
+        let labels: Vec<&str> = self.labels.iter().map(String::as_str).collect();
+        self.batch = match self.viewing_epoch {
+            Some(epoch) => {
+                let view = ReadView::new(epoch, self.transaction_id);
+                match labels.as_slice() {
+                    [] => self
+                        .store
+                        .filter_visible_node_ids_at(&self.store.all_node_ids(), view),
+                    [label] => self.store.nodes_by_label_at(label, view),
+                    labels => self.store.nodes_with_any_label_at(labels, view),
+                }
             }
-        };
-
-        // Filter by visibility if we have tx context.
-        // Uses batch methods that hold a single lock for all IDs instead of
-        // acquiring/releasing per node (avoids N+1 lock pattern).
-        self.batch = if let Some(epoch) = self.viewing_epoch {
-            if let Some(tx) = self.transaction_id {
-                self.store
-                    .filter_visible_node_ids_versioned(&all_ids, epoch, tx)
-            } else {
-                self.store.filter_visible_node_ids(&all_ids, epoch)
-            }
-        } else {
-            all_ids
+            None => match labels.as_slice() {
+                [] => self.store.node_ids(),
+                [label] => self.store.nodes_by_label(label),
+                labels => self.store.nodes_with_any_label(labels),
+            },
         };
 
         if self.batch.is_empty() {

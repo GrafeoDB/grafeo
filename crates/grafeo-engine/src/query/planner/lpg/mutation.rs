@@ -848,7 +848,8 @@ impl super::Planner {
             params,
             yield_columns,
             canonical_columns,
-        );
+        )
+        .with_view(self.read_view());
         #[cfg(feature = "lpg")]
         if let Some(lpg_store) = self.lpg_store.as_ref() {
             op = op.with_lpg_store(Arc::clone(lpg_store));

@@ -126,7 +126,7 @@ use crate::query::plan::{
 #[cfg(feature = "vector-index")]
 use crate::query::plan::{VectorMetric, VectorScanOp};
 use grafeo_common::grafeo_debug_span;
-use grafeo_common::types::{EpochId, TransactionId};
+use grafeo_common::types::{EpochId, ReadView, TransactionId};
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
@@ -490,6 +490,13 @@ impl Planner {
     #[must_use]
     pub fn transaction_id(&self) -> Option<TransactionId> {
         self.transaction_id
+    }
+
+    /// The view this planner's reads and operators read at: its
+    /// transaction at its snapshot, or committed at its viewing epoch.
+    #[must_use]
+    pub fn read_view(&self) -> ReadView {
+        ReadView::new(self.viewing_epoch, self.transaction_id)
     }
 
     /// Returns a reference to the transaction manager, if available.
@@ -1066,31 +1073,33 @@ impl Planner {
             }
         };
 
-        let operator: Box<dyn Operator> = if let Some(k) = scan.k {
-            Box::new(TextScanOperator::top_k(
+        let operator = if let Some(k) = scan.k {
+            TextScanOperator::top_k(
                 Arc::clone(&self.store),
                 &scan.label,
                 &scan.property,
                 &query_string,
                 k,
-            ))
+            )
         } else if let Some(threshold) = scan.threshold {
-            Box::new(TextScanOperator::with_threshold(
+            TextScanOperator::with_threshold(
                 Arc::clone(&self.store),
                 &scan.label,
                 &scan.property,
                 &query_string,
                 threshold,
-            ))
+            )
         } else {
-            Box::new(TextScanOperator::top_k(
+            TextScanOperator::top_k(
                 Arc::clone(&self.store),
                 &scan.label,
                 &scan.property,
                 &query_string,
                 100,
-            ))
+            )
         };
+        // The documents the query's view sees.
+        let operator: Box<dyn Operator> = Box::new(operator.with_view(self.read_view()));
 
         let mut columns = vec![scan.variable.clone()];
         if let Some(ref score_col) = scan.score_column {
@@ -1177,7 +1186,8 @@ impl Planner {
             query_vec,
             k,
             metric,
-        );
+        )
+        .with_view(self.read_view());
 
         if let Some(sim) = scan.min_similarity {
             operator = operator.with_min_similarity(sim);

@@ -6,7 +6,7 @@
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::traits::GraphStoreSearch;
-use grafeo_common::types::{LogicalType, NodeId};
+use grafeo_common::types::{LogicalType, NodeId, ReadView};
 use std::sync::Arc;
 
 /// A scan operator that retrieves nodes by BM25 text relevance.
@@ -46,6 +46,8 @@ pub struct TextScanOperator {
     executed: bool,
     /// Rows per output DataChunk (default 2048).
     chunk_capacity: usize,
+    /// The view the search reads at, if any.
+    view: Option<ReadView>,
 }
 
 impl TextScanOperator {
@@ -71,6 +73,7 @@ impl TextScanOperator {
             position: 0,
             executed: false,
             chunk_capacity: 2048,
+            view: None,
         }
     }
 
@@ -96,6 +99,7 @@ impl TextScanOperator {
             position: 0,
             executed: false,
             chunk_capacity: 2048,
+            view: None,
         }
     }
 
@@ -106,6 +110,14 @@ impl TextScanOperator {
         self
     }
 
+    /// Searches as `view` sees the documents: the store drops those it does
+    /// not see.
+    #[must_use]
+    pub fn with_view(mut self, view: ReadView) -> Self {
+        self.view = Some(view);
+        self
+    }
+
     /// Executes the search on first call and caches the results.
     fn execute_search(&mut self) {
         if self.executed {
@@ -113,18 +125,17 @@ impl TextScanOperator {
         }
         self.executed = true;
 
-        self.results = if let Some(k) = self.k {
-            self.store
-                .text_search(&self.label, &self.property, &self.query, k)
-        } else if let Some(threshold) = self.threshold {
-            self.store.text_search_with_threshold(
-                &self.label,
-                &self.property,
-                &self.query,
-                threshold,
-            )
-        } else {
-            Vec::new()
+        let (label, property, query) = (&self.label, &self.property, &self.query);
+        self.results = match (self.k, self.threshold, self.view) {
+            (Some(k), _, Some(view)) => self.store.text_search_at(label, property, query, k, view),
+            (Some(k), _, None) => self.store.text_search(label, property, query, k),
+            (None, Some(threshold), Some(view)) => self
+                .store
+                .text_search_with_threshold_at(label, property, query, threshold, view),
+            (None, Some(threshold), None) => self
+                .store
+                .text_search_with_threshold(label, property, query, threshold),
+            (None, None, _) => Vec::new(),
         };
     }
 }

@@ -43,7 +43,7 @@ use super::{
     Arc, BinaryOp, EmptyOperator, Error, ExpressionPredicate, FilterOp, FilterOperator,
     GraphStoreSearch, HashJoinOperator, HashMap, LogicalExpression, LogicalOperator,
     NodeListOperator, NodeScanOp, Operator, PhysicalJoinType, RangeBounds, RangeScanOperator,
-    Result, TransactionId, UnaryOp, Value,
+    Result, UnaryOp, Value,
 };
 use crate::query::plan::PushdownHint;
 #[cfg(feature = "vector-index")]
@@ -54,11 +54,11 @@ impl super::Planner {
     /// carries it. An index lookup checks its few results this way, instead of
     /// collecting every node with the label.
     fn visible_with_label(&self, id: NodeId, label: Option<&str>) -> bool {
-        let node = match self.transaction_id {
-            Some(tx) => self.store.get_node_versioned(id, self.viewing_epoch, tx),
-            None => self.store.get_node_at_epoch(id, self.viewing_epoch),
-        };
-        node.is_some_and(|node| label.is_none_or(|label| node.has_label(label)))
+        let view = self.read_view();
+        match label {
+            Some(label) => self.store.node_has_label_at(id, label, view) == Some(true),
+            None => self.store.is_node_visible_at(id, view),
+        }
     }
 
     /// Plans a filter operator.
@@ -703,7 +703,9 @@ impl super::Planner {
                 if !self.store.has_property_index(property) {
                     continue;
                 }
-                if let Some(found) = self.store.find_nodes_maybe_equal(property, value)
+                if let Some(found) =
+                    self.store
+                        .find_nodes_maybe_equal_at(property, value, self.read_view())
                     && candidates
                         .as_ref()
                         .is_none_or(|best| found.len() < best.len())
@@ -856,7 +858,10 @@ impl super::Planner {
         let mut seen: GrafeoSet<_> = GrafeoSet::default();
         let mut matching_nodes = Vec::new();
         for value in &values {
-            let Some(found) = self.store.find_nodes_maybe_equal(property, value) else {
+            let Some(found) =
+                self.store
+                    .find_nodes_maybe_equal_at(property, value, self.read_view())
+            else {
                 return Ok(None);
             };
             for node_id in found {
@@ -1048,11 +1053,10 @@ impl super::Planner {
     /// Plans a range filter using [`RangeScanOperator`].
     ///
     /// Phase 4d emits a dedicated range-scan operator that consumes
-    /// [`GraphStoreSearch::find_nodes_in_range_iter`] (lazy, with
-    /// per-block zone-map skip pruning when the store is a CompactStore;
-    /// eager fallback otherwise). The operator absorbs the label and
-    /// MVCC post-filters that the eager `NodeListOperator` path used to
-    /// apply manually, preserving identical query semantics.
+    /// [`GraphStoreSearch::find_nodes_in_range_iter_at`] at the query's
+    /// view: the store returns the nodes the view sees. The operator absorbs
+    /// the label post-filter that the eager `NodeListOperator` path used to
+    /// apply manually.
     ///
     /// Phase 4e: when an outer `plan_limit` set `self.limit_hint`, the
     /// hint is forwarded to the operator via `with_limit(n)` so the
@@ -1066,9 +1070,6 @@ impl super::Planner {
         property: &str,
         bounds: RangeBounds<'_>,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        let epoch = self.viewing_epoch;
-        let tx = self.transaction_id.unwrap_or(TransactionId::SYSTEM);
-
         let mut op = RangeScanOperator::new(
             Arc::clone(&self.store),
             property.to_string(),
@@ -1078,7 +1079,7 @@ impl super::Planner {
             bounds.max_inclusive,
             2048,
         )
-        .with_transaction_context(epoch, tx);
+        .with_view(self.read_view());
 
         if let Some(label) = scan_label {
             op = op.with_label_filter(label.clone());

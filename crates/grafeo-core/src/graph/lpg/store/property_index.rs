@@ -39,7 +39,7 @@ pub(crate) struct PropertyIndex {
 
 impl PropertyIndex {
     /// Adds `node` under `value`.
-    pub(super) fn insert(&self, value: HashableValue, node: NodeId) {
+    pub(crate) fn insert(&self, value: HashableValue, node: NodeId) {
         match self.values.entry(value) {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().insert(node);
@@ -59,7 +59,7 @@ impl PropertyIndex {
     }
 
     /// Removes `node` from `value`, dropping the value when no node holds it.
-    pub(super) fn remove(&self, value: &HashableValue, node: NodeId) {
+    pub(crate) fn remove(&self, value: &HashableValue, node: NodeId) {
         if let Some(mut nodes) = self.values.get_mut(value) {
             nodes.remove(&node);
         }
@@ -79,7 +79,7 @@ impl PropertyIndex {
     }
 
     /// The nodes that hold exactly `value`.
-    pub(super) fn nodes(&self, value: &HashableValue) -> Vec<NodeId> {
+    pub(crate) fn nodes(&self, value: &HashableValue) -> Vec<NodeId> {
         self.values
             .get(value)
             .map(|nodes| nodes.iter().copied().collect())
@@ -88,7 +88,7 @@ impl PropertyIndex {
 
     /// The nodes whose value `=` may find equal to `key`: every one it finds
     /// equal, and maybe others, for a filter to decide.
-    pub(super) fn nodes_maybe_equal(&self, key: &Value) -> Vec<NodeId> {
+    pub(crate) fn nodes_maybe_equal(&self, key: &Value) -> Vec<NodeId> {
         let Some(class) = HashKey::for_equality(key) else {
             return Vec::new(); // NULL equals nothing
         };
@@ -114,8 +114,37 @@ impl PropertyIndex {
     }
 
     /// How many distinct values the index holds.
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.values.len()
+    }
+}
+
+/// Which values a lookup of one key by `=` finds through an index: a node
+/// [`PropertyIndex::nodes_maybe_equal`] returns for the key holds one of
+/// them. A lookup that reads a candidate's value again (at a reader's view)
+/// keeps the candidate when this finds the value, so it keeps what the index
+/// would find for the value the reader sees.
+pub(crate) struct MaybeEqual {
+    class: HashKey,
+    probes: Vec<HashableValue>,
+}
+
+impl MaybeEqual {
+    /// The values found for `key`; `None` for a key `=` finds nothing equal
+    /// to (NULL).
+    pub(crate) fn new(key: &Value) -> Option<Self> {
+        Some(Self {
+            class: HashKey::for_equality(key)?,
+            probes: probes(key),
+        })
+    }
+
+    /// Whether the lookup finds `value`: a probe of the key, or a value no
+    /// probe finds in the key's `=` class.
+    pub(crate) fn finds(&self, value: &Value) -> bool {
+        let value = HashableValue::new(value.clone());
+        self.probes.contains(&value)
+            || other_class(value.inner()).is_some_and(|class| class == self.class)
     }
 }
 
@@ -358,6 +387,34 @@ mod tests {
             Value::List(vec![Value::Int64(42)].into()),
         ] {
             assert!(!is_found_by_probes(&value), "{value:?}");
+        }
+    }
+
+    /// `MaybeEqual` finds a value exactly when the index's lookup of the key
+    /// returns a node holding it.
+    #[test]
+    fn maybe_equal_finds_what_the_lookup_returns() {
+        let values = [
+            Value::Int64(42),
+            Value::Float64(42.0),
+            Value::from("42"),
+            Value::from("042"),
+            Value::from("42.0"),
+            Value::Decimal(Decimal::parse("42.00").unwrap()),
+            Value::Float64(0.1 + 0.2),
+            Value::Float64(0.3),
+            Value::Int64(1),
+            Value::from("abc"),
+            Value::List(vec![Value::Int64(42)].into()),
+            Value::Bool(true),
+        ];
+        let index = index(&values);
+        for key in values.iter().chain(&[Value::Null, Value::from("4.2e1")]) {
+            let found = found(&index, key.clone());
+            for (n, value) in values.iter().enumerate() {
+                let finds = MaybeEqual::new(key).is_some_and(|test| test.finds(value));
+                assert_eq!(finds, found.contains(&(n as u64)), "{key:?} and {value:?}");
+            }
         }
     }
 }

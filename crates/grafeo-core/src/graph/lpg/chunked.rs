@@ -95,6 +95,7 @@ use super::store::{Labels, OpenChangeSource, OpenChanges};
 use super::{Edge, LpgStore};
 use crate::codec::column_chunk::{ColumnChunk, decode_column_chunk_bytes};
 use crate::codec::{ChunkColumn, RowsChunker};
+use crate::graph::load::{LoadTarget, LoadedNames};
 
 /// The LPG section's version: chunks, as this module writes them.
 pub(crate) const LPG_SECTION_VERSION: u8 = 3;
@@ -192,6 +193,14 @@ impl Table {
         match self {
             Self::Node => "node",
             Self::Edge => "edge",
+        }
+    }
+
+    /// The node or edge `row` of the table.
+    fn entity_at(self, row: u64) -> grafeo_common::change::Entity {
+        match self {
+            Self::Node => grafeo_common::change::Entity::Node(NodeId::new(row)),
+            Self::Edge => grafeo_common::change::Entity::Edge(EdgeId::new(row)),
         }
     }
 
@@ -1294,13 +1303,18 @@ impl MetaReader<'_> {
 ///    (if any) has an epoch at least the last one; epochs are at most
 ///    `i64::MAX`.
 ///
-/// Before any row, every graph is restored with its id (the named ones
-/// created in `store`) and its dictionaries id for id, and the store's next
-/// graph id becomes the metadata's at least. Without `temporal` the history
-/// versions are checked and not applied, and values are set without their
-/// epochs. At the end each graph's next ids become the larger of its own and
-/// the metadata's, and with `temporal` every graph store's epoch is synced
-/// to the metadata's.
+/// The rows go into `store` through [`LoadTarget`], `LpgStore` or the
+/// row-group store, which migrates the section. Before any row, every graph
+/// is restored with its id (the named ones created in `store`) and its
+/// dictionaries id for id, and the store's next graph id becomes the
+/// metadata's at least. The history versions are checked and given to the
+/// store as older versions, which `LpgStore` keeps with `temporal` and the
+/// row-group store drops; values carry their epochs, which only `LpgStore`
+/// with `temporal` keeps. An edge whose end the graph does not hold is
+/// left out by the row-group store (see [`LoadTarget::load_edge`]). At the
+/// end each graph's next ids become the larger of its own and the
+/// metadata's, its epoch the metadata's (`LpgStore` with `temporal` only),
+/// and its load is finished ([`LoadTarget::load_finish`]).
 ///
 /// # Errors
 ///
@@ -1308,7 +1322,7 @@ impl MetaReader<'_> {
 /// the store cannot allocate (naming it), and for a graph or name the store
 /// holds already with another id; the source's error when a chunk cannot be
 /// fetched.
-pub(crate) fn read_lpg_chunks(store: &LpgStore, source: &dyn SectionSource) -> Result<()> {
+pub(crate) fn read_lpg_chunks<S: LoadTarget>(store: &S, source: &dyn SectionSource) -> Result<()> {
     let chunks = source.chunks();
     let Some((last, data)) = chunks.split_last() else {
         return Err(Error::corruption(
@@ -1337,9 +1351,9 @@ pub(crate) fn read_lpg_chunks(store: &LpgStore, source: &dyn SectionSource) -> R
         .map(|graph| (graph.id, graph.name.as_str()))
         .collect();
     let restored = store
-        .restore_graphs(&named, meta.next_graph_id)
+        .load_graphs(&named, meta.next_graph_id)
         .map_err(|error| Error::corruption(format!("LPG section: {error}")))?;
-    let graphs: Vec<GraphTarget<'_>> = std::iter::once(GraphTarget::Default(store))
+    let graphs: Vec<GraphTarget<'_, S>> = std::iter::once(GraphTarget::Default(store))
         .chain(restored.into_iter().map(GraphTarget::Named))
         .collect();
     for (graph, target) in meta.graphs.iter().zip(&graphs) {
@@ -1359,10 +1373,9 @@ pub(crate) fn read_lpg_chunks(store: &LpgStore, source: &dyn SectionSource) -> R
 
     for (graph, target) in meta.graphs.iter().zip(&reader.graphs) {
         let target = target.store();
-        target.set_next_node_id(target.next_node_id().max(graph.next_node_id));
-        target.set_next_edge_id(target.next_edge_id().max(graph.next_edge_id));
-        #[cfg(feature = "temporal")]
-        target.sync_epoch(EpochId::new(meta.epoch));
+        target.load_next_ids(graph.next_node_id, graph.next_edge_id);
+        target.load_section_epoch(EpochId::new(meta.epoch));
+        target.load_finish();
     }
     Ok(())
 }
@@ -1373,41 +1386,29 @@ pub(crate) fn read_lpg_chunks(store: &LpgStore, source: &dyn SectionSource) -> R
 ///
 /// Returns [`Error::Corruption`] when `target` holds one of the names, or one
 /// of the ids, already.
-fn restore_dictionaries(target: &LpgStore, graph: &GraphMeta) -> Result<()> {
-    let refuse = |what: &str, error: String| {
-        Error::corruption(format!("LPG section, graph {}, {what}: {error}", graph.id))
-    };
-    for (id, name) in &graph.labels.names {
-        target
-            .restore_label(*id, name)
-            .map_err(|error| refuse("label", error))?;
-    }
-    for (id, name) in &graph.edge_types.names {
-        target
-            .restore_edge_type(*id, name)
-            .map_err(|error| refuse("edge type", error))?;
-    }
-    for (id, name) in &graph.keys.names {
-        target
-            .restore_property_key(*id, name)
-            .map_err(|error| refuse("property key", error))?;
-    }
-    target.reserve_name_ids_below([
-        graph.labels.next_id,
-        graph.edge_types.next_id,
-        graph.keys.next_id,
-    ]);
-    Ok(())
+fn restore_dictionaries<S: LoadTarget>(target: &S, graph: &GraphMeta) -> Result<()> {
+    target
+        .load_names(LoadedNames {
+            labels: &graph.labels.names,
+            edge_types: &graph.edge_types.names,
+            keys: &graph.keys.names,
+            next_ids: [
+                graph.labels.next_id,
+                graph.edge_types.next_id,
+                graph.keys.next_id,
+            ],
+        })
+        .map_err(|error| Error::corruption(format!("LPG section, graph {}, {error}", graph.id)))
 }
 
 /// The store a graph of the section loads into.
-enum GraphTarget<'s> {
-    Default(&'s LpgStore),
-    Named(Arc<LpgStore>),
+enum GraphTarget<'s, S> {
+    Default(&'s S),
+    Named(Arc<S>),
 }
 
-impl GraphTarget<'_> {
-    fn store(&self) -> &LpgStore {
+impl<S> GraphTarget<'_, S> {
+    fn store(&self) -> &S {
         match self {
             Self::Default(store) => store,
             Self::Named(store) => store,
@@ -1654,13 +1655,13 @@ struct ReadGroup {
 
 /// The state of a read: the checked metadata, the graph stores and the group
 /// being read.
-struct Reader<'m, 's> {
+struct Reader<'m, 's, S> {
     layout: Layout<'m>,
-    graphs: Vec<GraphTarget<'s>>,
+    graphs: Vec<GraphTarget<'s, S>>,
     group: Option<ReadGroup>,
 }
 
-impl Reader<'_, '_> {
+impl<S: LoadTarget> Reader<'_, '_, S> {
     /// Reads the chunk at `index` of `data` (three for the edge columns);
     /// returns how many chunks it read.
     fn read(
@@ -1894,7 +1895,7 @@ impl Reader<'_, '_> {
             let labels =
                 label_names(text, names).map_err(|error| format!("node {row}: {error}"))?;
             target
-                .create_node_with_id(NodeId::new(row), &labels)
+                .load_node(NodeId::new(row), &labels)
                 .map_err(|error| format!("node {row}: {error}"))?;
             group.entities.set(row - group.start);
         }
@@ -1959,8 +1960,11 @@ impl Reader<'_, '_> {
                 .ok_or_else(|| {
                     format!("edge {row}: edge type {type_id} is not an edge type of the graph")
                 })?;
+            // The row-group store leaves out an edge whose end the graph
+            // does not hold (see `LoadTarget::load_edge`), and its values
+            // with it; the row still counts as an edge of the file.
             target_store
-                .create_edge_with_id(
+                .load_edge(
                     EdgeId::new(row),
                     NodeId::new(source),
                     NodeId::new(target),
@@ -1995,12 +1999,14 @@ impl Reader<'_, '_> {
                 if let Some((epoch, _)) = versions.last() {
                     group.history_epochs.insert((column_id, row), *epoch);
                 }
-                #[cfg(feature = "temporal")]
                 for (epoch, value) in versions {
-                    set_value(target, table, row, key, value, epoch);
+                    target.load_old_value(
+                        table.entity_at(row),
+                        key.as_str(),
+                        value,
+                        EpochId::new(epoch),
+                    );
                 }
-                #[cfg(not(feature = "temporal"))]
-                let _ = (versions, target, key);
                 group.values.set(row - group.start);
             }
             return Ok(());
@@ -2027,48 +2033,17 @@ impl Reader<'_, '_> {
                      of its history"
                 ));
             }
-            set_value(target, table, row, key, value, epoch);
+            target
+                .load_value(
+                    table.entity_at(row),
+                    key.as_str(),
+                    value,
+                    Some(EpochId::new(epoch)),
+                )
+                .map_err(|error| format!("{entity} {row}: {error}"))?;
             group.values.set(row - group.start);
         }
         Ok(())
-    }
-}
-
-/// Sets `value` of property `key` of the node or edge `row`, at `epoch`.
-#[cfg(feature = "temporal")]
-fn set_value(
-    target: &LpgStore,
-    table: Table,
-    row: u64,
-    key: &PropertyKey,
-    value: Value,
-    epoch: u64,
-) {
-    let epoch = EpochId::new(epoch);
-    match table {
-        Table::Node => {
-            target.set_node_property_at_epoch(NodeId::new(row), key.as_str(), value, epoch);
-        }
-        Table::Edge => {
-            target.set_edge_property_at_epoch(EdgeId::new(row), key.as_str(), value, epoch);
-        }
-    }
-}
-
-/// Sets `value` of property `key` of the node or edge `row` (a build without
-/// `temporal` keeps no epochs).
-#[cfg(not(feature = "temporal"))]
-fn set_value(
-    target: &LpgStore,
-    table: Table,
-    row: u64,
-    key: &PropertyKey,
-    value: Value,
-    _epoch: u64,
-) {
-    match table {
-        Table::Node => target.set_node_property(NodeId::new(row), key.as_str(), value),
-        Table::Edge => target.set_edge_property(EdgeId::new(row), key.as_str(), value),
     }
 }
 

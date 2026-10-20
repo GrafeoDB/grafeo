@@ -26,6 +26,10 @@ pub mod apply;
 /// The conformance suite of the stores behind the change set.
 #[cfg(all(test, feature = "lpg"))]
 mod conformance;
+// Rows loaded under their ids: the readers of earlier formats and the
+// copies of graph data write into either store through it.
+#[cfg(feature = "lpg")]
+pub mod load;
 pub mod lpg;
 pub mod projection;
 /// The row-group store (workstream H): not used by the engine until H2d.

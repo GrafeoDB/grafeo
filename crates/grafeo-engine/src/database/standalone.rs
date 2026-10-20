@@ -22,15 +22,16 @@ use grafeo_common::change::StandaloneOp;
 use grafeo_common::storage::catalog_record::{
     CatalogKey, CatalogRecord, IndexKeyRecord, IndexKindRecord, IndexNameRecord, IndexRecord,
 };
+#[cfg(feature = "wal")]
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::graph::lpg::LpgStore;
 
 use super::catalog_records::{
     constraint_definition, edge_type_definition, graph_indexes, graph_type_definition, index_name,
     node_type_definition, procedure_definition, record_name,
 };
 use super::catalog_section::GraphIndexes;
+use super::root_store::RootStore;
 use crate::catalog::{Catalog, CatalogError};
 use crate::transaction::{BuiltIndex, CommitsHeld, StandaloneChange, TransactionManager};
 
@@ -179,11 +180,11 @@ pub(crate) fn refuse_drop_with_open_changes(
 /// not apply after the group was logged is a broken invariant: the error
 /// comes back and the database is poisoned (no commit until it is reopened,
 /// whose replay applies the group).
-pub(crate) fn commit(
+pub(crate) fn commit<S: RootStore>(
     change: StandaloneChange,
     _held: &CommitsHeld<'_>,
     #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::Wal>,
-    store: &Arc<LpgStore>,
+    store: &Arc<S>,
     catalog: &Catalog,
     manager: &TransactionManager,
 ) -> Result<()> {
@@ -216,16 +217,16 @@ pub(crate) fn commit(
 ///
 /// As [`commit`]; a copied entity that does not apply poisons the database
 /// (the graph is new and empty, so it cannot conflict).
-pub(crate) fn commit_copy(
+pub(crate) fn commit_copy<S: RootStore>(
     change: StandaloneChange,
     _held: &CommitsHeld<'_>,
     #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::Wal>,
-    store: &Arc<LpgStore>,
+    store: &Arc<S>,
     catalog: &Catalog,
     manager: &TransactionManager,
-    (source, dest): (&LpgStore, &str),
+    (source, dest): (&S, &str),
 ) -> Result<()> {
-    use grafeo_core::graph::apply::{ChangeTarget, Writer};
+    use grafeo_core::graph::apply::Writer;
 
     let epoch = manager.current_epoch();
     #[cfg(feature = "wal")]
@@ -243,7 +244,7 @@ pub(crate) fn commit_copy(
         manager.poison(&message);
         return Err(Error::Internal(message));
     };
-    for op in copied(source, epoch) {
+    for op in source.copied(epoch) {
         if let Err(error) = target.apply(&op, Writer::Replay { epoch }) {
             let message = format!("a logged copy into {dest} did not apply: {error}");
             manager.poison(&message);
@@ -254,36 +255,6 @@ pub(crate) fn commit_copy(
     Ok(())
 }
 
-/// The create ops of every node, then every edge, of `source` that a reader
-/// at `epoch` sees, with their ids, labels and properties at that epoch.
-fn copied(
-    source: &LpgStore,
-    epoch: EpochId,
-) -> impl Iterator<Item = grafeo_common::change::DataOp> + '_ {
-    use grafeo_common::change::DataOp;
-    use grafeo_common::types::EdgeId;
-
-    let nodes = source
-        .all_node_ids()
-        .into_iter()
-        .filter_map(move |id| source.get_node_at_epoch(id, epoch))
-        .map(|node| DataOp::CreateNode {
-            id: node.id,
-            labels: node.labels,
-            properties: node.properties.into_iter().collect(),
-        });
-    let edges = (0..source.next_edge_id())
-        .filter_map(move |id| source.get_edge_at_epoch(EdgeId::new(id), epoch))
-        .map(|edge| DataOp::CreateEdge {
-            id: edge.id,
-            src: edge.src,
-            dst: edge.dst,
-            edge_type: edge.edge_type,
-            properties: edge.properties.into_iter().collect(),
-        });
-    nodes.chain(edges)
-}
-
 /// Writes a graph copy to `wal` as one group (see [`commit_copy`]) at
 /// `epoch`, and syncs it as the durability mode asks.
 ///
@@ -291,12 +262,12 @@ fn copied(
 ///
 /// As [`log`].
 #[cfg(feature = "wal")]
-fn log_copy(
+fn log_copy<S: RootStore>(
     wal: &grafeo_storage::wal::Wal,
     change: &StandaloneChange,
     manager: &TransactionManager,
     epoch: EpochId,
-    (source, dest): (&LpgStore, &str),
+    (source, dest): (&S, &str),
 ) -> Result<()> {
     use grafeo_common::types::TransactionId;
     use grafeo_storage::wal::GroupError;
@@ -306,7 +277,7 @@ fn log_copy(
     let mut group = wal
         .begin_group(TransactionId::SYSTEM)
         .map_err(commit_error)?;
-    write_copy(&mut group, change, epoch, dest, copied(source, epoch))?;
+    write_copy(&mut group, change, epoch, dest, source.copied(epoch))?;
     match group.finish() {
         Ok(_) => Ok(()),
         Err(error @ GroupError::OutcomeUnknown(_)) => {
@@ -377,10 +348,10 @@ fn log(
 /// that does not apply for another reason than a repeat (see
 /// [`Applying::Replay`]), or a put of an index whose definition does not fit
 /// this platform.
-pub(crate) fn apply(
+pub(crate) fn apply<S: RootStore>(
     op: &StandaloneOp,
     built: Option<BuiltIndex>,
-    store: &Arc<LpgStore>,
+    store: &Arc<S>,
     catalog: &Catalog,
     applying: &mut Applying<'_>,
 ) -> Result<()> {
@@ -475,11 +446,11 @@ pub(crate) fn apply_rdf(
 
 /// Applies the put of `record` (see [`apply`]): the record replaces the
 /// entry with its key, or adds it.
-fn put(
+fn put<S: RootStore>(
     op: &StandaloneOp,
     record: &CatalogRecord,
     built: Option<BuiltIndex>,
-    store: &Arc<LpgStore>,
+    store: &Arc<S>,
     catalog: &Catalog,
     applying: &mut Applying<'_>,
 ) -> Result<()> {
@@ -564,7 +535,7 @@ fn has_index_name(catalog: &Catalog, record: &IndexNameRecord) -> bool {
 
 /// The store of the graph with storage key `graph` (`None` for the default
 /// graph), or `None` when no such graph exists.
-fn graph_store(store: &Arc<LpgStore>, graph: Option<&str>) -> Option<Arc<LpgStore>> {
+fn graph_store<S: RootStore>(store: &Arc<S>, graph: Option<&str>) -> Option<Arc<S>> {
     match graph {
         None => Some(Arc::clone(store)),
         Some(key) => store.graph(key),
@@ -575,11 +546,11 @@ fn graph_store(store: &Arc<LpgStore>, graph: Option<&str>) -> Option<Arc<LpgStor
 /// statement built, or a property index, which is built from the data at
 /// once. Replay keeps a vector or text index for the build after the replay
 /// instead, in place of an index of the same key the image held.
-fn put_index(
+fn put_index<S: RootStore>(
     op: &StandaloneOp,
     record: &IndexRecord,
     built: Option<BuiltIndex>,
-    store: &Arc<LpgStore>,
+    store: &Arc<S>,
     applying: &mut Applying<'_>,
 ) -> Result<()> {
     let Some(target) = graph_store(store, record.graph.as_deref()) else {
@@ -592,7 +563,7 @@ fn put_index(
     match (applying, built) {
         (Applying::Replay { unbuilt }, _) => {
             let key = index_key(&record.index);
-            remove_index(&target, &key);
+            remove_index(&*target, &key);
             forget_unbuilt(unbuilt, record.graph.as_deref(), &key);
             let mut indexes = graph_indexes(vec![record.clone()])?;
             match unbuilt.iter_mut().find(|graph| graph.graph == record.graph) {
@@ -605,7 +576,7 @@ fn put_index(
             }
             Ok(())
         }
-        (Applying::Live, Some(index)) => install(&target, &record.index, index),
+        (Applying::Live, Some(index)) => install(&*target, &record.index, index),
         (Applying::Live, None) => Err(not_applied(op, "the index was not built")),
     }
 }
@@ -625,7 +596,7 @@ fn put_index(
         reason = "without vector and text indexes no index is ever built"
     )
 )]
-fn install(target: &LpgStore, kind: &IndexKindRecord, index: BuiltIndex) -> Result<()> {
+fn install<S: RootStore>(target: &S, kind: &IndexKindRecord, index: BuiltIndex) -> Result<()> {
     match index {
         #[cfg(feature = "vector-index")]
         BuiltIndex::Vector(index) => {
@@ -674,7 +645,7 @@ fn index_key(kind: &IndexKindRecord) -> IndexKeyRecord {
 }
 
 /// Removes the index `key` names from `target`; whether there was one.
-fn remove_index(target: &LpgStore, key: &IndexKeyRecord) -> bool {
+fn remove_index<S: RootStore>(target: &S, key: &IndexKeyRecord) -> bool {
     match key {
         IndexKeyRecord::Property { key } => target.drop_property_index(key),
         #[cfg(feature = "vector-index")]
@@ -707,10 +678,10 @@ fn forget_unbuilt(unbuilt: &mut Vec<GraphIndexes>, graph: Option<&str>, key: &In
 }
 
 /// Applies the drop of the entry `key` names (see [`apply`]).
-fn drop_entry(
+fn drop_entry<S: RootStore>(
     op: &StandaloneOp,
     key: &CatalogKey,
-    store: &Arc<LpgStore>,
+    store: &Arc<S>,
     catalog: &Catalog,
     applying: &mut Applying<'_>,
 ) -> Result<()> {
@@ -751,7 +722,7 @@ fn drop_entry(
                 forget_unbuilt(unbuilt, graph.as_deref(), index);
             }
             match graph_store(store, graph.as_deref()) {
-                Some(target) if remove_index(&target, index) => Ok(()),
+                Some(target) if remove_index(&*target, index) => Ok(()),
                 Some(_) => applying.missing(op, "there is no such index"),
                 None => applying.missing(op, "the graph does not exist"),
             }
@@ -784,10 +755,10 @@ fn drop_entry(
 /// vector or text index this build cannot build (it would be lost: see
 /// `sections::FeatureData`).
 #[cfg(feature = "wal")]
-pub(crate) fn replay(
+pub(crate) fn replay<S: RootStore>(
     record: &[u8],
     wal: &std::path::Path,
-    store: &Arc<LpgStore>,
+    store: &Arc<S>,
     #[cfg(feature = "triple-store")] rdf: &grafeo_core::graph::rdf::RdfStore,
     catalog: &Catalog,
     unbuilt: &mut Vec<GraphIndexes>,

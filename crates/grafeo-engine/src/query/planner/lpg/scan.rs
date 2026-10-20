@@ -95,18 +95,29 @@ pub(crate) fn with_smallest_scan_label(
 
 /// Whether a query that reads at `viewing_epoch`, in `transaction_id`, may
 /// scan another of a pattern's labels than the one written
-/// ([`with_smallest_scan_label`]). Not at a past epoch outside a transaction
-/// (`current_epoch` is the transaction manager's, `None` without one): a label
-/// scan finds the nodes that have the label now, while the check per row
-/// reads the labels a node had at the epoch. The same rule decides whether a
-/// query may look values up in a property index, which holds the values of
-/// now.
+/// ([`with_smallest_scan_label`]). The same rule decides whether a query may
+/// look values up in a property index.
+///
+/// Always when the store answers its label scans and lookups exactly at a
+/// view (`answers_at_view`, see
+/// [`GraphStore::answers_at_view`](grafeo_core::graph::GraphStore::answers_at_view)):
+/// they find what a scan with the per-row checks finds, in a transaction and
+/// at a past epoch alike. Otherwise as before the store answered at a view:
+/// in a transaction, whose per-row reads read the newest values and labels
+/// as the store's indexes hold them, and at the current epoch, but not at a
+/// past epoch outside a transaction (`current_epoch` is the transaction
+/// manager's, `None` without one), where a label scan or an index finds the
+/// labels and values of now while the check per row reads those of the
+/// epoch.
 pub(crate) fn may_choose_scan_label(
     viewing_epoch: EpochId,
     transaction_id: Option<TransactionId>,
     current_epoch: Option<EpochId>,
+    answers_at_view: bool,
 ) -> bool {
-    transaction_id.is_some() || current_epoch.is_none_or(|current| viewing_epoch >= current)
+    answers_at_view
+        || transaction_id.is_some()
+        || current_epoch.is_none_or(|current| viewing_epoch >= current)
 }
 
 /// The labels of the `OR` of labels that `predicate` requires of the node a
@@ -409,7 +420,12 @@ impl super::Planner {
             .transaction_manager
             .as_ref()
             .map(|manager| manager.current_epoch());
-        may_choose_scan_label(self.viewing_epoch, self.transaction_id, current_epoch)
+        may_choose_scan_label(
+            self.viewing_epoch,
+            self.transaction_id,
+            current_epoch,
+            self.store.answers_at_view(),
+        )
     }
 
     /// Plans a node scan operator.
@@ -508,6 +524,28 @@ mod tests {
     use crate::transaction::TransactionManager;
     use grafeo_common::types::{EpochId, TransactionId};
     use grafeo_core::graph::lpg::LpgStore;
+
+    /// A read at a past epoch outside a transaction may use label scans and
+    /// indexes only on a store that answers them at a view; a transaction
+    /// and a read of now may on any store.
+    #[test]
+    fn a_past_epoch_read_chooses_labels_only_on_a_store_that_answers_at_a_view() {
+        let (past, now) = (EpochId::new(3), Some(EpochId::new(19)));
+        assert!(!may_choose_scan_label(past, None, now, false));
+        assert!(may_choose_scan_label(past, None, now, true));
+        assert!(may_choose_scan_label(
+            past,
+            Some(TransactionId::new(7)),
+            now,
+            false
+        ));
+        assert!(may_choose_scan_label(EpochId::new(19), None, now, false));
+        assert!(may_choose_scan_label(past, None, None, false));
+        assert!(
+            !grafeo_core::graph::GraphStore::answers_at_view(&LpgStore::new().unwrap()),
+            "LpgStore answers its lookups of now"
+        );
+    }
 
     /// 19 `Big` nodes, three of them also `Small`, and three `Same` nodes.
     fn store() -> Arc<LpgStore> {

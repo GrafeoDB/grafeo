@@ -50,6 +50,7 @@ use grafeo_common::storage::section::{
 };
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::index::text::TextIndexOptions;
 use grafeo_core::index::vector::{DistanceMetric, QuantizationType};
 
@@ -130,6 +131,89 @@ struct IndexExtension {
     names: Vec<IndexName>,
 }
 
+/// What the catalog section reads of a store and writes to it: the named
+/// graphs (a schema's default graph is created as its record is read) and
+/// the definitions of each graph's indexes. `LpgStore` and the row-group
+/// store answer it with the same names, so the section checkpoints and opens
+/// either: the engine runs on `LpgStore` until the switch to the row-group
+/// store (#412 H2d), which flips the default of [`CatalogSection`].
+pub(crate) trait CatalogStore: Send + Sync + 'static {
+    /// The names of the named graphs, in no promised order.
+    fn graph_names(&self) -> Vec<String>;
+
+    /// The named graph `name`.
+    fn graph(&self, name: &str) -> Option<Arc<Self>>;
+
+    /// Creates the named graph `name`; `false` when it exists.
+    ///
+    /// # Errors
+    ///
+    /// When every graph id was given out.
+    fn create_graph(&self, name: &str) -> Result<bool>;
+
+    /// The keys of the property indexes.
+    fn property_index_keys(&self) -> Vec<String>;
+
+    /// The vector indexes, keyed `label:property`.
+    #[cfg(feature = "vector-index")]
+    fn vector_index_entries(
+        &self,
+    ) -> Vec<(String, Arc<grafeo_core::index::vector::VectorIndexKind>)>;
+
+    /// The text indexes, keyed `label:property`.
+    #[cfg(feature = "text-index")]
+    fn text_index_entries(
+        &self,
+    ) -> Vec<(
+        String,
+        Arc<parking_lot::RwLock<grafeo_core::index::text::InvertedIndex>>,
+    )>;
+}
+
+/// Implements [`CatalogStore`] for a store by its inherent methods of the
+/// same names.
+macro_rules! catalog_store {
+    ($store:ty) => {
+        impl CatalogStore for $store {
+            fn graph_names(&self) -> Vec<String> {
+                <$store>::graph_names(self)
+            }
+
+            fn graph(&self, name: &str) -> Option<Arc<Self>> {
+                <$store>::graph(self, name)
+            }
+
+            fn create_graph(&self, name: &str) -> Result<bool> {
+                Ok(<$store>::create_graph(self, name)?)
+            }
+
+            fn property_index_keys(&self) -> Vec<String> {
+                <$store>::property_index_keys(self)
+            }
+
+            #[cfg(feature = "vector-index")]
+            fn vector_index_entries(
+                &self,
+            ) -> Vec<(String, Arc<grafeo_core::index::vector::VectorIndexKind>)> {
+                <$store>::vector_index_entries(self)
+            }
+
+            #[cfg(feature = "text-index")]
+            fn text_index_entries(
+                &self,
+            ) -> Vec<(
+                String,
+                Arc<parking_lot::RwLock<grafeo_core::index::text::InvertedIndex>>,
+            )> {
+                <$store>::text_index_entries(self)
+            }
+        }
+    };
+}
+
+catalog_store!(LpgStore);
+catalog_store!(RowGroupStore);
+
 /// The indexes of one graph, as a checkpoint saves them: definitions only.
 /// Loading builds the indexes from the data, or restores the default graph's
 /// vector and text indexes from their own sections.
@@ -147,7 +231,7 @@ pub(crate) struct GraphIndexes {
 
 impl GraphIndexes {
     /// The indexes of `store`, the graph `graph`.
-    fn of(store: &LpgStore, graph: Option<String>) -> Self {
+    fn of<S: CatalogStore>(store: &S, graph: Option<String>) -> Self {
         let mut property = store.property_index_keys();
         property.sort();
 
@@ -344,9 +428,12 @@ struct SnapshotTextIndex {
 /// Writes and reads the schema and the index definitions and names (see the
 /// module documentation). The catalog is always small (typically < 10 KB)
 /// and always kept in RAM.
-pub struct CatalogSection {
+///
+/// `S` is the store whose named graphs and index definitions it reads and
+/// whose schema graphs it creates: `LpgStore`, or the row-group store.
+pub struct CatalogSection<S: CatalogStore = LpgStore> {
     catalog: Arc<Catalog>,
-    store: Arc<LpgStore>,
+    store: Arc<S>,
     epoch_fn: Box<dyn Fn() -> u64 + Send + Sync>,
     dirty: AtomicBool,
     /// The index definitions the last load read.
@@ -358,7 +445,7 @@ pub struct CatalogSection {
     caps: ChunkCaps,
 }
 
-impl CatalogSection {
+impl<S: CatalogStore> CatalogSection<S> {
     /// Create a new catalog section, which writes with the chunk caps of
     /// this moment ([`ChunkCaps::current`]).
     ///
@@ -366,7 +453,7 @@ impl CatalogSection {
     /// dependency on `TransactionManager` which lives in the engine layer.
     pub fn new(
         catalog: Arc<Catalog>,
-        store: Arc<LpgStore>,
+        store: Arc<S>,
         epoch_fn: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -413,12 +500,12 @@ impl CatalogSection {
 
     /// The indexes of the default graph and of each named graph that has any.
     fn collect_graph_indexes(&self) -> Vec<GraphIndexes> {
-        let mut graphs = vec![GraphIndexes::of(&self.store, None)];
+        let mut graphs = vec![GraphIndexes::of(&*self.store, None)];
         let mut names = self.store.graph_names();
         names.sort();
         for name in names {
             if let Some(graph) = self.store.graph(&name) {
-                let indexes = GraphIndexes::of(&graph, Some(name));
+                let indexes = GraphIndexes::of(&*graph, Some(name));
                 if !indexes.is_empty() {
                     graphs.push(indexes);
                 }
@@ -891,7 +978,7 @@ impl fmt::Display for ChunkDescription<'_> {
     }
 }
 
-impl Section for CatalogSection {
+impl<S: CatalogStore> Section for CatalogSection<S> {
     fn section_type(&self) -> SectionType {
         SectionType::Catalog
     }

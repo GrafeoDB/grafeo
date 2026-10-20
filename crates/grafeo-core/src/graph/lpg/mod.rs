@@ -42,6 +42,16 @@ pub use property::{CompareOp, PropertyStorage};
 
 // Store and section require the lpg feature
 #[cfg(feature = "lpg")]
+pub(crate) use chunked::{
+    LPG_SECTION_VERSION as LPG_SECTION_VERSION_3, read_lpg_chunks as read_version_3_chunks,
+};
+#[cfg(feature = "lpg")]
 pub use section::LpgStoreSection;
 #[cfg(feature = "lpg")]
+pub(crate) use section::load_blocks as load_0_5_blocks;
+#[cfg(feature = "lpg")]
+pub use section::load_versions;
+#[cfg(feature = "lpg")]
 pub use store::{LpgStore, OpenChangesByGraph};
+#[cfg(feature = "lpg")]
+pub(crate) use store::{MaybeEqual, PropertyIndex};

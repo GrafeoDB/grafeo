@@ -26,9 +26,10 @@ use crate::graph::lpg::{Edge, Node};
 use crate::index::vector::DistanceMetric;
 use crate::statistics::Statistics;
 use arcstr::ArcStr;
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashMap;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// Read-only graph operations used by the query engine.
@@ -451,6 +452,256 @@ pub trait GraphStore: Send + Sync {
             .collect()
     }
 
+    // --- Reads at a view (#412) ---
+    //
+    // Each read below answers as of a `ReadView`: a transaction at its
+    // snapshot, its own writes included, or a committed reader at an epoch.
+    // The defaults keep the answer of the same read without a view and drop
+    // what the view does not see (existence only), so every store keeps
+    // working as it did; a store that versions values and labels answers
+    // exactly and says so with `answers_at_view`.
+
+    /// Whether this store's lookups and label scans at a view answer what a
+    /// scan of every node finds at that view, read through the store's own
+    /// per-row reads at the view. The planner then lets a transaction or a
+    /// read at a past epoch use them in place of a scan. Index entries may
+    /// be a superset of what any one view sees, as long as the lookup
+    /// rechecks each candidate at the view.
+    ///
+    /// The default is `false`: the default lookups give the answer of now,
+    /// filtered by existence at the view.
+    fn answers_at_view(&self) -> bool {
+        false
+    }
+
+    /// Whether `view` sees node `id`.
+    fn is_node_visible_at(&self, id: NodeId, view: ReadView) -> bool {
+        match view.transaction {
+            Some(transaction_id) => self.is_node_visible_versioned(id, view.epoch, transaction_id),
+            None => self.is_node_visible_at_epoch(id, view.epoch),
+        }
+    }
+
+    /// Whether `view` sees edge `id`.
+    fn is_edge_visible_at(&self, id: EdgeId, view: ReadView) -> bool {
+        match view.transaction {
+            Some(transaction_id) => self.is_edge_visible_versioned(id, view.epoch, transaction_id),
+            None => self.is_edge_visible_at_epoch(id, view.epoch),
+        }
+    }
+
+    /// The nodes of `ids` that `view` sees, in their order.
+    fn filter_visible_node_ids_at(&self, ids: &[NodeId], view: ReadView) -> Vec<NodeId> {
+        match view.transaction {
+            Some(transaction_id) => {
+                self.filter_visible_node_ids_versioned(ids, view.epoch, transaction_id)
+            }
+            None => self.filter_visible_node_ids(ids, view.epoch),
+        }
+    }
+
+    /// Node `id` as `view` sees it.
+    fn get_node_at(&self, id: NodeId, view: ReadView) -> Option<Node> {
+        match view.transaction {
+            Some(transaction_id) => self.get_node_versioned(id, view.epoch, transaction_id),
+            None => self.get_node_at_epoch(id, view.epoch),
+        }
+    }
+
+    /// Edge `id` as `view` sees it.
+    fn get_edge_at(&self, id: EdgeId, view: ReadView) -> Option<Edge> {
+        match view.transaction {
+            Some(transaction_id) => self.get_edge_versioned(id, view.epoch, transaction_id),
+            None => self.get_edge_at_epoch(id, view.epoch),
+        }
+    }
+
+    /// The value of property `key` of node `id` as `view` sees the node:
+    /// `None` when the view does not see it or it has no such property.
+    fn node_property_at(&self, id: NodeId, key: &str, view: ReadView) -> Option<Value> {
+        match view.transaction {
+            Some(transaction_id) => {
+                self.node_property_versioned(id, key, view.epoch, transaction_id)
+            }
+            None => self.node_property_at_epoch(id, key, view.epoch),
+        }
+    }
+
+    /// The value of property `key` of edge `id` as `view` sees the edge
+    /// (see [`node_property_at`](Self::node_property_at)).
+    fn edge_property_at(&self, id: EdgeId, key: &str, view: ReadView) -> Option<Value> {
+        match view.transaction {
+            Some(transaction_id) => {
+                self.edge_property_versioned(id, key, view.epoch, transaction_id)
+            }
+            None => self.edge_property_at_epoch(id, key, view.epoch),
+        }
+    }
+
+    /// The labels of node `id` as `view` sees the node, `None` when the view
+    /// does not see it. The default builds the node.
+    fn node_labels_at(&self, id: NodeId, view: ReadView) -> Option<SmallVec<[ArcStr; 2]>> {
+        self.get_node_at(id, view).map(|node| node.labels)
+    }
+
+    /// Whether node `id` has `label` as `view` sees the node, `None` when
+    /// the view does not see it: a label check.
+    fn node_has_label_at(&self, id: NodeId, label: &str, view: ReadView) -> Option<bool> {
+        self.node_labels_at(id, view)
+            .map(|labels| labels.iter().any(|name| name.as_str() == label))
+    }
+
+    /// [`get_node_property_batch`](Self::get_node_property_batch) as `view`
+    /// sees the nodes: `None` for a node it does not see.
+    fn get_node_property_batch_at(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+        view: ReadView,
+    ) -> Vec<Option<Value>> {
+        let mut values = self.get_node_property_batch(ids, key);
+        for (value, id) in values.iter_mut().zip(ids) {
+            if value.is_some() && !self.is_node_visible_at(*id, view) {
+                *value = None;
+            }
+        }
+        values
+    }
+
+    /// [`get_nodes_properties_batch`](Self::get_nodes_properties_batch) as
+    /// `view` sees the nodes: no values for a node it does not see.
+    fn get_nodes_properties_batch_at(
+        &self,
+        ids: &[NodeId],
+        view: ReadView,
+    ) -> Vec<FxHashMap<PropertyKey, Value>> {
+        let mut values = self.get_nodes_properties_batch(ids);
+        for (map, id) in values.iter_mut().zip(ids) {
+            if !map.is_empty() && !self.is_node_visible_at(*id, view) {
+                map.clear();
+            }
+        }
+        values
+    }
+
+    /// [`get_nodes_properties_selective_batch`](Self::get_nodes_properties_selective_batch)
+    /// as `view` sees the nodes: no values for a node it does not see.
+    fn get_nodes_properties_selective_batch_at(
+        &self,
+        ids: &[NodeId],
+        keys: &[PropertyKey],
+        view: ReadView,
+    ) -> Vec<FxHashMap<PropertyKey, Value>> {
+        let mut values = self.get_nodes_properties_selective_batch(ids, keys);
+        for (map, id) in values.iter_mut().zip(ids) {
+            if !map.is_empty() && !self.is_node_visible_at(*id, view) {
+                map.clear();
+            }
+        }
+        values
+    }
+
+    /// [`get_edges_properties_selective_batch`](Self::get_edges_properties_selective_batch)
+    /// as `view` sees the edges: no values for an edge it does not see.
+    fn get_edges_properties_selective_batch_at(
+        &self,
+        ids: &[EdgeId],
+        keys: &[PropertyKey],
+        view: ReadView,
+    ) -> Vec<FxHashMap<PropertyKey, Value>> {
+        let mut values = self.get_edges_properties_selective_batch(ids, keys);
+        for (map, id) in values.iter_mut().zip(ids) {
+            if !map.is_empty() && !self.is_edge_visible_at(*id, view) {
+                map.clear();
+            }
+        }
+        values
+    }
+
+    /// The edges of `node` in `direction` that `view` sees, as (other node,
+    /// edge), in the order of [`edges_from`](Self::edges_from).
+    fn edges_from_at(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        view: ReadView,
+    ) -> Vec<(NodeId, EdgeId)> {
+        let mut edges = self.edges_from(node, direction);
+        edges.retain(|&(_, edge)| self.is_edge_visible_at(edge, view));
+        edges
+    }
+
+    /// The nodes at the other end of the edges of
+    /// [`edges_from_at`](Self::edges_from_at).
+    fn neighbors_at(&self, node: NodeId, direction: Direction, view: ReadView) -> Vec<NodeId> {
+        self.edges_from_at(node, direction, view)
+            .into_iter()
+            .map(|(other, _)| other)
+            .collect()
+    }
+
+    /// The nodes with `label` that `view` sees, in ID order.
+    fn nodes_by_label_at(&self, label: &str, view: ReadView) -> Vec<NodeId> {
+        self.filter_visible_node_ids_at(&self.nodes_by_label(label), view)
+    }
+
+    /// The nodes with at least one of `labels` that `view` sees, each once
+    /// and in ID order (see [`nodes_with_any_label`](Self::nodes_with_any_label)).
+    fn nodes_with_any_label_at(&self, labels: &[&str], view: ReadView) -> Vec<NodeId> {
+        self.filter_visible_node_ids_at(&self.nodes_with_any_label(labels), view)
+    }
+
+    /// The nodes `view` sees whose `property` equals `value`
+    /// (see [`find_nodes_by_property`](Self::find_nodes_by_property)).
+    fn find_nodes_by_property_at(
+        &self,
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Vec<NodeId> {
+        self.filter_visible_node_ids_at(&self.find_nodes_by_property(property, value), view)
+    }
+
+    /// The nodes `view` sees that meet every equality of `conditions`
+    /// (see [`find_nodes_by_properties`](Self::find_nodes_by_properties)).
+    fn find_nodes_by_properties_at(
+        &self,
+        conditions: &[(&str, Value)],
+        view: ReadView,
+    ) -> Vec<NodeId> {
+        self.filter_visible_node_ids_at(&self.find_nodes_by_properties(conditions), view)
+    }
+
+    /// [`find_nodes_maybe_equal`](Self::find_nodes_maybe_equal) for `view`:
+    /// every node the view sees that `=` finds equal, maybe others the view
+    /// sees, for a filter to decide; `None` without an index on `property`.
+    fn find_nodes_maybe_equal_at(
+        &self,
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Option<Vec<NodeId>> {
+        self.find_nodes_maybe_equal(property, value)
+            .map(|found| self.filter_visible_node_ids_at(&found, view))
+    }
+
+    /// The nodes `view` sees whose `property` lies within the bounds (see
+    /// [`find_nodes_in_range`](Self::find_nodes_in_range)).
+    fn find_nodes_in_range_at(
+        &self,
+        property: &str,
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+        view: ReadView,
+    ) -> Vec<NodeId> {
+        self.filter_visible_node_ids_at(
+            &self.find_nodes_in_range(property, min, max, min_inclusive, max_inclusive),
+            view,
+        )
+    }
+
     // --- History ---
 
     /// Returns all versions of a node with their creation/deletion epochs, newest first.
@@ -514,6 +765,27 @@ pub trait GraphStoreSearch: GraphStore {
         )
     }
 
+    /// [`find_nodes_in_range_iter`](Self::find_nodes_in_range_iter) for
+    /// `view`: the nodes it sees whose value lies within the bounds. The
+    /// default materializes
+    /// [`find_nodes_in_range_at`](GraphStore::find_nodes_in_range_at), as
+    /// the read without a view does; a store with a lazy range scan
+    /// overrides both.
+    fn find_nodes_in_range_iter_at<'a>(
+        &'a self,
+        property: &'a str,
+        min: Option<&'a Value>,
+        max: Option<&'a Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+        view: ReadView,
+    ) -> Box<dyn Iterator<Item = NodeId> + 'a> {
+        Box::new(
+            self.find_nodes_in_range_at(property, min, max, min_inclusive, max_inclusive, view)
+                .into_iter(),
+        )
+    }
+
     // --- Text search (BM25) ---
 
     /// Returns true if a BM25 text index exists for the given label and property.
@@ -537,6 +809,20 @@ pub trait GraphStoreSearch: GraphStore {
         _query: &str,
     ) -> Option<f64> {
         None
+    }
+
+    /// [`score_text`](Self::score_text) for `view`: the score of the node's
+    /// text as the view sees it. The default scores the text of now.
+    #[cfg(feature = "text-index")]
+    fn score_text_at(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        property: &str,
+        query: &str,
+        _view: ReadView,
+    ) -> Option<f64> {
+        self.score_text(node_id, label, property, query)
     }
 
     /// Returns the top-`k` documents by BM25 score for a text query.
@@ -564,6 +850,39 @@ pub trait GraphStoreSearch: GraphStore {
         _threshold: f64,
     ) -> Vec<(NodeId, f64)> {
         Vec::new()
+    }
+
+    /// [`text_search`](Self::text_search) for `view`: the documents it sees.
+    /// The default drops the results of now that the view does not see, so
+    /// it may return fewer than `k`.
+    #[cfg(feature = "text-index")]
+    fn text_search_at(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        k: usize,
+        view: ReadView,
+    ) -> Vec<(NodeId, f64)> {
+        let mut found = self.text_search(label, property, query, k);
+        found.retain(|&(id, _)| self.is_node_visible_at(id, view));
+        found
+    }
+
+    /// [`text_search_with_threshold`](Self::text_search_with_threshold) for
+    /// `view`: the documents it sees.
+    #[cfg(feature = "text-index")]
+    fn text_search_with_threshold_at(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        threshold: f64,
+        view: ReadView,
+    ) -> Vec<(NodeId, f64)> {
+        let mut found = self.text_search_with_threshold(label, property, query, threshold);
+        found.retain(|&(id, _)| self.is_node_visible_at(id, view));
+        found
     }
 
     // --- Vector search (HNSW or brute force) ---
@@ -621,6 +940,42 @@ pub trait GraphStoreSearch: GraphStore {
         _metric: DistanceMetric,
     ) -> Vec<(NodeId, f64)> {
         Vec::new()
+    }
+
+    /// [`vector_search`](Self::vector_search) for `view`: the nodes it sees.
+    /// The default drops the results of now that the view does not see, so
+    /// it may return fewer than `k`.
+    #[cfg(feature = "vector-index")]
+    fn vector_search_at(
+        &self,
+        label: Option<&str>,
+        property: &str,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        view: ReadView,
+    ) -> Vec<(NodeId, f64)> {
+        let mut found = self.vector_search(label, property, query, k, metric);
+        found.retain(|&(id, _)| self.is_node_visible_at(id, view));
+        found
+    }
+
+    /// [`vector_search_with_threshold`](Self::vector_search_with_threshold)
+    /// for `view`: the nodes it sees.
+    #[cfg(feature = "vector-index")]
+    fn vector_search_with_threshold_at(
+        &self,
+        label: Option<&str>,
+        property: &str,
+        query: &[f32],
+        threshold: f64,
+        metric: DistanceMetric,
+        view: ReadView,
+    ) -> Vec<(NodeId, f64)> {
+        let mut found =
+            self.vector_search_with_threshold(label, property, query, threshold, metric);
+        found.retain(|&(id, _)| self.is_node_visible_at(id, view));
+        found
     }
 }
 

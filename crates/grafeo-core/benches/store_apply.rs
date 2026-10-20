@@ -24,7 +24,9 @@ use std::hint::black_box;
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use grafeo_common::change::{ChangeSet, DataModel, DataOp, GraphRef};
-use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{
+    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
+};
 use grafeo_core::graph::apply::{Applied, ChangeTarget, Writer};
 use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
@@ -33,10 +35,33 @@ use grafeo_core::graph::{Direction, GraphStoreMut};
 /// The people in the graph each case starts from.
 const PEOPLE: u64 = 10_000;
 
+/// How often the write cases with an older reader collect: the reader holds
+/// the horizon back between collects, as one that runs for a while does.
+/// The other write cases collect right after each write or commit, as the
+/// engine does on the row-group store (#412 S6, decision B).
+const COLLECT_EVERY: u32 = 1_024;
+
 /// A store the cases run on.
 trait Store: GraphStoreMut + ChangeTarget {}
 
 impl<T: GraphStoreMut + ChangeTarget> Store for T {}
+
+/// A store with a property index.
+trait Indexed: Store {
+    fn create_property_index(&self, property: &str);
+}
+
+impl Indexed for LpgStore {
+    fn create_property_index(&self, property: &str) {
+        LpgStore::create_property_index(self, property);
+    }
+}
+
+impl Indexed for RowGroupStore {
+    fn create_property_index(&self, property: &str) {
+        RowGroupStore::create_property_index(self, property);
+    }
+}
 
 /// The epoch after the store's current one.
 fn next_epoch(store: &dyn Store) -> EpochId {
@@ -87,8 +112,26 @@ fn people(store: &dyn Store) -> Vec<NodeId> {
     ids
 }
 
+/// Calls `collect` every [`COLLECT_EVERY`] calls, counted in `calls`.
+fn collect_now_and_then<S>(store: &S, collect: fn(&S), calls: &mut u32) {
+    *calls += 1;
+    if *calls == COLLECT_EVERY {
+        *calls = 0;
+        collect(store);
+    }
+}
+
 /// The write and read cases on stores from `make`, named `store`.
-fn cases<S: Store + 'static>(c: &mut Criterion, store_name: &str, make: fn() -> S) {
+/// `collect` drops what no reader needs any more (the row-group store's
+/// update chains and version stamps, in the vectors it lists): the cases
+/// without an older reader call it right after each write or commit, as
+/// the engine does, the ones with an older reader now and then.
+fn cases<S: Indexed + 'static>(
+    c: &mut Criterion,
+    store_name: &str,
+    make: fn() -> S,
+    collect: fn(&S),
+) {
     let mut group = c.benchmark_group(format!("store_apply/{store_name}"));
 
     for before_images in [false, true] {
@@ -114,8 +157,10 @@ fn cases<S: Store + 'static>(c: &mut Criterion, store_name: &str, make: fn() -> 
         let store = make();
         let ids = people(&store);
         let mut row = 0_usize;
+        let mut calls = 0;
         group.bench_function(format!("immediate_set_node_property/{images}"), |b| {
             b.iter(|| {
+                collect_now_and_then(&store, collect, &mut calls);
                 row = (row + 1) % ids.len();
                 let op = DataOp::SetNodeProperty {
                     id: ids[row],
@@ -125,6 +170,28 @@ fn cases<S: Store + 'static>(c: &mut Criterion, store_name: &str, make: fn() -> 
                 black_box(immediate(&store, &op, before_images))
             });
         });
+
+        // The same writes while no reader reads before their epoch: each
+        // keeps what it replaces, and the collect right after it drops that.
+        let store = make();
+        let ids = people(&store);
+        let mut row = 0_usize;
+        group.bench_function(
+            format!("immediate_set_node_property_no_older_reader/{images}"),
+            |b| {
+                b.iter(|| {
+                    row = (row + 1) % ids.len();
+                    let op = DataOp::SetNodeProperty {
+                        id: ids[row],
+                        key: PropertyKey::new("age"),
+                        value: Value::Int64(i64::try_from(row).unwrap_or(0)),
+                    };
+                    let applied = immediate(&store, &op, before_images);
+                    collect(&store);
+                    black_box(applied)
+                });
+            },
+        );
 
         let store = make();
         let ids = people(&store);
@@ -147,8 +214,10 @@ fn cases<S: Store + 'static>(c: &mut Criterion, store_name: &str, make: fn() -> 
         let store = make();
         let ids = people(&store);
         let mut row = 0_usize;
+        let mut calls = 0;
         group.bench_function(format!("immediate_label_add_and_remove/{images}"), |b| {
             b.iter(|| {
+                collect_now_and_then(&store, collect, &mut calls);
                 row = (row + 1) % ids.len();
                 let label = ArcStr::from("Traveller");
                 let add = DataOp::AddNodeLabel {
@@ -166,8 +235,8 @@ fn cases<S: Store + 'static>(c: &mut Criterion, store_name: &str, make: fn() -> 
     }
 
     // A transaction of one write: apply as the transaction, record the
-    // entry, stamp it at the next epoch (the store's part of a private
-    // transaction; the transaction manager's part is not in here).
+    // entry, stamp it at the next epoch, collect (the store's part of a
+    // private transaction; the transaction manager's part is not in here).
     let store = make();
     let ids = people(&store);
     let mut row = 0_usize;
@@ -201,6 +270,75 @@ fn cases<S: Store + 'static>(c: &mut Criterion, store_name: &str, make: fn() -> 
             store
                 .stamp(id, &mut set.entries().iter(), next_epoch(&store))
                 .expect("the stamp");
+            collect(&store);
+        });
+    });
+
+    // The same transaction on a store with an index on the key it writes:
+    // the index keeps the old value for older readers until the collect.
+    let store = make();
+    store.create_property_index("age");
+    let ids = people(&store);
+    let mut row = 0_usize;
+    group.bench_function("transaction_set_indexed_property_and_stamp", |b| {
+        b.iter(|| {
+            row = (row + 1) % ids.len();
+            transaction += 1;
+            let id = TransactionId::new(transaction);
+            let writer = Writer::Transaction {
+                id,
+                snapshot: store.current_epoch(),
+            };
+            let op = DataOp::SetNodeProperty {
+                id: ids[row],
+                key: PropertyKey::new("age"),
+                value: Value::Int64(i64::try_from(row).unwrap_or(0)),
+            };
+            let mut set = ChangeSet::new();
+            let slot = set
+                .slot(GraphRef {
+                    model: DataModel::Lpg,
+                    key: None,
+                })
+                .expect("a slot");
+            if let Applied::Changed { before, version } =
+                store.apply(&op, writer).expect("the write applies")
+            {
+                set.push(slot, op, before, version).expect("the entry");
+            }
+            store
+                .stamp(id, &mut set.entries().iter(), next_epoch(&store))
+                .expect("the stamp");
+            collect(&store);
+        });
+    });
+
+    // Lookups through an index on `name` (one node per name): without a
+    // view, at a transaction's view, and maybe-equal at the view.
+    let store = make();
+    store.create_property_index("name");
+    let ids = people(&store);
+    let names: Vec<Value> = (0..ids.len())
+        .map(|row| Value::from(format!("Alix {row}")))
+        .collect();
+    let view = ReadView::transaction(TransactionId::new(7), store.current_epoch());
+    let mut row = 0_usize;
+    group.bench_function("index_lookup", |b| {
+        b.iter(|| {
+            row = (row + 1) % names.len();
+            black_box(store.find_nodes_by_property("name", &names[row]))
+        });
+    });
+    group.bench_function("index_lookup_at_view", |b| {
+        b.iter(|| {
+            row = (row + 1) % names.len();
+            black_box(store.find_nodes_by_property_at("name", &names[row], view))
+        });
+    });
+    group.bench_function("index_maybe_equal_at_view", |b| {
+        b.iter(|| {
+            row = (row + 1) % names.len();
+            black_box(store.find_nodes_maybe_equal_at("name", &names[row], view))
         });
     });
 
@@ -258,6 +396,80 @@ fn cases<S: Store + 'static>(c: &mut Criterion, store_name: &str, make: fn() -> 
     group.bench_function("label_scan_10k", |b| {
         b.iter(|| black_box(store.nodes_by_label("Person").len()));
     });
+
+    // Reads at a transaction's view, and the reads of now with the
+    // visibility checks the engine made before the reads at a view.
+    let view = ReadView::transaction(TransactionId::new(7), store.current_epoch());
+    group.bench_function("read_node_property_at_view", |b| {
+        b.iter(|| {
+            row = (row + 1) % ids.len();
+            black_box(store.node_property_at(ids[row], "age", view))
+        });
+    });
+    group.bench_function("expand_outgoing_at_view", |b| {
+        b.iter(|| {
+            row = (row + 1) % ids.len();
+            black_box(store.edges_from_at(ids[row], Direction::Outgoing, view))
+        });
+    });
+    group.bench_function("expand_outgoing_then_filter", |b| {
+        b.iter(|| {
+            row = (row + 1) % ids.len();
+            let mut edges = store.edges_from(ids[row], Direction::Outgoing);
+            edges.retain(|&(_, edge)| {
+                store.is_edge_visible_versioned(edge, view.epoch, TransactionId::new(7))
+            });
+            black_box(edges)
+        });
+    });
+    group.bench_function("label_scan_10k_at_view", |b| {
+        b.iter(|| black_box(store.nodes_by_label_at("Person", view).len()));
+    });
+    group.bench_function("label_scan_10k_then_filter", |b| {
+        b.iter(|| {
+            let ids = store.nodes_by_label("Person");
+            black_box(
+                store
+                    .filter_visible_node_ids_versioned(&ids, view.epoch, TransactionId::new(7))
+                    .len(),
+            )
+        });
+    });
+
+    // Reads by a committed reader while an open transaction has written
+    // every person's age and the label `Traveller`: where a store keeps
+    // the old values for older readers, each read walks what it kept.
+    let store = make();
+    let ids = people(&store);
+    let committed = ReadView::committed(store.current_epoch());
+    let writer = Writer::Transaction {
+        id: TransactionId::new(7),
+        snapshot: store.current_epoch(),
+    };
+    for (row, id) in ids.iter().enumerate() {
+        for op in [
+            DataOp::SetNodeProperty {
+                id: *id,
+                key: PropertyKey::new("age"),
+                value: Value::Int64(i64::try_from(row).unwrap_or(0)),
+            },
+            DataOp::AddNodeLabel {
+                id: *id,
+                label: ArcStr::from("Traveller"),
+            },
+        ] {
+            store.apply(&op, writer).expect("the open write");
+        }
+    }
+    group.bench_function("read_node_property_at_view_with_open_writes", |b| {
+        b.iter(|| {
+            row = (row + 1) % ids.len();
+            black_box(store.node_property_at(ids[row], "age", committed))
+        });
+    });
+    group.bench_function("label_scan_10k_at_view_with_open_writes", |b| {
+        b.iter(|| black_box(store.nodes_by_label_at("Person", committed).len()));
+    });
     group.finish();
 }
 
@@ -266,11 +478,14 @@ fn lpg_store() -> LpgStore {
 }
 
 fn bench_lpg_store(c: &mut Criterion) {
-    cases(c, "lpg", lpg_store);
+    // `LpgStore` keeps no old values to collect.
+    cases(c, "lpg", lpg_store, |_| {});
 }
 
 fn bench_rowgroup_store(c: &mut Criterion) {
-    cases(c, "rowgroup", RowGroupStore::new);
+    cases(c, "rowgroup", RowGroupStore::new, |store| {
+        store.collect(store.current_epoch());
+    });
 }
 
 criterion_group!(benches, bench_lpg_store, bench_rowgroup_store);

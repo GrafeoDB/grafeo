@@ -9,7 +9,7 @@ use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::GraphStoreSearch;
 use crate::index::vector::DistanceMetric;
-use grafeo_common::types::{LogicalType, NodeId};
+use grafeo_common::types::{LogicalType, NodeId, ReadView};
 use std::sync::Arc;
 
 /// A scan operator that finds nodes by vector similarity.
@@ -69,6 +69,8 @@ pub struct VectorScanOperator {
     position: usize,
     executed: bool,
     chunk_capacity: usize,
+    /// The view the search reads at, if any.
+    view: Option<ReadView>,
 }
 
 impl VectorScanOperator {
@@ -99,6 +101,7 @@ impl VectorScanOperator {
             position: 0,
             executed: false,
             chunk_capacity: 2048,
+            view: None,
         }
     }
 
@@ -126,19 +129,30 @@ impl VectorScanOperator {
         self
     }
 
+    /// Searches as `view` sees the nodes: the store drops those it does not
+    /// see.
+    #[must_use]
+    pub fn with_view(mut self, view: ReadView) -> Self {
+        self.view = Some(view);
+        self
+    }
+
     fn execute_search(&mut self) {
         if self.executed {
             return;
         }
         self.executed = true;
 
-        self.results = self.store.vector_search(
-            self.label.as_deref(),
-            &self.property,
-            &self.query,
-            self.k,
-            self.metric,
-        );
+        let (label, property) = (self.label.as_deref(), &self.property);
+        self.results = match self.view {
+            Some(view) => {
+                self.store
+                    .vector_search_at(label, property, &self.query, self.k, self.metric, view)
+            }
+            None => self
+                .store
+                .vector_search(label, property, &self.query, self.k, self.metric),
+        };
 
         self.apply_filters();
     }

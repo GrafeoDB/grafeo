@@ -2,32 +2,245 @@
 
 use std::collections::BTreeMap;
 
-use grafeo_common::types::{EpochId, NodeId, Value};
+use grafeo_common::types::{EpochId, NodeId, ReadView, Value};
 
 use super::{
-    KnownGap, LABELS, Reader, Rng, Tx, committed, conformance_suite, counts, counts_of, image,
-    people, random_write,
+    KnownGap, LABELS, Reader, Rng, Tx, apply_all, committed, conformance_suite, counts, counts_of,
+    image, people, random_write,
 };
 use crate::graph::Direction;
 use crate::graph::rowgroup::RowGroupStore;
 use crate::graph::traits::GraphStore;
 
-/// Values and labels are written in place until H2b's update chains.
-const IN_PLACE: &str = "values and labels are written in place until H2b (#412)";
-
-/// The cases the row-group store fails, each with its reason.
-const GAPS: &[KnownGap] = &[
-    KnownGap {
-        case: "an_open_transactions_value_and_label_writes_are_invisible_to_others",
-        reason: IN_PLACE,
-    },
-    KnownGap {
-        case: "a_reader_at_an_earlier_epoch_keeps_its_values_and_labels",
-        reason: IN_PLACE,
-    },
-];
+/// The cases the row-group store fails, each with its reason: none since
+/// H2b's update chains (#412).
+const GAPS: &[KnownGap] = &[];
 
 conformance_suite!(RowGroupStore, RowGroupStore::new, GAPS);
+
+// ── Collect at the horizon, and replay, through every read path ──────
+
+/// The collect and replay cases the row-group store fails, each with its
+/// reason. They run through the suite's harness, so a gap that closes
+/// fails its test too.
+const COLLECT_GAPS: &[KnownGap] = &[];
+
+/// Runs a collect or replay case of this module with [`COLLECT_GAPS`] on
+/// stores from `$make`.
+macro_rules! collect_cases {
+    ($make:expr; $($case:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $case() {
+                $crate::graph::conformance::run::<RowGroupStore>(
+                    stringify!($case),
+                    $crate::graph::conformance::rowgroup::cases::$case,
+                    $make,
+                    $crate::graph::conformance::rowgroup::COLLECT_GAPS,
+                );
+            }
+        )*
+    };
+}
+
+collect_cases!(RowGroupStore::new;
+    collect_keeps_every_read_path_at_the_horizon,
+    collect_returns_the_version_info_to_its_flat_size,
+    a_transactions_pending_writes_survive_collect,
+    others_keep_the_committed_values_through_collect,
+    replay_writes_no_version,
+);
+
+/// The suite and the collect cases again, on a store with property indexes
+/// on the keys the reads at a view probe: every equality and maybe-equal
+/// lookup at a view then goes through an index that holds old and pending
+/// values, which it must recheck at the view (#412 S7).
+mod indexed {
+    use super::{GAPS, RowGroupStore};
+    use crate::graph::conformance::conformance_suite;
+
+    fn indexed_store() -> RowGroupStore {
+        let store = RowGroupStore::new();
+        for key in ["name", "age", "city"] {
+            store.create_property_index(key);
+        }
+        store
+    }
+
+    conformance_suite!(RowGroupStore, indexed_store, GAPS);
+
+    collect_cases!(indexed_store;
+        collect_keeps_every_read_path_at_the_horizon,
+        collect_returns_the_version_info_to_its_flat_size,
+        a_transactions_pending_writes_survive_collect,
+        others_keep_the_committed_values_through_collect,
+        replay_writes_no_version,
+    );
+}
+
+/// The cases of [`collect_cases`].
+mod cases {
+    use grafeo_common::change::DataOp;
+    use grafeo_common::types::{ArcStr, PropertyKey, Value};
+
+    use super::super::cases::{create_and_delete_writes, value_and_label_writes};
+    use super::super::{
+        Outcome, Reader, Tx, apply_all, committed, ensure, image, next_epoch, paths_at, people,
+        same,
+    };
+    use crate::graph::apply::Writer;
+    use crate::graph::rowgroup::RowGroupStore;
+
+    /// After `collect(horizon)`, a reader at the horizon, a transaction that
+    /// began there and a reader at a later commit see, through every read at
+    /// their views, what they saw before the collect.
+    pub(super) fn collect_keeps_every_read_path_at_the_horizon(
+        make: &dyn Fn() -> RowGroupStore,
+    ) -> Outcome {
+        let store = make();
+        let people = people(&store)?;
+        let mut tx = Tx::begin(&store, 10);
+        value_and_label_writes(&mut tx, &people)?;
+        create_and_delete_writes(&mut tx, &people)?;
+        let horizon = tx.commit()?;
+        let reader = Tx::begin(&store, 11);
+        let mut tx = Tx::begin(&store, 12);
+        tx.set_node(people.mia, "city", Value::from("Prague"))?;
+        tx.remove_label(people.gus, "Person")?;
+        let later = tx.commit()?;
+
+        let (at_horizon, at_later) = (
+            image(&store, Reader::At(horizon)),
+            image(&store, Reader::At(later)),
+        );
+        let gone = store.collect(horizon);
+        ensure(gone > 0, || {
+            "the commit at the horizon deleted rows".to_string()
+        })?;
+        paths_at(&store, Reader::At(horizon), &at_horizon, &[&at_later])?;
+        paths_at(
+            &store,
+            Reader::Transaction(reader.id, reader.snapshot),
+            &at_horizon,
+            &[&at_later],
+        )?;
+        paths_at(&store, Reader::At(later), &at_later, &[&at_horizon])
+    }
+
+    /// Once every write is committed by the horizon and collected, the rows'
+    /// version info is as small as for a store that was never written
+    /// after its load, values and labels included.
+    pub(super) fn collect_returns_the_version_info_to_its_flat_size(
+        make: &dyn Fn() -> RowGroupStore,
+    ) -> Outcome {
+        let (written, untouched) = (make(), make());
+        let people = people(&written)?;
+        super::super::people(&untouched)?;
+        let mut tx = Tx::begin(&written, 10);
+        value_and_label_writes(&mut tx, &people)?;
+        tx.commit()?;
+        written.collect(written.current_epoch());
+        untouched.collect(untouched.current_epoch());
+        same(
+            &written.version_bytes(),
+            &untouched.version_bytes(),
+            "the version bytes after the collect",
+        )?;
+        same(
+            &written.stamped_vectors(),
+            &0,
+            "no vector keeps stamps after the collect",
+        )
+    }
+
+    /// An open transaction's writes stay through a collect at the store's
+    /// epoch: it still sees them through every read at its view.
+    pub(super) fn a_transactions_pending_writes_survive_collect(
+        make: &dyn Fn() -> RowGroupStore,
+    ) -> Outcome {
+        let store = make();
+        let people = people(&store)?;
+        let mut tx = Tx::begin(&store, 10);
+        value_and_label_writes(&mut tx, &people)?;
+        create_and_delete_writes(&mut tx, &people)?;
+        let own = tx.view();
+        store.collect(store.current_epoch());
+        ensure(store.stamped_vectors() > 0, || {
+            "the open transaction's vectors keep their stamps".to_string()
+        })?;
+        paths_at(
+            &store,
+            Reader::Transaction(tx.id, tx.snapshot),
+            &own,
+            &[&committed(&store)],
+        )
+    }
+
+    /// While a transaction is open, a collect at the store's epoch leaves
+    /// every other reader the committed values and labels (#412: the
+    /// versions an open write keeps survive the collect).
+    pub(super) fn others_keep_the_committed_values_through_collect(
+        make: &dyn Fn() -> RowGroupStore,
+    ) -> Outcome {
+        let store = make();
+        let people = people(&store)?;
+        let before = committed(&store);
+        let mut tx = Tx::begin(&store, 10);
+        value_and_label_writes(&mut tx, &people)?;
+        let own = tx.view();
+        store.collect(store.current_epoch());
+        paths_at(&store, Reader::At(store.current_epoch()), &before, &[&own])
+    }
+
+    /// Replay writes values and labels with no version: no reader runs
+    /// during recovery, so the version info stays as small as before the
+    /// replayed writes.
+    pub(super) fn replay_writes_no_version(make: &dyn Fn() -> RowGroupStore) -> Outcome {
+        let store = make();
+        let people = people(&store)?;
+        store.collect(store.current_epoch());
+        let bytes = store.version_bytes();
+        let ops = [
+            DataOp::SetNodeProperty {
+                id: people.alix,
+                key: PropertyKey::new("city"),
+                value: Value::from("Paris"),
+            },
+            DataOp::RemoveNodeProperty {
+                id: people.gus,
+                key: PropertyKey::new("age"),
+            },
+            DataOp::AddNodeLabel {
+                id: people.mia,
+                label: ArcStr::from("Traveller"),
+            },
+            DataOp::SetEdgeProperty {
+                id: people.alix_gus,
+                key: PropertyKey::new("since"),
+                value: Value::Int64(2019),
+            },
+        ];
+        for op in &ops {
+            apply_all(
+                &store,
+                std::slice::from_ref(op),
+                Writer::Replay {
+                    epoch: next_epoch(&store),
+                },
+            )?;
+        }
+        same(
+            &store.version_bytes(),
+            &bytes,
+            "the version bytes after the replayed writes",
+        )?;
+        same(
+            &store.stamped_vectors(),
+            &0,
+            "no vector holds stamps after the replayed value and label writes",
+        )
+    }
+}
 
 /// The data an image holds and whether its access paths agree.
 fn data(
@@ -197,6 +410,116 @@ fn a_vector_filled_by_one_transaction_holds_one_constant_stamp() {
     assert_eq!(store.collect(store.current_epoch()), 1);
     assert_eq!(store.stamped_vectors(), 0);
     assert_eq!(store.node_count(), 5 * VECTOR_ROWS + 1);
+}
+
+/// A transaction's first write of a value, or of a node's labels, creates
+/// its version: an undo node keeps what the write replaced. Its next write
+/// of the same value or labels replaces that version in place and keeps
+/// nothing more; a write of a row it created keeps nothing (no one else sees
+/// the row). A rollback takes every undo node out again. An immediate write
+/// keeps what it replaced, for older readers, until a collect at its epoch;
+/// replay keeps nothing.
+#[test]
+fn a_transactions_next_write_of_a_value_replaces_its_version() {
+    use grafeo_common::change::{DataOp, PendingVersion};
+    use grafeo_common::types::{ArcStr, PropertyKey};
+
+    use crate::graph::apply::{Applied, ChangeTarget, Writer};
+
+    let store = RowGroupStore::new();
+    let people = people(&store).unwrap();
+    store.collect(store.current_epoch());
+    let flat = store.version_bytes();
+    let set = |id: NodeId, key: &str, value: Value| DataOp::SetNodeProperty {
+        id,
+        key: PropertyKey::new(key),
+        value,
+    };
+    let label = |id: NodeId, name: &str, add: bool| {
+        let label = ArcStr::from(name);
+        if add {
+            DataOp::AddNodeLabel { id, label }
+        } else {
+            DataOp::RemoveNodeLabel { id, label }
+        }
+    };
+    let version = |applied: Result<Applied, _>| match applied {
+        Ok(Applied::Changed { version, .. }) => version,
+        other => panic!("expected a change, got {other:?}"),
+    };
+
+    let mut tx = Tx::begin(&store, 10);
+    let alix = people.alix;
+    assert_eq!(
+        version(tx.apply(set(alix, "age", Value::Int64(3)))),
+        PendingVersion::Created
+    );
+    assert_eq!(
+        version(tx.apply(set(alix, "age", Value::Int64(88)))),
+        PendingVersion::Replaced
+    );
+    assert_eq!(
+        version(tx.apply(set(alix, "city", Value::from("Paris")))),
+        PendingVersion::Created,
+        "another key, another version"
+    );
+    assert_eq!(
+        version(tx.apply(label(alix, "Traveller", true))),
+        PendingVersion::Created
+    );
+    assert_eq!(
+        version(tx.apply(label(alix, "Person", false))),
+        PendingVersion::Replaced
+    );
+    assert_eq!(store.update_nodes(), 3, "age, city and labels, a node each");
+    let jules = tx.create_node(&["Person"], &[]).unwrap();
+    assert_eq!(
+        version(tx.apply(set(jules, "age", Value::Int64(19)))),
+        PendingVersion::Created
+    );
+    assert_eq!(
+        version(tx.apply(label(jules, "City", true))),
+        PendingVersion::Created
+    );
+    assert_eq!(store.update_nodes(), 3, "nothing kept of Jules");
+    tx.roll_back().unwrap();
+    assert_eq!(store.update_nodes(), 0, "the rollback took every node out");
+    store.collect(store.current_epoch());
+    assert_eq!(store.version_bytes(), flat);
+
+    let epoch = super::next_epoch(&store);
+    store
+        .apply(
+            &set(people.gus, "age", Value::Int64(40)),
+            Writer::Immediate {
+                epoch,
+                before_images: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.node_property_at(
+            people.gus,
+            "age",
+            ReadView::committed(EpochId::new(epoch.as_u64() - 1))
+        ),
+        Some(Value::Int64(3)),
+        "an older reader keeps Gus's age"
+    );
+    assert_eq!(store.update_nodes(), 1);
+    store.collect(epoch);
+    assert_eq!(store.update_nodes(), 0);
+    assert_eq!(store.version_bytes(), flat, "a row costs what it did");
+
+    apply_all(
+        &store,
+        &[set(people.mia, "age", Value::Int64(19))],
+        Writer::Replay {
+            epoch: super::next_epoch(&store),
+        },
+    )
+    .unwrap();
+    assert_eq!(store.update_nodes(), 0, "replay keeps nothing");
 }
 
 /// While a transaction is open, `collect` leaves its vectors stamped: it

@@ -106,6 +106,15 @@ impl LpgStore {
         Some(record.type_id)
     }
 
+    /// Whether the engine runs [`gc_versions`](Self::gc_versions) after every
+    /// immediate call and commit: not this store, which the engine collects
+    /// every `gc_interval` commits, as with `temporal` a collect drops the
+    /// property and label history older than the read horizon, which
+    /// time-travel reads still read (the row-group store collects after
+    /// every write).
+    #[doc(hidden)]
+    pub const COLLECTS_AFTER_EVERY_WRITE: bool = false;
+
     /// Garbage collects the versions no reader at `min_epoch` or later can
     /// see.
     ///

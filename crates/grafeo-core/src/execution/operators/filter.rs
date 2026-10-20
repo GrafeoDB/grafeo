@@ -11,7 +11,7 @@ use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
     Decimal, DecimalError, EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey,
-    PropertyMap, TransactionId, Value,
+    PropertyMap, ReadView, TransactionId, Value,
 };
 #[cfg(feature = "regex")]
 use regex::Regex;
@@ -755,6 +755,30 @@ impl ExpressionPredicate {
         }
     }
 
+    /// The view this predicate reads at, when it has a transaction context.
+    fn view(&self) -> Option<ReadView> {
+        self.viewing_epoch
+            .map(|epoch| ReadView::new(epoch, self.transaction_id))
+    }
+
+    /// The labels of node `id` as this query sees the node, read without
+    /// building it.
+    fn resolve_labels(&self, id: NodeId) -> Option<smallvec::SmallVec<[arcstr::ArcStr; 2]>> {
+        match self.view() {
+            Some(view) => self.store.node_labels_at(id, view),
+            None => self.store.get_node(id).map(|node| node.labels),
+        }
+    }
+
+    /// Whether node `id` has `label` as this query sees the node: a label
+    /// check, `None` for a node the query does not see.
+    fn resolve_has_label(&self, id: NodeId, label: &str) -> Option<bool> {
+        match self.view() {
+            Some(view) => self.store.node_has_label_at(id, label, view),
+            None => self.store.get_node(id).map(|node| node.has_label(label)),
+        }
+    }
+
     /// Resolves a node using transaction-aware access when available.
     fn resolve_node(&self, node_id: NodeId) -> Option<Node> {
         if let (Some(ep), Some(tx)) = (self.viewing_epoch, self.transaction_id) {
@@ -803,27 +827,28 @@ impl ExpressionPredicate {
     /// another transaction that has not committed, or deleted by this one
     /// (the checks the expand operators make).
     fn visible_edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
-        let mut edges = self.store.edges_from(node, direction);
-        if let Some(epoch) = self.viewing_epoch {
-            edges.retain(|&(other, edge)| {
-                if let Some(tx) = self.transaction_id {
-                    self.store.is_edge_visible_versioned(edge, epoch, tx)
-                        && self.store.is_node_visible_versioned(other, epoch, tx)
-                } else {
-                    self.store.is_edge_visible_at_epoch(edge, epoch)
-                        && self.store.is_node_visible_at_epoch(other, epoch)
-                }
-            });
+        match self.view() {
+            Some(view) => {
+                let mut edges = self.store.edges_from_at(node, direction, view);
+                edges.retain(|&(other, _)| self.store.is_node_visible_at(other, view));
+                edges
+            }
+            None => self.store.edges_from(node, direction),
         }
-        edges
     }
 
     /// Whether the node has every label of `labels` (any node when `None`).
     fn has_labels(&self, node_id: NodeId, labels: &Option<Vec<String>>) -> bool {
-        labels.as_ref().is_none_or(|labels| {
-            self.resolve_node(node_id)
-                .is_some_and(|node| labels.iter().all(|label| node.has_label(label)))
-        })
+        labels
+            .as_ref()
+            .is_none_or(|labels| match labels.as_slice() {
+                [label] => self.resolve_has_label(node_id, label) == Some(true),
+                labels => self.resolve_labels(node_id).is_some_and(|names| {
+                    labels
+                        .iter()
+                        .all(|label| names.iter().any(|name| name.as_str() == label))
+                }),
+            })
     }
 
     /// What the row binds the pattern variable `name` to, read with `read`.
@@ -844,12 +869,15 @@ impl ExpressionPredicate {
         }
     }
 
-    /// The nodes this query sees.
+    /// The nodes this query sees, its transaction's own included.
     fn visible_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.store
-            .node_ids()
-            .into_iter()
-            .filter(|&id| self.resolve_node(id).is_some())
+        match self.view() {
+            Some(view) => self
+                .store
+                .filter_visible_node_ids_at(&self.store.all_node_ids(), view),
+            None => self.store.node_ids(),
+        }
+        .into_iter()
     }
 
     /// How many matches a fast-path `EXISTS` or `COUNT` pattern has for the
@@ -1442,10 +1470,10 @@ impl ExpressionPredicate {
                 let col_idx = *self.variable_columns.get(variable)?;
                 let col = chunk.column(col_idx)?;
                 let node_id = col.get_node_id(row)?;
-                let node = self.resolve_node(node_id)?;
+                let labels = self.resolve_labels(node_id)?;
                 // Sort labels so sets with the same members always produce
                 // the same list, regardless of internal storage order.
-                let mut sorted: Vec<&arcstr::ArcStr> = node.labels.iter().collect();
+                let mut sorted: Vec<&arcstr::ArcStr> = labels.iter().collect();
                 sorted.sort();
                 let labels: Vec<Value> = sorted
                     .into_iter()
@@ -2260,9 +2288,8 @@ impl ExpressionPredicate {
                     return None;
                 };
                 // Check if the node has this label
-                let node = self.resolve_node(node_id)?;
-                let has_label = node.labels.iter().any(|l| l.as_str() == label.as_str());
-                Some(Value::Bool(has_label))
+                self.resolve_has_label(node_id, label.as_str())
+                    .map(Value::Bool)
             }
             BuiltinFunction::IsSource => {
                 // isSource(node, edge) - checks if node is the source of edge
@@ -3936,11 +3963,13 @@ impl ExpressionPredicate {
                 };
 
                 // Get the node's labels and try each for a text index match
-                let node = self.resolve_node(node_id)?;
-                let score = node
-                    .labels
-                    .iter()
-                    .find_map(|label| self.store.score_text(node_id, label, property, query_str))?;
+                let labels = self.resolve_labels(node_id)?;
+                let score = labels.iter().find_map(|label| match self.view() {
+                    Some(view) => self
+                        .store
+                        .score_text_at(node_id, label, property, query_str, view),
+                    None => self.store.score_text(node_id, label, property, query_str),
+                })?;
 
                 if function == BuiltinFunction::TextMatch {
                     Some(Value::Bool(score > 0.0))

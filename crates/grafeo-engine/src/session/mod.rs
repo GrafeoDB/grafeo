@@ -24,7 +24,7 @@ use grafeo_common::grafeo_debug_span;
 use grafeo_common::grafeo_info_span;
 #[cfg(feature = "lpg")]
 use grafeo_common::types::{EdgeId, NodeId};
-use grafeo_common::types::{EpochId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{EpochId, PropertyKey, ReadView, TransactionId, Value};
 use grafeo_common::utils::error::Result;
 #[cfg(feature = "lpg")]
 use grafeo_core::graph::Direction;
@@ -2926,14 +2926,15 @@ impl Session {
     ) -> Result<crate::query::executor::stream::ResultStream<'_>> {
         use crate::query::executor::stream::{ResultStream, StreamGuard};
 
-        let (source, columns, deadline) = self.build_streaming_plan(query)?;
+        let (source, columns, deadline, pin) = self.build_streaming_plan(query)?;
         let guard = StreamGuard::new(&self.active_streams);
-        ResultStream::new(source, columns, deadline, guard)
+        ResultStream::new(source, columns, deadline, guard, pin)
     }
 
     /// Builds a pull-based physical pipeline for streaming, returning the
     /// root operator and metadata needed to wrap it in a `ResultStream` or
-    /// `OwnedResultStream`.
+    /// `OwnedResultStream`, with the pin of its read outside a transaction
+    /// (`None` inside one), which the stream holds.
     ///
     /// Rejects session/schema commands, mutations, EXPLAIN/PROFILE, and plans
     /// that require a push-based pipeline. Used by both
@@ -2946,6 +2947,7 @@ impl Session {
         Box<dyn grafeo_core::execution::operators::Operator>,
         Vec<String>,
         Option<Instant>,
+        Option<crate::transaction::ReadPin>,
     )> {
         use crate::query::{
             binder::Binder, cache::CacheKey, optimizer::Optimizer, processor::QueryLanguage,
@@ -3022,6 +3024,9 @@ impl Session {
         // Plan to physical operators.
         let active = self.active_store();
         let has_active_tx = self.current_transaction.lock().is_some();
+        // Outside a transaction the stream reads at the published epoch for
+        // as long as it lives: pinned until it is dropped (#412 decision Q6).
+        let pin = (!has_active_tx).then(|| self.transaction_manager.pin_read());
         let (viewing_epoch, transaction_id) = self.get_transaction_context();
         let planner = self
             .create_planner_for_store_with_read_only(
@@ -3063,7 +3068,7 @@ impl Session {
             ));
         }
 
-        Ok((source, columns, self.query_deadline()))
+        Ok((source, columns, self.query_deadline(), pin))
     }
 
     /// Executes a GQL query with visibility at the specified epoch.
@@ -4199,32 +4204,37 @@ impl Session {
             .map(|changes| changes.written_graphs())
             .unwrap_or_default();
 
-        // Auto-GC: periodically prune old MVCC versions
-        if self.gc_interval > 0 {
-            let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if count.is_multiple_of(self.gc_interval) {
-                #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-                let gc_start = std::time::Instant::now();
+        // Collect the versions no reader needs any more in the root and the
+        // stores the commit wrote (after every commit on a store that
+        // collects after every write, every `gc_interval` commits on
+        // `LpgStore`), and now and then the finished transactions.
+        let after =
+            crate::database::collect::AfterWrite::next(&self.commit_counter, self.gc_interval);
+        if after.collect {
+            #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+            let gc_start = std::time::Instant::now();
 
-                let min_epoch = self.transaction_manager.min_active_epoch();
-                for graph_name in &written {
-                    let store = self.resolve_store(graph_name);
-                    store.gc_versions(min_epoch);
-                }
-                self.transaction_manager.gc();
+            let root = self.root_store();
+            let written_stores: Vec<Arc<LpgStore>> = written
+                .iter()
+                .map(|graph_name| self.resolve_store(graph_name))
+                .collect();
+            let stores: Vec<&LpgStore> = std::iter::once(&*root)
+                .chain(written_stores.iter().map(|store| &**store))
+                .collect();
+            after.run(&self.transaction_manager, &stores);
 
-                #[cfg(feature = "metrics")]
+            #[cfg(feature = "metrics")]
+            if after.periodic {
+                crate::metrics::record_metric!(self.metrics, gc_runs, inc);
+                #[cfg(not(target_arch = "wasm32"))]
                 {
-                    crate::metrics::record_metric!(self.metrics, gc_runs, inc);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        let gc_duration_ms = gc_start.elapsed().as_secs_f64() * 1000.0;
-                        crate::metrics::record_metric!(
-                            self.metrics,
-                            gc_duration,
-                            observe gc_duration_ms
-                        );
-                    }
+                    let gc_duration_ms = gc_start.elapsed().as_secs_f64() * 1000.0;
+                    crate::metrics::record_metric!(
+                        self.metrics,
+                        gc_duration,
+                        observe gc_duration_ms
+                    );
                 }
             }
         }
@@ -4692,7 +4702,9 @@ impl Session {
     /// (`has_mutations`) outside a transaction in one of its own, which
     /// commits when `body` succeeds and rolls back when it fails; inside the
     /// open transaction, whose writes from `body` are undone when it fails,
-    /// and which goes on. A read runs as it is.
+    /// and which goes on. A read runs as it is, outside a transaction pinned
+    /// at the published epoch for its run (#412 decision Q6), so garbage
+    /// collection keeps what it reads.
     #[cfg(feature = "lpg")]
     pub(super) fn in_statement_transaction<T, F>(&self, has_mutations: bool, body: F) -> Result<T>
     where
@@ -4711,6 +4723,11 @@ impl Session {
             // Inside an open transaction a failed statement undoes its own
             // writes, and the transaction goes on.
             let transaction = *self.current_transaction.lock();
+            // Before `body` reads the published epoch: it reads there or
+            // later. Dropped when `body` returns or unwinds.
+            let _pin = transaction
+                .is_none()
+                .then(|| self.transaction_manager.pin_read());
             let start = transaction
                 .filter(|_| has_mutations)
                 .map(|tx| (tx, self.capture_savepoint("statement")));
@@ -4989,6 +5006,16 @@ impl Session {
         }
     }
 
+    /// The view the session's direct reads read at: its transaction at its
+    /// snapshot, or committed at the published epoch (or the epoch it was
+    /// set to read at), never a stamped commit that has not published.
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    fn read_view(&self) -> ReadView {
+        let (epoch, transaction_id) = self.get_transaction_context();
+        ReadView::new(epoch, transaction_id)
+    }
+
     /// Whether the planner may scan another of a pattern's labels than the
     /// one written, as it decides for this session's reads (see
     /// [`may_choose_scan_label`](crate::query::planner::lpg::scan::may_choose_scan_label)):
@@ -4999,6 +5026,7 @@ impl Session {
             viewing_epoch,
             transaction_id,
             Some(self.transaction_manager.current_epoch()),
+            self.active_store().answers_at_view(),
         )
     }
 
@@ -5484,14 +5512,12 @@ impl Session {
     #[cfg(feature = "lpg")]
     #[must_use]
     pub fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
-        let store = self.active_lpg_store();
-        let candidates = store.find_nodes_by_property(property, value);
-        match self.get_transaction_context() {
-            (epoch, Some(transaction_id)) => {
-                store.filter_visible_node_ids_versioned(&candidates, epoch, transaction_id)
-            }
-            (epoch, None) => store.filter_visible_node_ids(&candidates, epoch),
-        }
+        GraphStore::find_nodes_by_property_at(
+            &*self.active_lpg_store(),
+            property,
+            value,
+            self.read_view(),
+        )
     }
 
     /// Creates an index on a node property of the session's graph. Commits
@@ -5578,12 +5604,7 @@ impl Session {
     #[cfg(feature = "lpg")]
     #[must_use]
     pub fn get_node(&self, id: NodeId) -> Option<Node> {
-        let (epoch, transaction_id) = self.get_transaction_context();
-        self.active_lpg_store().get_node_versioned(
-            id,
-            epoch,
-            transaction_id.unwrap_or(TransactionId::SYSTEM),
-        )
+        GraphStore::get_node_at(&*self.active_lpg_store(), id, self.read_view())
     }
 
     /// Gets a single property from a node by ID, bypassing query planning.
@@ -5625,12 +5646,7 @@ impl Session {
     #[cfg(feature = "lpg")]
     #[must_use]
     pub fn get_edge(&self, id: EdgeId) -> Option<Edge> {
-        let (epoch, transaction_id) = self.get_transaction_context();
-        self.active_lpg_store().get_edge_versioned(
-            id,
-            epoch,
-            transaction_id.unwrap_or(TransactionId::SYSTEM),
-        )
+        GraphStore::get_edge_at(&*self.active_lpg_store(), id, self.read_view())
     }
 
     /// The edges of a node in `direction` as `(neighbor, edge)` pairs, as the
@@ -5646,18 +5662,18 @@ impl Session {
         direction: Direction,
         edge_types: &[&str],
     ) -> Vec<(NodeId, EdgeId)> {
-        let (epoch, transaction_id) = self.get_transaction_context();
-        let transaction_id = transaction_id.unwrap_or(TransactionId::SYSTEM);
+        let view = self.read_view();
+        let transaction_id = view.transaction.unwrap_or(TransactionId::SYSTEM);
         let store = self.active_store();
-        let node_visible = store.is_node_visible_versioned(node, epoch, transaction_id);
+        let node_visible = store.is_node_visible_at(node, view);
         crate::database::direct::node_edges(
             &*store,
             node,
             direction,
             edge_types,
             node_visible,
-            |edge| store.is_edge_visible_versioned(edge, epoch, transaction_id),
-            |edge| store.edge_type_versioned(edge, epoch, transaction_id),
+            |edge| store.is_edge_visible_at(edge, view),
+            |edge| store.edge_type_versioned(edge, view.epoch, transaction_id),
         )
     }
 
@@ -5780,11 +5796,10 @@ impl Session {
     #[cfg(feature = "lpg")]
     #[must_use]
     pub fn get_nodes_batch(&self, ids: &[NodeId]) -> Vec<Option<Node>> {
-        let (epoch, transaction_id) = self.get_transaction_context();
-        let tx = transaction_id.unwrap_or(TransactionId::SYSTEM);
+        let view = self.read_view();
         let active = self.active_lpg_store();
         ids.iter()
-            .map(|&id| active.get_node_versioned(id, epoch, tx))
+            .map(|&id| GraphStore::get_node_at(&*active, id, view))
             .collect()
     }
 
@@ -6023,6 +6038,67 @@ mod tests {
         assert!(tx_id3.is_none());
         // Epoch should have advanced after commit
         assert!(epoch3.as_u64() >= epoch2.as_u64());
+    }
+
+    /// A read statement outside a transaction pins the published epoch for
+    /// its run (#412 decision Q6): commits published while it runs leave the
+    /// read horizon at the read's epoch, and the horizon moves once the read
+    /// returns, also when it fails.
+    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[test]
+    fn a_read_outside_a_transaction_holds_the_read_horizon_for_its_run() {
+        use grafeo_common::utils::error::{Error, Result};
+
+        let db = GrafeoDB::new_in_memory();
+        let (session, other) = (db.session(), db.session());
+        other.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        let manager = &db.transaction_manager;
+        let pinned = manager.current_epoch();
+        session
+            .in_statement_transaction(false, || {
+                other.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+                assert!(manager.current_epoch() > pinned, "the insert published");
+                assert_eq!(manager.read_horizon(), pinned, "the running read");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(manager.read_horizon(), manager.current_epoch());
+
+        let failed: Result<()> = session.in_statement_transaction(false, || {
+            other.execute("INSERT (:Person {name: 'Mia'})").unwrap();
+            assert!(manager.read_horizon() < manager.current_epoch());
+            Err(Error::Internal("the read fails".to_string()))
+        });
+        assert!(failed.is_err());
+        assert_eq!(manager.read_horizon(), manager.current_epoch());
+    }
+
+    /// A stream read outside a transaction holds the read horizon at its
+    /// epoch for as long as it lives, a session's and the database's.
+    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[test]
+    fn a_stream_outside_a_transaction_holds_the_read_horizon_while_it_lives() {
+        let db = GrafeoDB::new_in_memory();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        let manager = &db.transaction_manager;
+        let pinned = manager.current_epoch();
+        let session = db.session();
+        let stream = session
+            .execute_streaming("MATCH (p:Person) RETURN p.name")
+            .unwrap();
+        let owned = db
+            .execute_streaming("MATCH (p:Person) RETURN p.name")
+            .unwrap();
+        db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+        assert_eq!(manager.read_horizon(), pinned);
+        assert_eq!(
+            stream.collect().unwrap().rows.len(),
+            1,
+            "the stream reads at its epoch"
+        );
+        assert_eq!(manager.read_horizon(), pinned, "the owned stream");
+        drop(owned);
+        assert_eq!(manager.read_horizon(), manager.current_epoch());
     }
 
     #[test]

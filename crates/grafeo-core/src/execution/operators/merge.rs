@@ -11,7 +11,7 @@ use super::{
 };
 use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
 use crate::graph::GraphStoreSearch;
-use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, Value};
+use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, ReadView, Value};
 use std::sync::Arc;
 
 /// Configuration for a node merge operation.
@@ -288,17 +288,35 @@ impl MergeOperator {
             .iter()
             .any(|(k, v)| !v.is_null() && self.writer.store().has_property_index(k));
 
+        // In a transaction the store answers at its view, its own creates
+        // included; the checks below read each candidate the same way.
+        let store = self.writer.store();
+        let view = match (self.writer.viewing_epoch(), self.writer.transaction_id()) {
+            (Some(epoch), Some(transaction_id)) => {
+                Some(ReadView::transaction(transaction_id, epoch))
+            }
+            _ => None,
+        };
         let candidates: Vec<NodeId> = if use_index {
             let conditions: Vec<(&str, Value)> = resolved_match_props
                 .iter()
                 .filter(|(_, v)| !v.is_null())
                 .map(|(k, v)| (k.as_str(), v.clone()))
                 .collect();
-            self.writer.store().find_nodes_by_properties(&conditions)
+            match view {
+                Some(view) => store.find_nodes_by_properties_at(&conditions, view),
+                None => store.find_nodes_by_properties(&conditions),
+            }
         } else if let Some(label) = self.scan_label() {
-            self.writer.store().nodes_by_label(label)
+            match view {
+                Some(view) => store.nodes_by_label_at(label, view),
+                None => store.nodes_by_label(label),
+            }
         } else {
-            self.writer.store().node_ids()
+            match view {
+                Some(view) => store.filter_visible_node_ids_at(&store.all_node_ids(), view),
+                None => store.node_ids(),
+            }
         };
 
         let mut matches = Vec::new();

@@ -147,9 +147,13 @@
 //!    and records `(transaction_id -> commit_epoch)` for post-hoc
 //!    conflict checks from transactions whose `start_epoch` preceded
 //!    the commit.
-//! 4. **GC**: [`GrafeoDB::gc()`](crate::GrafeoDB::gc) polls
-//!    `min_active_epoch()` and prunes version chains whose last
-//!    version is older than that minimum. The same epoch drives CDC
+//! 4. **GC**: after immediate calls and commits (every one on a store that
+//!    collects after every write, every `gc_interval`th on `LpgStore`; see
+//!    `database::collect`), and in [`GrafeoDB::gc()`](crate::GrafeoDB::gc),
+//!    the engine polls `read_horizon()`, the oldest epoch a reader may still
+//!    read at (open and committing transactions' snapshots, reads outside a
+//!    transaction pinned for their run, the published epoch), and prunes the
+//!    versions no reader at it or later can see. The same epoch drives CDC
 //!    retention (see [`crate::cdc`]) so both subsystems agree on
 //!    "how old is safely-forgotten."
 //!
@@ -210,6 +214,8 @@ pub(crate) use changes::{
 #[cfg(feature = "wal")]
 pub(crate) use manager::CommitGuard;
 pub(crate) use manager::CommitsHeld;
+#[cfg(all(feature = "gql", feature = "lpg"))]
+pub(crate) use manager::ReadPin;
 pub use manager::{
     EntityId, GraphEntity, IsolationLevel, TransactionInfo, TransactionManager, TransactionState,
 };

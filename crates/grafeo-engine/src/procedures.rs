@@ -28,7 +28,7 @@ use grafeo_adapters::plugins::algorithms::{
     TopologicalSortAlgorithm,
 };
 use grafeo_adapters::plugins::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use grafeo_common::types::Value;
+use grafeo_common::types::{ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphStoreSearch;
 #[cfg(feature = "lpg")]
@@ -81,6 +81,10 @@ pub struct ProcedureContext<'a> {
     /// not an LPG store (e.g., pure RDF) or in contexts that do not need it.
     #[cfg(feature = "lpg")]
     pub lpg_store: Option<&'a LpgStore>,
+
+    /// The view the calling query reads at, when it has one: the search
+    /// procedures return only the nodes it sees.
+    pub view: Option<ReadView>,
 }
 
 impl<'a> ProcedureContext<'a> {
@@ -91,6 +95,7 @@ impl<'a> ProcedureContext<'a> {
             store,
             #[cfg(feature = "lpg")]
             lpg_store: None,
+            view: None,
         }
     }
 
@@ -101,6 +106,31 @@ impl<'a> ProcedureContext<'a> {
         Self {
             store,
             lpg_store: Some(lpg_store),
+            view: None,
+        }
+    }
+
+    /// Reads at `view` (see [`view`](Self::view)).
+    #[must_use]
+    pub fn with_view(mut self, view: Option<ReadView>) -> Self {
+        self.view = view;
+        self
+    }
+
+    /// The results whose node the context's view sees, in their order;
+    /// every one without a view. A search index holds what open
+    /// transactions wrote too (#412).
+    #[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
+    fn visible<T>(
+        &self,
+        results: Vec<(grafeo_common::types::NodeId, T)>,
+    ) -> Vec<(grafeo_common::types::NodeId, T)> {
+        match self.view {
+            Some(view) => results
+                .into_iter()
+                .filter(|(id, _)| self.store.is_node_visible_at(*id, view))
+                .collect(),
+            None => results,
         }
     }
 }
@@ -386,7 +416,7 @@ impl Procedure for SearchVectorProcedure {
             ctx.store as &dyn grafeo_core::graph::GraphStore,
             property,
         ));
-        let results = index.search(&query, k, &accessor);
+        let results = ctx.visible(index.search(&query, k, &accessor));
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "distance".into()]);
         for (node_id, distance) in results {
@@ -522,7 +552,7 @@ impl Procedure for SearchMmrProcedure {
             ctx.store as &dyn grafeo_core::graph::GraphStore,
             property,
         ));
-        let initial = index.search(&query, fetch_k, &accessor);
+        let initial = ctx.visible(index.search(&query, fetch_k, &accessor));
         if initial.is_empty() {
             return Ok(AlgorithmResult::new(vec![
                 "node_id".into(),
@@ -648,7 +678,7 @@ impl Procedure for SearchTextProcedure {
             ))
         })?;
 
-        let results = index.read().search(query, k);
+        let results = ctx.visible(index.read().search(query, k));
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "score".into()]);
         for (node_id, score) in results {

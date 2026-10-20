@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{EpochId, LogicalType, NodeId, TransactionId, Value};
+use grafeo_common::types::{EpochId, LogicalType, NodeId, ReadView, TransactionId, Value};
 
 use super::{ExpressionPredicate, Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
@@ -121,7 +121,11 @@ impl NodeSeekOperator {
             match &self.key {
                 SeekKey::Id => found.extend(node_ids(key)),
                 SeekKey::Property(property) => {
-                    match self.store.find_nodes_maybe_equal(property, key) {
+                    let found_nodes = match self.view() {
+                        Some(view) => self.store.find_nodes_maybe_equal_at(property, key, view),
+                        None => self.store.find_nodes_maybe_equal(property, key),
+                    };
+                    match found_nodes {
                         Some(nodes) => found.extend(nodes),
                         // The store cannot look the key up: every node is a
                         // candidate, as for the scan the seek replaces.
@@ -136,19 +140,25 @@ impl NodeSeekOperator {
         Ok(found)
     }
 
+    /// The view the seek reads at, when it has a transaction context.
+    fn view(&self) -> Option<ReadView> {
+        self.viewing_epoch
+            .map(|epoch| ReadView::new(epoch, self.transaction_id))
+    }
+
+    /// Whether the query sees node `id` with the scan's label: a label check
+    /// at the view, without building the node.
     fn visible_with_label(&self, id: NodeId) -> bool {
-        let node = match (self.viewing_epoch, self.transaction_id) {
-            (Some(epoch), Some(transaction_id)) => {
-                self.store.get_node_versioned(id, epoch, transaction_id)
+        match (self.view(), self.label.as_deref()) {
+            (Some(view), Some(label)) => {
+                self.store.node_has_label_at(id, label, view) == Some(true)
             }
-            (Some(epoch), None) => self.store.get_node_at_epoch(id, epoch),
-            (None, _) => self.store.get_node(id),
-        };
-        node.is_some_and(|node| {
-            self.label
-                .as_deref()
-                .is_none_or(|label| node.has_label(label))
-        })
+            (Some(view), None) => self.store.is_node_visible_at(id, view),
+            (None, label) => self
+                .store
+                .get_node(id)
+                .is_some_and(|node| label.is_none_or(|label| node.has_label(label))),
+        }
     }
 
     /// Joins rows of `chunk`, from `next_row` on, with their matches until

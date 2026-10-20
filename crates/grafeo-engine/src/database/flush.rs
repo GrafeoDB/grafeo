@@ -216,12 +216,13 @@ impl CheckpointSources {
             .map_or(0, |t| t.0);
         let epoch = self.epoch();
         #[cfg(feature = "lpg")]
-        if let Some(store) = &self.root_store() {
+        if let Some(store) = &self.store {
+            let (nodes, edges) = store.counts();
             return FlushContext {
                 epoch,
                 transaction_id,
-                node_count: store.node_count() as u64,
-                edge_count: store.edge_count() as u64,
+                node_count: nodes as u64,
+                edge_count: edges as u64,
             };
         }
         FlushContext {

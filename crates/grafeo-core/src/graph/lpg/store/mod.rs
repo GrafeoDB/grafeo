@@ -13,6 +13,7 @@ mod apply;
 mod edge_ops;
 mod graph_store_impl;
 mod index;
+mod load;
 mod memory;
 mod node_ops;
 mod open_changes;
@@ -31,6 +32,8 @@ mod tests;
 pub(crate) use apply::testing;
 pub use open_changes::OpenChangesByGraph;
 pub(crate) use open_changes::{Labels, OpenChangeSource, OpenChanges};
+/// The property index, which the row-group store keeps too.
+pub(crate) use property_index::{MaybeEqual, PropertyIndex};
 
 use super::PropertyStorage;
 use super::dictionary::NameDictionary;

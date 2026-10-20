@@ -2689,10 +2689,14 @@ impl CatalogConstraintValidator {
         key: &str,
         value: &Value,
     ) -> Vec<grafeo_core::graph::lpg::Node> {
-        let candidates = if store.has_property_index(key) {
-            store.find_nodes_by_property(key, value)
-        } else {
-            store.nodes_by_label(label)
+        let view = self
+            .transaction
+            .map(|(epoch, id)| grafeo_common::types::ReadView::transaction(id, epoch));
+        let candidates = match (view, store.has_property_index(key)) {
+            (Some(view), true) => store.find_nodes_by_property_at(key, value, view),
+            (Some(view), false) => store.nodes_by_label_at(label, view),
+            (None, true) => store.find_nodes_by_property(key, value),
+            (None, false) => store.nodes_by_label(label),
         };
         let key = grafeo_common::types::PropertyKey::from(key);
         candidates

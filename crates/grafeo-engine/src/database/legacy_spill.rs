@@ -67,8 +67,8 @@ use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
+use super::root_store::RootStore;
 use grafeo_common::types::{NodeId, PropertyKey, Value};
-use grafeo_core::graph::lpg::LpgStore;
 
 const MAGIC: [u8; 8] = *b"GRAFVEC1";
 const HEADER_BYTES: usize = 64;
@@ -380,13 +380,13 @@ pub(crate) struct Folded {
 /// not an old spill file or is shorter than its header says, its dimensions
 /// differ from the index's, or records of nodes without the index's label
 /// were left out.
-pub(crate) fn fold_in(store: &LpgStore, files: &[LegacyVectorFile]) -> Folded {
+pub(crate) fn fold_in<S: RootStore>(store: &S, files: &[LegacyVectorFile]) -> Folded {
     fold_in_batches(store, files, BATCH_BYTES)
 }
 
 /// [`fold_in`], reading at most `batch_bytes` of records at a time.
-pub(crate) fn fold_in_batches(
-    store: &LpgStore,
+pub(crate) fn fold_in_batches<S: RootStore>(
+    store: &S,
     files: &[LegacyVectorFile],
     batch_bytes: usize,
 ) -> Folded {
@@ -483,8 +483,8 @@ struct FileFold {
 /// at a time, and counts the records left out only because their node lacks
 /// the label: after the fill, a node that exists without a value has no
 /// label to take one (a node of the label would have been filled).
-fn fill_from(
-    store: &LpgStore,
+fn fill_from<S: RootStore>(
+    store: &S,
     file: &LegacyVectorFile,
     old: &mut OldFile,
     batch_bytes: usize,
@@ -511,7 +511,8 @@ fn fill_from(
             &file.property,
             batch
                 .into_iter()
-                .map(|(id, vector)| (id, Value::Vector(vector.into()))),
+                .map(|(id, vector)| (id, Value::Vector(vector.into())))
+                .collect(),
         ) {
             Ok(filled) => read.filled += filled,
             Err(error) => {
@@ -535,7 +536,7 @@ fn fill_from(
 /// its configuration: a topology saved while the column was spilled was kept
 /// with vectors it could not read, so it can miss a node whose embedding
 /// changed then, or name one that has none.
-fn rebuild_index(store: &LpgStore, label: &str, property: &str) {
+fn rebuild_index<S: RootStore>(store: &S, label: &str, property: &str) {
     use grafeo_core::index::vector::{
         PropertyVectorAccessor, QuantizationType, VectorAccessor, VectorIndexKind,
     };
@@ -681,7 +682,7 @@ fn move_to_kept(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// The `(label, property)` of every vector index of `store`.
-fn every_vector_index(store: &LpgStore) -> BTreeSet<(String, String)> {
+fn every_vector_index<S: RootStore>(store: &S) -> BTreeSet<(String, String)> {
     store
         .vector_index_entries()
         .into_iter()
@@ -720,10 +721,10 @@ impl super::GrafeoDB {
         if files.is_empty() && !rebuild_every_index {
             return Ok(());
         }
-        let folded = fold_in(&self.lpg_store(), &files);
+        let folded = fold_in(&*self.lpg_store(), &files);
         let mut rebuilt = folded.indexes.clone();
         if rebuild_every_index {
-            rebuilt.extend(every_vector_index(&self.lpg_store()));
+            rebuilt.extend(every_vector_index(&*self.lpg_store()));
         }
         for (label, property) in &rebuilt {
             // A crash point where the rebuild is to be made durable: a
@@ -732,7 +733,7 @@ impl super::GrafeoDB {
             if !self.read_only {
                 grafeo_common::testing::crash::maybe_crash("legacy_spill:rebuild");
             }
-            rebuild_index(&self.lpg_store(), label, property);
+            rebuild_index(&*self.lpg_store(), label, property);
         }
         let shared: Vec<String> = folded
             .files
@@ -1002,7 +1003,7 @@ mod tests {
         for dimensions in [0, 3] {
             let vector: Vec<f32> = [3.0, 19.0, 88.0].into_iter().take(dimensions).collect();
             write_old(&path, dimensions, &[(alix.as_u64(), vector)]);
-            let folded = fold_in(&store, &find(dir.path(), true));
+            let folded = fold_in(&*store, &find(dir.path(), true));
             assert!(folded.files.is_empty(), "{dimensions} dimensions");
             assert_eq!(folded.filled, 0);
             assert_eq!(folded.kept.len(), 1, "{dimensions} dimensions");
@@ -1051,7 +1052,7 @@ mod tests {
             ],
         );
 
-        let folded = fold_in(&db.lpg_store(), &find(dir.path(), true));
+        let folded = fold_in(&*db.lpg_store(), &find(dir.path(), true));
         assert_eq!(folded.filled, 1, "Alix");
         assert!(folded.files.is_empty(), "not deleted");
         assert_eq!(folded.kept.len(), 1);
@@ -1109,7 +1110,7 @@ mod tests {
         let found = find(dir.path(), true);
         std::fs::remove_file(&path).unwrap();
 
-        let folded = fold_in(&db.lpg_store(), &found);
+        let folded = fold_in(&*db.lpg_store(), &found);
         assert!(folded.files.is_empty(), "not deleted");
         assert!(folded.kept.is_empty(), "not kept: {:?}", folded.kept);
         assert!(
@@ -1177,7 +1178,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         assert!(read(&path).is_err(), "longer than its header says");
-        let folded = fold_in(&db.lpg_store(), &find(dir.path(), true));
+        let folded = fold_in(&*db.lpg_store(), &find(dir.path(), true));
         assert!(folded.files.is_empty(), "the file is to be deleted");
         assert_eq!(folded.kept.len(), 1);
         assert!(
@@ -1213,7 +1214,7 @@ mod tests {
             &[(alix.as_u64(), vec![3.0, 19.0])],
         );
 
-        let folded = fold_in(&store, &find(dir.path(), true));
+        let folded = fold_in(&*store, &find(dir.path(), true));
         assert!(folded.files.is_empty(), "the file is to be deleted");
         assert!(folded.kept.is_empty());
         assert_eq!(folded.filled, 0);
@@ -1241,7 +1242,7 @@ mod tests {
             &records,
         );
 
-        let folded = fold_in_batches(&db.lpg_store(), &find(dir.path(), true), 40);
+        let folded = fold_in_batches(&*db.lpg_store(), &find(dir.path(), true), 40);
         assert_eq!((folded.batches, folded.filled), (3, 5));
         assert_eq!(folded.files.len(), 1);
     }
@@ -1267,7 +1268,7 @@ mod tests {
             .unwrap()
             .set_len(HEADER_BYTES as u64 + 16 * 319)
             .unwrap();
-        let read = fill_from(&db.lpg_store(), &file, &mut old, 16);
+        let read = fill_from(&*db.lpg_store(), &file, &mut old, 16);
         assert!(read.stopped.is_some(), "the read stops");
         assert!(
             read.filled > 0 && read.filled < 1988,
@@ -1300,7 +1301,7 @@ mod tests {
         }
         let store = db.lpg_store();
 
-        let folded = fold_in(&store, &find(dir.path(), true));
+        let folded = fold_in(&*store, &find(dir.path(), true));
         let paths: Vec<&PathBuf> = folded.files.iter().map(|file| &file.path).collect();
         assert_eq!(paths, vec![&good]);
         assert_eq!(folded.kept.len(), 1);

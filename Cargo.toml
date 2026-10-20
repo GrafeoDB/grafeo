@@ -60,7 +60,7 @@ byteorder = "1"
 fs2 = "0.4"
 
 # Checksums & hashing
-crc32fast = "1"
+crc32fast = "1.5.3"
 foldhash = "0.2"
 md5 = "0.8"
 sha1 = "0.11"
@@ -98,7 +98,7 @@ regex = "1"
 regex-lite = "0.1"
 
 # Unicode
-unicode-normalization = "0.1"
+unicode-normalization = "0.1.26"
 
 # Testing
 proptest = "1"

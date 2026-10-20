@@ -1036,3 +1036,124 @@ fn grouped_distinct_keeps_later_rows_after_pressure_spill() {
             .is_none()
     );
 }
+
+#[cfg(feature = "spill")]
+#[test]
+fn grouped_decimal_identities_survive_chunks_and_pressure_spill() {
+    use grafeo_common::memory::buffer::{MemoryRegion, PressureLevel};
+    use grafeo_common::types::Decimal;
+
+    let root = tempfile::tempdir().unwrap();
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_memory_limit(64 * 1024 * 1024)
+            .with_spill_path(root.path())
+            .without_query_timeout(),
+    )
+    .unwrap();
+    let precise = Decimal::parse("0.1234567890123456789012345678").unwrap();
+    let precise_scaled = Decimal::parse("0.12345678901234567890123456780").unwrap();
+    let values = [
+        Value::Decimal(Decimal::new(5, 1).unwrap()),
+        Value::Decimal(Decimal::new(50, 2).unwrap()),
+        Value::Float64(0.5),
+        Value::Int64(1),
+        Value::Float64(1.0),
+        Value::Decimal(Decimal::new(100, 2).unwrap()),
+        Value::List(vec![Value::Decimal(Decimal::new(5, 1).unwrap())].into()),
+        Value::List(vec![Value::Decimal(Decimal::new(50, 2).unwrap())].into()),
+        Value::List(vec![Value::Float64(0.5)].into()),
+        Value::Decimal(precise),
+        Value::Decimal(precise_scaled),
+        Value::Float64(precise.to_f64()),
+    ];
+    for value in &values {
+        for bucket in 0..512_i64 {
+            db.create_node_with_props(
+                &["DecimalIdentity"],
+                [("bucket", Value::Int64(bucket)), ("v", value.clone())],
+            )
+            .unwrap();
+        }
+    }
+    let manager = db.buffer_manager();
+    let baseline = manager.allocated();
+    let session = db.session();
+    let is_half = |value: &Value| match value {
+        Value::Decimal(value) => *value == Decimal::new(5, 1).unwrap(),
+        Value::Float64(value) => value.to_bits() == 0.5_f64.to_bits(),
+        _ => false,
+    };
+    for pressure in [false, true] {
+        let held = pressure.then(|| {
+            manager
+                .try_allocate(
+                    (manager.config().budget * 9 / 10)
+                        .checked_sub(baseline)
+                        .unwrap(),
+                    MemoryRegion::ExecutionBuffers,
+                )
+                .unwrap()
+        });
+        if pressure {
+            assert_eq!(manager.pressure_level(), PressureLevel::High);
+        }
+        let held_total = manager.allocated();
+        for _ in 0..2 {
+            let result = session
+                .execute("MATCH (n:DecimalIdentity) RETURN n.bucket AS bucket, count(DISTINCT n.v) AS distinct_values, count(*) AS total")
+                .unwrap();
+            assert_eq!(result.row_count(), 512);
+            let mut seen = [false; 512];
+            for row in result.rows() {
+                let bucket = usize::try_from(row[0].as_int64().unwrap()).unwrap();
+                assert!(!seen[bucket]);
+                seen[bucket] = true;
+                assert_eq!(&row[1..], &[Value::Int64(5), Value::Int64(12)]);
+            }
+            assert!(seen.into_iter().all(|present| present));
+            drop(result);
+            assert_eq!(manager.allocated(), held_total);
+
+            let result = session
+                .execute("MATCH (n:DecimalIdentity) RETURN n.bucket AS bucket, n.v AS value, count(*) AS c")
+                .unwrap();
+            assert_eq!(result.row_count(), 512 * 5);
+            let mut seen = vec![[false; 5]; 512];
+            for row in result.rows() {
+                let bucket = usize::try_from(row[0].as_int64().unwrap()).unwrap();
+                let value = &row[1];
+                let class = if is_half(value) {
+                    0
+                } else if matches!(value, Value::Int64(1))
+                    || matches!(value, Value::Float64(number) if number.to_bits() == 1.0_f64.to_bits())
+                    || matches!(value, Value::Decimal(number) if *number == Decimal::from_i64(1))
+                {
+                    1
+                } else if matches!(value, Value::List(items) if items.len() == 1 && is_half(&items[0]))
+                {
+                    2
+                } else if matches!(value, Value::Decimal(number) if *number == precise) {
+                    3
+                } else if matches!(value, Value::Float64(number) if number.to_bits() == precise.to_f64().to_bits())
+                {
+                    4
+                } else {
+                    panic!("unexpected decimal identity: {value:?}");
+                };
+                assert!(!seen[bucket][class]);
+                seen[bucket][class] = true;
+                assert_eq!(row[2], Value::Int64([3, 3, 3, 2, 1][class]));
+            }
+            assert!(
+                seen.iter()
+                    .all(|classes| classes.iter().all(|&present| present))
+            );
+            drop(result);
+            assert_eq!(manager.allocated(), held_total);
+            assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+        }
+        drop(held);
+        assert_eq!(manager.allocated(), baseline);
+    }
+}

@@ -417,17 +417,17 @@ impl QueryProcessor {
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
         // 6. Execute and collect results
-        let executor = Executor::with_columns(physical_plan.columns.clone());
-        let mut result = executor.execute(physical_plan.operator.as_mut())?;
+        let executor = Executor::with_columns(physical_plan.columns.clone())
+            .with_read_counter(planner.read_counter());
+        let result = executor.execute(physical_plan.operator.as_mut())?;
 
-        // Add execution metrics
-        let rows_scanned = result.rows.len() as u64; // Approximate: rows returned
+        // Add execution metrics (the executor set `rows_scanned`). On wasm32
+        // the engine has no clock, and the binding times the call.
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-            result.execution_time_ms = Some(elapsed_ms);
-        }
-        result.rows_scanned = Some(rows_scanned);
+        let result = QueryResult {
+            execution_time_ms: Some(start_time.elapsed().as_secs_f64() * 1000.0),
+            ..result
+        };
 
         Ok(result)
     }
@@ -838,6 +838,7 @@ pub(crate) fn explain_result(plan: &LogicalPlan) -> QueryResult {
         status_message: None,
         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         counters: Default::default(),
+        profile: None,
     }
 }
 
@@ -864,6 +865,7 @@ pub(crate) fn physical_explain_result(
         status_message: None,
         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         counters: Default::default(),
+        profile: None,
     }
 }
 

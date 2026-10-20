@@ -5,7 +5,7 @@
 //! brute-force scan otherwise. The operator itself owns only the search
 //! parameters and post-filter thresholds.
 
-use super::{Operator, OperatorError, OperatorResult};
+use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::GraphStoreSearch;
 use crate::index::vector::DistanceMetric;
@@ -71,6 +71,8 @@ pub struct VectorScanOperator {
     chunk_capacity: usize,
     /// The view the search reads at, if any.
     view: Option<ReadView>,
+    /// Counts the hits the search returns.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl VectorScanOperator {
@@ -102,6 +104,7 @@ impl VectorScanOperator {
             executed: false,
             chunk_capacity: 2048,
             view: None,
+            reads: None,
         }
     }
 
@@ -137,6 +140,14 @@ impl VectorScanOperator {
         self
     }
 
+    /// Counts the hits the search returns in `reads`, before the
+    /// similarity and distance thresholds.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
+        self
+    }
+
     fn execute_search(&mut self) {
         if self.executed {
             return;
@@ -153,6 +164,7 @@ impl VectorScanOperator {
                 .store
                 .vector_search(label, property, &self.query, self.k, self.metric),
         };
+        super::read_counter::count(self.reads.as_deref(), self.results.len());
 
         self.apply_filters();
     }

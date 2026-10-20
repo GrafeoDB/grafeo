@@ -16,7 +16,7 @@ use crate::database::QueryResult;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, QueryError, Result};
-use grafeo_core::execution::operators::{Operator, OperatorError, WriteCounter};
+use grafeo_core::execution::operators::{Operator, OperatorError, ReadCounter, WriteCounter};
 use grafeo_core::execution::{DataChunk, Pipeline};
 
 /// Executes a physical operator tree and collects results.
@@ -31,6 +31,8 @@ pub struct Executor {
     query_timeout: Option<Duration>,
     /// Counts the statement's writes, for the result's counters.
     write_counter: Option<Arc<WriteCounter>>,
+    /// Counts the rows the statement reads, for the result's `rows_scanned`.
+    read_counter: Option<Arc<ReadCounter>>,
 }
 
 impl Executor {
@@ -43,6 +45,7 @@ impl Executor {
             deadline: None,
             query_timeout: None,
             write_counter: None,
+            read_counter: None,
         }
     }
 
@@ -56,6 +59,7 @@ impl Executor {
             deadline: None,
             query_timeout: None,
             write_counter: None,
+            read_counter: None,
         }
     }
 
@@ -68,6 +72,7 @@ impl Executor {
             deadline: None,
             query_timeout: None,
             write_counter: None,
+            read_counter: None,
         }
     }
 
@@ -92,10 +97,21 @@ impl Executor {
         self
     }
 
-    /// The result, with the counters of the writes it made.
+    /// Reports the rows `counter` counts as the result's `rows_scanned`.
+    #[must_use]
+    pub fn with_read_counter(mut self, counter: Arc<ReadCounter>) -> Self {
+        self.read_counter = Some(counter);
+        self
+    }
+
+    /// The result, with the counters of the writes it made and the rows it
+    /// read.
     fn with_counters(&self, mut result: QueryResult) -> QueryResult {
         if let Some(counter) = &self.write_counter {
             result.counters = counter.counters();
+        }
+        if let Some(counter) = &self.read_counter {
+            result.rows_scanned = Some(counter.get());
         }
         result
     }

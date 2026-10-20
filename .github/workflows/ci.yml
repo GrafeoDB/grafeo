@@ -1030,6 +1030,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: wasm32-unknown-unknown
+          components: clippy
 
       - name: Install wasm-bindgen-cli
         uses: cargo-bins/cargo-binstall@main
@@ -1045,6 +1046,12 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-
+
+      # Code under cfg(target_arch = "wasm32") (the SIMD kernels, wasm-only
+      # imports, the WASM binding's tests) compiles only for this target, so
+      # the native clippy job never lints it.
+      - name: Clippy (wasm32)
+        run: cargo clippy -p grafeo-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
 
       # WASM profile: delegates to build-wasm.sh which compiles grafeo-wasm
       # with only the gql feature (no threads, no native allocators).

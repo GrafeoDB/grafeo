@@ -285,6 +285,8 @@ pub struct Planner {
     recording: Option<grafeo_core::execution::operators::Recording>,
     /// Counts the writes of the plan's writers.
     write_counter: Arc<grafeo_core::execution::operators::WriteCounter>,
+    /// Counts the rows the plan's access operators read from storage.
+    read_counter: Arc<grafeo_core::execution::operators::ReadCounter>,
     /// Session context for introspection functions (info, schema, current_schema, etc.).
     pub(super) session_context: grafeo_core::execution::operators::SessionContext,
     /// When true, expand operators use epoch-only visibility (no MVCC version
@@ -352,6 +354,7 @@ impl Planner {
             profile_entries: std::cell::RefCell::new(Vec::new()),
             recording: None,
             write_counter: Arc::default(),
+            read_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
@@ -413,6 +416,7 @@ impl Planner {
             profile_entries: std::cell::RefCell::new(Vec::new()),
             recording: None,
             write_counter: Arc::default(),
+            read_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
@@ -498,6 +502,25 @@ impl Planner {
         counter: Arc<grafeo_core::execution::operators::WriteCounter>,
     ) -> Self {
         self.write_counter = counter;
+        self
+    }
+
+    /// Counts the rows the plan's access operators read from storage,
+    /// before any filter: the statement's `rows_scanned`.
+    #[must_use]
+    pub fn read_counter(&self) -> Arc<grafeo_core::execution::operators::ReadCounter> {
+        Arc::clone(&self.read_counter)
+    }
+
+    /// Counts the reads into `counter` instead of a counter of its own, so
+    /// the reads of a stored procedure's body count for the statement that
+    /// calls it.
+    #[must_use]
+    pub fn with_read_counter(
+        mut self,
+        counter: Arc<grafeo_core::execution::operators::ReadCounter>,
+    ) -> Self {
+        self.read_counter = counter;
         self
     }
 
@@ -1147,7 +1170,11 @@ impl Planner {
             )
         };
         // The documents the query's view sees.
-        let operator: Box<dyn Operator> = Box::new(operator.with_view(self.read_view()));
+        let operator: Box<dyn Operator> = Box::new(
+            operator
+                .with_view(self.read_view())
+                .with_read_counter(self.read_counter()),
+        );
 
         let mut columns = vec![scan.variable.clone()];
         if let Some(ref score_col) = scan.score_column {
@@ -1235,7 +1262,8 @@ impl Planner {
             k,
             metric,
         )
-        .with_view(self.read_view());
+        .with_view(self.read_view())
+        .with_read_counter(self.read_counter());
 
         if let Some(sim) = scan.min_similarity {
             operator = operator.with_min_similarity(sim);

@@ -1,6 +1,6 @@
 //! Expand operator for relationship traversal.
 
-use super::{Operator, OperatorError, OperatorResult};
+use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
@@ -42,6 +42,8 @@ pub struct ExpandOperator {
     /// present.  Safe for read-only queries where the transaction has no
     /// pending writes, avoiding the cost of walking version chains.
     read_only: bool,
+    /// Counts the edges the expansion reads.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl ExpandOperator {
@@ -68,6 +70,7 @@ impl ExpandOperator {
             transaction_id: None,
             viewing_epoch: None,
             read_only: false,
+            reads: None,
         }
     }
 
@@ -97,6 +100,14 @@ impl ExpandOperator {
     /// cheaper epoch-only visibility checks.
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Counts the edges the expansion reads in `reads`, before the type and
+    /// visibility checks.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
         self
     }
 
@@ -158,14 +169,35 @@ impl ExpandOperator {
             self.store.as_ref(),
             source_id,
             self.direction,
-            &self.edge_types,
-            self.viewing_epoch,
-            self.transaction_id,
-            self.read_only,
+            &EdgeWalk {
+                edge_types: &self.edge_types,
+                epoch: self.viewing_epoch,
+                transaction_id: self.transaction_id,
+                read_only: self.read_only,
+                reads: self.reads.as_deref(),
+            },
         );
         self.current_edge_idx = 0;
         Ok(true)
     }
+}
+
+/// What an edge walker passes to [`visible_edges_from`] besides the node and
+/// direction: the edge types it takes (any type when empty), who reads (the
+/// epoch, and the transaction for a query that may have written) and the
+/// counter of the edges it reads.
+#[derive(Clone, Copy)]
+pub(super) struct EdgeWalk<'a> {
+    /// The edge types to take; every type when empty.
+    pub(super) edge_types: &'a [String],
+    /// The epoch the walk reads at, if any.
+    pub(super) epoch: Option<EpochId>,
+    /// The reading transaction, if any.
+    pub(super) transaction_id: Option<TransactionId>,
+    /// Whether the query does not write (see [`visible_edges_from`]).
+    pub(super) read_only: bool,
+    /// Counts the edges read, before the type and visibility checks.
+    pub(super) reads: Option<&'a ReadCounter>,
 }
 
 /// The edges from `node` in `direction` that a query sees, each with the node
@@ -184,11 +216,15 @@ pub(super) fn visible_edges_from(
     store: &dyn GraphStoreSearch,
     node: NodeId,
     direction: Direction,
-    edge_types: &[String],
-    epoch: Option<EpochId>,
-    transaction_id: Option<TransactionId>,
-    read_only: bool,
+    walk: &EdgeWalk<'_>,
 ) -> Vec<(NodeId, EdgeId)> {
+    let EdgeWalk {
+        edge_types,
+        epoch,
+        transaction_id,
+        read_only,
+        reads,
+    } = *walk;
     let versioned = if read_only {
         None
     } else {
@@ -208,6 +244,7 @@ pub(super) fn visible_edges_from(
         Some(view) if !typed => store.edges_from_at(node, direction, view),
         _ => store.edges_from(node, direction),
     };
+    super::read_counter::count(reads, edges.len());
     edges.retain(|&(other, edge)| {
         if typed {
             let actual = match versioned {

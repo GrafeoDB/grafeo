@@ -34,6 +34,16 @@ for row in result:
     print(row)
 ```
 
+## Threads
+
+Long-running calls release the GIL while Rust works: queries, commits,
+algorithms, searches, batch writes and upserts, index builds, imports, exports,
+opening a database and persistence (`save()`, backups, checkpoints,
+`compact()`, `close()`). Other Python threads keep running meanwhile, and
+several threads can query one database at once. Cheap calls that read or write
+one node or edge keep the GIL. A transaction is used from one thread at a time
+(see [Transactions](transactions.md#threads)).
+
 ## Query Languages
 
 Grafeo supports multiple query languages:

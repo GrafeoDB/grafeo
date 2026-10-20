@@ -188,7 +188,8 @@ fn profile_of_a_first_merge() {
         assert_profile(
             &LANGUAGES,
             query,
-            &[(0, "Project", 1), (1, "Merge", 1), (2, "Empty", 0)],
+            // MERGE's empty input has no operator of its own: `Merge (m, Empty)` (#461).
+            &[(0, "Project", 1), (1, "Merge", 1)],
         );
     }
     assert_profile(

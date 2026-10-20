@@ -533,7 +533,8 @@ fn the_seek_takes_over_an_element_where() {
     }
 }
 
-/// `PROFILE` shows the seek that runs, and the checks it took over.
+/// `PROFILE` shows the seek that runs, and the checks it took over in the
+/// detail of the filter that runs them (#461).
 #[test]
 fn profile_shows_the_seek_and_its_checks() {
     let db = files(true, None);
@@ -559,7 +560,7 @@ fn profile_shows_the_seek_and_its_checks() {
             assert!(
                 operators
                     .iter()
-                    .any(|line| line.starts_with("Filter (hasLabel(t, ")),
+                    .any(|line| line.contains(", Filter hasLabel(t, ")),
                 "{language:?} `{query}`:\n{profile}"
             );
         }

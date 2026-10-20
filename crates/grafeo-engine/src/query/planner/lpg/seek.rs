@@ -302,7 +302,7 @@ impl super::Planner {
         };
         // PROFILE entries for the scan and the checks the seek absorbs, in
         // the order the plan's tree lists them (children first).
-        self.record_absorbed_scan_entry("NodeSeek", operator);
+        self.record_kept_entry("NodeSeek", operator);
         for (check, _) in &checks {
             self.record_absorbed_scan_entry("Filter", check);
         }
@@ -354,7 +354,8 @@ impl super::Planner {
         let key = expression(seek.value, &columns)?;
         let mut rows =
             NodeSeekOperator::new(Arc::clone(&store), input, seek.key, key, scan.label.clone())
-                .with_transaction_context(self.viewing_epoch, self.transaction_id);
+                .with_transaction_context(self.viewing_epoch, self.transaction_id)
+                .with_read_counter(self.read_counter());
         if seek.list {
             rows = rows.with_list_key();
         }

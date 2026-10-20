@@ -17,7 +17,8 @@ Returned by all query methods (`execute`, `executeCypher`, etc.) and `Transactio
 | `columns` | `string[]` | Column names from the query |
 | `length` | `number` | Number of rows in the result |
 | `executionTimeMs` | `number \| null` | Query execution time in milliseconds |
-| `rowsScanned` | `number \| null` | Number of rows scanned during execution |
+| `rowsScanned` | `number \| null` | Rows the query read from storage before any filter: nodes its scans and index lookups read, edges its expands read, search hits and RDF triples |
+| `profile` | `QueryProfile \| null` | For a `PROFILE` statement, its operators as a tree: `totalTimeMs` and `root`, each operator with `operator`, `detail`, `rows`, `calls`, `selfTimeMs`, `timeMs` and `children` (experimental); `null` otherwise |
 
 ## Methods
 

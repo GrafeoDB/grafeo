@@ -3,17 +3,42 @@
 //! Functions here are used by multiple translator modules (GQL, Cypher, etc.)
 //! to avoid duplication of identical logic.
 
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 use std::cell::RefCell;
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "sql-pgq",
+    test
+))]
 use std::collections::HashSet;
 #[cfg(any(feature = "graphql", feature = "gremlin", feature = "sql-pgq", test))]
 use std::sync::atomic::{AtomicU32, Ordering};
 
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
+use crate::query::plan::AggregateFunction;
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sparql", test))]
+use crate::query::plan::DistinctOp;
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 use crate::query::plan::{
-    AggregateFunction, BinaryOp, CountExpr, DistinctOp, FilterOp, JoinOp, JoinType, LeftJoinOp,
-    LimitOp, LogicalExpression, LogicalOperator, ParameterScanOp, Projection, ReturnItem, ReturnOp,
-    SetPropertyOp, SkipOp, SortKey, SortOp,
+    BinaryOp, JoinOp, JoinType, LeftJoinOp, ParameterScanOp, Projection, SetPropertyOp,
 };
+use crate::query::plan::{
+    CountExpr, FilterOp, LimitOp, LogicalExpression, LogicalOperator, SkipOp, SortKey, SortOp,
+};
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "gremlin",
+    feature = "graphql",
+    feature = "sql-pgq",
+    test
+))]
+use crate::query::plan::{ReturnItem, ReturnOp};
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 use grafeo_common::types::Value;
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 
 /// Expands the `RETURN *` that ends a `CALL` subquery into the variables the
@@ -21,6 +46,7 @@ use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 /// (`outer`) stay where they are, and internal names (`_...`) are not
 /// returned. Fails when those variables are not known, so that the subquery
 /// names what it returns.
+#[cfg(any(feature = "gql", feature = "cypher"))]
 pub(crate) fn expand_subquery_return_star(
     subplan: &mut LogicalOperator,
     outer: Option<&HashSet<String>>,
@@ -57,6 +83,7 @@ pub(crate) fn expand_subquery_return_star(
 
 /// The `RETURN` that ends `plan`, under the `ORDER BY`, `SKIP`, `LIMIT` or
 /// `DISTINCT` that follow it.
+#[cfg(any(feature = "gql", feature = "cypher"))]
 fn final_return_mut(plan: &mut LogicalOperator) -> Option<&mut ReturnOp> {
     match plan {
         LogicalOperator::Return(ret) => Some(ret),
@@ -77,8 +104,10 @@ fn final_return_mut(plan: &mut LogicalOperator) -> Option<&mut ReturnOp> {
 /// an import's name to anything but the import itself (`WITH 3 AS a`) makes
 /// the name a variable of the body, and no longer an import.
 #[derive(Debug, Default)]
+#[cfg(any(feature = "gql", feature = "cypher"))]
 pub(crate) struct CallImports(RefCell<Vec<String>>);
 
+#[cfg(any(feature = "gql", feature = "cypher"))]
 impl CallImports {
     /// Runs `translate` with `imports` as the imports of the body it
     /// translates, and puts back the imports of the enclosing body
@@ -286,6 +315,7 @@ pub(crate) fn resolve_implicitly_grouped(
 /// The variables of a `CALL` subquery's outer row that it imports:
 /// `shared_variables` (the `ApplyOp`'s), with `*` replaced by the variables of
 /// the outer row, `outer`, in name order (none when they are not known here).
+#[cfg(any(feature = "gql", feature = "cypher"))]
 pub(crate) fn call_imports(
     shared_variables: &[String],
     outer: Option<&HashSet<String>>,
@@ -304,6 +334,7 @@ pub(crate) fn call_imports(
 /// as items. An aggregation cannot group by them, since a count over no rows
 /// would then be no row instead of one: its rows are joined with a scan of
 /// the imported values (one row, the outer row's).
+#[cfg(any(feature = "gql", feature = "cypher"))]
 pub(crate) fn with_imports(
     plan: LogicalOperator,
     missing: Vec<String>,
@@ -466,6 +497,7 @@ pub(crate) fn check_sort_reads_projection(
 /// The error for a `WITH` item that is an expression without a name. As in
 /// openCypher, later clauses refer to what a `WITH` passes on by name, and a
 /// property read such as `n.name` does not keep `n`.
+#[cfg(any(feature = "gql", feature = "cypher"))]
 pub(crate) fn unaliased_with_expression() -> Error {
     Error::Query(QueryError::new(
         QueryErrorKind::Semantic,
@@ -477,10 +509,13 @@ pub(crate) fn unaliased_with_expression() -> Error {
 // check of function calls.
 #[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 pub(crate) use crate::query::functions::is_aggregate_function;
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 use crate::query::plan::BuiltinFunction;
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 use crate::query::plan::Callee;
 
 /// Returns true if the aggregate function is a binary set function (requires two arguments).
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 pub(crate) fn is_binary_set_function(func: AggregateFunction) -> bool {
     matches!(
         func,
@@ -594,6 +629,7 @@ impl VarGen {
 ///
 /// Returns an error if the input is empty. Used by `build_property_predicate`
 /// in multiple translators.
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 pub(crate) fn combine_with_and(predicates: Vec<LogicalExpression>) -> Result<LogicalExpression> {
     LogicalExpression::conjunction(predicates).ok_or_else(|| {
         Error::Query(QueryError::new(
@@ -606,6 +642,7 @@ pub(crate) fn combine_with_and(predicates: Vec<LogicalExpression>) -> Result<Log
 /// `hasLabel(variable, label)` for every label, combined with AND, or `None`
 /// when `labels` is empty. A node pattern with several labels requires all of
 /// them, wherever the node appears in a pattern.
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 pub(crate) fn has_all_labels(variable: &str, labels: &[String]) -> Option<LogicalExpression> {
     LogicalExpression::conjunction(labels.iter().map(|label| {
         LogicalExpression::builtin(
@@ -641,7 +678,7 @@ pub(crate) struct PathHop {
 /// questioned edge (`->?`) that matched nothing has a null edge and node, and
 /// the path leaves the hop out. (A list literal keeps a null item, so the
 /// null is tested here.)
-#[cfg(any(feature = "gql", feature = "cypher"))]
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn id_list(variable: &str) -> LogicalExpression {
     let id = LogicalExpression::Id(variable.to_string());
     LogicalExpression::Case {
@@ -693,7 +730,7 @@ pub(crate) fn path_edge_ids(hops: &[PathHop]) -> LogicalExpression {
 }
 
 /// The lists `parts` joined into one (`a + b + ...`).
-#[cfg(any(feature = "gql", feature = "cypher"))]
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 fn concatenation(parts: Vec<LogicalExpression>) -> LogicalExpression {
     parts
         .into_iter()
@@ -797,7 +834,7 @@ impl GeneratedNames {
 /// translator makes up starts (`_anon_3`): the statement's own variables and
 /// aliases among them, wherever they appear, backquoted or not. A word in a
 /// string literal or a comment is taken too, which only skips a name.
-#[cfg(any(feature = "gql", feature = "cypher"))]
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 fn written_names(query: &str) -> HashSet<String> {
     query
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
@@ -813,7 +850,7 @@ fn written_names(query: &str) -> HashSet<String> {
 /// An edge pattern of a graph pattern whose edges must all be different:
 /// GQL's DIFFERENT EDGES (ISO/IEC 39075:2024 16.4) and every Cypher MATCH
 /// (openCypher 9, relationship uniqueness). See [`different_edges`].
-#[cfg(any(feature = "gql", feature = "cypher"))]
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 #[derive(Debug, Clone)]
 pub(crate) struct EdgeOccurrence {
     /// The variable the edge pattern binds.
@@ -825,7 +862,7 @@ pub(crate) struct EdgeOccurrence {
     pub types: Vec<String>,
 }
 
-#[cfg(any(feature = "gql", feature = "cypher"))]
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 impl EdgeOccurrence {
     /// Whether this edge pattern and `other` can bind one edge: an edge has
     /// one type, so two patterns that allow no common type never do.
@@ -856,7 +893,7 @@ impl EdgeOccurrence {
 /// needs no check. With `lone_groups`, a group variable on its own is still
 /// checked, for an expand whose path may repeat an edge; without, its own
 /// edges are known to differ (its expand matches trails).
-#[cfg(any(feature = "gql", feature = "cypher"))]
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn edges_to_compare(edges: &[EdgeOccurrence], lone_groups: bool) -> Vec<Vec<usize>> {
     let mut grouped = vec![false; edges.len()];
     let mut groups = Vec::new();
@@ -889,7 +926,7 @@ pub(crate) fn edges_to_compare(edges: &[EdgeOccurrence], lone_groups: bool) -> V
 /// into `edges`, see [`edges_to_compare`]) bind are all different, an edge
 /// of a group variable included: `all_different` over their ids, one check
 /// per group. `None` when there is no group.
-#[cfg(any(feature = "gql", feature = "cypher"))]
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn different_edges(
     edges: &[EdgeOccurrence],
     groups: &[Vec<usize>],
@@ -923,6 +960,7 @@ pub(crate) fn different_edges(
 /// pattern `WHERE` on a variable-length edge must hold for every edge of the
 /// path. `hop` may be the edge pattern's own variable: inside the predicate it
 /// is then the one edge, not the list of the path's edges.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn every_edge_matches(
     path: String,
     hop: String,
@@ -950,6 +988,7 @@ pub(crate) fn every_edge_matches(
 /// number, a string), or reads an aggregate (`head(collect(n)).name`, whose
 /// aggregate the translators do not take out of a key read), so the read
 /// would give null without saying why.
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalExpression> {
     if calls_an_aggregate(&base) {
         let base = crate::query::planner::common::expression_to_string(&base);
@@ -982,6 +1021,7 @@ pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalEx
 /// `properties(...)`, `startNode(r)` and `endNode(r)`, the first or last item
 /// of a list (`head`, `last`), or a key or element of one of those (or of a
 /// list literal, or of a list of nodes or edges such as `nodes(p)`).
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 fn can_be_map(expr: &LogicalExpression) -> bool {
     match expr {
         LogicalExpression::Variable(_)
@@ -1010,6 +1050,7 @@ fn can_be_map(expr: &LogicalExpression) -> bool {
 /// Whether an expression is a function that returns a list whose items can
 /// be maps, nodes or edges (`nodes(p)`, `relationships(p)`, and `tail` or
 /// `reverse` of a list).
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 fn can_be_list(expr: &LogicalExpression) -> bool {
     matches!(
         expr,
@@ -1027,6 +1068,7 @@ fn can_be_list(expr: &LogicalExpression) -> bool {
 
 /// Whether an expression calls an aggregate function in a function argument,
 /// an index or a key read (`head(collect(n))`, `collect(n)[0]`).
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 fn calls_an_aggregate(expr: &LogicalExpression) -> bool {
     match expr {
         LogicalExpression::FunctionCall { callee, args, .. } => {
@@ -1040,6 +1082,13 @@ fn calls_an_aggregate(expr: &LogicalExpression) -> bool {
     }
 }
 
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "sql-pgq",
+    test
+))]
 pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut HashSet<String>) {
     match expr {
         LogicalExpression::Variable(name) => {
@@ -1172,12 +1221,14 @@ pub(crate) fn collect_expression_variables(expr: &LogicalExpression, vars: &mut 
 // ---------------------------------------------------------------------------
 
 /// Splits a conjunctive predicate (AND-chain) into individual conjuncts.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn split_conjuncts(expr: LogicalExpression) -> Vec<LogicalExpression> {
     let mut result = Vec::new();
     split_conjuncts_recursive(expr, &mut result);
     result
 }
 
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 fn split_conjuncts_recursive(expr: LogicalExpression, out: &mut Vec<LogicalExpression>) {
     if let LogicalExpression::Binary {
         left,
@@ -1198,6 +1249,7 @@ fn split_conjuncts_recursive(expr: LogicalExpression, out: &mut Vec<LogicalExpre
 /// openCypher): it decides which matches count and never removes a row of the
 /// clauses before it, so each conjunct goes into the optional side or into
 /// the join condition.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) struct ClassifiedPredicates {
     /// Conjuncts with an `EXISTS`, `COUNT` or value subquery or a pattern
     /// comprehension that read no variable only the optional side binds (see
@@ -1224,6 +1276,7 @@ pub(crate) struct ClassifiedPredicates {
 /// condition cannot run a subquery. One that reads a variable only the
 /// optional side binds is a right filter, any other one stays a filter above
 /// the join.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn classify_optional_predicates(
     predicate: LogicalExpression,
     left_vars: &HashSet<String>,
@@ -1276,6 +1329,7 @@ pub(crate) fn classify_optional_predicates(
 /// Whether `expr` has an `EXISTS`, `COUNT` or value subquery or a pattern
 /// comprehension, whose plan may read variables of the row that
 /// [`collect_expression_variables`] does not list.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 fn has_subquery(expr: &LogicalExpression) -> bool {
     match expr {
         LogicalExpression::ExistsSubquery(_)
@@ -1346,6 +1400,7 @@ fn has_subquery(expr: &LogicalExpression) -> bool {
 }
 
 /// Collects all variables produced by a logical operator's subtree.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn collect_operator_variables(op: &LogicalOperator, vars: &mut HashSet<String>) {
     match op {
         LogicalOperator::NodeScan(scan) => {
@@ -1479,7 +1534,7 @@ pub(crate) fn collect_operator_variables(op: &LogicalOperator, vars: &mut HashSe
 /// shares with the earlier parts or with the input, so that a part like
 /// `(a)<-[:R]-(b)` after `(b:C)` still meets the `a` of the input, unless it
 /// reads a value of those rows (see [`comma_part_reads_earlier_rows`]).
-#[cfg(any(feature = "gql", feature = "cypher"))]
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn comma_part_join_variables(
     part: &HashSet<String>,
     start: Option<&str>,
@@ -1506,7 +1561,7 @@ pub(crate) fn comma_part_join_variables(
 /// MATCH (b:City), (b)<-[:VISITED {w: w}]-(a)`. On its own the part has no
 /// such value and matches nothing, so it goes on from the rows before it
 /// instead, like a part that shares no variable with them.
-#[cfg(any(feature = "gql", feature = "cypher"))]
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn comma_part_reads_earlier_rows(
     part: &LogicalOperator,
     part_vars: &HashSet<String>,
@@ -1521,7 +1576,7 @@ pub(crate) fn comma_part_reads_earlier_rows(
 
 /// Adds the variables the filters of `op`, and of every operator below it,
 /// read: the edge conditions of shortest-path searches included.
-#[cfg(any(feature = "gql", feature = "cypher"))]
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 fn collect_filter_reads(op: &LogicalOperator, read: &mut HashSet<String>) {
     match op {
         LogicalOperator::Filter(filter) => collect_expression_variables(&filter.predicate, read),
@@ -1545,6 +1600,7 @@ fn collect_filter_reads(op: &LogicalOperator, read: &mut HashSet<String>) {
 /// variables it imports (`imports` for `WITH *`), and a shortest path holds
 /// its ends and its path. Where they are not known here, every variable bound
 /// below `rows`.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 fn row_variables(rows: &LogicalOperator, imports: Option<&HashSet<String>>) -> HashSet<String> {
     rows.bound_variables(imports).unwrap_or_else(|| {
         let mut vars = HashSet::new();
@@ -1559,6 +1615,7 @@ fn row_variables(rows: &LogicalOperator, imports: Option<&HashSet<String>>) -> H
 /// map that reads an imported value) is a condition of the join: it decides
 /// which matches count, so it moves there. `imports` is what a subquery's
 /// `WITH *` imports (see [`row_variables`]).
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn optional_join(
     left: LogicalOperator,
     right: LogicalOperator,
@@ -1578,6 +1635,7 @@ pub(crate) fn optional_join(
 /// Removes from the filters of `plan` (down its pattern) the conjuncts that
 /// read a variable `left_vars` has and `right_vars` does not, adding them to
 /// `moved`.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 fn take_left_reading_filters(
     plan: LogicalOperator,
     left_vars: &HashSet<String>,
@@ -1656,6 +1714,7 @@ fn take_left_reading_filters(
 }
 
 /// The conjuncts of `predicate` (`a AND b AND c` gives three).
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 fn split_and(predicate: LogicalExpression) -> Vec<LogicalExpression> {
     match predicate {
         LogicalExpression::Binary {
@@ -1672,6 +1731,7 @@ fn split_and(predicate: LogicalExpression) -> Vec<LogicalExpression> {
 }
 
 /// The conjunction of `conjuncts`, `None` for none.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
     LogicalExpression::conjunction(conjuncts)
 }
@@ -1689,6 +1749,7 @@ fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression
 ///    which decides which pairs of rows are matches (a left row without one
 ///    keeps nulls)
 /// 5. Returns the LeftJoin and any remaining post-filters to apply above
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn build_left_join_with_predicates(
     left_join: LeftJoinOp,
     predicate: Option<LogicalExpression>,
@@ -1758,6 +1819,7 @@ pub(crate) fn build_left_join_with_predicates(
 /// together is setting them one after the other, and a list of thousands of
 /// assignments (`SET n.p0 = 0, n.p1 = 1, ...`) is one operator, not a chain
 /// as long. Any other value gets an operator of its own.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn push_set_property(
     plan: LogicalOperator,
     variable: &str,
@@ -1833,6 +1895,7 @@ pub(crate) fn wrap_limit(input: LogicalOperator, count: impl Into<CountExpr>) ->
 /// alias or a bare variable), or `None` for an unaliased expression, whose name
 /// is implementation-defined. Returns `None` when the branch does not end in a
 /// `RETURN` or uses `RETURN *` (columns unknown before planning).
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
     match op {
         LogicalOperator::Return(ret) => {
@@ -1916,6 +1979,7 @@ fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
 /// # Errors
 ///
 /// Returns a semantic error naming both column lists on the first mismatch.
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 pub(crate) fn check_branch_columns(operation: &str, branches: &[LogicalOperator]) -> Result<()> {
     let render = |columns: &[Option<String>]| -> String {
         columns
@@ -1953,6 +2017,7 @@ pub(crate) fn check_branch_columns(operation: &str, branches: &[LogicalOperator]
 }
 
 /// Wraps an operator with DISTINCT.
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sparql", test))]
 pub(crate) fn wrap_distinct(input: LogicalOperator) -> LogicalOperator {
     LogicalOperator::Distinct(DistinctOp {
         input: Box::new(input),
@@ -1961,6 +2026,7 @@ pub(crate) fn wrap_distinct(input: LogicalOperator) -> LogicalOperator {
 }
 
 /// Checks if a logical expression references any variable in the given set.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn references_any(expr: &LogicalExpression, names: &[String]) -> bool {
     match expr {
         LogicalExpression::Literal(_) | LogicalExpression::Parameter(_) => false,
@@ -2040,6 +2106,7 @@ pub(crate) fn references_any(expr: &LogicalExpression, names: &[String]) -> bool
 }
 
 /// Flattens a tree of AND-joined expressions into a list of conjuncts.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn flatten_and_conjuncts(expr: &LogicalExpression) -> Vec<&LogicalExpression> {
     match expr {
         LogicalExpression::Binary {
@@ -2056,11 +2123,20 @@ pub(crate) fn flatten_and_conjuncts(expr: &LogicalExpression) -> Vec<&LogicalExp
 }
 
 /// Joins a list of expressions with AND. Returns `None` for an empty list.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn join_and_conjuncts(parts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
     LogicalExpression::conjunction(parts)
 }
 
 /// Wraps an operator with RETURN.
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "gremlin",
+    feature = "graphql",
+    feature = "sql-pgq",
+    test
+))]
 pub(crate) fn wrap_return(
     input: LogicalOperator,
     items: Vec<ReturnItem>,
@@ -2077,6 +2153,7 @@ pub(crate) fn wrap_return(
 /// ISO GQL), or with GQL's `FINISH`. A `RETURN` of no items, which the
 /// planner runs to the end of its input for the writes and which returns no
 /// rows and no columns.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn no_result(input: LogicalOperator) -> LogicalOperator {
     wrap_return(input, Vec::new(), false)
 }

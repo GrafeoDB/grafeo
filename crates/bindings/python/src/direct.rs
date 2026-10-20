@@ -71,6 +71,7 @@ pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
     let execution_time = result.execution_time_ms;
     let rows_scanned = result.rows_scanned;
     let counters = result.counters;
+    let profile = result.profile.take();
     let mut query_result = PyQueryResult::with_metrics(
         columns,
         result.into_rows(),
@@ -80,19 +81,19 @@ pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
         rows_scanned,
     );
     query_result.counters = counters;
+    query_result.profile = profile;
     query_result
 }
 
-/// Runs a query in `language` in the session.
+/// Runs a query in `language` in the session, with parameters converted by
+/// [`params`]. It touches no Python object, so it runs with the GIL released.
 pub(crate) fn run(
     session: &Session,
     language: &str,
     query: &str,
-    query_params: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PyQueryResult> {
-    let result = session
-        .execute_language(query, language, params(query_params)?)
-        .map_err(PyGrafeoError::from)?;
+    query_params: Option<HashMap<String, Value>>,
+) -> Result<PyQueryResult, PyGrafeoError> {
+    let result = session.execute_language(query, language, query_params)?;
     Ok(query_result(result))
 }
 
@@ -293,39 +294,12 @@ impl DirectTarget for GraphHandle<'_> {
     }
 }
 
-/// Upserts rows as nodes and returns the summary as a dict.
-pub(crate) fn upsert_nodes<'py>(
-    py: Python<'py>,
-    target: &impl DirectTarget,
-    labels: &[String],
-    rows: &Bound<'_, PyList>,
-    key: &str,
-    replace: bool,
-) -> PyResult<Bound<'py, PyDict>> {
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let summary = target
-        .upsert_nodes(&labels, key, properties_list(rows)?, replace)
-        .map_err(PyGrafeoError::from)?;
-    upsert_summary(py, &summary)
-}
-
-/// Upserts rows as edges and returns the summary as a dict.
-pub(crate) fn upsert_edges<'py>(
-    py: Python<'py>,
-    target: &impl DirectTarget,
-    edge_type: &str,
-    rows: &Bound<'_, PyList>,
-    options: &EdgeUpsertOptions,
-) -> PyResult<Bound<'py, PyDict>> {
-    let summary = target
-        .upsert_edges(edge_type, properties_list(rows)?, options)
-        .map_err(PyGrafeoError::from)?;
-    upsert_summary(py, &summary)
-}
-
 /// An upsert summary as a dict: `created`, `updated`, `skipped` and
 /// `skipped_rows`.
-fn upsert_summary<'py>(py: Python<'py>, summary: &UpsertSummary) -> PyResult<Bound<'py, PyDict>> {
+pub(crate) fn upsert_summary<'py>(
+    py: Python<'py>,
+    summary: &UpsertSummary,
+) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("created", summary.created)?;
     dict.set_item("updated", summary.updated)?;

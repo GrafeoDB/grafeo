@@ -11,7 +11,7 @@ use grafeo_common::types::{EpochId, TransactionId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
-    Operator, OperatorError, OperatorResult, Recording, WriteCounter,
+    Operator, OperatorError, OperatorResult, ReadCounter, Recording, WriteCounter,
 };
 use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
 
@@ -77,6 +77,8 @@ pub struct ProcedureContext {
     pub catalog: Option<Arc<Catalog>>,
     /// The calling statement's write counter: the body's writes count there.
     pub write_counter: Arc<WriteCounter>,
+    /// The calling statement's read counter: the body's reads count there.
+    pub read_counter: Arc<ReadCounter>,
     /// The calling statement's recording: the body's writes are its
     /// transaction's.
     pub recording: Option<Recording>,
@@ -114,6 +116,8 @@ pub struct UserProcedureOperator {
     catalog: Option<Arc<Catalog>>,
     /// The calling statement's write counter.
     write_counter: Arc<WriteCounter>,
+    /// The calling statement's read counter.
+    read_counter: Arc<ReadCounter>,
     /// The calling statement's recording.
     recording: Option<Recording>,
     /// The database's projections, for `CALL ... {projection: ...}` in the body.
@@ -152,6 +156,7 @@ impl UserProcedureOperator {
             viewing_epoch: ctx.viewing_epoch,
             catalog: ctx.catalog,
             write_counter: ctx.write_counter,
+            read_counter: ctx.read_counter,
             recording: ctx.recording,
             #[cfg(feature = "lpg")]
             projections: ctx.projections,
@@ -185,7 +190,8 @@ impl UserProcedureOperator {
             }
             p
         }
-        .with_write_counter(Arc::clone(&self.write_counter));
+        .with_write_counter(Arc::clone(&self.write_counter))
+        .with_read_counter(Arc::clone(&self.read_counter));
         #[cfg(feature = "lpg")]
         let planner = match &self.projections {
             Some(projections) => planner.with_projections(Arc::clone(projections)),

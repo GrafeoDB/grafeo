@@ -192,13 +192,15 @@ impl Database {
     /// Runs a GQL query, routing through the active transaction session when
     /// one exists so uncommitted writes remain visible to the caller.
     fn run_query(&self, query: &str) -> Result<grafeo_engine::database::QueryResult, JsValue> {
-        let tx_slot = self.tx.borrow();
-        if let Some(session) = tx_slot.as_ref() {
-            session.execute(query).map_err(database_error)
-        } else {
-            drop(tx_slot);
-            self.db().execute(query).map_err(database_error)
-        }
+        timed(|| {
+            let tx_slot = self.tx.borrow();
+            if let Some(session) = tx_slot.as_ref() {
+                session.execute(query).map_err(database_error)
+            } else {
+                drop(tx_slot);
+                self.db().execute(query).map_err(database_error)
+            }
+        })
     }
 
     /// Runs a query with an explicit language, routing through the active
@@ -209,17 +211,19 @@ impl Database {
         language: &str,
         params: Option<HashMap<String, Value>>,
     ) -> Result<grafeo_engine::database::QueryResult, JsValue> {
-        let tx_slot = self.tx.borrow();
-        if let Some(session) = tx_slot.as_ref() {
-            session
-                .execute_language(query, language, params)
-                .map_err(database_error)
-        } else {
-            drop(tx_slot);
-            self.db()
-                .execute_language(query, language, params)
-                .map_err(database_error)
-        }
+        timed(|| {
+            let tx_slot = self.tx.borrow();
+            if let Some(session) = tx_slot.as_ref() {
+                session
+                    .execute_language(query, language, params)
+                    .map_err(database_error)
+            } else {
+                drop(tx_slot);
+                self.db()
+                    .execute_language(query, language, params)
+                    .map_err(database_error)
+            }
+        })
     }
 
     /// Executes a GQL query and returns results as an array of objects.
@@ -1594,6 +1598,49 @@ impl Database {
     }
 }
 
+/// Runs a query and gives its result the time the call took, when the engine
+/// has none: on wasm32 the engine has no clock, so the browser's (`Date.now()`,
+/// whole milliseconds) measures the whole call here.
+pub(crate) fn timed(
+    run: impl FnOnce() -> Result<grafeo_engine::database::QueryResult, JsValue>,
+) -> Result<grafeo_engine::database::QueryResult, JsValue> {
+    #[cfg(target_arch = "wasm32")]
+    let start = js_sys::Date::now();
+    #[allow(unused_mut, reason = "only wasm32 builds set the time")]
+    let mut result = run()?;
+    #[cfg(target_arch = "wasm32")]
+    if result.execution_time_ms.is_none() {
+        result.execution_time_ms = Some(js_sys::Date::now() - start);
+    }
+    Ok(result)
+}
+
+/// A `PROFILE` operator as `{operator, detail, rows, calls, selfTimeMs, timeMs, children}`.
+fn operator_profile_to_js(operator: &grafeo_engine::database::OperatorProfile) -> JsValue {
+    let obj = js_sys::Object::new();
+    let set = |key: &str, value: &JsValue| {
+        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str(key), value);
+    };
+    set("operator", &JsValue::from_str(&operator.operator));
+    set("detail", &JsValue::from_str(&operator.detail));
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "wasm32 memory is at most 4 GiB, so an operator produces fewer than 2^32 rows and calls"
+    )]
+    {
+        set("rows", &JsValue::from_f64(operator.rows as f64));
+        set("calls", &JsValue::from_f64(operator.calls as f64));
+    }
+    set("selfTimeMs", &JsValue::from_f64(operator.self_time_ms));
+    set("timeMs", &JsValue::from_f64(operator.time_ms));
+    let children = Array::new();
+    for child in &operator.children {
+        children.push(&operator_profile_to_js(child));
+    }
+    set("children", &children);
+    obj.into()
+}
+
 /// A query result's rows as an array of objects keyed by column name, the
 /// shape of the `execute*` methods.
 fn rows_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
@@ -1631,7 +1678,8 @@ fn counters_to_js(counters: &grafeo_engine::database::WriteCounters) -> JsValue 
 }
 
 /// Converts a query result to `{ columns: string[], rows: any[][], executionTimeMs?: number,
-/// counters }`, the shape of the `executeRaw*` methods.
+/// counters, profile? }`, the shape of the `executeRaw*` methods (`profile` for a `PROFILE`
+/// statement only).
 fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
     let obj = js_sys::Object::new();
 
@@ -1667,6 +1715,22 @@ fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
         &JsValue::from_str("counters"),
         &counters_to_js(&result.counters),
     );
+
+    // profile?: {root, totalTimeMs}, for a PROFILE statement
+    if let Some(profile) = result.profile() {
+        let js_profile = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(
+            &js_profile,
+            &JsValue::from_str("root"),
+            &operator_profile_to_js(&profile.root),
+        );
+        let _ = js_sys::Reflect::set(
+            &js_profile,
+            &JsValue::from_str("totalTimeMs"),
+            &JsValue::from_f64(profile.total_time_ms),
+        );
+        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("profile"), &js_profile);
+    }
 
     obj.into()
 }

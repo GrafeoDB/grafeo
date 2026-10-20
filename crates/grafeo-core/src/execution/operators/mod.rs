@@ -44,6 +44,7 @@ mod project;
 pub mod push;
 mod range_scan;
 mod rdf_path;
+mod read_counter;
 mod scan;
 #[cfg(feature = "text-index")]
 mod scan_text;
@@ -118,6 +119,7 @@ pub use rdf_path::{PathStep, RdfPathGraph};
 pub use rdf_path::{
     RdfPathConfig, RdfPathOperator, RdfPathPendingGraph, RdfPathReadControl, RdfPathReadOverlay,
 };
+pub use read_counter::ReadCounter;
 pub use scan::ScanOperator;
 #[cfg(feature = "text-index")]
 pub use scan_text::TextScanOperator;

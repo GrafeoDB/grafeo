@@ -86,7 +86,7 @@ impl JsResultStream {
     /// Values follow the Grafeo JSON convention: strings, numbers, booleans,
     /// and `null` map directly; temporal and complex types use the tagged
     /// form documented in `grafeo-bindings-common::json` (e.g. `{ "$date": ... }`).
-    #[napi]
+    #[napi(ts_return_type = "Promise<Record<string, unknown> | null>")]
     pub async fn next(&self) -> Result<Option<JsonValue>> {
         let iter = Arc::clone(&self.iter);
         let columns = Arc::clone(&self.columns);

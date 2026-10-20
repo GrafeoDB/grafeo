@@ -2,7 +2,9 @@
 //!
 //! After a profiled query executes, the results are collected into a
 //! [`ProfileNode`] tree that mirrors the physical operator tree, annotated
-//! with actual row counts, timing, and call counts.
+//! with actual row counts, timing, and call counts. The result of `PROFILE`
+//! holds it twice: as text in its one cell, and as a [`QueryProfile`] in
+//! [`QueryResult::profile`].
 
 use std::fmt::Write;
 use std::sync::Arc;
@@ -25,6 +27,71 @@ pub struct ProfileNode {
     pub stats: SharedProfileStats,
     /// Child nodes.
     pub children: Vec<ProfileNode>,
+    /// Whether a fast path of the operator above absorbed this one: it ran
+    /// as part of that operator, which the tree shows instead.
+    pub absorbed: bool,
+}
+
+/// The profile of a statement run with `PROFILE`: the operators that ran, as
+/// a tree, with the rows each one produced and the time it took.
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.0; operators and fields may still change in any release, with a
+/// CHANGELOG entry (see <https://grafeo.dev/stability/>).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[non_exhaustive]
+pub struct QueryProfile {
+    /// The operator that produces the statement's result.
+    pub root: OperatorProfile,
+    /// The time of the profiled run, in milliseconds; the result's
+    /// `execution_time_ms` adds parsing, planning and the commit.
+    pub total_time_ms: f64,
+}
+
+/// One operator of a [`QueryProfile`].
+///
+/// # Stability: Experimental
+///
+/// See [`QueryProfile`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[non_exhaustive]
+pub struct OperatorProfile {
+    /// The operator, for example `NodeScan`, `Filter` or `Expand`.
+    pub operator: String,
+    /// What it works on, for example `n:Person` or the index it reads.
+    pub detail: String,
+    /// The rows it produced.
+    pub rows: u64,
+    /// How often it was asked for a chunk of rows.
+    pub calls: u64,
+    /// Its own time, without the operators below it, in milliseconds.
+    pub self_time_ms: f64,
+    /// Its time with the operators below it, in milliseconds.
+    pub time_ms: f64,
+    /// The operators it reads from.
+    pub children: Vec<OperatorProfile>,
+}
+
+impl OperatorProfile {
+    /// The profile of `node` and the operators below it.
+    fn of(node: &ProfileNode) -> Self {
+        let stats = node.stats.lock().clone();
+        Self {
+            operator: node.name.clone(),
+            detail: node.label.clone(),
+            rows: stats.rows_out,
+            calls: stats.calls,
+            self_time_ms: nanos_to_ms(self_time_ns(node)),
+            time_ms: nanos_to_ms(stats.time_ns),
+            children: node.children.iter().map(Self::of).collect(),
+        }
+    }
+}
+
+/// Nanoseconds as milliseconds.
+fn nanos_to_ms(nanos: u64) -> f64 {
+    nanos as f64 / 1_000_000.0
 }
 
 /// An entry collected during physical planning, used to build the profile tree.
@@ -35,6 +102,9 @@ pub struct ProfileEntry {
     pub label: String,
     /// Shared stats handle passed to the `ProfiledOperator` wrapper.
     pub stats: SharedProfileStats,
+    /// Whether a fast path of the operator above absorbed this one (see
+    /// [`absorbed`](Self::absorbed)).
+    pub absorbed: bool,
 }
 
 impl ProfileEntry {
@@ -45,8 +115,19 @@ impl ProfileEntry {
             name: name.to_string(),
             label,
             stats: Arc::clone(&stats),
+            absorbed: false,
         };
         (entry, stats)
+    }
+
+    /// The entry of a logical operator that a fast path of the operator
+    /// above absorbed (a scan an index lookup replaced, say): the profile
+    /// tree leaves it out and names it in that operator's detail.
+    #[must_use]
+    pub fn absorbed(name: &str, label: String) -> Self {
+        let (mut entry, _stats) = Self::new(name, label);
+        entry.absorbed = true;
+        entry
     }
 }
 
@@ -64,7 +145,7 @@ pub fn build_profile_tree(
     entries: &mut impl Iterator<Item = ProfileEntry>,
 ) -> ProfileNode {
     // Recurse into children first (post-order)
-    let children: Vec<ProfileNode> = logical
+    let built: Vec<ProfileNode> = logical
         .children()
         .into_iter()
         .map(|child| build_profile_tree(child, entries))
@@ -81,11 +162,34 @@ pub fn build_profile_tree(
         )
     });
 
+    // An absorbed child ran as part of this operator: its children become
+    // this one's, and this operator's detail names it.
+    let mut label = entry.label;
+    let mut children = Vec::with_capacity(built.len());
+    for child in built {
+        if child.absorbed {
+            let taken = if child.label.is_empty() {
+                child.name
+            } else {
+                format!("{} {}", child.name, child.label)
+            };
+            label = if label.is_empty() {
+                taken
+            } else {
+                format!("{label}, {taken}")
+            };
+            children.extend(child.children);
+        } else {
+            children.push(child);
+        }
+    }
+
     ProfileNode {
         name: entry.name,
-        label: entry.label,
+        label,
         stats: entry.stats,
         children,
+        absorbed: entry.absorbed,
     }
 }
 
@@ -108,6 +212,10 @@ pub fn profile_result(root: &ProfileNode, total_time_ms: f64) -> QueryResult {
         status_message: None,
         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         counters: Default::default(),
+        profile: Some(QueryProfile {
+            root: OperatorProfile::of(root),
+            total_time_ms,
+        }),
     }
 }
 
@@ -116,8 +224,7 @@ fn format_node(out: &mut String, node: &ProfileNode, depth: usize) {
     let indent = "  ".repeat(depth);
 
     // Compute self-time before locking stats (self_time_ns also locks).
-    let self_time_ns = self_time_ns(node);
-    let self_time_ms = self_time_ns as f64 / 1_000_000.0;
+    let self_time_ms = nanos_to_ms(self_time_ns(node));
 
     let rows_out = node.stats.lock().rows_out;
 

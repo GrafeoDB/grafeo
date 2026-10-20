@@ -95,8 +95,10 @@ impl GraphHandle {
         params: Option<JsValue>,
     ) -> Result<grafeo_engine::database::QueryResult, JsValue> {
         let params: Option<HashMap<String, Value>> = Database::convert_params(params)?;
-        self.with_graph("execute", |graph| {
-            graph.execute_language(query, language, params)
+        crate::timed(|| {
+            self.with_graph("execute", |graph| {
+                graph.execute_language(query, language, params)
+            })
         })
     }
 }

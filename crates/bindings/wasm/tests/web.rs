@@ -106,7 +106,7 @@ fn test_snapshot_roundtrip() {
 
     // Export snapshot
     let snapshot = db.export_snapshot().expect("export");
-    assert!(!snapshot.is_empty());
+    assert!(!snapshot.is_empty(), "a snapshot holds the node");
 
     // Import into new database
     let restored = Database::import_snapshot(&snapshot).expect("import");
@@ -128,7 +128,7 @@ fn test_schema() {
 #[wasm_bindgen_test]
 fn test_version() {
     let v = Database::version();
-    assert!(!v.is_empty());
+    assert!(!v.is_empty(), "the version is set");
 }
 
 // ---------------------------------------------------------------------------
@@ -136,15 +136,11 @@ fn test_version() {
 // ---------------------------------------------------------------------------
 
 fn lpg_result_counts(result: &wasm_bindgen::JsValue) -> (u32, u32) {
-    let nodes = js_sys::Reflect::get(result, &wasm_bindgen::JsValue::from_str("nodes"))
-        .unwrap()
-        .as_f64()
-        .unwrap() as u32;
-    let edges = js_sys::Reflect::get(result, &wasm_bindgen::JsValue::from_str("edges"))
-        .unwrap()
-        .as_f64()
-        .unwrap() as u32;
-    (nodes, edges)
+    let count = |key: &str| -> u32 {
+        let value = js_sys::Reflect::get(result, &wasm_bindgen::JsValue::from_str(key)).unwrap();
+        serde_wasm_bindgen::from_value(value).expect("a count is a whole number")
+    };
+    (count("nodes"), count("edges"))
 }
 
 #[wasm_bindgen_test]
@@ -373,7 +369,7 @@ fn test_import_lpg_mixed_property_types() {
             "properties": {
                 "str_val": "hello",
                 "int_val": 42,
-                "float_val": 3.14,
+                "float_val": 2.5,
                 "bool_val": true,
                 "null_val": null,
                 "list_val": [1, 2, 3]
@@ -1167,7 +1163,7 @@ fn test_errors_carry_their_gql_status() {
         ),
         ("MATCH (n RETURN n", "42001", "GRAFEO-Q001"),
     ] {
-        let error = wasm_bindgen::JsValue::from(db.execute(query).unwrap_err());
+        let error = db.execute(query).unwrap_err();
         let get = |name: &str| {
             js_sys::Reflect::get(&error, &wasm_bindgen::JsValue::from_str(name))
                 .unwrap()
@@ -1178,4 +1174,59 @@ fn test_errors_carry_their_gql_status() {
         assert!(text.contains(message), "{query}: {text}");
         assert!(error.is_instance_of::<js_sys::Error>(), "{query}");
     }
+}
+
+/// `executeRaw` of a `PROFILE` statement has `profile`, the operator tree
+/// (#461); other statements have none.
+#[wasm_bindgen_test]
+fn test_execute_raw_profile_tree() {
+    let db = Database::new().expect("create db");
+    db.execute("INSERT (:Person {age: 30}), (:Person {age: 25}), (:Person {age: 35})")
+        .expect("insert");
+
+    let raw = db
+        .execute_raw("PROFILE MATCH (p:Person) WHERE p.age > 28 RETURN p.age")
+        .expect("profile");
+    let profile = field(&raw, "profile");
+    assert!(profile.is_object(), "PROFILE has a profile");
+    assert!(field(&profile, "totalTimeMs").as_f64().is_some());
+    let root = field(&profile, "root");
+    assert_eq!(field(&root, "rows").as_f64(), Some(2.0));
+    assert!(
+        field(&root, "operator")
+            .as_string()
+            .is_some_and(|op| !op.is_empty())
+    );
+    for key in ["detail", "calls", "selfTimeMs", "timeMs"] {
+        assert!(!field(&root, key).is_undefined(), "{key}");
+    }
+    assert!(js_sys::Array::is_array(&field(&root, "children")));
+
+    let plain = db
+        .execute_raw("MATCH (p:Person) RETURN p.age")
+        .expect("query");
+    assert!(field(&plain, "profile").is_undefined());
+}
+
+/// The engine has no clock on wasm32: the binding times every raw call (#461).
+#[wasm_bindgen_test]
+fn test_execute_raw_has_a_time() {
+    let db = Database::new().expect("create db");
+    db.execute("INSERT (:Person {age: 30})").expect("insert");
+    let raw = db
+        .execute_raw("MATCH (p:Person) RETURN p.age")
+        .expect("gql");
+    assert!(
+        field(&raw, "executionTimeMs")
+            .as_f64()
+            .is_some_and(|ms| ms >= 0.0)
+    );
+    let raw = db
+        .execute_raw_with_language("MATCH (p:Person) RETURN p.age", "gql")
+        .expect("with language");
+    assert!(
+        field(&raw, "executionTimeMs")
+            .as_f64()
+            .is_some_and(|ms| ms >= 0.0)
+    );
 }

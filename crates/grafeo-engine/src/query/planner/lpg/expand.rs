@@ -101,6 +101,7 @@ impl super::Planner {
             .with_path_mode(exec_path_mode)
             .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_read_only(self.read_only)
+            .with_read_counter(self.read_counter())
             .with_memory_budget(self.path_search_budget);
 
             // If a path alias is set, enable path length and detail output
@@ -176,7 +177,8 @@ impl super::Planner {
                 expand.edge_types.clone(),
             )
             .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_read_only(self.read_only);
+            .with_read_only(self.read_only)
+            .with_read_counter(self.read_counter());
             Box::new(expand_op)
         };
 
@@ -304,7 +306,8 @@ impl super::Planner {
             base_op,
             steps,
         )
-        .with_read_only(self.read_only);
+        .with_read_only(self.read_only)
+        .with_read_counter(self.read_counter());
 
         if let Some(transaction_id) = self.transaction_id {
             lazy_op = lazy_op.with_transaction_context(self.viewing_epoch, Some(transaction_id));

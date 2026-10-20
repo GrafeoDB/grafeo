@@ -765,12 +765,17 @@ impl super::Planner {
                 if !self.store.has_property_index(property) {
                     continue;
                 }
-                if let Some(found) =
+                let Some(found) =
                     self.store
                         .find_nodes_maybe_equal_at(property, value, self.read_view())
-                    && candidates
-                        .as_ref()
-                        .is_none_or(|best| found.len() < best.len())
+                else {
+                    continue;
+                };
+                // Every lookup reads, also one whose set is not the smallest.
+                self.read_counter().add(found.len());
+                if candidates
+                    .as_ref()
+                    .is_none_or(|best| found.len() < best.len())
                 {
                     candidates = Some(found);
                 }
@@ -822,7 +827,8 @@ impl super::Planner {
                 Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
                 labels,
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id),
+            .with_transaction_context(self.viewing_epoch, self.transaction_id)
+            .with_read_counter(self.read_counter()),
         );
         // PROFILE names the labels the scan reads.
         let read = LogicalOperator::NodeScan(NodeScanOp {
@@ -926,6 +932,7 @@ impl super::Planner {
             else {
                 return Ok(None);
             };
+            self.read_counter().add(found.len());
             for node_id in found {
                 if seen.insert(node_id) {
                     matching_nodes.push(node_id);
@@ -1021,9 +1028,9 @@ impl super::Planner {
     /// `build_profile_tree` walks the logical tree in post-order and panics
     /// if it runs out of entries. When a fast path collapses a `Filter` over
     /// a `NodeScan` into one physical op, the scan's entry is missing
-    /// without this call. Stats stay empty: the work is attributed to the
-    /// wrapping operator's entry, leaving a cosmetic 0-row/0-ns line for
-    /// the absorbed scan in PROFILE output.
+    /// without this call. The entry is marked absorbed: the profile tree
+    /// leaves it out, gives its children to the absorbing operator and names
+    /// it in that operator's detail (#461), whose stats hold the work.
     ///
     /// Pass the source operator's `name()` (e.g. `"NodeScan"`, `"EdgeScan"`)
     /// so future absorbers don't get mislabeled. A seek also absorbs the
@@ -1033,8 +1040,21 @@ impl super::Planner {
         if !self.profiling.get() {
             return;
         }
-        let label = absorbed.display_label();
-        let (entry, _stats) = crate::query::profile::ProfileEntry::new(op_name, label);
+        let entry =
+            crate::query::profile::ProfileEntry::absorbed(op_name, absorbed.display_label());
+        self.profile_entries.borrow_mut().push(entry);
+    }
+
+    /// Pushes the profile entry of a physical operator a fast path builds in
+    /// place of `replaced` without profiling it on its own (a seek, a hash
+    /// join): unlike an absorbed scan it keeps a line in the profile tree,
+    /// with whatever stats it has (none), so PROFILE shows that it runs.
+    pub(super) fn record_kept_entry(&self, op_name: &str, replaced: &LogicalOperator) {
+        if !self.profiling.get() {
+            return;
+        }
+        let (entry, _stats) =
+            crate::query::profile::ProfileEntry::new(op_name, replaced.display_label());
         self.profile_entries.borrow_mut().push(entry);
     }
 
@@ -1141,7 +1161,8 @@ impl super::Planner {
             bounds.max_inclusive,
             2048,
         )
-        .with_view(self.read_view());
+        .with_view(self.read_view())
+        .with_read_counter(self.read_counter());
 
         if let Some(label) = scan_label {
             op = op.with_label_filter(label.clone());

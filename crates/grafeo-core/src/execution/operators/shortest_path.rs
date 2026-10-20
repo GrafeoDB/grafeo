@@ -5,11 +5,11 @@
 //! keeps (ISO/IEC 39075:2024 16.6 `<path search prefix>`): the k shortest, or
 //! every path of the k shortest lengths, under a path mode.
 
-use super::expand::visible_edges_from;
+use super::expand::{EdgeWalk, visible_edges_from};
 use super::variable_length_expand::{
     DEFAULT_PATH_SEARCH_BUDGET, PathMode, PathSegment, path_budget_error,
 };
-use super::{Operator, OperatorError, OperatorResult, Predicate};
+use super::{Operator, OperatorError, OperatorResult, Predicate, ReadCounter};
 use crate::execution::DataChunk;
 use crate::execution::chunk::DataChunkBuilder;
 use crate::graph::Direction;
@@ -142,6 +142,8 @@ pub struct ShortestPathOperator {
     viewing_epoch: Option<EpochId>,
     /// When true, skip versioned MVCC lookups (fast path for read-only queries).
     read_only: bool,
+    /// Counts the edges the expansion reads.
+    reads: Option<Arc<ReadCounter>>,
     /// The columns written after the length.
     outputs: PathOutputs,
     /// A condition every edge of a path meets (see [`Self::with_edge_condition`]).
@@ -260,6 +262,7 @@ impl ShortestPathOperator {
             transaction_id: None,
             viewing_epoch: None,
             read_only: false,
+            reads: None,
             outputs: PathOutputs::default(),
             edge_condition: None,
             budget: DEFAULT_PATH_SEARCH_BUDGET,
@@ -296,6 +299,14 @@ impl ShortestPathOperator {
     /// Marks this search as read-only, enabling fast-path lookups.
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Counts the edges the expansion reads in `reads`, before the type and
+    /// visibility checks.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
         self
     }
 
@@ -422,10 +433,13 @@ impl PathSearch<'_> {
             op.store.as_ref(),
             node,
             direction,
-            &op.edge_types,
-            op.viewing_epoch,
-            op.transaction_id,
-            op.read_only,
+            &EdgeWalk {
+                edge_types: &op.edge_types,
+                epoch: op.viewing_epoch,
+                transaction_id: op.transaction_id,
+                read_only: op.read_only,
+                reads: op.reads.as_deref(),
+            },
         );
         // Both directions list a self-loop twice, as it goes out and comes
         // in: it is one step, which two would make two copies of a path

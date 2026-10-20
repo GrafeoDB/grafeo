@@ -146,6 +146,7 @@ impl Transaction {
         let exec_time = result.execution_time_ms;
         let scanned = result.rows_scanned;
         let counters = result.counters;
+        let profile = result.profile.take();
 
         Ok(QueryResult::with_metrics(
             columns,
@@ -155,7 +156,8 @@ impl Transaction {
             exec_time,
             scanned,
         )
-        .with_counters(counters))
+        .with_counters(counters)
+        .with_profile(profile))
     }
 
     pub(crate) fn new(db: Arc<RwLock<GrafeoDB>>, isolation_level: Option<&str>) -> Result<Self> {

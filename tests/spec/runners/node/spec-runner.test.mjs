@@ -23,7 +23,7 @@ let GrafeoDB
 let GRAFEO_AVAILABLE = false
 
 try {
-  const mod = await import('../../../../crates/bindings/node/index.js')
+  const mod = await import('../../../../crates/bindings/node/grafeo.js')
   GrafeoDB = mod.GrafeoDB
   GRAFEO_AVAILABLE = true
 } catch {

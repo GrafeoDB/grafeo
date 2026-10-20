@@ -137,7 +137,7 @@ fn assert_profile_operator_rows(
         "missing {operator} in PROFILE: {report}"
     );
     // PROFILE can give an aggregate and its projection the same operator name.
-    for line in operators {
+    for line in &operators {
         let rows = line
             .split_whitespace()
             .find_map(|field| field.strip_prefix("rows="))
@@ -146,6 +146,21 @@ fn assert_profile_operator_rows(
             .unwrap();
         assert_eq!(rows, expected_rows, "{report}");
     }
+    let mut pending = vec![
+        &result
+            .profile()
+            .expect("PROFILE has a structured tree")
+            .root,
+    ];
+    let mut matching_nodes = 0;
+    while let Some(node) = pending.pop() {
+        if node.operator == operator {
+            assert_eq!(node.rows, u64::try_from(expected_rows).unwrap(), "{node:?}");
+            matching_nodes += 1;
+        }
+        pending.extend(node.children.iter());
+    }
+    assert_eq!(matching_nodes, operators.len(), "text and tree must agree");
 }
 
 #[test]
@@ -1100,6 +1115,65 @@ fn grouped_result_retains_cold_and_cached_rows_until_drop_or_transfer() {
 
 #[cfg(feature = "spill")]
 #[test]
+fn grouped_read_counts_survive_cold_and_cached_result_ownership() {
+    use grafeo_common::memory::buffer::MemoryRegion;
+
+    for pressured in [false, true] {
+        let (root, db) = grouped_result_fixture();
+        db.execute("UNWIND range(0, 3) AS i INSERT (:GroupedTelemetry {bucket: i % 2})")
+            .unwrap();
+        let manager = db.buffer_manager();
+        let baseline = manager.allocated();
+        let held = pressured.then(|| {
+            manager
+                .try_allocate(
+                    manager.config().budget * 9 / 10 - baseline,
+                    MemoryRegion::ExecutionBuffers,
+                )
+                .unwrap()
+        });
+        let held_total = manager.allocated();
+        let session = db.session();
+        let query = "MATCH (n:GroupedTelemetry) RETURN n.bucket AS bucket, count(*) AS c";
+        for transfer in [false, true] {
+            let before = db.query_cache().stats();
+            let result = session.execute(query).unwrap();
+            let after = db.query_cache().stats();
+            if transfer {
+                assert!(after.optimized_hits > before.optimized_hits);
+            } else {
+                assert_eq!(after.optimized_hits, before.optimized_hits);
+                assert!(after.optimized_misses > before.optimized_misses);
+            }
+            assert_eq!(result.rows_scanned, Some(4));
+            assert!(result.profile().is_none());
+            assert_eq!(result.row_count(), 2);
+            let mut seen = [false; 2];
+            for row in result.rows() {
+                let bucket = usize::try_from(row[0].as_int64().unwrap()).unwrap();
+                assert!(!seen[bucket]);
+                seen[bucket] = true;
+                assert_eq!(row[1], Value::Int64(2));
+            }
+            assert_eq!(seen, [true; 2]);
+            assert!(manager.allocated() > held_total);
+            if transfer {
+                let rows = result.into_rows();
+                assert_eq!(manager.allocated(), held_total);
+                assert_eq!(rows.len(), 2);
+            } else {
+                drop(result);
+            }
+            assert_eq!(manager.allocated(), held_total);
+            assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+        }
+        drop(held);
+        assert_eq!(manager.allocated(), baseline);
+    }
+}
+
+#[cfg(feature = "spill")]
+#[test]
 fn grouped_result_denial_cleans_cold_and_cached_queries() {
     use grafeo_common::memory::buffer::MemoryRegion;
     let (root, db) = grouped_result_fixture();
@@ -1314,9 +1388,22 @@ fn profile_grouped_denial_preserves_headroom() {
     }
     drop(held);
     assert_eq!(manager.allocated(), baseline);
-    let result = session.execute(query).unwrap();
-    assert_profile_operator_rows(&result, "HashAggregate", 2051);
-    drop(result);
-    assert_eq!(manager.allocated(), baseline);
-    assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+    for pressured in [false, true] {
+        let held = pressured.then(|| {
+            manager
+                .try_allocate(
+                    manager.config().budget * 9 / 10 - baseline,
+                    MemoryRegion::ExecutionBuffers,
+                )
+                .unwrap()
+        });
+        let held_total = manager.allocated();
+        let result = session.execute(query).unwrap();
+        assert_profile_operator_rows(&result, "HashAggregate", 2051);
+        drop(result);
+        assert_eq!(manager.allocated(), held_total);
+        assert!(std::fs::read_dir(root.path()).unwrap().next().is_none());
+        drop(held);
+        assert_eq!(manager.allocated(), baseline);
+    }
 }

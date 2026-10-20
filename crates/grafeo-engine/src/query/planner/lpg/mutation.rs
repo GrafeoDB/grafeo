@@ -702,6 +702,7 @@ impl super::Planner {
             .with_hop_bounds(sp.min_hops, sp.max_hops)
             .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_read_only(self.read_only)
+            .with_read_counter(self.read_counter())
             .with_memory_budget(self.path_search_budget)
             .with_path_output();
 
@@ -1089,6 +1090,7 @@ impl super::Planner {
                 viewing_epoch: self.viewing_epoch,
                 catalog: self.catalog.clone(),
                 write_counter: self.write_counter(),
+                read_counter: self.read_counter(),
                 recording: self.recording.clone(),
                 #[cfg(feature = "lpg")]
                 projections: self.projections.clone(),

@@ -3597,6 +3597,7 @@ impl crate::admin::AdminService for GrafeoDB {
 // Query Result Types
 // =========================================================================
 
+pub use crate::query::profile::{OperatorProfile, QueryProfile};
 pub use grafeo_core::execution::operators::WriteCounters;
 
 /// The result of running a query.
@@ -3638,9 +3639,16 @@ pub struct QueryResult {
     /// Executor reservation; fields drop in order, after their row buffers.
     #[cfg(feature = "spill")]
     pub(crate) rows_owner: Option<grafeo_core::execution::memory::GroupedMemoryOwner>,
-    /// Query execution time in milliseconds (if timing was enabled).
+    /// The time of the whole call, in milliseconds: parsing, planning,
+    /// execution and, for a statement outside a transaction, its commit.
+    /// `None` on wasm32, where the engine has no clock (the WASM binding
+    /// times its calls itself).
     pub execution_time_ms: Option<f64>,
-    /// Number of rows scanned during query execution (estimate).
+    /// The rows the statement read from storage, before any filter: the
+    /// nodes its scans, label scans, index lookups and range scans read, the
+    /// hits of its text and vector searches, the edges its expands read and
+    /// the triples its RDF scans read. A count over a whole label reports
+    /// every node it read, not the one row it returns.
     pub rows_scanned: Option<u64>,
     /// Status message for DDL and session commands (e.g., "Created node type 'Person'").
     pub status_message: Option<String>,
@@ -3652,6 +3660,9 @@ pub struct QueryResult {
     /// What the statement's writes changed: nodes and edges created and
     /// deleted, properties set, labels added and removed.
     pub counters: WriteCounters,
+    /// The operators of a statement run with `PROFILE`, as a tree with their
+    /// rows and times; `None` for every other statement.
+    pub profile: Option<QueryProfile>,
 }
 
 impl QueryResult {
@@ -3705,6 +3716,7 @@ impl QueryResult {
             status_message: None,
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
             counters: Default::default(),
+            profile: None,
         }
     }
 
@@ -3723,6 +3735,7 @@ impl QueryResult {
             status_message: Some(msg.into()),
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS_OMITTED_RESULT,
             counters: Default::default(),
+            profile: None,
         }
     }
 
@@ -3746,6 +3759,7 @@ impl QueryResult {
             status_message: None,
             gql_status,
             counters: Default::default(),
+            profile: None,
         })
     }
 
@@ -3771,6 +3785,7 @@ impl QueryResult {
             status_message: None,
             gql_status,
             counters: Default::default(),
+            profile: None,
         })
     }
 
@@ -3797,6 +3812,7 @@ impl QueryResult {
             status_message: None,
             gql_status,
             counters: Default::default(),
+            profile: None,
         })
     }
 
@@ -3940,13 +3956,21 @@ impl QueryResult {
         self
     }
 
+    /// The operator tree of a statement run with `PROFILE`, `None` for every
+    /// other statement.
+    #[must_use]
+    pub fn profile(&self) -> Option<&QueryProfile> {
+        self.profile.as_ref()
+    }
+
     /// Returns the execution time in milliseconds, if available.
     #[must_use]
     pub fn execution_time_ms(&self) -> Option<f64> {
         self.execution_time_ms
     }
 
-    /// Returns the number of rows scanned, if available.
+    /// The rows the statement read from storage, before any filter (see the
+    /// field of the same name).
     #[must_use]
     pub fn rows_scanned(&self) -> Option<u64> {
         self.rows_scanned

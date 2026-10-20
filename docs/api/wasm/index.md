@@ -36,7 +36,7 @@ const db = new Database();   // in-memory (all WASM databases are in-memory)
 
 ```javascript
 db.execute(gql);                              // GQL: returns array of row objects
-db.executeRaw(gql);                          // GQL: returns {columns, rows, executionTimeMs, counters}
+db.executeRaw(gql);                          // GQL: returns {columns, rows, executionTimeMs, counters}, and profile for PROFILE
 db.executeWithParams(gql, params);           // GQL with parameter binding
 db.executeWithLanguage(query, language);     // "gql", "cypher", "graphql", etc.
 db.executeWithLanguageAndParams(query, language, params);  // language + params

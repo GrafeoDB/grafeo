@@ -457,7 +457,16 @@ export declare class QueryResult {
   get length(): number
   /** Query execution time in milliseconds (if available). */
   get executionTimeMs(): number | null
-  /** Number of rows scanned during execution (if available). */
+  /**
+   * The operators of a `PROFILE` statement as a tree, or `null` for any
+   * other statement.
+   */
+  get profile(): QueryProfile | null
+  /**
+   * The rows the query read from storage before any filter: nodes its
+   * scans and index lookups read, edges its expands read, search hits and
+   * RDF triples (if available).
+   */
   get rowsScanned(): number | null
   /**
    * What the query's writes changed: nodes and edges created and deleted,
@@ -510,7 +519,7 @@ export declare class ResultStream {
    * and `null` map directly; temporal and complex types use the tagged
    * form documented in `grafeo-bindings-common::json` (e.g. `{ "$date": ... }`).
    */
-  next(): Promise<JsonValue | null>
+  next(): Promise<Record<string, unknown> | null>
   /**
    * Explicitly releases the underlying operator tree. After calling this,
    * `next()` returns `null`. Useful when you want to break out of iteration
@@ -645,6 +654,38 @@ export interface NodeEdgesOptions {
   direction?: string
   /** Only edges of these types (default: every type). */
   edgeTypes?: Array<string>
+}
+
+/** One operator of a `QueryProfile`. */
+export interface OperatorProfile {
+  /** The operator, for example `NodeScan`, `Filter` or `Expand`. */
+  operator: string
+  /** What it works on, for example `n:Person` or the index it reads. */
+  detail: string
+  /** The rows it produced. */
+  rows: number
+  /** How often it was asked for a chunk of rows. */
+  calls: number
+  /** Its own time, without the operators below it, in milliseconds. */
+  selfTimeMs: number
+  /** Its time with the operators below it, in milliseconds. */
+  timeMs: number
+  /** The operators it reads from. */
+  children: Array<OperatorProfile>
+}
+
+/**
+ * The operators of a `PROFILE` statement as a tree. Experimental: the
+ * fields may still change (see https://grafeo.dev/stability/).
+ */
+export interface QueryProfile {
+  /** The operator that produces the statement's result. */
+  root: OperatorProfile
+  /**
+   * The time of the profiled run, in milliseconds; `executionTimeMs`
+   * adds parsing, planning and the commit.
+   */
+  totalTimeMs: number
 }
 
 /** Returns the active SIMD instruction set for vector operations. */

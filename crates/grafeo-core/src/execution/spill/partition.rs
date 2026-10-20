@@ -150,17 +150,13 @@ impl<V: Clone + Send + Sync + 'static> OwnedPartitionDrainCursor<V> {
         let capacity = self
             .remaining
             .min(crate::execution::chunk::DEFAULT_CHUNK_SIZE);
-        let manager = Arc::clone(
-            self.state
-                .metadata_owner
-                .as_ref()
-                .expect("admitted drain retains metadata owner")
-                .manager(),
-        );
-        let mut owner = GroupedMemoryOwner::try_new(
-            manager,
-            checked_grouped_bytes(capacity, std::mem::size_of::<V>())?,
-        )?;
+        let mut owner = self
+            .state
+            .metadata_owner
+            .as_mut()
+            .expect("admitted drain retains metadata owner")
+            .split(0)?;
+        owner.try_grow(checked_grouped_bytes(capacity, std::mem::size_of::<V>())?)?;
         let mut values = Vec::new();
         values
             .try_reserve_exact(capacity)
@@ -365,9 +361,18 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         }
 
         // Load from disk
-        if let Some(spill_file) = self.spill_files[partition_idx].as_ref() {
+        if self.spill_files[partition_idx].is_some() {
+            let owner = self
+                .metadata_owner
+                .as_mut()
+                .map(|owner| owner.split(0))
+                .transpose()
+                .map_err(std::io::Error::other)?;
+            let spill_file = self.spill_files[partition_idx]
+                .as_ref()
+                .expect("spill file was just checked");
             // Keep the file owner until the entire partition has decoded.
-            let loaded = self.load_partition(spill_file)?;
+            let loaded = self.load_partition(spill_file, owner)?;
             let mut completed = [self.spill_files[partition_idx].take()];
             release_spill_files(&self.manager, &mut completed);
             self.partitions[partition_idx] = Some(loaded);
@@ -383,10 +388,18 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     }
 
     /// Loads a partition from a spill file.
-    fn load_partition(&self, spill_file: &SpillFile) -> std::io::Result<ResidentPartition<V>> {
+    fn load_partition(
+        &self,
+        spill_file: &SpillFile,
+        owner: Option<GroupedMemoryOwner>,
+    ) -> std::io::Result<ResidentPartition<V>> {
         if let Some(decode) = self.admitted_deserializer {
             return self
-                .load_accounted_partition(spill_file, decode)
+                .load_accounted_partition(
+                    spill_file,
+                    decode,
+                    owner.expect("admitted reload retains metadata authority"),
+                )
                 .map_err(std::io::Error::other);
         }
         let mut reader = spill_file.reader()?;
@@ -435,22 +448,17 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         &self,
         spill_file: &SpillFile,
         decode: fn(&mut dyn Read, &mut GroupedMemoryOwner) -> Result<V, OperatorError>,
+        mut table_owner: GroupedMemoryOwner,
     ) -> Result<ResidentPartition<V>, OperatorError> {
-        let manager = Arc::clone(
-            self.metadata_owner
-                .as_ref()
-                .expect("accounted state has metadata admission")
-                .manager(),
-        );
         // The metadata owner reserves one bounded reader/writer workspace.
         let mut reader = spill_file.reader().map_err(grouped_io_error)?;
         let mut adapter = SpillReaderAdapter(&mut reader);
         let count = usize::try_from(read_u64(&mut adapter).map_err(grouped_io_error)?)
             .map_err(|_| grouped_memory_limit())?;
-        let table_owner = GroupedMemoryOwner::try_new(
-            Arc::clone(&manager),
-            grouped_hash_table_bytes::<(SerializedKey, PartitionEntry<V>)>(count)?,
-        )?;
+        table_owner.try_grow(grouped_hash_table_bytes::<(
+            SerializedKey,
+            PartitionEntry<V>,
+        )>(count)?)?;
         let table_bytes = table_owner.size();
         let mut partition = ResidentPartition {
             entries: HashMap::new(),
@@ -464,7 +472,12 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         for _ in 0..count {
             let key_len = usize::try_from(read_u64(&mut adapter).map_err(grouped_io_error)?)
                 .map_err(|_| grouped_memory_limit())?;
-            let mut owner = GroupedMemoryOwner::try_new(Arc::clone(&manager), key_len)?;
+            let mut owner = partition
+                .table_owner
+                .as_mut()
+                .expect("admitted reload has a table owner")
+                .split(0)?;
+            owner.try_grow(key_len)?;
             let mut bytes = Vec::new();
             bytes
                 .try_reserve_exact(key_len)

@@ -1066,6 +1066,120 @@ fn grouped_result_fixture() -> (tempfile::TempDir, GrafeoDB) {
 }
 
 #[cfg(feature = "spill")]
+#[test]
+fn grouped_consumer_scans_stay_bounded_across_spill_reload() {
+    use grafeo_common::memory::buffer::{MemoryConsumer, MemoryRegion, StorageTier};
+    use grafeo_common::utils::error::Error;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ScanCounter(AtomicUsize);
+    impl MemoryConsumer for ScanCounter {
+        fn name(&self) -> &str {
+            "grouped-query-scan-counter"
+        }
+        fn memory_usage(&self) -> usize {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            0
+        }
+        fn eviction_priority(&self) -> u8 {
+            0
+        }
+        fn region(&self) -> MemoryRegion {
+            MemoryRegion::ExecutionBuffers
+        }
+        fn evict(&self, _target_bytes: usize) -> usize {
+            0
+        }
+        fn current_tier(&self) -> StorageTier {
+            StorageTier::Uninitialized
+        }
+    }
+
+    const GROUPS: usize = 1024;
+    const BUDGET: usize = 32 << 20;
+    const QUERY: &str = "MATCH (n:AggregateCost) RETURN n.bucket AS bucket, sum(n.value) AS total, count(*) AS count";
+    let mut scans = Vec::new();
+    for repetitions in [2_i64, 4] {
+        let root = tempfile::tempdir().unwrap();
+        let spill_path = root.path().join("spill");
+        let db = GrafeoDB::with_config(
+            grafeo_engine::Config::in_memory()
+                .with_memory_limit(BUDGET)
+                .with_spill_path(&spill_path)
+                .without_query_timeout(),
+        )
+        .unwrap();
+        for value in 1..=repetitions {
+            for bucket in 0..GROUPS {
+                db.create_node_with_props(
+                    &["AggregateCost"],
+                    [
+                        ("bucket", Value::Int64(i64::try_from(bucket).unwrap())),
+                        ("value", Value::Int64(value)),
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        let manager = db.buffer_manager();
+        let baseline = manager.allocated();
+        let held = manager
+            .try_allocate(BUDGET * 9 / 10 - baseline, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        let held_total = manager.allocated();
+        let session = db.session();
+        // A blocked lazy directory proves this workload really spills.
+        std::fs::write(&spill_path, b"blocked spill directory").unwrap();
+        assert!(matches!(session.execute(QUERY), Err(Error::Io(_))));
+        assert_eq!(manager.allocated(), held_total);
+        std::fs::remove_file(&spill_path).unwrap();
+        drop(session.execute(QUERY).unwrap());
+        assert_eq!(manager.allocated(), held_total);
+
+        let counter = Arc::new(ScanCounter(AtomicUsize::new(0)));
+        manager.register_consumer(counter.clone());
+        let before = db.query_cache().stats();
+        let result = session.execute(QUERY).unwrap();
+        scans.push(counter.0.load(Ordering::Relaxed));
+        assert!(db.query_cache().stats().optimized_hits > before.optimized_hits);
+        assert_eq!(result.row_count(), GROUPS);
+        let mut seen = [false; GROUPS];
+        for row in result.rows() {
+            let [
+                Value::Int64(bucket),
+                Value::Int64(total),
+                Value::Int64(count),
+            ] = row.as_slice()
+            else {
+                panic!("unexpected grouped row: {row:?}");
+            };
+            let bucket = usize::try_from(*bucket).unwrap();
+            assert!(bucket < GROUPS && !seen[bucket]);
+            seen[bucket] = true;
+            assert_eq!(
+                (*total, *count),
+                (repetitions * (repetitions + 1) / 2, repetitions)
+            );
+        }
+        assert!(seen.into_iter().all(|present| present));
+        assert!(manager.allocated() > held_total);
+        drop(result);
+        assert_eq!(manager.allocated(), held_total);
+        assert!(std::fs::read_dir(&spill_path).unwrap().next().is_none());
+        drop(held);
+        assert_eq!(manager.allocated(), baseline);
+    }
+    // Initial state and input schema establish admission. Child owners must
+    // grow that authority without repeating global scans during reload/output.
+    assert!(
+        scans.iter().all(|count| *count <= 2),
+        "consumer scans for one/two input chunks: {scans:?}"
+    );
+    assert_eq!(scans[0], scans[1]);
+}
+
+#[cfg(feature = "spill")]
 fn assert_grouped_result_rows(result: &grafeo_engine::database::QueryResult) {
     assert_eq!(result.row_count(), 2051);
     let mut seen = vec![false; 2051];

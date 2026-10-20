@@ -76,7 +76,7 @@ impl GroupedOutput {
         };
         // Tuple fields free states before their grant on every error path.
         let batch = batch.into_parts();
-        let output_owner = GroupedMemoryOwner::try_new(Arc::clone(self.schema_owner.manager()), 0)?;
+        let output_owner = self.schema_owner.split(0)?;
         let mut chunk = DataChunk::try_with_owner(&self.types, batch.0.len(), output_owner)?;
         let rows = batch.0.len();
         for state in batch.0 {
@@ -767,21 +767,20 @@ impl SpillableAggregatePushOperator {
         let Some(partitioned) = self.partitioned_groups.take() else {
             return Ok(None);
         };
-        let manager = Arc::clone(
-            self.memory_ctx
-                .as_ref()
-                .expect("memory-aware finalization")
-                .buffer_manager(),
-        );
         let columns = self
             .group_by
             .len()
             .checked_add(self.aggregates.len())
             .ok_or_else(grouped_memory_limit)?;
-        let mut schema_owner = GroupedMemoryOwner::try_new(
-            manager,
-            checked_grouped_bytes(columns, std::mem::size_of::<LogicalType>())?,
-        )?;
+        let mut schema_owner = self
+            .input_types_owner
+            .as_mut()
+            .expect("admitted grouping retains its input schema")
+            .split(0)?;
+        schema_owner.try_grow(checked_grouped_bytes(
+            columns,
+            std::mem::size_of::<LogicalType>(),
+        )?)?;
         let mut types = Vec::new();
         types
             .try_reserve_exact(columns)

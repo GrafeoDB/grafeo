@@ -394,7 +394,7 @@ impl ChunkCollector {
 
     #[cfg(feature = "spill")]
     fn admit_chunk_slot(&mut self, chunk: &mut DataChunk) -> Result<(), OperatorError> {
-        use super::memory::{GroupedMemoryOwner, checked_grouped_bytes, grouped_memory_limit};
+        use super::memory::{checked_grouped_bytes, grouped_memory_limit};
         let manager = chunk.owner_mut().map(|owner| owner.manager().clone());
         if let Some(manager) = manager {
             if let Some(owner) = &self.chunks_owner {
@@ -404,10 +404,15 @@ impl ChunkCollector {
                     ));
                 }
             } else {
-                self.chunks_owner = Some(GroupedMemoryOwner::try_new(
-                    manager,
-                    checked_grouped_bytes(self.chunks.capacity(), size_of::<DataChunk>())?,
-                )?);
+                let mut owner = chunk
+                    .owner_mut()
+                    .expect("accounted chunk retains its owner")
+                    .split(0)?;
+                owner.try_grow(checked_grouped_bytes(
+                    self.chunks.capacity(),
+                    size_of::<DataChunk>(),
+                )?)?;
+                self.chunks_owner = Some(owner);
             }
         }
         let Some(owner) = &mut self.chunks_owner else {

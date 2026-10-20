@@ -265,10 +265,10 @@ impl super::Planner {
             // Try vector-left + text-right, then vector-right + text-left.
             let result = self
                 .extract_vector_predicate(left)
-                .and_then(|v| self.extract_text_predicate(right).map(|t| (v, t)))
+                .zip(self.extract_text_predicate(right))
                 .or_else(|| {
                     self.extract_vector_predicate(right)
-                        .and_then(|v| self.extract_text_predicate(left).map(|t| (v, t)))
+                        .zip(self.extract_text_predicate(left))
                 });
             let Some((v, t)) = result else {
                 return Ok(None);

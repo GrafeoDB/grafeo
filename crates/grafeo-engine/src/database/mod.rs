@@ -32,6 +32,7 @@ pub(crate) mod catalog_section;
 #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
 mod checkpoint_timer;
 // What runs after each immediate call and commit: the version collect.
+#[cfg(feature = "lpg")]
 pub(crate) mod collect;
 #[cfg(feature = "lpg")]
 mod crud;

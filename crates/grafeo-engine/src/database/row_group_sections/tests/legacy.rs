@@ -195,10 +195,18 @@ fn definitions(catalog: &crate::catalog::Catalog) -> Vec<String> {
 /// What a query sees of a graph of the engine's store: its rows, without
 /// the edges whose end the graph does not hold (a 0.5.43 WAL directory
 /// replays some into a named graph), which `LpgStore` keeps and the
-/// row-group store leaves out.
+/// row-group store leaves out, and without null values: `LpgStore` keeps a
+/// stored null in a build without `temporal`, while the row-group store
+/// never holds one (a null value is no value, #412 decision Q8).
 fn seen(store: &dyn GraphStore) -> (BTreeMap<u64, NodeView>, BTreeMap<u64, EdgeView>) {
-    let (nodes, mut edges) = committed_of(store);
+    let (mut nodes, mut edges) = committed_of(store);
     edges.retain(|_, (src, dst, _, _)| nodes.contains_key(src) && nodes.contains_key(dst));
+    for (_, values) in nodes.values_mut() {
+        values.retain(|(_, value)| !value.is_null());
+    }
+    for (_, _, _, values) in edges.values_mut() {
+        values.retain(|(_, value)| !value.is_null());
+    }
     (nodes, edges)
 }
 
@@ -262,19 +270,50 @@ fn assert_same_database(db: &GrafeoDB, database: &Database, what: &str) {
     }
 }
 
+/// Both reads of a fixture, or `None` when this build lacks a feature the
+/// fixture's data needs (RDF triples without `triple-store`, an index without
+/// its feature): then the row-group read refuses it as the engine does, with
+/// the error that names the feature, and drops nothing silently.
+fn both_read(
+    read: Result<Database>,
+    engine: Result<GrafeoDB>,
+    what: &str,
+) -> Option<(Database, GrafeoDB)> {
+    const NEEDS_A_FEATURE: &str = "only a build with the";
+    match (read, engine) {
+        (Ok(database), Ok(db)) => Some((database, db)),
+        (Err(read), Err(engine)) => {
+            let (read, engine) = (read.to_string(), engine.to_string());
+            assert!(
+                read.contains(NEEDS_A_FEATURE) && engine.contains(NEEDS_A_FEATURE),
+                "{what}: both refuse, for a feature this build lacks: {read} / {engine}"
+            );
+            None
+        }
+        (read, engine) => panic!(
+            "{what}: the row-group read and the engine disagree: {:?} / {:?}",
+            read.err().map(|error| error.to_string()),
+            engine.err().map(|error| error.to_string())
+        ),
+    }
+}
+
 /// Asserts what `read` loads of the database at `path` matches the engine's
 /// read-only open of it, leaves every byte under `dir` as it was, and that
 /// a checkpoint of it (the migration's write, version 4) reopens with the
 /// same, its versions costing what a loaded root's do.
 fn assert_migrates(dir: &Path, path: &Path, read: fn(&Path) -> Result<Database>, what: &str) {
     let before = bytes_under(dir);
-    let database = read(path).unwrap_or_else(|error| panic!("{what}: {error}"));
+    let read = read(path);
     assert_eq!(
         bytes_under(dir),
         before,
         "{what}: the files stay as they were"
     );
-    let db = GrafeoDB::open_read_only(path).unwrap();
+    let engine = GrafeoDB::open_read_only(path);
+    let Some((database, db)) = both_read(read, engine, what) else {
+        return;
+    };
     assert_same_database(&db, &database, what);
     assert!(db.node_count() > 0, "{what}: the fixture holds data");
 
@@ -385,9 +424,12 @@ fn snapshot_fixtures_import_into_row_groups() {
                 .join(relative),
         )
         .unwrap();
-        let db = GrafeoDB::import_snapshot(&data).unwrap();
         let database = Database::new();
-        row_groups::restore(&parts(&database), &data, "import").unwrap();
+        let read = row_groups::restore(&parts(&database), &data, "import").map(|()| database);
+        let Some((database, db)) = both_read(read, GrafeoDB::import_snapshot(&data), relative)
+        else {
+            continue;
+        };
         continue_row_group_epochs(&database.root, &database.transaction_manager);
         assert_same_database(&db, &database, relative);
     }

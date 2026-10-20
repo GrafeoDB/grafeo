@@ -42,12 +42,55 @@ impl super::Planner {
 
         // An aggregate that comes first (`RETURN count(*)`) aggregates the
         // one empty row.
-        let (mut input_op, input_columns) = self.plan_input(&agg.input)?;
+        let (mut input_op, mut input_columns) = self.plan_input(&agg.input)?;
         // Values that read the graph after a write (`... SET h.c = i RETURN
         // sum(h.c)`) read what the whole write left (see `after_write`).
         if super::after_write::aggregate_reads(agg) {
             input_op = super::mutation::read_first_after_a_write(input_op, &agg.input);
         }
+
+        // A subquery in a grouping key or an aggregate's argument
+        // (`sum(COUNT { ... })`) runs per input row, as one in a projection
+        // does (see `lift_subqueries`): its value is a column of the rows
+        // the aggregate reads. A key column keeps the name of the key as
+        // written (`COUNT {...}`), which the RETURN above it reads.
+        let key_names: Vec<String> = agg.group_by.iter().map(expression_to_string).collect();
+        let input_writes = agg.input.has_mutations();
+        let lifted_aggregate;
+        let agg = if agg
+            .group_by
+            .iter()
+            .chain(
+                agg.aggregates.iter().flat_map(|aggregate| {
+                    aggregate.expression.iter().chain(&aggregate.expression2)
+                }),
+            )
+            .any(|expression| {
+                self.has_subquery_to_lift(expression, Some(&input_columns), input_writes)
+            }) {
+            let mut owned = agg.clone();
+            let expressions =
+                owned
+                    .group_by
+                    .iter_mut()
+                    .chain(owned.aggregates.iter_mut().flat_map(|aggregate| {
+                        aggregate
+                            .expression
+                            .iter_mut()
+                            .chain(aggregate.expression2.iter_mut())
+                    }));
+            for expression in expressions {
+                let (lifted, lifted_input, lifted_columns) =
+                    self.lift_subqueries(expression, input_op, input_columns, input_writes)?;
+                *expression = lifted;
+                input_op = lifted_input;
+                input_columns = lifted_columns;
+            }
+            lifted_aggregate = owned;
+            &lifted_aggregate
+        } else {
+            agg
+        };
 
         // Build variable to column index mapping
         let mut variable_columns: HashMap<String, usize> = input_columns
@@ -243,10 +286,10 @@ impl super::Planner {
 
         // Add group-by columns: a group key keeps what it holds, also one
         // computed by an expression (`{msg: m}`, `x.msg`, `startNode(r)`).
-        for expr in &agg.group_by {
+        for (expr, name) in agg.group_by.iter().zip(key_names) {
             let entity = self.held_entity(expr);
             output_schema.push(entity_type(entity.as_ref()));
-            output_columns.push(expression_to_string(expr));
+            output_columns.push(name);
             output_entities.push(entity);
         }
 

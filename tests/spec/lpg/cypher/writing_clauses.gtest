@@ -582,12 +582,16 @@ tests:
       rows:
         - [Alix, false, true]
 
-  - name: merge_on_create_set_on_another_variable_is_an_error
+  # ON CREATE and ON MATCH take SET items as a SET clause does: one may set
+  # any element of the pattern (it was refused).
+  - name: merge_on_create_set_on_another_variable
     statements:
       - "CREATE (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
       - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[r:KNOWS]->(b) ON CREATE SET a.since = 3"
+      - "MATCH (a:Person {name: 'Alix'}) RETURN a.since AS since"
     expect:
-      error: "MERGE"
+      rows:
+        - [3]
 
   # ---------------------------------------------------------------------------
   # MERGE of a relationship to or from an anonymous node with a label or
@@ -628,9 +632,13 @@ tests:
 
   # Without a label or a property the node could be any node; that MERGE
   # is not supported yet and says so.
-  - name: merge_relationship_to_a_bare_anonymous_node_is_an_error
+  # A node with neither a label nor a property is any node: Alix knows
+  # nobody, so the MERGE creates an empty node with the relationship.
+  - name: merge_relationship_to_a_bare_anonymous_node
     statements:
       - "CREATE (:Person {name: 'Alix'})"
       - "MATCH (h:Person) MERGE (h)-[:KNOWS]->()"
+      - "MATCH (:Person {name: 'Alix'})-[:KNOWS]->(x) RETURN labels(x) AS l"
     expect:
-      error: "anonymous node"
+      rows:
+        - [[]]

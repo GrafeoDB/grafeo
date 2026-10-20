@@ -1,6 +1,7 @@
 //! Variable-length expand operator for multi-hop path traversal.
 
 use super::expand::visible_edges_from;
+use super::filter::Predicate;
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
@@ -130,6 +131,9 @@ pub struct VariableLengthExpandOperator {
     /// The nodes emitted for earlier input rows, with
     /// [`Self::with_reachability_across_rows`].
     emitted_across_rows: FxHashSet<NodeId>,
+    /// A condition every edge of a path meets (see
+    /// [`Self::with_edge_condition`]).
+    edge_condition: Option<Box<dyn Predicate>>,
 }
 
 /// Which rows a variable-length expand emits.
@@ -210,6 +214,9 @@ struct RowSearch {
     max_open: usize,
     /// The budget, in bytes, for the error message.
     budget: usize,
+    /// The row the edge condition reads (see
+    /// [`VariableLengthExpandOperator::condition_row`]).
+    condition_row: Option<DataChunk>,
 }
 
 impl RowSearch {
@@ -341,7 +348,53 @@ impl VariableLengthExpandOperator {
             path_mode: PathMode::Walk,
             reachability: Reachability::Off,
             emitted_across_rows: FxHashSet::default(),
+            edge_condition: None,
         }
+    }
+
+    /// Walks only the edges that meet `condition`, so every edge of a path
+    /// meets it and a path stops at the first edge that does not, instead of
+    /// being enumerated whole and filtered after: the property map or the
+    /// `WHERE` of a variable-length edge pattern. The condition reads one
+    /// row: the columns of the input row, then the candidate edge in the
+    /// column after them.
+    #[must_use]
+    pub fn with_edge_condition(mut self, condition: Box<dyn Predicate>) -> Self {
+        self.edge_condition = Some(condition);
+        self
+    }
+
+    /// The row the edge condition reads for input row `input_idx`: its
+    /// columns, then a placeholder for the candidate edge. `None` without a
+    /// condition.
+    fn condition_row(&self, input_idx: usize) -> Option<DataChunk> {
+        self.edge_condition.as_ref()?;
+        let input_row = self.input_rows.as_ref()?.get(input_idx)?;
+        let mut types: Vec<LogicalType> = input_row
+            .columns
+            .iter()
+            .map(|value| match value {
+                ColumnValue::NodeId(_) => LogicalType::Node,
+                ColumnValue::EdgeId(_) => LogicalType::Edge,
+                ColumnValue::Value(_) => LogicalType::Any,
+            })
+            .collect();
+        types.push(LogicalType::Edge);
+        let mut row = DataChunk::with_capacity(&types, 1);
+        for (index, value) in input_row.columns.iter().enumerate() {
+            if let Some(column) = row.column_mut(index) {
+                match value {
+                    ColumnValue::NodeId(id) => column.push_node_id(*id),
+                    ColumnValue::EdgeId(id) => column.push_edge_id(*id),
+                    ColumnValue::Value(value) => column.push_value(value.clone()),
+                }
+            }
+        }
+        if let Some(edge) = row.column_mut(input_row.columns.len()) {
+            edge.push_edge_id(EdgeId(0));
+        }
+        row.set_count(1);
+        Some(row)
     }
 
     /// Sets the path traversal mode.
@@ -468,6 +521,11 @@ impl VariableLengthExpandOperator {
                     ))
                 })?;
 
+                // A null source (a node an OPTIONAL MATCH did not find) has
+                // no paths: the row goes no further.
+                if col.is_null(row_idx) {
+                    continue;
+                }
                 let source_node = col.get_node_id(row_idx).ok_or_else(|| {
                     OperatorError::Internal("Expected node ID in source column".into())
                 })?;
@@ -502,9 +560,14 @@ impl VariableLengthExpandOperator {
     }
 
     /// Gets edges from a node, respecting filters and visibility (see
-    /// [`visible_edges_from`]).
-    fn get_edges(&self, node_id: NodeId) -> Vec<(NodeId, EdgeId)> {
-        visible_edges_from(
+    /// [`visible_edges_from`]) and the edge condition, which reads
+    /// `condition_row` (see [`condition_row`](Self::condition_row)).
+    fn get_edges(
+        &self,
+        node_id: NodeId,
+        condition_row: Option<&mut DataChunk>,
+    ) -> Result<Vec<(NodeId, EdgeId)>, OperatorError> {
+        let mut edges = visible_edges_from(
             self.store.as_ref(),
             node_id,
             self.direction,
@@ -512,7 +575,32 @@ impl VariableLengthExpandOperator {
             self.viewing_epoch,
             self.transaction_id,
             self.read_only,
-        )
+        );
+        if let (Some(condition), Some(row)) = (&self.edge_condition, condition_row) {
+            let edge_column = row.column_count() - 1;
+            let mut failure = None;
+            edges.retain(|&(_, edge)| {
+                if failure.is_some() {
+                    return false;
+                }
+                let Some(column) = row.column_mut(edge_column) else {
+                    return false;
+                };
+                column.clear();
+                column.push_edge_id(edge);
+                match condition.evaluate(row, 0) {
+                    Ok(passes) => passes,
+                    Err(error) => {
+                        failure = Some(error);
+                        false
+                    }
+                }
+            });
+            if let Some(error) = failure {
+                return Err(error);
+            }
+        }
+        Ok(edges)
     }
 
     /// Checks whether a candidate expansion is allowed under the current path mode.
@@ -602,6 +690,7 @@ impl VariableLengthExpandOperator {
             open: VecDeque::new(),
             max_open: (self.budget / self.bytes_per_open_path()).max(1),
             budget: self.budget,
+            condition_row: self.condition_row(input_idx),
         };
         if self.max_hops > 0 {
             let root = follows_paths.then(|| {
@@ -627,7 +716,7 @@ impl VariableLengthExpandOperator {
         length: u32,
         segment: Option<&Arc<PathSegment>>,
     ) -> Result<(), OperatorError> {
-        for (target, edge) in self.get_edges(node) {
+        for (target, edge) in self.get_edges(node, search.condition_row.as_mut())? {
             let extended = match segment {
                 Some(segment) => {
                     if !self.is_expansion_allowed(segment, target, edge, search.source) {
@@ -701,7 +790,11 @@ impl VariableLengthExpandOperator {
     /// node is then expanded once from `min_hops` on (twice if it was in
     /// layer `min_hops - 1`), also for the hundred hops of an unbounded
     /// pattern.
-    fn reachable_targets(&self, input_idx: usize, source_node: NodeId) -> Vec<OutputRow> {
+    fn reachable_targets(
+        &self,
+        input_idx: usize,
+        source_node: NodeId,
+    ) -> Result<Vec<OutputRow>, OperatorError> {
         let reached = |target_id, path_length| OutputRow {
             input_idx,
             edge_id: None,
@@ -710,6 +803,7 @@ impl VariableLengthExpandOperator {
             path_nodes: None,
             path_edges: None,
         };
+        let mut condition_row = self.condition_row(input_idx);
         let mut results = Vec::new();
         let mut emitted: FxHashSet<NodeId> = FxHashSet::default();
         let mut layer = vec![source_node];
@@ -724,7 +818,7 @@ impl VariableLengthExpandOperator {
         for depth in 1..=self.max_hops {
             let emitting = depth >= self.min_hops;
             for &node in &layer {
-                for (target, _) in self.get_edges(node) {
+                for (target, _) in self.get_edges(node, condition_row.as_mut())? {
                     if emitting {
                         if emitted.insert(target) {
                             results.push(reached(target, depth));
@@ -742,7 +836,7 @@ impl VariableLengthExpandOperator {
             next_layer.clear();
             in_next_layer.clear();
         }
-        results
+        Ok(results)
     }
 
     /// Fills the output buffer with a chunk of rows, or with the rest of
@@ -767,7 +861,7 @@ impl VariableLengthExpandOperator {
             };
             self.current_input_idx += 1;
             if self.searches_reachability() {
-                let mut results = self.reachable_targets(input_idx, source_node);
+                let mut results = self.reachable_targets(input_idx, source_node)?;
                 if self.reachability == Reachability::AcrossInputRows {
                     results.retain(|row| self.emitted_across_rows.insert(row.target_id));
                 }

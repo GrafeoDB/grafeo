@@ -1938,6 +1938,8 @@ impl AggregateFunction {
         ("min", Self::Min),
         ("max", Self::Max),
         ("collect", Self::Collect),
+        // The ISO GQL name of `collect`.
+        ("collect_list", Self::Collect),
         ("stdev", Self::StdDev),
         ("stddev", Self::StdDev),
         ("stddev_samp", Self::StdDev),

@@ -1087,9 +1087,18 @@ impl<'a> Parser<'a> {
                     // <-[...]- (incoming with bracket details)
                     (Direction::Incoming, true)
                 } else if self.current.kind == TokenKind::Minus {
-                    // <-- (anonymous incoming shorthand)
+                    // <-- (anonymous incoming shorthand), or <--> (either way)
                     self.advance();
-                    (Direction::Incoming, false)
+                    if self.current.kind == TokenKind::Gt {
+                        self.advance();
+                        (Direction::Undirected, false)
+                    } else {
+                        (Direction::Incoming, false)
+                    }
+                } else if self.current.kind == TokenKind::Arrow {
+                    // <-> (either way)
+                    self.advance();
+                    (Direction::Undirected, false)
                 } else {
                     (Direction::Incoming, false)
                 }
@@ -1181,10 +1190,15 @@ impl<'a> Parser<'a> {
 
                 self.expect(TokenKind::RBracket)?;
 
-                // Determine direction from closing symbol
+                // Determine direction from closing symbol: `<-[...]->` points
+                // both ways, which openCypher reads as either direction.
                 let dir = if self.current.kind == TokenKind::Arrow {
                     self.advance();
-                    Direction::Outgoing
+                    if direction == Direction::Incoming {
+                        Direction::Undirected
+                    } else {
+                        Direction::Outgoing
+                    }
                 } else if self.current.kind == TokenKind::Minus {
                     self.advance();
                     if direction == Direction::Incoming {
@@ -1392,79 +1406,81 @@ impl<'a> Parser<'a> {
     }
 
     /// The operands and operators of a chain of comparisons, each operator
-    /// nesting one level (see [`Self::parse_comparison_expression`]).
+    /// nesting one level (see [`Self::parse_comparison_expression`]). Each
+    /// operand is a predicate expression: `1 = 2 IN [false]` compares 1 with
+    /// `2 IN [false]`.
     fn parse_comparison_chain(&mut self) -> Result<Expression> {
-        let mut left = self.parse_additive_expression()?;
+        let mut left = self.parse_predicate_expression()?;
         // The right operand of the comparison `left` ends with, kept when the
         // next operator is a comparison too, which compares it again.
         let mut chained_operand: Option<Expression> = None;
 
-        loop {
-            if let Some(op) = comparison_op(self.current.kind) {
-                self.advance();
-                let right = self.parse_additive_expression()?;
-                let middle = chained_operand.take();
-                if comparison_op(self.current.kind).is_some() {
-                    chained_operand = Some(right.clone());
-                }
-                left = match middle {
-                    // `a < b <= c` reads `a < b AND b <= c`.
-                    Some(middle) => Expression::Binary {
-                        left: Box::new(left),
-                        op: BinaryOp::And,
-                        right: Box::new(Expression::Binary {
-                            left: Box::new(middle),
-                            op,
-                            right: Box::new(right),
-                        }),
-                    },
-                    None => Expression::Binary {
-                        left: Box::new(left),
+        while let Some(op) = comparison_op(self.current.kind) {
+            self.advance();
+            let right = self.parse_predicate_expression()?;
+            let middle = chained_operand.take();
+            if comparison_op(self.current.kind).is_some() {
+                chained_operand = Some(right.clone());
+            }
+            left = match middle {
+                // `a < b <= c` reads `a < b AND b <= c`.
+                Some(middle) => Expression::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::And,
+                    right: Box::new(Expression::Binary {
+                        left: Box::new(middle),
                         op,
                         right: Box::new(right),
-                    },
-                };
-                continue;
-            }
+                    }),
+                },
+                None => Expression::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                },
+            };
+        }
 
+        Ok(left)
+    }
+
+    /// The string, list and null predicates (`IN`, `STARTS WITH`, `ENDS
+    /// WITH`, `CONTAINS`, `=~`, `IS [NOT] NULL`), left to right. They bind
+    /// tighter than the comparisons, as in openCypher 9: `x IN l = true` is
+    /// `(x IN l) = true`.
+    fn parse_predicate_expression(&mut self) -> Result<Expression> {
+        let chain = self.begin_chain();
+        let predicate = self.parse_predicate_chain();
+        self.end_chain(chain);
+        predicate
+    }
+
+    fn parse_predicate_chain(&mut self) -> Result<Expression> {
+        let mut left = self.parse_additive_expression()?;
+        loop {
             let op = match self.current.kind {
-                TokenKind::In => BinaryOp::In,
-                TokenKind::Starts => {
+                TokenKind::In => {
                     self.advance();
-                    self.expect(TokenKind::With)?;
-                    let right = self.parse_additive_expression()?;
-                    self.link_chain()?;
-                    left = Expression::Binary {
-                        left: Box::new(left),
-                        op: BinaryOp::StartsWith,
-                        right: Box::new(right),
-                    };
-                    continue;
+                    BinaryOp::In
                 }
-                TokenKind::Ends => {
+                TokenKind::Starts | TokenKind::Ends => {
+                    let op = if self.current.kind == TokenKind::Starts {
+                        BinaryOp::StartsWith
+                    } else {
+                        BinaryOp::EndsWith
+                    };
                     self.advance();
                     self.expect(TokenKind::With)?;
-                    let right = self.parse_additive_expression()?;
-                    self.link_chain()?;
-                    left = Expression::Binary {
-                        left: Box::new(left),
-                        op: BinaryOp::EndsWith,
-                        right: Box::new(right),
-                    };
-                    continue;
+                    op
                 }
                 TokenKind::Contains => {
                     self.advance();
-                    let right = self.parse_additive_expression()?;
-                    self.link_chain()?;
-                    left = Expression::Binary {
-                        left: Box::new(left),
-                        op: BinaryOp::Contains,
-                        right: Box::new(right),
-                    };
-                    continue;
+                    BinaryOp::Contains
                 }
-                TokenKind::RegexMatch => BinaryOp::RegexMatch,
+                TokenKind::RegexMatch => {
+                    self.advance();
+                    BinaryOp::RegexMatch
+                }
                 TokenKind::Is => {
                     self.advance();
                     let not = self.current.kind == TokenKind::Not;
@@ -1483,10 +1499,8 @@ impl<'a> Parser<'a> {
                     };
                     continue;
                 }
-                _ => break,
+                _ => return Ok(left),
             };
-
-            self.advance();
             let right = self.parse_additive_expression()?;
             self.link_chain()?;
             left = Expression::Binary {
@@ -1495,8 +1509,6 @@ impl<'a> Parser<'a> {
                 right: Box::new(right),
             };
         }
-
-        Ok(left)
     }
 
     fn parse_additive_expression(&mut self) -> Result<Expression> {

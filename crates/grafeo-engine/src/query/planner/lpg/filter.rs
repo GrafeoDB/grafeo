@@ -114,6 +114,12 @@ impl super::Planner {
             return Ok((empty_op, columns));
         }
 
+        // A condition on every edge of a variable-length path: checked during
+        // the expand's search
+        if let Some(result) = self.try_plan_filter_into_variable_length_expand(filter)? {
+            return Ok(result);
+        }
+
         // A key from the input row, or an ID: look the node up per row
         if let Some(result) = self.try_plan_filter_with_node_seek(filter)? {
             return Ok(result);
@@ -204,6 +210,62 @@ impl super::Planner {
     /// run per row: the parts of an `AND` without one are a filter of their
     /// own first (which may use an index), then each subquery adds its count
     /// to the row and the rest of the predicate reads it.
+    /// Plans `all(hop IN edges(path) WHERE condition)` conjuncts of a filter
+    /// right over the variable-length expand that binds `path` as a check of
+    /// each edge during its search: a path stops at its first edge that
+    /// fails, instead of being enumerated whole and dropped after. That holds
+    /// the same paths, as the condition reads the one edge and the input
+    /// row only (a conjunct that reads anything else stays in the filter).
+    /// `None` when no conjunct qualifies.
+    fn try_plan_filter_into_variable_length_expand(
+        &self,
+        filter: &FilterOp,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        let LogicalOperator::Expand(expand) = filter.input.as_ref() else {
+            return Ok(None);
+        };
+        let Some(path) = expand.path_alias.as_deref() else {
+            return Ok(None);
+        };
+        if !expand.is_variable_length() || self.reachability_mode(expand).is_some() {
+            return Ok(None);
+        }
+        let Some(row) = expand.input.bound_variables(None) else {
+            return Ok(None);
+        };
+        let mut conjuncts = Vec::new();
+        split_conjuncts(&filter.predicate, &mut conjuncts);
+        let mut taken = Vec::new();
+        let mut kept = Vec::new();
+        for conjunct in conjuncts {
+            match edge_condition_of(&conjunct, path, &row) {
+                Some((hop, predicate)) => taken.push(super::expand::PendingEdgeCondition {
+                    path: path.to_string(),
+                    hops: vec![hop],
+                    predicate,
+                }),
+                None => kept.push(conjunct),
+            }
+        }
+        if taken.is_empty() {
+            return Ok(None);
+        }
+        self.pending_edge_conditions.borrow_mut().extend(taken);
+        let planned = match join_conjuncts(kept) {
+            Some(predicate) => self.plan_filter(&FilterOp {
+                predicate,
+                input: filter.input.clone(),
+                pushdown_hint: filter.pushdown_hint.clone(),
+            }),
+            None => self.plan_input(&filter.input),
+        };
+        // The expand took its conditions; drop any it did not reach.
+        self.pending_edge_conditions
+            .borrow_mut()
+            .retain(|condition| condition.path != path);
+        planned.map(Some)
+    }
+
     fn plan_filter_with_subqueries(
         &self,
         filter: &FilterOp,
@@ -1718,4 +1780,39 @@ fn split_conjuncts(predicate: &LogicalExpression, out: &mut Vec<LogicalExpressio
 /// The `AND` of `conjuncts`, or `None` when there are none.
 fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
     LogicalExpression::conjunction(conjuncts)
+}
+
+/// The hop and the condition of `all(hop IN edges(path) WHERE condition)`
+/// when the condition reads nothing but the hop and the variables `row` binds
+/// (the input of the expand that binds `path`).
+fn edge_condition_of(
+    conjunct: &LogicalExpression,
+    path: &str,
+    row: &std::collections::HashSet<String>,
+) -> Option<(String, LogicalExpression)> {
+    let LogicalExpression::ListPredicate {
+        kind: crate::query::plan::ListPredicateKind::All,
+        variable: hop,
+        list_expr,
+        predicate,
+    } = conjunct
+    else {
+        return None;
+    };
+    let LogicalExpression::FunctionCall {
+        callee: crate::query::plan::Callee::Builtin(crate::query::plan::BuiltinFunction::Edges),
+        args,
+        ..
+    } = list_expr.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(args.as_slice(), [LogicalExpression::Variable(name)] if name == path) {
+        return None;
+    }
+    let mut read = Vec::new();
+    super::project::collect_vars(predicate, &mut read);
+    read.iter()
+        .all(|name| name == hop || row.contains(name))
+        .then(|| (hop.clone(), predicate.as_ref().clone()))
 }

@@ -14,7 +14,7 @@
 pub mod cardinality;
 pub mod cost;
 mod cycles;
-pub(crate) use cycles::close_cycles;
+pub(crate) use cycles::{close_cycles, plan_names};
 pub mod join_order;
 
 pub use cardinality::{

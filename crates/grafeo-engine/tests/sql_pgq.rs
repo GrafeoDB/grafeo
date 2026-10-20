@@ -1046,3 +1046,44 @@ fn having_count_zero_returns_empty() {
         .unwrap();
     assert_eq!(result.rows().len(), 0);
 }
+
+/// `-[:T*]->` is one or more hops, as `*1..`, in GQL and Cypher too (it read
+/// as exactly one hop).
+#[test]
+fn a_star_without_bounds_is_one_or_more_hops() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute(
+        "INSERT (:Message {id: 10})-[:REPLY_OF]->(:Message {id: 11})-[:REPLY_OF]->(:Post {id: 12})",
+    )
+    .unwrap();
+    let ids = |query: &str| -> Vec<Value> {
+        let mut ids: Vec<Value> = db
+            .execute_sql(query)
+            .unwrap_or_else(|e| panic!("`{query}`: {e}"))
+            .rows()
+            .iter()
+            .map(|row| row[0].clone())
+            .collect();
+        ids.sort_by_key(ToString::to_string);
+        ids
+    };
+    let reached = [Value::Int64(11), Value::Int64(12)];
+    assert_eq!(
+        ids(
+            "SELECT * FROM GRAPH_TABLE (MATCH (m:Message {id: 10})-[:REPLY_OF*]->(p) COLUMNS (p.id AS id))"
+        ),
+        reached
+    );
+    assert_eq!(
+        ids(
+            "SELECT * FROM GRAPH_TABLE (MATCH (m:Message {id: 10})-[:REPLY_OF*1..]->(p) COLUMNS (p.id AS id))"
+        ),
+        reached
+    );
+    assert_eq!(
+        ids(
+            "SELECT * FROM GRAPH_TABLE (MATCH (m:Message {id: 10})-[:REPLY_OF*1]->(p) COLUMNS (p.id AS id))"
+        ),
+        [Value::Int64(11)]
+    );
+}

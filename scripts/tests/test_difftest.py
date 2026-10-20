@@ -267,13 +267,26 @@ def test_a_write_keyword_counts_only_outside_a_string():
     assert not writes_outside_strings('RETURN "CREATE (n)" AS text')
 
 
-def test_only_the_writes_fixture_has_writing_cases():
+def test_only_the_write_fixtures_have_writing_cases():
     # Each fixture is built once and shared by its cases, so a write would change
-    # what later cases see. The `writes` fixture is the one exception: an empty
-    # database of its own, whose cases run in corpus order and read what the
-    # writes before them left. A write keyword inside a string literal is a
-    # value (BZ2 passes query text as an argument that must run nothing).
+    # what later cases see. The write fixtures (`corpus.WRITE_FIXTURES`) are the
+    # exception: databases of their own, whose cases run in corpus order and read
+    # what the writes before them left. A write keyword inside a string literal is
+    # a value (BZ2 passes query text as an argument that must run nothing).
     for case in corpus.CASES:
-        if case.fixture == "writes":
+        if case.fixture in corpus.WRITE_FIXTURES:
             continue
         assert not writes_outside_strings(case.query), case.id
+
+
+def test_a_write_fixture_serves_only_its_sections():
+    # A write fixture's cases read what the writes before them left, so a case of
+    # another section on it would see those writes: each one is used by the
+    # sections it names only.
+    for case in corpus.CASES:
+        sections = corpus.WRITE_FIXTURES.get(case.fixture)
+        if sections is not None:
+            section = re.match(r"[A-Z]+", case.id).group()
+            assert section in sections, (case.id, case.fixture)
+    for fixture in corpus.WRITE_FIXTURES:
+        assert fixture in corpus.FIXTURES, fixture

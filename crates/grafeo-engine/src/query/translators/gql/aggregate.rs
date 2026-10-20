@@ -3,6 +3,7 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::query::functions::resolve_call;
+pub(super) use crate::query::translators::common::HavingScope;
 
 impl GqlTranslator {
     /// Takes the horizontal aggregates out of `items` (a RETURN or WITH list),
@@ -389,7 +390,10 @@ impl GqlTranslator {
     /// an expression over the keys (`p.name` or `upper(p.name)` for `GROUP BY
     /// p`, `count(*) + p.age`), as Neo4j's Cypher 25 `GROUP BY` and SQL's
     /// functionally dependent columns do, or a constant (`3 AS three`). Each
-    /// such item is rewritten to read the key columns.
+    /// such item is rewritten to read the key columns. A `CALL` body's import
+    /// has one value per call, so an item may read it too: this returns the
+    /// imports the items read, which the Aggregate's output must have back
+    /// (see `with_imports`) before the items read it.
     ///
     /// # Errors
     ///
@@ -402,7 +406,7 @@ impl GqlTranslator {
         post_return: &mut [ReturnItem],
         keys: &[LogicalExpression],
         aggregates: &[AggregateExpr],
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let scope = HavingScope::new(keys, None);
         let key_texts: Vec<String> = keys
             .iter()
@@ -412,6 +416,7 @@ impl GqlTranslator {
             .iter()
             .filter_map(|aggregate| aggregate.alias.as_deref())
             .collect();
+        let mut imports_read = Vec::new();
         for (item, returned) in items.iter().zip(post_return.iter_mut()) {
             // A key or a direct aggregate already reads its column.
             if let LogicalExpression::Variable(column) = &returned.expression
@@ -432,10 +437,18 @@ impl GqlTranslator {
             let resolved = scope.resolve(expression);
             let mut names = HashSet::new();
             collect_expression_variables(&resolved, &mut names);
+            let mut read: Vec<&String> = names
+                .iter()
+                .filter(|name| self.call_imports.contains(name) && !imports_read.contains(*name))
+                .collect();
+            read.sort();
+            imports_read.extend(read.into_iter().cloned());
             if let Some(name) = names
                 .iter()
                 .filter(|name| {
-                    !key_texts.contains(*name) && !aggregate_columns.contains(name.as_str())
+                    !key_texts.contains(*name)
+                        && !aggregate_columns.contains(name.as_str())
+                        && !self.call_imports.contains(name)
                 })
                 .min()
             {
@@ -460,7 +473,7 @@ impl GqlTranslator {
             }
             returned.expression = resolved;
         }
-        Ok(())
+        Ok(imports_read)
     }
 
     /// Extracts all aggregates from a wrapping expression, assigning each a
@@ -479,7 +492,11 @@ impl GqlTranslator {
                 args,
                 distinct,
             } => {
-                // If this function IS an aggregate, extract it directly.
+                // If this function IS an aggregate, extract it directly, under
+                // the next `_agg_N` the statement does not spell itself.
+                while self.names.is_written(&format!("_agg_{agg_counter}")) {
+                    *agg_counter += 1;
+                }
                 let alias = format!("_agg_{agg_counter}");
                 if let Some(agg) = self.try_extract_aggregate(expr, &Some(alias.clone()))? {
                     *agg_counter += 1;
@@ -590,6 +607,7 @@ impl GqlTranslator {
                 distinct,
             } => {
                 if let Some(func) = AggregateFunction::from_name(name) {
+                    crate::query::functions::check_aggregate_call(name, func, args.len())?;
                     let agg_expr = if args.is_empty() {
                         // COUNT(*) case
                         AggregateExpr {
@@ -745,90 +763,6 @@ pub(super) struct WithoutHorizontalAggregates {
     pub(super) having: Option<ast::Expression>,
     /// The input of the clause, with the horizontal aggregates.
     pub(super) plan: LogicalOperator,
-}
-
-/// What a HAVING condition reads: the output of the Aggregate, whose columns
-/// are the grouping keys (named by their text, `m.name`) and the aggregates.
-/// A grouping key written in the condition reads its key column, and an
-/// alias of the RETURN list reads what the result computes for it (`k` for
-/// `m.name AS k`, `c` for `count(*) + 1 AS c`).
-pub(super) struct HavingScope {
-    keys: HashSet<String>,
-    aliases: HashMap<String, LogicalExpression>,
-}
-
-impl HavingScope {
-    /// The scope of an Aggregate grouped by `group_by`, whose result
-    /// `post_return` projects (if it projects one).
-    pub(super) fn new(group_by: &[LogicalExpression], post_return: Option<&[ReturnItem]>) -> Self {
-        let keys = group_by
-            .iter()
-            .map(crate::query::planner::common::expression_to_string)
-            .collect();
-        let aliases = post_return
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|item| Some((item.alias.clone()?, item.expression.clone())))
-            .collect();
-        Self { keys, aliases }
-    }
-
-    /// `expr` reading the Aggregate's output (see [`HavingScope`]).
-    pub(super) fn resolve(&self, expr: LogicalExpression) -> LogicalExpression {
-        if let LogicalExpression::Variable(name) = &expr {
-            return self.aliases.get(name).cloned().unwrap_or(expr);
-        }
-        let text = crate::query::planner::common::expression_to_string(&expr);
-        if self.keys.contains(&text) {
-            return LogicalExpression::Variable(text);
-        }
-        match expr {
-            LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
-                left: Box::new(self.resolve(*left)),
-                op,
-                right: Box::new(self.resolve(*right)),
-            },
-            LogicalExpression::Unary { op, operand } => LogicalExpression::Unary {
-                op,
-                operand: Box::new(self.resolve(*operand)),
-            },
-            LogicalExpression::FunctionCall {
-                callee,
-                name,
-                args,
-                distinct,
-            } => LogicalExpression::FunctionCall {
-                callee,
-                name,
-                args: args.into_iter().map(|arg| self.resolve(arg)).collect(),
-                distinct,
-            },
-            LogicalExpression::List(items) => {
-                LogicalExpression::List(items.into_iter().map(|item| self.resolve(item)).collect())
-            }
-            LogicalExpression::Case {
-                operand,
-                when_clauses,
-                else_clause,
-            } => LogicalExpression::Case {
-                operand: operand.map(|operand| Box::new(self.resolve(*operand))),
-                when_clauses: when_clauses
-                    .into_iter()
-                    .map(|(condition, result)| (self.resolve(condition), self.resolve(result)))
-                    .collect(),
-                else_clause: else_clause.map(|clause| Box::new(self.resolve(*clause))),
-            },
-            LogicalExpression::IndexAccess { base, index } => LogicalExpression::IndexAccess {
-                base: Box::new(self.resolve(*base)),
-                index: Box::new(self.resolve(*index)),
-            },
-            LogicalExpression::MapAccess { base, key } => LogicalExpression::MapAccess {
-                base: Box::new(self.resolve(*base)),
-                key,
-            },
-            other => other,
-        }
-    }
 }
 
 /// Checks if an AST expression contains an aggregate function call.

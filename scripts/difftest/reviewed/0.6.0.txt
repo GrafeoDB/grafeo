@@ -486,6 +486,91 @@ BU6|gql af570eb864 CREATE GRAPH ... AS COPY OF copies the source's nodes with th
 BU7|gql 35d071d9a8 CREATE GRAPH ... AS COPY OF copies the source's edges with their properties (#423); the copy was an empty graph.
 BX1|cypher ~dbc78da38d A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
 BX1|gql ~dbc78da38d A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
-BZ1|gql e4ac8a6af8 A stored procedure's arguments are values bound to its parameters; they were put into the body's text, so `$a` replaced the start of `$ab` and the body failed to parse.
+BX2|cypher ~72f863649b A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
+BX2|gql ~72f863649b A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
+BZ1|gql ~e4ac8a6af8 A stored procedure's arguments are values bound to its parameters; they were put into the body's text in hash-map order, so `$a` could replace the start of `$ab` and the body failed to parse.
 BZ2|gql d62b1885ec A stored procedure's argument holding a quote and query text is a value; put into the body's text, it ended the string and the body failed to parse.
 BZ4|gql c71d67736e A stored procedure takes a list or map argument as a value; the call refused it as not constant.
+CA1|cypher a7c82952ef A procedure call after other clauses runs once per incoming row, whose variables stay in scope; Cypher dropped the input (one row per procedure row).
+CA1|gql a7c82952ef A procedure call after other clauses runs once per incoming row; GQL did not parse a CALL ... YIELD followed by RETURN inside a query.
+CA2|cypher 48324b27df A procedure call after other clauses runs once per incoming row, whose variables stay in scope; Cypher dropped the input and refused its variables.
+CA2|gql 48324b27df A procedure call after other clauses runs once per incoming row; GQL did not parse a CALL ... YIELD followed by RETURN inside a query.
+CA3|cypher a17e8c38d9 A procedure call after other clauses runs once per incoming row, whose variables stay in scope; Cypher dropped the input and refused its variables.
+CA3|gql a17e8c38d9 A procedure call after other clauses runs once per incoming row; GQL did not parse a CALL ... YIELD followed by RETURN inside a query.
+CA4|cypher 631dcf4c67 A procedure call after other clauses runs once per incoming row, whose variables stay in scope; Cypher dropped the input and refused its variables.
+CA4|gql 631dcf4c67 A procedure call after other clauses runs once per incoming row; GQL did not parse a CALL ... YIELD followed by RETURN inside a query.
+CB1|cypher 3386dc5066 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the walk returned it twice.
+CB1|gql 3386dc5066 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the walk returned it twice.
+CB2|cypher c3a135fc82 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the count took the loop twice (6, not 5).
+CB2|gql c3a135fc82 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the count took the loop twice (6, not 5).
+CB3|cypher 5e50249ce5 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the one-hop walk reached Mia twice.
+CB3|gql 5e50249ce5 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the one-hop walk reached Mia twice.
+CB4|cypher ee2e439430 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and COUNT counted it twice.
+CB4|gql ee2e439430 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and COUNT counted it twice.
+CB5|cypher 1f58d9d0a7 A variable named like an aggregate column keeps its values: the column is named after a name the statement does not spell; the variable read the count (1).
+CB5|gql 1f58d9d0a7 A variable named like an aggregate column keeps its values: the column is named after a name the statement does not spell; the variable read the count (1).
+CB6|cypher 18b7553fe9 A variable named like an anonymous edge's column keeps its node: the planner names that column after a name the plan does not bind; the variable read the edge (null name).
+CB6|gql 18b7553fe9 A variable named like an anonymous edge's column keeps its node: the planner names that column after a name the plan does not bind; the variable read the edge (null name).
+CC1|cypher cec15ca8f1 MERGE matches the whole pattern or creates all of it (openCypher); a pattern of two relationships was refused (its variable then undefined).
+CC2|cypher cec15ca8f1 MERGE matches the whole pattern or creates all of it (openCypher); the second MERGE finds the pattern the first created; it was refused.
+CC3|gql cec15ca8f1 MERGE matches the whole pattern or creates all of it (openCypher); a pattern of two relationships was refused (its variable then undefined).
+CC4|cypher c3a135fc82 MERGE matches the whole pattern or creates all of it (openCypher); the two-relationship MERGEs created their N and N2 nodes (5, not 3).
+CC4|gql c3a135fc82 MERGE matches the whole pattern or creates all of it (openCypher); the two-relationship MERGEs created their N and N2 nodes (5, not 3).
+CC6|cypher 5d966be177 MERGE matches the whole pattern or creates all of it (openCypher); Vincent did not know a Gus, so the MERGE created one with the relationship; it reused the existing Gus.
+CC6|gql 5d966be177 MERGE matches the whole pattern or creates all of it (openCypher); Vincent did not know a Gus, so the MERGE created one with the relationship; it reused the existing Gus.
+CC7|cypher 6128a541a6 A node MERGE's ON CREATE SET n = {...} replaces the properties, the merged key too, as SET n = {...} does; it added the map's keys.
+CC8|cypher 390328ca99 Arrows both ways (<-[:KNOWS]->) match either direction, as openCypher reads them; they matched outgoing only.
+CC9|cypher 9da9ef3f24 CREATE of a relationship without a type is an error (openCypher); it created one of type RELATED.
+CC10|cypher 2886b8064e IN binds tighter than = (openCypher 9): 1 = (2 IN [false]) is false; it read (1 = 2) IN [false].
+CD1|cypher ebe7440d0e An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched.
+CD1|gql ebe7440d0e An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched.
+CD2|cypher c7ba799c2e An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched (here reading the row's t).
+CD2|gql c7ba799c2e An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched (here reading the row's t).
+CD3|cypher 1adebb7e6d An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched; after the pattern e is the list of the edges.
+CD3|gql 1adebb7e6d An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched; after the pattern e is the list of the edges.
+CD4|cypher 8133434ea5 A pattern from a node an OPTIONAL MATCH did not find matches nothing; it failed with an internal error.
+CD4|gql 8133434ea5 A pattern from a node an OPTIONAL MATCH did not find matches nothing; it failed with an internal error.
+CD5|gql 987a8578f3 collect_list is collect under its ISO GQL name; it evaluated to null per row.
+CE1|cypher 3f326aae44 An aggregate takes its number of arguments: count(a, b) is refused; it counted a and dropped b.
+CE1|gql 3f326aae44 An aggregate takes its number of arguments: count(a, b) is refused; it counted a and dropped b.
+CE2|cypher 370f0115da An aggregate takes its number of arguments: sum() is refused; it was built like a count of the rows and returned null.
+CE2|gql 370f0115da An aggregate takes its number of arguments: sum() is refused; it was built like a count of the rows and returned null.
+CE3|cypher f2c193efb5 A COUNT subquery in an aggregate's argument runs per row; it failed with an internal error.
+CE3|gql f2c193efb5 A COUNT subquery in an aggregate's argument runs per row; it failed with an internal error.
+CE4|cypher c0ec3421ef A COUNT subquery as a grouping key runs per row; it failed with an internal error.
+CE4|gql c0ec3421ef A COUNT subquery as a grouping key runs per row; it failed with an internal error.
+CE5|gql d7742a9773 GQL takes HAVING right after GROUP BY, before ORDER BY; it was a syntax error.
+CE6|cypher 6c609b5a99 Without GROUP BY an item with an aggregate reads only the grouping keys; one that reads another variable is refused (openCypher AmbiguousAggregationExpression), it returned null.
+CE6|gql 6c609b5a99 Without GROUP BY an item with an aggregate reads only the grouping keys; one that reads another variable is refused (openCypher AmbiguousAggregationExpression), it returned null.
+CE7|cypher 061de0e349 Without GROUP BY a part of an item with an aggregate that is a grouping key reads the key; it returned null.
+CE7|gql 061de0e349 Without GROUP BY a part of an item with an aggregate that is a grouping key reads the key; it returned null.
+CE8|cypher 06255368a4 An item with an aggregate in a CALL body reads the body's import, which has one value per call; it returned null.
+CE8|gql 06255368a4 An item with an aggregate in a CALL body reads the body's import, which has one value per call; it returned null.
+CE9|cypher ab8f1a1655 Without GROUP BY a grouping key inside a CASE with an aggregate reads the key; it returned null.
+CE9|gql ab8f1a1655 Without GROUP BY a grouping key inside a CASE with an aggregate reads the key; it returned null.
+CF1|cypher b4f6764c26 id and properties read a node an expression yields (here an item of a list), as labels does; they read only a variable and returned null.
+CF1|gql b4f6764c26 id and properties read a node an expression yields (here an item of a list), as labels does; they read only a variable and returned null.
+CF2|cypher 341ff5d5bf elementId and properties read an edge an expression yields (here an item of a list), as labels does; they returned null.
+CF2|gql 341ff5d5bf elementId and properties read an edge an expression yields (here an item of a list), as labels does; they returned null.
+CF3|cypher 062dcc1245 properties reads the node startNode(r) yields; it returned null.
+CF3|gql 062dcc1245 properties reads the node startNode(r) yields; it returned null.
+CF4|cypher cb62d95ce2 properties of a map is the map (openCypher); it returned null.
+CF4|gql cb62d95ce2 properties of a map is the map (openCypher); it returned null.
+CF5|cypher a3daef970e date, time and datetime read a zoned datetime: its local date, its local time of day with the offset (Python drops a time's offset) and its instant; they returned null.
+CF5|gql a3daef970e date, time and datetime read a zoned datetime: its local date, its local time of day with the offset (Python drops a time's offset) and its instant; they returned null.
+CF6|gql fcd746ade6 A label added to a node converts its values to the types of the label's node type, as a write does; an integer of a FLOAT64 property failed with expects Float64.
+CF7|cypher d465c9b19b A label added to a node converts its values to the types of the label's node type, as a write does; an integer of a FLOAT64 property failed with expects Float64.
+CG1|cypher 2c0519a916 After a WITH that neither aggregates nor is DISTINCT, ORDER BY reads the WITH's input as well (openCypher); GQL failed with Undefined variable, and 0.5.44's Cypher too.
+CG1|gql 2c0519a916 After a WITH that neither aggregates nor is DISTINCT, ORDER BY reads the WITH's input as well (openCypher); GQL failed with Undefined variable, and 0.5.44's Cypher too.
+CG2|cypher 2fe70f102d After an aggregating RETURN, a key that repeats a returned aggregate reads its column; it was ignored (0.5.44) or refused in GQL.
+CG2|gql 2fe70f102d After an aggregating RETURN, a key that repeats a returned aggregate reads its column; it was ignored (0.5.44) or refused in GQL.
+CG3|cypher d38dc1ed52 After an aggregating RETURN, a key that repeats a grouping key (a.name AS name) reads its column; it failed with an internal error.
+CG3|gql d38dc1ed52 After an aggregating RETURN, a key that repeats a grouping key (a.name AS name) reads its column; it failed with an internal error.
+CG4|cypher 48f063d96f After an aggregating RETURN, a key that reads a variable the RETURN drops is Undefined variable; it was an internal error.
+CG4|gql 48f063d96f After an aggregating RETURN, a key that reads a variable the RETURN drops is Undefined variable; it was an internal error.
+CG6|gql 1b610399e9 GQL's ORDER BY statement after a WITH sorts nulls last (#571), as a RETURN's ORDER BY does; 0.5.44 had no ORDER BY statement after WITH.
+CG7|gql 1b610399e9 GQL's ORDER BY statement sorts nulls last (#571), as a RETURN's ORDER BY does; 0.5.44 had no ORDER BY statement before RETURN.
+CG5|cypher 2d8a50291b With DISTINCT, ORDER BY reads only what the WITH returns (openCypher, SQL); the error now names the variable and says why. GQL had no ORDER BY after WITH.
+CG5|gql 2d8a50291b With DISTINCT, ORDER BY reads only what the WITH returns (openCypher, SQL); the error now names the variable and says why. GQL had no ORDER BY after WITH.
+CG8|cypher 0007e81c96 With DISTINCT, ORDER BY reads only what the RETURN returns (openCypher TCK ReturnOrderBy2, SQL): it added the sort key to the distinct row and returned duplicates.
+CG8|gql 0007e81c96 With DISTINCT, ORDER BY reads only what the RETURN returns (openCypher TCK ReturnOrderBy2, SQL): it added the sort key to the distinct row and returned duplicates.

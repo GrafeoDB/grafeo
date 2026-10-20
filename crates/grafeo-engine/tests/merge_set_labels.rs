@@ -4,10 +4,9 @@
 //! while the property items beside them were written, so the MERGE reported
 //! success and left the node without the label.
 //!
-//! An item the MERGE cannot apply (a label for a relationship MERGE, an item
-//! on another variable than the merged one, or `n += <map>` with a map that is
-//! not a literal) is an error, not a silent no-op or a write to the wrong
-//! element.
+//! The items of `ON CREATE` and `ON MATCH` are SET items as in a SET clause:
+//! they may set any element of the pattern or a variable bound before, and
+//! `n += <map>` takes any map (they were refused).
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test merge_set_labels
@@ -191,31 +190,46 @@ fn a_rolled_back_merge_leaves_no_label() {
 }
 
 #[test]
-fn an_item_the_merge_cannot_apply_is_an_error_that_writes_nothing() {
-    for query in [
-        // A relationship has no labels, and the MERGE writes the relationship.
-        "MERGE (a:Person {name: 'Alix'})-[r:KNOWS]->(b:Person {name: 'Gus'}) ON CREATE SET a:New",
-        // An item on another variable than the merged one.
-        "MERGE (a:Person {name: 'Alix'})-[r:KNOWS]->(b:Person {name: 'Gus'}) ON CREATE SET a.since = 3",
-        "MATCH (g:Person {name: 'Gus'}) MERGE (p:Person {name: 'Alix'}) ON CREATE SET g:Seen",
-        "MATCH (g:Person {name: 'Gus'}) MERGE (p:Person {name: 'Alix'}) ON MATCH SET g.seen = true",
-        // A map that is not a literal (it was dropped).
-        "MATCH (g:Person {name: 'Gus'}) MERGE (p:Person {name: 'Alix'}) ON CREATE SET p += properties(g)",
+fn an_item_on_any_element_is_set_as_a_set_clause_sets_it() {
+    for (query, read, expected) in [
+        // A label for a node of a relationship MERGE.
+        (
+            "MERGE (a:Person {name: 'Alix'})-[r:KNOWS]->(b:Person {name: 'Gus'}) \
+             ON CREATE SET a:New",
+            "MATCH (a:New) RETURN a.name",
+            Value::from("Alix"),
+        ),
+        // A property of another element of the pattern.
+        (
+            "MERGE (a:Person {name: 'Alix'})-[r:KNOWS]->(b:Person {name: 'Gus'}) \
+             ON CREATE SET a.since = 3",
+            "MATCH (a:Person {name: 'Alix'}) RETURN a.since",
+            Value::Int64(3),
+        ),
+        // A variable bound before the MERGE.
+        (
+            "MATCH (g:Person {name: 'Gus'}) MERGE (p:Person {name: 'Alix'}) ON CREATE SET g:Seen",
+            "MATCH (g:Seen) RETURN g.name",
+            Value::from("Gus"),
+        ),
+        (
+            "MATCH (g:Person {name: 'Gus'}) MERGE (p:Person {name: 'Gus'}) \
+             ON MATCH SET g.seen = true",
+            "MATCH (g:Person {name: 'Gus'}) RETURN g.seen",
+            Value::Bool(true),
+        ),
+        // A map that is not a literal.
+        (
+            "MATCH (g:Person {name: 'Gus'}) MERGE (p:Person {name: 'Alix'}) \
+             ON CREATE SET p += properties(g)",
+            "MATCH (p:Person) WHERE p.name = 'Gus' RETURN count(p)",
+            Value::Int64(2),
+        ),
     ] {
         let db = GrafeoDB::new_in_memory();
         let session = db.session();
         cypher(&session, "CREATE (:Person {name: 'Gus'})");
-        let error = session
-            .execute_cypher(query)
-            .expect_err("the item cannot be applied");
-        assert!(
-            error.to_string().contains("MERGE"),
-            "{query}: the error names the MERGE: {error}"
-        );
-        assert_eq!(
-            cypher(&session, "MATCH (n) RETURN count(n)"),
-            [vec![Value::Int64(1)]],
-            "{query}: nothing was written"
-        );
+        cypher(&session, query);
+        assert_eq!(cypher(&session, read), [[expected]], "{query}");
     }
 }

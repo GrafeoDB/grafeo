@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-#[cfg(any(feature = "graphql", feature = "gremlin", test))]
+#[cfg(any(feature = "graphql", feature = "gremlin", feature = "sql-pgq", test))]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::query::plan::{
@@ -107,6 +107,180 @@ impl CallImports {
             .cloned()
             .collect()
     }
+    /// Whether `name` is an import of the body being translated.
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        self.0.borrow().iter().any(|import| import == name)
+    }
+}
+
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+/// What a HAVING condition reads: the output of the Aggregate, whose columns
+/// are the grouping keys (named by their text, `m.name`) and the aggregates.
+/// A grouping key written in the condition reads its key column, and an
+/// alias of the RETURN list reads what the result computes for it (`k` for
+/// `m.name AS k`, `c` for `count(*) + 1 AS c`).
+pub(crate) struct HavingScope {
+    keys: HashSet<String>,
+    aliases: std::collections::HashMap<String, LogicalExpression>,
+}
+
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+impl HavingScope {
+    /// The scope of an Aggregate grouped by `group_by`, whose result
+    /// `post_return` projects (if it projects one).
+    pub(crate) fn new(group_by: &[LogicalExpression], post_return: Option<&[ReturnItem]>) -> Self {
+        let keys = group_by
+            .iter()
+            .map(crate::query::planner::common::expression_to_string)
+            .collect();
+        let aliases = post_return
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|item| Some((item.alias.clone()?, item.expression.clone())))
+            .collect();
+        Self { keys, aliases }
+    }
+
+    /// `expr` reading the Aggregate's output (see [`HavingScope`]).
+    pub(crate) fn resolve(&self, expr: LogicalExpression) -> LogicalExpression {
+        if let LogicalExpression::Variable(name) = &expr {
+            return self.aliases.get(name).cloned().unwrap_or(expr);
+        }
+        let text = crate::query::planner::common::expression_to_string(&expr);
+        if self.keys.contains(&text) {
+            return LogicalExpression::Variable(text);
+        }
+        match expr {
+            LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
+                left: Box::new(self.resolve(*left)),
+                op,
+                right: Box::new(self.resolve(*right)),
+            },
+            LogicalExpression::Unary { op, operand } => LogicalExpression::Unary {
+                op,
+                operand: Box::new(self.resolve(*operand)),
+            },
+            LogicalExpression::FunctionCall {
+                callee,
+                name,
+                args,
+                distinct,
+            } => LogicalExpression::FunctionCall {
+                callee,
+                name,
+                args: args.into_iter().map(|arg| self.resolve(arg)).collect(),
+                distinct,
+            },
+            LogicalExpression::List(items) => {
+                LogicalExpression::List(items.into_iter().map(|item| self.resolve(item)).collect())
+            }
+            LogicalExpression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => LogicalExpression::Case {
+                operand: operand.map(|operand| Box::new(self.resolve(*operand))),
+                when_clauses: when_clauses
+                    .into_iter()
+                    .map(|(condition, result)| (self.resolve(condition), self.resolve(result)))
+                    .collect(),
+                else_clause: else_clause.map(|clause| Box::new(self.resolve(*clause))),
+            },
+            LogicalExpression::IndexAccess { base, index } => LogicalExpression::IndexAccess {
+                base: Box::new(self.resolve(*base)),
+                index: Box::new(self.resolve(*index)),
+            },
+            LogicalExpression::MapAccess { base, key } => LogicalExpression::MapAccess {
+                base: Box::new(self.resolve(*base)),
+                key,
+            },
+            other => other,
+        }
+    }
+}
+
+#[cfg(any(feature = "gql", feature = "cypher"))]
+/// Makes the items of an implicitly grouped RETURN or WITH `clause` (one
+/// without GROUP BY, whose grouping keys `keys` are its items without an
+/// aggregate) read the output of the Aggregate, as `resolve_grouped_items`
+/// of the GQL translator does for an explicit GROUP BY. `post_return` holds
+/// one item per item of the clause, and `aggregates` are their aggregates.
+///
+/// An item that wraps an aggregate (`count(*) + p.age`) may read the keys,
+/// the aggregates and constants, which have one value per group; a part of
+/// it that is a key (`p.age` for the key `p.age`) reads the key column. A
+/// `CALL` body's import has one value per call, so an item may read it too:
+/// this returns the imports the items read, which the Aggregate's output
+/// must have back (see [`with_imports`]) before the items read it.
+///
+/// # Errors
+///
+/// Returns a semantic error naming the first item that reads another
+/// variable of the grouped rows outside an aggregate: it has a value per
+/// grouped row, not per group (openCypher's AmbiguousAggregationExpression).
+pub(crate) fn resolve_implicitly_grouped(
+    clause: &str,
+    post_return: &mut [ReturnItem],
+    keys: &[LogicalExpression],
+    aggregates: &[crate::query::plan::AggregateExpr],
+    imports: &CallImports,
+) -> Result<Vec<String>> {
+    let scope = HavingScope::new(keys, None);
+    let key_texts: Vec<String> = keys
+        .iter()
+        .map(crate::query::planner::common::expression_to_string)
+        .collect();
+    let aggregate_columns: HashSet<&str> = aggregates
+        .iter()
+        .filter_map(|aggregate| aggregate.alias.as_deref())
+        .collect();
+    let mut imports_read = Vec::new();
+    for returned in post_return {
+        let resolved = scope.resolve(returned.expression.clone());
+        let mut names = HashSet::new();
+        collect_expression_variables(&resolved, &mut names);
+        let mut read: Vec<&String> = names
+            .iter()
+            .filter(|name| {
+                !key_texts.contains(*name)
+                    && !aggregate_columns.contains(name.as_str())
+                    && imports.contains(name)
+                    && !imports_read.contains(*name)
+            })
+            .collect();
+        read.sort();
+        imports_read.extend(read.into_iter().cloned());
+        if let Some(name) = names
+            .iter()
+            .filter(|name| {
+                !key_texts.contains(*name)
+                    && !aggregate_columns.contains(name.as_str())
+                    && !imports.contains(name)
+            })
+            .min()
+        {
+            let item = returned.alias.clone().unwrap_or_else(|| {
+                crate::query::planner::common::expression_to_string(&returned.expression)
+            });
+            let keys = if key_texts.is_empty() {
+                "it has none".to_string()
+            } else {
+                key_texts.join(", ")
+            };
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "{clause} item {item} reads {name} beside an aggregate, but {name} is not \
+                     a grouping key: the grouping keys of a {clause} are its items without an \
+                     aggregate ({keys}), and an item with an aggregate may read only them, \
+                     aggregates and constants, which have one value per group; add {name} as \
+                     an item of its own or aggregate it"
+                ),
+            )));
+        }
+        returned.expression = resolved;
+    }
+    Ok(imports_read)
 }
 
 /// The variables of a `CALL` subquery's outer row that it imports:
@@ -157,6 +331,136 @@ pub(crate) fn with_imports(
             conditions: Vec::new(),
         }),
     }
+}
+
+#[cfg(any(feature = "gql", feature = "cypher"))]
+/// Adds the variables `kept` to the projection of a WITH (`plan`, maybe
+/// under the filter of its WHERE), so that a sort after it reads them, and
+/// says whether it did. A plan of another shape, or a WHERE that reads one
+/// of them (where they are not in scope), comes back unchanged.
+pub(crate) fn keep_columns(plan: LogicalOperator, kept: &[String]) -> (LogicalOperator, bool) {
+    match plan {
+        LogicalOperator::Project(mut project) if !project.pass_through_input => {
+            // A name it projects already (an import a CALL body's WITH passes
+            // on) is not projected twice.
+            let projects = |name: &str| {
+                project.projections.iter().any(|projection| {
+                    match (&projection.alias, &projection.expression) {
+                        (Some(alias), _) => alias == name,
+                        (None, LogicalExpression::Variable(variable)) => variable == name,
+                        (None, _) => false,
+                    }
+                })
+            };
+            let added: Vec<Projection> = kept
+                .iter()
+                .filter(|name| !projects(name))
+                .map(|name| Projection {
+                    expression: LogicalExpression::Variable(name.clone()),
+                    alias: None,
+                })
+                .collect();
+            project.projections.extend(added);
+            (LogicalOperator::Project(project), true)
+        }
+        LogicalOperator::Filter(mut filter) => {
+            let mut read = HashSet::new();
+            collect_expression_variables(&filter.predicate, &mut read);
+            if kept.iter().any(|name| read.contains(name)) {
+                return (LogicalOperator::Filter(filter), false);
+            }
+            let (input, kept_them) = keep_columns(*filter.input, kept);
+            filter.input = Box::new(input);
+            (LogicalOperator::Filter(filter), kept_them)
+        }
+        other => (other, false),
+    }
+}
+
+/// Sorts the rows of a WITH by `keys` that read variables of its input it
+/// does not project (`WITH a.name AS name ORDER BY a.age`, as openCypher's
+/// ORDER BY reads after a WITH that neither aggregates nor is DISTINCT): the
+/// projection keeps those variables for the sort, and a projection of the
+/// WITH's own columns, `projected`, after the sort drops them again. A WITH
+/// of another shape sorts as it is, and planning reports the variables it
+/// lacks.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn sort_keeping_input(
+    plan: LogicalOperator,
+    keys: Vec<SortKey>,
+    projected: Vec<String>,
+) -> LogicalOperator {
+    let mut read = HashSet::new();
+    for key in &keys {
+        collect_expression_variables(&key.expression, &mut read);
+    }
+    let mut kept: Vec<String> = read
+        .into_iter()
+        .filter(|name| !projected.contains(name))
+        .collect();
+    if kept.is_empty() {
+        return wrap_sort(plan, keys);
+    }
+    kept.sort();
+    let (plan, kept_them) = keep_columns(plan, &kept);
+    if !kept_them {
+        return wrap_sort(plan, keys);
+    }
+    LogicalOperator::Project(crate::query::plan::ProjectOp {
+        projections: projected
+            .into_iter()
+            .map(|name| Projection {
+                expression: LogicalExpression::Variable(name),
+                alias: None,
+            })
+            .collect(),
+        input: Box::new(wrap_sort(plan, keys)),
+        pass_through_input: false,
+    })
+}
+
+/// Checks that the ORDER BY key `key`, after a WITH or RETURN (`clause`)
+/// that aggregates or (otherwise) is DISTINCT, reads only the clause's
+/// columns, `columns`: after an aggregation the variables of its input are
+/// gone, and with DISTINCT rows that differ only in one of them are one row,
+/// so it has no single value to sort by (openCypher TCK ReturnOrderBy2, and
+/// SQL's rule for SELECT DISTINCT).
+///
+/// # Errors
+///
+/// Returns a semantic error naming the first other variable it reads.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(crate) fn check_sort_reads_projection(
+    key: &LogicalExpression,
+    columns: &[&str],
+    clause: &str,
+    aggregating: bool,
+) -> Result<()> {
+    let mut read = HashSet::new();
+    collect_expression_variables(key, &mut read);
+    let Some(name) = read
+        .into_iter()
+        .filter(|name| !columns.contains(&name.as_str()))
+        .min()
+    else {
+        return Ok(());
+    };
+    let message = if aggregating {
+        format!(
+            "Undefined variable '{name}': after an aggregating {clause}, ORDER BY reads only \
+             what it returns"
+        )
+    } else {
+        format!(
+            "ORDER BY reads '{name}', which the {clause} DISTINCT does not return: with \
+             DISTINCT, ORDER BY reads only what the {clause} returns, since rows that differ \
+             only in '{name}' are one row; return it, or sort by a returned column"
+        )
+    };
+    Err(Error::Query(QueryError::new(
+        QueryErrorKind::Semantic,
+        message,
+    )))
 }
 
 /// The error for a `WITH` item that is an expression without a name. As in
@@ -259,12 +563,12 @@ pub(crate) fn capitalize_first(s: &str) -> String {
 ///
 /// Replaces the duplicated `var_counter: AtomicU32` + `next_var()` pattern
 /// used across multiple translators.
-#[cfg(any(feature = "graphql", feature = "gremlin", test))]
+#[cfg(any(feature = "graphql", feature = "gremlin", feature = "sql-pgq", test))]
 pub(crate) struct VarGen {
     counter: AtomicU32,
 }
 
-#[cfg(any(feature = "graphql", feature = "gremlin", test))]
+#[cfg(any(feature = "graphql", feature = "gremlin", feature = "sql-pgq", test))]
 impl VarGen {
     /// Creates a new variable generator starting from 0.
     pub fn new() -> Self {
@@ -483,8 +787,7 @@ impl GeneratedNames {
     }
 
     /// Whether the statement spells `name`, so that a name made up another
-    /// way (Cypher's aggregate columns) must skip it.
-    #[cfg(feature = "cypher")]
+    /// way (the aggregate columns) must skip it.
     pub(crate) fn is_written(&self, name: &str) -> bool {
         self.written.contains(name)
     }
@@ -611,64 +914,6 @@ pub(crate) fn different_edges(
 // ---------------------------------------------------------------------------
 // MERGE
 // ---------------------------------------------------------------------------
-
-/// The variable of an end node of a MERGE relationship pattern, and `input`
-/// with a MERGE of that node after it when the pattern gives the node
-/// `labels` or `match_properties`, as in `MERGE (h)-[:R]->(:T {x: 3})`: a node
-/// without a `variable` gets the name `fresh` makes. One with neither a
-/// variable nor a label or property could be any node, which the
-/// relationship MERGE does not support: an error.
-///
-/// # Errors
-///
-/// Returns an error for an anonymous node without a label or property.
-#[cfg(any(feature = "gql", feature = "cypher"))]
-pub(crate) fn merge_end_node(
-    variable: Option<&str>,
-    labels: &[String],
-    match_properties: Vec<(String, LogicalExpression)>,
-    input: LogicalOperator,
-    fresh: impl FnOnce() -> String,
-) -> Result<(String, LogicalOperator)> {
-    let defined = !labels.is_empty() || !match_properties.is_empty();
-    let variable = match variable {
-        Some(name) => name.to_string(),
-        None if defined => fresh(),
-        None => {
-            return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "MERGE of a relationship with an anonymous node without a label or property is \
-                 not supported: MATCH or MERGE that node first and use its variable",
-            )));
-        }
-    };
-    if !defined {
-        return Ok((variable, input));
-    }
-    let merge = LogicalOperator::Merge(crate::query::plan::MergeOp {
-        variable: variable.clone(),
-        labels: labels.to_vec(),
-        match_properties,
-        on_create: Vec::new(),
-        on_match: Vec::new(),
-        on_create_labels: Vec::new(),
-        on_match_labels: Vec::new(),
-        input: Box::new(input),
-    });
-    Ok((variable, merge))
-}
-
-/// The error for a MERGE of a pattern with more than one relationship, which
-/// would have to match or create the whole pattern: only one relationship
-/// per MERGE is supported.
-#[cfg(any(feature = "gql", feature = "cypher"))]
-pub(crate) fn merge_of_a_longer_path() -> Error {
-    Error::Query(QueryError::new(
-        QueryErrorKind::Semantic,
-        "MERGE of a pattern with more than one relationship is not supported: merge one \
-         relationship per MERGE clause",
-    ))
-}
 
 // ---------------------------------------------------------------------------
 // Variable extraction

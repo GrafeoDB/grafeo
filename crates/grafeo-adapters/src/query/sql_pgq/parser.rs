@@ -717,7 +717,13 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The bounds after a `*`: `*n` exactly n hops, `*n..m`, `*n..`, `*..m`,
+    /// and `*` alone one or more hops, as in GQL and Cypher (it read as one
+    /// hop).
     fn parse_hop_range(&mut self) -> Result<(Option<u32>, Option<u32>)> {
+        if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Dot) {
+            return Ok((Some(1), None));
+        }
         let min = if self.current.kind == TokenKind::Integer {
             let val = self.current.text.parse().unwrap_or(1);
             self.advance();

@@ -2,7 +2,9 @@
 //!
 //! Translates SPARQL 1.1 AST to the common logical plan representation.
 
-use super::common::{wrap_distinct, wrap_filter, wrap_limit, wrap_skip, wrap_sort};
+use super::common::{
+    collect_expression_variables, wrap_distinct, wrap_filter, wrap_limit, wrap_skip, wrap_sort,
+};
 use crate::query::plan::Callee;
 use crate::query::plan::{
     AddGraphOp, AggregateExpr, AggregateFunction, AggregateOp, AntiJoinOp, BinaryOp, BindOp,
@@ -15,7 +17,7 @@ use grafeo_adapters::query::sparql::{self, ast};
 use grafeo_common::storage::log_record::RdfGraphTarget;
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Global counter for generating unique query IDs (blank node scoping).
@@ -145,14 +147,19 @@ impl SparqlTranslator {
                 Vec::new()
             };
 
-            // Translate HAVING: rewrite aggregate calls as variable references
-            // to the computed aggregate column aliases
+            // Translate HAVING: each aggregate in it, wherever it stands (in a
+            // function call too), reads the column of the same aggregate of the
+            // SELECT, or of one computed for the HAVING only
+            let mut aggregates = aggregates;
+            let projected_aggregates = aggregates.len();
             let having_expr = if let Some(having) = &select.solution_modifiers.having {
-                let raw = self.translate_expression(having)?;
-                Some(Self::rewrite_aggregates_as_refs(&raw, &aggregates))
+                let mut having = having.clone();
+                self.take_having_aggregates(&mut having, &mut aggregates)?;
+                Some(self.translate_expression(&having)?)
             } else {
                 None
             };
+            let hidden_aggregates = aggregates.len() > projected_aggregates;
 
             plan = LogicalOperator::Aggregate(AggregateOp {
                 group_by: group_by_exprs,
@@ -160,14 +167,80 @@ impl SparqlTranslator {
                 input: Box::new(plan),
                 having: having_expr,
             });
+            // The aggregates the HAVING alone computes are not results.
+            if hidden_aggregates && let ast::Projection::Variables(vars) = &select.projection {
+                plan = LogicalOperator::Project(ProjectOp {
+                    projections: vars
+                        .iter()
+                        .filter_map(|pv| {
+                            let name = pv.alias.clone().or_else(|| match &pv.expression {
+                                ast::Expression::Variable(name) => Some(name.clone()),
+                                _ => None,
+                            })?;
+                            Some(Projection {
+                                expression: LogicalExpression::Variable(name),
+                                alias: None,
+                            })
+                        })
+                        .collect(),
+                    input: Box::new(plan),
+                    pass_through_input: false,
+                });
+            }
         }
+
+        let sort_keys = match &select.solution_modifiers.order_by {
+            Some(order_by) => Some(
+                order_by
+                    .iter()
+                    .map(|oc| {
+                        Ok(SortKey {
+                            expression: self.translate_expression(&oc.expression)?,
+                            order: match oc.direction {
+                                ast::SortDirection::Ascending => SortOrder::Ascending,
+                                ast::SortDirection::Descending => SortOrder::Descending,
+                            },
+                            nulls: None,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            None => None,
+        };
 
         // Apply projection before ORDER BY so that computed aliases
         // (e.g. `SELECT (CONCAT(?a, ?b) AS ?full) ... ORDER BY ?full`)
-        // are available to the sort operator.
+        // are available to the sort operator. SPARQL orders the solutions
+        // before it projects them (SPARQL 1.1, 18.2.5), so ORDER BY may read
+        // a variable the SELECT leaves out: the projection carries it to the
+        // sort, and a second one leaves it out after.
+        let mut projected_after_sort = None;
         if !has_aggregates {
-            let projections = self.translate_projection(&select.projection)?;
+            let mut projections = self.translate_projection(&select.projection)?;
             if !projections.is_empty() {
+                let names: Vec<String> = projections
+                    .iter()
+                    .map(|projection| {
+                        crate::query::planner::common::output_column_name(
+                            projection.alias.as_deref(),
+                            &projection.expression,
+                        )
+                    })
+                    .collect();
+                let mut read = HashSet::new();
+                for key in sort_keys.iter().flatten() {
+                    collect_expression_variables(&key.expression, &mut read);
+                }
+                let mut carried: Vec<&String> =
+                    read.iter().filter(|name| !names.contains(name)).collect();
+                carried.sort();
+                if !carried.is_empty() {
+                    projections.extend(carried.into_iter().map(|name| Projection {
+                        expression: LogicalExpression::Variable(name.clone()),
+                        alias: None,
+                    }));
+                    projected_after_sort = Some(names);
+                }
                 plan = LogicalOperator::Project(ProjectOp {
                     projections,
                     input: Box::new(plan),
@@ -177,22 +250,21 @@ impl SparqlTranslator {
         }
 
         // Apply ORDER BY (after projection so aliases are resolvable)
-        if let Some(order_by) = &select.solution_modifiers.order_by {
-            let keys = order_by
-                .iter()
-                .map(|oc| {
-                    Ok(SortKey {
-                        expression: self.translate_expression(&oc.expression)?,
-                        order: match oc.direction {
-                            ast::SortDirection::Ascending => SortOrder::Ascending,
-                            ast::SortDirection::Descending => SortOrder::Descending,
-                        },
-                        nulls: None,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-
+        if let Some(keys) = sort_keys {
             plan = wrap_sort(plan, keys);
+        }
+        if let Some(names) = projected_after_sort {
+            plan = LogicalOperator::Project(ProjectOp {
+                projections: names
+                    .into_iter()
+                    .map(|name| Projection {
+                        expression: LogicalExpression::Variable(name),
+                        alias: None,
+                    })
+                    .collect(),
+                input: Box::new(plan),
+                pass_through_input: false,
+            });
         }
 
         // Apply DISTINCT (after projection, before OFFSET/LIMIT).
@@ -1616,38 +1688,92 @@ impl SparqlTranslator {
         }
     }
 
-    /// Rewrites aggregate function calls in a HAVING expression as variable
-    /// references to the already-computed aggregate column aliases.
-    fn rewrite_aggregates_as_refs(
-        expr: &LogicalExpression,
-        aggregates: &[AggregateExpr],
-    ) -> LogicalExpression {
+    /// Replaces each aggregate of a HAVING expression, wherever it stands,
+    /// by a variable that reads its column: the column of the same aggregate
+    /// of `aggregates` (same function, arguments, DISTINCT and separator),
+    /// or of one this adds for the HAVING alone.
+    fn take_having_aggregates(
+        &mut self,
+        expr: &mut ast::Expression,
+        aggregates: &mut Vec<AggregateExpr>,
+    ) -> Result<()> {
         match expr {
-            LogicalExpression::FunctionCall {
-                callee: Callee::Aggregate(function),
-                ..
-            } => {
-                // The aggregate's column, by function. CountNonNull is the
-                // physical variant of COUNT(expr), so it matches COUNT.
-                let alias = aggregates.iter().find_map(|agg| {
-                    let same = agg.function == *function
-                        || (*function == AggregateFunction::Count
-                            && agg.function == AggregateFunction::CountNonNull);
-                    if same { agg.alias.clone() } else { None }
-                });
-                alias.map_or_else(|| expr.clone(), LogicalExpression::Variable)
+            ast::Expression::Aggregate(_) => {
+                let Some(mut aggregate) = self.extract_aggregate(expr, &None)? else {
+                    return Ok(());
+                };
+                let key = |aggregate: &AggregateExpr| {
+                    format!(
+                        "{:?}",
+                        (
+                            aggregate.function,
+                            &aggregate.expression,
+                            &aggregate.expression2,
+                            aggregate.distinct,
+                            &aggregate.separator,
+                            aggregate.percentile,
+                        )
+                    )
+                };
+                let wanted = key(&aggregate);
+                let alias = match aggregates
+                    .iter()
+                    .find(|existing| existing.alias.is_some() && key(existing) == wanted)
+                {
+                    Some(existing) => existing.alias.clone().expect("checked above"),
+                    None => {
+                        let alias = format!("__having_{}", self.next_anon());
+                        aggregate.alias = Some(alias.clone());
+                        aggregates.push(aggregate);
+                        alias
+                    }
+                };
+                *expr = ast::Expression::Variable(alias);
             }
-            LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
-                left: Box::new(Self::rewrite_aggregates_as_refs(left, aggregates)),
-                op: *op,
-                right: Box::new(Self::rewrite_aggregates_as_refs(right, aggregates)),
-            },
-            LogicalExpression::Unary { op, operand } => LogicalExpression::Unary {
-                op: *op,
-                operand: Box::new(Self::rewrite_aggregates_as_refs(operand, aggregates)),
-            },
-            _ => expr.clone(),
+            ast::Expression::Binary { left, right, .. } => {
+                self.take_having_aggregates(left, aggregates)?;
+                self.take_having_aggregates(right, aggregates)?;
+            }
+            ast::Expression::Unary { operand, .. } => {
+                self.take_having_aggregates(operand, aggregates)?;
+            }
+            ast::Expression::FunctionCall { arguments, .. } => {
+                for argument in arguments {
+                    self.take_having_aggregates(argument, aggregates)?;
+                }
+            }
+            ast::Expression::Bracketed(inner) => self.take_having_aggregates(inner, aggregates)?,
+            ast::Expression::Conditional {
+                condition,
+                then_expression,
+                else_expression,
+            } => {
+                self.take_having_aggregates(condition, aggregates)?;
+                self.take_having_aggregates(then_expression, aggregates)?;
+                self.take_having_aggregates(else_expression, aggregates)?;
+            }
+            ast::Expression::Coalesce(expressions) => {
+                for expression in expressions {
+                    self.take_having_aggregates(expression, aggregates)?;
+                }
+            }
+            ast::Expression::In { expression, list }
+            | ast::Expression::NotIn { expression, list } => {
+                self.take_having_aggregates(expression, aggregates)?;
+                for item in list {
+                    self.take_having_aggregates(item, aggregates)?;
+                }
+            }
+            // No aggregate inside: an EXISTS pattern is evaluated per group
+            // row, not aggregated.
+            ast::Expression::Variable(_)
+            | ast::Expression::Iri(_)
+            | ast::Expression::Literal(_)
+            | ast::Expression::Bound(_)
+            | ast::Expression::Exists(_)
+            | ast::Expression::NotExists(_) => {}
         }
+        Ok(())
     }
 
     fn join_patterns(

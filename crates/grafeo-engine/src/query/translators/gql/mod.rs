@@ -5,6 +5,7 @@
 mod aggregate;
 mod expression;
 mod pattern;
+mod sort;
 
 use std::collections::{HashMap, HashSet};
 
@@ -21,10 +22,9 @@ use crate::query::plan::{
     CallProcedureOp, CountExpr, CreateElement, CreateOp, DeleteNodeOp, EntityKind, ExceptOp,
     ExpandDirection, ExpandOp, HorizontalAggregateOp, IntersectOp, JoinCondition, JoinOp, JoinType,
     LeftJoinOp, LoadDataFormat, LoadDataOp, LogicalExpression, LogicalOperator, LogicalPlan,
-    MergeOp, MergeRelationshipOp, NodeScanOp, NullsOrdering, OtherwiseOp, ParameterScanOp,
-    PathMode, ProcedureYield, ProjectOp, Projection, RemoveLabelOp, ReturnItem, ReturnOp,
-    SetPropertyOp, ShortestPathEdgeCondition, ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp,
-    UnwindOp,
+    MergeOp, NodeScanOp, NullsOrdering, OtherwiseOp, ParameterScanOp, PathMode, ProcedureYield,
+    ProjectOp, Projection, RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp,
+    ShortestPathEdgeCondition, ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
 #[cfg(test)]
 use crate::query::plan::{FilterOp, LimitOp, SkipOp};
@@ -98,6 +98,9 @@ struct GqlTranslator {
     /// The variables the `CALL` body being translated imports, which a
     /// `WITH` in it passes on whether it names them or not.
     call_imports: CallImports,
+    /// What the WITH just translated projects, for an ORDER BY statement
+    /// right after it (see `sort`); `None` after any other clause.
+    sort_scope: std::cell::RefCell<Option<sort::SortScope>>,
 }
 
 /// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
@@ -327,6 +330,7 @@ impl GqlTranslator {
             call_scope: std::cell::RefCell::new(None),
             names: GeneratedNames::new(query),
             call_imports: CallImports::default(),
+            sort_scope: std::cell::RefCell::new(None),
         }
     }
 
@@ -478,75 +482,50 @@ impl GqlTranslator {
                         !return_clause.group_by.is_empty(),
                     )?;
                 // Explicit GROUP BY wins over the keys implied by the items.
-                let group_by = if return_clause.group_by.is_empty() {
-                    auto_group_by
+                let (group_by, imports_read) = if return_clause.group_by.is_empty() {
+                    let imports_read = super::common::resolve_implicitly_grouped(
+                        "RETURN",
+                        post_return.as_deref_mut().unwrap_or_default(),
+                        &auto_group_by,
+                        &aggregates,
+                        &self.call_imports,
+                    )?;
+                    (auto_group_by, imports_read)
                 } else {
                     let keys = self.translate_group_by(
                         &return_clause.group_by,
                         &return_clause.items,
                         &plan,
                     )?;
-                    self.resolve_grouped_items(
+                    let imports_read = self.resolve_grouped_items(
                         &return_clause.items,
                         post_return.as_deref_mut().unwrap_or_default(),
                         &keys,
                         &aggregates,
                     )?;
-                    keys
+                    (keys, imports_read)
                 };
 
-                plan = LogicalOperator::Aggregate(AggregateOp {
-                    group_by,
-                    aggregates,
-                    input: Box::new(plan),
-                    having: None,
-                });
-
-                // Collect aggregate output column names for ORDER BY rewriting.
-                // After aggregation the original entity variable no longer exists,
-                // so property references like `n.prop` must become flat variable
-                // references when they match an output column.
-                let agg_output_columns: HashSet<String> = post_return
-                    .as_ref()
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|ri| {
-                                ri.alias.clone().or_else(|| {
-                                    if let LogicalExpression::Variable(v) = &ri.expression {
-                                        Some(v.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                plan = super::common::with_imports(
+                    LogicalOperator::Aggregate(AggregateOp {
+                        group_by,
+                        aggregates,
+                        input: Box::new(plan),
+                        having: None,
+                    }),
+                    imports_read,
+                    true,
+                );
 
                 if let Some(return_items) = post_return {
                     plan = wrap_return(plan, return_items, return_clause.distinct);
                 }
 
-                // Apply ORDER BY with aggregate-aware rewriting
+                // An ORDER BY after an aggregating RETURN reads its columns
+                // (see `sort`).
                 if let Some(order_by) = &return_clause.order_by {
-                    let keys = order_by
-                        .items
-                        .iter()
-                        .map(|item| {
-                            let mut expression = self.translate_expression(&item.expression)?;
-                            if let LogicalExpression::Property { .. } = &expression {
-                                let col_name = crate::query::planner::common::expression_to_string(
-                                    &expression,
-                                );
-                                if agg_output_columns.contains(&col_name) {
-                                    expression = LogicalExpression::Variable(col_name);
-                                }
-                            }
-                            Ok(sort_key(item, expression))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-
+                    let keys =
+                        self.projected_sort_keys(order_by, &return_clause.items, "RETURN", true)?;
                     plan = wrap_sort(plan, keys);
                 }
 
@@ -589,13 +568,19 @@ impl GqlTranslator {
             // with aggregate-aware ORDER BY rewriting.
             if !has_aggregates {
                 if let Some(order_by) = &return_clause.order_by {
-                    let keys = order_by
-                        .items
-                        .iter()
-                        .map(|item| {
-                            Ok(sort_key(item, self.translate_expression(&item.expression)?))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
+                    // With DISTINCT, ORDER BY reads only what the RETURN
+                    // returns (see `sort`).
+                    let keys = if return_clause.distinct && !return_clause.items.is_empty() {
+                        self.projected_sort_keys(order_by, &return_clause.items, "RETURN", false)?
+                    } else {
+                        order_by
+                            .items
+                            .iter()
+                            .map(|item| {
+                                Ok(sort_key(item, self.translate_expression(&item.expression)?))
+                            })
+                            .collect::<Result<Vec<_>>>()?
+                    };
 
                     plan = wrap_sort(plan, keys);
                 }
@@ -650,6 +635,9 @@ impl GqlTranslator {
                 // A clause may walk the plan below it recursively (the
                 // variables it binds): stop before that is too deep.
                 crate::query::limits::check_partial_plan_depth(&mut plan)?;
+                // What the clause before projected, if it was a WITH: an
+                // ORDER BY right after it sorts that. Only a WITH sets it.
+                let sort_scope = self.sort_scope.take();
                 match clause {
                     ast::QueryClause::Match(match_clause) => {
                         if matches!(plan, LogicalOperator::Empty) && match_clause.optional {
@@ -814,8 +802,11 @@ impl GqlTranslator {
                         plan = self.apply_statement_where(plan, filter, after_optional_match)?;
                     }
                     ast::QueryClause::OrderByAndPage(page) => {
-                        plan = self.apply_order_by_and_page(plan, page)?;
+                        plan = self.apply_order_by_and_page(plan, page, sort_scope.as_ref())?;
                     }
+                }
+                if !matches!(clause, ast::QueryClause::With(_)) {
+                    self.sort_scope.replace(None);
                 }
                 after_optional_match =
                     matches!(clause, ast::QueryClause::Match(found) if found.optional);
@@ -992,38 +983,41 @@ impl GqlTranslator {
                     !query.return_clause.group_by.is_empty() || having_aggregates,
                 )?;
             // HAVING's aggregates are numbered after the `_agg_N` ones of the
-            // RETURN list.
-            let mut having_counter = u32::try_from(
-                aggregates
-                    .iter()
-                    .filter(|aggregate| {
-                        aggregate
-                            .alias
-                            .as_deref()
-                            .is_some_and(|alias| alias.starts_with("_agg_"))
-                    })
-                    .count(),
-            )
-            .map_err(|_| {
-                Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    "too many aggregates in one RETURN",
-                ))
-            })?;
+            // RETURN list (which skip the names the statement spells, so the
+            // next number follows the highest, not the count).
+            let mut having_counter = aggregates
+                .iter()
+                .filter_map(|aggregate| {
+                    aggregate
+                        .alias
+                        .as_deref()?
+                        .strip_prefix("_agg_")?
+                        .parse::<u32>()
+                        .ok()
+                })
+                .max()
+                .map_or(0, |highest| highest.saturating_add(1));
 
             // Use explicit GROUP BY if provided, otherwise use auto-detected
-            let group_by = if query.return_clause.group_by.is_empty() {
-                auto_group_by
+            let (group_by, imports_read) = if query.return_clause.group_by.is_empty() {
+                let imports_read = super::common::resolve_implicitly_grouped(
+                    "RETURN",
+                    post_return.as_deref_mut().unwrap_or_default(),
+                    &auto_group_by,
+                    &aggregates,
+                    &self.call_imports,
+                )?;
+                (auto_group_by, imports_read)
             } else {
                 let keys =
                     self.translate_group_by(&query.return_clause.group_by, &return_items, &plan)?;
-                self.resolve_grouped_items(
+                let imports_read = self.resolve_grouped_items(
                     &return_items,
                     post_return.as_deref_mut().unwrap_or_default(),
                     &keys,
                     &aggregates,
                 )?;
-                keys
+                (keys, imports_read)
             };
 
             // Translate HAVING clause if present; its aggregates become
@@ -1044,34 +1038,16 @@ impl GqlTranslator {
                 None => None,
             };
 
-            let agg_op = LogicalOperator::Aggregate(AggregateOp {
-                group_by,
-                aggregates,
-                input: Box::new(plan),
-                having,
-            });
-
-            // Collect aggregate output column names before post_return is consumed.
-            // These are used to rewrite ORDER BY property references (e.g. `a.species`)
-            // into flat variable references (e.g. Variable("a.species")) since after
-            // aggregation the original entity variable no longer exists.
-            let agg_output_columns: std::collections::HashSet<String> = post_return
-                .as_ref()
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|ri| {
-                            ri.alias.clone().or_else(|| {
-                                if let LogicalExpression::Variable(v) = &ri.expression {
-                                    Some(v.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let agg_op = super::common::with_imports(
+                LogicalOperator::Aggregate(AggregateOp {
+                    group_by,
+                    aggregates,
+                    input: Box::new(plan),
+                    having,
+                }),
+                imports_read,
+                true,
+            );
 
             if let Some(return_items) = post_return {
                 plan = wrap_return(agg_op, return_items, query.return_clause.distinct);
@@ -1085,28 +1061,23 @@ impl GqlTranslator {
             // an aggregate output column, since the entity variable no longer exists
             // after aggregation.
             if let Some(order_by) = &return_order_by {
-                let keys = order_by
-                    .items
-                    .iter()
-                    .map(|item| {
-                        let mut expression = self.translate_expression(&item.expression)?;
-                        if let LogicalExpression::Property { .. } = &expression {
-                            let col_name =
-                                crate::query::planner::common::expression_to_string(&expression);
-                            if agg_output_columns.contains(&col_name) {
-                                expression = LogicalExpression::Variable(col_name);
-                            }
-                        }
-                        Ok(sort_key(item, expression))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
+                let keys = self.projected_sort_keys(order_by, &return_items, "RETURN", true)?;
                 plan = wrap_sort(plan, keys);
             }
 
             // Note: For aggregate queries, we don't add a Return operator
             // because Aggregate already produces the final output
         } else {
+            // With DISTINCT, ORDER BY reads only what the RETURN returns (see
+            // `sort`).
+            let distinct_keys = match &return_order_by {
+                Some(order_by)
+                    if query.return_clause.distinct && !query.return_clause.is_wildcard =>
+                {
+                    Some(self.projected_sort_keys(order_by, &return_items, "RETURN", false)?)
+                }
+                _ => None,
+            };
             // Apply RETURN first (closest to input), then Sort wraps it.
             // This ensures RETURN aliases are visible to ORDER BY in the binder.
             let return_items = if query.return_clause.is_wildcard {
@@ -1131,11 +1102,16 @@ impl GqlTranslator {
 
             // Apply ORDER BY (wraps Return so aliases are visible)
             if let Some(order_by) = &return_order_by {
-                let keys = order_by
-                    .items
-                    .iter()
-                    .map(|item| Ok(sort_key(item, self.translate_expression(&item.expression)?)))
-                    .collect::<Result<Vec<_>>>()?;
+                let keys = match distinct_keys {
+                    Some(keys) => keys,
+                    None => order_by
+                        .items
+                        .iter()
+                        .map(|item| {
+                            Ok(sort_key(item, self.translate_expression(&item.expression)?))
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                };
 
                 plan = wrap_sort(plan, keys);
             }
@@ -1585,9 +1561,35 @@ impl GqlTranslator {
                 .iter()
                 .any(|item| contains_aggregate(&item.expression));
 
+            // What an ORDER BY right after this WITH reads: its items, and the
+            // variables of its LET bindings.
+            let mut scope_items = items.clone();
+            scope_items.extend(
+                with_clause
+                    .let_bindings
+                    .iter()
+                    .map(|(name, _)| ast::ReturnItem {
+                        expression: ast::Expression::Variable(name.clone()),
+                        alias: None,
+                        span: None,
+                    }),
+            );
+            self.sort_scope.replace(Some(sort::SortScope {
+                aggregating: has_aggregates,
+                distinct: with_clause.distinct,
+                items: scope_items,
+            }));
+
             if has_aggregates {
-                let (aggregates, auto_group_by, post_return) =
+                let (aggregates, auto_group_by, mut post_return) =
                     self.extract_aggregates_and_groups(&items, false)?;
+                let imports_read = super::common::resolve_implicitly_grouped(
+                    "WITH",
+                    post_return.as_deref_mut().unwrap_or_default(),
+                    &auto_group_by,
+                    &aggregates,
+                    &self.call_imports,
+                )?;
 
                 // Split the WHERE into HAVING (aggregate-referencing
                 // conjuncts) and a post-aggregate filter (the rest).
@@ -1614,12 +1616,16 @@ impl GqlTranslator {
                     (None, None)
                 };
 
-                plan = LogicalOperator::Aggregate(AggregateOp {
-                    group_by: auto_group_by,
-                    aggregates,
-                    input: Box::new(plan),
-                    having,
-                });
+                plan = super::common::with_imports(
+                    LogicalOperator::Aggregate(AggregateOp {
+                        group_by: auto_group_by,
+                        aggregates,
+                        input: Box::new(plan),
+                        having,
+                    }),
+                    imports_read,
+                    true,
+                );
 
                 // Apply post-aggregate projection if aggregates were wrapped
                 // in expressions (e.g. WITH count(n) + 1 AS cnt_plus_one)
@@ -1709,14 +1715,39 @@ impl GqlTranslator {
         &self,
         mut plan: LogicalOperator,
         page: &ast::OrderByAndPage,
+        after_with: Option<&sort::SortScope>,
     ) -> Result<LogicalOperator> {
         if let Some(order_by) = &page.order_by {
-            let keys = order_by
-                .items
-                .iter()
-                .map(|item| self.translate_sort_key(item))
-                .collect::<Result<Vec<_>>>()?;
-            plan = wrap_sort(plan, keys);
+            plan = match after_with {
+                // After a WITH, as openCypher's ORDER BY reads (see `sort`):
+                // a WITH that neither aggregates nor is DISTINCT keeps the
+                // input variables a key reads for the sort.
+                Some(scope) => {
+                    let keys = self.sort_keys_after_with(order_by, scope)?;
+                    if scope.aggregating || scope.distinct {
+                        wrap_sort(plan, keys)
+                    } else {
+                        let projected = scope
+                            .items
+                            .iter()
+                            .filter_map(|item| match (&item.alias, &item.expression) {
+                                (Some(alias), _) => Some(alias.clone()),
+                                (None, ast::Expression::Variable(name)) => Some(name.clone()),
+                                (None, _) => None,
+                            })
+                            .collect();
+                        super::common::sort_keeping_input(plan, keys, projected)
+                    }
+                }
+                None => {
+                    let keys = order_by
+                        .items
+                        .iter()
+                        .map(|item| self.translate_sort_key(item))
+                        .collect::<Result<Vec<_>>>()?;
+                    wrap_sort(plan, keys)
+                }
+            };
         }
         if let Some(offset) = &page.offset {
             plan = wrap_skip(plan, Self::eval_as_count_expr(offset)?);
@@ -1727,19 +1758,10 @@ impl GqlTranslator {
         Ok(plan)
     }
 
-    /// Translates one ORDER BY item to a sort key.
+    /// Translates one ORDER BY item to a sort key: nulls last unless it says
+    /// NULLS FIRST, as every GQL ORDER BY sorts (see `sort_key`).
     fn translate_sort_key(&self, item: &ast::OrderByItem) -> Result<SortKey> {
-        Ok(SortKey {
-            expression: self.translate_expression(&item.expression)?,
-            order: match item.order {
-                ast::SortOrder::Asc => SortOrder::Ascending,
-                ast::SortOrder::Desc => SortOrder::Descending,
-            },
-            nulls: item.nulls.map(|n| match n {
-                ast::NullsOrdering::First => NullsOrdering::First,
-                ast::NullsOrdering::Last => NullsOrdering::Last,
-            }),
-        })
+        Ok(sort_key(item, self.translate_expression(&item.expression)?))
     }
 
     /// Translates `CALL { subquery }` to an `Apply` that runs the subquery for

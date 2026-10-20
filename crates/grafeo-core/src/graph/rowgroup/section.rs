@@ -1908,8 +1908,8 @@ mod tests {
     }
 
     /// A loaded store keeps its property columns as the file's chunks until
-    /// their first use: a read decodes its own column only, and a write to a
-    /// cold column keeps the column's other rows.
+    /// a write or a read of a complex value needs decoding. Scalar reads
+    /// stay encoded, and writes preserve the column's other rows.
     #[test]
     fn loaded_columns_stay_encoded_until_their_first_use() {
         use grafeo_common::change::DataOp;
@@ -1930,6 +1930,13 @@ mod tests {
             "counts, labels and adjacency read no property column"
         );
         let cold_bytes = loaded.heap_bytes();
+
+        assert_eq!(
+            loaded.get_node_property(gus, &PropertyKey::new("age")),
+            Some(Value::Int64(3))
+        );
+        assert_eq!(loaded.cold_columns(), 4, "a scalar read stays encoded");
+        assert_eq!(loaded.heap_bytes(), cold_bytes);
 
         let name = PropertyKey::new("name");
         assert_eq!(
@@ -1963,14 +1970,18 @@ mod tests {
         assert_eq!(loaded.get_node_property(alix, &age), Some(Value::Int64(88)));
         assert_eq!(loaded.get_node_property(gus, &age), Some(Value::Int64(3)));
 
-        // A whole node reads every column of its group.
+        // Whole entities use the same scalar path; the city string decodes.
         assert!(loaded.get_node(alix).is_some());
         assert!(
             loaded
                 .get_edge(grafeo_common::types::EdgeId::new(0))
                 .is_some()
         );
-        assert_eq!(loaded.cold_columns(), 0);
+        assert_eq!(
+            loaded.cold_columns(),
+            1,
+            "the edge's scalar column stays encoded"
+        );
         assert!(
             loaded.heap_bytes() != cold_bytes,
             "the decoded columns are counted"

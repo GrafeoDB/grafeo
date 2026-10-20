@@ -21,16 +21,22 @@
 
 use std::hint::black_box;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use bytes::Bytes;
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 use grafeo_common::change::{ChangeSet, DataModel, DataOp, GraphRef};
+use grafeo_common::storage::{ChunkCaps, ChunkMeta, SectionSink, SectionSource};
 use grafeo_common::types::{
     ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
 };
+use grafeo_common::utils::error::Result;
 use grafeo_core::graph::apply::{Applied, ChangeTarget, Writer};
 use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{Direction, GraphStoreMut};
+use grafeo_core::graph::rowgroup::section::{
+    GraphToWrite, LPG_SECTION_VERSION, read_lpg_section, write_lpg_section,
+};
+use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut};
 
 /// The people in the graph each case starts from.
 const PEOPLE: u64 = 10_000;
@@ -488,5 +494,122 @@ fn bench_rowgroup_store(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_lpg_store, bench_rowgroup_store);
+/// The same encoded section supplies every cold-read iteration.
+#[derive(Default)]
+struct MemorySection {
+    metas: Vec<ChunkMeta>,
+    bytes: Vec<Bytes>,
+}
+
+impl SectionSink for MemorySection {
+    fn write_chunk(&mut self, meta: ChunkMeta, bytes: &[u8]) -> Result<()> {
+        self.metas.push(meta);
+        self.bytes.push(Bytes::copy_from_slice(bytes));
+        Ok(())
+    }
+}
+
+impl SectionSource for MemorySection {
+    fn chunks(&self) -> &[ChunkMeta] {
+        &self.metas
+    }
+
+    fn fetch(&self, index: usize) -> Result<Bytes> {
+        Ok(self.bytes[index].clone())
+    }
+
+    fn stored_length(&self, index: usize) -> Result<u64> {
+        Ok(u64::try_from(self.bytes[index].len()).expect("a chunk length fits u64"))
+    }
+
+    fn section_version(&self) -> u8 {
+        LPG_SECTION_VERSION
+    }
+}
+
+fn cold_property_section() -> (MemorySection, NodeId) {
+    const NODES: u64 = 65_536;
+    let store = RowGroupStore::new();
+    let first = store.reserve_node_ids(NODES).expect("node ids").start;
+    let writer = Writer::Replay {
+        epoch: EpochId::new(1),
+    };
+    for row in 0..NODES {
+        let op = DataOp::CreateNode {
+            id: NodeId::new(first + row),
+            labels: Default::default(),
+            properties: vec![(
+                PropertyKey::new("ordinal"),
+                Value::Int64(i64::try_from(row).expect("the row fits i64")),
+            )],
+        };
+        store.apply(&op, writer).expect("a node");
+    }
+
+    let mut section = MemorySection::default();
+    write_lpg_section(
+        &[GraphToWrite {
+            id: 0,
+            name: "",
+            store: &store,
+        }],
+        1,
+        store.current_epoch(),
+        ChunkCaps::DEFAULT,
+        &mut section,
+    )
+    .expect("write the property section");
+    (section, NodeId::new(first + NODES - 1))
+}
+
+fn load_property_section(section: &MemorySection) -> RowGroupStore {
+    let (next_graph, mut graphs) = read_lpg_section(section).expect("read the property section");
+    assert_eq!((next_graph, graphs.len()), (1, 1));
+    let store = graphs.remove(0).store;
+    assert_eq!(store.cold_columns(), 1, "the property starts encoded");
+    store
+}
+
+fn bench_rowgroup_cold_reads(c: &mut Criterion) {
+    let (section, last) = cold_property_section();
+    let key = PropertyKey::new("ordinal");
+    let expected = Some(Value::Int64(65_535));
+    let mut group = c.benchmark_group("store_apply/rowgroup_cold");
+
+    group.bench_function("first_point_read_65536", |b| {
+        b.iter_batched(
+            || load_property_section(&section),
+            |store| {
+                assert_eq!(
+                    black_box(store.get_node_property(black_box(last), black_box(&key))),
+                    expected,
+                );
+                // Returning the store keeps its destruction outside timing.
+                store
+            },
+            BatchSize::PerIteration,
+        );
+    });
+
+    let hot = load_property_section(&section);
+    // A same-value write thaws the column on both baseline and candidate.
+    hot.set_node_property(last, "ordinal", Value::Int64(65_535));
+    assert_eq!(hot.cold_columns(), 0, "the control uses a hot column");
+    group.bench_function("hot_point_read_65536", |b| {
+        b.iter(|| {
+            assert_eq!(
+                black_box(hot.get_node_property(black_box(last), black_box(&key))),
+                expected,
+            );
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_lpg_store,
+    bench_rowgroup_store,
+    bench_rowgroup_cold_reads
+);
 criterion_main!(benches);

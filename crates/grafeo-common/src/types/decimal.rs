@@ -136,6 +136,19 @@ impl Decimal {
         self.scale
     }
 
+    /// The same value without trailing zeros after the point (`1.50` is
+    /// `1.5`, `3.00` is `3`): one decimal for every scale of a value, as `==`
+    /// and `Hash` see it. For identities such as grouping keys; a value shown
+    /// to the user keeps its own scale.
+    #[must_use]
+    pub fn normalize(&self) -> Self {
+        let (mantissa, scale) = self.normalized();
+        Self {
+            scale,
+            mantissa: words(mantissa),
+        }
+    }
+
     /// The mantissa and scale without trailing zeros after the point: the
     /// same pair for every scale of a value.
     fn normalized(&self) -> (i128, u8) {
@@ -939,6 +952,32 @@ mod tests {
         assert_eq!(d("0.000"), d("0"));
         assert_eq!(hash_of(&d("-0.00")), hash_of(&d("0")));
         assert_ne!(d("1.5"), d("1.05"));
+    }
+
+    #[test]
+    fn normalize_drops_trailing_zeros_after_the_point_and_keeps_the_value() {
+        for (text, normalized, scale) in [
+            ("1.50", "1.5", 1),
+            ("3.000", "3", 0),
+            ("-0.120", "-0.12", 2),
+            ("0.000", "0", 0),
+            ("-0.00", "0", 0),
+            ("100", "100", 0),
+            ("1.05", "1.05", 2),
+            (
+                "0.12345678901234567890123456780",
+                "0.1234567890123456789012345678",
+                28,
+            ),
+        ] {
+            let value = d(text);
+            let once = value.normalize();
+            assert_eq!(once.to_string(), normalized, "{text}");
+            assert_eq!(once.scale(), scale, "{text}");
+            assert_eq!(once, value, "{text}: the same value");
+            assert_eq!(hash_of(&once), hash_of(&value), "{text}");
+            assert_eq!(once.normalize().scale(), scale, "{text}: idempotent");
+        }
     }
 
     #[test]

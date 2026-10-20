@@ -484,18 +484,9 @@ fn representative_decimal(decimal: grafeo_common::types::Decimal) -> Value {
     if grafeo_common::types::Decimal::from_f64(float).is_ok_and(|back| back == decimal) {
         return representative_float(float);
     }
-    // Decimal equality ignores trailing fractional zeros, but its value
-    // codec preserves them. Canonicalize only the identity; callers keep
-    // the original first value separately for query output.
-    let (mut mantissa, mut scale) = (decimal.mantissa(), decimal.scale());
-    while scale > 0 && mantissa % 10 == 0 {
-        mantissa /= 10;
-        scale -= 1;
-    }
-    Value::Decimal(
-        grafeo_common::types::Decimal::new(mantissa, scale)
-            .expect("removing trailing zeros preserves a validated decimal"),
-    )
+    // Equality ignores trailing zeros after the point, the value codec keeps
+    // them: only the identity drops them, the first value stays as it was.
+    Value::Decimal(decimal.normalize())
 }
 
 /// A vector item's representative: one NaN for every NaN, and `0.0` for

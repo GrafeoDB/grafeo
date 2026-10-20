@@ -792,6 +792,115 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "spill", not(target_arch = "wasm32")))]
+    fn deadline_after_real_grouped_spill_cleans_pipeline_and_allows_fresh_query() {
+        use crate::execution::memory::OperatorMemoryContext;
+        use crate::execution::operators::AggregateExpr;
+        use crate::execution::operators::push::SpillableAggregatePushOperator;
+        use crate::execution::spill::SpillManager;
+        use grafeo_common::memory::buffer::{BufferManager, MemoryRegion};
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let budget = 32 * 1024 * 1024;
+        let manager = BufferManager::with_budget(budget);
+        let spill = Arc::new(SpillManager::new(directory.path()).unwrap());
+        let context = OperatorMemoryContext::new(Arc::clone(&manager), Arc::clone(&spill));
+        let held = manager
+            .try_allocate(budget * 9 / 10, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count_star()],
+            context.clone(),
+        );
+        let mut source = TestSource::new(1, 1024);
+        let mut unused_sink = ChunkCollector::new();
+        assert!(
+            aggregate
+                .push(
+                    source.next_chunk(DEFAULT_CHUNK_SIZE).unwrap().unwrap(),
+                    &mut unused_sink
+                )
+                .unwrap()
+        );
+        assert_eq!(unused_sink.row_count(), 0);
+        drop(unused_sink);
+        assert!(spill.active_file_count() > 0);
+        assert!(spill.spilled_bytes() > 0);
+        assert!(
+            std::fs::read_dir(directory.path())
+                .unwrap()
+                .next()
+                .is_some()
+        );
+        let mut pipeline = Pipeline::new(
+            Box::new(TestSource::new(0, 0)),
+            vec![Box::new(aggregate)],
+            Box::new(ChunkCollector::new()),
+        );
+        // The pipeline checks its real deadline while it owns the spilled state.
+        pipeline.set_deadline(Some(Instant::now()));
+        assert!(matches!(pipeline.execute(), Err(OperatorError::Timeout)));
+        // Expiration precedes draining: the pipeline still owns the spill.
+        assert!(spill.active_file_count() > 0);
+        drop(pipeline);
+        assert_eq!(manager.allocated(), held.size());
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+
+        let mut fresh = Pipeline::new(
+            Box::new(TestSource::new(1, 1024)),
+            vec![Box::new(
+                SpillableAggregatePushOperator::with_memory_context(
+                    vec![0],
+                    vec![AggregateExpr::count_star()],
+                    context,
+                ),
+            )],
+            Box::new(ChunkCollector::new()),
+        );
+        fresh.execute().unwrap();
+        let collector = fresh
+            .into_sink()
+            .into_any()
+            .downcast::<ChunkCollector>()
+            .unwrap();
+        assert_eq!(collector.row_count(), 1024);
+        let chunks = collector.into_chunks();
+        let mut seen = vec![false; 1024];
+        for chunk in &chunks {
+            for row in chunk.selected_indices() {
+                let key = usize::try_from(
+                    chunk
+                        .column(0)
+                        .unwrap()
+                        .get_value(row)
+                        .unwrap()
+                        .as_int64()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert!(key < seen.len() && !seen[key]);
+                seen[key] = true;
+                assert_eq!(
+                    chunk.column(1).unwrap().get_value(row),
+                    Some(Value::Int64(1))
+                );
+            }
+        }
+        assert!(seen.into_iter().all(|present| present));
+        drop(chunks);
+        assert_eq!(manager.allocated(), held.size());
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
     fn deadline_prevents_empty_source_finalization() {
         let produced = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut pipeline = Pipeline::new(

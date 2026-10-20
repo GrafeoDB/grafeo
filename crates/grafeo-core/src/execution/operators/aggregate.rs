@@ -1595,6 +1595,86 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "spill", not(target_arch = "wasm32")))]
+    fn accounted_pull_deadline_after_observed_spill_cleans_state_and_resets() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let (directory, manager, spill, context) = accounted_pull_fixture();
+        let held = manager
+            .try_allocate(1024, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        let observed_spill = Arc::new(AtomicBool::new(false));
+        let source = ControlledGroupedRows {
+            phase: 0,
+            manager: Arc::clone(&manager),
+            spill: Arc::clone(&spill),
+            observed_spill: Arc::clone(&observed_spill),
+            fail_after_spill: false,
+        };
+        let mut aggregate = HashAggregateOperator::new(
+            Box::new(source),
+            vec![0],
+            vec![AggregateExpr::count_star()],
+            vec![LogicalType::Int64, LogicalType::Int64],
+        )
+        .with_memory_context(context, None);
+        let first = aggregate.next().unwrap().unwrap();
+        assert!(observed_spill.load(Ordering::SeqCst));
+        assert_eq!(first.len(), crate::execution::chunk::DEFAULT_CHUNK_SIZE);
+        let mut seen = vec![false; 2051];
+        for row in first.selected_indices() {
+            let key = usize::try_from(first.column(0).unwrap().get_int64(row).unwrap()).unwrap();
+            assert!(key < seen.len() && !seen[key]);
+            seen[key] = true;
+            assert_eq!(
+                first.column(1).unwrap().get_int64(row),
+                Some(if key == 0 { 2 } else { 1 })
+            );
+        }
+        drop(first);
+        assert!(manager.allocated() > held.size());
+        // Expire the actual stored deadline after a witnessed spill and output.
+        // The first batch may already have consumed the spilled file.
+        aggregate.memory_context.as_mut().unwrap().1 = Some(std::time::Instant::now());
+        assert!(matches!(aggregate.next(), Err(OperatorError::Timeout)));
+        assert_eq!(manager.allocated(), held.size());
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+
+        aggregate.memory_context.as_mut().unwrap().1 = None;
+        aggregate.reset();
+        seen.fill(false);
+        let mut rows = 0;
+        let mut total = 0;
+        while let Some(chunk) = aggregate.next().unwrap() {
+            for row in chunk.selected_indices() {
+                let key =
+                    usize::try_from(chunk.column(0).unwrap().get_int64(row).unwrap()).unwrap();
+                assert!(key < seen.len() && !seen[key]);
+                seen[key] = true;
+                let count = chunk.column(1).unwrap().get_int64(row).unwrap();
+                assert_eq!(count, if key == 0 { 2 } else { 1 });
+                total += count;
+                rows += 1;
+            }
+        }
+        assert!(observed_spill.load(Ordering::SeqCst));
+        assert_eq!((rows, total), (2051, 2052));
+        assert!(seen.into_iter().all(|present| present));
+        drop(aggregate);
+        assert_eq!(manager.allocated(), held.size());
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
     #[cfg(feature = "spill")]
     fn accounted_pull_source_timeout_after_observed_spill_cleans_state() {
         use std::sync::{

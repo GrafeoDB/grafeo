@@ -143,6 +143,13 @@ impl ExpandOperator {
             OperatorError::ColumnNotFound(format!("Column {} not found", self.source_column))
         })?;
 
+        // A null source (a node an OPTIONAL MATCH did not find) has no edges:
+        // a pattern from it matches nothing.
+        if col.is_null(self.current_row) {
+            self.current_edges = Vec::new();
+            self.current_edge_idx = 0;
+            return Ok(true);
+        }
         let source_id = col
             .get_node_id(self.current_row)
             .ok_or_else(|| OperatorError::Internal("Expected node ID in source column".into()))?;
@@ -223,7 +230,33 @@ pub(super) fn visible_edges_from(
                 && store.is_node_visible_at(other, view)
         })
     });
+    take_self_loops_once(node, direction, &mut edges);
     edges
+}
+
+/// Keeps one entry for each self-loop of `node` among `edges`, its edges in
+/// `direction`. A self-loop is in both adjacency lists of its node, so both
+/// directions list it twice; a walk takes it once, as an undirected pattern
+/// matches it once (openCypher TCK Match3 [11] and [12]).
+pub(super) fn take_self_loops_once(
+    node: NodeId,
+    direction: Direction,
+    edges: &mut Vec<(NodeId, EdgeId)>,
+) {
+    if direction != Direction::Both {
+        return;
+    }
+    let mut loops: Vec<EdgeId> = Vec::new();
+    edges.retain(|&(other, edge)| {
+        if other != node {
+            return true;
+        }
+        if loops.contains(&edge) {
+            return false;
+        }
+        loops.push(edge);
+        true
+    });
 }
 
 impl Operator for ExpandOperator {

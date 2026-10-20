@@ -1,11 +1,12 @@
 # Rosetta: MERGE of a relationship pattern
 #
-# An end node without a variable is merged on its own first when the pattern
-# gives it a label or a property, in GQL as in Cypher (GQL failed with
-# "requires a target node variable"). A node with neither could be any node,
-# and a pattern of more than one relationship would have to be matched or
-# created as a whole: both are refused (the longer pattern used to merge its
-# first relationship and drop the rest without a word).
+# MERGE matches the whole pattern, or when nothing matches creates all of it,
+# in GQL as in Cypher (openCypher's MERGE): the variables bound before are
+# reused, every other node and relationship is matched or created with the
+# rest. A node the pattern does not connect is not reused, a node with neither
+# a label nor a property is any node, and a pattern of more than one
+# relationship is merged as a whole (it was refused, and before that merged
+# its first relationship and dropped the rest without a word).
 
 meta:
   model: lpg
@@ -16,8 +17,9 @@ meta:
 
 tests:
 
-  # The MERGE finds Gus instead of creating a second one.
-  - name: merge_to_an_anonymous_labeled_node_finds_it
+  # Vincent does not know Gus: the MERGE creates the relationship with a new
+  # Gus (the existing one is not connected), so two Gus nodes, one known.
+  - name: merge_to_an_anonymous_labeled_node_creates_the_whole_pattern
     setup:
       - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'}), (:Person {name: 'Vincent'})"
     variants:
@@ -25,7 +27,18 @@ tests:
       cypher: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(:Person {name: 'Gus'}) WITH count(*) AS merged MATCH (p:Person {name: 'Gus'}) OPTIONAL MATCH (p)<-[r:KNOWS]-(:Person {name: 'Vincent'}) RETURN merged, count(DISTINCT p) AS gus, count(r) AS r"
     expect:
       rows:
-        - [1, 1, 1]
+        - [1, 2, 1]
+
+  # Once Vincent knows a Gus, the MERGE finds the whole pattern.
+  - name: merge_finds_the_whole_pattern
+    setup:
+      - "INSERT (v:Person {name: 'Vincent'})-[:KNOWS]->(:Person {name: 'Gus'}), (:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(:Person {name: 'Gus'}) WITH count(*) AS merged MATCH (p:Person {name: 'Gus'}) RETURN merged, count(p) AS gus"
+      cypher: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(:Person {name: 'Gus'}) WITH count(*) AS merged MATCH (p:Person {name: 'Gus'}) RETURN merged, count(p) AS gus"
+    expect:
+      rows:
+        - [1, 2]
 
   - name: merge_from_an_anonymous_node_it_creates
     setup:
@@ -37,20 +50,24 @@ tests:
       rows:
         - [1, Prague, Gus]
 
-  - name: an_anonymous_node_without_a_label_or_property_is_refused
+  # A node with neither a label nor a property is any node: Vincent knows
+  # nobody, so the MERGE creates an empty node with the relationship.
+  - name: an_anonymous_node_without_a_label_or_property_is_any_node
     setup:
       - "INSERT (:Person {name: 'Vincent'})"
     variants:
-      gql: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->()"
-      cypher: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->()"
+      gql: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(x) WITH count(*) AS merged MATCH (n) RETURN merged, count(n) AS nodes"
+      cypher: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(x) WITH count(*) AS merged MATCH (n) RETURN merged, count(n) AS nodes"
     expect:
-      error: "anonymous node without a label or property"
+      rows:
+        - [1, 2]
 
-  - name: a_merge_of_two_relationships_is_refused
+  - name: a_merge_of_two_relationships_is_created_whole
     setup:
       - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
     variants:
-      gql: "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S]->(b)-[:T]->(:N {id: 3})"
-      cypher: "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S]->(b)-[:T]->(:N {id: 3})"
+      gql: "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S]->(b)-[:T]->(:N {id: 3}) WITH count(*) AS merged MATCH (:Person {name: 'Alix'})-[:S]->(:Person {name: 'Gus'})-[:T]->(n:N) RETURN merged, n.id AS id"
+      cypher: "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S]->(b)-[:T]->(:N {id: 3}) WITH count(*) AS merged MATCH (:Person {name: 'Alix'})-[:S]->(:Person {name: 'Gus'})-[:T]->(n:N) RETURN merged, n.id AS id"
     expect:
-      error: "more than one relationship"
+      rows:
+        - [1, 3]

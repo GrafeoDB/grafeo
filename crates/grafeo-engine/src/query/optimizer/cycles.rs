@@ -95,7 +95,7 @@ fn same(fresh: &str, bound: String) -> LogicalExpression {
 }
 
 /// Adds every name that `op` or an operator below it binds.
-fn plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
+pub(crate) fn plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
     let bound: Vec<&String> = match op {
         LogicalOperator::NodeScan(scan) => vec![&scan.variable],
         LogicalOperator::EdgeScan(scan) => vec![&scan.variable],

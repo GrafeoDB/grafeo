@@ -90,7 +90,8 @@ def empty(grafeo):
 
 
 def writes(grafeo):
-    """An empty database for the cases that write (section BR), which no other case reads."""
+    """An empty database for the cases that write (sections BR, BS and BU), which no other
+    case reads."""
     return grafeo.GrafeoDB()
 
 
@@ -211,10 +212,62 @@ def procedures(grafeo):
     return db
 
 
+def loops(grafeo):
+    """Mia KNOWS herself (since 1) and Gus (since 2), Gus KNOWS Alix (since 3), for
+    section CB."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (m:Person {name: 'Mia'})-[:KNOWS {since: 1}]->(m), "
+        "(m)-[:KNOWS {since: 2}]->(g:Person {name: 'Gus'}), "
+        "(g)-[:KNOWS {since: 3}]->(:Person {name: 'Alix'})"
+    )
+    return db
+
+
+def merges(grafeo):
+    """Alix, Gus and Vincent, and Alix KNOWS Gus, for section CC, whose cases write in
+    order."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (a:Person {name: 'Alix'}), (g:Person {name: 'Gus'}), "
+        "(:Person {name: 'Vincent'}), (a)-[:KNOWS]->(g)"
+    )
+    return db
+
+
+def weighted(grafeo):
+    """A chain 0 -> 1 -> 2 -> 3 of KNOWS edges weighing 20, 30 and 5, for sections CD and CE."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (:P {i: 0})-[:KNOWS {w: 20}]->(:P {i: 1})-[:KNOWS {w: 30}]->(:P {i: 2})"
+        "-[:KNOWS {w: 5}]->(:P {i: 3})"
+    )
+    return db
+
+
+def leads(grafeo):
+    """Node type `Customer (spend FLOAT64)` and two leads with an integer `spend`, for
+    section CF, whose cases add the label in order."""
+    db = grafeo.GrafeoDB()
+    db.execute("CREATE NODE TYPE Customer (spend FLOAT64)")
+    db.execute("INSERT (:Lead {id: 1, spend: 3}), (:Lead {id: 2, spend: 19})")
+    return db
+
+
 def mixed_indexed(grafeo):
     """`mixed` with a property index on `p`."""
     return mixed(grafeo, indexed=True)
 
+
+# Fixtures of their own, whose cases run in corpus order and read what the writes
+# before them left: the only fixtures a case may write to, each with the sections
+# whose cases use it. Every other fixture is built once and shared, so a write would
+# change what later cases see.
+WRITE_FIXTURES = {
+    "writes": {"BR", "BS", "BU"},
+    "merges": {"CC"},
+    "leads": {"CF"},
+}
 
 FIXTURES = {
     "social": social,
@@ -229,6 +282,10 @@ FIXTURES = {
     "mixed": mixed,
     "mixed_indexed": mixed_indexed,
     "procedures": procedures,
+    "loops": loops,
+    "merges": merges,
+    "weighted": weighted,
+    "leads": leads,
 }
 
 CASES: list[Case] = []
@@ -1563,5 +1620,125 @@ for case_id, query in [
     ("BZ4", "CALL same([2.5e0, [3, 'Berlin'], {city: 'Prague'}]) YIELD v RETURN v"),
 ]:
     case(case_id, query, GQL, "procedures")
+
+# CA: a procedure call inside a query runs once per incoming row, whose variables stay in
+#     scope: five people times two labels (CA1), each UNWIND value with each label (CA2), a
+#     row's own value beside the call's (CA3), a WHERE after YIELD (CA4); Cypher dropped the
+#     input and GQL did not parse a CALL ... YIELD followed by RETURN inside a query
+for case_id, query in [
+    ("CA1", "MATCH (p:Person) CALL db.labels() YIELD label RETURN count(*) AS c"),
+    ("CA2", "UNWIND [1, 2] AS x CALL db.labels() YIELD label RETURN x, label"),
+    ("CA3", "MATCH (a:Person {name: 'Alix'}) CALL db.labels() YIELD label RETURN a.name AS a, label"),
+    ("CA4", "MATCH (p:Person) CALL db.labels() YIELD label WHERE label = 'City' RETURN p.name AS name, label"),
+]:
+    case(case_id, query)
+
+# CB: an undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]): the
+#     loop alone (CB1), every edge from both ends and the loop from its one end (CB2), a
+#     one-hop variable-length walk (CB3), a COUNT subquery (CB4); and the names the engine
+#     makes up skip the user's: an aggregate column (CB5), an anonymous edge's column (CB6)
+for case_id, query in [
+    ("CB1", "MATCH (n)-[r]-(n) RETURN n.name AS name"),
+    ("CB2", "MATCH (a)-[r]-(b) RETURN count(r) AS c"),
+    ("CB3", "MATCH (m:Person {name: 'Mia'})-[*1..1]-(x) RETURN x.name AS name"),
+    ("CB4", "MATCH (m:Person {name: 'Mia'}) RETURN COUNT { MATCH (m)-[]-(m) } AS c"),
+    ("CB5", "UNWIND [3, 19] AS _agg_0 RETURN _agg_0, count(*) > 0 AS any"),
+    ("CB6", "MATCH (_anon_edge_0:Person {name: 'Gus'}), (a)-[]->(b) RETURN _anon_edge_0.name AS n, count(*) AS c"),
+]:
+    case(case_id, query, BOTH, "loops")
+
+# CC: MERGE matches the whole pattern or creates all of it (openCypher), in GQL and Cypher:
+#     a pattern of two relationships is created, then found (CC1 to CC3, refused before), a
+#     node the pattern does not connect is not reused (CC5, CC6: a second Gus), and a node
+#     MERGE's SET n = {...} replaces the properties (CC7). Cypher reads arrows both ways as
+#     either direction (CC8), refuses CREATE without a type (CC9), and binds IN tighter than
+#     = (CC10). The cases write, in order, on a database of their own (fixture `merges`).
+for case_id, query, languages in [
+    ("CC1", "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S]->(b)-[:T]->(n:N {id: 3}) RETURN n.id AS id", CYPHER),
+    ("CC2", "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S]->(b)-[:T]->(n:N {id: 3}) RETURN n.id AS id", CYPHER),
+    ("CC3", "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S2]->(b)-[:T2]->(n:N2 {id: 3}) RETURN n.id AS id", GQL),
+    ("CC4", "MATCH (n) RETURN count(n) AS c", BOTH),
+    ("CC5", "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(g:Person {name: 'Gus'}) RETURN count(g) AS c", CYPHER),
+    ("CC6", "MATCH (p:Person {name: 'Gus'}) RETURN count(p) AS c", BOTH),
+    ("CC7", "MERGE (n:X {id: 1}) ON CREATE SET n = {fresh: 2} RETURN n.id AS id, n.fresh AS fresh", CYPHER),
+    ("CC8", "MATCH (g:Person {name: 'Gus'})<-[:KNOWS]->(b) RETURN b.name AS b", CYPHER),
+    ("CC9", "CREATE (a)-[]->(b)", CYPHER),
+    ("CC10", "RETURN 1 = 2 IN [false] AS v", CYPHER),
+]:
+    case(case_id, query, languages, "merges")
+
+# CD: a condition on a variable-length edge holds for each edge (Cypher read its inline WHERE
+#     against the edge list and returned nothing; GQL already checked each edge): alone
+#     (CD1), reading the row (CD2), with the edge list after the pattern (CD3); a pattern
+#     from a node an OPTIONAL MATCH did not find matches nothing (CD4, an internal error);
+#     collect_list is collect under its ISO GQL name (CD5)
+for case_id, query, languages in [
+    ("CD1", "MATCH (a:P {i: 0})-[e:KNOWS*1..3 WHERE e.w > 10]->(b) RETURN b.i AS i", BOTH),
+    ("CD2", "UNWIND [15, 25] AS t MATCH (a:P {i: 0})-[e:KNOWS*1..3 WHERE e.w > t]->(b) RETURN t, b.i AS i", BOTH),
+    ("CD3", "MATCH (a:P {i: 0})-[e:KNOWS*1..3 WHERE e.w > 10]->(b) RETURN size(e) AS hops", BOTH),
+    ("CD4", "OPTIONAL MATCH (n:Missing) MATCH (n)-[:KNOWS*1..3]->(m) RETURN count(m) AS c", BOTH),
+    ("CD5", "UNWIND [3, 19] AS x RETURN collect_list(x) AS l", GQL),
+]:
+    case(case_id, query, languages, "weighted")
+
+# CE: aggregate calls. An aggregate takes its number of arguments (CE1 counted the first,
+#     CE2 counted the rows); a COUNT subquery in an aggregate's argument or as a grouping key
+#     runs per row (CE3, CE4, internal errors); GQL takes HAVING before ORDER BY (CE5, a
+#     syntax error). Without GROUP BY an item with an aggregate reads only the keys (the
+#     items without one): another variable is refused (CE6, openCypher's
+#     AmbiguousAggregationExpression), and a key, also in CASE, or a CALL import reads its
+#     value (CE7 to CE9; all four returned null)
+for case_id, query, languages in [
+    ("CE1", "MATCH (p:P) RETURN count(p.i, p.i) AS c", BOTH),
+    ("CE2", "MATCH (p:P) RETURN sum() AS s", BOTH),
+    ("CE3", "UNWIND [1, 2] AS j RETURN sum(COUNT { MATCH (t:P) WHERE t.i = 3 - j }) AS s", BOTH),
+    ("CE4", "UNWIND [1, 2, 3] AS j RETURN COUNT { MATCH (t:P) WHERE t.i = 2 * j } AS found, count(*) AS c", BOTH),
+    ("CE5", "MATCH (p:P) RETURN p.i % 2 AS odd GROUP BY odd HAVING count(*) > 1 ORDER BY odd", GQL),
+    ("CE6", "MATCH (p:P) RETURN p.i % 2 AS odd, count(*) + p.i AS n", BOTH),
+    ("CE7", "MATCH (p:P) RETURN p.i AS i, count(*) + p.i AS n", BOTH),
+    ("CE8", "UNWIND [100] AS t CALL (t) { MATCH (p:P) RETURN count(*) + t AS n } RETURN n", BOTH),
+    ("CE9", "MATCH (p:P) RETURN p.i AS i, CASE WHEN count(*) > 1 THEN -1 ELSE p.i END AS c", BOTH),
+]:
+    case(case_id, query, languages, "weighted")
+
+# CF: id, elementId and properties read the node or edge any expression yields, as labels
+#     does (CF1 to CF3, null before), and properties of a map is the map (CF4, null);
+#     datetime, date and time read a zoned datetime: its instant, and its local date and time
+#     of day with the offset (CF5, null). A label added to a node converts its values to the
+#     label's types (CF6, CF7: "expects Float64" before)
+for case_id, query, languages, fixture in [
+    ("CF1", "MATCH (n:P {i: 0}) WITH n, [n] AS l RETURN properties(l[0]) AS p, id(l[0]) = id(n) AS same", BOTH, "weighted"),
+    ("CF2", "MATCH (a:P {i: 0})-[r]->() WITH r, [r] AS l RETURN properties(l[0]) AS p, elementId(l[0]) = elementId(r) AS same", BOTH, "weighted"),
+    ("CF3", "MATCH (a:P {i: 0})-[r]->() RETURN properties(startNode(r)) AS p", BOTH, "weighted"),
+    ("CF4", "RETURN properties({a: 1}) AS p", BOTH, "weighted"),
+    ("CF5", "RETURN date(zoned_datetime('2024-03-01T00:30:00+01:00')) AS d, time(zoned_datetime('2024-03-01T00:30:00+01:00')) AS t, datetime(zoned_datetime('2024-03-01T00:30:00+01:00')) AS i", BOTH, "weighted"),
+    ("CF6", "MATCH (n:Lead {id: 1}) SET n:Customer RETURN n.spend AS s", GQL, "leads"),
+    ("CF7", "MATCH (n:Lead {id: 2}) SET n:Customer RETURN n.spend AS s", CYPHER, "leads"),
+]:
+    case(case_id, query, languages, fixture)
+
+# CG: ORDER BY scope in GQL, as Cypher has it since 0.6.0-beta.1 (openCypher): after a plain
+#     WITH it reads the WITH's input (CG1, GQL: "Undefined variable"); after an aggregating
+#     RETURN a key that repeats an aggregate or a grouping key reads its column (CG2, CG3, GQL:
+#     refused and an internal error), and a dropped variable is "Undefined variable" (CG4,
+#     GQL: an internal error), also after a DISTINCT WITH (CG5). Every GQL ORDER BY puts nulls
+#     last (#571), also the ORDER BY statement (CG6, CG7: nulls first descending). With
+#     DISTINCT, ORDER BY reads only what the clause returns (CG8, it returned duplicates),
+#     an unaliased returned expression too (CG9)
+for case_id, query, languages in [
+    ("CG1", "MATCH (a:Person) WITH a.name AS name ORDER BY a.age RETURN name", BOTH),
+    ("CG2", "MATCH (a:Person)-[:LIVES_IN]->(c) RETURN c.name, max(a.age) ORDER BY max(a.age)", BOTH),
+    ("CG3", "MATCH (a:Person) RETURN a.name AS name, count(*) AS c ORDER BY a.name DESC", BOTH),
+    ("CG6", "MATCH (a:Person) WITH a.w AS w ORDER BY w DESC RETURN w", GQL),
+    ("CG7", "MATCH (a:Person) ORDER BY a.w DESC RETURN a.w AS w", GQL),
+    ("CG9", "MATCH (a:Person) RETURN DISTINCT a.age > 29 ORDER BY a.age > 29", BOTH),
+]:
+    ordered(case_id, query, languages, "social")
+for case_id, query in [
+    ("CG4", "MATCH (a:Person) RETURN count(*) AS c ORDER BY a.age"),
+    ("CG5", "MATCH (a:Person) WITH DISTINCT a.age > 29 AS old ORDER BY a.name RETURN old"),
+    ("CG8", "MATCH (a:Person) RETURN DISTINCT a.age > 29 AS old ORDER BY a.name"),
+]:
+    case(case_id, query, BOTH, "social")
 
 # fmt: on

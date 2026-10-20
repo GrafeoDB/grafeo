@@ -208,6 +208,13 @@ pub struct Planner {
     pub(super) viewing_epoch: EpochId,
     /// Counter for generating unique anonymous edge column names.
     pub(super) anon_edge_counter: std::cell::Cell<u32>,
+    /// The names the plan being planned binds, which an anonymous edge's
+    /// column name skips (a user variable `_anon_edge_0` stays the user's).
+    pub(super) plan_names: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Edge conditions a filter hands to the variable-length expand that
+    /// binds their path, to check during its search (see
+    /// `try_plan_filter_into_variable_length_expand`).
+    pub(super) pending_edge_conditions: std::cell::RefCell<Vec<expand::PendingEdgeCondition>>,
     /// Counter for the column names of subqueries planned per row.
     pub(super) subquery_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
@@ -320,6 +327,8 @@ impl Planner {
             transaction_id: None,
             viewing_epoch: epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            plan_names: std::cell::RefCell::new(std::collections::HashSet::new()),
+            pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             shuffle_unordered: false,
@@ -379,6 +388,8 @@ impl Planner {
             transaction_id,
             viewing_epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            plan_names: std::cell::RefCell::new(std::collections::HashSet::new()),
+            pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             shuffle_unordered: false,
@@ -700,9 +711,15 @@ impl Planner {
     /// Returns the column name for the caller to push into its output columns.
     pub(super) fn register_edge_column(&self, edge_variable: &Option<String>) -> String {
         let name = edge_variable.clone().unwrap_or_else(|| {
-            let count = self.anon_edge_counter.get();
-            self.anon_edge_counter.set(count + 1);
-            format!("_anon_edge_{}", count)
+            let taken = self.plan_names.borrow();
+            loop {
+                let count = self.anon_edge_counter.get();
+                self.anon_edge_counter.set(count + 1);
+                let name = format!("_anon_edge_{count}");
+                if !taken.contains(&name) {
+                    break name;
+                }
+            }
         });
         self.edge_columns.borrow_mut().insert(name.clone());
         name
@@ -750,6 +767,14 @@ impl Planner {
         chain
     }
 
+    /// Records the names `logical_plan` binds, so the column names the
+    /// planner makes up for anonymous edges skip them.
+    fn take_plan_names(&self, logical_plan: &LogicalPlan) {
+        let mut names = self.plan_names.borrow_mut();
+        names.clear();
+        crate::query::optimizer::plan_names(&logical_plan.root, &mut names);
+    }
+
     /// Plans a logical plan into a physical operator.
     ///
     /// # Errors
@@ -758,6 +783,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
+        self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
         let operator = self.shuffled_root(logical_plan, operator);
@@ -791,6 +817,7 @@ impl Planner {
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
+        self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
 
         let result = self.plan_operator(&logical_plan.root);

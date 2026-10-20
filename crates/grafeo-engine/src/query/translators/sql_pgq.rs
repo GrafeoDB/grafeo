@@ -7,8 +7,9 @@
 use std::collections::HashSet;
 
 use super::common::{
-    VarGen, check_branch_columns, combine_with_and, has_all_labels, is_aggregate_function,
-    is_binary_set_function, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    HavingScope, VarGen, check_branch_columns, collect_expression_variables, combine_with_and,
+    has_all_labels, is_aggregate_function, is_binary_set_function, wrap_filter, wrap_limit,
+    wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::functions::resolve_call;
 use crate::query::plan::{
@@ -292,6 +293,13 @@ impl SqlPgqTranslator {
                         );
                     }
                 }
+                // The keys the GROUP BY lists: what a non-aggregate SELECT
+                // item may read (a part of it that is a key reads the key).
+                let grouping_scope = HavingScope::new(&group_by, None);
+                let grouping_keys: HashSet<String> = group_by
+                    .iter()
+                    .map(crate::query::planner::common::expression_to_string)
+                    .collect();
 
                 // The Aggregate outputs each key in a column named after its
                 // expression and each aggregate in a column named after its
@@ -325,12 +333,39 @@ impl SqlPgqTranslator {
                             column
                         }
                         // A non-aggregate SELECT item is a grouping key. With
-                        // an explicit GROUP BY it should be listed there, but
-                        // it is added anyway so no column is dropped.
-                        _ => add_key(
-                            &mut group_by,
-                            self.translate_expression(&item.expression, table_alias)?,
-                        ),
+                        // an explicit GROUP BY it reads grouping keys only
+                        // (ISO/IEC 9075-2: it is functionally dependent on
+                        // them), a key itself, an expression of keys or a
+                        // constant; reading another column, it would split
+                        // the groups the GROUP BY makes.
+                        _ => {
+                            let key = self.translate_expression(&item.expression, table_alias)?;
+                            if select.group_by.is_some() {
+                                let mut read = HashSet::new();
+                                collect_expression_variables(
+                                    &grouping_scope.resolve(key.clone()),
+                                    &mut read,
+                                );
+                                if let Some(column) = read
+                                    .iter()
+                                    .filter(|name| !grouping_keys.contains(*name))
+                                    .min()
+                                {
+                                    return Err(Error::Query(QueryError::new(
+                                        QueryErrorKind::Semantic,
+                                        format!(
+                                            "SELECT item {} reads {column}, which is neither \
+                                             in GROUP BY nor in an aggregate: add it to GROUP \
+                                             BY or aggregate it",
+                                            crate::query::planner::common::expression_to_string(
+                                                &key
+                                            )
+                                        ),
+                                    )));
+                                }
+                            }
+                            add_key(&mut group_by, key)
+                        }
                     };
                     return_items.push(ReturnItem {
                         expression: LogicalExpression::Variable(column.clone()),
@@ -768,6 +803,7 @@ impl SqlPgqTranslator {
         alias: Option<String>,
         table_alias: Option<&str>,
     ) -> Result<AggregateExpr> {
+        crate::query::functions::check_aggregate_call(name, function, args.len())?;
         let expression = match args.first() {
             None => None,
             Some(ast::Expression::Variable(v)) if v == "*" => None, // COUNT(*)

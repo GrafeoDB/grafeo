@@ -738,9 +738,10 @@ mod tests {
                     "MATCH (n)-[*1..3]-(m) RETURN DISTINCT m.id ORDER BY m.id DESC",
                     AcrossInputRows,
                 ),
-                // The planner adds the sort key to the distinct row
+                // A sort key that is another returned column (with DISTINCT,
+                // ORDER BY reads only what the RETURN returns)
                 (
-                    "MATCH (n)-[*1..3]-(m) RETURN DISTINCT m.id ORDER BY m.name",
+                    "MATCH (n)-[*1..3]-(m) RETURN DISTINCT m.id, m.name ORDER BY m.name",
                     AcrossInputRows,
                 ),
                 (

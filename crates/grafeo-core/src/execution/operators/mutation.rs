@@ -540,6 +540,11 @@ impl Operator for CreateNodeOperator {
 
 /// Reads the entity id in `column` of `row`, for the error messages naming
 /// the column (`from`, `node`, ...) and the id kind (`node`, `edge`, ...).
+/// The start of a relationship a CREATE or MERGE creates, for [`id_at`]'s errors.
+const START: &str = "the start of the created relationship";
+/// The end of a relationship a CREATE or MERGE creates, for [`id_at`]'s errors.
+const END: &str = "the end of the created relationship";
+
 fn id_at(
     chunk: &DataChunk,
     column: usize,
@@ -554,6 +559,11 @@ fn id_at(
     match value {
         // Ids travel as the bits of an i64.
         Value::Int64(id) => Ok(id.cast_unsigned()),
+        // A node an OPTIONAL MATCH did not find, for one.
+        Value::Null => Err(OperatorError::TypeMismatch {
+            expected: format!("a {id_kind} for {column_name}"),
+            found: "null".to_string(),
+        }),
         other => Err(OperatorError::TypeMismatch {
             expected: format!("Int64 ({id_kind} ID)"),
             found: format!("{other:?}"),
@@ -676,8 +686,8 @@ impl Operator for CreateEdgeOperator {
         let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
-            let from = NodeId(id_at(&chunk, self.from_column, row, "from", "node")?);
-            let to = NodeId(id_at(&chunk, self.to_column, row, "to", "node")?);
+            let from = NodeId(id_at(&chunk, self.from_column, row, START, "node")?);
+            let to = NodeId(id_at(&chunk, self.to_column, row, END, "node")?);
             let properties =
                 self.expressions
                     .resolve_row(&self.properties, &chunk, row, &self.writer)?;
@@ -876,8 +886,8 @@ impl Operator for CreateOperator {
                     let mut ids =
                         output.then(|| ValueVector::with_capacity(LogicalType::Edge, rows.len()));
                     for row in 0..rows.len() {
-                        let from = NodeId(id_at(&out, *from_column, row, "from", "node")?);
-                        let to = NodeId(id_at(&out, *to_column, row, "to", "node")?);
+                        let from = NodeId(id_at(&out, *from_column, row, START, "node")?);
+                        let to = NodeId(id_at(&out, *to_column, row, END, "node")?);
                         let properties =
                             expressions.resolve_row(properties, &out, row, &self.writer)?;
                         let edge_id = self.writer.create_edge(from, to, edge_type, properties)?;

@@ -516,6 +516,11 @@ fn subquery_output(subplan: &LogicalOperator) -> Option<LogicalOperator> {
                 .map(subquery_output)
                 .collect::<Option<_>>()?,
         })),
+        // So does an OTHERWISE (a MERGE's match, or else its create).
+        LogicalOperator::Otherwise(otherwise) => Some(LogicalOperator::Otherwise(OtherwiseOp {
+            left: Box::new(subquery_output(&otherwise.left)?),
+            right: Box::new(subquery_output(&otherwise.right)?),
+        })),
         _ => None,
     }
 }

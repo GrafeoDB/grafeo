@@ -158,10 +158,20 @@ tests:
       rows:
         - [false]
 
+  # IS NULL binds tighter than `=` (openCypher 9): `null = (null IS NULL)`
+  # is `null = true`, null.
   - name: null_equality_returns_null
     setup:
       - "CREATE (:N {v: 1})"
     query: "MATCH (n:N) RETURN null = null IS NULL AS r"
+    expect:
+      rows:
+        - [null]
+
+  - name: null_equality_is_null
+    setup:
+      - "CREATE (:N {v: 1})"
+    query: "MATCH (n:N) RETURN (null = null) IS NULL AS r"
     expect:
       rows:
         - [true]

@@ -220,10 +220,12 @@ pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::
             w.write_all(&d.mantissa().to_le_bytes())?;
             Ok(2 + 16)
         }
-        _ => {
-            w.write_all(&[TAG_NULL])?;
-            Ok(1)
-        }
+        // `Value` is `#[non_exhaustive]`: a kind added without a tag here
+        // fails the spill instead of coming back as null.
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("the spill format has no tag for this kind of value: {other:?}"),
+        )),
     }
 }
 
@@ -1514,6 +1516,61 @@ mod tests {
         serialize_value(&value, &mut buf).unwrap();
         let mut cursor = Cursor::new(buf);
         deserialize_value(&mut cursor).unwrap()
+    }
+
+    /// Every kind of value comes back as it went in (compared by its Debug
+    /// form, so a NaN equals itself): a kind without a tag must not spill as
+    /// null.
+    #[test]
+    fn every_kind_of_value_round_trips() {
+        use grafeo_common::types::{
+            Date, Decimal, Duration, PropertyKey, Time, Timestamp, ZonedDatetime,
+        };
+        use std::collections::HashMap;
+        let counter = |pairs: &[(&str, u64)]| -> Arc<HashMap<String, u64>> {
+            Arc::new(pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect())
+        };
+        let list = |items: Vec<Value>| Value::List(Arc::from(items));
+        let map = Value::Map(Arc::new(
+            [(PropertyKey::new("city"), Value::from("Prague"))]
+                .into_iter()
+                .collect(),
+        ));
+        for value in [
+            Value::Null,
+            Value::Bool(true),
+            Value::Int64(i64::MIN),
+            Value::Float64(f64::NAN),
+            Value::Float64(-0.0),
+            Value::from("Amsterdam"),
+            Value::Bytes(Arc::from(vec![3u8, 19, 88])),
+            Value::Timestamp(Timestamp::from_micros(1_696_500_000_123_457)),
+            Value::Date(Date::from_days(-3)),
+            Value::Time(Time::from_nanos(88).unwrap().with_offset(3600)),
+            Value::Duration(Duration::new(3, 19, 88)),
+            Value::ZonedDatetime(ZonedDatetime::from_timestamp_offset(
+                Timestamp::from_micros(1_696_500_000_123_457),
+                7200,
+            )),
+            list(vec![Value::Int64(3), list(vec![Value::from("Berlin")])]),
+            map.clone(),
+            Value::Vector(Arc::from(vec![3.0f32, -19.5])),
+            Value::Path {
+                nodes: Arc::from(vec![map.clone()]),
+                edges: Arc::from(Vec::<Value>::new()),
+            },
+            Value::GCounter(counter(&[("Alix", 3)])),
+            Value::OnCounter {
+                pos: counter(&[("Mia", 88)]),
+                neg: counter(&[("Jules", 3)]),
+            },
+            Value::Decimal(Decimal::parse("1.50").unwrap()),
+        ] {
+            assert_eq!(
+                format!("{:?}", roundtrip_value(value.clone())),
+                format!("{value:?}")
+            );
+        }
     }
 
     /// A spilled decimal comes back with its value and its scale.

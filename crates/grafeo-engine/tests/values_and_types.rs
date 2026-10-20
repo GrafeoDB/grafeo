@@ -108,6 +108,15 @@ fn gql_nulls_last_holds_for_hidden_keys_limits_and_aggregates() {
         ],
         "several keys"
     );
+    // The ORDER BY statement sorts the same way: after a WITH, after a LET
+    // and on its own (it put the null first descending).
+    for query in [
+        "MATCH (n:Person) WITH n.rank AS rank ORDER BY rank DESC RETURN rank",
+        "MATCH (n:Person) LET rank = n.rank ORDER BY rank DESC RETURN rank",
+        "MATCH (n:Person) ORDER BY n.rank DESC RETURN n.rank AS rank",
+    ] {
+        assert_eq!(names(query), ints(&[Some(19), Some(3), None]), "{query}");
+    }
 }
 
 /// Cypher keeps openCypher's order: null is the largest value, so it comes
@@ -409,6 +418,69 @@ fn the_direct_api_stores_an_integer_in_a_float64_property_as_a_float() {
         db.get_edge(buys).unwrap().get_property("price").cloned(),
         Some(Value::Float64(88.0)),
         "create_edge_with_props"
+    );
+}
+
+/// A node that gets a label keeps its values, converted to the types of the
+/// label's node type: `SET n:Customer` on a node with an integer `totalSpend`
+/// failed with "expects Float64". A rolled-back label leaves the integer, and
+/// one without an exact float is still refused.
+#[test]
+fn a_label_added_to_a_node_converts_its_values() {
+    let db = shop();
+    for (language, id, query) in [
+        (
+            "gql",
+            "a",
+            "MATCH (n:Lead {customerId: 'a'}) SET n:Customer RETURN n.totalSpend",
+        ),
+        (
+            "cypher",
+            "b",
+            "MATCH (n:Lead {customerId: 'b'}) SET n:Customer RETURN n.totalSpend",
+        ),
+    ] {
+        db.execute(&format!(
+            "INSERT (:Lead {{customerId: '{id}', totalSpend: 3}})"
+        ))
+        .unwrap();
+        let result = db
+            .execute_language(query, language, None)
+            .unwrap_or_else(|e| panic!("{language}: {e}"));
+        assert_eq!(column(&result), [Value::Float64(3.0)], "{language}: RETURN");
+        assert_eq!(spend(&db, id), Value::Float64(3.0), "{language}: stored");
+    }
+
+    db.execute("INSERT (:Lead {customerId: 'c', totalSpend: 19})")
+        .unwrap();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session
+        .execute("MATCH (n:Lead {customerId: 'c'}) SET n:Customer")
+        .unwrap();
+    session.rollback().unwrap();
+    assert_eq!(
+        single(&db, "MATCH (n:Lead {customerId: 'c'}) RETURN n.totalSpend"),
+        Value::Int64(19),
+        "rolled back"
+    );
+    assert_eq!(
+        single(&db, "MATCH (n:Customer {customerId: 'c'}) RETURN count(n)"),
+        Value::Int64(0),
+        "rolled back: no label"
+    );
+
+    db.execute("INSERT (:Lead {customerId: 'd', totalSpend: 9007199254740993})")
+        .unwrap();
+    let error = db
+        .execute("MATCH (n:Lead {customerId: 'd'}) SET n:Customer")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("exact"), "{error}");
+    assert_eq!(
+        single(&db, "MATCH (n:Customer {customerId: 'd'}) RETURN count(n)"),
+        Value::Int64(0),
+        "refused: no label"
     );
 }
 

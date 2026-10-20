@@ -552,6 +552,14 @@ impl<'a> Parser<'a> {
     /// CALL name.space(args) [YIELD field [AS alias], ...]
     /// ```
     fn parse_call_statement(&mut self) -> Result<CallStatement> {
+        self.parse_procedure_call(true)
+    }
+
+    /// Parses `CALL name(args) [YIELD ... [WHERE ...]]`, and with
+    /// `with_return` the `RETURN` a statement-level call may end with. A call
+    /// inside a query leaves its `RETURN` to the query, which goes on after
+    /// it.
+    fn parse_procedure_call(&mut self, with_return: bool) -> Result<CallStatement> {
         let span_start = self.current.span.start;
         self.expect(TokenKind::Call)?;
 
@@ -598,11 +606,12 @@ impl<'a> Parser<'a> {
         };
 
         // Parse optional RETURN clause (only valid after YIELD)
-        let return_clause = if yield_items.is_some() && self.current.kind == TokenKind::Return {
-            Some(self.parse_return_clause()?)
-        } else {
-            None
-        };
+        let return_clause =
+            if with_return && yield_items.is_some() && self.current.kind == TokenKind::Return {
+                Some(self.parse_return_clause()?)
+            } else {
+                None
+            };
 
         Ok(CallStatement {
             procedure_name: name_parts,
@@ -824,7 +833,7 @@ impl<'a> Parser<'a> {
                             ordered_clauses.push(self.parse_inline_call(true)?);
                         } else {
                             // OPTIONAL CALL procedure(...)
-                            let call = self.parse_call_statement()?;
+                            let call = self.parse_procedure_call(false)?;
                             ordered_clauses.push(QueryClause::CallProcedure(call));
                         }
                     } else {
@@ -869,7 +878,7 @@ impl<'a> Parser<'a> {
                     if matches!(self.peek_kind(), TokenKind::LBrace | TokenKind::LParen) {
                         ordered_clauses.push(self.parse_inline_call(false)?);
                     } else {
-                        let call = self.parse_call_statement()?;
+                        let call = self.parse_procedure_call(false)?;
                         ordered_clauses.push(QueryClause::CallProcedure(call));
                     }
                 }
@@ -928,8 +937,11 @@ impl<'a> Parser<'a> {
         }
 
         // Parse RETURN, FINISH, or SELECT clause
+        let mut having_after_group_by = None;
         let return_clause = if self.current.kind == TokenKind::Return {
-            self.parse_return_clause()?
+            let (return_clause, having) = self.parse_return_and_having(true)?;
+            having_after_group_by = having;
+            return_clause
         } else if self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("FINISH")
         {
             // FINISH: consume input, return empty result
@@ -976,11 +988,15 @@ impl<'a> Parser<'a> {
             return Err(self.error("Expected RETURN, FINISH, or SELECT"));
         };
 
-        // Parse optional HAVING clause (after RETURN, filters aggregate results)
+        // Parse optional HAVING clause (after RETURN, filters aggregate
+        // results), unless the GROUP BY of the RETURN had one
         let having_clause = if self.current.kind == TokenKind::Having {
+            if having_after_group_by.is_some() {
+                return Err(self.error("A RETURN takes one HAVING"));
+            }
             Some(self.parse_having_clause()?)
         } else {
-            None
+            having_after_group_by
         };
 
         Ok(QueryStatement {
@@ -2905,6 +2921,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_return_clause(&mut self) -> Result<ReturnClause> {
+        Ok(self.parse_return_and_having(false)?.0)
+    }
+
+    /// Parses a RETURN clause and, with `accept_having`, a HAVING right after
+    /// its GROUP BY (before ORDER BY, as SQL orders them): the return clause
+    /// and that HAVING, if any. A query statement also takes its HAVING after
+    /// the whole RETURN clause.
+    fn parse_return_and_having(
+        &mut self,
+        accept_having: bool,
+    ) -> Result<(ReturnClause, Option<HavingClause>)> {
         self.expect(TokenKind::Return)?;
 
         let distinct = if self.current.kind == TokenKind::Distinct {
@@ -2945,6 +2972,12 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
+        let having =
+            if accept_having && !group_by.is_empty() && self.current.kind == TokenKind::Having {
+                Some(self.parse_having_clause()?)
+            } else {
+                None
+            };
 
         let order_by = if self.current.kind == TokenKind::Order {
             Some(self.parse_order_by()?)
@@ -2968,17 +3001,20 @@ impl<'a> Parser<'a> {
             None
         };
 
-        Ok(ReturnClause {
-            distinct,
-            items,
-            is_wildcard,
-            group_by,
-            order_by,
-            skip,
-            limit,
-            is_finish: false,
-            span: None,
-        })
+        Ok((
+            ReturnClause {
+                distinct,
+                items,
+                is_wildcard,
+                group_by,
+                order_by,
+                skip,
+                limit,
+                is_finish: false,
+                span: None,
+            },
+            having,
+        ))
     }
 
     /// Parses a SELECT clause (SQL-style projection, same semantics as RETURN).

@@ -1211,6 +1211,31 @@ impl Binder {
                 }
             }
             LogicalOperator::Distinct(d) => Self::register_subplan_columns(&d.input, ctx),
+            // The branches of an OTHERWISE return the same columns.
+            LogicalOperator::Otherwise(otherwise) => {
+                Self::register_subplan_columns(&otherwise.left, ctx);
+            }
+            // A procedure call in a query returns the columns it yields, also
+            // under the `WHERE` that follows its `YIELD`.
+            LogicalOperator::CallProcedure(call) => {
+                for item in call.yield_items.iter().flatten() {
+                    let name = item.alias.as_deref().unwrap_or(&item.field_name);
+                    ctx.add_variable(
+                        name.to_string(),
+                        VariableInfo {
+                            name: name.to_string(),
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
+                }
+            }
+            LogicalOperator::Filter(filter)
+                if matches!(*filter.input, LogicalOperator::CallProcedure(_)) =>
+            {
+                Self::register_subplan_columns(&filter.input, ctx);
+            }
             LogicalOperator::Aggregate(agg) => {
                 // Aggregate produces named output columns
                 for expr in &agg.aggregates {

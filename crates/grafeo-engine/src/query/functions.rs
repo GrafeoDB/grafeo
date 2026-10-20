@@ -31,6 +31,60 @@ pub(crate) fn is_aggregate_function(name: &str) -> bool {
     AggregateFunction::from_name(name).is_some()
 }
 
+/// Checks the number of arguments of a call to the aggregate `function`
+/// (named `name` in the query): `count` takes 0 (`count(*)`) or 1,
+/// `group_concat` and `listagg` 1 or 2 (the separator), the percentiles, the
+/// covariances, `corr` and the regressions 2, every other aggregate 1. A call
+/// with another number used to build from what it found: `count(a, b)`
+/// counted `a`, and `sum()` counted the rows.
+///
+/// # Errors
+///
+/// `Function '<name>' takes <numbers>, got <arguments>`, as for a built-in
+/// function.
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+pub(crate) fn check_aggregate_call(
+    name: &str,
+    function: AggregateFunction,
+    arguments: usize,
+) -> Result<()> {
+    let (low, high, takes) = match function {
+        AggregateFunction::Count | AggregateFunction::CountNonNull => (0, 1, "0 or 1 arguments"),
+        AggregateFunction::GroupConcat => (1, 2, "1 or 2 arguments"),
+        AggregateFunction::PercentileDisc
+        | AggregateFunction::PercentileCont
+        | AggregateFunction::CovarSamp
+        | AggregateFunction::CovarPop
+        | AggregateFunction::Corr
+        | AggregateFunction::RegrSlope
+        | AggregateFunction::RegrIntercept
+        | AggregateFunction::RegrR2
+        | AggregateFunction::RegrCount
+        | AggregateFunction::RegrSxx
+        | AggregateFunction::RegrSyy
+        | AggregateFunction::RegrSxy
+        | AggregateFunction::RegrAvgx
+        | AggregateFunction::RegrAvgy => (2, 2, "2 arguments"),
+        AggregateFunction::Sum
+        | AggregateFunction::Avg
+        | AggregateFunction::Min
+        | AggregateFunction::Max
+        | AggregateFunction::Collect
+        | AggregateFunction::StdDev
+        | AggregateFunction::StdDevPop
+        | AggregateFunction::Variance
+        | AggregateFunction::VariancePop
+        | AggregateFunction::Sample => (1, 1, "1 argument"),
+    };
+    if (low..=high).contains(&arguments) {
+        Ok(())
+    } else {
+        Err(semantic(format!(
+            "Function '{name}' takes {takes}, got {arguments}"
+        )))
+    }
+}
+
 /// A semantic error with `message`.
 fn semantic(message: String) -> Error {
     Error::Query(QueryError::new(QueryErrorKind::Semantic, message))

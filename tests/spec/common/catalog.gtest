@@ -188,7 +188,6 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: inline_call_labels
-    skip: "nested CALL subquery with inner CALL procedure not parsed"
     query: |
       CALL {
         CALL db.labels() YIELD label

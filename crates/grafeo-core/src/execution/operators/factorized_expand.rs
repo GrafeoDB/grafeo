@@ -146,11 +146,15 @@ impl FactorizedExpandOperator {
         offsets.push(0);
 
         for row_idx in 0..row_count {
-            let source_id = source_col.get_node_id(row_idx).ok_or_else(|| {
-                OperatorError::Internal("Expected node ID in source column".into())
-            })?;
-
-            let neighbors = self.get_neighbors(source_id);
+            // A null source has no edges (see `ExpandOperator`).
+            let neighbors = if source_col.is_null(row_idx) {
+                Vec::new()
+            } else {
+                let source_id = source_col.get_node_id(row_idx).ok_or_else(|| {
+                    OperatorError::Internal("Expected node ID in source column".into())
+                })?;
+                self.get_neighbors(source_id)
+            };
 
             for (target_id, edge_id) in neighbors {
                 edge_ids.push_edge_id(edge_id);
@@ -448,20 +452,23 @@ impl FactorizedExpandChain {
 
         // Iterate through all physical values in the source column
         for idx in 0..source_len {
-            let source_id = source_col.data().get_node_id(idx).ok_or_else(|| {
-                OperatorError::Internal("Expected node ID in source column".into())
-            })?;
-
-            // Get neighbors with filtering
-            let neighbors = visible_edges_from(
-                self.store.as_ref(),
-                source_id,
-                direction,
-                &edge_types,
-                self.viewing_epoch,
-                self.transaction_id,
-                self.read_only,
-            );
+            // A null source has no edges (see `ExpandOperator`).
+            let neighbors = if source_col.data().is_null(idx) {
+                Vec::new()
+            } else {
+                let source_id = source_col.data().get_node_id(idx).ok_or_else(|| {
+                    OperatorError::Internal("Expected node ID in source column".into())
+                })?;
+                visible_edges_from(
+                    self.store.as_ref(),
+                    source_id,
+                    direction,
+                    &edge_types,
+                    self.viewing_epoch,
+                    self.transaction_id,
+                    self.read_only,
+                )
+            };
 
             for (target_id, edge_id) in neighbors {
                 edge_ids.push_edge_id(edge_id);

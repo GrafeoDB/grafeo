@@ -597,6 +597,7 @@ impl GraphWriter {
         let Some(node) = self.node(id) else {
             return Ok(0);
         };
+        let mut converted = Vec::new();
         if let Some(validator) = &self.validator {
             let added: Vec<String> = labels
                 .iter()
@@ -607,7 +608,18 @@ impl GraphWriter {
                 let mut all_labels = node_labels(&node);
                 all_labels.extend(added.iter().cloned());
                 validator.validate_node_labels_allowed(&all_labels)?;
-                let values = property_list(&node.properties);
+                // A value the type of a new label converts (an integer of a
+                // FLOAT64 property) is checked and stored converted, as a
+                // write of it is.
+                let mut values = property_list(&node.properties);
+                for (key, value) in &mut values {
+                    if let Some(conversion) =
+                        validator.convert_node_property(&all_labels, key, value)
+                    {
+                        *value = conversion.clone();
+                        converted.push((key.clone(), conversion));
+                    }
+                }
                 // The node does not carry the new labels yet, so their UNIQUE
                 // checks cannot find the node itself.
                 self.check_node_values(validator.as_ref(), &added, &values, None)?;
@@ -633,6 +645,7 @@ impl GraphWriter {
             };
             added += usize::from(new);
         }
+        self.write_values(Entity::Node(id), &converted)?;
         self.count(|c| &c.labels_added, added);
         Ok(added)
     }

@@ -827,14 +827,16 @@ impl ExpressionPredicate {
     /// another transaction that has not committed, or deleted by this one
     /// (the checks the expand operators make).
     fn visible_edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
-        match self.view() {
+        let mut edges = match self.view() {
             Some(view) => {
                 let mut edges = self.store.edges_from_at(node, direction, view);
                 edges.retain(|&(other, _)| self.store.is_node_visible_at(other, view));
                 edges
             }
             None => self.store.edges_from(node, direction),
-        }
+        };
+        super::expand::take_self_loops_once(node, direction, &mut edges);
+        edges
     }
 
     /// Whether the node has every label of `labels` (any node when `None`).
@@ -2173,8 +2175,14 @@ impl ExpressionPredicate {
                         #[allow(clippy::cast_possible_wrap)]
                         return Some(Value::Int64(edge_id.0 as i64));
                     }
+                    return None;
                 }
-                None
+                // A node or an edge an expression yields (`l[0]`, `m.x`,
+                // `startNode(r)`, see `shape`).
+                let id = self
+                    .entity_id(&args[0], &LogicalType::Node, chunk, row)
+                    .or_else(|| self.entity_id(&args[0], &LogicalType::Edge, chunk, row))?;
+                i64::try_from(id).ok().map(Value::Int64)
             }
             BuiltinFunction::ElementId => {
                 if args.len() != 1 {
@@ -2197,8 +2205,14 @@ impl ExpressionPredicate {
                     {
                         return Some(Value::String(format!("n:{}", node_id.0).into()));
                     }
+                    return None;
                 }
-                None
+                // A node or an edge an expression yields, as `id` reads it.
+                if let Some(node) = self.node_of(&args[0], chunk, row) {
+                    return Some(Value::String(format!("n:{}", node.id.0).into()));
+                }
+                let edge = self.edge_of(&args[0], chunk, row)?;
+                Some(Value::String(format!("e:{}", edge.id.0).into()))
             }
             BuiltinFunction::Labels => {
                 if args.len() != 1 {
@@ -2598,17 +2612,31 @@ impl ExpressionPredicate {
                 }
             }
             BuiltinFunction::Properties => {
-                if args.len() != 1 {
+                let [argument] = args else {
                     return None;
-                }
-                if let FilterExpression::Variable(var) = &args[0] {
-                    let map: std::collections::BTreeMap<PropertyKey, Value> = self
-                        .element_properties(var, chunk, row)?
-                        .into_iter()
-                        .collect();
+                };
+                // The properties of a node or an edge, of a variable or one an
+                // expression yields (`l[0]`, `m.x`, as `id` reads it).
+                let properties = match argument {
+                    FilterExpression::Variable(var) => self.element_properties(var, chunk, row),
+                    _ => self
+                        .node_of(argument, chunk, row)
+                        .map(|node| node.properties)
+                        .or_else(|| {
+                            self.edge_of(argument, chunk, row)
+                                .map(|edge| edge.properties)
+                        }),
+                };
+                if let Some(properties) = properties {
+                    let map: std::collections::BTreeMap<PropertyKey, Value> =
+                        properties.into_iter().collect();
                     return Some(Value::Map(Arc::new(map)));
                 }
-                None
+                // A map is its own properties (openCypher).
+                match self.eval_expr(argument, chunk, row)? {
+                    map @ Value::Map(_) => Some(map),
+                    _ => None,
+                }
             }
             // property_values(n) returns all property values of a node or edge as a flat list.
             // Used by Gremlin values() with no keys.
@@ -3426,6 +3454,8 @@ impl ExpressionPredicate {
                 match val {
                     Value::String(s) => grafeo_common::types::Date::parse(&s).map(Value::Date),
                     Value::Timestamp(ts) => Some(Value::Date(ts.to_date())),
+                    // The date where the value's offset puts it.
+                    Value::ZonedDatetime(zoned) => Some(Value::Date(zoned.to_local_date())),
                     Value::Date(_) => Some(val),
                     Value::Map(m) => {
                         let year = i32::try_from(map_int(&m, "year")?).ok()?;
@@ -3444,6 +3474,9 @@ impl ExpressionPredicate {
                 match val {
                     Value::String(s) => grafeo_common::types::Time::parse(&s).map(Value::Time),
                     Value::Timestamp(ts) => Some(Value::Time(ts.to_time())),
+                    // The time of day where the value's offset puts it, with
+                    // the offset.
+                    Value::ZonedDatetime(zoned) => Some(Value::Time(zoned.to_local_time())),
                     Value::Time(_) => Some(val),
                     Value::Map(m) => {
                         let hour = u32::try_from(map_int_or(&m, "hour", 0)?).ok()?;
@@ -3483,6 +3516,8 @@ impl ExpressionPredicate {
                         None
                     }
                     Value::Timestamp(_) => Some(val),
+                    // The instant, as `datetime('...+01:00')` reads one.
+                    Value::ZonedDatetime(zoned) => Some(Value::Timestamp(zoned.as_timestamp())),
                     // `{epochMillis: n}` and `{epochSeconds: n, nanosecond: m}`:
                     // the instant that long after 1970-01-01T00:00:00Z.
                     Value::Map(m) if m.contains_key(&PropertyKey::from("epochMillis")) => {

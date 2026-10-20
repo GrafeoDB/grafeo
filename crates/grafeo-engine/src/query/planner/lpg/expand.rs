@@ -3,9 +3,21 @@
 use super::reachability::ReachabilityMode;
 use super::{
     Arc, Direction, Error, ExecutionPathMode, ExpandDirection, ExpandOp, ExpandOperator,
-    ExpandStep, GraphStoreSearch, LazyFactorizedChainOperator, LogicalOperator, Operator, PathMode,
-    Result, VariableLengthExpandOperator,
+    ExpandStep, GraphStoreSearch, LazyFactorizedChainOperator, LogicalExpression, LogicalOperator,
+    Operator, PathMode, Result, VariableLengthExpandOperator,
 };
+
+/// A condition on every edge of the path a variable-length expand binds: the
+/// edge is `hops` (each of them names it), the predicate may read the input
+/// row's columns too.
+pub(crate) struct PendingEdgeCondition {
+    /// The path variable of the expand that checks it.
+    pub(crate) path: String,
+    /// The names the predicate reads the candidate edge as.
+    pub(crate) hops: Vec<String>,
+    /// The condition.
+    pub(crate) predicate: LogicalExpression,
+}
 
 impl super::Planner {
     /// Plans an expand operator.
@@ -99,6 +111,49 @@ impl super::Planner {
             }
             if binds_edge_list {
                 expand_op = expand_op.with_edge_list_output();
+            }
+            // The conditions a filter over this expand handed over: checked
+            // on each candidate edge, with the input row's columns
+            let conditions: Vec<PendingEdgeCondition> = match &expand.path_alias {
+                Some(path) => {
+                    let mut pending = self.pending_edge_conditions.borrow_mut();
+                    let (taken, kept) = std::mem::take(&mut *pending)
+                        .into_iter()
+                        .partition(|condition| &condition.path == path);
+                    *pending = kept;
+                    taken
+                }
+                None => Vec::new(),
+            };
+            if !conditions.is_empty() {
+                let mut variable_columns: std::collections::HashMap<String, usize> = input_columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| (name.clone(), i))
+                    .collect();
+                let mut predicates = Vec::with_capacity(conditions.len());
+                for condition in conditions {
+                    for hop in condition.hops {
+                        variable_columns.insert(hop, input_columns.len());
+                    }
+                    predicates.push(condition.predicate);
+                }
+                let predicate = predicates
+                    .into_iter()
+                    .reduce(|left, right| LogicalExpression::Binary {
+                        left: Box::new(left),
+                        op: crate::query::plan::BinaryOp::And,
+                        right: Box::new(right),
+                    })
+                    .expect("at least one condition");
+                let predicate = grafeo_core::execution::operators::ExpressionPredicate::new(
+                    self.convert_expression(&predicate)?,
+                    variable_columns,
+                    Arc::clone(&self.store),
+                )
+                .with_transaction_context(self.viewing_epoch, self.transaction_id)
+                .with_session_context(self.session_context.clone());
+                expand_op = expand_op.with_edge_condition(Box::new(predicate));
             }
             match reachability {
                 Some(ReachabilityMode::PerInputRow) => {

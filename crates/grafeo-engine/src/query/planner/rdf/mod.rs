@@ -3925,15 +3925,19 @@ impl RdfExpressionPredicate {
                 }
             }
 
-            // ROUND - round to nearest integer
+            // ROUND - fn:round: the nearest integer, of two equally near ones
+            // the one nearer positive infinity (ROUND(-2.5) is -2)
             "ROUND" => {
                 if args.is_empty() {
                     return None;
                 }
                 match self.eval_expr(&args[0], chunk, row)? {
                     Value::Int64(v) => Some(Value::Int64(v)),
-                    Value::Float64(v) => Some(Value::Float64(v.round())),
-                    Value::Decimal(v) => Some(Value::Decimal(v.round())),
+                    Value::Float64(v) => Some(Value::Float64(round_half_up(v))),
+                    Value::Decimal(v) => Some(Value::Decimal(
+                        v.checked_add(&Decimal::new(5, 1).ok()?)
+                            .map_or_else(|_| v.round(), |half_up| half_up.floor()),
+                    )),
                     _ => None,
                 }
             }
@@ -4908,6 +4912,19 @@ fn numeric(value: &Value) -> Option<Numeric> {
     }
 }
 
+/// fn:round of a double: the nearest integer, of two equally near ones the
+/// one nearer positive infinity, keeping the sign of a negative value that
+/// rounds to zero. `v - v.floor()` is exact for every finite double.
+fn round_half_up(v: f64) -> f64 {
+    let floor = v.floor();
+    let rounded = if v - floor >= 0.5 { floor + 1.0 } else { floor };
+    if rounded == 0.0 {
+        0.0_f64.copysign(v)
+    } else {
+        rounded
+    }
+}
+
 /// `+`, `-`, `*` and `/` by the XPath numeric promotion of SPARQL 1.1
 /// (`op:numeric-add` and the others): a double makes a double; otherwise a
 /// decimal makes a decimal; two integers give an integer, except a division,
@@ -4930,7 +4947,8 @@ fn numeric_op(left: &Value, op: BinaryFilterOp, right: &Value) -> Option<Value> 
             BinaryFilterOp::Add => Some(Value::Float64(a + b)),
             BinaryFilterOp::Sub => Some(Value::Float64(a - b)),
             BinaryFilterOp::Mul => Some(Value::Float64(a * b)),
-            BinaryFilterOp::Div if b != 0.0 => Some(Value::Float64(a / b)),
+            // IEEE 754: a double divided by zero is INF, -INF or NaN.
+            BinaryFilterOp::Div => Some(Value::Float64(a / b)),
             _ => None,
         };
     }
@@ -6914,5 +6932,53 @@ mod tests {
         ));
         let any = op.into_any();
         assert!(any.downcast::<RdfTripleScanOperator>().is_ok());
+    }
+
+    /// fn:round takes a half towards positive infinity, keeps the sign of a
+    /// negative value that rounds to zero, and passes infinities and NaN on.
+    #[test]
+    fn round_half_up_follows_fn_round() {
+        assert_eq!(round_half_up(2.5), 3.0);
+        assert_eq!(round_half_up(-2.5), -2.0);
+        assert_eq!(round_half_up(-2.6), -3.0);
+        assert_eq!(round_half_up(0.49999999999999994), 0.0);
+        assert!(round_half_up(-0.4).is_sign_negative());
+        assert_eq!(round_half_up(-0.4), 0.0);
+        assert_eq!(round_half_up(-0.5), 0.0);
+        assert!(round_half_up(-0.5).is_sign_negative());
+        assert_eq!(round_half_up(f64::INFINITY), f64::INFINITY);
+        assert_eq!(round_half_up(f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert!(round_half_up(f64::NAN).is_nan());
+        assert_eq!(
+            round_half_up(4_503_599_627_370_495.5),
+            4_503_599_627_370_496.0
+        );
+    }
+
+    /// A double divided by zero follows IEEE 754; integer and decimal
+    /// division by zero leave the result unbound.
+    #[test]
+    fn numeric_division_by_zero() {
+        let divide = |left: Value, right: Value| numeric_op(&left, BinaryFilterOp::Div, &right);
+        assert_eq!(
+            divide(Value::Float64(1.0), Value::Int64(0)),
+            Some(Value::Float64(f64::INFINITY))
+        );
+        assert_eq!(
+            divide(Value::Float64(-1.0), Value::Int64(0)),
+            Some(Value::Float64(f64::NEG_INFINITY))
+        );
+        assert!(matches!(
+            divide(Value::Float64(0.0), Value::Float64(0.0)),
+            Some(Value::Float64(v)) if v.is_nan()
+        ));
+        assert_eq!(divide(Value::Int64(1), Value::Int64(0)), None);
+        assert_eq!(
+            divide(
+                Value::Decimal(Decimal::new(15, 1).unwrap()),
+                Value::Int64(0)
+            ),
+            None
+        );
     }
 }

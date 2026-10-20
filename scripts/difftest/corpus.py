@@ -1741,4 +1741,13 @@ for case_id, query in [
 ]:
     case(case_id, query, BOTH, "social")
 
+# CH: IS TYPED DECIMAL holds for a decimal (#610): a literal, the result of arithmetic and a
+#     list of decimals (it was false outside a LIST<...> type)
+for case_id, query in [
+    ("CH1", "RETURN 1.50 IS TYPED DECIMAL AS d, 1.50 IS TYPED DEC AS dec, 1.50 IS TYPED FLOAT64 AS f"),
+    ("CH2", "RETURN (1.50 + 1) IS TYPED DECIMAL AS d, toDecimal(2) IS TYPED DECIMAL AS t"),
+    ("CH3", "RETURN [1.5, 2.25] IS TYPED LIST<DECIMAL> AS l, 1.5e0 IS TYPED DECIMAL AS f"),
+]:
+    case(case_id, query, GQL, "empty")
+
 # fmt: on

@@ -2502,30 +2502,16 @@ impl ExpressionPredicate {
                 let Value::String(type_name) = self.eval_expr(&args[1], chunk, row)? else {
                     return None;
                 };
-                let matches = match type_name.to_uppercase().as_str() {
-                    "BOOLEAN" | "BOOL" => matches!(val, Value::Bool(_)),
-                    "INTEGER" | "INT" | "INT64" => matches!(val, Value::Int64(_)),
-                    "FLOAT" | "FLOAT64" | "DOUBLE" => matches!(val, Value::Float64(_)),
-                    "STRING" => matches!(val, Value::String(_)),
-                    "LIST" => matches!(val, Value::List(_)),
-                    "MAP" | "RECORD" => matches!(val, Value::Map(_)),
-                    "NULL" => matches!(val, Value::Null),
-                    "DATE" => matches!(val, Value::Date(_)),
-                    "TIME" => matches!(val, Value::Time(_)),
-                    "DATETIME" | "TIMESTAMP" => matches!(val, Value::Timestamp(_)),
-                    "DURATION" => matches!(val, Value::Duration(_)),
-                    "PATH" => matches!(val, Value::Path { .. }),
-                    "NODE" | "EDGE" | "GRAPH" => false,
-                    s if s.starts_with("LIST<") && s.ends_with('>') => {
-                        let elem_type = &s[5..s.len() - 1];
-                        match &val {
-                            Value::List(items) => {
-                                items.iter().all(|v| Self::value_matches_type(v, elem_type))
-                            }
-                            _ => false,
-                        }
-                    }
-                    _ => false,
+                let type_name = type_name.to_uppercase();
+                let element_type = type_name
+                    .strip_prefix("LIST<")
+                    .and_then(|rest| rest.strip_suffix('>'));
+                let matches = match (element_type, &val) {
+                    (Some(element_type), Value::List(items)) => items
+                        .iter()
+                        .all(|v| Self::value_matches_type(v, element_type)),
+                    (Some(_), _) => false,
+                    (None, _) => Self::value_matches_type(&val, &type_name),
                 };
                 Some(Value::Bool(matches))
             }

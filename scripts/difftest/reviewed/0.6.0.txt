@@ -574,3 +574,6 @@ CG5|cypher 2d8a50291b With DISTINCT, ORDER BY reads only what the WITH returns (
 CG5|gql 2d8a50291b With DISTINCT, ORDER BY reads only what the WITH returns (openCypher, SQL); the error now names the variable and says why. GQL had no ORDER BY after WITH.
 CG8|cypher 0007e81c96 With DISTINCT, ORDER BY reads only what the RETURN returns (openCypher TCK ReturnOrderBy2, SQL): it added the sort key to the distinct row and returned duplicates.
 CG8|gql 0007e81c96 With DISTINCT, ORDER BY reads only what the RETURN returns (openCypher TCK ReturnOrderBy2, SQL): it added the sort key to the distinct row and returned duplicates.
+CH1|gql 14f508d351 IS TYPED DECIMAL and DEC hold for a decimal (#610); 1.50 was the float 1.5.
+CH2|gql fcff68cb42 IS TYPED DECIMAL holds for the result of decimal arithmetic and toDecimal (#610); they were a float and null.
+CH3|gql 54ffe9a53f IS TYPED LIST<DECIMAL> holds for a list of decimals (#610); 1.5 was a float.

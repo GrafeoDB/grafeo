@@ -346,6 +346,53 @@ pub(crate) fn checked_grouped_bytes(
     count.checked_mul(width).ok_or_else(grouped_memory_limit)
 }
 
+/// Bounds a fresh std/hashbrown table allocation for the pinned Rust 1.99
+/// layout. The data area is followed by one control byte per bucket and a
+/// 16-byte control group. Charge the old table separately during rehashing.
+#[cfg(feature = "spill")]
+pub(crate) fn grouped_hash_table_bytes<T>(
+    entries: usize,
+) -> Result<usize, super::operators::OperatorError> {
+    if entries == 0 {
+        return Ok(0);
+    }
+    // Small-table minima depend on element size in hashbrown 0.17.1;
+    // sixteen buckets bounds each case without assuming an older layout.
+    let buckets = entries
+        .checked_mul(8)
+        .and_then(|n| n.checked_add(6))
+        .map(|n| n / 7)
+        .and_then(usize::checked_next_power_of_two)
+        .ok_or_else(grouped_memory_limit)?
+        .max(16);
+    let alignment = std::mem::align_of::<T>().max(16);
+    let bytes = checked_grouped_bytes(buckets, std::mem::size_of::<T>())?;
+    let aligned = bytes
+        .checked_add(alignment - 1)
+        .map(|n| n & !(alignment - 1))
+        .ok_or_else(grouped_memory_limit)?;
+    aligned
+        .checked_add(buckets)
+        .and_then(|n| n.checked_add(16))
+        .ok_or_else(grouped_memory_limit)
+}
+
+#[cfg(feature = "spill")]
+pub(crate) fn grouped_io_error(error: std::io::Error) -> super::operators::OperatorError {
+    if error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<super::operators::OperatorError>())
+    {
+        // The type was checked above; retain its resource/timeout category.
+        let inner = error.into_inner().expect("checked an inner operator error");
+        *inner
+            .downcast::<super::operators::OperatorError>()
+            .expect("checked operator error type")
+    } else {
+        super::operators::OperatorError::from(grafeo_common::utils::error::Error::Io(error))
+    }
+}
+
 impl std::fmt::Debug for GroupedMemoryOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GroupedMemoryOwner")

@@ -318,6 +318,12 @@ impl AggregateExpr {
 pub struct HashableValue(grafeo_common::types::HashableValue);
 
 impl HashableValue {
+    /// Wraps a representative already canonicalized by admitted traversal.
+    #[cfg(feature = "spill")]
+    pub(crate) fn from_representative(value: Value) -> Self {
+        Self(grafeo_common::types::HashableValue(value))
+    }
+
     /// The value that stands for every value of this identity: an integral
     /// float in the range of `i64` as that integer, NaN as one NaN, a zoned
     /// datetime or a time with an offset at UTC, and lists, maps, paths and
@@ -451,7 +457,7 @@ fn representative(value: &Value) -> Value {
 /// NaN, else the float itself. An integer converted to a float would round
 /// above 2^53 and take `2^53 + 1` for `2^53`; the float converted to the
 /// integer is exact.
-fn representative_float(float: f64) -> Value {
+pub(crate) fn representative_float(float: f64) -> Value {
     // 2^63, the smallest float above every i64.
     const BEYOND_I64: f64 = 9_223_372_036_854_775_808.0;
     if float.is_nan() {
@@ -469,12 +475,28 @@ fn representative_float(float: f64) -> Value {
     Value::Float64(float)
 }
 
+/// Transient heap bound for the existing Decimal conversions and formatting.
+///
+/// A finite f64's shortest fixed notation needs at most a sign, `0.`,
+/// 324 leading fractional zeros and 17 significant digits (344 bytes;
+/// the largest integer needs fewer). A Decimal's scale/mantissa are at
+/// most 38, hence its printed value needs at most 41 bytes, its integer
+/// digit buffer 38, and its zero-padding buffer 38. Decimal::from_f64,
+/// to_f64 and Display allocate these strings; parsing itself allocates none.
+/// Rust's String growth doubles capacity or meets the required length, so
+/// three times each nonempty output bound covers old/new allocation overlap.
+/// Zero padding uses one exact allocation. Summing all four bounds is
+/// conservative even though the conversions do not keep them all live.
+#[cfg(feature = "spill")]
+pub(crate) const DECIMAL_SCRATCH_BYTES: usize =
+    3 * (1 + 2 + 324 + 17) + 3 * (1 + 2 + 38) + 3 * 38 + 38;
+
 /// A decimal's representative, as `=` compares it with the other numbers:
 /// the integer it equals when it is whole and fits an `i64` (`3.0` is `3`),
 /// the float whose shortest text it is (`1.5` is the float `1.5`), else the
 /// decimal with trailing fractional zeros removed, so scale aliases also
 /// serialize to the same identity bytes.
-fn representative_decimal(decimal: grafeo_common::types::Decimal) -> Value {
+pub(crate) fn representative_decimal(decimal: grafeo_common::types::Decimal) -> Value {
     if decimal.floor() == decimal
         && let Some(integer) = decimal.trunc_to_i64()
     {
@@ -491,7 +513,7 @@ fn representative_decimal(decimal: grafeo_common::types::Decimal) -> Value {
 
 /// A vector item's representative: one NaN for every NaN, and `0.0` for
 /// `-0.0`.
-fn representative_f32(item: f32) -> f32 {
+pub(crate) fn representative_f32(item: f32) -> f32 {
     if item.is_nan() {
         f32::NAN
     } else if item == 0.0 {
@@ -504,7 +526,7 @@ fn representative_f32(item: f32) -> f32 {
 
 /// A time's representative: a time with an offset at UTC (`14:00+01:00` is
 /// `13:00Z`), a local time as it is.
-fn representative_time(time: grafeo_common::types::Time) -> grafeo_common::types::Time {
+pub(crate) fn representative_time(time: grafeo_common::types::Time) -> grafeo_common::types::Time {
     const NANOS_PER_DAY: i64 = 86_400 * 1_000_000_000;
     let at_utc = || {
         let offset = time.offset_seconds()?;

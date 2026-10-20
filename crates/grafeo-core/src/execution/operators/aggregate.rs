@@ -16,6 +16,10 @@ use super::accumulator::{AggregateExpr, AggregateFunction, HashableValue, RowKey
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder, copied_column_type};
 
+#[cfg(feature = "spill")]
+#[path = "aggregate_admitted.rs"]
+mod admitted;
+
 /// State for a single aggregation computation.
 ///
 /// Used by both the pull-based [`HashAggregateOperator`] and the push-based
@@ -885,6 +889,23 @@ struct Group {
     states: Vec<AggregateState>,
 }
 
+/// Group state shared with the existing push aggregate implementation.
+#[derive(Clone)]
+pub(crate) struct AdmittedGroupState {
+    pub(crate) key_values: Vec<Value>,
+    pub(crate) accumulators: Vec<AggregateState>,
+}
+
+/// The bounded output cursor used by both grouped operator interfaces.
+#[cfg(feature = "spill")]
+pub(crate) struct GroupedOutput {
+    pub(crate) cursor: crate::execution::spill::OwnedPartitionDrainCursor<AdmittedGroupState>,
+    pub(crate) types: Vec<LogicalType>,
+    pub(crate) group_columns: usize,
+    // The schema is destroyed before the reservation that owns it.
+    pub(crate) schema_owner: crate::execution::memory::GroupedMemoryOwner,
+}
+
 /// Hash-based aggregate operator.
 ///
 /// Groups input by key columns and computes aggregations for each group. A
@@ -908,6 +929,18 @@ pub struct HashAggregateOperator {
     aggregation_complete: bool,
     /// Results iterator.
     results: Option<std::vec::IntoIter<(RowKey, Group)>>,
+    #[cfg(feature = "spill")]
+    memory_context: Option<(
+        crate::execution::memory::OperatorMemoryContext,
+        Option<std::time::Instant>,
+    )>,
+    #[cfg(feature = "spill")]
+    accounted_backend: Option<super::push::SpillableAggregatePushOperator>,
+    #[cfg(feature = "spill")]
+    accounted_output: Option<GroupedOutput>,
+    // The backend's copied configuration drops before this reservation.
+    #[cfg(feature = "spill")]
+    backend_config_owner: Option<crate::execution::memory::GroupedMemoryOwner>,
 }
 
 impl HashAggregateOperator {
@@ -933,7 +966,132 @@ impl HashAggregateOperator {
             groups: IndexMap::new(),
             aggregation_complete: false,
             results: None,
+            #[cfg(feature = "spill")]
+            memory_context: None,
+            #[cfg(feature = "spill")]
+            accounted_backend: None,
+            #[cfg(feature = "spill")]
+            accounted_output: None,
+            #[cfg(feature = "spill")]
+            backend_config_owner: None,
         }
+    }
+
+    /// Uses admitted grouped state while keeping this pull operator and its child.
+    #[cfg(feature = "spill")]
+    #[must_use]
+    pub fn with_memory_context(
+        mut self,
+        ctx: crate::execution::memory::OperatorMemoryContext,
+        deadline: Option<std::time::Instant>,
+    ) -> Self {
+        self.memory_context = Some((ctx, deadline));
+        self
+    }
+
+    #[cfg(feature = "spill")]
+    fn check_accounted_deadline(&self) -> Result<(), OperatorError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((_, Some(deadline))) = &self.memory_context
+            && std::time::Instant::now() >= *deadline
+        {
+            return Err(OperatorError::Timeout);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "spill")]
+    fn initialize_accounted(&mut self) -> Result<(), OperatorError> {
+        use crate::execution::memory::{
+            GroupedMemoryOwner, checked_grouped_bytes, grouped_memory_limit,
+        };
+        let ctx = self
+            .memory_context
+            .as_ref()
+            .expect("memory-aware pull aggregate")
+            .0
+            .clone();
+        let mut bytes =
+            checked_grouped_bytes(self.group_columns.len(), std::mem::size_of::<usize>())?
+                .checked_add(checked_grouped_bytes(
+                    self.aggregates.len(),
+                    std::mem::size_of::<AggregateExpr>(),
+                )?)
+                .ok_or_else(grouped_memory_limit)?;
+        for expression in &self.aggregates {
+            for text in [&expression.alias, &expression.separator]
+                .into_iter()
+                .flatten()
+            {
+                bytes = bytes
+                    .checked_add(text.len())
+                    .ok_or_else(grouped_memory_limit)?;
+            }
+        }
+        let owner =
+            GroupedMemoryOwner::try_new(std::sync::Arc::clone(ctx.buffer_manager()), bytes)?;
+        let mut columns = Vec::new();
+        columns
+            .try_reserve_exact(self.group_columns.len())
+            .map_err(|_| grouped_memory_limit())?;
+        columns.extend(self.group_columns.iter().copied());
+        let mut aggregates = Vec::new();
+        aggregates
+            .try_reserve_exact(self.aggregates.len())
+            .map_err(|_| grouped_memory_limit())?;
+        aggregates.extend(self.aggregates.iter().cloned());
+        self.accounted_backend = Some(
+            super::push::SpillableAggregatePushOperator::with_memory_context(
+                columns, aggregates, ctx,
+            ),
+        );
+        self.backend_config_owner = Some(owner);
+        Ok(())
+    }
+
+    #[cfg(feature = "spill")]
+    fn clear_accounted(&mut self) {
+        self.accounted_backend = None;
+        self.accounted_output = None;
+        self.backend_config_owner = None;
+    }
+
+    #[cfg(feature = "spill")]
+    fn next_accounted(&mut self) -> OperatorResult {
+        self.check_accounted_deadline()?;
+        if !self.aggregation_complete {
+            self.initialize_accounted()?;
+            loop {
+                self.check_accounted_deadline()?;
+                let Some(chunk) = self.child.next()? else {
+                    break;
+                };
+                self.check_accounted_deadline()?;
+                self.accounted_backend
+                    .as_mut()
+                    .expect("admitted pull backend")
+                    .ingest_accounted(chunk)?;
+            }
+            self.check_accounted_deadline()?;
+            self.accounted_output = self
+                .accounted_backend
+                .as_mut()
+                .expect("admitted pull backend")
+                .take_accounted_output(Some(&self.output_schema))?;
+            self.accounted_backend = None;
+            self.backend_config_owner = None;
+            self.aggregation_complete = true;
+        }
+        self.check_accounted_deadline()?;
+        let next = match self.accounted_output.as_mut() {
+            Some(output) => output.next_chunk()?,
+            None => None,
+        };
+        self.check_accounted_deadline()?;
+        if next.is_none() {
+            self.accounted_output = None;
+        }
+        Ok(next)
     }
 
     /// The output column types: the group keys' input types (see
@@ -1035,6 +1193,15 @@ impl HashAggregateOperator {
 
 impl Operator for HashAggregateOperator {
     fn next(&mut self) -> OperatorResult {
+        #[cfg(feature = "spill")]
+        if !self.group_columns.is_empty() && self.memory_context.is_some() {
+            let result = self.next_accounted();
+            if result.is_err() {
+                self.clear_accounted();
+                self.aggregation_complete = true;
+            }
+            return result;
+        }
         // Perform aggregation if not done
         if !self.aggregation_complete {
             self.aggregate()?;
@@ -1095,6 +1262,8 @@ impl Operator for HashAggregateOperator {
     }
 
     fn reset(&mut self) {
+        #[cfg(feature = "spill")]
+        self.clear_accounted();
         self.child.reset();
         self.input_types = ColumnTypes::default();
         self.groups.clear();
@@ -1241,6 +1410,222 @@ mod tests {
     use super::*;
     use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
+
+    #[cfg(feature = "spill")]
+    fn accounted_pull_fixture() -> (
+        tempfile::TempDir,
+        std::sync::Arc<grafeo_common::memory::buffer::BufferManager>,
+        std::sync::Arc<crate::execution::spill::SpillManager>,
+        crate::execution::memory::OperatorMemoryContext,
+    ) {
+        use crate::execution::memory::OperatorMemoryContext;
+        use crate::execution::spill::SpillManager;
+        use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
+        use std::sync::Arc;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let manager = BufferManager::new(BufferManagerConfig {
+            hard_limit_fraction: 1.0,
+            ..BufferManagerConfig::with_budget(8 * 1024 * 1024)
+        });
+        let spill = Arc::new(SpillManager::new(directory.path()).unwrap());
+        let context = OperatorMemoryContext::new(Arc::clone(&manager), Arc::clone(&spill));
+        (directory, manager, spill, context)
+    }
+
+    #[cfg(feature = "spill")]
+    struct ControlledGroupedRows {
+        phase: usize,
+        manager: std::sync::Arc<grafeo_common::memory::buffer::BufferManager>,
+        spill: std::sync::Arc<crate::execution::spill::SpillManager>,
+        observed_spill: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        fail_after_spill: bool,
+    }
+
+    #[cfg(feature = "spill")]
+    impl Operator for ControlledGroupedRows {
+        fn next(&mut self) -> OperatorResult {
+            match self.phase {
+                0 => {
+                    self.phase = 1;
+                    let mut builder = DataChunkBuilder::with_capacity(&[LogicalType::Int64], 2051);
+                    for key in 0..2051 {
+                        builder.column_mut(0).unwrap().push_int64(key);
+                        builder.advance_row();
+                    }
+                    Ok(Some(builder.finish()))
+                }
+                1 => {
+                    self.phase = 2;
+                    // The registered consumer defers the request until ingestion.
+                    assert_eq!(self.manager.spill_all(), 0);
+                    let mut builder = DataChunkBuilder::with_capacity(&[LogicalType::Int64], 1);
+                    builder.column_mut(0).unwrap().push_int64(0);
+                    builder.advance_row();
+                    Ok(Some(builder.finish()))
+                }
+                2 => {
+                    self.phase = 3;
+                    if self.spill.active_file_count() == 0 || self.spill.spilled_bytes() == 0 {
+                        return Err(OperatorError::Internal(
+                            "the source must observe a spill".into(),
+                        ));
+                    }
+                    self.observed_spill
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    if self.fail_after_spill {
+                        Err(OperatorError::Timeout)
+                    } else {
+                        Ok(None)
+                    }
+                }
+                _ => Ok(None),
+            }
+        }
+
+        fn reset(&mut self) {
+            self.phase = 0;
+            self.observed_spill
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn name(&self) -> &'static str {
+            "ControlledGroupedRows"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn accounted_pull_preserves_entity_keys_and_declared_scalar_schema() {
+        use grafeo_common::types::{EdgeId, NodeId};
+        let (_directory, manager, spill, context) = accounted_pull_fixture();
+        let mut builder = DataChunkBuilder::with_capacity(
+            &[LogicalType::Node, LogicalType::Edge, LogicalType::Int64],
+            3,
+        );
+        for (node, edge, value) in [(101, 11, 3), (101, 11, 4), (102, 12, 5)] {
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_node_id(NodeId::new(node));
+            builder
+                .column_mut(1)
+                .unwrap()
+                .push_edge_id(EdgeId::new(edge));
+            builder.column_mut(2).unwrap().push_int64(value);
+            builder.advance_row();
+        }
+        let mut aggregate = HashAggregateOperator::new(
+            Box::new(MockOperator::new(vec![builder.finish()])),
+            vec![0, 1],
+            vec![AggregateExpr::sum(2)],
+            vec![LogicalType::Any, LogicalType::Any, LogicalType::Int64],
+        )
+        .with_memory_context(context, None);
+        let chunk = aggregate.next().unwrap().unwrap();
+        assert_eq!(
+            chunk.column_types(),
+            [LogicalType::Node, LogicalType::Edge, LogicalType::Int64]
+        );
+        let mut rows: Vec<_> = chunk
+            .selected_indices()
+            .map(|row| {
+                (
+                    chunk.column(0).unwrap().get_node_id(row).unwrap().as_u64(),
+                    chunk.column(1).unwrap().get_edge_id(row).unwrap().as_u64(),
+                    chunk.column(2).unwrap().get_int64(row).unwrap(),
+                )
+            })
+            .collect();
+        rows.sort_unstable();
+        assert_eq!(rows, [(101, 11, 7), (102, 12, 5)]);
+        assert!(manager.allocated() > 0);
+        drop(chunk);
+        drop(aggregate);
+        assert_eq!(manager.allocated(), 0);
+        assert_eq!(spill.active_file_count(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn accounted_pull_partial_drain_reset_and_drop_release_grants_and_files() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let (_directory, manager, spill, context) = accounted_pull_fixture();
+        let observed_spill = Arc::new(AtomicBool::new(false));
+        let source = ControlledGroupedRows {
+            phase: 0,
+            manager: Arc::clone(&manager),
+            spill: Arc::clone(&spill),
+            observed_spill: Arc::clone(&observed_spill),
+            fail_after_spill: false,
+        };
+        let mut aggregate = HashAggregateOperator::new(
+            Box::new(source),
+            vec![0],
+            vec![AggregateExpr::count_star()],
+            vec![LogicalType::Int64, LogicalType::Int64],
+        )
+        .with_memory_context(context, None);
+        for reset in [true, false] {
+            let chunk = aggregate.next().unwrap().unwrap();
+            assert!(observed_spill.load(Ordering::SeqCst));
+            assert_eq!(chunk.len(), crate::execution::chunk::DEFAULT_CHUNK_SIZE);
+            drop(chunk);
+            assert!(
+                manager.allocated() > 0,
+                "the unfinished drain retains its grants"
+            );
+            if reset {
+                aggregate.reset();
+                assert_eq!(manager.allocated(), 0);
+                assert_eq!(spill.active_file_count(), 0);
+            }
+        }
+        drop(aggregate);
+        assert_eq!(manager.allocated(), 0);
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn accounted_pull_source_timeout_after_observed_spill_cleans_state() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let (_directory, manager, spill, context) = accounted_pull_fixture();
+        let observed_spill = Arc::new(AtomicBool::new(false));
+        let source = ControlledGroupedRows {
+            phase: 0,
+            manager: Arc::clone(&manager),
+            spill: Arc::clone(&spill),
+            observed_spill: Arc::clone(&observed_spill),
+            fail_after_spill: true,
+        };
+        let mut aggregate = HashAggregateOperator::new(
+            Box::new(source),
+            vec![0],
+            vec![AggregateExpr::count_star()],
+            vec![LogicalType::Int64, LogicalType::Int64],
+        )
+        .with_memory_context(context, None);
+        assert!(matches!(aggregate.next(), Err(OperatorError::Timeout)));
+        assert!(
+            observed_spill.load(Ordering::SeqCst),
+            "the failure follows an actual spill"
+        );
+        assert_eq!(manager.allocated(), 0);
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+    }
 
     struct MockOperator {
         chunks: Vec<DataChunk>,

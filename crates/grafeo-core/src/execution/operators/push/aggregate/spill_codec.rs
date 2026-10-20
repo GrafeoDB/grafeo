@@ -12,8 +12,15 @@ use std::io::{Read, Write};
 use grafeo_common::types::Value;
 
 use super::GroupState;
+use crate::execution::memory::{
+    GroupedMemoryOwner, grouped_hash_table_bytes, grouped_io_error, grouped_memory_limit,
+};
+use crate::execution::operators::OperatorError;
 use crate::execution::operators::accumulator::{AggregateFunction, AggregateState, HashableValue};
 use crate::execution::spill::{deserialize_value, serialize_value};
+use crate::execution::spill::{
+    deserialize_value_admitted, deserialize_value_representative_admitted, value_hash_scratch_bytes,
+};
 
 /// The tag of each accumulator state in a record.
 mod tags {
@@ -485,6 +492,269 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
     })
 }
 
+struct GroupAdmission<'a> {
+    owner: &'a mut GroupedMemoryOwner,
+    original: usize,
+    keep: bool,
+}
+
+impl Drop for GroupAdmission<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = self.owner.try_resize(self.original);
+        }
+    }
+}
+
+fn admitted_buffer<T>(
+    length: usize,
+    owner: &mut GroupedMemoryOwner,
+) -> Result<Vec<T>, OperatorError> {
+    let layout = std::alloc::Layout::array::<T>(length)
+        .map_err(|_| grouped_io_error(invalid("invalid aggregate capacity")))?;
+    owner.try_grow(layout.size())?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(length)
+        .map_err(|_| grouped_memory_limit())?;
+    Ok(values)
+}
+
+fn read_values_admitted(
+    r: &mut dyn Read,
+    owner: &mut GroupedMemoryOwner,
+) -> Result<Vec<Value>, OperatorError> {
+    let length = read_len(r).map_err(grouped_io_error)?;
+    let mut values = admitted_buffer(length, owner)?;
+    for _ in 0..length {
+        values.push(deserialize_value_admitted(r, owner)?);
+    }
+    Ok(values)
+}
+
+fn read_string_admitted(
+    r: &mut dyn Read,
+    owner: &mut GroupedMemoryOwner,
+) -> Result<String, OperatorError> {
+    let length = read_len(r).map_err(grouped_io_error)?;
+    let mut bytes = admitted_buffer::<u8>(length, owner)?;
+    bytes.resize(length, 0);
+    r.read_exact(&mut bytes).map_err(grouped_io_error)?;
+    String::from_utf8(bytes).map_err(|_| grouped_io_error(invalid("aggregate string is not UTF-8")))
+}
+
+fn read_seen_admitted(
+    r: &mut dyn Read,
+    owner: &mut GroupedMemoryOwner,
+) -> Result<HashSet<HashableValue>, OperatorError> {
+    let length = read_len(r).map_err(grouped_io_error)?;
+    owner.try_grow(grouped_hash_table_bytes::<HashableValue>(length)?)?;
+    let mut seen = HashSet::new();
+    seen.try_reserve(length)
+        .map_err(|_| grouped_memory_limit())?;
+    for _ in 0..length {
+        let value = deserialize_value_representative_admitted(r, owner)?;
+        let scratch = value_hash_scratch_bytes(&value, owner)?;
+        let retained_size = owner.size();
+        owner.try_grow(scratch)?;
+        seen.insert(HashableValue::from_representative(value));
+        // Hash/sort scratch has dropped before returning this temporary grant.
+        owner.try_resize(retained_size)?;
+    }
+    Ok(seen)
+}
+
+/// Reads the unchanged live-state bytes with the caller's reservation.
+/// Decode refusal leaves its original grant intact, so the partition keeps
+/// cleanup authority over the spill file and can retry the same record.
+pub(super) fn deserialize_group_state_admitted(
+    r: &mut dyn Read,
+    owner: &mut GroupedMemoryOwner,
+) -> Result<GroupState, OperatorError> {
+    let original = owner.size();
+    let mut admission = GroupAdmission {
+        owner,
+        original,
+        keep: false,
+    };
+    let result = (|| {
+        let key_values = read_values_admitted(r, admission.owner)?;
+        let length = read_len(r).map_err(grouped_io_error)?;
+        let mut accumulators = admitted_buffer(length, admission.owner)?;
+        for _ in 0..length {
+            let tag = read_tag(r).map_err(grouped_io_error)?;
+            accumulators.push(read_tagged_accumulator_admitted(r, tag, admission.owner)?);
+        }
+        Ok(GroupState {
+            key_values,
+            accumulators,
+        })
+    })();
+    admission.keep = result.is_ok();
+    result
+}
+
+fn read_tagged_accumulator_admitted(
+    r: &mut dyn Read,
+    tag: u8,
+    owner: &mut GroupedMemoryOwner,
+) -> Result<AggregateState, OperatorError> {
+    Ok(match tag {
+        tags::COUNT => AggregateState::Count(read_i64(r).map_err(grouped_io_error)?),
+        tags::COUNT_DISTINCT => AggregateState::CountDistinct(
+            read_i64(r).map_err(grouped_io_error)?,
+            read_seen_admitted(r, owner)?,
+        ),
+        tags::SUM_INT | tags::SUM_INT_DISTINCT => {
+            let sum = read_i128(r).map_err(grouped_io_error)?;
+            let count = read_i64(r).map_err(grouped_io_error)?;
+            if tag == tags::SUM_INT {
+                AggregateState::SumInt(sum, count)
+            } else {
+                AggregateState::SumIntDistinct(sum, count, read_seen_admitted(r, owner)?)
+            }
+        }
+        tags::SUM_FLOAT | tags::SUM_FLOAT_DISTINCT => {
+            let sum = read_f64(r).map_err(grouped_io_error)?;
+            let compensation = read_f64(r).map_err(grouped_io_error)?;
+            let count = read_i64(r).map_err(grouped_io_error)?;
+            if tag == tags::SUM_FLOAT {
+                AggregateState::SumFloat(sum, compensation, count)
+            } else {
+                AggregateState::SumFloatDistinct(
+                    sum,
+                    compensation,
+                    count,
+                    read_seen_admitted(r, owner)?,
+                )
+            }
+        }
+        tags::AVG | tags::AVG_DISTINCT => {
+            let sum = read_f64(r).map_err(grouped_io_error)?;
+            let count = read_i64(r).map_err(grouped_io_error)?;
+            if tag == tags::AVG {
+                AggregateState::Avg(sum, count)
+            } else {
+                AggregateState::AvgDistinct(sum, count, read_seen_admitted(r, owner)?)
+            }
+        }
+        tags::SUM_DECIMAL | tags::AVG_DECIMAL => {
+            let total = if read_flag(r).map_err(grouped_io_error)? {
+                match deserialize_value_admitted(r, owner)? {
+                    Value::Decimal(total) => Some(total),
+                    _ => {
+                        return Err(grouped_io_error(invalid(
+                            "a decimal aggregate state holds another value",
+                        )));
+                    }
+                }
+            } else {
+                None
+            };
+            let count = read_i64(r).map_err(grouped_io_error)?;
+            if tag == tags::SUM_DECIMAL {
+                AggregateState::SumDecimal(total, count)
+            } else {
+                AggregateState::AvgDecimal(total, count)
+            }
+        }
+        tags::MIN
+        | tags::MAX
+        | tags::MIN_OF_RDF_LITERALS
+        | tags::MAX_OF_RDF_LITERALS
+        | tags::FIRST
+        | tags::LAST
+        | tags::SAMPLE => {
+            let value = if read_flag(r).map_err(grouped_io_error)? {
+                Some(deserialize_value_admitted(r, owner)?)
+            } else {
+                None
+            };
+            match tag {
+                tags::MIN => AggregateState::Min(value),
+                tags::MAX => AggregateState::Max(value),
+                tags::MIN_OF_RDF_LITERALS => AggregateState::MinOfRdfLiterals(value),
+                tags::MAX_OF_RDF_LITERALS => AggregateState::MaxOfRdfLiterals(value),
+                tags::FIRST => AggregateState::First(value),
+                tags::LAST => AggregateState::Last(value),
+                _ => AggregateState::Sample(value),
+            }
+        }
+        tags::COLLECT | tags::COLLECT_DISTINCT => {
+            let values = read_values_admitted(r, owner)?;
+            if tag == tags::COLLECT {
+                AggregateState::Collect(values)
+            } else {
+                AggregateState::CollectDistinct(values, read_seen_admitted(r, owner)?)
+            }
+        }
+        tags::GROUP_CONCAT | tags::GROUP_CONCAT_DISTINCT => {
+            let len = read_len(r).map_err(grouped_io_error)?;
+            let mut values = admitted_buffer::<String>(len, owner)?;
+            for _ in 0..len {
+                values.push(read_string_admitted(r, owner)?);
+            }
+            let separator = read_string_admitted(r, owner)?;
+            if tag == tags::GROUP_CONCAT {
+                AggregateState::GroupConcat(values, separator)
+            } else {
+                AggregateState::GroupConcatDistinct(
+                    values,
+                    separator,
+                    read_seen_admitted(r, owner)?,
+                )
+            }
+        }
+        tags::STDDEV | tags::STDDEV_POP | tags::VARIANCE | tags::VARIANCE_POP => {
+            let count = read_i64(r).map_err(grouped_io_error)?;
+            let mean = read_f64(r).map_err(grouped_io_error)?;
+            let m2 = read_f64(r).map_err(grouped_io_error)?;
+            match tag {
+                tags::STDDEV => AggregateState::StdDev { count, mean, m2 },
+                tags::STDDEV_POP => AggregateState::StdDevPop { count, mean, m2 },
+                tags::VARIANCE => AggregateState::Variance { count, mean, m2 },
+                _ => AggregateState::VariancePop { count, mean, m2 },
+            }
+        }
+        tags::PERCENTILE_DISC | tags::PERCENTILE_CONT => {
+            let len = read_len(r).map_err(grouped_io_error)?;
+            let mut values = admitted_buffer::<f64>(len, owner)?;
+            for _ in 0..len {
+                values.push(read_f64(r).map_err(grouped_io_error)?);
+            }
+            let percentile = read_f64(r).map_err(grouped_io_error)?;
+            if tag == tags::PERCENTILE_DISC {
+                AggregateState::PercentileDisc { values, percentile }
+            } else {
+                AggregateState::PercentileCont { values, percentile }
+            }
+        }
+        tags::BIVARIATE => AggregateState::Bivariate {
+            kind: read_bivariate_kind(r).map_err(grouped_io_error)?,
+            count: read_i64(r).map_err(grouped_io_error)?,
+            mean_x: read_f64(r).map_err(grouped_io_error)?,
+            mean_y: read_f64(r).map_err(grouped_io_error)?,
+            m2_x: read_f64(r).map_err(grouped_io_error)?,
+            m2_y: read_f64(r).map_err(grouped_io_error)?,
+            c_xy: read_f64(r).map_err(grouped_io_error)?,
+        },
+        tags::DISTINCT => {
+            let inner_tag = read_tag(r).map_err(grouped_io_error)?;
+            if inner_tag == tags::DISTINCT {
+                return Err(grouped_io_error(invalid(
+                    "a DISTINCT aggregate state wraps another",
+                )));
+            }
+            owner.try_grow(std::mem::size_of::<AggregateState>())?;
+            AggregateState::Distinct {
+                inner: Box::new(read_tagged_accumulator_admitted(r, inner_tag, owner)?),
+                seen: read_seen_admitted(r, owner)?,
+            }
+        }
+        _ => return Err(grouped_io_error(invalid("unknown aggregate state tag"))),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +793,183 @@ mod tests {
                 "sum None 7"
             ]
         );
+    }
+
+    fn admitted_owner(budget: usize) -> GroupedMemoryOwner {
+        use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
+        let manager = BufferManager::new(BufferManagerConfig {
+            hard_limit_fraction: 1.0,
+            ..BufferManagerConfig::with_budget(budget)
+        });
+        GroupedMemoryOwner::try_new(manager, 0).unwrap()
+    }
+
+    #[test]
+    fn admitted_numeric_states_preserve_current_bytes_and_resume() {
+        use grafeo_common::types::Decimal;
+
+        fn assert_states_equal(actual: &GroupState, expected: &GroupState) {
+            assert_eq!(actual.key_values, expected.key_values);
+            assert_eq!(actual.accumulators.len(), expected.accumulators.len());
+            for (actual, expected) in actual.accumulators.iter().zip(&expected.accumulators) {
+                match (actual, expected) {
+                    (
+                        AggregateState::SumInt(actual_sum, actual_count),
+                        AggregateState::SumInt(expected_sum, expected_count),
+                    ) => assert_eq!((actual_sum, actual_count), (expected_sum, expected_count)),
+                    (
+                        AggregateState::SumIntDistinct(actual_sum, actual_count, actual_seen),
+                        AggregateState::SumIntDistinct(expected_sum, expected_count, expected_seen),
+                    ) => {
+                        assert_eq!((actual_sum, actual_count), (expected_sum, expected_count));
+                        assert_eq!(actual_seen, expected_seen);
+                    }
+                    (
+                        AggregateState::SumDecimal(actual_total, actual_count),
+                        AggregateState::SumDecimal(expected_total, expected_count),
+                    )
+                    | (
+                        AggregateState::AvgDecimal(actual_total, actual_count),
+                        AggregateState::AvgDecimal(expected_total, expected_count),
+                    ) => {
+                        assert_eq!(actual_count, expected_count);
+                        assert_eq!(
+                            actual_total.map(|total| (total.mantissa(), total.scale())),
+                            expected_total.map(|total| (total.mantissa(), total.scale()))
+                        );
+                    }
+                    _ => panic!("unexpected numeric states: {actual:?}, {expected:?}"),
+                }
+                match (actual.finalize(), expected.finalize()) {
+                    (Ok(actual), Ok(expected)) => assert_eq!(actual, expected),
+                    (Err(actual), Err(expected)) => {
+                        assert_eq!(actual.to_string(), expected.to_string());
+                    }
+                    other => panic!("different finalization outcomes: {other:?}"),
+                }
+            }
+        }
+
+        let past = i128::from(i64::MAX) + 2;
+        let total = Decimal::parse("-12.50").unwrap();
+        let seen = HashSet::from([HashableValue::from(Value::Int64(i64::MAX))]);
+        let group = GroupState {
+            key_values: vec![Value::Decimal(total)],
+            accumulators: vec![
+                AggregateState::SumInt(past, 3),
+                AggregateState::SumIntDistinct(past, 3, seen),
+                AggregateState::SumDecimal(Some(total), 3),
+                AggregateState::AvgDecimal(Some(total), 4),
+                AggregateState::SumDecimal(None, 7),
+                AggregateState::AvgDecimal(None, 7),
+            ],
+        };
+        let mut bytes = Vec::new();
+        serialize_group_state(&group, &mut bytes).unwrap();
+        let mut legacy = deserialize_group_state(&mut bytes.as_slice()).unwrap();
+        let mut owner = admitted_owner(1024 * 1024);
+        let mut admitted =
+            deserialize_group_state_admitted(&mut bytes.as_slice(), &mut owner).unwrap();
+        let mut encoded = Vec::new();
+        serialize_group_state(&admitted, &mut encoded).unwrap();
+        assert_eq!(
+            encoded, bytes,
+            "admission must preserve current spill bytes"
+        );
+        assert!(matches!(admitted.accumulators[0], AggregateState::SumInt(sum, 3) if sum == past));
+        for (left, right) in admitted
+            .accumulators
+            .iter_mut()
+            .zip(&mut legacy.accumulators)
+        {
+            left.update(Some(Value::Int64(-2)));
+            right.update(Some(Value::Int64(-2)));
+        }
+        assert_eq!(
+            admitted.accumulators[0].finalize().unwrap(),
+            Value::Int64(i64::MAX)
+        );
+        assert_eq!(
+            admitted.accumulators[1].finalize().unwrap(),
+            Value::Int64(i64::MAX)
+        );
+        assert!(matches!(
+            admitted.accumulators[4],
+            AggregateState::SumDecimal(None, 8)
+        ));
+        assert!(matches!(
+            admitted.accumulators[5],
+            AggregateState::AvgDecimal(None, 8)
+        ));
+        let mut continued = Vec::new();
+        serialize_group_state(&admitted, &mut continued).unwrap();
+        assert_states_equal(&admitted, &legacy);
+        let resumed = deserialize_group_state(&mut continued.as_slice()).unwrap();
+        assert_states_equal(&resumed, &legacy);
+        let mut resumed_owner = admitted_owner(1024 * 1024);
+        let admitted_resumed =
+            deserialize_group_state_admitted(&mut continued.as_slice(), &mut resumed_owner)
+                .unwrap();
+        assert_states_equal(&admitted_resumed, &legacy);
+    }
+
+    #[test]
+    fn admitted_malformed_group_restores_original_reservation() {
+        let mut bytes = Vec::new();
+        bytes.extend(1u64.to_le_bytes());
+        serialize_value(&Value::List(vec![Value::Int64(1)].into()), &mut bytes).unwrap();
+        bytes.extend(1u64.to_le_bytes());
+        bytes.push(255);
+        let mut owner = admitted_owner(1024 * 1024);
+        owner.try_grow(32).unwrap();
+        assert!(deserialize_group_state_admitted(&mut bytes.as_slice(), &mut owner).is_err());
+        assert_eq!(owner.size(), 32);
+        assert_eq!(owner.manager().allocated(), 32);
+    }
+
+    #[test]
+    fn admitted_distinct_reload_preserves_nested_identity() {
+        let identity = HashableValue::from(Value::List(vec![Value::Float64(3.0)].into()));
+        let mut seen = HashSet::new();
+        seen.insert(identity.clone());
+        let group = GroupState {
+            key_values: vec![Value::Int64(7)],
+            accumulators: vec![AggregateState::CountDistinct(1, seen)],
+        };
+        let mut bytes = Vec::new();
+        serialize_group_state(&group, &mut bytes).unwrap();
+        let mut owner = admitted_owner(1024 * 1024);
+        let mut decoded =
+            deserialize_group_state_admitted(&mut bytes.as_slice(), &mut owner).unwrap();
+        match decoded.accumulators.pop().unwrap() {
+            AggregateState::CountDistinct(count, seen) => {
+                assert_eq!(count, 1);
+                assert!(seen.contains(&identity));
+            }
+            _ => panic!("wrong live accumulator"),
+        }
+        assert!(owner.size() > 0);
+    }
+
+    #[test]
+    fn nested_declared_capacity_is_rejected_without_panicking() {
+        // One key: a list containing a vector with an impossible capacity.
+        // The fixture is small; refusal must precede any payload allocation.
+        let mut bytes = Vec::new();
+        bytes.extend(1u64.to_le_bytes());
+        bytes.push(7); // Value::List
+        bytes.extend(1u64.to_le_bytes());
+        bytes.push(9); // Value::Vector
+        bytes.extend(u64::MAX.to_le_bytes());
+
+        let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            deserialize_group_state(&mut bytes.as_slice())
+        }));
+        let error = decoded
+            .expect("an impossible nested capacity must not panic")
+            .err()
+            .expect("an impossible nested capacity must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     /// A DISTINCT state wraps the state of the aggregate itself, never

@@ -1,15 +1,22 @@
 //! Push-based aggregate operator (pipeline breaker).
 
 use crate::execution::chunk::{ColumnTypes, DataChunk};
+#[cfg(feature = "spill")]
+use crate::execution::memory::GroupedMemoryOwner;
 use crate::execution::operators::OperatorError;
 use crate::execution::operators::accumulator::{AggregateExpr, AggregateState, RowKey};
+use crate::execution::operators::aggregate::AdmittedGroupState as GroupState;
+#[cfg(feature = "spill")]
+use crate::execution::operators::aggregate::GroupedOutput;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 #[cfg(feature = "spill")]
 use crate::execution::spill::{PartitionedState, SpillManager};
 use crate::execution::vector::ValueVector;
 use grafeo_common::types::Value;
 #[cfg(feature = "spill")]
-use spill_codec::{deserialize_group_state, serialize_group_state};
+use spill_codec::{
+    deserialize_group_state, deserialize_group_state_admitted, serialize_group_state,
+};
 use std::collections::HashMap;
 #[cfg(feature = "spill")]
 use std::sync::Arc;
@@ -61,11 +68,106 @@ fn output_columns(
         .collect()
 }
 
-/// Group state with key values and accumulators.
-#[derive(Clone)]
-struct GroupState {
-    key_values: Vec<Value>,
-    accumulators: Vec<AggregateState>,
+#[cfg(feature = "spill")]
+impl GroupedOutput {
+    pub(crate) fn next_chunk(&mut self) -> Result<Option<DataChunk>, OperatorError> {
+        let Some(batch) = self.cursor.next_batch()? else {
+            return Ok(None);
+        };
+        // Tuple fields free states before their grant on every error path.
+        let batch = batch.into_parts();
+        let output_owner = GroupedMemoryOwner::try_new(Arc::clone(self.schema_owner.manager()), 0)?;
+        let mut chunk = DataChunk::try_with_owner(&self.types, batch.0.len(), output_owner)?;
+        let rows = batch.0.len();
+        for state in batch.0 {
+            for (column, value) in state.key_values.into_iter().enumerate() {
+                let owner = chunk.owner_mut().expect("owned output chunk");
+                let heap = crate::execution::spill::value_retained_bytes(&value, owner)?;
+                owner.try_grow(heap)?;
+                chunk.try_push_owned_value(column, value)?;
+            }
+            for (index, acc) in state.accumulators.into_iter().enumerate() {
+                let value =
+                    acc.finalize_accounted(chunk.owner_mut().expect("owned output chunk"))?;
+                chunk.try_push_owned_value(self.group_columns + index, value)?;
+            }
+        }
+        drop(batch.1);
+        chunk.set_count(rows);
+        Ok(Some(chunk))
+    }
+}
+
+#[cfg(feature = "spill")]
+fn group_state_admitted(
+    chunk: &DataChunk,
+    row: usize,
+    columns: &[usize],
+    aggregates: &[AggregateExpr],
+    owner: &mut crate::execution::memory::GroupedMemoryOwner,
+) -> Result<GroupState, OperatorError> {
+    use crate::execution::memory::{checked_grouped_bytes, grouped_memory_limit};
+    use crate::execution::operators::accumulator::AggregateFunction;
+    let key_bytes = checked_grouped_bytes(columns.len(), std::mem::size_of::<Value>())?;
+    let state_bytes =
+        checked_grouped_bytes(aggregates.len(), std::mem::size_of::<AggregateState>())?;
+    owner.try_grow(
+        key_bytes
+            .checked_add(state_bytes)
+            .ok_or_else(grouped_memory_limit)?,
+    )?;
+    let mut key_values = Vec::new();
+    key_values
+        .try_reserve_exact(columns.len())
+        .map_err(|_| grouped_memory_limit())?;
+    for &column in columns {
+        let value = chunk
+            .column(column)
+            .and_then(|v| v.get_value(row))
+            .unwrap_or(Value::Null);
+        let heap = crate::execution::spill::value_retained_bytes(&value, owner)?;
+        owner.try_grow(heap)?;
+        key_values.push(value);
+    }
+    let mut accumulators = Vec::new();
+    accumulators
+        .try_reserve_exact(aggregates.len())
+        .map_err(|_| grouped_memory_limit())?;
+    for expr in aggregates {
+        if expr.function == AggregateFunction::GroupConcat {
+            owner.try_grow(expr.separator.as_ref().map_or(1, String::len))?;
+        }
+        if expr.distinct
+            && matches!(
+                expr.function,
+                AggregateFunction::StdDev
+                    | AggregateFunction::StdDevPop
+                    | AggregateFunction::Variance
+                    | AggregateFunction::VariancePop
+                    | AggregateFunction::PercentileDisc
+                    | AggregateFunction::PercentileCont
+                    | AggregateFunction::CovarSamp
+                    | AggregateFunction::CovarPop
+                    | AggregateFunction::Corr
+                    | AggregateFunction::RegrSlope
+                    | AggregateFunction::RegrIntercept
+                    | AggregateFunction::RegrR2
+                    | AggregateFunction::RegrCount
+                    | AggregateFunction::RegrSxx
+                    | AggregateFunction::RegrSyy
+                    | AggregateFunction::RegrSxy
+                    | AggregateFunction::RegrAvgx
+                    | AggregateFunction::RegrAvgy
+            )
+        {
+            owner.try_grow(std::mem::size_of::<AggregateState>())?;
+        }
+        accumulators.push(AggregateState::for_expr(expr));
+    }
+    Ok(GroupState {
+        key_values,
+        accumulators,
+    })
 }
 
 /// Push-based aggregate operator.
@@ -242,6 +344,8 @@ pub struct SpillableAggregatePushOperator {
     estimated_bytes: usize,
     /// The column types of the input chunks.
     input_types: ColumnTypes,
+    /// Reservation outlives the retained input schema.
+    input_types_owner: Option<GroupedMemoryOwner>,
 }
 
 #[cfg(feature = "spill")]
@@ -267,6 +371,7 @@ impl SpillableAggregatePushOperator {
             spill_state: None,
             estimated_bytes: 0,
             input_types: ColumnTypes::default(),
+            input_types_owner: None,
         }
     }
 
@@ -303,6 +408,7 @@ impl SpillableAggregatePushOperator {
             spill_state: None,
             estimated_bytes: 0,
             input_types: ColumnTypes::default(),
+            input_types_owner: None,
         }
     }
 
@@ -323,26 +429,24 @@ impl SpillableAggregatePushOperator {
             None
         };
 
-        let state = std::sync::Arc::new(OperatorSpillState::new(
-            "SpillableAggregatePush".to_string(),
-        ));
+        // The registry removes consumers by name. Each live instance needs
+        // its own name so cleanup cannot unregister another query.
+        static NEXT_CONSUMER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let consumer_id = NEXT_CONSUMER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let state = std::sync::Arc::new(OperatorSpillState::new(format!(
+            "SpillableAggregatePush/{consumer_id}"
+        )));
         let adapter =
             std::sync::Arc::new(OperatorConsumerAdapter::new(std::sync::Arc::clone(&state)));
         ctx.register_consumer(adapter);
-
-        // Pre-create partitioned state using the spill manager from memory context
-        let partitioned = PartitionedState::new(
-            std::sync::Arc::clone(ctx.spill_manager()),
-            256,
-            serialize_group_state,
-            deserialize_group_state,
-        );
 
         Self {
             group_by,
             aggregates,
             spill_manager: None,
-            partitioned_groups: Some(partitioned),
+            // Admission remains fallible at the first push while this public
+            // constructor retains its existing signature.
+            partitioned_groups: None,
             groups: HashMap::new(),
             global_state,
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
@@ -351,6 +455,7 @@ impl SpillableAggregatePushOperator {
             spill_state: Some(state),
             estimated_bytes: 0,
             input_types: ColumnTypes::default(),
+            input_types_owner: None,
         }
     }
 
@@ -363,6 +468,86 @@ impl SpillableAggregatePushOperator {
     pub fn with_threshold(mut self, threshold: usize) -> Self {
         self.spill_threshold = threshold;
         self
+    }
+
+    /// Uses the admitted path only for the ordinary memory-aware caller.
+    fn push_accounted_row(&mut self, chunk: &DataChunk, row: usize) -> Result<(), OperatorError> {
+        use crate::execution::memory::{
+            GroupedMemoryOwner, checked_grouped_bytes, grouped_memory_limit,
+        };
+        let ctx = self.memory_ctx.as_ref().expect("memory-aware aggregate");
+        let mut scratch = GroupedMemoryOwner::try_new(
+            Arc::clone(ctx.buffer_manager()),
+            checked_grouped_bytes(self.group_by.len(), std::mem::size_of::<Value>())?,
+        )?;
+        let mut key = Vec::new();
+        key.try_reserve_exact(self.group_by.len())
+            .map_err(|_| grouped_memory_limit())?;
+        for &column in &self.group_by {
+            let value = chunk
+                .column(column)
+                .and_then(|v| v.get_value(row))
+                .unwrap_or(Value::Null);
+            key.push(crate::execution::spill::value_representative_admitted(
+                &value,
+                &mut scratch,
+            )?);
+        }
+        let columns = &self.group_by;
+        let aggregates = &self.aggregates;
+        self.partitioned_groups
+            .as_mut()
+            .expect("admitted partition initialized")
+            .with_value_accounted(
+                &key,
+                |owner| group_state_admitted(chunk, row, columns, aggregates, owner),
+                |state, owner| {
+                    for (acc, expr) in state.accumulators.iter_mut().zip(aggregates) {
+                        let value = expr
+                            .column
+                            .and_then(|col| chunk.column(col).and_then(|v| v.get_value(row)));
+                        let second = expr
+                            .column2
+                            .and_then(|col| chunk.column(col).and_then(|v| v.get_value(row)));
+                        let value = if expr.column.is_some() {
+                            Some(value.unwrap_or(Value::Null))
+                        } else {
+                            None
+                        };
+                        acc.update_accounted(value, second, owner)?;
+                    }
+                    Ok(())
+                },
+            )
+    }
+
+    /// Makes room before group updates approach the allocation ceiling.
+    fn spill_before_group_growth(&mut self) -> Result<(), OperatorError> {
+        let (Some(ctx), Some(partitioned)) = (&self.memory_ctx, &mut self.partitioned_groups)
+        else {
+            return Ok(());
+        };
+        if partitioned.total_size() < AGGREGATE_MIN_BUFFER_GROUPS {
+            return Ok(());
+        }
+        let manager = ctx.buffer_manager();
+        // Critical starts at the hard limit. Leave one percent below that
+        // ceiling for the next bounded interval's admission and spill work.
+        let threshold = manager
+            .hard_limit()
+            .saturating_sub((manager.hard_limit() / 100).max(1));
+        while manager.allocated() >= threshold {
+            // Competing reservations may keep pressure high even after
+            // every resident partition is gone. Zero progress ends the loop.
+            if partitioned
+                .spill_largest()
+                .map_err(crate::execution::memory::grouped_io_error)?
+                == 0
+            {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Checks whether spilling should occur and performs it if needed.
@@ -434,9 +619,7 @@ impl SpillableAggregatePushOperator {
                 for (key, state) in self.groups.drain() {
                     partitioned
                         .insert(key.representatives(), state)
-                        .map_err(|e| {
-                            OperatorError::from(grafeo_common::utils::error::Error::Io(e))
-                        })?;
+                        .map_err(crate::execution::memory::grouped_io_error)?;
                 }
 
                 self.partitioned_groups = Some(partitioned);
@@ -447,23 +630,41 @@ impl SpillableAggregatePushOperator {
         Ok(())
     }
 
-    /// Unregisters this operator's consumer from the BufferManager.
-    fn unregister_consumer(&self) {
-        if let (Some(ctx), Some(state)) = (&self.memory_ctx, &self.spill_state) {
-            ctx.unregister_consumer(state.name());
-        }
-    }
-}
-
-#[cfg(feature = "spill")]
-impl PushOperator for SpillableAggregatePushOperator {
-    fn push(&mut self, chunk: DataChunk, _sink: &mut dyn Sink) -> Result<bool, OperatorError> {
+    fn ingest(&mut self, chunk: DataChunk) -> Result<bool, OperatorError> {
         if chunk.is_empty() {
             return Ok(true);
         }
-        self.input_types.add(&chunk);
+        if !self.group_by.is_empty()
+            && self.partitioned_groups.is_none()
+            && let Some(ctx) = &self.memory_ctx
+        {
+            self.partitioned_groups = Some(PartitionedState::try_new_accounted(
+                Arc::clone(ctx.buffer_manager()),
+                Arc::clone(ctx.spill_manager()),
+                256,
+                serialize_group_state,
+                deserialize_group_state,
+                deserialize_group_state_admitted,
+            )?);
+        }
+        if !self.group_by.is_empty()
+            && let Some(ctx) = &self.memory_ctx
+        {
+            if self.input_types_owner.is_none() {
+                self.input_types_owner = Some(GroupedMemoryOwner::try_new(
+                    Arc::clone(ctx.buffer_manager()),
+                    0,
+                )?);
+            }
+            self.input_types.add_accounted(
+                &chunk,
+                self.input_types_owner.as_mut().expect("owned input schema"),
+            )?;
+        } else {
+            self.input_types.add(&chunk);
+        }
 
-        for row in chunk.selected_indices() {
+        for (row_number, row) in chunk.selected_indices().enumerate() {
             if self.group_by.is_empty() {
                 // Global aggregation - same as non-spillable
                 if let Some(ref mut accumulators) = self.global_state {
@@ -471,6 +672,13 @@ impl PushOperator for SpillableAggregatePushOperator {
                         update_accumulator(acc, expr, &chunk, row);
                     }
                 }
+            } else if self.memory_ctx.is_some() {
+                // End-of-chunk pressure checks can be too late. Check in
+                // bounded intervals while preserving the normal spill policy.
+                if row_number % 64 == 0 {
+                    self.spill_before_group_growth()?;
+                }
+                self.push_accounted_row(&chunk, row)?;
             } else if self.using_partitioned {
                 // Use partitioned state
                 if let Some(ref mut partitioned) = self.partitioned_groups {
@@ -486,9 +694,7 @@ impl PushOperator for SpillableAggregatePushOperator {
                             key_values: RowKey::values_of(&chunk, row, group_by),
                             accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
                         })
-                        .map_err(|e| {
-                            OperatorError::from(grafeo_common::utils::error::Error::Io(e))
-                        })?;
+                        .map_err(crate::execution::memory::grouped_io_error)?;
 
                     for (acc, expr) in state.accumulators.iter_mut().zip(&self.aggregates) {
                         update_accumulator(acc, expr, &chunk, row);
@@ -525,7 +731,13 @@ impl PushOperator for SpillableAggregatePushOperator {
             };
             let key_size = self.group_by.len() * std::mem::size_of::<Value>();
             let acc_size = self.aggregates.len() * 64; // rough accumulator size
-            self.estimated_bytes = group_count * (key_size + acc_size + 48);
+            self.estimated_bytes = if self.memory_ctx.is_some() {
+                self.partitioned_groups
+                    .as_ref()
+                    .map_or(0, PartitionedState::accounted_bytes)
+            } else {
+                group_count * (key_size + acc_size + 48)
+            };
             spill_state.set_usage(self.estimated_bytes);
         }
 
@@ -535,7 +747,112 @@ impl PushOperator for SpillableAggregatePushOperator {
         Ok(true)
     }
 
+    /// The admitted ingestion used by the pull aggregate without changing its tree.
+    pub(crate) fn ingest_accounted(&mut self, chunk: DataChunk) -> Result<(), OperatorError> {
+        debug_assert!(!self.group_by.is_empty() && self.memory_ctx.is_some());
+        self.ingest(chunk).map(|_| ())
+    }
+
+    /// Moves grouped state into the same bounded output cursor for pull and push.
+    pub(crate) fn take_accounted_output(
+        &mut self,
+        declared: Option<&[grafeo_common::types::LogicalType]>,
+    ) -> Result<Option<GroupedOutput>, OperatorError> {
+        use crate::execution::memory::{checked_grouped_bytes, grouped_memory_limit};
+        use grafeo_common::types::LogicalType;
+        let Some(partitioned) = self.partitioned_groups.take() else {
+            return Ok(None);
+        };
+        let manager = Arc::clone(
+            self.memory_ctx
+                .as_ref()
+                .expect("memory-aware finalization")
+                .buffer_manager(),
+        );
+        let columns = self
+            .group_by
+            .len()
+            .checked_add(self.aggregates.len())
+            .ok_or_else(grouped_memory_limit)?;
+        let mut schema_owner = GroupedMemoryOwner::try_new(
+            manager,
+            checked_grouped_bytes(columns, std::mem::size_of::<LogicalType>())?,
+        )?;
+        let mut types = Vec::new();
+        types
+            .try_reserve_exact(columns)
+            .map_err(|_| grouped_memory_limit())?;
+        for index in 0..columns {
+            let declared = declared.and_then(|types| types.get(index));
+            let input = self
+                .group_by
+                .get(index)
+                .and_then(|&column| self.input_types.types().get(column));
+            let ty = match (input, declared) {
+                (
+                    Some(LogicalType::Any),
+                    Some(entity @ (LogicalType::Node | LogicalType::Edge)),
+                ) => entity,
+                (Some(input), _) => input,
+                (None, Some(declared)) => declared,
+                _ => &LogicalType::Any,
+            };
+            let heap =
+                crate::execution::vector::logical_type_retained_bytes(ty, &mut schema_owner)?;
+            schema_owner.try_grow(heap)?;
+            types.push(ty.clone());
+        }
+        let cursor = partitioned.into_owned_drain()?;
+        self.unregister_consumer();
+        if let Some(state) = &self.spill_state {
+            state.set_usage(0);
+        }
+        self.estimated_bytes = 0;
+        Ok(Some(GroupedOutput {
+            cursor,
+            types,
+            group_columns: self.group_by.len(),
+            schema_owner,
+        }))
+    }
+
+    fn finalize_grouped_accounted(&mut self, sink: &mut dyn Sink) -> Result<(), OperatorError> {
+        if let Some(mut output) = self.take_accounted_output(None)? {
+            while let Some(chunk) = output.next_chunk()? {
+                if !sink.consume(chunk)? {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Unregisters this operator's consumer from the BufferManager.
+    fn unregister_consumer(&self) {
+        if let (Some(ctx), Some(state)) = (&self.memory_ctx, &self.spill_state) {
+            ctx.unregister_consumer(state.name());
+        }
+    }
+}
+
+#[cfg(feature = "spill")]
+impl Drop for SpillableAggregatePushOperator {
+    fn drop(&mut self) {
+        self.unregister_consumer();
+    }
+}
+
+#[cfg(feature = "spill")]
+impl PushOperator for SpillableAggregatePushOperator {
+    fn push(&mut self, chunk: DataChunk, _sink: &mut dyn Sink) -> Result<bool, OperatorError> {
+        self.ingest(chunk)
+    }
+
     fn finalize(&mut self, sink: &mut dyn Sink) -> Result<(), OperatorError> {
+        if !self.group_by.is_empty() && self.memory_ctx.is_some() {
+            return self.finalize_grouped_accounted(sink);
+        }
+
         let mut columns = output_columns(&self.group_by, self.aggregates.len(), &self.input_types);
 
         if self.group_by.is_empty() {
@@ -2174,6 +2491,484 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "spill")]
+    fn accounted_aggregate_fixture(
+        budget: usize,
+    ) -> (
+        tempfile::TempDir,
+        Arc<grafeo_common::memory::buffer::BufferManager>,
+        crate::execution::memory::OperatorMemoryContext,
+    ) {
+        use crate::execution::memory::OperatorMemoryContext;
+        use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let manager = BufferManager::new(BufferManagerConfig {
+            hard_limit_fraction: 1.0,
+            ..BufferManagerConfig::with_budget(budget)
+        });
+        let spill = Arc::new(SpillManager::new(directory.path()).unwrap());
+        let context = OperatorMemoryContext::new(Arc::clone(&manager), spill);
+        (directory, manager, context)
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn denied_group_admission_preserves_headroom_and_next_query() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+
+        let budget = 1024 * 1024;
+        let (_directory, manager, context) = accounted_aggregate_fixture(budget);
+        let held = manager
+            .try_allocate(budget, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context.clone(),
+        );
+        let mut sink = CollectorSink::new();
+        assert!(matches!(
+            aggregate.push(create_two_column_chunk(&[7], &[10]), &mut sink),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        drop(aggregate);
+        assert_eq!(manager.allocated(), held.size());
+        assert!(sink.into_chunks().is_empty());
+
+        drop(held);
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context,
+        );
+        let mut sink = CollectorSink::new();
+        aggregate
+            .push(create_two_column_chunk(&[7], &[10]), &mut sink)
+            .unwrap();
+        aggregate.finalize(&mut sink).unwrap();
+        drop(aggregate);
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.iter().map(DataChunk::len).sum::<usize>(), 1);
+        assert_eq!(
+            chunks[0].column(1).unwrap().get_value(0),
+            Some(Value::Int64(1))
+        );
+        drop(chunks);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn denied_reload_keeps_spill_authority_and_headroom() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+
+        let budget = 1024 * 1024;
+        let (_directory, manager, context) = accounted_aggregate_fixture(budget);
+        let spill = Arc::clone(context.spill_manager());
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context,
+        );
+        let mut sink = CollectorSink::new();
+        aggregate
+            .push(create_two_column_chunk(&[7], &[10]), &mut sink)
+            .unwrap();
+        let partitioned = aggregate.partitioned_groups.as_mut().unwrap();
+        let partition = partitioned.partition_for(&[Value::Int64(7)]);
+        partitioned.spill_partition(partition).unwrap();
+        assert_eq!(spill.active_file_count(), 1);
+        let bytes = spill.spilled_bytes();
+        let held = manager
+            .try_allocate(budget - manager.allocated(), MemoryRegion::ExecutionBuffers)
+            .unwrap();
+
+        for _ in 0..2 {
+            assert!(
+                matches!(
+                    aggregate.push(create_two_column_chunk(&[7], &[20]), &mut sink),
+                    Err(OperatorError::LimitExceeded(_))
+                ),
+                "a reload must be admitted before decoding or replacing the spilled state"
+            );
+            let partitioned = aggregate.partitioned_groups.as_ref().unwrap();
+            assert_eq!(partitioned.spilled_count(), 1);
+            assert!(!partitioned.is_in_memory(partition));
+            assert_eq!(spill.spilled_bytes(), bytes);
+            assert_eq!(spill.active_file_count(), 1);
+            assert_eq!(manager.allocated(), budget);
+        }
+        drop(aggregate);
+        assert_eq!(manager.allocated(), held.size());
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn denied_nested_reload_preserves_file_and_grants() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+        let budget = 8 * 1024 * 1024;
+        let (_directory, manager, context) = accounted_aggregate_fixture(budget);
+        let spill = Arc::clone(context.spill_manager());
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1).with_distinct()],
+            context,
+        );
+        let mut sink = CollectorSink::new();
+        let nested = Value::List((0..8192).map(Value::Int64).collect());
+        aggregate
+            .push(
+                DataChunk::new(vec![
+                    ValueVector::from_values(&[Value::Int64(7)]),
+                    ValueVector::from_values(&[nested]),
+                ]),
+                &mut sink,
+            )
+            .unwrap();
+        let partitioned = aggregate.partitioned_groups.as_mut().unwrap();
+        let partition = partitioned.partition_for(&[Value::Int64(7)]);
+        partitioned.spill_partition(partition).unwrap();
+        let bytes = spill.spilled_bytes();
+        assert!(bytes > 0);
+        let baseline = manager.allocated();
+        let headroom = 96 * 1024;
+        let held = manager
+            .try_allocate(budget - baseline - headroom, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        for _ in 0..2 {
+            assert!(
+                matches!(
+                    aggregate.push(create_two_column_chunk(&[7], &[20]), &mut sink),
+                    Err(OperatorError::LimitExceeded(_))
+                ),
+                "nested state must be admitted before allocating decoded containers"
+            );
+            let partitioned = aggregate.partitioned_groups.as_ref().unwrap();
+            assert_eq!(partitioned.spilled_count(), 1);
+            assert!(!partitioned.is_in_memory(partition));
+            assert_eq!(spill.active_file_count(), 1);
+            assert_eq!(spill.spilled_bytes(), bytes);
+            assert_eq!(manager.allocated(), baseline + held.size());
+        }
+        drop(aggregate);
+        assert_eq!(manager.allocated(), held.size());
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn denied_nested_update_does_not_change_distinct_state() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+        let budget = 8 * 1024 * 1024;
+        let (_directory, manager, context) = accounted_aggregate_fixture(budget);
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1).with_distinct()],
+            context,
+        );
+        let mut sink = CollectorSink::new();
+        aggregate
+            .push(create_two_column_chunk(&[7], &[10]), &mut sink)
+            .unwrap();
+        let baseline = manager.allocated();
+        let held = manager
+            .try_allocate(budget - baseline - 2048, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        let nested = Value::List((0..8192).map(Value::Int64).collect());
+        assert!(matches!(
+            aggregate.push(
+                DataChunk::new(vec![
+                    ValueVector::from_values(&[Value::Int64(7)]),
+                    ValueVector::from_values(&[nested]),
+                ]),
+                &mut sink
+            ),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        assert_eq!(manager.allocated(), baseline + held.size());
+        drop(held);
+        aggregate.finalize(&mut sink).unwrap();
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.iter().map(DataChunk::len).sum::<usize>(), 1);
+        assert_eq!(
+            chunks[0].column(1).unwrap().get_value(0),
+            Some(Value::Int64(1))
+        );
+        drop(chunks);
+        drop(aggregate);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn dropping_one_aggregate_preserves_other_consumer() {
+        let (_directory, manager, context) = accounted_aggregate_fixture(1024 * 1024);
+        let baseline = manager.stats().consumer_count;
+        let first = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context.clone(),
+        );
+        let second = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context,
+        );
+        assert_eq!(manager.stats().consumer_count, baseline + 2);
+        drop(first);
+        assert_eq!(manager.stats().consumer_count, baseline + 1);
+        drop(second);
+        assert_eq!(manager.stats().consumer_count, baseline);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn retained_chunks_keep_grants_after_aggregate_drop() {
+        let (_directory, manager, context) = accounted_aggregate_fixture(32 * 1024 * 1024);
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context,
+        );
+        let mut sink = CollectorSink::new();
+        aggregate
+            .push(create_two_column_chunk(&[7], &[10]), &mut sink)
+            .unwrap();
+        aggregate.finalize(&mut sink).unwrap();
+        drop(aggregate);
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 1);
+        assert!(
+            manager.allocated() > 0,
+            "retained output must retain its reservation"
+        );
+        drop(chunks);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn accounted_single_chunk_spills_before_exhausting_headroom() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+        use std::collections::BTreeMap;
+
+        let budget = 32 * 1024 * 1024;
+        let (directory, manager, context) = accounted_aggregate_fixture(budget);
+        let spill = Arc::clone(context.spill_manager());
+        let mut calibration = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context.clone(),
+        );
+        let mut calibration_sink = CollectorSink::new();
+        calibration
+            .push(create_two_column_chunk(&[0], &[0]), &mut calibration_sink)
+            .unwrap();
+        let partitions = calibration.partitioned_groups.as_ref().unwrap();
+        let resident_partition = partitions.partition_for(&[Value::Int64(0)]);
+        let incoming_partition = (1..=256)
+            .map(|key| partitions.partition_for(&[Value::Int64(key)]))
+            .find(|&partition| partition != resident_partition)
+            .unwrap();
+        let mut resident = vec![0];
+        let mut incoming = Vec::new();
+        for key in 1.. {
+            let partition = partitions.partition_for(&[Value::Int64(key)]);
+            if partition == resident_partition && resident.len() < AGGREGATE_MIN_BUFFER_GROUPS {
+                resident.push(key);
+            } else if partition == incoming_partition && incoming.len() < 128 {
+                incoming.push(key);
+            }
+            if resident.len() == AGGREGATE_MIN_BUFFER_GROUPS && incoming.len() == 128 {
+                break;
+            }
+        }
+        calibration
+            .push(
+                create_two_column_chunk(&resident[1..], &resident[1..]),
+                &mut calibration_sink,
+            )
+            .unwrap();
+        let resident_bytes = manager.allocated();
+        // Measure this exact input's retained admission with ample headroom.
+        // Repeated keys also detect rows lost or applied twice during spill/retry.
+        let repeated: Vec<i64> = incoming.iter().chain(&incoming).copied().collect();
+        calibration
+            .push(
+                create_two_column_chunk(&repeated, &repeated),
+                &mut calibration_sink,
+            )
+            .unwrap();
+        let incoming_bytes = manager.allocated() - resident_bytes;
+        assert!(incoming_bytes > 0);
+        assert_eq!(spill.active_file_count(), 0);
+        drop(calibration);
+        assert!(calibration_sink.into_chunks().is_empty());
+        assert_eq!(manager.allocated(), 0);
+
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context,
+        );
+        let mut sink = CollectorSink::new();
+        aggregate
+            .push(create_two_column_chunk(&resident, &resident), &mut sink)
+            .unwrap();
+        assert_eq!(manager.allocated(), resident_bytes);
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(
+            aggregate.partitioned_groups.as_ref().unwrap().total_size(),
+            AGGREGATE_MIN_BUFFER_GROUPS
+        );
+        let headroom = incoming_bytes / 2;
+        let held = manager
+            .try_allocate(
+                budget - manager.allocated() - headroom,
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        aggregate
+            .push(create_two_column_chunk(&repeated, &repeated), &mut sink)
+            .expect("spillable resident groups must make room within a single input chunk");
+        assert!(spill.active_file_count() > 0, "automatic spill must occur");
+        assert!(spill.spilled_bytes() > 0);
+        assert!(manager.allocated() <= budget);
+        drop(held);
+
+        aggregate.finalize(&mut sink).unwrap();
+        drop(aggregate);
+        let chunks = sink.into_chunks();
+        let mut actual = BTreeMap::new();
+        for chunk in &chunks {
+            for row in 0..chunk.len() {
+                let Some(Value::Int64(key)) = chunk.column(0).unwrap().get_value(row) else {
+                    panic!("expected an integer group key");
+                };
+                let Some(Value::Int64(count)) = chunk.column(1).unwrap().get_value(row) else {
+                    panic!("expected an integer count");
+                };
+                assert!(
+                    actual.insert(key, count).is_none(),
+                    "duplicate output group"
+                );
+            }
+        }
+        let expected: BTreeMap<_, _> = resident
+            .iter()
+            .map(|&key| (key, 1))
+            .chain(incoming.iter().map(|&key| (key, 2)))
+            .collect();
+        assert_eq!(actual, expected);
+        drop(chunks);
+        assert_eq!(manager.allocated(), 0);
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn owned_drain_emits_bounded_batches() {
+        let (_directory, manager, context) = accounted_aggregate_fixture(32 * 1024 * 1024);
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context,
+        );
+        let keys: Vec<i64> = (0..4097).collect();
+        let mut sink = CollectorSink::new();
+        for rows in keys.chunks(256) {
+            aggregate
+                .push(create_two_column_chunk(rows, rows), &mut sink)
+                .unwrap();
+        }
+        aggregate.finalize(&mut sink).unwrap();
+        drop(aggregate);
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.iter().map(DataChunk::len).sum::<usize>(), keys.len());
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 2048));
+        for chunk in &chunks {
+            for row in 0..chunk.len() {
+                assert_eq!(
+                    chunk.column(1).unwrap().get_value(row),
+                    Some(Value::Int64(1))
+                );
+            }
+        }
+        drop(chunks);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn failed_partition_decode_preserves_cleanup_authority() {
+        use tempfile::TempDir;
+
+        let directory = TempDir::new().unwrap();
+        let manager = Arc::new(SpillManager::new(directory.path()).unwrap());
+        let mut aggregate = SpillableAggregatePushOperator::with_spilling(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            Arc::clone(&manager),
+            usize::MAX,
+        );
+        let mut sink = CollectorSink::new();
+        aggregate
+            .push(create_two_column_chunk(&[7], &[10]), &mut sink)
+            .unwrap();
+        let partitioned = aggregate.partitioned_groups.as_mut().unwrap();
+        let partition = partitioned.partition_for(&[Value::Int64(7)]);
+        partitioned.spill_partition(partition).unwrap();
+        let spilled_bytes = manager.spilled_bytes();
+        assert!(spilled_bytes > 0);
+        let path = std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+
+        // Valid partition framing, then an unknown accumulator tag.
+        let mut malformed = Vec::new();
+        for count in [1u64, 0, 0, 0, 1] {
+            malformed.extend(count.to_le_bytes());
+        }
+        malformed.push(255);
+        std::fs::write(path, malformed).unwrap();
+
+        for _ in 0..2 {
+            assert!(
+                aggregate
+                    .push(create_two_column_chunk(&[7], &[20]), &mut sink)
+                    .is_err(),
+                "a failed reload must not silently replace the spilled state"
+            );
+            let partitioned = aggregate.partitioned_groups.as_ref().unwrap();
+            assert_eq!(partitioned.spilled_count(), 1);
+            assert!(!partitioned.is_in_memory(partition));
+            assert_eq!(partitioned.partition_size(partition), 1);
+            assert_eq!(manager.spilled_bytes(), spilled_bytes);
+        }
+
+        aggregate.partitioned_groups.as_mut().unwrap().cleanup();
+        assert_eq!(
+            aggregate.partitioned_groups.as_ref().unwrap().total_size(),
+            0
+        );
+        assert_eq!(manager.spilled_bytes(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
     #[test]
     #[cfg(feature = "spill")]
     fn spill_partition_count_distinct_resumes() {
@@ -2213,6 +3008,7 @@ mod tests {
                 .is_in_memory(partition)
         );
         assert_eq!(manager.spilled_bytes(), 0);
+        assert_eq!(manager.active_file_count(), 0);
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
         aggregate.finalize(&mut sink).unwrap();
         let chunks = sink.into_chunks();
@@ -2279,5 +3075,138 @@ mod tests {
         sums.sort_unstable();
         let expected: Vec<i64> = (0..20).map(|i| i * 5).collect();
         assert_eq!(sums, expected);
+    }
+    #[test]
+    #[cfg(feature = "spill")]
+    fn owned_spilled_drain_limit_stops_after_first_batch() {
+        use crate::execution::pipeline::{ChunkCollector, Pipeline, Source};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DECODED: AtomicUsize = AtomicUsize::new(0);
+        fn counted_decode(
+            reader: &mut dyn std::io::Read,
+            owner: &mut crate::execution::memory::GroupedMemoryOwner,
+        ) -> Result<GroupState, OperatorError> {
+            let state = deserialize_group_state_admitted(reader, owner)?;
+            DECODED.fetch_add(1, Ordering::SeqCst);
+            Ok(state)
+        }
+        struct EmptySource;
+        impl Source for EmptySource {
+            fn next_chunk(&mut self, _size: usize) -> Result<Option<DataChunk>, OperatorError> {
+                Ok(None)
+            }
+            fn reset(&mut self) {}
+            fn name(&self) -> &'static str {
+                "EmptySource"
+            }
+        }
+        DECODED.store(0, Ordering::SeqCst);
+        let (_directory, manager, context) = accounted_aggregate_fixture(32 * 1024 * 1024);
+        let spill = Arc::clone(context.spill_manager());
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context,
+        );
+        aggregate.partitioned_groups = Some(
+            PartitionedState::try_new_accounted(
+                Arc::clone(&manager),
+                Arc::clone(&spill),
+                256,
+                serialize_group_state,
+                deserialize_group_state,
+                counted_decode,
+            )
+            .unwrap(),
+        );
+        let keys: Vec<i64> = (0..4097).collect();
+        let mut discarded = CollectorSink::new();
+        for rows in keys.chunks(256) {
+            aggregate
+                .push(create_two_column_chunk(rows, rows), &mut discarded)
+                .unwrap();
+        }
+        let state = aggregate.partitioned_groups.as_mut().unwrap();
+        for partition in 0..256 {
+            state.spill_partition(partition).unwrap();
+        }
+        assert!(spill.active_file_count() > 0 && spill.spilled_bytes() > 0);
+        let mut pipeline = Pipeline::new(
+            Box::new(EmptySource),
+            vec![
+                Box::new(aggregate),
+                Box::new(crate::execution::operators::push::LimitPushOperator::new(3)),
+            ],
+            Box::new(ChunkCollector::new()),
+        );
+        pipeline.execute().unwrap();
+        assert_eq!(
+            DECODED.load(Ordering::SeqCst),
+            2048,
+            "LIMIT must stop before decoding a second batch"
+        );
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+        let retained = pipeline
+            .into_sink()
+            .into_any()
+            .downcast::<ChunkCollector>()
+            .unwrap();
+        assert_eq!(retained.row_count(), 3);
+        assert!(manager.allocated() > 0);
+        drop(retained);
+        assert_eq!(manager.allocated(), 0);
+        assert_eq!(manager.stats().consumer_count, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn failed_sink_releases_grouped_query_resources() {
+        struct FailedSink;
+        impl Sink for FailedSink {
+            fn consume(&mut self, _chunk: DataChunk) -> Result<bool, OperatorError> {
+                Err(OperatorError::Internal("injected sink failure".to_string()))
+            }
+            fn finalize(&mut self) -> Result<(), OperatorError> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "FailedSink"
+            }
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+                self
+            }
+        }
+        let (_directory, manager, context) = accounted_aggregate_fixture(32 * 1024 * 1024);
+        let spill = Arc::clone(context.spill_manager());
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context,
+        );
+        aggregate
+            .push(
+                create_two_column_chunk(&[7], &[10]),
+                &mut CollectorSink::new(),
+            )
+            .unwrap();
+        let partition = aggregate
+            .partitioned_groups
+            .as_ref()
+            .unwrap()
+            .partition_for(&[Value::Int64(7)]);
+        aggregate
+            .partitioned_groups
+            .as_mut()
+            .unwrap()
+            .spill_partition(partition)
+            .unwrap();
+        assert!(spill.spilled_bytes() > 0);
+        assert!(aggregate.finalize(&mut FailedSink).is_err());
+        drop(aggregate);
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
+        assert_eq!(manager.allocated(), 0);
+        assert_eq!(manager.stats().consumer_count, 0);
     }
 }

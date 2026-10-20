@@ -5,7 +5,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Buffer size for spill file I/O (64 KB).
-const BUFFER_SIZE: usize = 64 * 1024;
+pub(super) const BUFFER_SIZE: usize = 64 * 1024;
 
 /// Handle for a single spill file.
 ///

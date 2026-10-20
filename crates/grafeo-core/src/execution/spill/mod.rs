@@ -23,5 +23,10 @@ mod serializer;
 pub use external_sort::{ExternalSort, NullOrder, SortDirection, SortKey};
 pub use file::{SpillFile, SpillFileReader};
 pub use manager::SpillManager;
+pub(crate) use partition::OwnedPartitionDrainCursor;
 pub use partition::{DEFAULT_NUM_PARTITIONS, PartitionedState};
 pub use serializer::{deserialize_row, deserialize_value, serialize_row, serialize_value};
+pub(crate) use serializer::{
+    deserialize_value_admitted, deserialize_value_representative_admitted,
+    value_hash_scratch_bytes, value_representative_admitted, value_retained_bytes,
+};

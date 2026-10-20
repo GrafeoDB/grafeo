@@ -730,6 +730,102 @@ pub(crate) struct ColumnTypes {
 }
 
 impl ColumnTypes {
+    /// Takes column types into account with a dedicated schema reservation.
+    ///
+    /// The owner must cover only this schema and outlive its metadata storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a resource or reservation error without changing the schema.
+    #[cfg(feature = "spill")]
+    pub(crate) fn add_accounted(
+        &mut self,
+        chunk: &DataChunk,
+        owner: &mut GroupedMemoryOwner,
+    ) -> Result<(), OperatorError> {
+        let has_rows = chunk.row_count() > 0;
+        match &mut self.types {
+            Some(types) if self.from_rows && has_rows => {
+                if !types.iter().zip(chunk.columns()).any(|(known, column)| {
+                    known != column.data_type() && !matches!(known, LogicalType::Any)
+                }) {
+                    return Ok(());
+                }
+                let mut retained = types
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<LogicalType>())
+                    .ok_or_else(grouped_memory_limit)?;
+                // Measure before mutating. The traversal helper admits its
+                // scratch while the old metadata is still covered by owner.
+                for (index, known) in types.iter().enumerate() {
+                    if chunk
+                        .column(index)
+                        .is_none_or(|column| known == column.data_type())
+                    {
+                        retained = retained
+                            .checked_add(logical_type_retained_bytes(known, owner)?)
+                            .ok_or_else(grouped_memory_limit)?;
+                    }
+                }
+                if retained > owner.size() {
+                    return Err(OperatorError::Internal(
+                        "grouped input schema has unowned metadata".into(),
+                    ));
+                }
+                for (known, column) in types.iter_mut().zip(chunk.columns()) {
+                    if known != column.data_type() {
+                        // Assignment drops nested metadata before its bytes
+                        // are released from the dedicated reservation below.
+                        *known = LogicalType::Any;
+                    }
+                }
+                owner.try_resize(retained)
+            }
+            Some(_) if self.from_rows || !has_rows => Ok(()),
+            _ => {
+                let original = owner.size();
+                let replacement: Result<_, OperatorError> = (|| {
+                    let mut types = try_admitted_vec(chunk.column_count(), owner)?;
+                    let mut retained = types
+                        .capacity()
+                        .checked_mul(std::mem::size_of::<LogicalType>())
+                        .ok_or_else(grouped_memory_limit)?;
+                    for column in chunk.columns() {
+                        let data_type = column.data_type();
+                        // Retained source capacities bound the clone's heap.
+                        // Admit that bound before invoking LogicalType::clone.
+                        let bytes = logical_type_retained_bytes(data_type, owner)?;
+                        owner.try_grow(bytes)?;
+                        let cloned = data_type.clone();
+                        retained = retained
+                            .checked_add(logical_type_retained_bytes(&cloned, owner)?)
+                            .ok_or_else(grouped_memory_limit)?;
+                        types.push(cloned);
+                    }
+                    if retained > owner.size() - original {
+                        return Err(OperatorError::Internal(
+                            "grouped input schema clone exceeds its admission".into(),
+                        ));
+                    }
+                    Ok((types, retained))
+                })();
+                let (types, retained) = match replacement {
+                    Ok(replacement) => replacement,
+                    Err(error) => {
+                        // The unsuccessful replacement was dropped before
+                        // releasing any of the admission that covered it.
+                        owner.try_resize(original)?;
+                        return Err(error);
+                    }
+                };
+                let previous = self.types.replace(types);
+                drop(previous);
+                self.from_rows = has_rows;
+                owner.try_resize(retained)
+            }
+        }
+    }
+
     /// Takes the column types of `chunk` into account.
     pub(crate) fn add(&mut self, chunk: &DataChunk) {
         let has_rows = chunk.row_count() > 0;
@@ -1048,6 +1144,119 @@ mod owned_tests {
         let data_type = LogicalType::Tuple(vec![LogicalType::Int64; 512]);
         let result = DataChunk::try_with_owner(&[data_type], 0, owner(&manager));
         assert!(matches!(result, Err(OperatorError::LimitExceeded(_))));
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn accounted_column_types_denies_nested_schema_before_clone() {
+        let manager = manager(4096);
+        let mut reservation = owner(&manager);
+        let mut types = ColumnTypes::default();
+        let chunk =
+            DataChunk::with_capacity(&[LogicalType::Tuple(vec![LogicalType::Int64; 512])], 0);
+        assert!(matches!(
+            types.add_accounted(&chunk, &mut reservation),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        assert_eq!(types.types(), &[]);
+        assert_eq!(reservation.size(), 0);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn accounted_column_types_retains_schema_until_drop() {
+        let manager = manager(16 * 1024);
+        let mut reservation = owner(&manager);
+        let mut types = ColumnTypes::default();
+        let schema = LogicalType::Struct(vec![(
+            "field".repeat(16),
+            LogicalType::List(Box::new(LogicalType::Int64)),
+        )]);
+        let chunk = DataChunk::with_capacity(std::slice::from_ref(&schema), 0);
+        types.add_accounted(&chunk, &mut reservation).unwrap();
+        assert_eq!(types.types(), &[schema]);
+        assert!(reservation.size() > std::mem::size_of::<LogicalType>());
+        assert_eq!(manager.allocated(), reservation.size());
+        drop(types);
+        assert!(manager.allocated() > 0);
+        drop(reservation);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn accounted_column_types_denies_replacement_overlap_and_preserves_schema() {
+        let manager = manager(16 * 1024);
+        let mut reservation = owner(&manager);
+        let mut types = ColumnTypes::default();
+        let schema = LogicalType::List(Box::new(LogicalType::Int64));
+        let empty = DataChunk::with_capacity(std::slice::from_ref(&schema), 0);
+        types.add_accounted(&empty, &mut reservation).unwrap();
+        let original = reservation.size();
+        let mut with_rows = DataChunk::with_capacity(&[LogicalType::Bool], 1);
+        with_rows
+            .column_mut(0)
+            .unwrap()
+            .push_value(Value::Bool(true));
+        with_rows.set_count(1);
+        let held = manager
+            .try_allocate(
+                16 * 1024 - manager.allocated(),
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        assert!(matches!(
+            types.add_accounted(&with_rows, &mut reservation),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        assert_eq!(types.types(), &[schema]);
+        assert_eq!(reservation.size(), original);
+        assert!(!types.from_rows);
+        assert_eq!(manager.allocated(), 16 * 1024);
+        drop(held);
+        types.add_accounted(&with_rows, &mut reservation).unwrap();
+        assert_eq!(types.types(), &[LogicalType::Bool]);
+        assert!(types.from_rows);
+        assert_eq!(reservation.size(), std::mem::size_of::<LogicalType>());
+        drop(types);
+        drop(reservation);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn accounted_column_types_releases_differing_heap_and_ignores_empty_rows() {
+        let manager = manager(16 * 1024);
+        let mut reservation = owner(&manager);
+        let mut types = ColumnTypes::default();
+        let mut first =
+            DataChunk::with_capacity(&[LogicalType::List(Box::new(LogicalType::Int64))], 1);
+        first.column_mut(0).unwrap().push_value(Value::Int64(7));
+        first.set_count(1);
+        types.add_accounted(&first, &mut reservation).unwrap();
+        let original = reservation.size();
+        let mut different = DataChunk::with_capacity(&[LogicalType::Bool], 1);
+        different
+            .column_mut(0)
+            .unwrap()
+            .push_value(Value::Bool(true));
+        different.set_count(1);
+        types.add_accounted(&different, &mut reservation).unwrap();
+        assert_eq!(types.types(), &[LogicalType::Any]);
+        assert!(reservation.size() < original);
+        assert_eq!(reservation.size(), std::mem::size_of::<LogicalType>());
+        let held = manager
+            .try_allocate(
+                16 * 1024 - manager.allocated(),
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        let empty = DataChunk::with_capacity(&[LogicalType::String], 0);
+        types.add_accounted(&empty, &mut reservation).unwrap();
+        assert_eq!(types.types(), &[LogicalType::Any]);
+        assert_eq!(manager.allocated(), 16 * 1024);
+        drop(types);
+        drop(reservation);
+        assert_eq!(manager.allocated(), held.size());
+        drop(held);
         assert_eq!(manager.allocated(), 0);
     }
 }

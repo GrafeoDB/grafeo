@@ -3886,13 +3886,19 @@ impl RdfExpressionPredicate {
                 Some(Value::Bool(is_numeric))
             }
 
-            // ABS - absolute value
+            // ABS - absolute value; past the i64 range it goes on as a
+            // decimal, as XPath integers are unbounded
             "ABS" => {
                 if args.is_empty() {
                     return None;
                 }
                 match self.eval_expr(&args[0], chunk, row)? {
-                    Value::Int64(v) => Some(Value::Int64(v.abs())),
+                    Value::Int64(v) => {
+                        Some(v.checked_abs().map_or_else(
+                            || Value::Decimal(Decimal::from_i64(v).abs()),
+                            Value::Int64,
+                        ))
+                    }
                     Value::Float64(v) => Some(Value::Float64(v.abs())),
                     Value::Decimal(v) => Some(Value::Decimal(v.abs())),
                     _ => None,

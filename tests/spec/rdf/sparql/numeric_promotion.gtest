@@ -77,6 +77,16 @@ tests:
       rows:
         - [1.50, true, true]
 
+  # XPath integers are unbounded: ABS of the smallest 64-bit integer goes on
+  # as a decimal.
+  - name: abs_of_the_smallest_integer_goes_on_as_a_decimal
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (ABS(-9223372036854775807 - 1) AS ?a) (ABS(-9223372036854775807 - 1) = 9223372036854775808 AS ?exact) WHERE {}
+    expect:
+      rows:
+        - [9223372036854775808, true]
+
   # fn:round: of two equally near integers, the one nearer positive infinity.
   - name: round_takes_a_half_towards_positive_infinity
     query: "SELECT (ROUND(2.5) = 3 AS ?up) (ROUND(-2.5) = -2 AS ?down) (ROUND(-2.6) = -3 AS ?near) WHERE {}"

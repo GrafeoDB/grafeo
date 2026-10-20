@@ -577,3 +577,5 @@ CG8|gql 0007e81c96 With DISTINCT, ORDER BY reads only what the RETURN returns (o
 CH1|gql 14f508d351 IS TYPED DECIMAL and DEC hold for a decimal (#610); 1.50 was the float 1.5.
 CH2|gql fcff68cb42 IS TYPED DECIMAL holds for the result of decimal arithmetic and toDecimal (#610); they were a float and null.
 CH3|gql 54ffe9a53f IS TYPED LIST<DECIMAL> holds for a list of decimals (#610); 1.5 was a float.
+CI1|cypher a5336ae099 abs of the smallest integer fails as out of range (22003, #639); it returned the negative number itself.
+CI1|gql a5336ae099 abs of the smallest integer fails as out of range (22003, #639); it returned the negative number itself.

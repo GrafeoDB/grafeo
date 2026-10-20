@@ -3147,7 +3147,10 @@ impl ExpressionPredicate {
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
-                    Value::Int64(i) => Some(Value::Int64(i.abs())),
+                    Value::Int64(i) => match i.checked_abs() {
+                        Some(magnitude) => Some(Value::Int64(magnitude)),
+                        None => self.fail(OperatorError::numeric_out_of_range(format!("abs({i})"))),
+                    },
                     Value::Float64(f) => Some(Value::Float64(f.abs())),
                     Value::Decimal(d) => Some(Value::Decimal(d.abs())),
                     _ => None,

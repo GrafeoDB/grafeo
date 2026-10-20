@@ -1750,4 +1750,12 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL, "empty")
 
+# CI: abs of the smallest integer fails as out of range (22003, #639), as its negation does;
+#     abs of other integers is unchanged
+for case_id, query in [
+    ("CI1", "UNWIND [-9223372036854775807 - 1] AS x RETURN abs(x) AS a"),
+    ("CI2", "UNWIND [-9223372036854775807, -3, 0] AS x RETURN abs(x) AS a"),
+]:
+    case(case_id, query, BOTH, "empty")
+
 # fmt: on

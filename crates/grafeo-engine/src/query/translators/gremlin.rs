@@ -81,17 +81,26 @@ struct EdgeContext {
     direction: ExpandDirection,
 }
 
+/// A step's Gremlin name for messages: `OutE(..)` is `outE`.
+fn step_name(step: &ast::Step) -> String {
+    let debug = format!("{step:?}");
+    let variant = debug.split(['(', ' ', '{']).next().unwrap_or_default();
+    let mut chars = variant.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_lowercase().chain(chars).collect()
+    })
+}
+
 /// TinkerPop `not()` semantics: a traverser missing the property is *retained*.
 /// SQL `NOT NULL` is `NULL` (row dropped), so use `NOT coalesce(p, false)`; `p` appears
 /// once, so nested `not()` stays linear in size.
 fn negate_null_safe(pred: LogicalExpression) -> LogicalExpression {
     LogicalExpression::Unary {
         op: UnaryOp::Not,
-        operand: Box::new(LogicalExpression::FunctionCall {
-            name: "coalesce".to_string(),
-            args: vec![pred, LogicalExpression::Literal(Value::Bool(false))],
-            distinct: false,
-        }),
+        operand: Box::new(LogicalExpression::builtin(
+            BuiltinFunction::Coalesce,
+            vec![pred, LogicalExpression::Literal(Value::Bool(false))],
+        )),
     }
 }
 
@@ -2292,16 +2301,22 @@ impl GremlinTranslator {
                 }
                 // Nested compound groups: recurse so `.or(__.and(..), __.has(..))` is not
                 // silently dropped by the fallthrough below.
+                // A branch without a condition passes every traverser: it
+                // adds nothing to an `and()` and makes an `or()` pass all.
                 ast::Step::And(traversals) | ast::Step::Or(traversals) => {
                     let is_and = matches!(step, ast::Step::And(_));
                     let mut inner: Vec<LogicalExpression> = Vec::new();
+                    let mut passes_all = false;
                     for sub in traversals {
-                        if let Some(pred) = self.steps_to_predicate(sub, current_var)? {
-                            inner.push(pred);
+                        match self.steps_to_predicate(sub, current_var)? {
+                            Some(pred) => inner.push(pred),
+                            None => passes_all = true,
                         }
                     }
                     let folded = if is_and {
                         LogicalExpression::conjunction(inner)
+                    } else if passes_all {
+                        None
                     } else {
                         LogicalExpression::disjunction(inner)
                     };
@@ -2309,17 +2324,29 @@ impl GremlinTranslator {
                         predicates.push(pred);
                     }
                 }
+                // `not()` of a branch without a condition passes nothing.
                 ast::Step::Not(inner_steps) => {
-                    if let Some(pred) = self.steps_to_predicate(inner_steps, current_var)? {
-                        predicates.push(negate_null_safe(pred));
-                    }
+                    predicates.push(match self.steps_to_predicate(inner_steps, current_var)? {
+                        Some(pred) => negate_null_safe(pred),
+                        None => LogicalExpression::Literal(Value::Bool(false)),
+                    });
                 }
                 ast::Step::Where(ast::WhereClause::Traversal(inner_steps)) => {
                     if let Some(pred) = self.steps_to_predicate(inner_steps, current_var)? {
                         predicates.push(pred);
                     }
                 }
-                _ => {}
+                // Leaving a step out would loosen the filter: refuse it until
+                // it is translated.
+                other => {
+                    return Err(Error::Query(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        format!(
+                            "the Gremlin step {}() is not supported inside and(), or(), not(), where() or choose() yet",
+                            step_name(other)
+                        ),
+                    )));
+                }
             }
         }
         Ok(LogicalExpression::conjunction(predicates))

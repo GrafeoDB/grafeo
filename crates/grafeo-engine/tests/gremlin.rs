@@ -2106,3 +2106,24 @@ fn test_element_map_no_args() {
         other => panic!("Expected Map value from elementMap(), got: {other:?}"),
     }
 }
+
+/// A step a predicate traversal cannot evaluate yet fails the query: leaving
+/// it out loosened the filter, so `or(has('name', 'Gus'), outE('KNOWS'))`
+/// returned Gus alone where TinkerPop also returns Alix.
+#[test]
+fn an_unsupported_step_in_a_predicate_is_an_error() {
+    let db = create_social_network();
+    let error = db
+        .execute_gremlin("g.V().or(__.has('name', 'Gus'), __.outE('KNOWS'))")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("outE") && error.contains("not supported"),
+        "{error}"
+    );
+    let error = db
+        .execute_gremlin("g.V().where(__.outE('KNOWS'))")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("outE"), "{error}");
+}

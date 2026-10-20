@@ -249,15 +249,31 @@ def test_cases_name_known_languages_and_fixtures():
         assert re.fullmatch(r"[A-Z]+\d+", case.id), case.id
 
 
+WRITES = re.compile(r"\b(INSERT|CREATE|SET|REMOVE|DELETE|MERGE|DROP)\b", re.IGNORECASE)
+# A quoted string, with backslash escapes: query text inside one is a value.
+STRING_LITERAL = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+
+
+def writes_outside_strings(query: str) -> bool:
+    return WRITES.search(STRING_LITERAL.sub("''", query)) is not None
+
+
+def test_a_write_keyword_counts_only_outside_a_string():
+    assert writes_outside_strings("MATCH (n) DETACH DELETE n")
+    assert writes_outside_strings("CALL p('x') YIELD v SET v.a = 1")
+    assert not writes_outside_strings(
+        r"CALL p('it\'s\' DETACH DELETE n') YIELD v RETURN v"
+    )
+    assert not writes_outside_strings('RETURN "CREATE (n)" AS text')
+
+
 def test_only_the_writes_fixture_has_writing_cases():
     # Each fixture is built once and shared by its cases, so a write would change
     # what later cases see. The `writes` fixture is the one exception: an empty
     # database of its own, whose cases run in corpus order and read what the
-    # writes before them left.
-    writes = re.compile(
-        r"\b(INSERT|CREATE|SET|REMOVE|DELETE|MERGE|DROP)\b", re.IGNORECASE
-    )
+    # writes before them left. A write keyword inside a string literal is a
+    # value (BZ2 passes query text as an argument that must run nothing).
     for case in corpus.CASES:
         if case.fixture == "writes":
             continue
-        assert not writes.search(case.query), case.id
+        assert not writes_outside_strings(case.query), case.id

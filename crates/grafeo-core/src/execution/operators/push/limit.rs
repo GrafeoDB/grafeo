@@ -56,6 +56,20 @@ impl PushOperator for LimitPushOperator {
             // Need to truncate chunk
             self.passed += remaining;
 
+            #[cfg(feature = "spill")]
+            if chunk.selection().is_none() {
+                let mut chunk = chunk;
+                if chunk.owner_mut().is_some() {
+                    // Owned aggregate output has no selection: keep the same
+                    // buffers/grant and expose only the leading rows.
+                    chunk.set_count(remaining);
+                    sink.consume(chunk)?;
+                    return Ok(false);
+                }
+                let selection = SelectionVector::new_all(remaining);
+                sink.consume(chunk.filter(&selection))?;
+                return Ok(false);
+            }
             // Create selection for first `remaining` rows
             let selection = SelectionVector::new_all(remaining);
             let truncated = chunk.filter(&selection);

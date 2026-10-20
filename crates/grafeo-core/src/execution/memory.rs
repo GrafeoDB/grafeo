@@ -229,6 +229,131 @@ impl OperatorMemoryContext {
     }
 }
 
+/// Reservation carried with grouped state or the output that owns its buffers.
+///
+/// This owner never detaches a grant from its releaser. Splitting transfers
+/// existing admission; merging is permitted only for the same buffer manager.
+pub struct GroupedMemoryOwner {
+    grant: MemoryGrant,
+    manager: Arc<BufferManager>,
+}
+
+impl GroupedMemoryOwner {
+    /// Admits bytes before the caller allocates their backing storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns the existing resource-limit error if admission is refused.
+    pub fn try_new(
+        manager: Arc<BufferManager>,
+        bytes: usize,
+    ) -> Result<Self, super::operators::OperatorError> {
+        let grant = manager
+            .try_allocate(bytes, MemoryRegion::ExecutionBuffers)
+            .ok_or_else(grouped_memory_limit)?;
+        Ok(Self { grant, manager })
+    }
+
+    /// Returns this owner's reserved byte count.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.grant.size()
+    }
+
+    /// Returns the manager that owns this reservation.
+    #[must_use]
+    pub fn manager(&self) -> &Arc<BufferManager> {
+        &self.manager
+    }
+
+    /// Admits additional bytes before growing owned storage.
+    ///
+    /// # Errors
+    ///
+    /// Overflow or refused admission leaves the original reservation intact.
+    pub fn try_grow(&mut self, additional: usize) -> Result<(), super::operators::OperatorError> {
+        let total = self
+            .size()
+            .checked_add(additional)
+            .ok_or_else(grouped_memory_limit)?;
+        self.try_resize(total)
+    }
+
+    /// Transfers already admitted bytes without allocating another grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when the requested bytes are not owned.
+    pub fn split(&mut self, bytes: usize) -> Result<Self, super::operators::OperatorError> {
+        let grant = self.grant.split(bytes).ok_or_else(|| {
+            super::operators::OperatorError::Internal(
+                "grouped memory reservation cannot transfer unowned bytes".to_string(),
+            )
+        })?;
+        Ok(Self {
+            grant,
+            manager: Arc::clone(&self.manager),
+        })
+    }
+
+    /// Combines reservations from the same manager.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error and the unmerged owner on a manager mismatch or
+    /// overflow, preserving the caller's authority over its live buffers.
+    pub fn try_merge(
+        &mut self,
+        other: Self,
+    ) -> Result<(), (super::operators::OperatorError, Self)> {
+        if !Arc::ptr_eq(&self.manager, &other.manager)
+            || self.size().checked_add(other.size()).is_none()
+        {
+            return Err((
+                super::operators::OperatorError::Internal(
+                    "grouped memory reservations must belong to the same manager".to_string(),
+                ),
+                other,
+            ));
+        }
+        self.grant.merge(other.grant);
+        Ok(())
+    }
+
+    pub(crate) fn try_resize(
+        &mut self,
+        bytes: usize,
+    ) -> Result<(), super::operators::OperatorError> {
+        if self.grant.resize(bytes) {
+            Ok(())
+        } else {
+            Err(grouped_memory_limit())
+        }
+    }
+}
+
+pub(crate) fn grouped_memory_limit() -> super::operators::OperatorError {
+    super::operators::OperatorError::LimitExceeded(
+        "grouped query exceeds its memory limit; increase the memory budget or reduce the grouped result".to_string(),
+    )
+}
+
+#[cfg(feature = "spill")]
+pub(crate) fn checked_grouped_bytes(
+    count: usize,
+    width: usize,
+) -> Result<usize, super::operators::OperatorError> {
+    count.checked_mul(width).ok_or_else(grouped_memory_limit)
+}
+
+impl std::fmt::Debug for GroupedMemoryOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GroupedMemoryOwner")
+            .field("bytes", &self.size())
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

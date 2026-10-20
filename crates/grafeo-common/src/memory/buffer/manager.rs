@@ -480,6 +480,12 @@ impl BufferManager {
         self.config.budget
     }
 
+    /// Returns the computed allocation ceiling in bytes.
+    #[must_use]
+    pub fn hard_limit(&self) -> usize {
+        self.hard_limit
+    }
+
     /// Returns currently allocated bytes.
     #[must_use]
     pub fn allocated(&self) -> usize {

@@ -2,6 +2,10 @@
 
 use arcstr::ArcStr;
 
+#[cfg(feature = "spill")]
+use super::memory::{GroupedMemoryOwner, grouped_memory_limit};
+#[cfg(feature = "spill")]
+use super::operators::OperatorError;
 use grafeo_common::types::{EdgeId, LogicalType, NodeId, Value};
 
 /// Default vector capacity (tuples per vector).
@@ -50,6 +54,134 @@ enum VectorData {
 }
 
 impl ValueVector {
+    #[cfg(feature = "spill")]
+    pub(super) fn try_with_owner(
+        data_type: &LogicalType,
+        capacity: usize,
+        owner: &mut GroupedMemoryOwner,
+    ) -> Result<Self, OperatorError> {
+        let original = owner.size();
+        let result = (|| {
+            let type_bytes = measure_logical_type(data_type, owner, true)?;
+            owner.try_grow(type_bytes)?;
+            let data_type = data_type.clone();
+            let data = VectorData::try_with_owner(&data_type, capacity, owner)?;
+            Ok(Self {
+                data_type,
+                data,
+                len: 0,
+                validity: None,
+            })
+        })();
+        if result.is_err() {
+            owner.try_resize(original)?;
+        }
+        result
+    }
+
+    /// Appends a prepaid payload, admitting all replacement arrays first.
+    #[cfg(feature = "spill")]
+    pub(super) fn try_push_owned_value(
+        &mut self,
+        value: Value,
+        owner: &mut GroupedMemoryOwner,
+    ) -> Result<(), OperatorError> {
+        let required = self.len.checked_add(1).ok_or_else(grouped_memory_limit)?;
+        if required > DEFAULT_VECTOR_CAPACITY {
+            return Err(grouped_memory_limit());
+        }
+        let null = value.is_null();
+        let convert = !self.data.accepts(&value);
+        let grow_data = convert || required > self.data.capacity();
+        let grow_validity = null
+            && self
+                .validity
+                .as_ref()
+                .is_none_or(|v| required > v.capacity());
+        if !grow_data && !grow_validity {
+            self.push_value(value);
+            return Ok(());
+        }
+
+        let mut released = if grow_data {
+            self.data.array_bytes()?
+        } else {
+            0
+        };
+        if grow_validity {
+            released = released
+                .checked_add(self.validity.as_ref().map_or(0, Vec::capacity))
+                .ok_or_else(grouped_memory_limit)?;
+        }
+        let original = owner.size();
+        let staged = (|| {
+            let replacement = if convert {
+                Some(VectorData::Generic(try_admitted_vec(
+                    required.next_power_of_two(),
+                    owner,
+                )?))
+            } else if grow_data {
+                Some(VectorData::try_with_owner(
+                    &self.data_type,
+                    required.next_power_of_two(),
+                    owner,
+                )?)
+            } else {
+                None
+            };
+            let validity = if grow_validity {
+                let mut bitmap = try_admitted_vec(required.next_power_of_two(), owner)?;
+                if let Some(previous) = &self.validity {
+                    bitmap.extend_from_slice(previous);
+                }
+                bitmap.resize(self.len, true);
+                Some(bitmap)
+            } else {
+                None
+            };
+
+            let retained = owner
+                .size()
+                .checked_sub(released)
+                .ok_or_else(grouped_memory_limit)?;
+            Ok((replacement, validity, retained))
+        })();
+        let (replacement, validity, retained) = match staged {
+            Ok(staged) => staged,
+            Err(error) => {
+                owner.try_resize(original)?;
+                return Err(error);
+            }
+        };
+
+        // Existing arrays stay untouched until every replacement has been
+        // admitted and allocated. Moving or cloning cells cannot allocate.
+        if let Some(mut replacement) = replacement {
+            if convert {
+                let VectorData::Generic(values) = &mut replacement else {
+                    unreachable!("conversion creates a generic array");
+                };
+                for row in 0..self.len {
+                    values.push(self.get_value(row).unwrap_or(Value::Null));
+                }
+                // Only scalar typed arrays need conversion; their
+                // LogicalType contains no heap storage.
+                self.data_type = LogicalType::Any;
+            } else {
+                replacement.append(&mut self.data);
+            }
+            let previous = std::mem::replace(&mut self.data, replacement);
+            drop(previous);
+        }
+        if let Some(validity) = validity {
+            let previous = self.validity.replace(validity);
+            drop(previous);
+        }
+        owner.try_resize(retained)?;
+        self.push_value(value);
+        Ok(())
+    }
+
     /// Creates a new empty generic vector.
     #[must_use]
     pub fn new() -> Self {
@@ -513,6 +645,228 @@ impl ValueVector {
         self.len = 0;
         self.validity = None;
     }
+}
+
+#[cfg(feature = "spill")]
+impl VectorData {
+    fn try_with_owner(
+        data_type: &LogicalType,
+        capacity: usize,
+        owner: &mut GroupedMemoryOwner,
+    ) -> Result<Self, OperatorError> {
+        Ok(match data_type {
+            LogicalType::Bool => Self::Bool(try_admitted_vec(capacity, owner)?),
+            LogicalType::Int8 | LogicalType::Int16 | LogicalType::Int32 | LogicalType::Int64 => {
+                Self::Int64(try_admitted_vec(capacity, owner)?)
+            }
+            LogicalType::Float32 | LogicalType::Float64 => {
+                Self::Float64(try_admitted_vec(capacity, owner)?)
+            }
+            LogicalType::String => Self::String(try_admitted_vec(capacity, owner)?),
+            LogicalType::Node => Self::NodeId(try_admitted_vec(capacity, owner)?),
+            LogicalType::Edge => Self::EdgeId(try_admitted_vec(capacity, owner)?),
+            _ => Self::Generic(try_admitted_vec(capacity, owner)?),
+        })
+    }
+
+    fn accepts(&self, value: &Value) -> bool {
+        value.is_null()
+            || matches!(
+                (self, value),
+                (Self::Bool(_), Value::Bool(_))
+                    | (
+                        Self::Int64(_) | Self::NodeId(_) | Self::EdgeId(_),
+                        Value::Int64(_)
+                    )
+                    | (Self::Float64(_), Value::Float64(_))
+                    | (Self::String(_), Value::String(_))
+                    | (Self::Generic(_), _)
+            )
+    }
+
+    fn capacity(&self) -> usize {
+        match self {
+            Self::Bool(v) => v.capacity(),
+            Self::Int64(v) => v.capacity(),
+            Self::Float64(v) => v.capacity(),
+            Self::String(v) => v.capacity(),
+            Self::NodeId(v) => v.capacity(),
+            Self::EdgeId(v) => v.capacity(),
+            Self::Generic(v) => v.capacity(),
+        }
+    }
+
+    fn array_bytes(&self) -> Result<usize, OperatorError> {
+        let width = match self {
+            Self::Bool(_) => std::mem::size_of::<bool>(),
+            Self::Int64(_) => std::mem::size_of::<i64>(),
+            Self::Float64(_) => std::mem::size_of::<f64>(),
+            Self::String(_) => std::mem::size_of::<ArcStr>(),
+            Self::NodeId(_) => std::mem::size_of::<NodeId>(),
+            Self::EdgeId(_) => std::mem::size_of::<EdgeId>(),
+            Self::Generic(_) => std::mem::size_of::<Value>(),
+        };
+        self.capacity()
+            .checked_mul(width)
+            .ok_or_else(grouped_memory_limit)
+    }
+
+    fn append(&mut self, previous: &mut Self) {
+        match (self, previous) {
+            (Self::Bool(next), Self::Bool(old)) => next.append(old),
+            (Self::Int64(next), Self::Int64(old)) => next.append(old),
+            (Self::Float64(next), Self::Float64(old)) => next.append(old),
+            (Self::String(next), Self::String(old)) => next.append(old),
+            (Self::NodeId(next), Self::NodeId(old)) => next.append(old),
+            (Self::EdgeId(next), Self::EdgeId(old)) => next.append(old),
+            (Self::Generic(next), Self::Generic(old)) => next.append(old),
+            _ => unreachable!("growth retains the vector's storage kind"),
+        }
+    }
+}
+
+/// Admits the exact array layout requested from Rust's global allocator.
+#[cfg(feature = "spill")]
+pub(super) fn try_admitted_vec<T>(
+    capacity: usize,
+    owner: &mut GroupedMemoryOwner,
+) -> Result<Vec<T>, OperatorError> {
+    let bytes = capacity
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(grouped_memory_limit)?;
+    let original = owner.size();
+    owner.try_grow(bytes)?;
+    let mut values = Vec::new();
+    if values.try_reserve_exact(capacity).is_err() {
+        drop(values);
+        owner.try_resize(original)?;
+        return Err(grouped_memory_limit());
+    }
+    Ok(values)
+}
+
+#[cfg(feature = "spill")]
+enum TypeChildren<'a> {
+    One(Option<&'a LogicalType>),
+    Pair(Option<&'a LogicalType>, Option<&'a LogicalType>),
+    Tuple(std::slice::Iter<'a, LogicalType>),
+    Struct(std::slice::Iter<'a, (String, LogicalType)>),
+}
+
+#[cfg(feature = "spill")]
+impl<'a> TypeChildren<'a> {
+    fn next(&mut self) -> Option<&'a LogicalType> {
+        match self {
+            Self::One(next) => next.take(),
+            Self::Pair(first, second) => first.take().or_else(|| second.take()),
+            Self::Tuple(types) => types.next(),
+            Self::Struct(fields) => fields.next().map(|(_, ty)| ty),
+        }
+    }
+}
+
+/// Measures a type's retained heap with admitted, iterative traversal scratch.
+#[cfg(feature = "spill")]
+pub(crate) fn logical_type_retained_bytes(
+    data_type: &LogicalType,
+    owner: &mut GroupedMemoryOwner,
+) -> Result<usize, OperatorError> {
+    measure_logical_type(data_type, owner, false)
+}
+
+#[cfg(feature = "spill")]
+fn measure_logical_type(
+    data_type: &LogicalType,
+    owner: &mut GroupedMemoryOwner,
+    cloning: bool,
+) -> Result<usize, OperatorError> {
+    let mut scratch = owner.split(0)?;
+    let mut frames = Vec::<TypeChildren<'_>>::new();
+    let mut current = Some(data_type);
+    let mut bytes = 0usize;
+    while let Some(ty) = current {
+        let (own_bytes, children) = match ty {
+            LogicalType::List(inner) => (
+                std::mem::size_of::<LogicalType>(),
+                Some(TypeChildren::One(Some(inner))),
+            ),
+            LogicalType::Map { key, value } => (
+                2 * std::mem::size_of::<LogicalType>(),
+                Some(TypeChildren::Pair(Some(key), Some(value))),
+            ),
+            LogicalType::Tuple(types) => (
+                (if cloning {
+                    types.len()
+                } else {
+                    types.capacity()
+                })
+                .checked_mul(std::mem::size_of::<LogicalType>())
+                .ok_or_else(grouped_memory_limit)?,
+                Some(TypeChildren::Tuple(types.iter())),
+            ),
+            LogicalType::Struct(fields) => {
+                let mut fields_bytes = (if cloning {
+                    fields.len()
+                } else {
+                    fields.capacity()
+                })
+                .checked_mul(std::mem::size_of::<(String, LogicalType)>())
+                .ok_or_else(grouped_memory_limit)?;
+                for (name, _) in fields {
+                    fields_bytes = fields_bytes
+                        .checked_add(if cloning { name.len() } else { name.capacity() })
+                        .ok_or_else(grouped_memory_limit)?;
+                }
+                (fields_bytes, Some(TypeChildren::Struct(fields.iter())))
+            }
+            _ => (0, None),
+        };
+        bytes = bytes
+            .checked_add(own_bytes)
+            .ok_or_else(grouped_memory_limit)?;
+        if let Some(mut children) = children
+            && let Some(next) = children.next()
+        {
+            if frames.len() == frames.capacity() {
+                let capacity = frames
+                    .len()
+                    .checked_add(1)
+                    .and_then(usize::checked_next_power_of_two)
+                    .ok_or_else(grouped_memory_limit)?;
+                let mut replacement = try_admitted_vec(capacity, &mut scratch)?;
+                let previous_bytes = frames
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<TypeChildren<'_>>())
+                    .ok_or_else(grouped_memory_limit)?;
+                replacement.append(&mut frames);
+                let previous = std::mem::replace(&mut frames, replacement);
+                drop(previous);
+                scratch.try_resize(
+                    scratch
+                        .size()
+                        .checked_sub(previous_bytes)
+                        .ok_or_else(grouped_memory_limit)?,
+                )?;
+            }
+            frames.push(children);
+            current = Some(next);
+            continue;
+        }
+        current = loop {
+            match frames.last_mut() {
+                Some(children) => match children.next() {
+                    Some(next) => break Some(next),
+                    None => {
+                        frames.pop();
+                    }
+                },
+                None => break None,
+            }
+        };
+    }
+    drop(frames);
+    drop(scratch);
+    Ok(bytes)
 }
 
 impl Default for ValueVector {

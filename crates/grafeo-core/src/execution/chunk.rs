@@ -3,10 +3,18 @@
 //! A DataChunk holds a batch of rows in columnar format. Processing data in
 //! batches (typically 1024-2048 rows) lets the CPU stay busy and enables SIMD.
 
+#[cfg(feature = "spill")]
+use super::memory::{GroupedMemoryOwner, grouped_memory_limit};
+#[cfg(feature = "spill")]
+use super::operators::OperatorError;
 use super::selection::SelectionVector;
 use super::vector::ValueVector;
+#[cfg(feature = "spill")]
+use super::vector::{logical_type_retained_bytes, try_admitted_vec};
 use crate::index::ZoneMapEntry;
 use grafeo_common::types::LogicalType;
+#[cfg(feature = "spill")]
+use grafeo_common::types::Value;
 use grafeo_common::utils::hash::FxHashMap;
 
 /// Default chunk size (number of tuples).
@@ -65,9 +73,204 @@ pub struct DataChunk {
     capacity: usize,
     /// Zone map hints for chunk-level filtering (optional).
     zone_hints: Option<ChunkZoneHints>,
+    /// Column containers admitted through the controlled grouped-output route.
+    #[cfg(feature = "spill")]
+    owned_column_bytes: usize,
+    /// Keeps admission live until every chunk container has been dropped.
+    #[cfg(feature = "spill")]
+    owner: Option<GroupedMemoryOwner>,
+}
+
+/// Rows together with the reservation that owns their executor buffers.
+#[cfg(feature = "spill")]
+#[derive(Debug)]
+pub struct AccountedRows {
+    rows: Vec<Vec<Value>>,
+    column_types: Option<Vec<LogicalType>>,
+    owner: Option<GroupedMemoryOwner>,
+}
+
+#[cfg(feature = "spill")]
+impl AccountedRows {
+    /// Transfers rows and their reservation together to the next consumer.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<Vec<Value>>, Option<GroupedMemoryOwner>) {
+        (self.rows, self.owner)
+    }
+
+    /// Transfers captured schema and rows before their shared reservation.
+    #[must_use]
+    pub fn into_parts_with_types(
+        self,
+    ) -> (
+        Vec<Vec<Value>>,
+        Option<Vec<LogicalType>>,
+        Option<GroupedMemoryOwner>,
+    ) {
+        (self.rows, self.column_types, self.owner)
+    }
 }
 
 impl DataChunk {
+    /// Creates an admitted chunk for grouped output.
+    ///
+    /// Use [`Self::try_push_owned_value`] on this route. The existing manual
+    /// mutation APIs retain their unaccounted behavior for compatibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns a resource error if its buffers cannot be admitted.
+    #[cfg(feature = "spill")]
+    pub fn try_with_owner(
+        column_types: &[LogicalType],
+        capacity: usize,
+        mut owner: GroupedMemoryOwner,
+    ) -> Result<Self, OperatorError> {
+        if capacity > DEFAULT_CHUNK_SIZE {
+            return Err(grouped_memory_limit());
+        }
+        let original = owner.size();
+        let mut columns = try_admitted_vec(column_types.len(), &mut owner)?;
+        for data_type in column_types {
+            columns.push(ValueVector::try_with_owner(
+                data_type, capacity, &mut owner,
+            )?);
+        }
+        let owned_column_bytes = owner.size() - original;
+        Ok(Self {
+            columns,
+            selection: None,
+            count: 0,
+            capacity,
+            zone_hints: None,
+            owned_column_bytes,
+            owner: Some(owner),
+        })
+    }
+
+    /// Borrows the reservation carried by an admitted chunk.
+    #[cfg(feature = "spill")]
+    pub fn owner_mut(&mut self) -> Option<&mut GroupedMemoryOwner> {
+        self.owner.as_mut()
+    }
+
+    /// Pushes a value whose payload has already been admitted by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-column or resource error before growing a buffer.
+    #[cfg(feature = "spill")]
+    pub fn try_push_owned_value(
+        &mut self,
+        column: usize,
+        value: Value,
+    ) -> Result<(), OperatorError> {
+        let owner = self.owner.as_mut().ok_or_else(|| {
+            OperatorError::Internal("grouped output chunk has no memory owner".into())
+        })?;
+        let column = self.columns.get_mut(column).ok_or_else(|| {
+            OperatorError::Internal("grouped output column is out of bounds".into())
+        })?;
+        let before = owner.size();
+        column.try_push_owned_value(value, owner)?;
+        // Payloads are admitted before this call. Only the vector's arrays
+        // change its reservation here, including scalar-to-generic conversion.
+        if owner.size() >= before {
+            self.owned_column_bytes += owner.size() - before;
+        } else {
+            self.owned_column_bytes -= before - owner.size();
+        }
+        Ok(())
+    }
+
+    /// Converts columns to rows while carrying their executor reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a resource error if the live copy overlap cannot be admitted.
+    #[cfg(feature = "spill")]
+    pub fn try_into_accounted_rows(self) -> Result<AccountedRows, OperatorError> {
+        self.try_into_accounted_rows_with_types(false)
+    }
+
+    /// Captures result types while admitting their live copy overlap with columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns a resource error before growing schema or row buffers.
+    #[cfg(feature = "spill")]
+    pub fn try_into_accounted_rows_with_types(
+        self,
+        capture_types: bool,
+    ) -> Result<AccountedRows, OperatorError> {
+        self.try_into_accounted_rows_with_types_limited(capture_types, usize::MAX)
+    }
+
+    /// Takes at most `limit` selected rows while retaining their reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a resource error before allocating schema or row buffers.
+    #[cfg(feature = "spill")]
+    pub fn try_into_accounted_rows_with_types_limited(
+        mut self,
+        capture_types: bool,
+        limit: usize,
+    ) -> Result<AccountedRows, OperatorError> {
+        let column_types = if capture_types {
+            let mut types = match self.owner.as_mut() {
+                Some(owner) => try_admitted_vec(self.columns.len(), owner)?,
+                None => Vec::with_capacity(self.columns.len()),
+            };
+            for column in &self.columns {
+                if let Some(owner) = self.owner.as_mut() {
+                    let bytes = logical_type_retained_bytes(column.data_type(), owner)?;
+                    owner.try_grow(bytes)?;
+                }
+                types.push(column.data_type().clone());
+            }
+            Some(types)
+        } else {
+            None
+        };
+        let count = self.row_count().min(limit);
+        let mut rows = match self.owner.as_mut() {
+            Some(owner) => try_admitted_vec(count, owner)?,
+            None => Vec::with_capacity(count),
+        };
+        for position in 0..count {
+            let row = self
+                .selection
+                .as_ref()
+                .map_or(position, |s| s.get(position).unwrap_or(position));
+            let mut values = match self.owner.as_mut() {
+                Some(owner) => try_admitted_vec(self.columns.len(), owner)?,
+                None => Vec::with_capacity(self.columns.len()),
+            };
+            for column in &self.columns {
+                // Value clones share their payloads; no second payload heap
+                // is allocated while the column and row representations overlap.
+                values.push(column.get_value(row).unwrap_or(Value::Null));
+            }
+            rows.push(values);
+        }
+        self.columns = Vec::new();
+        self.selection = None;
+        self.zone_hints = None;
+        if let Some(owner) = self.owner.as_mut() {
+            let retained = owner
+                .size()
+                .checked_sub(self.owned_column_bytes)
+                .ok_or_else(grouped_memory_limit)?;
+            owner.try_resize(retained)?;
+        }
+        Ok(AccountedRows {
+            rows,
+            column_types,
+            owner: self.owner.take(),
+        })
+    }
+
     /// Creates an empty data chunk with no columns.
     #[must_use]
     pub fn empty() -> Self {
@@ -77,6 +280,10 @@ impl DataChunk {
             count: 0,
             capacity: 0,
             zone_hints: None,
+            #[cfg(feature = "spill")]
+            owned_column_bytes: 0,
+            #[cfg(feature = "spill")]
+            owner: None,
         }
     }
 
@@ -91,6 +298,10 @@ impl DataChunk {
             count,
             capacity,
             zone_hints: None,
+            #[cfg(feature = "spill")]
+            owned_column_bytes: 0,
+            #[cfg(feature = "spill")]
+            owner: None,
         }
     }
 
@@ -114,6 +325,10 @@ impl DataChunk {
             count: 0,
             capacity,
             zone_hints: None,
+            #[cfg(feature = "spill")]
+            owned_column_bytes: 0,
+            #[cfg(feature = "spill")]
+            owner: None,
         }
     }
 
@@ -339,6 +554,10 @@ impl DataChunk {
             count: row_count,
             capacity: row_count,
             zone_hints: None,
+            #[cfg(feature = "spill")]
+            owned_column_bytes: 0,
+            #[cfg(feature = "spill")]
+            owner: None,
         }
     }
 
@@ -366,6 +585,10 @@ impl DataChunk {
                 count: chunks[0].count,
                 capacity: chunks[0].capacity,
                 zone_hints: chunks[0].zone_hints.clone(),
+                #[cfg(feature = "spill")]
+                owned_column_bytes: 0,
+                #[cfg(feature = "spill")]
+                owner: None,
             };
         }
 
@@ -402,6 +625,10 @@ impl DataChunk {
             count: total_rows,
             capacity: total_rows,
             zone_hints: None,
+            #[cfg(feature = "spill")]
+            owned_column_bytes: 0,
+            #[cfg(feature = "spill")]
+            owner: None,
         }
     }
 
@@ -431,6 +658,10 @@ impl DataChunk {
             count: selected.len(),
             capacity: selected.len(),
             zone_hints: None,
+            #[cfg(feature = "spill")]
+            owned_column_bytes: 0,
+            #[cfg(feature = "spill")]
+            owner: None,
         }
     }
 
@@ -468,6 +699,10 @@ impl DataChunk {
             count: actual_count,
             capacity: actual_count,
             zone_hints: None,
+            #[cfg(feature = "spill")]
+            owned_column_bytes: 0,
+            #[cfg(feature = "spill")]
+            owner: None,
         }
     }
 
@@ -561,7 +796,259 @@ impl Clone for DataChunk {
             count: self.count,
             capacity: self.capacity,
             zone_hints: self.zone_hints.clone(),
+            #[cfg(feature = "spill")]
+            owned_column_bytes: 0,
+            #[cfg(feature = "spill")]
+            owner: None,
         }
+    }
+}
+
+#[cfg(all(test, feature = "spill"))]
+mod owned_tests {
+    use super::*;
+    use crate::execution::memory::GroupedMemoryOwner;
+    use crate::execution::operators::OperatorError;
+    use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig, MemoryRegion};
+    use grafeo_common::types::{EdgeId, NodeId, Value};
+    use std::sync::Arc;
+
+    fn manager(budget: usize) -> Arc<BufferManager> {
+        BufferManager::new(BufferManagerConfig {
+            budget,
+            soft_limit_fraction: 1.0,
+            evict_limit_fraction: 1.0,
+            hard_limit_fraction: 1.0,
+            background_eviction: false,
+            spill_path: None,
+        })
+    }
+
+    fn owner(manager: &Arc<BufferManager>) -> GroupedMemoryOwner {
+        GroupedMemoryOwner::try_new(Arc::clone(manager), 0).unwrap()
+    }
+
+    #[test]
+    fn owned_chunk_denies_buffers_before_allocation() {
+        let manager = manager(64);
+        let result = DataChunk::try_with_owner(&[LogicalType::Any], 16, owner(&manager));
+        assert!(matches!(result, Err(OperatorError::LimitExceeded(_))));
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn owned_chunk_keeps_reservation_until_drop() {
+        let manager = manager(16 * 1024);
+        let chunk = DataChunk::try_with_owner(&[LogicalType::Int64], 2, owner(&manager)).unwrap();
+        assert!(manager.allocated() > 0);
+        drop(chunk);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn owned_rows_deny_copy_overlap_and_release_input() {
+        let manager = manager(16 * 1024);
+        let mut chunk = DataChunk::try_with_owner(&[LogicalType::Any], 1, owner(&manager)).unwrap();
+        chunk.try_push_owned_value(0, Value::Int64(7)).unwrap();
+        chunk.set_count(1);
+        let held = manager
+            .try_allocate(
+                16 * 1024 - manager.allocated(),
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        assert!(matches!(
+            chunk.try_into_accounted_rows(),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        assert_eq!(manager.allocated(), held.size());
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn owned_schema_capture_requires_headroom() {
+        let budget = 16 * 1024;
+        let manager = manager(budget);
+        let schema = LogicalType::List(Box::new(LogicalType::Struct(vec![(
+            "field".repeat(512),
+            LogicalType::Int64,
+        )])));
+        let mut chunk = DataChunk::try_with_owner(&[schema], 1, owner(&manager)).unwrap();
+        chunk.try_push_owned_value(0, Value::Null).unwrap();
+        chunk.set_count(1);
+        let held = manager
+            .try_allocate(budget - manager.allocated(), MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        assert!(matches!(
+            chunk.try_into_accounted_rows_with_types(true),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        assert_eq!(manager.allocated(), held.size());
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn owned_rows_transfer_shared_payload_and_reservation() {
+        let manager = manager(16 * 1024);
+        let payload: Arc<[u8]> = Arc::from([11, 22, 33]);
+        let reservation = GroupedMemoryOwner::try_new(Arc::clone(&manager), 64).unwrap();
+        let mut chunk = DataChunk::try_with_owner(&[LogicalType::Any], 2, reservation).unwrap();
+        chunk
+            .try_push_owned_value(0, Value::Bytes(Arc::clone(&payload)))
+            .unwrap();
+        chunk.try_push_owned_value(0, Value::Null).unwrap();
+        chunk.set_count(2);
+        let (rows, reservation) = chunk.try_into_accounted_rows().unwrap().into_parts();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1], vec![Value::Null]);
+        let Value::Bytes(copied) = &rows[0][0] else {
+            panic!("the byte value must retain its type");
+        };
+        assert!(Arc::ptr_eq(&payload, copied));
+        assert!(reservation.is_some());
+        assert!(manager.allocated() > 64);
+        drop(rows);
+        assert!(manager.allocated() > 0);
+        drop(reservation);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn owned_rows_keep_entity_types_and_nulls() {
+        let manager = manager(16 * 1024);
+        let mut chunk =
+            DataChunk::try_with_owner(&[LogicalType::Node, LogicalType::Edge], 2, owner(&manager))
+                .unwrap();
+        chunk
+            .try_push_owned_value(0, Value::Int64(i64::MIN))
+            .unwrap();
+        chunk.try_push_owned_value(1, Value::Int64(-1)).unwrap();
+        chunk.try_push_owned_value(0, Value::Null).unwrap();
+        chunk.try_push_owned_value(1, Value::Int64(7)).unwrap();
+        chunk.set_count(2);
+        assert_eq!(chunk.column_types(), [LogicalType::Node, LogicalType::Edge]);
+        assert_eq!(
+            chunk.column(0).unwrap().get_node_id(0),
+            Some(NodeId::new(1 << 63))
+        );
+        assert_eq!(
+            chunk.column(1).unwrap().get_edge_id(0),
+            Some(EdgeId::new(u64::MAX))
+        );
+        let rows = chunk.try_into_accounted_rows().unwrap();
+        let (values, reservation) = rows.into_parts();
+        assert_eq!(
+            values,
+            vec![
+                vec![Value::Int64(i64::MIN), Value::Int64(-1)],
+                vec![Value::Null, Value::Int64(7)]
+            ]
+        );
+        drop(values);
+        drop(reservation);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn owned_push_denies_growth_without_changing_column() {
+        let manager = manager(16 * 1024);
+        let mut chunk = DataChunk::try_with_owner(&[LogicalType::Any], 1, owner(&manager)).unwrap();
+        chunk.try_push_owned_value(0, Value::Int64(7)).unwrap();
+        let held = manager
+            .try_allocate(
+                16 * 1024 - manager.allocated(),
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        assert!(matches!(
+            chunk.try_push_owned_value(0, Value::Int64(9)),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        assert_eq!(chunk.column(0).unwrap().len(), 1);
+        assert_eq!(chunk.column(0).unwrap().get_value(0), Some(Value::Int64(7)));
+        assert_eq!(manager.allocated(), 16 * 1024);
+        drop(chunk);
+        assert_eq!(manager.allocated(), held.size());
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn owned_push_denies_null_validity_before_mutation() {
+        let manager = manager(16 * 1024);
+        let mut chunk =
+            DataChunk::try_with_owner(&[LogicalType::Int64], 1, owner(&manager)).unwrap();
+        let held = manager
+            .try_allocate(
+                16 * 1024 - manager.allocated(),
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        assert!(matches!(
+            chunk.try_push_owned_value(0, Value::Null),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        assert_eq!(chunk.column(0).unwrap().len(), 0);
+        drop(chunk);
+        assert_eq!(manager.allocated(), held.size());
+    }
+
+    #[test]
+    fn owned_push_denies_type_conversion_before_mutation() {
+        let manager = manager(16 * 1024);
+        let mut chunk =
+            DataChunk::try_with_owner(&[LogicalType::Int64], 1, owner(&manager)).unwrap();
+        chunk.try_push_owned_value(0, Value::Int64(7)).unwrap();
+        let held = manager
+            .try_allocate(
+                16 * 1024 - manager.allocated(),
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        assert!(matches!(
+            chunk.try_push_owned_value(0, Value::Bool(true)),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        assert_eq!(chunk.column(0).unwrap().data_type(), &LogicalType::Int64);
+        assert_eq!(chunk.column(0).unwrap().get_value(0), Some(Value::Int64(7)));
+        assert_eq!(chunk.column(0).unwrap().len(), 1);
+        drop(chunk);
+        assert_eq!(manager.allocated(), held.size());
+    }
+
+    #[test]
+    fn owned_push_preserves_values_across_growth_and_conversion() {
+        let manager = manager(16 * 1024);
+        let mut chunk =
+            DataChunk::try_with_owner(&[LogicalType::Int64], 1, owner(&manager)).unwrap();
+        chunk.try_push_owned_value(0, Value::Int64(7)).unwrap();
+        chunk.try_push_owned_value(0, Value::Bool(true)).unwrap();
+        chunk.try_push_owned_value(0, Value::Null).unwrap();
+        chunk.set_count(3);
+        assert_eq!(chunk.column_types(), [LogicalType::Any]);
+        let (rows, reservation) = chunk.try_into_accounted_rows().unwrap().into_parts();
+        assert_eq!(
+            rows,
+            vec![
+                vec![Value::Int64(7)],
+                vec![Value::Bool(true)],
+                vec![Value::Null]
+            ]
+        );
+        drop(rows);
+        drop(reservation);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    fn owned_chunk_denies_nested_type_metadata_before_clone() {
+        let manager = manager(4096);
+        let data_type = LogicalType::Tuple(vec![LogicalType::Int64; 512]);
+        let result = DataChunk::try_with_owner(&[data_type], 0, owner(&manager));
+        assert!(matches!(result, Err(OperatorError::LimitExceeded(_))));
+        assert_eq!(manager.allocated(), 0);
     }
 }
 

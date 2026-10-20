@@ -282,70 +282,88 @@ impl Pipeline {
         Ok(true)
     }
 
-    /// Finalize all operators in reverse order.
+    /// Finalize in source order, forwarding each batch through the remaining
+    /// operators immediately so downstream stop/error reaches its producer.
     fn finalize_all(&mut self) -> Result<(), OperatorError> {
-        // For pipeline breakers, finalize produces output
-        // We need to chain finalize calls through the operators
-
-        if self.operators.is_empty() {
-            return self.sink.finalize();
+        for index in 0..self.operators.len() {
+            self.check_deadline()?;
+            let (_, pending) = self.operators.split_at_mut(index);
+            let (operator, remaining) = pending.split_first_mut().expect("index is in bounds");
+            let mut forwarding = FinalizeForwarder {
+                operators: remaining,
+                sink: &mut *self.sink,
+                deadline: self.deadline,
+                stopped: false,
+            };
+            operator.finalize(&mut forwarding)?;
+            // Stop this producer immediately, but still flush downstream
+            // operators: LIMIT may have left accepted rows in a buffered sort
+            // or aggregate before it refused the next producer batch.
         }
-
-        // Finalize operators in order, each pushing to the next
-        for i in 0..self.operators.len() {
-            let is_last = i == self.operators.len() - 1;
-
-            if is_last {
-                self.operators[i].finalize(&mut *self.sink)?;
-            } else {
-                // Collect finalize output and push through remaining operators
-                let mut collector = ChunkCollector::new();
-                self.operators[i].finalize(&mut collector)?;
-
-                for chunk in collector.into_chunks() {
-                    // Push through remaining operators
-                    self.push_through_from(chunk, i + 1)?;
-                }
-            }
-        }
-
+        self.check_deadline()?;
         self.sink.finalize()
     }
+}
 
-    /// Push a chunk through operators starting at index.
-    fn push_through_from(&mut self, chunk: DataChunk, start: usize) -> Result<bool, OperatorError> {
-        let mut current_chunk = chunk;
-
-        for i in start..self.operators.len() {
-            let is_last = i == self.operators.len() - 1;
-
-            if is_last {
-                return self.operators[i].push(current_chunk, &mut *self.sink);
-            }
-
-            let mut collector = ChunkCollector::new();
-            let continue_processing = self.operators[i].push(current_chunk, &mut collector)?;
-
-            if !continue_processing || collector.is_empty() {
-                return Ok(continue_processing);
-            }
-
-            current_chunk = collector.into_single_chunk();
+/// This borrowed adapter lives only during one finalization call.
+struct FinalizeForwarder<'a> {
+    operators: &'a mut [Box<dyn PushOperator>],
+    sink: &'a mut dyn Sink,
+    deadline: Option<Instant>,
+    stopped: bool,
+}
+impl Sink for FinalizeForwarder<'_> {
+    fn consume(&mut self, chunk: DataChunk) -> Result<bool, OperatorError> {
+        if self.stopped {
+            return Ok(false);
         }
-
-        self.sink.consume(current_chunk)
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(OperatorError::Timeout);
+        }
+        let continued = if let Some((operator, remaining)) = self.operators.split_first_mut() {
+            let mut forwarding = FinalizeForwarder {
+                operators: remaining,
+                sink: self.sink,
+                deadline: self.deadline,
+                stopped: false,
+            };
+            let continued = operator.push(chunk, &mut forwarding)?;
+            continued && !forwarding.stopped
+        } else {
+            self.sink.consume(chunk)?
+        };
+        self.stopped = !continued;
+        Ok(continued)
+    }
+    fn finalize(&mut self) -> Result<(), OperatorError> {
+        Ok(())
+    }
+    fn name(&self) -> &'static str {
+        "FinalizeForwarder"
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        unreachable!("borrowed finalization adapter cannot be detached")
     }
 }
 
 /// Collects chunks from operators for intermediate processing.
 pub struct ChunkCollector {
     chunks: Vec<DataChunk>,
+    #[cfg(feature = "spill")]
+    chunks_owner: Option<super::memory::GroupedMemoryOwner>,
 }
 
 impl ChunkCollector {
     /// Create a new chunk collector.
     pub fn new() -> Self {
-        Self { chunks: Vec::new() }
+        Self {
+            chunks: Vec::new(),
+            #[cfg(feature = "spill")]
+            chunks_owner: None,
+        }
     }
 
     /// Check if collector has any chunks.
@@ -361,6 +379,64 @@ impl ChunkCollector {
     /// Convert to a vector of chunks.
     pub fn into_chunks(self) -> Vec<DataChunk> {
         self.chunks
+    }
+
+    /// Transfers chunks together with the reservation for their outer container.
+    ///
+    /// Keep the owner until the vector storage has been released. Each chunk
+    /// separately retains its data reservation.
+    #[cfg(feature = "spill")]
+    pub fn into_accounted_chunks(
+        self,
+    ) -> (Vec<DataChunk>, Option<super::memory::GroupedMemoryOwner>) {
+        (self.chunks, self.chunks_owner)
+    }
+
+    #[cfg(feature = "spill")]
+    fn admit_chunk_slot(&mut self, chunk: &mut DataChunk) -> Result<(), OperatorError> {
+        use super::memory::{GroupedMemoryOwner, checked_grouped_bytes, grouped_memory_limit};
+        let manager = chunk.owner_mut().map(|owner| owner.manager().clone());
+        if let Some(manager) = manager {
+            if let Some(owner) = &self.chunks_owner {
+                if !std::sync::Arc::ptr_eq(owner.manager(), &manager) {
+                    return Err(OperatorError::Internal(
+                        "collected chunks must belong to the same memory manager".to_string(),
+                    ));
+                }
+            } else {
+                self.chunks_owner = Some(GroupedMemoryOwner::try_new(
+                    manager,
+                    checked_grouped_bytes(self.chunks.capacity(), size_of::<DataChunk>())?,
+                )?);
+            }
+        }
+        let Some(owner) = &mut self.chunks_owner else {
+            return Ok(());
+        };
+        if self.chunks.len() < self.chunks.capacity() {
+            return Ok(());
+        }
+        let old_bytes = owner.size();
+        let capacity = self
+            .chunks
+            .capacity()
+            .checked_mul(2)
+            .map(|n| n.max(4))
+            .ok_or_else(grouped_memory_limit)?;
+        owner.try_grow(checked_grouped_bytes(capacity, size_of::<DataChunk>())?)?;
+        if self
+            .chunks
+            .try_reserve_exact(capacity - self.chunks.len())
+            .is_err()
+        {
+            owner.try_resize(old_bytes)?;
+            return Err(grouped_memory_limit());
+        }
+        owner.try_resize(checked_grouped_bytes(
+            self.chunks.capacity(),
+            size_of::<DataChunk>(),
+        )?)?;
+        Ok(())
     }
 
     /// Merge all chunks into a single chunk.
@@ -394,7 +470,11 @@ impl Default for ChunkCollector {
 
 impl Sink for ChunkCollector {
     fn consume(&mut self, chunk: DataChunk) -> Result<bool, OperatorError> {
+        #[cfg(feature = "spill")]
+        let mut chunk = chunk;
         if !chunk.is_empty() {
+            #[cfg(feature = "spill")]
+            self.admit_chunk_slot(&mut chunk)?;
             self.chunks.push(chunk);
         }
         Ok(true)
@@ -635,5 +715,172 @@ mod tests {
 
         let computed_size = pipeline.compute_chunk_size();
         assert!(computed_size <= SMALL_CHUNK_SIZE);
+    }
+    struct FinalizeBatches(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl PushOperator for FinalizeBatches {
+        fn push(&mut self, _chunk: DataChunk, _sink: &mut dyn Sink) -> Result<bool, OperatorError> {
+            Ok(true)
+        }
+        fn finalize(&mut self, sink: &mut dyn Sink) -> Result<(), OperatorError> {
+            for value in [1, 2] {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let chunk = DataChunk::new(vec![ValueVector::from_values(&[Value::Int64(value)])]);
+                if !sink.consume(chunk)? {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "FinalizeBatches"
+        }
+    }
+
+    #[test]
+    fn limit_stops_before_second_drain_batch() {
+        let produced = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut pipeline = Pipeline::new(
+            Box::new(TestSource::new(0, 0)),
+            vec![
+                Box::new(FinalizeBatches(produced.clone())),
+                Box::new(crate::execution::operators::push::LimitPushOperator::new(1)),
+            ],
+            Box::new(ChunkCollector::new()),
+        );
+        pipeline.execute().unwrap();
+        assert_eq!(produced.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let sink = pipeline
+            .into_sink()
+            .into_any()
+            .downcast::<ChunkCollector>()
+            .unwrap();
+        assert_eq!(sink.row_count(), 1);
+    }
+
+    #[test]
+    fn limit_stop_still_finalizes_downstream_sort() {
+        let produced = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut pipeline = Pipeline::new(
+            Box::new(TestSource::new(0, 0)),
+            vec![
+                Box::new(FinalizeBatches(produced.clone())),
+                Box::new(crate::execution::operators::push::LimitPushOperator::new(1)),
+                Box::new(crate::execution::operators::push::SortPushOperator::ascending(0)),
+            ],
+            Box::new(ChunkCollector::new()),
+        );
+        pipeline.execute().unwrap();
+        assert_eq!(produced.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let sink = pipeline
+            .into_sink()
+            .into_any()
+            .downcast::<ChunkCollector>()
+            .unwrap();
+        assert_eq!(sink.row_count(), 1);
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].column_count(), 1);
+        assert_eq!(
+            chunks[0].column(0).unwrap().get_value(0),
+            Some(Value::Int64(1))
+        );
+    }
+
+    #[test]
+    fn deadline_prevents_empty_source_finalization() {
+        let produced = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut pipeline = Pipeline::new(
+            Box::new(TestSource::new(0, 0)),
+            vec![Box::new(FinalizeBatches(produced.clone()))],
+            Box::new(ChunkCollector::new()),
+        )
+        .with_deadline(Some(Instant::now()));
+        assert!(matches!(pipeline.execute(), Err(OperatorError::Timeout)));
+        assert_eq!(produced.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+    #[test]
+    #[cfg(feature = "spill")]
+    fn owned_collector_denies_container_growth_before_retaining_chunk() {
+        use crate::execution::memory::GroupedMemoryOwner;
+        use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig, MemoryRegion};
+        use grafeo_common::types::LogicalType;
+        let budget = 1024 * 1024;
+        let manager = BufferManager::new(BufferManagerConfig {
+            budget,
+            hard_limit_fraction: 1.0,
+            ..BufferManagerConfig::default()
+        });
+        let owner = GroupedMemoryOwner::try_new(manager.clone(), 0).unwrap();
+        let mut chunk = DataChunk::try_with_owner(&[LogicalType::Int64], 1, owner).unwrap();
+        chunk.try_push_owned_value(0, Value::Int64(7)).unwrap();
+        chunk.set_count(1);
+        let held = manager
+            .try_allocate(budget - manager.allocated(), MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        let mut collector = ChunkCollector::new();
+        assert!(matches!(
+            collector.consume(chunk),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        assert!(collector.is_empty());
+        drop(collector);
+        assert_eq!(manager.allocated(), held.size());
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn owned_collector_handoff_keeps_container_and_chunk_grants() {
+        use crate::execution::memory::GroupedMemoryOwner;
+        use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
+        use grafeo_common::types::LogicalType;
+        let manager = BufferManager::new(BufferManagerConfig::default());
+        let mut collector = ChunkCollector::new();
+        for value in 0..5 {
+            let owner = GroupedMemoryOwner::try_new(manager.clone(), 0).unwrap();
+            let mut chunk = DataChunk::try_with_owner(&[LogicalType::Int64], 1, owner).unwrap();
+            chunk.try_push_owned_value(0, Value::Int64(value)).unwrap();
+            chunk.set_count(1);
+            collector.consume(chunk).unwrap();
+        }
+        let retained = manager.allocated();
+        let (chunks, owner) = collector.into_accounted_chunks();
+        assert_eq!(chunks.len(), 5);
+        assert_eq!(manager.allocated(), retained);
+        let container_bytes = owner.as_ref().unwrap().size();
+        assert_eq!(container_bytes, chunks.capacity() * size_of::<DataChunk>());
+        drop(chunks);
+        assert_eq!(manager.allocated(), container_bytes);
+        drop(owner);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn owned_collector_rejects_foreign_manager_without_losing_retained_chunk() {
+        use crate::execution::memory::GroupedMemoryOwner;
+        use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
+        use grafeo_common::types::LogicalType;
+        let first = BufferManager::new(BufferManagerConfig::default());
+        let second = BufferManager::new(BufferManagerConfig::default());
+        let mut collector = ChunkCollector::new();
+        for manager in [&first, &second] {
+            let owner = GroupedMemoryOwner::try_new(manager.clone(), 0).unwrap();
+            let mut chunk = DataChunk::try_with_owner(&[LogicalType::Int64], 1, owner).unwrap();
+            chunk.try_push_owned_value(0, Value::Int64(7)).unwrap();
+            chunk.set_count(1);
+            let result = collector.consume(chunk);
+            if std::sync::Arc::ptr_eq(manager, &first) {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(OperatorError::Internal(_))));
+            }
+        }
+        assert_eq!(collector.row_count(), 1);
+        assert!(first.allocated() > 0);
+        assert_eq!(second.allocated(), 0);
+        drop(collector);
+        assert_eq!(first.allocated(), 0);
     }
 }

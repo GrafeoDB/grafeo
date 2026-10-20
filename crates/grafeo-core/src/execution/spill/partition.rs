@@ -538,7 +538,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
                         grouped_hash_table_bytes::<(SerializedKey, PartitionEntry<V>)>(needed)?;
                     let mut table_owner = match partition.table_owner.take() {
                         Some(owner) => owner,
-                        None => GroupedMemoryOwner::try_new(Arc::clone(key_owner.manager()), 0)?,
+                        None => key_owner.split(0)?,
                     };
                     let old_bytes = table_owner.size();
                     // Old and new tables coexist while hashbrown rehashes.
@@ -1084,6 +1084,175 @@ mod tests {
 
     fn key(values: &[i64]) -> Vec<Value> {
         values.iter().map(|&v| Value::Int64(v)).collect()
+    }
+
+    struct ConsumerScanCounter(std::sync::atomic::AtomicUsize);
+
+    impl grafeo_common::memory::buffer::MemoryConsumer for ConsumerScanCounter {
+        fn name(&self) -> &str {
+            "partition-pressure-probe"
+        }
+        fn memory_usage(&self) -> usize {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            0
+        }
+        fn eviction_priority(&self) -> u8 {
+            0
+        }
+        fn region(&self) -> grafeo_common::memory::buffer::MemoryRegion {
+            grafeo_common::memory::buffer::MemoryRegion::ExecutionBuffers
+        }
+        fn evict(&self, _target_bytes: usize) -> usize {
+            0
+        }
+        fn current_tier(&self) -> grafeo_common::memory::buffer::StorageTier {
+            grafeo_common::memory::buffer::StorageTier::Uninitialized
+        }
+    }
+
+    fn deserialize_i64_admitted(
+        reader: &mut dyn Read,
+        _owner: &mut GroupedMemoryOwner,
+    ) -> Result<i64, OperatorError> {
+        deserialize_i64(reader).map_err(grouped_io_error)
+    }
+
+    #[test]
+    fn accounted_table_creation_does_not_scan_consumers() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const PARTITIONS: usize = 256;
+        let (directory, spill) = create_manager();
+        let budget = 32 * 1024 * 1024;
+        let buffer = BufferManager::with_budget(budget);
+        let mut state: PartitionedState<i64> = PartitionedState::try_new_accounted(
+            Arc::clone(&buffer),
+            Arc::clone(&spill),
+            PARTITIONS,
+            serialize_i64,
+            deserialize_i64,
+            deserialize_i64_admitted,
+        )
+        .unwrap();
+        let mut keys = vec![None; PARTITIONS];
+        let mut missing = PARTITIONS;
+        for value in 0..100_000_i64 {
+            let candidate = key(&[value]);
+            let index = state.partition_for(&candidate);
+            if keys[index].is_none() {
+                keys[index] = Some(candidate);
+                missing -= 1;
+                if missing == 0 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(missing, 0, "fixture must exercise every partition");
+        let held = buffer
+            .try_allocate(
+                budget * 9 / 10 - buffer.allocated(),
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        assert_eq!(buffer.allocated(), budget * 9 / 10);
+        let scans = Arc::new(ConsumerScanCounter(AtomicUsize::new(0)));
+        buffer.register_consumer(scans.clone());
+        for key in keys.iter().flatten() {
+            state
+                .with_value_accounted(
+                    key,
+                    |_| Ok(0),
+                    |value, _owner| {
+                        *value += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            scans.0.load(Ordering::Relaxed),
+            0,
+            "creating admitted tables must not scan consumers for empty grants"
+        );
+        assert_eq!(state.total_size(), PARTITIONS);
+        for key in keys.iter().flatten() {
+            state
+                .with_value_accounted(
+                    key,
+                    |_| panic!("every fixture group already exists"),
+                    |value, _owner| {
+                        assert_eq!(*value, 1);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        drop(state);
+        assert_eq!(buffer.allocated(), held.size());
+        drop(held);
+        assert_eq!(buffer.allocated(), 0);
+    }
+
+    #[test]
+    fn accounted_table_refusal_evicts_before_initializing_value() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+        use std::cell::Cell;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (_directory, spill) = create_manager();
+        let buffer = BufferManager::with_budget(32 * 1024 * 1024);
+        let mut state: PartitionedState<i64> = PartitionedState::try_new_accounted(
+            Arc::clone(&buffer),
+            Arc::clone(&spill),
+            256,
+            serialize_i64,
+            deserialize_i64,
+            deserialize_i64_admitted,
+        )
+        .unwrap();
+        let key = key(&[1]);
+        let mut key_bytes = ByteCounter(0);
+        serialize_row(&key, &mut key_bytes).unwrap();
+        let held = buffer
+            .try_allocate(
+                buffer.hard_limit() - buffer.allocated() - key_bytes.0,
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        let before = buffer.allocated();
+        let scans = Arc::new(ConsumerScanCounter(AtomicUsize::new(0)));
+        buffer.register_consumer(scans.clone());
+        let initialized = Cell::new(false);
+        let updated = Cell::new(false);
+        let error = state
+            .with_value_accounted(
+                &key,
+                |_owner| {
+                    initialized.set(true);
+                    Ok(0)
+                },
+                |_value, _owner| {
+                    updated.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, OperatorError::LimitExceeded(_)));
+        assert!(
+            scans.0.load(Ordering::Relaxed) > 0,
+            "refusal must try eviction"
+        );
+        assert!(!initialized.get() && !updated.get());
+        assert_eq!(state.total_size(), 0);
+        assert_eq!(buffer.allocated(), before);
+        assert_eq!(spill.active_file_count(), 0);
+        drop(state);
+        assert_eq!(buffer.allocated(), held.size());
+        drop(held);
+        assert_eq!(buffer.allocated(), 0);
     }
 
     #[test]

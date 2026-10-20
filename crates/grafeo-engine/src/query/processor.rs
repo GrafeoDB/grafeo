@@ -830,6 +830,8 @@ pub(crate) fn explain_result(plan: &LogicalPlan) -> QueryResult {
     QueryResult {
         columns: vec!["plan".to_string()],
         column_types: vec![grafeo_common::types::LogicalType::String],
+        #[cfg(feature = "spill")]
+        rows_owner: None,
         rows: vec![vec![Value::String(tree_text.into())]],
         execution_time_ms: None,
         rows_scanned: None,
@@ -854,6 +856,8 @@ pub(crate) fn physical_explain_result(
     QueryResult {
         columns: vec!["plan".to_string()],
         column_types: vec![grafeo_common::types::LogicalType::String],
+        #[cfg(feature = "spill")]
+        rows_owner: None,
         rows: vec![vec![Value::String(output.into())]],
         execution_time_ms: None,
         rows_scanned: None,

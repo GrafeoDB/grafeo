@@ -135,12 +135,22 @@ impl Executor {
 
             match operator.next() {
                 Ok(Some(chunk)) => {
-                    // Capture column types from first non-empty chunk
-                    if !types_captured && chunk.column_count() > 0 {
-                        self.capture_column_types(&chunk, &mut result);
-                        types_captured = true;
+                    #[cfg(feature = "spill")]
+                    self.collect_accounted_chunk(
+                        chunk,
+                        &mut result,
+                        &mut types_captured,
+                        usize::MAX,
+                    )?;
+                    #[cfg(not(feature = "spill"))]
+                    {
+                        // Capture column types from the first chunk with columns.
+                        if !types_captured && chunk.column_count() > 0 {
+                            self.capture_column_types(&chunk, &mut result);
+                            types_captured = true;
+                        }
+                        self.collect_chunk(&chunk, &mut result)?;
                     }
-                    self.collect_chunk(&chunk, &mut result)?;
                 }
                 Ok(None) => break,
                 Err(err) => return Err(convert_operator_error(err)),
@@ -194,16 +204,33 @@ impl Executor {
         let collector = any_sink
             .downcast::<ChunkCollector>()
             .expect("sink should be ChunkCollector");
+        #[cfg(feature = "spill")]
+        let (chunks, collector_owner) = collector.into_accounted_chunks();
+        #[cfg(not(feature = "spill"))]
         let chunks = collector.into_chunks();
 
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
 
-        for chunk in &chunks {
+        #[cfg(feature = "spill")]
+        {
+            // Keep the iterator before its owner in one tuple: on success or
+            // error, remaining chunks and the collector Vec allocation drop
+            // before that container's grant is released.
+            let mut chunks = (chunks.into_iter(), collector_owner);
+            for chunk in chunks.0.by_ref() {
+                self.check_deadline()?;
+                self.collect_accounted_chunk(chunk, &mut result, &mut types_captured, usize::MAX)?;
+            }
+            drop(chunks);
+        }
+        #[cfg(not(feature = "spill"))]
+        for chunk in chunks {
+            self.check_deadline()?;
             if !types_captured && chunk.column_count() > 0 {
-                self.capture_column_types(chunk, &mut result);
+                self.capture_column_types(&chunk, &mut result);
                 types_captured = true;
             }
-            self.collect_chunk(chunk, &mut result)?;
+            self.collect_chunk(&chunk, &mut result)?;
         }
 
         Ok(self.with_counters(result))
@@ -232,13 +259,25 @@ impl Executor {
 
             match operator.next() {
                 Ok(Some(chunk)) => {
-                    // Capture column types from first non-empty chunk
-                    if !types_captured && chunk.column_count() > 0 {
-                        self.capture_column_types(&chunk, &mut result);
-                        types_captured = true;
-                    }
                     let remaining = limit - collected;
-                    collected += self.collect_chunk_limited(&chunk, &mut result, remaining)?;
+                    #[cfg(feature = "spill")]
+                    {
+                        collected += self.collect_accounted_chunk(
+                            chunk,
+                            &mut result,
+                            &mut types_captured,
+                            remaining,
+                        )?;
+                    }
+                    #[cfg(not(feature = "spill"))]
+                    {
+                        // Capture column types from the first chunk with columns.
+                        if !types_captured && chunk.column_count() > 0 {
+                            self.capture_column_types(&chunk, &mut result);
+                            types_captured = true;
+                        }
+                        collected += self.collect_chunk_limited(&chunk, &mut result, remaining)?;
+                    }
                 }
                 Ok(None) => break,
                 Err(err) => return Err(convert_operator_error(err)),
@@ -246,6 +285,37 @@ impl Executor {
         }
 
         Ok(self.with_counters(result))
+    }
+
+    /// Transfers selected rows and their admission, including any captured schema.
+    #[cfg(feature = "spill")]
+    fn collect_accounted_chunk(
+        &self,
+        mut chunk: DataChunk,
+        result: &mut QueryResult,
+        types_captured: &mut bool,
+        limit: usize,
+    ) -> Result<usize> {
+        let count = chunk.row_count().min(limit);
+        let capture_types = !*types_captured && chunk.column_count() > 0;
+        if chunk.owner_mut().is_none() {
+            // Legacy chunks keep the direct collection path without a second
+            // outer row container or a new executor reservation.
+            if capture_types {
+                self.capture_column_types(&chunk, result);
+                *types_captured = true;
+            }
+            return self.collect_chunk_limited(&chunk, result, limit);
+        }
+        let rows = chunk
+            .try_into_accounted_rows_with_types_limited(capture_types, limit)
+            .map_err(|error| match error {
+                OperatorError::Timeout => self.timeout_error(),
+                other => convert_operator_error(other),
+            })?;
+        result.extend_accounted(rows)?;
+        *types_captured |= capture_types;
+        Ok(count)
     }
 
     /// Captures column types from a DataChunk.
@@ -264,6 +334,7 @@ impl Executor {
     ///
     /// Uses `selected_indices()` to correctly handle chunks with selection vectors
     /// (e.g., after filtering operations).
+    #[cfg(not(feature = "spill"))]
     fn collect_chunk(&self, chunk: &DataChunk, result: &mut QueryResult) -> Result<usize> {
         let col_count = chunk.column_count();
         let mut collected = 0;
@@ -601,6 +672,313 @@ mod tests {
 
         let result = executor.execute_pipeline(source, vec![]).unwrap();
         assert_eq!(result.column_types, vec![LogicalType::Int64]);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn accounted_executor_retains_nested_result_schema() {
+        use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
+        use grafeo_core::execution::memory::GroupedMemoryOwner;
+        use std::sync::Arc;
+
+        struct AdmittedChunk(Option<DataChunk>);
+        impl Operator for AdmittedChunk {
+            fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
+                Ok(self.0.take())
+            }
+            fn reset(&mut self) {}
+            fn name(&self) -> &'static str {
+                "AdmittedSchemaChunk"
+            }
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+                self
+            }
+        }
+
+        let manager = BufferManager::new(BufferManagerConfig {
+            hard_limit_fraction: 1.0,
+            ..BufferManagerConfig::with_budget(1024 * 1024)
+        });
+        let executor = Executor::with_columns(vec!["value".into()]);
+        let execute = |schema: &LogicalType| {
+            let owner = GroupedMemoryOwner::try_new(Arc::clone(&manager), 0).unwrap();
+            let mut chunk =
+                DataChunk::try_with_owner(std::slice::from_ref(schema), 1, owner).unwrap();
+            // Null has no retained payload, so the two runs differ only in
+            // schema heap, not in result values or row/container capacities.
+            chunk.try_push_owned_value(0, Value::Null).unwrap();
+            chunk.set_count(1);
+            executor
+                .execute_pipeline(Box::new(AdmittedChunk(Some(chunk))), vec![])
+                .unwrap()
+        };
+
+        let scalar = execute(&LogicalType::Int64);
+        assert_eq!(scalar.rows(), &[vec![Value::Null]]);
+        let scalar_bytes = manager.allocated();
+        assert!(scalar_bytes > 0);
+        drop(scalar);
+        assert_eq!(manager.allocated(), 0);
+
+        let field_name = "f".repeat(8192);
+        // Two Box<LogicalType> allocations, one Struct field array, and its
+        // String. Cloning these nonempty Vec/String values uses their lengths.
+        let schema_heap = 2 * std::mem::size_of::<LogicalType>()
+            + std::mem::size_of::<(String, LogicalType)>()
+            + field_name.len();
+        let schema = LogicalType::List(Box::new(LogicalType::Struct(vec![(
+            field_name,
+            LogicalType::List(Box::new(LogicalType::Int64)),
+        )])));
+        let mut result = execute(&schema);
+        assert_eq!(result.rows(), &[vec![Value::Null]]);
+        assert_eq!(result.column_types, vec![schema]);
+        assert_eq!(
+            manager.allocated(),
+            scalar_bytes + schema_heap,
+            "capturing a nested schema must retain its additional heap admission"
+        );
+        // Exercise the real result lifetime after every row buffer is gone.
+        // Reservation shrink on public mutation is not part of this contract;
+        // the existing row grant and the schema grant stay until result drop.
+        result.rows.clear();
+        result.rows.shrink_to_fit();
+        assert_eq!(manager.allocated(), scalar_bytes + schema_heap);
+        assert_eq!(result.column_types.len(), 1);
+        drop(result);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[cfg(feature = "spill")]
+    mod accounted_pull {
+        use super::*;
+        use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
+        use grafeo_core::execution::memory::GroupedMemoryOwner;
+        use grafeo_core::execution::selection::SelectionVector;
+        use std::collections::VecDeque;
+
+        struct Source {
+            chunks: VecDeque<DataChunk>,
+            manager: Arc<BufferManager>,
+            failure: Option<OperatorError>,
+            pulls: usize,
+        }
+
+        impl Operator for Source {
+            fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
+                self.pulls += 1;
+                if let Some(chunk) = self.chunks.pop_front() {
+                    return Ok(Some(chunk));
+                }
+                if let Some(error) = self.failure.take() {
+                    assert!(
+                        self.manager.allocated() > 0,
+                        "the first batch must still be admitted when the source fails"
+                    );
+                    return Err(error);
+                }
+                Ok(None)
+            }
+
+            fn reset(&mut self) {}
+            fn name(&self) -> &'static str {
+                "AdmittedPull"
+            }
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+                self
+            }
+        }
+
+        fn manager() -> Arc<BufferManager> {
+            BufferManager::new(BufferManagerConfig {
+                hard_limit_fraction: 1.0,
+                ..BufferManagerConfig::with_budget(1024 * 1024)
+            })
+        }
+
+        fn chunk(
+            manager: &Arc<BufferManager>,
+            schema: &LogicalType,
+            values: &[Value],
+        ) -> DataChunk {
+            let owner = GroupedMemoryOwner::try_new(Arc::clone(manager), 0).unwrap();
+            let mut chunk =
+                DataChunk::try_with_owner(std::slice::from_ref(schema), values.len(), owner)
+                    .unwrap();
+            for value in values {
+                chunk.try_push_owned_value(0, value.clone()).unwrap();
+            }
+            chunk.set_count(values.len());
+            chunk
+        }
+
+        fn source(manager: &Arc<BufferManager>, chunks: Vec<DataChunk>) -> Source {
+            Source {
+                chunks: chunks.into(),
+                manager: Arc::clone(manager),
+                failure: None,
+                pulls: 0,
+            }
+        }
+
+        fn execute(source: &mut Source, limited: bool) -> Result<QueryResult> {
+            let executor = Executor::with_columns(vec!["value".into()]);
+            if limited {
+                executor.execute_with_limit(source, usize::MAX)
+            } else {
+                executor.execute(source)
+            }
+        }
+
+        #[test]
+        fn retained_rows_keep_admission_until_drop_or_transfer() {
+            for limited in [false, true] {
+                for transfer in [false, true] {
+                    let manager = manager();
+                    let mut source = source(
+                        &manager,
+                        vec![chunk(&manager, &LogicalType::Int64, &[Value::Int64(7)])],
+                    );
+                    let result = execute(&mut source, limited).unwrap();
+                    let retained = manager.allocated();
+                    assert!(retained > 0, "the result owns its row admission");
+                    assert_eq!(result.rows(), &[vec![Value::Int64(7)]]);
+                    assert_eq!(result.iter().count(), 1);
+                    assert_eq!(manager.allocated(), retained, "borrowing retains admission");
+                    if transfer {
+                        let rows = result.into_rows();
+                        assert_eq!(manager.allocated(), 0);
+                        assert_eq!(rows, vec![vec![Value::Int64(7)]]);
+                    } else {
+                        drop(result);
+                        assert_eq!(manager.allocated(), 0);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn empty_nested_schema_keeps_admission_until_result_drop() {
+            for limited in [false, true] {
+                let manager = manager();
+                let field = "nested".repeat(1024);
+                let schema = LogicalType::List(Box::new(LogicalType::Struct(vec![(
+                    field.clone(),
+                    LogicalType::Int64,
+                )])));
+                let mut source = source(&manager, vec![chunk(&manager, &schema, &[])]);
+                let result = execute(&mut source, limited).unwrap();
+                assert!(result.is_empty());
+                assert_eq!(result.column_types, vec![schema]);
+                assert!(
+                    manager.allocated() >= field.len(),
+                    "a schema-only result must retain its nested metadata admission"
+                );
+                drop(result);
+                assert_eq!(manager.allocated(), 0);
+            }
+        }
+
+        #[test]
+        fn empty_then_nonempty_chunks_preserve_first_schema_and_values() {
+            for limited in [false, true] {
+                let manager = manager();
+                let schema = LogicalType::List(Box::new(LogicalType::Int64));
+                let mut source = source(
+                    &manager,
+                    vec![
+                        chunk(&manager, &schema, &[]),
+                        chunk(&manager, &schema, &[Value::Null]),
+                    ],
+                );
+                let result = execute(&mut source, limited).unwrap();
+                assert_eq!(result.column_types, vec![schema]);
+                assert_eq!(result.rows(), &[vec![Value::Null]]);
+                assert!(manager.allocated() > 0);
+                drop(result);
+                assert_eq!(manager.allocated(), 0);
+            }
+        }
+
+        #[test]
+        fn partial_limit_preserves_selection_and_stops_pulling() {
+            let manager = manager();
+            let mut input = chunk(
+                &manager,
+                &LogicalType::Int64,
+                &[10, 20, 30, 40, 50].map(Value::Int64),
+            );
+            input.set_selection(SelectionVector::from_predicate(5, |row| {
+                matches!(row, 1 | 3 | 4)
+            }));
+            let mut source = source(&manager, vec![input]);
+            source.failure = Some(OperatorError::Execution("must not pull again".into()));
+            let result = Executor::with_columns(vec!["value".into()])
+                .execute_with_limit(&mut source, 2)
+                .unwrap();
+            assert_eq!(source.pulls, 1);
+            assert_eq!(result.column_types, vec![LogicalType::Int64]);
+            assert_eq!(
+                result.rows(),
+                &[vec![Value::Int64(20)], vec![Value::Int64(40)]]
+            );
+            assert!(manager.allocated() > 0);
+            drop(result);
+            assert_eq!(manager.allocated(), 0);
+        }
+
+        #[test]
+        fn zero_limit_leaves_unpulled_input_with_its_caller() {
+            let manager = manager();
+            let mut source = source(
+                &manager,
+                vec![chunk(&manager, &LogicalType::Int64, &[Value::Int64(7)])],
+            );
+            let input_bytes = manager.allocated();
+            let result = Executor::with_columns(vec!["value".into()])
+                .execute_with_limit(&mut source, 0)
+                .unwrap();
+            assert!(result.is_empty());
+            assert_eq!(source.pulls, 0);
+            assert_eq!(manager.allocated(), input_bytes);
+            drop(result);
+            assert_eq!(manager.allocated(), input_bytes);
+            drop(source);
+            assert_eq!(manager.allocated(), 0);
+        }
+
+        #[test]
+        fn later_source_failure_releases_already_collected_rows() {
+            for limited in [false, true] {
+                for timeout in [false, true] {
+                    let manager = manager();
+                    let mut source = source(
+                        &manager,
+                        vec![chunk(&manager, &LogicalType::Int64, &[Value::Int64(7)])],
+                    );
+                    source.failure = Some(if timeout {
+                        OperatorError::Timeout
+                    } else {
+                        OperatorError::Execution("failure after admitted output".into())
+                    });
+                    let error = execute(&mut source, limited).unwrap_err();
+                    assert_eq!(
+                        error.error_code(),
+                        if timeout {
+                            ErrorCode::QueryTimeout
+                        } else {
+                            ErrorCode::QueryExecution
+                        }
+                    );
+                    assert_eq!(source.pulls, 2);
+                    assert_eq!(
+                        manager.allocated(),
+                        0,
+                        "the failed result releases its rows"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

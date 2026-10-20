@@ -100,6 +100,8 @@ pub fn profile_result(root: &ProfileNode, total_time_ms: f64) -> QueryResult {
     QueryResult {
         columns: vec!["profile".to_string()],
         column_types: vec![LogicalType::String],
+        #[cfg(feature = "spill")]
+        rows_owner: None,
         rows: vec![vec![Value::String(output.into())]],
         execution_time_ms: Some(total_time_ms),
         rows_scanned: None,

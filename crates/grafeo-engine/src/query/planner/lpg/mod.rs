@@ -263,6 +263,12 @@ pub struct Planner {
     pub(super) after_a_write: std::cell::Cell<bool>,
     /// When true, each physical operator is wrapped in `ProfiledOperator`.
     profiling: std::cell::Cell<bool>,
+    /// The shared grouped-query budget used by instrumented pull execution.
+    #[cfg(feature = "spill")]
+    profile_memory_context: Option<(
+        grafeo_core::execution::OperatorMemoryContext,
+        Option<std::time::Instant>,
+    )>,
     /// Profile entries collected during planning (post-order).
     profile_entries: std::cell::RefCell<Vec<crate::query::profile::ProfileEntry>>,
     /// Where the plan's writers write and record their writes: the active
@@ -332,6 +338,8 @@ impl Planner {
             statement_writes: std::cell::Cell::new(None),
             after_a_write: std::cell::Cell::new(false),
             profiling: std::cell::Cell::new(false),
+            #[cfg(feature = "spill")]
+            profile_memory_context: None,
             profile_entries: std::cell::RefCell::new(Vec::new()),
             recording: None,
             write_counter: Arc::default(),
@@ -389,6 +397,8 @@ impl Planner {
             statement_writes: std::cell::Cell::new(None),
             after_a_write: std::cell::Cell::new(false),
             profiling: std::cell::Cell::new(false),
+            #[cfg(feature = "spill")]
+            profile_memory_context: None,
             profile_entries: std::cell::RefCell::new(Vec::new()),
             recording: None,
             write_counter: Arc::default(),
@@ -752,6 +762,17 @@ impl Planner {
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
         let operator = self.shuffled_root(logical_plan, operator);
         Ok(PhysicalPlan { operator, columns })
+    }
+
+    /// Shares grouped-state admission with PROFILE's instrumented operators.
+    #[cfg(feature = "spill")]
+    pub(crate) fn with_profile_memory_context(
+        mut self,
+        context: Option<grafeo_core::execution::OperatorMemoryContext>,
+        deadline: Option<std::time::Instant>,
+    ) -> Self {
+        self.profile_memory_context = context.map(|context| (context, deadline));
+        self
     }
 
     /// Plans a logical plan with profiling: each physical operator is wrapped

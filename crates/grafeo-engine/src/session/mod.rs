@@ -2797,6 +2797,11 @@ impl Session {
                     viewing_epoch,
                     transaction_id,
                 )?;
+                #[cfg(feature = "spill")]
+                let planner = planner.with_profile_memory_context(
+                    self.make_operator_memory_context(),
+                    self.query_deadline(),
+                );
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
                 let executor = self
@@ -3336,6 +3341,11 @@ impl Session {
                     viewing_epoch,
                     transaction_id,
                 )?;
+                #[cfg(feature = "spill")]
+                let planner = planner.with_profile_memory_context(
+                    self.make_operator_memory_context(),
+                    self.query_deadline(),
+                );
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
                 let executor = self
@@ -3755,6 +3765,8 @@ impl Session {
                                 cpg.node_tables.len(),
                                 cpg.edge_tables.len()
                             ))]],
+                            #[cfg(feature = "spill")]
+                            rows_owner: None,
                             execution_time_ms: None,
                             rows_scanned: None,
                             status_message: None,
@@ -7625,5 +7637,58 @@ mod tests {
             )),
             "a write into the dropped graph was logged: {records:?}"
         );
+    }
+    #[test]
+    #[cfg(all(feature = "spill", feature = "gql"))]
+    fn configured_spill_failure_does_not_fall_back() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+        let root = tempfile::tempdir().unwrap();
+        let spill_path = root.path().join("blocked");
+        let db = GrafeoDB::with_config(
+            crate::Config::in_memory()
+                .with_memory_limit(64 * 1024 * 1024)
+                .with_spill_path(&spill_path)
+                .without_query_timeout(),
+        )
+        .unwrap();
+        // Construction is lazy. Fail the actual filesystem caller when it
+        // tries to spill, instead of adding a synthetic constructor hook.
+        std::fs::write(&spill_path, b"not a directory").unwrap();
+        let manager = db.buffer_manager();
+        let baseline = manager.allocated();
+        let held = manager
+            .try_allocate(
+                manager.config().budget * 9 / 10,
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        let held_total = manager.allocated();
+        let session = db.session();
+        let query = "UNWIND range(0, 8191) AS x RETURN x % 512 AS bucket, count(DISTINCT x) AS c";
+        let profile = format!("PROFILE {query}");
+        for query in [query, profile.as_str()] {
+            for _ in 0..2 {
+                let error = session.execute(query).unwrap_err();
+                assert!(
+                    matches!(error, grafeo_common::utils::error::Error::Io(_)),
+                    "{error}"
+                );
+                assert_eq!(manager.allocated(), held_total);
+                assert!(spill_path.is_file());
+            }
+        }
+        std::fs::remove_file(&spill_path).unwrap();
+        let result = session.execute(query).unwrap();
+        assert_eq!(result.row_count(), 512);
+        assert!(result.rows().iter().all(|row| row[1] == Value::Int64(16)));
+        drop(result);
+        assert_eq!(manager.allocated(), held_total);
+        let result = session.execute(&profile).unwrap();
+        let report = result.rows()[0][0].as_str().unwrap();
+        assert!(report.contains("HashAggregate") && report.contains("rows=512"));
+        drop(result);
+        assert_eq!(manager.allocated(), held_total);
+        drop(held);
+        assert_eq!(manager.allocated(), baseline);
     }
 }

@@ -321,12 +321,24 @@ impl super::Planner {
                 output_schema,
             ))
         } else {
-            Box::new(HashAggregateOperator::new(
+            let operator = HashAggregateOperator::new(
                 input_op,
                 group_columns,
                 physical_aggregates,
                 output_schema,
-            ))
+            );
+            #[cfg(feature = "spill")]
+            let operator = match self
+                .profile_memory_context
+                .as_ref()
+                .filter(|_| self.profiling.get())
+            {
+                Some((context, deadline)) => {
+                    operator.with_memory_context(context.clone(), *deadline)
+                }
+                None => operator,
+            };
+            Box::new(operator)
         };
 
         // Apply HAVING clause filter if present

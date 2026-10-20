@@ -3635,6 +3635,9 @@ pub struct QueryResult {
     /// Use [`rows()`](Self::rows) for borrowed access or
     /// [`into_rows()`](Self::into_rows) to take ownership.
     pub(crate) rows: Vec<Vec<grafeo_common::types::Value>>,
+    /// Executor reservation; fields drop in order, after their row buffers.
+    #[cfg(feature = "spill")]
+    pub(crate) rows_owner: Option<grafeo_core::execution::memory::GroupedMemoryOwner>,
     /// Query execution time in milliseconds (if timing was enabled).
     pub execution_time_ms: Option<f64>,
     /// Number of rows scanned during query execution (estimate).
@@ -3695,6 +3698,8 @@ impl QueryResult {
             columns: Vec::new(),
             column_types: Vec::new(),
             rows: Vec::new(),
+            #[cfg(feature = "spill")]
+            rows_owner: None,
             execution_time_ms: None,
             rows_scanned: None,
             status_message: None,
@@ -3711,6 +3716,8 @@ impl QueryResult {
             columns: Vec::new(),
             column_types: Vec::new(),
             rows: Vec::new(),
+            #[cfg(feature = "spill")]
+            rows_owner: None,
             execution_time_ms: None,
             rows_scanned: None,
             status_message: Some(msg.into()),
@@ -3732,6 +3739,8 @@ impl QueryResult {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
             rows: Vec::new(),
+            #[cfg(feature = "spill")]
+            rows_owner: None,
             execution_time_ms: None,
             rows_scanned: None,
             status_message: None,
@@ -3755,6 +3764,8 @@ impl QueryResult {
             columns,
             column_types,
             rows: Vec::new(),
+            #[cfg(feature = "spill")]
+            rows_owner: None,
             execution_time_ms: None,
             rows_scanned: None,
             status_message: None,
@@ -3779,6 +3790,8 @@ impl QueryResult {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
             rows,
+            #[cfg(feature = "spill")]
+            rows_owner: None,
             execution_time_ms: None,
             rows_scanned: None,
             status_message: None,
@@ -3790,6 +3803,134 @@ impl QueryResult {
     /// Appends a row to this result.
     pub fn push_row(&mut self, row: Vec<grafeo_common::types::Value>) {
         self.rows.push(row);
+    }
+
+    /// Moves admitted executor rows into the result without releasing their
+    /// reservation before their buffers.
+    #[cfg(feature = "spill")]
+    pub(crate) fn extend_accounted(
+        &mut self,
+        rows: grafeo_core::execution::chunk::AccountedRows,
+    ) -> Result<()> {
+        use crate::query::executor::convert_operator_error;
+        use grafeo_core::execution::operators::OperatorError;
+
+        // Keep the tuple intact: tuple fields drop in order, so an error frees
+        // source row buffers before their reservation, including before merge.
+        let mut source = rows.into_parts_with_types();
+        if let (Some(current), Some(incoming)) = (&self.rows_owner, &source.2)
+            && !Arc::ptr_eq(current.manager(), incoming.manager())
+        {
+            return Err(convert_operator_error(OperatorError::Internal(
+                "query result reservations must belong to the same manager".into(),
+            )));
+        }
+        let limit = || {
+            convert_operator_error(OperatorError::LimitExceeded(
+            "grouped result exceeds its memory limit; increase the memory budget or reduce the grouped result".into(),
+        ))
+        };
+        let bytes = |capacity| {
+            std::alloc::Layout::array::<Vec<grafeo_common::types::Value>>(capacity)
+                .map(|layout| layout.size())
+                .map_err(|_| limit())
+        };
+        let length = self
+            .rows
+            .len()
+            .checked_add(source.0.len())
+            .ok_or_else(limit)?;
+        let old_capacity = self.rows.capacity();
+        let old_bytes = bytes(old_capacity)?;
+        let source_is_owned = source.2.is_some();
+        let source_bytes = if source_is_owned {
+            bytes(source.0.capacity())?
+        } else {
+            0
+        };
+        let had_owner = self.rows_owner.is_some();
+        let grows = length > old_capacity;
+        let additional = if grows {
+            let new_bytes = bytes(length)?;
+            // Existing accounted storage is already charged. A legacy result
+            // gaining an owner must also cover the old outer-buffer overlap.
+            if had_owner {
+                new_bytes
+            } else {
+                new_bytes.checked_add(old_bytes).ok_or_else(limit)?
+            }
+        } else if had_owner {
+            0
+        } else {
+            old_bytes
+        };
+
+        if let Some(incoming) = &source.2
+            && incoming.size() < source_bytes
+        {
+            return Err(convert_operator_error(OperatorError::Internal(
+                "query result source does not own its row container".into(),
+            )));
+        }
+        if let (Some(current), Some(incoming)) = (&self.rows_owner, &source.2) {
+            current
+                .size()
+                .checked_add(incoming.size())
+                .and_then(|size| size.checked_add(additional))
+                .ok_or_else(limit)?;
+        }
+
+        if let Some(owner) = self.rows_owner.as_mut().or(source.2.as_mut()) {
+            // Admission precedes allocation while old and source containers
+            // remain live. Failure leaves existing result rows unchanged.
+            owner.try_grow(additional).map_err(convert_operator_error)?;
+            if grows {
+                if self
+                    .rows
+                    .try_reserve_exact(length - self.rows.len())
+                    .is_err()
+                {
+                    drop(owner.split(additional).map_err(convert_operator_error)?);
+                    return Err(limit());
+                }
+                // try_reserve_exact has freed the old outer buffer.
+                drop(owner.split(old_bytes).map_err(convert_operator_error)?);
+            }
+        } else {
+            // Unowned chunks preserve the existing public execution behavior.
+            if let Some(column_types) = source.1.take() {
+                self.column_types = column_types;
+            }
+            self.rows.append(&mut source.0);
+            return Ok(());
+        }
+
+        if let Some(incoming) = source.2.take() {
+            if let Some(current) = &mut self.rows_owner {
+                if let Err((error, incoming)) = current.try_merge(incoming) {
+                    source.2 = Some(incoming);
+                    return Err(convert_operator_error(error));
+                }
+            } else {
+                self.rows_owner = Some(incoming);
+            }
+        }
+        if let Some(column_types) = source.1.take() {
+            self.column_types = column_types;
+        }
+        self.rows.append(&mut source.0); // Capacity was admitted and reserved.
+        // append empties the source Vec but retains its capacity. Free that
+        // allocation before relinquishing its now-obsolete outer reservation.
+        drop(std::mem::take(&mut source.0));
+        if source_is_owned {
+            let owner = self.rows_owner.as_mut().ok_or_else(|| {
+                convert_operator_error(OperatorError::Internal(
+                    "accounted query result lost its reservation".into(),
+                ))
+            })?;
+            drop(owner.split(source_bytes).map_err(convert_operator_error)?);
+        }
+        Ok(())
     }
 
     /// Sets the execution metrics on this result.
@@ -3853,6 +3994,9 @@ impl QueryResult {
     }
 
     /// Takes ownership of all result rows.
+    ///
+    /// The rows leave executor memory accounting at this boundary. Their
+    /// buffers remain allocated and are now owned by the caller.
     #[must_use]
     pub fn into_rows(self) -> Vec<Vec<grafeo_common::types::Value>> {
         self.rows
@@ -3864,6 +4008,9 @@ impl QueryResult {
     }
 
     /// Converts this query result to an Arrow [`RecordBatch`](arrow_array::RecordBatch).
+    ///
+    /// Export buffers are owned by the caller, outside executor row accounting;
+    /// this result keeps its existing rows and reservation.
     ///
     /// Each column in the result becomes an Arrow array. Type mapping:
     /// - `Int64` / `Float64` / `Bool` / `String` / `Bytes`: direct Arrow equivalents
@@ -4708,6 +4855,120 @@ mod tests {
     // =========================================================================
     // QueryResult tests
     // =========================================================================
+
+    #[cfg(feature = "spill")]
+    fn result_memory_manager() -> Arc<BufferManager> {
+        BufferManager::new(BufferManagerConfig {
+            hard_limit_fraction: 1.0,
+            ..BufferManagerConfig::with_budget(16 * 1024)
+        })
+    }
+
+    #[cfg(feature = "spill")]
+    fn accounted_result_rows(
+        manager: &Arc<BufferManager>,
+        value: i64,
+    ) -> grafeo_core::execution::chunk::AccountedRows {
+        use grafeo_common::types::{LogicalType, Value};
+        use grafeo_core::execution::{DataChunk, memory::GroupedMemoryOwner};
+        let owner = GroupedMemoryOwner::try_new(Arc::clone(manager), 0).unwrap();
+        let mut chunk = DataChunk::try_with_owner(&[LogicalType::Any], 1, owner).unwrap();
+        chunk.try_push_owned_value(0, Value::Int64(value)).unwrap();
+        chunk.set_count(1);
+        chunk.try_into_accounted_rows().unwrap()
+    }
+
+    #[cfg(feature = "spill")]
+    #[test]
+    fn accounted_result_borrow_retains_grant_until_drop() {
+        let manager = result_memory_manager();
+        let rows = accounted_result_rows(&manager, 7);
+        assert!(manager.allocated() > 0);
+        let mut result = QueryResult::new(vec!["v".into()]).unwrap();
+        result.extend_accounted(rows).unwrap();
+        assert_eq!(
+            result.rows(),
+            &[vec![grafeo_common::types::Value::Int64(7)]]
+        );
+        assert!(
+            manager.allocated() > 0,
+            "borrowing result rows retains their executor grant"
+        );
+        drop(result);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[cfg(feature = "spill")]
+    #[test]
+    fn accounted_result_into_rows_relinquishes_executor_grant() {
+        let manager = result_memory_manager();
+        let mut result = QueryResult::new(vec!["v".into()]).unwrap();
+        result
+            .extend_accounted(accounted_result_rows(&manager, 7))
+            .unwrap();
+        assert!(manager.allocated() > 0);
+        let rows = result.into_rows();
+        assert_eq!(rows, vec![vec![grafeo_common::types::Value::Int64(7)]]);
+        assert_eq!(
+            manager.allocated(),
+            0,
+            "owned caller rows have left executor accounting"
+        );
+    }
+
+    #[cfg(feature = "spill")]
+    #[test]
+    fn accounted_result_denies_outer_growth_without_changing_old_rows() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+        let manager = result_memory_manager();
+        let mut result = QueryResult::new(vec!["v".into()]).unwrap();
+        result
+            .extend_accounted(accounted_result_rows(&manager, 7))
+            .unwrap();
+        let retained = manager.allocated();
+        let next = accounted_result_rows(&manager, 8);
+        let held = manager
+            .try_allocate(manager.available(), MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        let error = result
+            .extend_accounted(next)
+            .expect_err("result growth needs admitted overlap");
+        assert!(error.to_string().contains("memory"), "{error}");
+        assert_eq!(
+            result.rows(),
+            &[vec![grafeo_common::types::Value::Int64(7)]]
+        );
+        assert_eq!(manager.allocated(), retained + held.size());
+        drop(result);
+        assert_eq!(manager.allocated(), held.size());
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+    }
+
+    #[cfg(feature = "spill")]
+    #[test]
+    fn accounted_result_rejects_different_manager_without_losing_rows() {
+        let manager = result_memory_manager();
+        let other = result_memory_manager();
+        let mut result = QueryResult::new(vec!["v".into()]).unwrap();
+        result
+            .extend_accounted(accounted_result_rows(&manager, 7))
+            .unwrap();
+        let retained = manager.allocated();
+        let next = accounted_result_rows(&other, 8);
+        assert!(other.allocated() > 0);
+        result
+            .extend_accounted(next)
+            .expect_err("one result cannot merge independent manager grants");
+        assert_eq!(
+            result.rows(),
+            &[vec![grafeo_common::types::Value::Int64(7)]]
+        );
+        assert_eq!(manager.allocated(), retained);
+        assert_eq!(other.allocated(), 0);
+        drop(result);
+        assert_eq!(manager.allocated(), 0);
+    }
 
     #[test]
     fn test_query_result_empty() {

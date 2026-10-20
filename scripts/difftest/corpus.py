@@ -1758,4 +1758,18 @@ for case_id, query in [
 ]:
     case(case_id, query, BOTH, "empty")
 
+# CJ: float = and <> are exact (IEEE 754): a float sum is not its rounded value (CJ1, CJ2), -0.0
+#     equals 0.0 and NaN equals nothing (CJ3), a value near 0 or just below 1 is not 0 or 1
+#     (CJ4), an integer equals only a float of exactly its value (CJ5), DISTINCT keeps NaN
+#     together (CJ6)
+for case_id, query, languages in [
+    ("CJ1", "RETURN 0.1e0 + 0.2e0 = 0.3e0 AS eq, 0.1e0 + 0.2e0 <> 0.3e0 AS ne", GQL),
+    ("CJ2", "RETURN 0.1 + 0.2 = 0.3 AS eq, 0.1 + 0.2 <> 0.3 AS ne", CYPHER),
+    ("CJ3", "RETURN -0.0e0 = 0.0e0 AS z, NaN = NaN AS nan, NaN <> NaN AS ne", GQL),
+    ("CJ4", "RETURN 1.0e-300 = 0 AS tiny, 0.9999999999999999e0 = 1 AS one", GQL),
+    ("CJ5", "RETURN 9007199254740993 = 9007199254740992.0e0 AS above, 9007199254740992 = 9007199254740992.0e0 AS exact", GQL),
+    ("CJ6", "UNWIND [NaN, NaN, 0.0e0, -0.0e0] AS x RETURN count(DISTINCT x) AS n", GQL),
+]:
+    case(case_id, query, languages, "empty")
+
 # fmt: on

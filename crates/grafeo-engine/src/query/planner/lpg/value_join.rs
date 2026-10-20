@@ -623,15 +623,7 @@ mod tests {
                 (Value::from("5"), Value::Int64(5)),
                 (Value::from("+5"), Value::Float64(5.0)),
                 (Value::from("1e3"), Value::Float64(1000.0)),
-                (Value::Float64(1e-17), Value::Int64(0)),
                 (Value::Float64(-0.0), Value::Float64(0.0)),
-                (Value::Float64(0.999_999_999_999_999_9), Value::Int64(1)),
-                (Value::Float64(0.999_999_999_999_999_9), Value::Float64(1.0)),
-                (Value::Float64(-0.999_999_999_999_999_9), Value::Int64(-1)),
-                (
-                    Value::Int64(two_to_53 + 1),
-                    Value::Float64(9_007_199_254_740_992.0),
-                ),
                 (list(vec![Value::Null]), list(vec![Value::Null])),
                 (
                     list(vec![Value::from("1")]),
@@ -656,6 +648,16 @@ mod tests {
                 (Value::Float64(2.0), Value::Float64(1.999_999_999_999_999_8)),
                 (time("13:00:00"), time("13:00:00Z")),
                 (Value::Int64(two_to_53), Value::Int64(two_to_53 + 1)),
+                // Floats compare exactly: no tolerance near 0 or 1, and an
+                // integer above 2^53 meets no float.
+                (Value::Float64(1e-17), Value::Int64(0)),
+                (Value::Float64(0.999_999_999_999_999_9), Value::Int64(1)),
+                (Value::Float64(0.999_999_999_999_999_9), Value::Float64(1.0)),
+                (Value::Float64(-0.999_999_999_999_999_9), Value::Int64(-1)),
+                (
+                    Value::Int64(two_to_53 + 1),
+                    Value::Float64(9_007_199_254_740_992.0),
+                ),
             ] {
                 assert!(
                     !joined.contains(&pair(&a, &b)),

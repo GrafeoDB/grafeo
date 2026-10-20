@@ -5041,17 +5041,18 @@ fn rdf_values_equal(left: &Value, right: &Value) -> bool {
         }
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Int64(a), Value::Int64(b)) => a == b,
-        (Value::Float64(a), Value::Float64(b)) => (a - b).abs() < f64::EPSILON,
+        // op:numeric-equal on doubles is IEEE: NaN equals nothing.
+        (Value::Float64(a), Value::Float64(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Int64(a), Value::Float64(b)) | (Value::Float64(b), Value::Int64(a)) => {
-            (*a as f64 - b).abs() < f64::EPSILON
+            grafeo_core::execution::operators::value_utils::int_equals_float(*a, *b)
         }
         // RDF stores numeric literals as strings: allow cross-type equality
         (Value::String(s), Value::Int64(i)) | (Value::Int64(i), Value::String(s)) => {
             s.parse::<i64>().is_ok_and(|n| n == *i)
         }
         (Value::String(s), Value::Float64(f)) | (Value::Float64(f), Value::String(s)) => {
-            s.parse::<f64>().is_ok_and(|n| (n - f).abs() < f64::EPSILON)
+            grafeo_core::execution::operators::value_utils::text_equals_float(s, *f)
         }
         _ => false,
     }

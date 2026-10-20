@@ -99,6 +99,10 @@ Changes since 0.6.0-beta.1.
 - **Every GQL ORDER BY sorts nulls last** unless it says `NULLS FIRST`, as #571 made the `ORDER BY` of a `RETURN` do: the `ORDER BY` statement (after a `WITH`, a `LET` or on its own) still put nulls first descending.
 - **With DISTINCT, ORDER BY reads only what the clause returns**, in GQL and Cypher, as openCypher and SQL define it: `RETURN DISTINCT p.city AS city ORDER BY p.age` returned duplicates (the sort key joined the distinct row) and is now an error that names the variable.
 
+### Result changes
+
+- **Float `=` and `<>` are exact** (IEEE 754), in GQL, Cypher and SPARQL: two floats were equal when they differed by less than `f64::EPSILON`, so `0.1e0 + 0.2e0 = 0.3e0` (Cypher `0.1 + 0.2 = 0.3`) was true; it is now false, as ISO GQL and openCypher define it. `-0.0` equals `0.0` and NaN equals nothing, itself included, as before; grouping and `DISTINCT` still keep NaN together. An integer equals only a float of exactly its value (`9007199254740993` no longer equals `9007199254740992.0e0`), and so does the integer text of a string. A filter, a property index, an `IN` list, `id()` and a join on the property find the same rows. Use decimals for exact fractions (`0.1 + 0.2 = 0.3` in GQL).
+
 ## [0.6.0-beta.1] - 2026-10-11
 
 > **0.6.0-beta.1 is a preview of this release.** The file format is not final: a database written by the beta may not open in 0.6.0 or in a later beta. The first read-write open of a 0.5.x database keeps the old files under `.pre-0.6` names; keep that copy, it is the way back. Known gaps in the beta: a failed write of the write-ahead log is logged and the commit still succeeds ([#498](https://github.com/GrafeoDB/grafeo/issues/498)), and recovery can stop at damage in the log without an error ([#425](https://github.com/GrafeoDB/grafeo/issues/425)). The npm packages are published under the `next` tag (`npm install @grafeo-db/js@next`), the Python package as `0.6.0b1` (`uv pip install --pre grafeo`).

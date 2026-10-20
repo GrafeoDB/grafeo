@@ -463,14 +463,21 @@ impl Decimal {
 
     /// Compares with a float by the float's shortest round-trip text (the
     /// float `1.5` equals `1.5`). NaN is greater than every decimal; the
-    /// infinities and floats past 38 digits order by their sign.
+    /// infinities and floats past 38 digits order by their sign. A float
+    /// whose text has more than 38 digits after the point (`1e-300`) equals
+    /// no decimal: it orders next to the decimal it rounds to, on its own
+    /// side of it.
     #[must_use]
     pub fn cmp_f64(&self, value: f64) -> Ordering {
         if value.is_nan() {
             return Ordering::Less;
         }
         match Self::from_f64(value) {
-            Ok(other) => self.cmp(&other),
+            Ok(other) => match self.cmp(&other) {
+                Ordering::Equal if other.to_f64() < value => Ordering::Less,
+                Ordering::Equal if other.to_f64() > value => Ordering::Greater,
+                order => order,
+            },
             Err(_) if value > 0.0 => Ordering::Less,
             Err(_) => Ordering::Greater,
         }
@@ -1177,6 +1184,15 @@ mod tests {
         assert_eq!(d("0").cmp_f64(f64::NAN), Ordering::Less);
         assert_eq!(d("0").cmp_f64(f64::INFINITY), Ordering::Less);
         assert_eq!(d("0").cmp_f64(f64::NEG_INFINITY), Ordering::Greater);
+        // Below 38 digits after the point a float equals no decimal, but
+        // orders on its own side of the decimal it rounds to.
+        assert_eq!(d("0").cmp_f64(1e-300), Ordering::Less);
+        assert_eq!(d("0").cmp_f64(-1e-300), Ordering::Greater);
+        assert_eq!(d("0").cmp_f64(-0.0), Ordering::Equal);
+        let smallest = d("0.00000000000000000000000000000000000001");
+        assert_eq!(smallest.cmp_f64(0.6e-38), Ordering::Greater);
+        assert_eq!(smallest.cmp_f64(1.4e-38), Ordering::Less);
+        assert_eq!(smallest.cmp_f64(1e-38), Ordering::Equal);
     }
 
     #[test]

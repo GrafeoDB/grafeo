@@ -140,8 +140,8 @@ impl ColumnPredicate {
                 CompareOp::Ge => a >= b,
             },
             (Value::Float64(a), Value::Float64(b)) => match self.op {
-                CompareOp::Eq => (a - b).abs() < f64::EPSILON,
-                CompareOp::Ne => (a - b).abs() >= f64::EPSILON,
+                CompareOp::Eq => a == b,
+                CompareOp::Ne => a != b,
                 CompareOp::Lt => a < b,
                 CompareOp::Le => a <= b,
                 CompareOp::Gt => a > b,
@@ -163,8 +163,8 @@ impl ColumnPredicate {
             (Value::Int64(a), Value::Float64(b)) | (Value::Float64(b), Value::Int64(a)) => {
                 let af = *a as f64;
                 match self.op {
-                    CompareOp::Eq => (af - b).abs() < f64::EPSILON,
-                    CompareOp::Ne => (af - b).abs() >= f64::EPSILON,
+                    CompareOp::Eq => super::value_utils::int_equals_float(*a, *b),
+                    CompareOp::Ne => !super::value_utils::int_equals_float(*a, *b),
                     CompareOp::Lt => af < *b,
                     CompareOp::Le => af <= *b,
                     CompareOp::Gt => af > *b,
@@ -298,8 +298,8 @@ impl PropertyPredicate {
                 CompareOp::Ge => a >= b,
             },
             (Value::Float64(a), Value::Float64(b)) => match self.op {
-                CompareOp::Eq => (a - b).abs() < f64::EPSILON,
-                CompareOp::Ne => (a - b).abs() >= f64::EPSILON,
+                CompareOp::Eq => a == b,
+                CompareOp::Ne => a != b,
                 CompareOp::Lt => a < b,
                 CompareOp::Le => a <= b,
                 CompareOp::Gt => a > b,

@@ -47,7 +47,6 @@ tests:
         - [true, 0.30000000000000004]
 
   - name: float_equality_is_exact
-    skip: "float = and <> compare within f64::EPSILON in the filter operators, so 0.1e0 + 0.2e0 = 0.3e0 is true"
     query: "RETURN 0.1e0 + 0.2e0 = 0.3e0 AS eq, 0.1e0 + 0.2e0 <> 0.3e0 AS ne"
     expect:
       rows:

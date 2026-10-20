@@ -194,6 +194,26 @@ pub(crate) fn compare_floats(a: f64, b: f64) -> Ordering {
     }
 }
 
+/// Whether `=` finds an integer equal to a float: exactly, as
+/// [`compare_int_float`] orders them, so `2^53 + 1` does not equal the float
+/// `2^53`. NaN equals no integer.
+#[must_use]
+pub fn int_equals_float(int: i64, float: f64) -> bool {
+    compare_int_float(int, float).is_eq()
+}
+
+/// Whether `=` finds a numeric string equal to a float (RDF stores numeric
+/// literals as strings): integer text exactly as that integer, so
+/// `'9007199254740993'` does not equal the float `2^53`; other number text
+/// as the float it parses as.
+#[must_use]
+pub fn text_equals_float(text: &str, float: f64) -> bool {
+    match text.parse::<i64>() {
+        Ok(integer) => int_equals_float(integer, float),
+        Err(_) => text.parse::<f64>().is_ok_and(|number| number == float),
+    }
+}
+
 /// Compares an integer with a float exactly. Converting the integer to a
 /// float rounds above 2^53, which would make `2^53 + 1` equal to the float
 /// `2^53` while the integers `2^53` and `2^53 + 1` differ. NaN is after every

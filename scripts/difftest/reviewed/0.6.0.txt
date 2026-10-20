@@ -579,3 +579,9 @@ CH2|gql fcff68cb42 IS TYPED DECIMAL holds for the result of decimal arithmetic a
 CH3|gql 54ffe9a53f IS TYPED LIST<DECIMAL> holds for a list of decimals (#610); 1.5 was a float.
 CI1|cypher a5336ae099 abs of the smallest integer fails as out of range (22003, #639); it returned the negative number itself.
 CI1|gql a5336ae099 abs of the smallest integer fails as out of range (22003, #639); it returned the negative number itself.
+BV1|gql 1833f3e5c6 Float = is exact (IEEE 754); 0.1e0 + 0.2e0 = 0.3e0 was true within f64::EPSILON.
+CJ1|gql 2974ef3846 Float = and <> are exact (IEEE 754); 0.1e0 + 0.2e0 was equal to 0.3e0 within f64::EPSILON.
+CJ2|cypher 2974ef3846 Float = and <> are exact (IEEE 754); 0.1 + 0.2 was equal to 0.3 within f64::EPSILON.
+CJ4|gql 2c1063fb01 Float = is exact (IEEE 754); 1.0e-300 equalled 0 and 0.9999999999999999e0 equalled 1 within f64::EPSILON.
+CJ5|gql 3fedd5fe3a An integer equals only a float of exactly its value; 2^53 + 1 equalled the float 2^53.
+CJ6|gql 251a434f71 DISTINCT keeps NaN together and -0.0 with 0.0 (openCypher equivalence); each NaN was its own value.

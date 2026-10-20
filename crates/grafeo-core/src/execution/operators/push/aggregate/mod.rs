@@ -472,14 +472,18 @@ impl SpillableAggregatePushOperator {
 
     /// Uses the admitted path only for the ordinary memory-aware caller.
     fn push_accounted_row(&mut self, chunk: &DataChunk, row: usize) -> Result<(), OperatorError> {
-        use crate::execution::memory::{
-            GroupedMemoryOwner, checked_grouped_bytes, grouped_memory_limit,
-        };
-        let ctx = self.memory_ctx.as_ref().expect("memory-aware aggregate");
-        let mut scratch = GroupedMemoryOwner::try_new(
-            Arc::clone(ctx.buffer_manager()),
-            checked_grouped_bytes(self.group_by.len(), std::mem::size_of::<Value>())?,
-        )?;
+        use crate::execution::memory::{checked_grouped_bytes, grouped_memory_limit};
+        // Fresh allocations synchronously visit consumers under pressure.
+        // Grow a child grant instead; admission still precedes scratch storage.
+        let mut scratch = self
+            .input_types_owner
+            .as_mut()
+            .expect("memory-aware aggregate retains its schema owner")
+            .split(0)?;
+        scratch.try_grow(checked_grouped_bytes(
+            self.group_by.len(),
+            std::mem::size_of::<Value>(),
+        )?)?;
         let mut key = Vec::new();
         key.try_reserve_exact(self.group_by.len())
             .map_err(|_| grouped_memory_limit())?;
@@ -2510,6 +2514,83 @@ mod tests {
         let spill = Arc::new(SpillManager::new(directory.path()).unwrap());
         let context = OperatorMemoryContext::new(Arc::clone(&manager), spill);
         (directory, manager, context)
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn repeated_scalar_keys_do_not_scan_consumers_per_row() {
+        use grafeo_common::memory::buffer::{MemoryConsumer, MemoryRegion, StorageTier};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct PressureProbe(AtomicUsize);
+        impl MemoryConsumer for PressureProbe {
+            fn name(&self) -> &str {
+                "aggregate-pressure-probe"
+            }
+            fn memory_usage(&self) -> usize {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                0
+            }
+            fn eviction_priority(&self) -> u8 {
+                0
+            }
+            fn region(&self) -> MemoryRegion {
+                MemoryRegion::ExecutionBuffers
+            }
+            fn evict(&self, _target_bytes: usize) -> usize {
+                0
+            }
+            fn current_tier(&self) -> StorageTier {
+                StorageTier::Uninitialized
+            }
+        }
+
+        let budget = 32 * 1024 * 1024;
+        let (_directory, manager, context) = accounted_aggregate_fixture(budget);
+        let held = manager
+            .try_allocate(budget * 9 / 10, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        let probe = Arc::new(PressureProbe(AtomicUsize::new(0)));
+        manager.register_consumer(probe.clone());
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::count(1)],
+            context,
+        );
+        let mut sink = CollectorSink::new();
+        aggregate
+            .push(create_two_column_chunk(&[7], &[10]), &mut sink)
+            .unwrap();
+        probe.0.store(0, Ordering::Relaxed);
+        aggregate
+            .push(create_two_column_chunk(&[7; 128], &[10; 128]), &mut sink)
+            .unwrap();
+        let small_batch_scans = probe.0.swap(0, Ordering::Relaxed);
+        aggregate
+            .push(create_two_column_chunk(&[7; 2048], &[10; 2048]), &mut sink)
+            .unwrap();
+        let large_batch_scans = probe.0.load(Ordering::Relaxed);
+        assert!(
+            large_batch_scans <= small_batch_scans + 4,
+            "repeated keys must not scan consumers per row: 128 rows caused \
+             {small_batch_scans} scans; 2048 rows caused {large_batch_scans}"
+        );
+        aggregate.finalize(&mut sink).unwrap();
+        drop(aggregate);
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.iter().map(DataChunk::len).sum::<usize>(), 1);
+        assert_eq!(
+            chunks[0].column(0).unwrap().get_value(0),
+            Some(Value::Int64(7))
+        );
+        assert_eq!(
+            chunks[0].column(1).unwrap().get_value(0),
+            Some(Value::Int64(2177))
+        );
+        drop(chunks);
+        assert_eq!(manager.allocated(), held.size());
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
     }
 
     #[test]

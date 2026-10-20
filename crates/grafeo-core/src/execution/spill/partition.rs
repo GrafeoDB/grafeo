@@ -509,16 +509,17 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         F: FnOnce(&mut GroupedMemoryOwner) -> Result<V, OperatorError>,
         U: FnOnce(&mut V, &mut GroupedMemoryOwner) -> Result<(), OperatorError>,
     {
-        let manager = Arc::clone(
-            self.metadata_owner
-                .as_ref()
-                .expect("accounted caller has partition admission")
-                .manager(),
-        );
         let idx = self.partition_for(key);
         let mut counter = ByteCounter(0);
         serialize_row(key, &mut counter).map_err(grouped_io_error)?;
-        let mut key_owner = GroupedMemoryOwner::try_new(manager, counter.0)?;
+        // Retain the query's grant authority without a fresh pressure sweep
+        // for every lookup. Growth still enforces the shared hard limit.
+        let mut key_owner = self
+            .metadata_owner
+            .as_mut()
+            .expect("accounted caller has partition admission")
+            .split(0)?;
+        key_owner.try_grow(counter.0)?;
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(counter.0)

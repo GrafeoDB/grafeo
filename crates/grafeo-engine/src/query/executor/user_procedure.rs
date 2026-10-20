@@ -1,7 +1,7 @@
 //! Operator for executing user-defined stored procedures.
 //!
-//! `bind_body` puts the call's arguments into the stored GQL body, and
-//! translates and binds it when the call is planned; the operator plans and
+//! `bind_body` translates the stored GQL body, binds the call's arguments to
+//! its parameters and binds it when the call is planned; the operator plans and
 //! executes it as a sub-query using a fresh planner/executor pipeline.
 
 use std::collections::HashMap;
@@ -20,25 +20,24 @@ use crate::database::QueryResult;
 use crate::query::binder::Binder;
 use crate::query::plan::LogicalPlan;
 use crate::query::planner::Planner;
+use crate::query::processor::substitute_params;
 use crate::transaction::TransactionManager;
 
-/// The body of procedure `name` with the call's arguments in place of its
-/// parameters, translated and bound as a statement is, so a mistake in it is
-/// found when the call is planned, before anything runs.
+/// The body of procedure `name` with the call's arguments bound to its
+/// parameters, as a statement's parameters are (values, never query text),
+/// translated and bound as a statement is, so a mistake in it is found when
+/// the call is planned, before anything runs.
 ///
 /// # Errors
 ///
 /// Returns the syntax or semantic error of the body (an unbound variable,
-/// for one), its message naming the procedure.
+/// or a parameter the procedure does not declare, for one), its message
+/// naming the procedure.
 pub(crate) fn bind_body(
     name: &str,
     body: &str,
     params: &HashMap<String, Value>,
 ) -> Result<LogicalPlan> {
-    let mut body = body.to_string();
-    for (param, value) in params {
-        body = body.replace(&format!("${param}"), &value_to_gql_literal(value));
-    }
     let in_procedure = |error: Error| match error {
         Error::Query(mut query) => {
             query.message = format!("procedure '{name}': {}", query.message);
@@ -46,7 +45,14 @@ pub(crate) fn bind_body(
         }
         other => other,
     };
-    let mut plan = crate::query::translators::gql::translate(&body).map_err(in_procedure)?;
+    let mut plan = crate::query::translators::gql::translate(body).map_err(in_procedure)?;
+    if plan.default_params.is_empty() {
+        substitute_params(&mut plan, params).map_err(in_procedure)?;
+    } else {
+        let mut merged = plan.default_params.clone();
+        merged.extend(params.iter().map(|(k, v)| (k.clone(), v.clone())));
+        substitute_params(&mut plan, &merged).map_err(in_procedure)?;
+    }
     Binder::new().bind(&plan).map_err(in_procedure)?;
     // A pattern through a node or edge bound before is checked, as in a
     // session's plan (the optimizer's first pass; the body skips the
@@ -279,17 +285,5 @@ impl Operator for UserProcedureOperator {
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
-    }
-}
-
-/// Converts a Value to a GQL literal string for parameter substitution.
-fn value_to_gql_literal(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".to_string(),
-        Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
-        Value::Int64(n) => n.to_string(),
-        Value::Float64(f) => format!("{f:?}"),
-        Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        _ => format!("'{value}'"),
     }
 }

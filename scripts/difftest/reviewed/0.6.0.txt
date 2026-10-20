@@ -486,3 +486,6 @@ BU6|gql af570eb864 CREATE GRAPH ... AS COPY OF copies the source's nodes with th
 BU7|gql 35d071d9a8 CREATE GRAPH ... AS COPY OF copies the source's edges with their properties (#423); the copy was an empty graph.
 BX1|cypher ~dbc78da38d A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
 BX1|gql ~dbc78da38d A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
+BZ1|gql e4ac8a6af8 A stored procedure's arguments are values bound to its parameters; they were put into the body's text, so `$a` replaced the start of `$ab` and the body failed to parse.
+BZ2|gql d62b1885ec A stored procedure's argument holding a quote and query text is a value; put into the body's text, it ended the string and the body failed to parse.
+BZ4|gql c71d67736e A stored procedure takes a list or map argument as a value; the call refused it as not constant.

@@ -198,6 +198,19 @@ def mixed(grafeo, indexed=False):
     return db
 
 
+def procedures(grafeo):
+    """Two stored procedures for section BZ: `pair(a, ab, abc)` returns its three
+    arguments, `same(x)` returns its one; Alix and Gus as `Person` nodes."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})")
+    db.execute(
+        "CREATE PROCEDURE pair(a STRING, ab STRING, abc STRING) "
+        "RETURNS (a STRING, ab STRING, abc STRING) AS { RETURN $abc AS abc, $a AS a, $ab AS ab }"
+    )
+    db.execute("CREATE PROCEDURE same(x ANY) RETURNS (v ANY) AS { RETURN $x AS v }")
+    return db
+
+
 def mixed_indexed(grafeo):
     """`mixed` with a property index on `p`."""
     return mixed(grafeo, indexed=True)
@@ -215,6 +228,7 @@ FIXTURES = {
     "typed": typed,
     "mixed": mixed,
     "mixed_indexed": mixed_indexed,
+    "procedures": procedures,
 }
 
 CASES: list[Case] = []
@@ -1537,5 +1551,17 @@ for case_id, query, languages in [
     ("BY8", "UNWIND [9223372036854775807, 1, -1] AS x RETURN sum(x) AS s", BOTH),
 ]:
     case(case_id, query, languages)
+
+# BZ: a stored procedure's arguments are values bound to its parameters, as a statement's
+#     parameters are: a parameter that prefixes another keeps its value (BZ1), a value with
+#     a quote and query text stays a value and runs nothing (BZ2, then BZ3 counts the
+#     nodes), a float, a list and a map arrive as themselves, not as text (BZ4)
+for case_id, query in [
+    ("BZ1", "CALL pair('Alix', 'Gus', 'Mia') YIELD a, ab, abc RETURN a, ab, abc"),
+    ("BZ2", r"CALL same('it\'s\' AS v NEXT MATCH (n) DETACH DELETE n RETURN 1') YIELD v RETURN v"),
+    ("BZ3", "MATCH (p:Person) RETURN count(p) AS c"),
+    ("BZ4", "CALL same([2.5e0, [3, 'Berlin'], {city: 'Prague'}]) YIELD v RETURN v"),
+]:
+    case(case_id, query, GQL, "procedures")
 
 # fmt: on

@@ -61,6 +61,7 @@ Changes since 0.6.0-beta.1.
 - **Buffer admission**: simultaneous buffer grants and grant resizing obey the buffer manager's hard limit. Oversized requests return refusal instead of overflowing.
 - **Text and hybrid search return the same results on identical calls** ([#619](https://github.com/GrafeoDB/grafeo/issues/619)): equal scores came back in hash-map order, so two identical `text_search` or `hybrid_search` calls could rank a tie differently and the cut at `k` could keep another subset of it. Equal scores now rank by ascending node id, and a cut inside a tie keeps the lowest ids; the same holds for equal distances in vector search, and a NaN score or distance ranks last.
 - **SPARQL `+` and `*` paths stopped after 50 repetitions**: endpoint reachability now follows finite predicate, inverse, sequence and alternative steps without a hop cap. The traversal preserves graph and dataset boundaries and pending transaction writes, streams one origin at a time, and fails when its memory budget or query deadline is exhausted.
+- **A stored procedure's arguments are values**: a call put each argument into the procedure's body as text, so a parameter whose name starts another's (`$a` and `$ab`) took part of the other's place, a string holding a quote or query text became part of the body, a float arrived as a decimal, and a list or map argument was refused. Arguments are now bound to the body's parameters as a statement's parameters are, and a parameter the procedure does not declare is an error that names it.
 
 ## [0.6.0-beta.1] - 2026-10-11
 

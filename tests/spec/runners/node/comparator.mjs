@@ -200,3 +200,28 @@ export function assertRowsOrdered(result, expected) {
     }
   }
 }
+
+/**
+ * What an error case expects, for its failure message.
+ */
+export function describeError(expect) {
+  const parts = []
+  if (expect.error != null) parts.push(`containing '${expect.error}'`)
+  if (expect.gqlStatus != null) parts.push(`with GQLSTATUS ${expect.gqlStatus}`)
+  return parts.join(' ')
+}
+
+/**
+ * Assert that an error carries the GQLSTATUS `expected` (its `gqlStatus`). An
+ * error without one fails the case: a status the binding does not expose is a
+ * gap, not a pass.
+ */
+export function assertGqlStatus(err, expected) {
+  const status = err == null ? undefined : err.gqlStatus
+  if (status == null) {
+    throw new Error(`Error '${err?.message ?? String(err)}' has no GQLSTATUS`)
+  }
+  if (String(status) !== expected) {
+    throw new Error(`Error '${err.message}' has GQLSTATUS ${status}, expected ${expected}`)
+  }
+}

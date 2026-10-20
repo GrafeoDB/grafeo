@@ -83,6 +83,7 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `count` | Expected row count (no value check) |
 | `empty` | `true` for zero rows |
 | `error` | Substring that must appear in the error message |
+| `gql_status` | GQLSTATUS the error must have (`"22012"`), alone or next to `error`. The case fails when the statement succeeds, and when the binding exposes no status for the error |
 | `columns` | Expected column names: `[name, age]` |
 | `hash` | MD5 hex digest of sorted pipe-delimited rows |
 | `precision` | Float tolerance: cells compared within `10^(-precision)` |

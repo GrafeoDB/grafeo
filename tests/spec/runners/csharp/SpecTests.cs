@@ -150,9 +150,9 @@ public class SpecTests : IDisposable
             var expect = tc.Expect;
 
             // Error tests
-            if (expect.Error is not null)
+            if (expect.Error is not null || expect.GqlStatus is not null)
             {
-                RunErrorTest(_db, language, queries, expect.Error, parameters);
+                RunErrorTest(_db, language, queries, expect.Error, expect.GqlStatus, parameters);
                 return;
             }
 
@@ -435,9 +435,14 @@ public class SpecTests : IDisposable
     // Error test
     // =========================================================================
 
+    /// <summary>
+    /// Runs the queries, expecting the last one to fail with an error whose
+    /// message contains <paramref name="expectedSubstring"/> and whose GQLSTATUS
+    /// is <paramref name="expectedStatus"/>, for each that is given.
+    /// </summary>
     private static void RunErrorTest(
-        GrafeoDB db, string language, List<string> queries, string expectedSubstring,
-        Dictionary<string, object?>? parameters = null)
+        GrafeoDB db, string language, List<string> queries, string? expectedSubstring,
+        string? expectedStatus, Dictionary<string, object?>? parameters = null)
     {
         // Execute all-but-last normally (with params so $param works)
         for (var i = 0; i < queries.Count - 1; i++)
@@ -446,7 +451,18 @@ public class SpecTests : IDisposable
         // Last query should fail (with params if present)
         var ex = Assert.ThrowsAny<Exception>(() =>
             ExecuteQuery(db, language, queries[^1], parameters));
-        Assert.Contains(expectedSubstring, ex.Message);
+        if (expectedSubstring is not null)
+            Assert.Contains(expectedSubstring, ex.Message);
+        if (expectedStatus is not null)
+        {
+            // An error without a status fails the case: a status the binding
+            // does not expose is a gap, not a pass.
+            var status = (ex as GrafeoException)?.GqlStatus;
+            Assert.True(status is not null,
+                $"Error '{ex.Message}' ({ex.GetType().Name}) has no GQLSTATUS");
+            Assert.True(status == expectedStatus,
+                $"Error '{ex.Message}' has GQLSTATUS {status}, expected {expectedStatus}");
+        }
     }
 
     // =========================================================================

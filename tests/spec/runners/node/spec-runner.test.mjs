@@ -13,7 +13,7 @@ vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
-import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, resultToRows } from './comparator.mjs'
+import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, resultToRows, describeError, assertGqlStatus } from './comparator.mjs'
 
 // ---------------------------------------------------------------------------
 // Import GrafeoDB (skip all tests gracefully if unavailable)
@@ -262,21 +262,25 @@ async function runTestCase(db, tc, language, setupLanguage) {
   const params = coerceParams(tc.params)
 
   // Determine queries
-  const queries = tc.statements.length > 0 ? tc.statements : (tc.query || exp.error != null) ? [tc.query ?? ''] : []
+  const queries = tc.statements.length > 0 ? tc.statements : (tc.query || exp.error != null || exp.gqlStatus != null) ? [tc.query ?? ''] : []
   if (queries.length === 0) throw new Error(`No query or statements in test '${tc.name}'`)
 
   // Error case: execute all-but-last normally, only last should fail
-  if (exp.error != null) {
+  if (exp.error != null || exp.gqlStatus != null) {
     for (let i = 0; i < queries.length - 1; i++) {
       await executeQuery(db, language, queries[i], params)
     }
+    let failure = null
     try {
       await executeQuery(db, language, queries[queries.length - 1], params)
-      throw new Error(`Expected error containing '${exp.error}' but query succeeded`)
     } catch (err) {
-      if (err.message.startsWith('Expected error')) throw err
-      expect(err.message || String(err)).toContain(exp.error)
+      failure = err
     }
+    if (failure === null) {
+      throw new Error(`Expected error ${describeError(exp)} but query succeeded`)
+    }
+    if (exp.error != null) expect(failure.message || String(failure)).toContain(exp.error)
+    if (exp.gqlStatus != null) assertGqlStatus(failure, exp.gqlStatus)
     return
   }
 

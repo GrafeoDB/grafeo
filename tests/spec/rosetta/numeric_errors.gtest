@@ -6,8 +6,8 @@
 # its IEEE result, a null operand gives null, and a false left side of AND (a
 # true one of OR) decides without evaluating the right side.
 #
-# The error check matches the message text; the GQLSTATUS itself is checked
-# by the binding tests (Python GrafeoError.gql_status and the others).
+# Each error case checks the message text and the GQLSTATUS (`gql_status`),
+# which every binding exposes.
 
 meta:
   model: lpg
@@ -28,6 +28,7 @@ tests:
       cypher: "RETURN 9223372036854775807 + 1 AS v"
     expect:
       error: "numeric value out of range: 9223372036854775807 + 1"
+      gql_status: "22003"
 
   - name: integer_subtraction_past_the_range_fails
     variants:
@@ -35,6 +36,7 @@ tests:
       cypher: "RETURN -9223372036854775807 - 2 AS v"
     expect:
       error: "numeric value out of range: -9223372036854775807 - 2"
+      gql_status: "22003"
 
   - name: integer_multiplication_past_the_range_fails
     variants:
@@ -42,6 +44,7 @@ tests:
       cypher: "RETURN 4611686018427387904 * 2 AS v"
     expect:
       error: "numeric value out of range: 4611686018427387904 * 2"
+      gql_status: "22003"
 
   - name: integer_arithmetic_up_to_the_bounds_succeeds
     variants:
@@ -59,6 +62,7 @@ tests:
       cypher: "MATCH (n:N) RETURN -n.v AS v"
     expect:
       error: "numeric value out of range: -(-9223372036854775808)"
+      gql_status: "22003"
 
   - name: abs_of_the_smallest_integer_fails
     setup:
@@ -68,6 +72,7 @@ tests:
       cypher: "MATCH (n:N) RETURN abs(n.v) AS v"
     expect:
       error: "numeric value out of range: abs(-9223372036854775808)"
+      gql_status: "22003"
 
   - name: the_smallest_integer_divided_by_minus_one_fails
     setup:
@@ -77,6 +82,7 @@ tests:
       cypher: "MATCH (n:N) RETURN n.v / -1 AS v"
     expect:
       error: "numeric value out of range: -9223372036854775808 / -1"
+      gql_status: "22003"
 
   - name: the_smallest_integer_modulo_minus_one_is_zero
     setup:
@@ -100,6 +106,7 @@ tests:
       cypher: "MATCH (n:N) RETURN 10 / n.v AS v"
     expect:
       error: "division by zero: 10 / 0"
+      gql_status: "22012"
 
   - name: integer_remainder_by_zero_fails
     variants:
@@ -107,6 +114,14 @@ tests:
       cypher: "RETURN 10 % 0 AS v"
     expect:
       error: "division by zero: 10 % 0"
+      gql_status: "22012"
+
+  - name: a_division_by_zero_is_known_by_its_gqlstatus_alone
+    variants:
+      gql: "RETURN 7 % 0 AS v"
+      cypher: "RETURN 7 % 0 AS v"
+    expect:
+      gql_status: "22012"
 
   - name: integer_division_truncates_towards_zero
     variants:
@@ -154,6 +169,7 @@ tests:
       cypher: "UNWIND [9223372036854775807, 1] AS x RETURN sum(x) AS total"
     expect:
       error: "numeric value out of range: sum 9223372036854775808"
+      gql_status: "22003"
 
   - name: an_integer_sum_below_the_range_fails
     variants:
@@ -161,6 +177,7 @@ tests:
       cypher: "UNWIND [-9223372036854775807, -2] AS x RETURN sum(x) AS total"
     expect:
       error: "numeric value out of range: sum -9223372036854775809"
+      gql_status: "22003"
 
   - name: a_grouped_sum_fails_only_for_the_group_past_the_range
     setup:
@@ -170,6 +187,7 @@ tests:
       cypher: "MATCH (n:N) RETURN n.city AS city, sum(n.v) AS total"
     expect:
       error: "numeric value out of range: sum 9223372036854775808"
+      gql_status: "22003"
 
   # ---------------------------------------------------------------------------
   # Short circuit
@@ -204,6 +222,7 @@ tests:
       cypher: "MATCH (n:N) WHERE 10 / n.v > 1 AND n.v <> 0 RETURN n.name"
     expect:
       error: "division by zero: 10 / 0"
+      gql_status: "22012"
 
   - name: case_guards_a_division
     setup:

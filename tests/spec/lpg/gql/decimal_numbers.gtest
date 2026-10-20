@@ -285,11 +285,13 @@ tests:
     query: "RETURN 1.0 / 0 AS d"
     expect:
       error: "division by zero"
+      gql_status: "22012"
 
   - name: decimal_modulo_by_zero_fails
     query: "RETURN 1.5 % 0 AS d"
     expect:
       error: "division by zero"
+      gql_status: "22012"
 
   - name: float_division_by_zero_is_infinity
     query: "RETURN 1.0e0 / 0.0e0 AS d"
@@ -301,8 +303,10 @@ tests:
     query: "RETURN 99999999999999999999999999999999999999M * 10 AS d"
     expect:
       error: "numeric value out of range"
+      gql_status: "22003"
 
   - name: decimal_sum_past_38_digits_fails
     query: "UNWIND [99999999999999999999999999999999999999M, 1M] AS x RETURN sum(x) AS total"
     expect:
       error: "numeric value out of range"
+      gql_status: "22003"

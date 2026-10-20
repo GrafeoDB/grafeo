@@ -47,6 +47,7 @@ class Expect:
     count: int | None = None
     empty: bool = False
     error: str | None = None
+    gql_status: str | None = None
     hash: str | None = None
     precision: int | None = None
     columns: list[str] = field(default_factory=list)
@@ -238,6 +239,10 @@ def _parse_expect_dict(d: dict) -> Expect:
     if error is not None:
         e.error = str(error)
 
+    gql_status = d.get("gql_status")
+    if gql_status is not None:
+        e.gql_status = str(gql_status)
+
     hash_val = d.get("hash")
     if hash_val is not None:
         e.hash = str(hash_val)
@@ -419,6 +424,9 @@ def _lb_parse_expect(lines: list[str], idx: int) -> tuple:
             idx += 1
         elif key == "error":
             e.error = _unquote(value)
+            idx += 1
+        elif key == "gql_status":
+            e.gql_status = _unquote(value)
             idx += 1
         elif key == "hash":
             e.hash = _unquote(value)

@@ -117,6 +117,8 @@ struct Expect {
     count: Option<usize>,
     empty: bool,
     error: Option<String>,
+    /// The GQLSTATUS the error must have (`22012`), alone or next to `error`.
+    gql_status: Option<String>,
     hash: Option<String>,
     precision: Option<u32>,
     columns: Vec<String>,
@@ -387,6 +389,10 @@ fn parse_expect(lines: &[&str], idx: &mut usize) -> Result<Expect, String> {
                 }
                 "error" => {
                     expect.error = Some(unquote(value));
+                    *idx += 1;
+                }
+                "gql_status" => {
+                    expect.gql_status = Some(unquote(value));
                     *idx += 1;
                 }
                 "hash" => {
@@ -1425,8 +1431,8 @@ fn generate_execute_and_assert(
         generate_params_hashmap(output, tc);
     }
 
-    // Error case
-    if let Some(err_substr) = &expect.error {
+    // Error case: a message to contain, a GQLSTATUS to have, or both
+    if expect.error.is_some() || expect.gql_status.is_some() {
         if has_params {
             writeln!(
                 output,
@@ -1446,22 +1452,15 @@ fn generate_execute_and_assert(
             )
             .unwrap();
         }
+        let option = |value: &Option<String>| match value {
+            Some(text) => format!("Some(\"{}\")", escape_rust_string(text)),
+            None => "None".to_string(),
+        };
         writeln!(
             output,
-            "        assert!(result.is_err(), \"Expected error containing '{}' but query succeeded\");",
-            escape_rust_string(err_substr)
-        )
-        .unwrap();
-        writeln!(
-            output,
-            "        let err_msg = format!(\"{{}}\", result.unwrap_err());",
-        )
-        .unwrap();
-        writeln!(
-            output,
-            "        assert!(err_msg.contains(\"{}\"), \"Error '{{}}' does not contain '{}'\", err_msg);",
-            escape_rust_string(err_substr),
-            escape_rust_string(err_substr)
+            "        assert_error(result, {}, {});",
+            option(&expect.error),
+            option(&expect.gql_status)
         )
         .unwrap();
         return;

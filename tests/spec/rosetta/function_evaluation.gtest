@@ -28,6 +28,7 @@ tests:
       cypher: "MATCH (p:Person) RETURN p.name ORDER BY upperr(p.name)"
     expect:
       error: "Unknown function 'upperr'"
+      gql_status: "42002"
 
   - name: an_unknown_function_in_with_fails
     variants:
@@ -35,6 +36,7 @@ tests:
       cypher: "UNWIND ['Alix'] AS name WITH upperr(name) AS loud RETURN loud"
     expect:
       error: "Unknown function 'upperr'"
+      gql_status: "42002"
 
   - name: an_unknown_function_in_a_case_branch_that_never_runs_fails
     variants:
@@ -42,6 +44,7 @@ tests:
       cypher: "RETURN CASE WHEN false THEN upperr('Alix') ELSE 'Gus' END AS name"
     expect:
       error: "Unknown function 'upperr'"
+      gql_status: "42002"
 
   - name: an_unknown_function_inside_an_aggregate_fails
     variants:
@@ -49,6 +52,7 @@ tests:
       cypher: "UNWIND [1, 2] AS x RETURN sum(upperr(x)) AS total"
     expect:
       error: "Unknown function 'upperr'"
+      gql_status: "42002"
 
   - name: an_unknown_function_suggests_a_close_name
     variants:
@@ -56,6 +60,7 @@ tests:
       cypher: "RETURN upperr('Alix') AS name"
     expect:
       error: "Did you mean 'upper'?"
+      gql_status: "42002"
 
   - name: explain_of_an_unknown_function_fails
     variants:
@@ -63,6 +68,7 @@ tests:
       cypher: "EXPLAIN RETURN upperr('Alix') AS name"
     expect:
       error: "Unknown function 'upperr'"
+      gql_status: "42002"
 
   - name: explain_of_a_wrong_number_of_arguments_fails
     variants:
@@ -77,6 +83,7 @@ tests:
       cypher: "MATCH (p:Person) RETURN upperr(p.name) AS name"
     expect:
       error: "Unknown function 'upperr'"
+      gql_status: "42002"
 
   # ---------------------------------------------------------------------------
   # Names resolve regardless of case

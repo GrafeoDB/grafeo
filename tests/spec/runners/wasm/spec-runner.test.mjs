@@ -15,7 +15,7 @@ vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams } from '../node/parser.mjs'
-import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash } from '../node/comparator.mjs'
+import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus } from '../node/comparator.mjs'
 
 // ---------------------------------------------------------------------------
 // Import WASM bindings (skip all tests gracefully if unavailable)
@@ -301,24 +301,28 @@ function runTestCase(db, tc, language, setupLanguage) {
   const exp = tc.expect
 
   // Determine queries
-  const queries = tc.statements.length > 0 ? tc.statements : (tc.query || exp.error != null) ? [tc.query ?? ''] : []
+  const queries = tc.statements.length > 0 ? tc.statements : (tc.query || exp.error != null || exp.gqlStatus != null) ? [tc.query ?? ''] : []
   if (queries.length === 0) throw new Error(`No query or statements in test '${tc.name}'`)
 
   // Params apply to every statement of the test, as in the other runners
   const params = coerceParams(tc.params)
 
   // Error case: execute all-but-last normally, only last should fail
-  if (exp.error != null) {
+  if (exp.error != null || exp.gqlStatus != null) {
     for (let i = 0; i < queries.length - 1; i++) {
       executeQuery(db, language, queries[i], params)
     }
+    let failure = null
     try {
       executeQuery(db, language, queries[queries.length - 1], params)
-      throw new Error(`Expected error containing '${exp.error}' but query succeeded`)
     } catch (err) {
-      if (err.message.startsWith('Expected error')) throw err
-      expect(err.message || String(err)).toContain(exp.error)
+      failure = err
     }
+    if (failure === null) {
+      throw new Error(`Expected error ${describeError(exp)} but query succeeded`)
+    }
+    if (exp.error != null) expect(failure.message || String(failure)).toContain(exp.error)
+    if (exp.gqlStatus != null) assertGqlStatus(failure, exp.gqlStatus)
     return
   }
 

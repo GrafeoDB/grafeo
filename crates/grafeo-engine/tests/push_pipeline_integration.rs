@@ -1521,3 +1521,76 @@ fn profile_grouped_denial_preserves_headroom() {
         assert_eq!(manager.allocated(), baseline);
     }
 }
+
+#[cfg(feature = "spill")]
+#[test]
+fn grouped_collect_distinct_reloads_nested_values_in_cold_and_cached_plans() {
+    use grafeo_common::memory::buffer::{MemoryRegion, PressureLevel};
+    use grafeo_common::utils::error::Error;
+
+    const BUDGET: usize = 64 * 1024 * 1024;
+    const QUERY: &str = "UNWIND range(0, 4095) AS x \
+        RETURN x % 512 AS bucket, \
+        collect(DISTINCT [CASE WHEN x < 1024 THEN 0 WHEN x < 2048 THEN 1 ELSE 2 END, 'payload']) AS collected";
+    let root = tempfile::tempdir().unwrap();
+    let spill_path = root.path().join("spill");
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_memory_limit(BUDGET)
+            .with_spill_path(&spill_path)
+            .without_query_timeout(),
+    )
+    .unwrap();
+    let manager = db.buffer_manager();
+    let baseline = manager.allocated();
+    let held = manager
+        .try_allocate(BUDGET * 9 / 10 - baseline, MemoryRegion::ExecutionBuffers)
+        .unwrap();
+    let held_total = manager.allocated();
+    assert_eq!(manager.pressure_level(), PressureLevel::High);
+    let session = db.session();
+
+    // An I/O failure proves that this query really reaches the spill path.
+    std::fs::write(&spill_path, b"blocked spill directory").unwrap();
+    assert!(matches!(session.execute(QUERY), Err(Error::Io(_))));
+    assert_eq!(manager.allocated(), held_total);
+    std::fs::remove_file(&spill_path).unwrap();
+    db.query_cache().clear();
+
+    for cached in [false, true] {
+        let before = db.query_cache().stats();
+        let result = session.execute(QUERY).unwrap();
+        if cached {
+            assert!(db.query_cache().stats().optimized_hits > before.optimized_hits);
+        }
+        let mut rows = result.rows().to_vec();
+        rows.sort_by_key(|row| row[0].as_int64().unwrap());
+        assert_eq!(rows.len(), 512);
+        for (bucket, row) in rows.iter().enumerate() {
+            assert_eq!(row[0], Value::Int64(i64::try_from(bucket).unwrap()));
+            let Value::List(values) = &row[1] else {
+                panic!("COLLECT returns a list");
+            };
+            assert_eq!(values.len(), 3);
+            let mut identities = Vec::new();
+            for value in values.iter() {
+                let Value::List(pair) = value else {
+                    panic!("COLLECT preserves each nested list");
+                };
+                assert_eq!(pair.len(), 2);
+                assert_eq!(pair[1], Value::from("payload"));
+                identities.push(pair[0].as_int64().unwrap());
+            }
+            identities.sort_unstable();
+            assert_eq!(identities, [0, 1, 2]);
+        }
+        drop(rows);
+        assert!(manager.allocated() > held_total);
+        drop(result);
+        assert_eq!(manager.allocated(), held_total);
+        assert_eq!(manager.pressure_level(), PressureLevel::High);
+        assert!(std::fs::read_dir(&spill_path).unwrap().next().is_none());
+    }
+    drop(held);
+    assert_eq!(manager.allocated(), baseline);
+}

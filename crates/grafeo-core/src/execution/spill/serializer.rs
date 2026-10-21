@@ -1570,6 +1570,25 @@ mod tests {
                 format!("{:?}", roundtrip_value(value.clone())),
                 format!("{value:?}")
             );
+
+            let mut bytes = Vec::new();
+            serialize_value(&value, &mut bytes).unwrap();
+            let mut owner = admitted_owner(1024 * 1024);
+            owner.try_grow(32).unwrap();
+            let manager = Arc::clone(owner.manager());
+            let decoded = deserialize_value_admitted(&mut bytes.as_slice(), &mut owner).unwrap();
+            assert_eq!(format!("{decoded:?}"), format!("{value:?}"));
+            let retained = value_retained_bytes(&decoded, &mut owner).unwrap();
+            assert!(owner.size() >= 32 + retained, "{value:?}");
+            assert_eq!(manager.allocated(), owner.size());
+            let mut encoded = Vec::new();
+            serialize_value(&decoded, &mut encoded).unwrap();
+            assert_eq!(encoded, bytes, "admission preserves the value's bytes");
+            drop(decoded);
+            owner.try_resize(32).unwrap();
+            assert_eq!(manager.allocated(), 32);
+            drop(owner);
+            assert_eq!(manager.allocated(), 0);
         }
     }
 
@@ -1806,5 +1825,83 @@ mod tests {
         // String "hi": 11 bytes (tag + 8 length + 2)
         serialize_value(&Value::String(ArcStr::from("hi")), &mut buf).unwrap();
         assert_eq!(buf.len(), 11);
+    }
+
+    #[test]
+    fn admitted_complex_payload_errors_restore_existing_reservation() {
+        use grafeo_common::memory::buffer::BufferManager;
+        use grafeo_common::types::PropertyKey;
+        use grafeo_common::utils::error::Error;
+
+        struct ObservedRead<'a> {
+            remaining: &'a [u8],
+            manager: &'a BufferManager,
+            peak: usize,
+        }
+
+        impl Read for ObservedRead<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                self.peak = self.peak.max(self.manager.allocated());
+                self.remaining.read(output)
+            }
+        }
+
+        let map = Value::Map(Arc::new(BTreeMap::from([
+            (
+                PropertyKey::new("first"),
+                Value::List(vec![Value::from("inside"), Value::Int64(7)].into()),
+            ),
+            (PropertyKey::new("last"), Value::from("payload")),
+        ])));
+        for value in [
+            Value::from("retained payload"),
+            map.clone(),
+            Value::Path {
+                nodes: vec![map, Value::from("last node")].into(),
+                edges: vec![Value::from("edge payload")].into(),
+            },
+        ] {
+            let mut bytes = Vec::new();
+            serialize_value(&value, &mut bytes).unwrap();
+            let mut measuring = admitted_owner(1024 * 1024);
+            let retained = value_retained_bytes(&value, &mut measuring).unwrap();
+            assert!(retained > 0);
+            assert_eq!(measuring.size(), 0);
+            drop(measuring);
+
+            let mut owner = admitted_owner(32 + retained - 1);
+            owner.try_grow(32).unwrap();
+            let manager = Arc::clone(owner.manager());
+            assert!(matches!(
+                deserialize_value_admitted(&mut bytes.as_slice(), &mut owner),
+                Err(OperatorError::LimitExceeded(_))
+            ));
+            assert_eq!(owner.size(), 32);
+            assert_eq!(manager.allocated(), 32);
+            drop(owner);
+            assert_eq!(manager.allocated(), 0);
+
+            let mut owner = admitted_owner(1024 * 1024);
+            owner.try_grow(32).unwrap();
+            let manager = Arc::clone(owner.manager());
+            let mut reader = ObservedRead {
+                remaining: &bytes[..bytes.len() - 1],
+                manager: &manager,
+                peak: 32,
+            };
+            let error = deserialize_value_admitted(&mut reader, &mut owner).unwrap_err();
+            assert!(matches!(
+                error,
+                OperatorError::Wrapped(ref error)
+                    if matches!(error.as_ref(), Error::Io(error)
+                        if error.kind() == std::io::ErrorKind::UnexpectedEof)
+            ));
+            assert!(reader.peak > 32, "the payload must start decoding");
+            assert_eq!(reader.remaining, &[] as &[u8]);
+            assert_eq!(owner.size(), 32);
+            assert_eq!(manager.allocated(), 32);
+            drop(owner);
+            assert_eq!(manager.allocated(), 0);
+        }
     }
 }

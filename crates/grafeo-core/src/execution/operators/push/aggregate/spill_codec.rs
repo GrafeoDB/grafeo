@@ -1002,4 +1002,173 @@ mod tests {
         };
         assert!(serialize_group_state(&group, &mut Vec::new()).is_err());
     }
+
+    #[test]
+    fn admitted_live_variants_resume_with_owned_state() {
+        fn seen(state: &AggregateState) -> Option<&HashSet<HashableValue>> {
+            match state {
+                AggregateState::CountDistinct(_, seen)
+                | AggregateState::SumIntDistinct(_, _, seen)
+                | AggregateState::SumFloatDistinct(_, _, _, seen)
+                | AggregateState::AvgDistinct(_, _, seen)
+                | AggregateState::CollectDistinct(_, seen)
+                | AggregateState::GroupConcatDistinct(_, _, seen)
+                | AggregateState::Distinct { seen, .. } => Some(seen),
+                _ => None,
+            }
+        }
+
+        let functions = [
+            AggregateFunction::Count,
+            AggregateFunction::CountNonNull,
+            AggregateFunction::Sum,
+            AggregateFunction::Avg,
+            AggregateFunction::Min,
+            AggregateFunction::Max,
+            AggregateFunction::First,
+            AggregateFunction::Last,
+            AggregateFunction::Collect,
+            AggregateFunction::StdDev,
+            AggregateFunction::StdDevPop,
+            AggregateFunction::Variance,
+            AggregateFunction::VariancePop,
+            AggregateFunction::PercentileDisc,
+            AggregateFunction::PercentileCont,
+            AggregateFunction::GroupConcat,
+            AggregateFunction::Sample,
+            AggregateFunction::CovarSamp,
+            AggregateFunction::CovarPop,
+            AggregateFunction::Corr,
+            AggregateFunction::RegrSlope,
+            AggregateFunction::RegrIntercept,
+            AggregateFunction::RegrR2,
+            AggregateFunction::RegrCount,
+            AggregateFunction::RegrSxx,
+            AggregateFunction::RegrSyy,
+            AggregateFunction::RegrSxy,
+            AggregateFunction::RegrAvgx,
+            AggregateFunction::RegrAvgy,
+        ];
+        for function in functions {
+            for distinct in [false, true] {
+                for floats in [false, true] {
+                    let operand = |value: i32| {
+                        if function == AggregateFunction::GroupConcat {
+                            Value::from(format!("item-{value}"))
+                        } else if floats {
+                            Value::Float64(f64::from(value))
+                        } else {
+                            Value::Int64(i64::from(value))
+                        }
+                    };
+                    let update = |state: &mut AggregateState, y, x| {
+                        if state.is_bivariate() {
+                            state.update_bivariate(Some(operand(y)), Some(operand(x)));
+                        } else {
+                            state.update(Some(operand(y)));
+                        }
+                    };
+                    let mut populated =
+                        AggregateState::new(function, distinct, Some(0.25), Some("|"));
+                    update(&mut populated, 1, 2);
+                    update(&mut populated, 3, 4);
+                    let mut uninterrupted = GroupState {
+                        key_values: vec![Value::from("continuation")],
+                        // The empty state also exercises optional None payloads,
+                        // empty buffers and empty DISTINCT sets on reload.
+                        accumulators: vec![
+                            populated,
+                            AggregateState::new(function, distinct, Some(0.25), Some("|")),
+                        ],
+                    };
+                    let mut bytes = Vec::new();
+                    serialize_group_state(&uninterrupted, &mut bytes).unwrap();
+                    let mut owner = admitted_owner(1024 * 1024);
+                    owner.try_grow(32).unwrap();
+                    let manager = std::sync::Arc::clone(owner.manager());
+                    let mut restored =
+                        deserialize_group_state_admitted(&mut bytes.as_slice(), &mut owner)
+                            .unwrap();
+                    assert_eq!(restored.key_values, uninterrupted.key_values);
+                    assert!(owner.size() > 32, "the decoded key remains owned");
+                    if function == AggregateFunction::GroupConcat {
+                        match &restored.accumulators[0] {
+                            AggregateState::GroupConcat(values, separator)
+                            | AggregateState::GroupConcatDistinct(values, separator, _) => {
+                                assert_eq!(values.len(), 2);
+                                assert_eq!(values[0], "item-1");
+                                assert_eq!(values[1], "item-3");
+                                assert_eq!(separator, "|");
+                            }
+                            other => panic!("expected a populated string state, got {other:?}"),
+                        }
+                    }
+
+                    for (actual, expected) in restored
+                        .accumulators
+                        .iter()
+                        .zip(&uninterrupted.accumulators)
+                    {
+                        assert_eq!(
+                            std::mem::discriminant(actual),
+                            std::mem::discriminant(expected)
+                        );
+                        assert_eq!(seen(actual), seen(expected));
+                        assert_eq!(actual.finalize().unwrap(), expected.finalize().unwrap());
+                    }
+                    for (y, x) in [(3, 4), (5, 8), (9, 16)] {
+                        for (actual, expected) in restored
+                            .accumulators
+                            .iter_mut()
+                            .zip(&mut uninterrupted.accumulators)
+                        {
+                            update(expected, y, x);
+                            let second = actual.is_bivariate().then(|| operand(x));
+                            actual
+                                .update_accounted(Some(operand(y)), second, &mut owner)
+                                .unwrap();
+                            assert_eq!(seen(actual), seen(expected));
+                            assert_eq!(
+                                actual.finalize().unwrap(),
+                                expected.finalize().unwrap(),
+                                "{function:?}, distinct={distinct}, floats={floats}, y={y}"
+                            );
+                        }
+                        assert_eq!(manager.allocated(), owner.size());
+                    }
+
+                    let mut continued = Vec::new();
+                    serialize_group_state(&restored, &mut continued).unwrap();
+                    let mut resumed_owner = admitted_owner(1024 * 1024);
+                    resumed_owner.try_grow(32).unwrap();
+                    let resumed_manager = std::sync::Arc::clone(resumed_owner.manager());
+                    let resumed = deserialize_group_state_admitted(
+                        &mut continued.as_slice(),
+                        &mut resumed_owner,
+                    )
+                    .unwrap();
+                    assert_eq!(resumed.key_values, uninterrupted.key_values);
+                    for (actual, expected) in
+                        resumed.accumulators.iter().zip(&uninterrupted.accumulators)
+                    {
+                        assert_eq!(seen(actual), seen(expected));
+                        let output = actual.finalize_accounted(&mut resumed_owner, None).unwrap();
+                        assert_eq!(output, expected.finalize().unwrap());
+                        drop(output);
+                    }
+                    assert_eq!(resumed_manager.allocated(), resumed_owner.size());
+                    drop(resumed);
+                    resumed_owner.try_resize(32).unwrap();
+                    assert_eq!(resumed_manager.allocated(), 32);
+                    drop(resumed_owner);
+                    assert_eq!(resumed_manager.allocated(), 0);
+                    drop(restored);
+                    owner.try_resize(32).unwrap();
+                    assert_eq!(manager.allocated(), 32);
+                    drop(owner);
+                    assert_eq!(manager.allocated(), 0);
+                }
+            }
+        }
+    }
 }

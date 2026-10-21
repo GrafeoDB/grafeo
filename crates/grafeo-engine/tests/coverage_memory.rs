@@ -60,8 +60,10 @@ fn test_memory_usage_with_data() {
 
     // Indexes should report non-zero (adjacency, labels)
     assert!(usage.indexes.forward_adjacency_bytes > 0);
+    // Labels are bitmaps per row group: the label index, with no reverse
+    // index of each node's labels.
     assert!(usage.indexes.label_index_bytes > 0);
-    assert!(usage.indexes.node_labels_bytes > 0);
+    assert_eq!(usage.indexes.node_labels_bytes, 0);
 
     // MVCC should report at least depth 1 for each chain
     assert!(usage.mvcc.total_bytes > 0);
@@ -149,6 +151,54 @@ fn test_detailed_stats_memory_matches_memory_usage_total() {
         stats.memory_bytes > 0,
         "populated database should report non-zero memory_bytes"
     );
+}
+
+/// `memory_usage()` counts every graph: the rows of a named graph, and the
+/// property, vector and text indexes of every graph, by name.
+#[test]
+fn test_memory_usage_covers_named_graphs_and_indexes() {
+    let db = GrafeoDB::new_in_memory();
+    let before = db.memory_usage();
+    db.create_graph("trips").unwrap();
+    let trips = db.graph("trips").unwrap();
+    for i in 0..200 {
+        trips
+            .execute(&format!(
+                "INSERT (:City {{name: 'Prague {i}', bio: 'the castle and the bridges'}})"
+            ))
+            .unwrap();
+    }
+    let with_rows = db.memory_usage();
+    assert!(
+        with_rows.store.nodes_bytes > before.store.nodes_bytes
+            && with_rows.store.node_properties_bytes > before.store.node_properties_bytes,
+        "the named graph's rows count: {:?} then {:?}",
+        before.store,
+        with_rows.store
+    );
+
+    db.create_property_index("name").unwrap();
+    #[cfg(feature = "text-index")]
+    trips
+        .execute("CREATE INDEX trips_bio FOR (c:City) ON (c.bio) USING TEXT")
+        .unwrap();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    let with_indexes = db.memory_usage();
+    assert!(
+        with_indexes.indexes.property_index_bytes > 0,
+        "the property index"
+    );
+    #[cfg(feature = "text-index")]
+    {
+        let names: Vec<&str> = with_indexes
+            .indexes
+            .text_indexes
+            .iter()
+            .map(|index| index.name.as_str())
+            .collect();
+        assert_eq!(names, ["trips/City:bio"], "the named graph's text index");
+        assert_eq!(with_indexes.indexes.text_indexes[0].item_count, 200);
+    }
 }
 
 #[test]

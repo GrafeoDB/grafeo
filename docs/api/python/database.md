@@ -1210,7 +1210,7 @@ def clear_plan_cache(self) -> None
 
 ### get_node_at_epoch()
 
-Get a node as it existed at a specific historical epoch. Returns `None` if the node did not exist at that epoch.
+Get a node as it existed at a specific historical epoch. Returns `None` if the node did not exist at that epoch, and raises `GrafeoError` for an epoch older than the history the database keeps.
 
 ```python
 def get_node_at_epoch(self, id: int, epoch: int) -> Optional[Node]
@@ -1218,7 +1218,7 @@ def get_node_at_epoch(self, id: int, epoch: int) -> Optional[Node]
 
 ### get_edge_at_epoch()
 
-Get an edge as it existed at a specific historical epoch. Returns `None` if the edge did not exist at that epoch.
+Get an edge as it existed at a specific historical epoch. Returns `None` if the edge did not exist at that epoch, and raises `GrafeoError` for an epoch older than the history the database keeps.
 
 ```python
 def get_edge_at_epoch(self, id: int, epoch: int) -> Optional[Edge]
@@ -1242,7 +1242,7 @@ def get_edge_history(self, id: int) -> List[Tuple[int, Optional[int], Edge]]
 
 ### get_node_property_at_epoch()
 
-Returns a property value as it existed at a specific epoch. Requires the `temporal` feature.
+Returns a property value as it existed at a specific epoch, or `None` if the property did not exist then. Raises `GrafeoError` for an epoch older than the history the database keeps.
 
 ```python
 def get_node_property_at_epoch(self, id: int, key: str, epoch: int) -> Optional[Any]
@@ -1251,7 +1251,6 @@ def get_node_property_at_epoch(self, id: int, key: str, epoch: int) -> Optional[
 ### get_node_property_history()
 
 Returns the full version timeline for a single property: list of (epoch, value) tuples.
-Requires the `temporal` feature.
 
 ```python
 def get_node_property_history(self, id: int, key: str) -> List[Tuple[int, Any]]

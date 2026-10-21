@@ -700,7 +700,7 @@ impl GraphWriter {
             for (_, edge) in outgoing.into_iter().chain(incoming) {
                 self.remove_edge(edge, Some(id))?;
             }
-        } else if self.store.out_degree(id) + self.store.in_degree(id) > 0 {
+        } else {
             let degree = self.connected_edge_count(id);
             if degree > 0 {
                 return Err(OperatorError::ConstraintViolation(format!(
@@ -719,27 +719,34 @@ impl GraphWriter {
         Ok(deleted)
     }
 
-    /// The edges of node `id` that a delete without `DETACH` refuses: those
-    /// the store lists for it, less the ones this writer's transaction
-    /// deleted itself. The base of a compacted store lists a transaction's
-    /// deletes until it commits, as other readers still see them; an edge the
-    /// transaction deleted is one visible at its snapshot that it no longer
-    /// sees. Edges others created or committed after the snapshot still
-    /// count.
+    /// The edges of node `id` that a delete without `DETACH` refuses, among
+    /// those the store lists for it (a store lists an edge until it collects
+    /// it, also one a committed delete took out or a transaction's delete
+    /// still open): the edges this writer's transaction sees (its own new
+    /// ones included), and those committed now that it did not delete
+    /// itself, so edges others created or committed after its snapshot still
+    /// count. An edge the transaction deleted is one visible at its snapshot
+    /// that it no longer sees. Without a transaction, the edges committed
+    /// now.
     fn connected_edge_count(&self, id: NodeId) -> usize {
         let outgoing = self.store.edges_from(id, Direction::Outgoing);
         let incoming = self.store.edges_from(id, Direction::Incoming);
         let edges = outgoing.into_iter().chain(incoming).map(|(_, edge)| edge);
+        let now = self.store.current_epoch();
         let (Some(epoch), Some(transaction_id)) = (self.viewing_epoch, self.transaction_id) else {
-            return edges.count();
+            return edges
+                .filter(|&edge| self.store.is_edge_visible_at_epoch(edge, now))
+                .count();
         };
         edges
             .filter(|&edge| {
-                let deleted_by_this_transaction = self.store.is_edge_visible_at_epoch(edge, epoch)
-                    && !self
-                        .store
-                        .is_edge_visible_versioned(edge, epoch, transaction_id);
-                !deleted_by_this_transaction
+                let seen = self
+                    .store
+                    .is_edge_visible_versioned(edge, epoch, transaction_id);
+                let deleted_by_this_transaction =
+                    !seen && self.store.is_edge_visible_at_epoch(edge, epoch);
+                seen || (!deleted_by_this_transaction
+                    && self.store.is_edge_visible_at_epoch(edge, now))
             })
             .count()
     }

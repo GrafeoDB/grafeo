@@ -32,9 +32,10 @@ mod conformance;
 pub mod load;
 pub mod lpg;
 pub mod projection;
-/// The row-group store (workstream H): not used by the engine until H2d.
+pub mod property_filter;
+/// The row-group store (workstream H), the store the engine holds its
+/// graphs in.
 #[cfg(feature = "lpg")]
-#[doc(hidden)]
 pub mod rowgroup;
 pub mod traits;
 

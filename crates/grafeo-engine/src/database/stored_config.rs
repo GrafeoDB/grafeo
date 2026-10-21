@@ -23,14 +23,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use grafeo_common::storage::catalog_record::{
-    DurabilityRecord, GraphModelRecord, SectionMemoryRecord, StoredConfigRecord, TierRecord,
+    DurabilityRecord, GraphModelRecord, HistoryRetentionRecord, SectionMemoryRecord,
+    StoredConfigRecord, TierRecord,
 };
 use grafeo_common::storage::{SectionMemoryConfig, SectionType, TierOverride};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_storage::file::GrafeoFileManager;
 
 use super::encryption::DatabaseKeys;
-use crate::config::{Config, DurabilityMode, GraphModel, SetFields};
+use crate::config::{Config, DurabilityMode, GraphModel, HistoryRetention, SetFields};
 
 /// What a new database at `path` stores of `config`: every stored setting's
 /// value in effect, set or default.
@@ -57,6 +58,7 @@ pub(super) fn record_of(config: &Config, path: &Path) -> StoredConfigRecord {
             .spill_path()
             .and_then(|spill| relative_spill_path(spill, path)),
         sections,
+        history_retention: retention_record(config.history_retention()),
     }
 }
 
@@ -107,6 +109,11 @@ pub(super) fn changed(
             wanted.sections
         } else {
             stored.sections
+        },
+        history_retention: if set(SetFields::HISTORY_RETENTION) {
+            wanted.history_retention
+        } else {
+            stored.history_retention
         },
     })
 }
@@ -165,6 +172,9 @@ pub(super) fn applied(config: Config, stored: &StoredConfigRecord, path: &Path) 
                 config = config.with_section_config(section_type, memory);
             }
         }
+    }
+    if !set(&config, SetFields::HISTORY_RETENTION) {
+        config = config.with_history_retention(history_retention(stored.history_retention));
     }
     Ok(config)
 }
@@ -233,6 +243,29 @@ fn relative_spill_path(spill: &Path, path: &Path) -> Option<String> {
         .ok()
         .filter(|relative| !relative.as_os_str().is_empty())
         .and_then(|relative| relative.to_str().map(str::to_string))
+}
+
+/// The record of a history retention.
+pub(super) fn retention_record(retention: HistoryRetention) -> HistoryRetentionRecord {
+    match retention {
+        HistoryRetention::Duration(window) => HistoryRetentionRecord::Duration {
+            millis: u64::try_from(window.as_millis()).unwrap_or(u64::MAX),
+        },
+        HistoryRetention::Forever => HistoryRetentionRecord::Forever,
+        // `HistoryRetention` is non-exhaustive for callers only.
+        HistoryRetention::Off => HistoryRetentionRecord::Off,
+    }
+}
+
+/// The history retention a record holds.
+pub(super) fn history_retention(record: HistoryRetentionRecord) -> HistoryRetention {
+    match record {
+        HistoryRetentionRecord::Off => HistoryRetention::Off,
+        HistoryRetentionRecord::Duration { millis } => {
+            HistoryRetention::Duration(Duration::from_millis(millis))
+        }
+        HistoryRetentionRecord::Forever => HistoryRetention::Forever,
+    }
 }
 
 fn durability_record(mode: DurabilityMode) -> DurabilityRecord {

@@ -286,7 +286,12 @@ fn every_write_advances_the_epoch() {
 /// or deleted after it: each direct write commits at a later epoch.
 #[test]
 fn a_pinned_epoch_does_not_see_later_writes() {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: a read at an earlier epoch needs it.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     let alix = db.create_node(&["Person"]).unwrap();
     let gus = db.create_node(&["Person"]).unwrap();
     let knows = db.create_edge(alix, gus, "KNOWS").unwrap();
@@ -296,10 +301,10 @@ fn a_pinned_epoch_does_not_see_later_writes() {
     let likes = db.create_edge(gus, vincent, "LIKES").unwrap();
     assert!(db.delete_edge(knows).unwrap());
 
-    assert!(db.get_node_at_epoch(vincent, pinned).is_none());
-    assert!(db.get_edge_at_epoch(likes, pinned).is_none());
-    assert!(db.get_edge_at_epoch(knows, pinned).is_some());
-    assert!(db.get_node_at_epoch(alix, pinned).is_some());
+    assert!(db.get_node_at_epoch(vincent, pinned).unwrap().is_none());
+    assert!(db.get_edge_at_epoch(likes, pinned).unwrap().is_none());
+    assert!(db.get_edge_at_epoch(knows, pinned).unwrap().is_some());
+    assert!(db.get_node_at_epoch(alix, pinned).unwrap().is_some());
     assert!(db.get_edge(knows).is_none());
 }
 
@@ -456,10 +461,14 @@ fn direct_writes_and_transactions_run_side_by_side() {
 
 /// With versioned properties and labels, a reader pinned before a direct write
 /// still sees the values and labels from before it.
-#[cfg(feature = "temporal")]
 #[test]
 fn a_pinned_epoch_sees_the_properties_and_labels_it_had() {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: a read at an earlier epoch needs it.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     let alix = db
         .create_node_with_props(&["Person"], [("city", Value::from("Amsterdam"))])
         .unwrap();
@@ -469,16 +478,18 @@ fn a_pinned_epoch_sees_the_properties_and_labels_it_had() {
     assert!(db.add_node_label(alix, "Employee").unwrap());
 
     assert_eq!(
-        db.get_node_property_at_epoch(alix, "city", pinned),
+        db.get_node_property_at_epoch(alix, "city", pinned).unwrap(),
         Some(Value::from("Amsterdam"))
     );
     assert!(
         !db.get_node_at_epoch(alix, pinned)
             .unwrap()
+            .unwrap()
             .has_label("Employee")
     );
     assert_eq!(
-        db.get_node_property_at_epoch(alix, "city", db.current_epoch()),
+        db.get_node_property_at_epoch(alix, "city", db.current_epoch())
+            .unwrap(),
         Some(Value::from("Berlin"))
     );
     assert!(db.get_node(alix).unwrap().has_label("Employee"));

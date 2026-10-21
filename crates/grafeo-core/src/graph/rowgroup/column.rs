@@ -10,19 +10,32 @@
 //! A column holds the newest value of each row; what a row held before the
 //! writes some readers must not see is in the column's update chains
 //! (`updates`), which the reads at a version consult.
+//!
+//! A column is cold when it holds its values as encoded chunks: as a load
+//! left them (in memory), or spilled (P8): written to a spill file whose
+//! mapping the chunks read, so its values leave the heap. A spilled column
+//! reads each row through its chunk's point view, as a loaded one does, and
+//! comes back into memory when it is written (#412 decision Q9) or reloaded.
 
+use std::ops::Range;
 use std::sync::OnceLock;
 
 use bytes::Bytes;
 use grafeo_common::change::PendingVersion;
 use grafeo_common::types::{ArcStr, Value};
+use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::Mutex;
 
 use super::Read;
 use super::bitset::Bitset;
 use super::updates::Updates;
-use crate::codec::column_chunk::{PointView, decode_column_chunk_bytes};
+use super::versions::VECTOR_ROWS;
+use crate::codec::column_chunk::{PointView, decode_column_chunk_bytes, encode_column_chunk};
+
+/// The rows of a chunk a spill encodes: a vector of rows, so each chunk
+/// stays small to encode and its zone map tight.
+const SPILL_CHUNK_ROWS: usize = VECTOR_ROWS;
 
 /// The values of a column's rows, by row.
 #[derive(Debug, Clone)]
@@ -107,6 +120,21 @@ impl Data {
         }
     }
 
+    /// The heap bytes the values hold besides the column's own vectors: the
+    /// components of vectors and the bytes of strings.
+    fn payload_bytes(&self) -> usize {
+        let payload = |value: &Value| match value {
+            Value::Vector(vector) => std::mem::size_of_val::<[f32]>(vector),
+            Value::String(string) => string.len(),
+            _ => 0,
+        };
+        match self {
+            Self::Int64(_) | Self::Float64(_) | Self::Bool(_) => 0,
+            Self::String(values) => values.iter().map(|value| value.len()).sum(),
+            Self::Values(values) => values.iter().map(payload).sum(),
+        }
+    }
+
     fn heap_bytes(&self) -> usize {
         match self {
             Self::Int64(values) => values.capacity() * std::mem::size_of::<i64>(),
@@ -127,6 +155,83 @@ struct Hot {
     /// What rows held before the writes some readers must not see: a
     /// column with update chains is hot (a write thaws a cold column).
     updates: Updates<Option<Value>>,
+    /// The least and the greatest value the column held since it became
+    /// hot: a zone map of every version a reader may still see.
+    bound: Bound,
+}
+
+/// The values a hot column held, as a range that only widens (a value
+/// taken out leaves it as it is, so it covers the kept versions too): a
+/// zone map the planner prunes filters with.
+#[derive(Debug, Clone, Default)]
+enum Bound {
+    /// No value yet.
+    #[default]
+    Empty,
+    /// Every value lies between these.
+    Range { min: Value, max: Value },
+    /// Values that do not order against each other: anything may match.
+    Any,
+}
+
+impl Bound {
+    /// Takes `value` in.
+    fn widen(&mut self, value: &Value) {
+        use std::cmp::Ordering;
+
+        match self {
+            Self::Any => {}
+            Self::Empty => {
+                *self = Self::Range {
+                    min: value.clone(),
+                    max: value.clone(),
+                };
+            }
+            Self::Range { min, max } => {
+                match (
+                    super::read::compare_for_range(value, min),
+                    super::read::compare_for_range(value, max),
+                ) {
+                    (Some(below), Some(above)) => {
+                        if below == Ordering::Less {
+                            *min = value.clone();
+                        }
+                        if above == Ordering::Greater {
+                            *max = value.clone();
+                        }
+                    }
+                    _ => *self = Self::Any,
+                }
+            }
+        }
+    }
+
+    /// Whether a value of the column may meet `value` by `op`.
+    fn might_match(&self, op: crate::graph::lpg::CompareOp, value: &Value) -> bool {
+        use std::cmp::Ordering;
+
+        use crate::graph::lpg::CompareOp;
+
+        let (min, max) = match self {
+            Self::Empty => return false,
+            Self::Any => return true,
+            Self::Range { min, max } => (min, max),
+        };
+        let (Some(to_min), Some(to_max)) = (
+            super::read::compare_for_range(value, min),
+            super::read::compare_for_range(value, max),
+        ) else {
+            return true;
+        };
+        match op {
+            CompareOp::Eq => to_min != Ordering::Less && to_max != Ordering::Greater,
+            CompareOp::Ne => !(to_min == Ordering::Equal && to_max == Ordering::Equal),
+            CompareOp::Lt => to_min == Ordering::Greater,
+            CompareOp::Le => to_min != Ordering::Less,
+            CompareOp::Gt => to_max == Ordering::Less,
+            CompareOp::Ge => to_max != Ordering::Greater,
+        }
+    }
 }
 
 impl Hot {
@@ -137,6 +242,7 @@ impl Hot {
 
     /// Sets the value at `row`.
     fn set(&mut self, row: usize, value: &Value) {
+        self.bound.widen(value);
         if !self.data.put(row, value) {
             if self.present.is_empty() {
                 self.data = Data::for_value(value);
@@ -181,6 +287,32 @@ impl Hot {
     fn heap_bytes(&self) -> usize {
         self.present.heap_bytes() + self.data.heap_bytes()
     }
+
+    /// The decoded values of `chunks`.
+    fn decode(chunks: &[ColdChunk]) -> Result<Self> {
+        let mut hot = Self {
+            present: Bitset::default(),
+            data: Data::Values(Vec::new()),
+            updates: Updates::default(),
+            bound: Bound::Empty,
+        };
+        for chunk in chunks {
+            let decoded = decode_column_chunk_bytes(&chunk.bytes, chunk.codec, chunk.row_count)?;
+            for (offset, value) in decoded.values {
+                hot.set(chunk.first_row + offset as usize, &value);
+            }
+        }
+        Ok(hot)
+    }
+}
+
+/// Where a cold chunk's bytes are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Home {
+    /// In memory, as the load fetched them.
+    Memory,
+    /// In a spill file, mapped: off the heap.
+    Spilled,
 }
 
 /// A column chunk as the file holds it, kept encoded: the values of rows
@@ -192,6 +324,62 @@ struct ColdChunk {
     codec: u8,
     bytes: Bytes,
     point: Option<PointView>,
+    home: Home,
+}
+
+/// What a spill of a column does (see [`Columns::plan_spill`]).
+pub(super) enum SpillPlan {
+    /// Nothing: the column has no value, or is spilled already.
+    Nothing,
+    /// The column stays in memory: it has update chains, which a cold column
+    /// cannot hold (a write thaws it, Q9), and which the readers that must
+    /// not see a write read.
+    Chained,
+    /// The column stays in memory: a chunk of it would have no point view
+    /// (strings, values of several kinds), so its first read would decode
+    /// the whole column back onto the heap.
+    Unsupported,
+    /// The chunks to write to a spill file.
+    Write(SpillChunks),
+}
+
+/// A column's chunks encoded for a spill: the bytes a spill file holds and
+/// where each chunk is in them.
+pub(super) struct SpillChunks {
+    /// The chunks, one after the other: what the spill file holds.
+    pub(super) bytes: Vec<u8>,
+    places: Vec<ChunkPlace>,
+    /// The heap bytes the column holds now, which the spill frees.
+    pub(super) resident: usize,
+}
+
+/// Where a chunk is in a spill file, and what its directory entry says.
+struct ChunkPlace {
+    first_row: usize,
+    row_count: u32,
+    codec: u8,
+    range: Range<usize>,
+}
+
+impl SpillChunks {
+    fn new(resident: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            places: Vec::new(),
+            resident,
+        }
+    }
+
+    fn push(&mut self, first_row: usize, row_count: u32, codec: u8, bytes: &[u8]) {
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(bytes);
+        self.places.push(ChunkPlace {
+            first_row,
+            row_count,
+            codec,
+            range: start..self.bytes.len(),
+        });
+    }
 }
 
 /// One property key's values in a row group.
@@ -219,6 +407,7 @@ impl Column {
                 present: Bitset::default(),
                 data: Data::for_value(value),
                 updates: Updates::default(),
+                bound: Bound::Empty,
             }),
         }
     }
@@ -277,21 +466,171 @@ impl Column {
         // Otherwise a concurrent point read could find neither form.
         let mut cold = self.cold.lock();
         self.hot.get_or_init(|| {
-            let mut hot = Hot {
-                present: Bitset::default(),
-                data: Data::Values(Vec::new()),
-                updates: Updates::default(),
-            };
-            for chunk in std::mem::take(&mut *cold) {
-                // The load decoded each chunk once to check it.
-                let decoded = decode_column_chunk_bytes(&chunk.bytes, chunk.codec, chunk.row_count)
-                    .expect("a chunk the load checked");
-                for (offset, value) in decoded.values {
-                    hot.set(chunk.first_row + offset as usize, &value);
-                }
-            }
+            // The load decoded each chunk once to check it, and a spill
+            // checked that its file holds the chunks it encoded.
+            let hot = Hot::decode(&cold).expect("a chunk the load or the spill checked");
+            *cold = Vec::new();
             hot
         })
+    }
+
+    /// Decodes the cold chunks into the hot form, as [`hot`](Self::hot)
+    /// does, returning a chunk's decode error instead (the column then stays
+    /// as it was).
+    fn thaw(&mut self) -> Result<()> {
+        if self.hot.get().is_some() {
+            return Ok(());
+        }
+        let cold = self.cold.get_mut();
+        let hot = Hot::decode(cold)?;
+        *cold = Vec::new();
+        self.hot = OnceLock::from(hot);
+        Ok(())
+    }
+
+    /// Whether the row has a value, reading a cold column's presence bits
+    /// without decoding a value.
+    fn has_value(&self, row: usize) -> bool {
+        if let Some(hot) = self.hot.get() {
+            return hot.present.get(row);
+        }
+        let cold = self.cold.lock();
+        if let Some(hot) = self.hot.get() {
+            return hot.present.get(row);
+        }
+        let Some(chunk) = cold.iter().find(|chunk| {
+            row.checked_sub(chunk.first_row)
+                .is_some_and(|offset| offset < chunk.row_count as usize)
+        }) else {
+            return false;
+        };
+        match (&chunk.point, u32::try_from(row - chunk.first_row)) {
+            (Some(point), Ok(offset)) => point.has(offset),
+            _ => {
+                drop(cold);
+                self.hot().present.get(row)
+            }
+        }
+    }
+
+    /// What a spill of the column writes (see [`SpillPlan`]): the chunks of
+    /// its hot form encoded a vector of rows each, or the chunks a load left
+    /// in memory as they are.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's error for a value the format cannot hold.
+    fn plan_spill(&self) -> Result<SpillPlan> {
+        if self.hot.get().is_none() {
+            let cold = self.cold.lock();
+            // A read that decoded the column meanwhile left it hot.
+            if self.hot.get().is_none() {
+                return Ok(Self::plan_cold_spill(&cold));
+            }
+        }
+        let hot = self.hot();
+        if !hot.updates.is_empty() {
+            return Ok(SpillPlan::Chained);
+        }
+        if hot.present.is_empty() {
+            return Ok(SpillPlan::Nothing);
+        }
+        let mut chunks = SpillChunks::new(hot.heap_bytes() + hot.data.payload_bytes());
+        let rows = u32::try_from(SPILL_CHUNK_ROWS).expect("a vector of rows fits a chunk");
+        let mut window: Vec<(u32, Value)> = Vec::new();
+        let mut first_row = 0;
+        // Encodes the window's values as one chunk; `false` for a chunk
+        // without a point view.
+        let mut flush = |first_row: usize, window: &mut Vec<(u32, Value)>| -> Result<bool> {
+            if window.is_empty() {
+                return Ok(true);
+            }
+            let (codec, bytes) = encode_column_chunk(rows, window, None)?;
+            window.clear();
+            if !PointView::supports(codec) {
+                return Ok(false);
+            }
+            chunks.push(first_row, rows, codec.to_byte(), &bytes);
+            Ok(true)
+        };
+        for row in hot.present.rows() {
+            let start = row - row % SPILL_CHUNK_ROWS;
+            if start != first_row {
+                if !flush(first_row, &mut window)? {
+                    return Ok(SpillPlan::Unsupported);
+                }
+                first_row = start;
+            }
+            let offset = u32::try_from(row - start).expect("an offset in a vector of rows");
+            window.push((offset, hot.data.get(row)));
+        }
+        if !flush(first_row, &mut window)? {
+            return Ok(SpillPlan::Unsupported);
+        }
+        Ok(SpillPlan::Write(chunks))
+    }
+
+    /// [`plan_spill`](Self::plan_spill) of a cold column: its chunks as a
+    /// load left them, unless they are spilled already.
+    fn plan_cold_spill(cold: &[ColdChunk]) -> SpillPlan {
+        if cold.is_empty() || cold.iter().any(|chunk| chunk.home == Home::Spilled) {
+            return SpillPlan::Nothing;
+        }
+        if cold.iter().any(|chunk| chunk.point.is_none()) {
+            return SpillPlan::Unsupported;
+        }
+        let resident = cold.iter().map(|chunk| chunk.bytes.len()).sum();
+        let mut chunks = SpillChunks::new(resident);
+        for chunk in cold {
+            chunks.push(chunk.first_row, chunk.row_count, chunk.codec, &chunk.bytes);
+        }
+        SpillPlan::Write(chunks)
+    }
+
+    /// Makes the column cold, its chunks read from `mapped`: the spill file
+    /// that holds `chunks` (from [`plan_spill`](Self::plan_spill), with no
+    /// write since).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`], changing nothing, when `mapped` does not
+    /// hold the bytes `chunks` encoded, or a chunk gets no point view.
+    fn install_spill(&mut self, chunks: SpillChunks, mapped: &Bytes) -> Result<()> {
+        if mapped.as_ref() != chunks.bytes.as_slice() {
+            return Err(Error::Internal(
+                "a spill file does not hold the chunks written to it".to_string(),
+            ));
+        }
+        let mut cold = Vec::with_capacity(chunks.places.len());
+        for place in chunks.places {
+            let bytes = mapped.slice(place.range);
+            // The bytes are those the encoder wrote or the load checked.
+            let point = PointView::from_validated(&bytes, place.codec, place.row_count)?
+                .ok_or_else(|| {
+                    Error::Internal("a spilled chunk without a point view".to_string())
+                })?;
+            cold.push(ColdChunk {
+                first_row: place.first_row,
+                row_count: place.row_count,
+                codec: place.codec,
+                bytes,
+                point: Some(point),
+                home: Home::Spilled,
+            });
+        }
+        *self.cold.get_mut() = cold;
+        self.hot = OnceLock::new();
+        Ok(())
+    }
+
+    /// Whether its chunks are in a spill file.
+    fn is_spilled(&self) -> bool {
+        self.is_cold()
+            && self
+                .cold
+                .lock()
+                .iter()
+                .any(|chunk| chunk.home == Home::Spilled)
     }
 
     /// Reads a scalar from its chunk, decoding only for unsupported kinds.
@@ -325,17 +664,32 @@ impl Column {
         self.hot.get().is_none()
     }
 
-    /// The bytes of the chunks it still holds encoded, with their metadata
-    /// and the point views' indexes.
+    /// The heap bytes of the chunks it still holds encoded: their metadata,
+    /// the point views' indexes, and the bytes of the chunks in memory (a
+    /// spilled chunk's are in its file).
     fn cold_bytes(&self) -> usize {
         let cold = self.cold.lock();
         cold.capacity() * std::mem::size_of::<ColdChunk>()
             + cold
                 .iter()
                 .map(|chunk| {
-                    chunk.bytes.len() + chunk.point.as_ref().map_or(0, PointView::index_heap_bytes)
+                    let bytes = match chunk.home {
+                        Home::Memory => chunk.bytes.len(),
+                        Home::Spilled => 0,
+                    };
+                    bytes + chunk.point.as_ref().map_or(0, PointView::index_heap_bytes)
                 })
                 .sum::<usize>()
+    }
+
+    /// The bytes of its chunks in a spill file.
+    fn spilled_bytes(&self) -> usize {
+        self.cold
+            .lock()
+            .iter()
+            .filter(|chunk| chunk.home == Home::Spilled)
+            .map(|chunk| chunk.bytes.len())
+            .sum()
     }
 
     /// The heap bytes of its decoded values, none while it is cold.
@@ -376,6 +730,7 @@ impl Columns {
                 codec,
                 bytes,
                 point,
+                home: Home::Memory,
             });
         } else {
             // Written to already: decode into the hot values.
@@ -386,6 +741,27 @@ impl Columns {
                 hot.set(first_row + offset as usize, &value);
             }
         }
+    }
+
+    /// Whether a value of key `key` may meet `value` by `op`: by the zone
+    /// map of the hot column; a cold one (its chunks' zone maps are not read
+    /// here yet) may always. `None` without a column of the key.
+    pub(super) fn might_match(
+        &self,
+        key: u32,
+        op: crate::graph::lpg::CompareOp,
+        value: &Value,
+    ) -> Option<bool> {
+        let column = self.by_key.get(&key)?;
+        if let Some(hot) = column.hot.get() {
+            return Some(hot.bound.might_match(op, value));
+        }
+        // Under the chunks' lock: a thaw publishes the hot form first.
+        let cold = column.cold.lock();
+        Some(match column.hot.get() {
+            Some(hot) => hot.bound.might_match(op, value),
+            None => !cold.is_empty(),
+        })
     }
 
     /// The columns that still hold their chunks encoded.
@@ -538,9 +914,13 @@ impl Columns {
             .filter_map(move |(key, column)| column.value_at(row, read).map(|value| (*key, value)))
     }
 
-    /// Takes every value at `row` out, with what any chain kept of it.
+    /// Takes every value at `row` out, with what any chain kept of it. A
+    /// cold column without a value at the row stays cold.
     pub(super) fn clear_row(&mut self, row: usize) {
         for column in self.by_key.values_mut() {
+            if column.is_cold() && !column.has_value(row) {
+                continue;
+            }
             let hot = column.hot_mut();
             hot.take(row);
             if !hot.updates.is_empty() {
@@ -582,6 +962,18 @@ impl Columns {
             .flat_map(move |updates| updates.kept_stamped(row))
     }
 
+    /// Restores the update chains of key `key` a load reads from a file's
+    /// history (see [`Updates::load`]), thawing its column: a column with
+    /// chains is hot (Q9). A key with no value left in the rows (every row
+    /// had it removed last) gets an empty column to hold them.
+    pub(super) fn load_kept(&mut self, key: u32, kept: Vec<(usize, u64, Option<Value>)>) {
+        self.by_key
+            .entry(key)
+            .or_insert_with(Column::cold)
+            .updates_mut()
+            .load(kept);
+    }
+
     /// The rows the update chains of key `key` hold, `None` when they hold
     /// none.
     pub(super) fn chained_rows(&self, key: u32) -> Option<Bitset> {
@@ -611,9 +1003,77 @@ impl Columns {
             + self.by_key.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<Column>())
     }
 
-    /// The bytes of the chunks its columns still hold encoded.
+    /// The heap bytes of the chunks its columns still hold encoded.
     pub(super) fn cold_bytes(&self) -> usize {
         self.by_key.values().map(Column::cold_bytes).sum::<usize>()
+    }
+
+    /// What a spill of key `key`'s column writes (see [`SpillPlan`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's error for a value the format cannot hold.
+    pub(super) fn plan_spill(&self, key: u32) -> Result<SpillPlan> {
+        match self.by_key.get(&key) {
+            Some(column) => column.plan_spill(),
+            None => Ok(SpillPlan::Nothing),
+        }
+    }
+
+    /// Makes key `key`'s column cold, read from `mapped`, the spill file of
+    /// `chunks` (planned with no write since); returns the column's heap
+    /// bytes after.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`], changing nothing, when `mapped` does not
+    /// hold the planned bytes, or the column is gone.
+    pub(super) fn install_spill(
+        &mut self,
+        key: u32,
+        chunks: SpillChunks,
+        mapped: &Bytes,
+    ) -> Result<usize> {
+        let column = self
+            .by_key
+            .get_mut(&key)
+            .ok_or_else(|| Error::Internal("a spilled column is gone".to_string()))?;
+        column.install_spill(chunks, mapped)?;
+        Ok(column.cold_bytes())
+    }
+
+    /// Brings key `key`'s spilled column back into memory; returns whether
+    /// it was spilled.
+    ///
+    /// # Errors
+    ///
+    /// Returns a chunk's decode error; the column then stays spilled.
+    pub(super) fn reload(&mut self, key: u32) -> Result<bool> {
+        match self.by_key.get_mut(&key) {
+            Some(column) if column.is_spilled() => column.thaw().map(|()| true),
+            _ => Ok(false),
+        }
+    }
+
+    /// The key ids of its spilled columns.
+    pub(super) fn spilled_keys(&self) -> impl Iterator<Item = u32> + '_ {
+        self.by_key
+            .iter()
+            .filter(|(_, column)| column.is_spilled())
+            .map(|(key, _)| *key)
+    }
+
+    /// The bytes of its columns' chunks in spill files.
+    pub(super) fn spilled_bytes(&self) -> usize {
+        self.by_key.values().map(Column::spilled_bytes).sum()
+    }
+
+    /// The columns whose chunks are in spill files.
+    pub(super) fn spilled_count(&self) -> usize {
+        self.by_key
+            .values()
+            .filter(|column| column.is_spilled())
+            .count()
     }
 }
 

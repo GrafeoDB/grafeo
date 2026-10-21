@@ -102,7 +102,12 @@ fn table(rows: &[&[&str]]) -> Vec<Vec<Value>> {
 /// `a.rs` at 5, Vincent in `b.rs` at '7' (a string), Jules without a path at
 /// 1, and Mia in `z.rs`, which no file has, at 5.0.
 fn files() -> GrafeoDB {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: a read at an earlier epoch needs it.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     db.execute(
         "INSERT (:File {path: 'a.rs', lines: 5.0}), (:File {path: 'b.rs', lines: 7}), \
                 (:File {path: 'c.rs', lines: 5}), (:File {lines: 1})",
@@ -754,7 +759,6 @@ fn a_subquery_beside_the_key_filters_the_joined_rows() {
 }
 
 /// A read of an earlier epoch joins the nodes and values of that epoch.
-#[cfg(feature = "temporal")]
 #[test]
 fn a_read_of_an_earlier_epoch_joins_the_values_of_then() {
     let db = files();

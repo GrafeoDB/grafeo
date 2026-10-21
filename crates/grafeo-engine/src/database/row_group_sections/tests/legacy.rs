@@ -1,7 +1,7 @@
 //! The paths of earlier formats, snapshots and copies on a row-group root
 //! (#412 P5): every database a released Grafeo wrote opens into the
-//! row-group store as it opens into `LpgStore` today, the engine's own
-//! read-only open of each fixture being the reference, and checkpoints to
+//! row-group store, the engine's own read-only open of each fixture being
+//! the reference, and checkpoints to
 //! version 4 holding the same; snapshots export, import and restore; a graph
 //! copy holds what a reader at its epoch sees; embeddings a 0.5.x build
 //! spilled come back.
@@ -79,7 +79,7 @@ fn parts(database: &Database) -> Parts<'_> {
 }
 
 /// A database on a row-group root holding the 0.5.x database at `path`,
-/// read as the engine's read-only open reads it into `LpgStore` (its file
+/// read as the engine's read-only open reads it (its file
 /// and sidecar WAL, or the WAL of its directory, through the same
 /// functions), with every index built and the epochs continued.
 fn read_0_5(path: &Path) -> Result<Database> {
@@ -128,6 +128,7 @@ fn read_0_6(path: &Path) -> Result<Database> {
             #[cfg(feature = "triple-store")]
             &database.rdf_store,
         )
+        .map(|history| assert_eq!(history, None, "a fixture keeps no history"))
     })?;
     database
         .root
@@ -194,10 +195,10 @@ fn definitions(catalog: &crate::catalog::Catalog) -> Vec<String> {
 
 /// What a query sees of a graph of the engine's store: its rows, without
 /// the edges whose end the graph does not hold (a 0.5.43 WAL directory
-/// replays some into a named graph), which `LpgStore` keeps and the
-/// row-group store leaves out, and without null values: `LpgStore` keeps a
-/// stored null in a build without `temporal`, while the row-group store
-/// never holds one (a null value is no value, #412 decision Q8).
+/// replays some into a named graph), which 0.5.x kept and the row-group
+/// store leaves out, and without null values, which 0.5.x kept and the
+/// row-group store never holds (a null value is no value, #412 decision
+/// Q8).
 fn seen(store: &dyn GraphStore) -> (BTreeMap<u64, NodeView>, BTreeMap<u64, EdgeView>) {
     let (mut nodes, mut edges) = committed_of(store);
     edges.retain(|_, (src, dst, _, _)| nodes.contains_key(src) && nodes.contains_key(dst));
@@ -257,17 +258,12 @@ fn assert_same_database(db: &GrafeoDB, database: &Database, what: &str) {
         db.rdf_store.len(),
         "{what}: the RDF triples"
     );
-    // Both give a replayed commit an epoch of its own, which `LpgStore`
-    // keeps only with `temporal`.
-    let (epoch, reference) = (
+    // Both give a replayed commit an epoch of its own.
+    assert_eq!(
         database.transaction_manager.current_epoch(),
         db.transaction_manager.current_epoch(),
+        "{what}: the epoch"
     );
-    if cfg!(feature = "temporal") {
-        assert_eq!(epoch, reference, "{what}: the epoch");
-    } else {
-        assert!(epoch >= reference, "{what}: the epoch {epoch:?}");
-    }
 }
 
 /// Both reads of a fixture, or `None` when this build lacks a feature the
@@ -375,7 +371,7 @@ fn beta_files_of_version_3_open_into_row_groups() {
 }
 
 /// Embeddings 0.5.44 spilled to `<file>.spill` come back into the row-group
-/// store's columns as they come back into `LpgStore`'s: the newer value in
+/// store's columns as 0.5.44 read them back: the newer value in
 /// the file wins, a node deleted while spilled gets none (see the fixture's
 /// README).
 #[cfg(feature = "vector-index")]
@@ -438,7 +434,7 @@ fn snapshot_fixtures_import_into_row_groups() {
 /// A snapshot exported while transactions are open in the default graph
 /// and in a named graph holds each graph's committed state, read at the
 /// export's epoch without a committed copy; it imports into a row-group
-/// root with every index, and into the engine's `LpgStore` alike.
+/// root with every index, and into a database alike.
 #[test]
 fn a_snapshot_export_during_open_writes_round_trips() {
     let database = Database::new();
@@ -465,11 +461,11 @@ fn a_snapshot_export_during_open_writes_round_trips() {
     );
 
     let db = GrafeoDB::import_snapshot(&data).unwrap();
-    assert_eq!(committed_of(&*db.lpg_store()), committed[0], "LpgStore");
+    assert_eq!(committed_of(&*db.lpg_store()), committed[0], "the database");
     assert_eq!(
         committed_of(&*db.lpg_store().graph("trips").unwrap()),
         committed[1],
-        "LpgStore, trips"
+        "the database, trips"
     );
     assert_eq!(
         indexes_of(&*db.lpg_store()),

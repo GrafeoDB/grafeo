@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use grafeo_common::types::{NodeId, Value};
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::graph::traits::GraphStoreMut;
 use grafeo_engine::{Config, GrafeoDB};
 
@@ -167,7 +167,7 @@ fn schema_counts_committed_data_only() {
 
 #[test]
 fn direct_reads_on_an_external_store() {
-    let store = Arc::new(LpgStore::new().unwrap());
+    let store = Arc::new(RowGroupStore::new());
     let alix = store.create_node(&["Person"]);
     store.set_node_property(alix, "name", Value::from("Alix"));
     let gus = store.create_node(&["Person"]);
@@ -236,4 +236,54 @@ fn reads_of_a_dropped_selected_graph_find_nothing() {
 
     db.set_current_graph(None).unwrap();
     assert_eq!(name(&db, alix), Some(Value::from("Alix")));
+}
+
+/// A view as of the current epoch keeps the graph it reads while it lives,
+/// in a database that keeps no history: reads of the store at its read view
+/// see one state, across later commits and a collect. The bindings read
+/// through it where they make several store calls for one answer.
+#[test]
+fn reads_at_a_view_of_now_see_one_state_while_it_lives() {
+    use grafeo_core::graph::{Direction, GraphStore};
+
+    let db = GrafeoDB::new_in_memory();
+    let alix = person(&db, "Alix");
+    let gus = person(&db, "Gus");
+    db.create_edge(alix, gus, "KNOWS").unwrap();
+    let store = db.store();
+
+    let now = db.as_of(db.current_epoch()).unwrap();
+    let view = now.read_view();
+    db.execute("MATCH (p:Person {name: 'Gus'}) DETACH DELETE p")
+        .unwrap();
+    db.execute("MATCH (p:Person {name: 'Alix'}) SET p.name = 'Mia'")
+        .unwrap();
+    db.gc();
+    assert_eq!(store.nodes_by_label_at("Person", view), vec![alix, gus]);
+    assert_eq!(
+        store.node_property_at(alix, "name", view),
+        Some(Value::from("Alix")),
+        "the pinned view keeps the value it read"
+    );
+    assert_eq!(
+        store.edges_from_at(alix, Direction::Outgoing, view).len(),
+        1,
+        "and the edge the delete took"
+    );
+
+    drop(now);
+    db.gc();
+    let later = db.as_of(db.current_epoch()).unwrap();
+    assert_eq!(
+        store.nodes_by_label_at("Person", later.read_view()),
+        vec![alix]
+    );
+    assert_eq!(
+        store.node_property_at(alix, "name", later.read_view()),
+        Some(Value::from("Mia"))
+    );
+    assert_eq!(
+        store.edges_from_at(alix, Direction::Outgoing, later.read_view()),
+        Vec::<(NodeId, grafeo_common::types::EdgeId)>::new()
+    );
 }

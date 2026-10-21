@@ -27,7 +27,7 @@ fn make_embedding(seed: u64, dim: usize) -> Vec<f32> {
 }
 
 #[test]
-#[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
 fn alix_force_disk_on_vector_only_does_not_spill_lpg() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("alix.grafeo");
@@ -86,7 +86,7 @@ fn alix_force_disk_on_vector_only_does_not_spill_lpg() {
 }
 
 #[test]
-#[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
 fn gus_no_force_disk_overrides_means_no_auto_spill() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("gus.grafeo");
@@ -159,7 +159,7 @@ fn jules_with_section_tier_no_existing_config_uses_none_max_ram() {
 }
 
 #[test]
-#[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
 fn hans_force_ram_skips_explicit_spill_request() {
     // Phase 8g: even an explicit spill_consumer_by_name() must respect
     // ForceRam. The pin is the hard contract, not a soft hint.
@@ -209,7 +209,7 @@ fn hans_force_ram_skips_explicit_spill_request() {
 }
 
 #[test]
-#[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
 fn django_force_ram_survives_spill_all() {
     // spill_all() must skip ForceRam consumers but spill others.
     let dir = tempfile::TempDir::new().unwrap();
@@ -258,7 +258,7 @@ fn beatrix_clear_force_ram_re_enables_spill() {
 }
 
 #[test]
-#[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
 fn shosanna_reload_eligible_brings_spilled_vectors_back_to_ram() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("shosanna.grafeo");
@@ -310,7 +310,7 @@ fn shosanna_reload_eligible_brings_spilled_vectors_back_to_ram() {
 }
 
 #[test]
-#[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
 fn mia_storage_tiers_lists_only_section_consumers() {
     // The introspection method must skip CDC/overlay consumers and only
     // return entries for the SectionType-named section consumers.

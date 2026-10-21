@@ -51,7 +51,8 @@ impl RowGroupStore {
     /// Removes every row of this store, as `LpgStore::clear` does for a
     /// snapshot restore: the rows, their counts and the indexes go, the next
     /// node and edge ids start over, and the dictionaries keep every id they
-    /// gave out (a name used again gets its old id). The epoch stays: it
+    /// gave out (a name used again gets its old id), and the store keeps
+    /// backward edges as it did. The epoch stays: it
     /// never goes back, so a reader's epoch keeps its meaning. The named
     /// graphs stay too (a restore drops them first). No transaction may be
     /// open in the store.
@@ -60,10 +61,12 @@ impl RowGroupStore {
         let labels = std::mem::take(&mut inner.labels);
         let edge_types = std::mem::take(&mut inner.edge_types);
         let keys = std::mem::take(&mut inner.keys);
+        let incoming_edges = inner.incoming_edges;
         *inner = super::Inner {
             labels,
             edge_types,
             keys,
+            incoming_edges,
             ..super::Inner::default()
         };
         self.next_node_id.store(0, Ordering::Release);

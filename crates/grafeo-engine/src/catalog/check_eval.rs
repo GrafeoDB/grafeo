@@ -22,7 +22,7 @@ use grafeo_core::execution::operators::{BinaryFilterOp, FilterExpression, UnaryF
 #[cfg(feature = "lpg")]
 use grafeo_core::execution::{DataChunk, operators::ExpressionPredicate, vector::ValueVector};
 #[cfg(feature = "lpg")]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 /// A parsed CHECK constraint expression, ready to evaluate.
 pub(crate) struct CheckExpression {
@@ -128,10 +128,10 @@ impl CheckExpression {
 /// one, since a CHECK expression reads property values only. `None` when it
 /// cannot be made (an arena that does not allocate).
 #[cfg(feature = "lpg")]
-fn no_graph() -> Option<Arc<LpgStore>> {
-    static NO_GRAPH: OnceLock<Option<Arc<LpgStore>>> = OnceLock::new();
+fn no_graph() -> Option<Arc<RowGroupStore>> {
+    static NO_GRAPH: OnceLock<Option<Arc<RowGroupStore>>> = OnceLock::new();
     NO_GRAPH
-        .get_or_init(|| LpgStore::new().ok().map(Arc::new))
+        .get_or_init(|| Some(Arc::new(RowGroupStore::new())))
         .clone()
 }
 

@@ -2,13 +2,14 @@
 //! holds the newest text of each node with the label, and the searches at a
 //! view (see the parent module).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use grafeo_common::types::{ArcStr, NodeId, PropertyKey, Value};
+use grafeo_common::types::{ArcStr, NodeId, PropertyKey, ReadView, Value};
 use parking_lot::RwLock;
 
 use super::super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
-use super::search_key;
+use super::{IndexSearch, search_key};
 use crate::index::text::InvertedIndex;
 
 /// A text index of the store, with the label and key it indexes.
@@ -131,16 +132,18 @@ impl Inner {
     }
 
     /// The documents of the text index on `label` and `property` that
-    /// `read` sees holding a term of `query`, best first: the index's
-    /// scores for the nodes every reader sees alike, the text at the view
-    /// scored with the index's statistics of now for the nodes whose value
-    /// or labels a chain holds. Empty without the index.
+    /// `read` sees holding a term of `query`, best first, among the nodes of
+    /// `allowed` only when given: the index's scores for the nodes every
+    /// reader sees alike, the text at the view scored with the index's
+    /// statistics of now for the nodes whose value or labels a chain holds.
+    /// Empty without the index.
     pub(in crate::graph::rowgroup) fn text_search_at(
         &self,
         label: &str,
         property: &str,
         query: &str,
         limit: TextLimit,
+        allowed: Option<&HashSet<NodeId>>,
         read: Read,
     ) -> Vec<(NodeId, f64)> {
         let Some(entry) = self.indexes.text.get(&search_key(label, property)) else {
@@ -150,10 +153,15 @@ impl Inner {
         let changed = self.changed_rows(key);
         let index = entry.index.read();
         let mut scores = index.scores(query, |id| {
-            !changed.contains(&id.as_u64()) && self.node_visible(id.as_u64(), read)
+            allowed.is_none_or(|allowed| allowed.contains(&id))
+                && !changed.contains(&id.as_u64())
+                && self.node_visible(id.as_u64(), read)
         });
         if let Some(label) = self.label_id(label) {
             for raw in changed {
+                if allowed.is_some_and(|allowed| !allowed.contains(&NodeId::new(raw))) {
+                    continue;
+                }
                 if let Some(text) = self.text_at(raw, label, key, read)
                     && let Some(score) = index.score_text(&text, query)
                 {
@@ -232,6 +240,37 @@ impl RowGroupStore {
             .indexes
             .text
             .insert(search_key(label, property), entry);
+    }
+
+    /// The best `search.k` documents of the text index on `label` and
+    /// `property` for `query` that `view` sees, best first (equal scores by
+    /// ascending node id), among `search`'s allowed nodes only when given:
+    /// the database's `text_search`. Scores use the index's statistics of
+    /// now (decision Q5 A). `None` without the index.
+    ///
+    /// The store's lock is held for the search, and the index's lock only
+    /// inside it, in the order the writes take them.
+    #[must_use]
+    pub fn text_index_search_at(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        search: IndexSearch<'_>,
+        view: ReadView,
+    ) -> Option<Vec<(NodeId, f64)>> {
+        let inner = self.inner.read();
+        if !inner.has_text_index(label, property) {
+            return None;
+        }
+        Some(inner.text_search_at(
+            label,
+            property,
+            query,
+            TextLimit::Top(search.k),
+            search.allowed,
+            Read::view(view),
+        ))
     }
 
     /// Retrieves the text index for a label and a property.

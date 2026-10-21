@@ -281,10 +281,14 @@ fn a_savepoint_rollback_restores_a_deleted_node_it_created_whole() {
 /// With `temporal`, a node deleted keeps its labels in its history: a read
 /// at an epoch before the delete finds it with them (the undo log path
 /// dropped the node's whole label history).
-#[cfg(feature = "temporal")]
 #[test]
 fn a_read_before_a_delete_sees_the_deleted_nodes_labels() {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: the test reads an earlier epoch.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     db.execute("INSERT (:Person:Boxer {name: 'Butch'})")
         .unwrap();
     let before = db.current_epoch();
@@ -307,7 +311,7 @@ fn a_read_before_a_delete_sees_the_deleted_nodes_labels() {
 
 /// With `temporal`, a rolled-back value and a rolled-back label leave the
 /// text index as they found it (the undo log path left both in the index).
-#[cfg(all(feature = "temporal", feature = "text-index"))]
+#[cfg(feature = "text-index")]
 #[test]
 fn a_rollback_leaves_the_text_index_as_committed() {
     let db = GrafeoDB::new_in_memory();
@@ -339,6 +343,8 @@ fn a_rollback_leaves_the_text_index_as_committed() {
 /// anything.
 #[test]
 fn a_rollback_names_the_external_store_that_keeps_its_writes() {
+    // An external store without undo: `LpgStore` as a user's own store
+    // (the engine holds the row-group store; H2e replaces this one).
     use grafeo_core::graph::GraphStoreMut;
     use grafeo_core::graph::lpg::LpgStore;
 
@@ -519,13 +525,16 @@ mod crash {
 /// writer of a node fails with a write conflict and changes nothing.
 #[test]
 fn query_processors_in_transactions_claim_what_they_write() {
-    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
+    use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
     use grafeo_engine::query::{QueryLanguage, QueryProcessor};
     use grafeo_engine::transaction::TransactionManager;
 
-    let store = Arc::new(LpgStore::new().unwrap());
-    let alix = store.create_node_with_props(&["Person"], [("name", Value::from("Alix"))]);
+    let store = Arc::new(RowGroupStore::new());
+    let alix = store.create_node_with_props(&["Person"], &[("name".into(), Value::from("Alix"))]);
     let manager = Arc::new(TransactionManager::new());
+    // The transactions read from the epoch the store's direct write took.
+    manager.sync_epoch(store.current_epoch());
     let (first, second) = (manager.begin(), manager.begin());
     let epoch = manager.current_epoch();
     let processor = |transaction| {
@@ -549,8 +558,17 @@ fn query_processors_in_transactions_claim_what_they_write() {
         .unwrap_err();
     assert!(is_conflict(&error), "{error}");
     assert_eq!(
-        store.get_node_property(alix, &"city".into()),
+        store.node_property_at(
+            alix,
+            "city",
+            grafeo_common::types::ReadView::new(epoch, Some(first))
+        ),
         Some(Value::from("Berlin")),
-        "the refused write changed nothing"
+        "the refused write changed nothing of the first's"
+    );
+    assert_eq!(
+        store.get_node_property(alix, &"city".into()),
+        None,
+        "and neither is committed"
     );
 }

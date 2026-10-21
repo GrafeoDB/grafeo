@@ -17,7 +17,7 @@
 use std::ops::Range;
 
 use super::bitset::Bitset;
-use super::{ABSENT, PENDING, RowVersion};
+use super::{ABSENT, PENDING, Read, RowVersion};
 
 /// The rows of a vector.
 pub(crate) const VECTOR_ROWS: usize = 2_048;
@@ -249,6 +249,17 @@ impl Versions {
 
     /// Whether `row` exists in any reader's view (created, by anyone, and
     /// not undone): a bit test in either form of its vector.
+    /// Whether `read` sees `row`, in one lookup: a row of a flat vector,
+    /// the common case, is seen by every reader once it exists (a bit
+    /// test); a stamped vector's row by its stamps.
+    pub(super) fn visible(&self, row: usize, read: Read) -> bool {
+        match self.vectors.get(row / VECTOR_ROWS) {
+            None => false,
+            Some(Vector::Flat(exists)) => exists.get(row % VECTOR_ROWS),
+            Some(Vector::Stamped(stamped)) => stamped.get(row % VECTOR_ROWS).visible(read),
+        }
+    }
+
     pub(super) fn exists(&self, row: usize) -> bool {
         match self.vectors.get(row / VECTOR_ROWS) {
             None => false,

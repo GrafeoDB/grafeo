@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{ArcStr, NodeId, PropertyKey, Value};
+use grafeo_common::types::{ArcStr, NodeId, PropertyKey, ReadView, Value};
 
 use super::super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
-use super::search_key;
+use super::{IndexSearch, search_key};
 use crate::index::ranking::by_ascending_distance;
 use crate::index::vector::{
     DistanceMetric, HnswConfig, VectorAccessor, VectorIndexKind, brute_force_knn, compute_distance,
@@ -201,7 +201,16 @@ impl Inner {
             && let Some(entry) = self.indexes.vector.get(&search_key(name, property))
             && entry.index.config().metric == metric
         {
-            return self.indexed_nearest(entry, query, k, metric, read);
+            let search = IndexSearch {
+                k,
+                ef: Some(EF),
+                allowed: None,
+            };
+            return self
+                .indexed_nearest(entry, query, search, read)
+                .into_iter()
+                .map(|(id, distance)| (id, f64::from(distance)))
+                .collect();
         }
         let vectors = self.scanned_vectors(label, property, read);
         brute_force_knn(
@@ -215,33 +224,44 @@ impl Inner {
         .collect()
     }
 
-    /// The `k` nodes `read` sees nearest to `query`, through `entry`'s
-    /// index: its nearest nodes among those every reader sees alike, fetched
-    /// again with twice as many until `k` are left after the ones the view
-    /// does not see (or the index has no more), and the vectors at the view
-    /// of the nodes whose value or labels a chain holds, measured here.
+    /// The `search.k` nodes `read` sees nearest to `query`, through
+    /// `entry`'s index with `search`'s beam width (the index's own when
+    /// `None`), among `search`'s allowed nodes only when given: the index's
+    /// nearest nodes among those every reader sees alike, fetched again with
+    /// twice as many until `k` are left after the ones the view does not see
+    /// (or the index has no more), and the vectors at the view of the nodes
+    /// whose value or labels a chain holds, measured here by the index's
+    /// metric.
     fn indexed_nearest(
         &self,
         entry: &VectorEntry,
         query: &[f32],
-        k: usize,
-        metric: DistanceMetric,
+        search: IndexSearch<'_>,
         read: Read,
-    ) -> Vec<(NodeId, f64)> {
+    ) -> Vec<(NodeId, f32)> {
+        let IndexSearch { k, ef, allowed } = search;
         let key = self.keys.get_id(entry.property.as_str());
         let changed = self.changed_rows(key);
         let vectors = self.newest_vectors(entry.property.as_str());
         let size = entry.index.len();
         let mut fetch = k;
         let mut found = loop {
-            let nearest = entry.index.search_with_ef(query, fetch, EF, &vectors);
+            let nearest = match (allowed, ef) {
+                (Some(allowed), Some(ef)) => entry
+                    .index
+                    .search_with_ef_and_filter(query, fetch, ef, allowed, &vectors),
+                (Some(allowed), None) => entry
+                    .index
+                    .search_with_filter(query, fetch, allowed, &vectors),
+                (None, Some(ef)) => entry.index.search_with_ef(query, fetch, ef, &vectors),
+                (None, None) => entry.index.search(query, fetch, &vectors),
+            };
             let complete = nearest.len() < fetch || fetch >= size;
-            let kept: Vec<(NodeId, f64)> = nearest
+            let kept: Vec<(NodeId, f32)> = nearest
                 .into_iter()
                 .filter(|(id, _)| {
                     !changed.contains(&id.as_u64()) && self.node_visible(id.as_u64(), read)
                 })
-                .map(|(id, distance)| (id, f64::from(distance)))
                 .collect();
             if kept.len() >= k || complete {
                 break kept;
@@ -252,14 +272,17 @@ impl Inner {
             found.truncate(k);
             return found;
         }
+        let metric = entry.index.config().metric;
         let label = self.label_id(&entry.label);
         if let (Some(label), Some(key)) = (label, key) {
             for raw in changed {
+                if allowed.is_some_and(|allowed| !allowed.contains(&NodeId::new(raw))) {
+                    continue;
+                }
                 if let Some(vector) = self.vector_at(raw, Some(label), key, read)
                     && vector.len() == query.len()
                 {
-                    let distance = compute_distance(query, &vector, metric);
-                    found.push((NodeId::new(raw), f64::from(distance)));
+                    found.push((NodeId::new(raw), compute_distance(query, &vector, metric)));
                 }
             }
         }
@@ -325,6 +348,73 @@ impl RowGroupStore {
             .indexes
             .vector
             .insert(search_key(label, property), entry);
+    }
+
+    /// The nodes `view` sees nearest to `query`, nearest first, through the
+    /// vector index on `label` and `property`, by the index's metric, with
+    /// `search`'s `k`, beam width and allowed nodes: the database's
+    /// `vector_search`. The index holds each node's newest vector; the nodes
+    /// whose vector or labels a version some reader may still need holds are
+    /// measured at the view instead, so the answer is the view's. `None`
+    /// without the index.
+    ///
+    /// The store's lock is held for the search, and no other lock is taken
+    /// with it but the index's own, in the order the writes take them.
+    #[must_use]
+    pub fn vector_index_search_at(
+        &self,
+        label: &str,
+        property: &str,
+        query: &[f32],
+        search: IndexSearch<'_>,
+        view: ReadView,
+    ) -> Option<Vec<(NodeId, f32)>> {
+        let inner = self.inner.read();
+        let entry = inner.indexes.vector.get(&search_key(label, property))?;
+        Some(inner.indexed_nearest(entry, query, search, Read::view(view)))
+    }
+
+    /// [`vector_index_search_at`](Self::vector_index_search_at) for each of
+    /// `queries`, in their order, under one hold of the store's lock (in
+    /// parallel with the `parallel` feature). `None` without the index.
+    #[must_use]
+    pub fn vector_index_batch_search_at(
+        &self,
+        label: &str,
+        property: &str,
+        queries: &[Vec<f32>],
+        search: IndexSearch<'_>,
+        view: ReadView,
+    ) -> Option<Vec<Vec<(NodeId, f32)>>> {
+        let inner = self.inner.read();
+        let entry = inner.indexes.vector.get(&search_key(label, property))?;
+        let read = Read::view(view);
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            Some(
+                queries
+                    .par_iter()
+                    .map(|query| inner.indexed_nearest(entry, query, search, read))
+                    .collect(),
+            )
+        }
+        #[cfg(not(feature = "parallel"))]
+        Some(
+            queries
+                .iter()
+                .map(|query| inner.indexed_nearest(entry, query, search, read))
+                .collect(),
+        )
+    }
+
+    /// Node `id`'s vector of `property` as `view` sees it (any label), for
+    /// a reranking of search results at the view.
+    #[must_use]
+    pub fn vector_at(&self, id: NodeId, property: &str, view: ReadView) -> Option<Arc<[f32]>> {
+        let inner = self.inner.read();
+        let key = inner.keys.get_id(property)?;
+        inner.vector_at(id.as_u64(), None, key, Read::view(view))
     }
 
     /// Retrieves the vector index for a label and a property.

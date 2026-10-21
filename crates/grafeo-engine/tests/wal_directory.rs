@@ -211,7 +211,6 @@ fn a_0_5_directory_whose_wal_rotated_loads_every_file() {
 /// named graph `trips` without a switch back to the default graph (0.5.43
 /// never logged one). In `trips`, node 1 is named Paris, later Amsterdam, and
 /// node 3 (Berlin) comes last.
-#[cfg(feature = "temporal")]
 fn write_0_5_43_named_graph_directory(path: &Path) {
     let wal = WalManager::open(path.join("wal")).unwrap();
     let mut transaction = 0;
@@ -271,7 +270,6 @@ fn write_0_5_43_named_graph_directory(path: &Path) {
 
 /// What an open of the named-graph directory shows: the database's epoch,
 /// the cities in `trips`, and the name history of node 1 there.
-#[cfg(feature = "temporal")]
 fn named_graph_view(
     db: &GrafeoDB,
 ) -> (
@@ -297,11 +295,10 @@ fn named_graph_view(
 /// A 0.5.43 directory whose last commits all went to a named graph is read at
 /// one epoch, the highest any graph reached during the replay: every open (read
 /// only, `open_in_memory`, the migration, a reopen of the migrated file) shows
-/// the latest values with their whole history, at the same epoch, and a new
-/// commit continues above it. Replay advances the epoch of the graph a commit
-/// lands in, and 0.5.43 never switched back to the default graph, so a read at
-/// the default graph's epoch would show a stale name and miss Berlin.
-#[cfg(feature = "temporal")]
+/// the latest values, at the same epoch, and a new commit continues above it.
+/// Replay advances the epoch of the graph a commit lands in, and 0.5.43 never
+/// switched back to the default graph, so a read at the default graph's epoch
+/// would show a stale name and miss Berlin.
 #[test]
 fn a_0_5_43_directory_is_read_at_the_epoch_its_named_graphs_reached() {
     let dir = tempfile::tempdir().unwrap();
@@ -324,11 +321,13 @@ fn a_0_5_43_directory_is_read_at_the_epoch_its_named_graphs_reached() {
         ],
         "read-only: every city with its latest name"
     );
+    // The 0.5.x versions are not carried over (a database's history starts
+    // where it was read or migrated): the latest name only.
     let names: Vec<&Value> = history.iter().map(|(_, value)| value).collect();
     assert_eq!(
         names,
-        [&Value::from("Paris"), &Value::from("Amsterdam")],
-        "read-only: the whole name history of node 1"
+        [&Value::from("Amsterdam")],
+        "read-only: the latest name of node 1"
     );
     assert!(
         history.windows(2).all(|pair| pair[0].0 < pair[1].0)

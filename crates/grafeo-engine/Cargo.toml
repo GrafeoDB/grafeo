@@ -93,7 +93,7 @@ grafeo-file = ["dep:grafeo-storage", "grafeo-storage/grafeo-file", "dep:crc32fas
 encryption = ["dep:grafeo-storage", "grafeo-common/encryption", "grafeo-storage/encryption"]  # AES-256-GCM encryption at rest
 spill = ["grafeo-core/spill"]  # Disk spilling for out-of-core execution
 mmap = ["grafeo-core/mmap", "dep:memmap2"]  # File-backed vector storage
-temporal = ["grafeo-core/temporal"]  # Append-only versioned properties
+temporal = []  # Deprecated since 0.6.0: enables nothing (a database's history retention, Config::with_history_retention, replaces it); removed in 0.7.0
 compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 # Convenience groups
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]  # All query language parsers

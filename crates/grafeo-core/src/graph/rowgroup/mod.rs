@@ -16,7 +16,10 @@
 //! - for nodes, one bitmap of rows per label (FD5 in memory) and the nodes'
 //!   outgoing and incoming edges, each node's sorted by edge type and other
 //!   node, with a hot delta for the edges added since (FD6 in memory,
-//!   `adjacency`);
+//!   `adjacency`); a store built without backward edges
+//!   ([`RowGroupStore::with_backward_edges`](crate::graph::rowgroup::RowGroupStore::with_backward_edges))
+//!   keeps the outgoing ones only, and finds a node's incoming edges in the
+//!   edge table instead;
 //! - for edges, the source, target and type of each row;
 //! - per column, and for the nodes' labels, update chains per vector of
 //!   2,048 rows: what the rows held before the writes some readers must not
@@ -41,7 +44,13 @@
 //! of earlier formats, the snapshots and the copies of graph data load come
 //! in through the replay writer (`load`, a
 //! [`LoadTarget`](crate::graph::load::LoadTarget)), so the section reader
-//! migrates the LPG sections of 0.5.x and of version 3 into a root.
+//! migrates the LPG sections of 0.5.x and of version 3 into a root. Under a
+//! memory limit a node property column spills into files the engine writes
+//! and maps, and reads from them without coming back onto the heap (`spill`).
+//! A database that keeps history (a retention window) keeps the same
+//! versions longer, and checkpoints them as `History` chunks; what time
+//! travel needs besides, the history calls and the floor of what the store
+//! answers, is in `history`.
 
 mod adjacency;
 mod adjacency_chunk;
@@ -52,16 +61,18 @@ mod column;
 mod diagnostics;
 mod epochs;
 mod graphs;
+mod history;
 mod index;
 mod load;
 mod read;
 pub mod section;
+mod spill;
 mod updates;
 mod versions;
 mod write;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use grafeo_common::change::{EdgeImage, Labels, NodeImage, Properties};
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, ReadView, Value};
@@ -72,6 +83,9 @@ use self::adjacency::{Adjacency, Adjacent};
 use self::bitset::Bitset;
 use self::column::Columns;
 pub use self::diagnostics::RowGroupMemory;
+#[cfg(any(feature = "text-index", feature = "vector-index"))]
+pub use self::index::IndexSearch;
+pub use self::spill::{ColumnSpill, ColumnSpillReport};
 use self::updates::Updates;
 #[cfg(test)]
 pub(crate) use self::versions::VECTOR_ROWS;
@@ -335,6 +349,18 @@ impl Counts {
     }
 }
 
+/// Whether a store keeps each node's incoming edges, as `LpgStore`'s
+/// backward adjacency (`backward_edges`): fixed when the store is built.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum IncomingEdges {
+    /// Kept with each node, as the outgoing ones are.
+    #[default]
+    Kept,
+    /// Not kept: a read of a node's incoming edges scans the edge table's
+    /// targets (see [`Inner::incoming_by_scan`]).
+    NotKept,
+}
+
 /// Everything the store's lock guards.
 #[derive(Debug, Default)]
 struct Inner {
@@ -348,6 +374,8 @@ struct Inner {
     indexes: index::Indexes,
     /// The row groups with a listed vector (`collect`).
     listed: collect::Listed,
+    /// Whether the nodes' incoming edges are kept.
+    incoming_edges: IncomingEdges,
 }
 
 impl Inner {
@@ -384,14 +412,28 @@ impl Inner {
         }
     }
 
+    /// The node's group and row, if `read` sees the node: one lookup of
+    /// its vector's versions, a bit test while the vector is flat.
+    fn node_seen(&self, id: u64, read: Read) -> Option<(&NodeGroup, usize)> {
+        let (group, row) = locate(id);
+        let group = self.nodes.get(&group)?;
+        group.versions.visible(row, read).then_some((group, row))
+    }
+
+    /// The edge's group and row, if `read` sees the edge (see
+    /// [`node_seen`](Self::node_seen)).
+    fn edge_seen(&self, id: u64, read: Read) -> Option<(&EdgeGroup, usize)> {
+        let (group, row) = locate(id);
+        let group = self.edges.get(&group)?;
+        group.versions.visible(row, read).then_some((group, row))
+    }
+
     fn node_visible(&self, id: u64, read: Read) -> bool {
-        self.node(id)
-            .is_some_and(|(group, row)| group.version(row).visible(read))
+        self.node_seen(id, read).is_some()
     }
 
     fn edge_visible(&self, id: u64, read: Read) -> bool {
-        self.edge(id)
-            .is_some_and(|(group, row)| group.version(row).visible(read))
+        self.edge_seen(id, read).is_some()
     }
 
     /// The names of label ids, in their order.
@@ -482,14 +524,59 @@ impl Inner {
         })
     }
 
-    /// Whether `read` sees an edge of node `id`, either way.
+    /// Whether `read` sees an edge of node `id`, either way: without the
+    /// incoming edges kept, its incoming ones by a scan of the edge table.
     fn sees_an_edge_of(&self, id: u64, read: Read) -> bool {
         self.node(id).is_some_and(|(group, row)| {
             group
                 .outgoing
                 .of(row)
-                .chain(group.incoming.of(row))
                 .any(|adjacent| self.edge_visible(adjacent.edge, read))
+                || if self.keeps_incoming() {
+                    group
+                        .incoming
+                        .of(row)
+                        .any(|adjacent| self.edge_visible(adjacent.edge, read))
+                } else {
+                    self.incoming_by_scan(id)
+                        .any(|adjacent| self.edge_visible(adjacent.edge, read))
+                }
+        })
+    }
+
+    /// Whether the nodes' incoming edges are kept.
+    fn keeps_incoming(&self) -> bool {
+        self.incoming_edges == IncomingEdges::Kept
+    }
+
+    /// The directions of adjacency the store keeps for an edge's two ends:
+    /// (node, other node, outgoing) for its source, and for its target when
+    /// the incoming edges are kept.
+    fn kept_ends(&self, src: u64, dst: u64) -> impl Iterator<Item = (u64, u64, bool)> + use<> {
+        let incoming = self.keeps_incoming();
+        [(src, dst, true), (dst, src, false)]
+            .into_iter()
+            .filter(move |(_, _, outgoing)| *outgoing || incoming)
+    }
+
+    /// Node `node`'s incoming edges as the edge table holds them, by edge
+    /// id: every edge row with that target not collected yet, deleted ones
+    /// included, as the incoming adjacency would list them. A store that
+    /// keeps no incoming edges reads them so (`LpgStore` without backward
+    /// adjacency scans its edges alike): one pass over the target column of
+    /// every edge row group.
+    fn incoming_by_scan(&self, node: u64) -> impl Iterator<Item = Adjacent> + '_ {
+        self.edges.iter().flat_map(move |(index, group)| {
+            group
+                .dst
+                .iter()
+                .enumerate()
+                .filter(move |(row, dst)| **dst == node && group.versions.exists(*row))
+                .map(move |(row, _)| Adjacent {
+                    edge_type: group.edge_type[row],
+                    other: group.src[row],
+                    edge: index * ROWS_PER_GROUP + row as u64,
+                })
         })
     }
 
@@ -511,8 +598,22 @@ pub struct RowGroupStore {
     /// Whether the store lists a vector (`collect`): a collect while it
     /// lists none returns at once, without taking the lock.
     has_listed: AtomicBool,
+    /// The writes stamped at once and the entries commits stamped since the
+    /// last collect: each may have left a version that only a reader before
+    /// its epoch needs (`collect`).
+    settled: AtomicUsize,
+    /// One past the horizon of the last collect when it left committed
+    /// versions some reader at that horizon may still need, 0 when it left
+    /// none (`collect`).
+    held_at: AtomicU64,
     /// Its named graphs, its graph id, and whether it was dropped (`graphs`).
     graphs: graphs::Graphs,
+    /// Whether the database keeps history (a retention window, H2c): replay
+    /// then keeps what it replaces as an immediate write does (`history`).
+    history: AtomicBool,
+    /// The oldest epoch the store answers reads at: the newest horizon it
+    /// was collected at, or the one its history was loaded from (`history`).
+    floor: AtomicU64,
 }
 
 /// What a collect took out: rows, and the values and label sets kept for
@@ -524,10 +625,35 @@ struct Collected {
 }
 
 impl RowGroupStore {
-    /// An empty store.
+    /// An empty store that keeps each node's incoming edges.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty store that keeps each node's incoming edges, or with
+    /// `backward_edges` false keeps none, as `LpgStoreConfig::backward_edges`
+    /// and the database's `Config::backward_edges` say: an edge is then in
+    /// its source's adjacency only, a read of a node's incoming edges scans
+    /// the edge table, [`has_backward_adjacency`](crate::graph::GraphStore::has_backward_adjacency)
+    /// is false so a planner can avoid them, and a checkpoint writes no
+    /// incoming adjacency. Its named graphs are built the same way.
+    #[must_use]
+    pub fn with_backward_edges(backward_edges: bool) -> Self {
+        let store = Self::default();
+        store.inner.write().incoming_edges = if backward_edges {
+            IncomingEdges::Kept
+        } else {
+            IncomingEdges::NotKept
+        };
+        store
+    }
+
+    /// Whether it keeps each node's incoming edges (see
+    /// [`with_backward_edges`](Self::with_backward_edges)).
+    #[must_use]
+    pub fn keeps_backward_edges(&self) -> bool {
+        self.inner.read().keeps_incoming()
     }
 
     /// The vectors of rows, nodes and edges, whose version info holds

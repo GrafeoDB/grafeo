@@ -62,6 +62,10 @@ pub enum SectionType {
     /// previously-deleted base node does not reappear after reload
     /// when the next compact has not yet run.
     OverlayDeletions = 5,
+    /// The history's time index (time travel): when each commit in the
+    /// retention window happened, and the oldest epoch a read may ask for.
+    /// Written only by a database that keeps history.
+    TimeIndex = 6,
 
     /// Vector embeddings, HNSW topology, quantization data.
     VectorStore = 10,
@@ -96,6 +100,7 @@ impl SectionType {
             Self::RdfStore => 3,
             Self::CompactStore => 4,
             Self::OverlayDeletions => 5,
+            Self::TimeIndex => 6,
             Self::VectorStore => 10,
             Self::TextIndex => 11,
             Self::RdfRing => 12,
@@ -120,6 +125,7 @@ impl SectionType {
             | Self::RdfStore
             | Self::CompactStore
             | Self::OverlayDeletions
+            | Self::TimeIndex
             | Self::VectorStore
             | Self::TextIndex
             | Self::RdfRing
@@ -136,6 +142,7 @@ impl SectionType {
             3 => Some(Self::RdfStore),
             4 => Some(Self::CompactStore),
             5 => Some(Self::OverlayDeletions),
+            6 => Some(Self::TimeIndex),
             10 => Some(Self::VectorStore),
             11 => Some(Self::TextIndex),
             12 => Some(Self::RdfRing),
@@ -201,6 +208,12 @@ impl SectionType {
             Self::CompactStore => SectionFlags {
                 required: true,
                 mmap_able: true,
+            },
+            Self::TimeIndex => SectionFlags {
+                // History is data: a reader that does not know it must not
+                // open the file and answer reads at a time without it.
+                required: true,
+                mmap_able: false,
             },
             Self::OverlayDeletions => SectionFlags {
                 // Marked non-required so older readers that don't know about
@@ -839,6 +852,7 @@ mod tests {
             SectionType::RdfStore,
             SectionType::CompactStore,
             SectionType::OverlayDeletions,
+            SectionType::TimeIndex,
             SectionType::VectorStore,
             SectionType::TextIndex,
             SectionType::RdfRing,
@@ -847,18 +861,19 @@ mod tests {
             let byte = u8::try_from(section_type as u32).unwrap();
             assert_eq!(SectionType::from_u8(byte), Some(section_type));
         }
-        for byte in [0u8, 6, 9, 13, 19, 21, 250] {
+        for byte in [0u8, 7, 9, 13, 19, 21, 250] {
             assert_eq!(SectionType::from_u8(byte), None, "byte {byte}");
         }
     }
 
     /// Every section type, in declaration order.
-    const EVERY_SECTION_TYPE: [SectionType; 9] = [
+    const EVERY_SECTION_TYPE: [SectionType; 10] = [
         SectionType::Catalog,
         SectionType::LpgStore,
         SectionType::RdfStore,
         SectionType::CompactStore,
         SectionType::OverlayDeletions,
+        SectionType::TimeIndex,
         SectionType::VectorStore,
         SectionType::TextIndex,
         SectionType::RdfRing,
@@ -874,10 +889,11 @@ mod tests {
             SectionType::RdfStore => 2,
             SectionType::CompactStore => 3,
             SectionType::OverlayDeletions => 4,
-            SectionType::VectorStore => 5,
-            SectionType::TextIndex => 6,
-            SectionType::RdfRing => 7,
-            SectionType::PropertyIndex => 8,
+            SectionType::TimeIndex => 5,
+            SectionType::VectorStore => 6,
+            SectionType::TextIndex => 7,
+            SectionType::RdfRing => 8,
+            SectionType::PropertyIndex => 9,
         }
     }
 
@@ -933,6 +949,8 @@ mod tests {
 
     #[test]
     fn section_type_classification() {
+        assert!(SectionType::TimeIndex.is_data_section());
+        assert!(SectionType::TimeIndex.default_flags().required);
         assert!(SectionType::Catalog.is_data_section());
         assert!(SectionType::LpgStore.is_data_section());
         assert!(SectionType::RdfStore.is_data_section());

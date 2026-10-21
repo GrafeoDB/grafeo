@@ -1,23 +1,17 @@
 """Snapshot isolation of values and deletes through the Python binding (#412).
 
-The reproduction of issue #412 and its read-modify-write counter. On today's
-store values are written in place and a delete takes effect at the deleting
-transaction's start, so these fail: each is a strict ``xfail`` that fails as
-soon as it passes, and then moves out of ``xfail``. The engine's full set of
-guarantees is ``crates/grafeo-engine/tests/snapshot_isolation.rs``.
+The reproduction of issue #412 and its read-modify-write counter: no reader
+sees an open transaction's values or deletes, a transaction reads the same
+value twice, and no increment of an aborted transaction is counted. The
+engine's full set of guarantees is
+``crates/grafeo-engine/tests/snapshot_isolation.rs``.
 """
 
 import contextlib
 import threading
 
 import grafeo
-import pytest
 from grafeo import GrafeoDB
-
-IN_PLACE = "#412: values are written in place, every reader sees an open transaction's write"
-DELETE_AT_START = (
-    "#412: a delete takes effect at the deleting transaction's start, not at its commit"
-)
 
 
 def only(result, column):
@@ -57,7 +51,6 @@ def test_a_transaction_reads_its_own_write():
     tx.rollback()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=IN_PLACE)
 def test_another_session_does_not_read_an_uncommitted_value():
     db = people()
     tx = db.begin_transaction()
@@ -68,7 +61,6 @@ def test_another_session_does_not_read_an_uncommitted_value():
         tx.rollback()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=IN_PLACE)
 def test_a_transaction_reads_the_same_value_twice():
     db = people()
     tx = db.begin_transaction()
@@ -79,7 +71,6 @@ def test_a_transaction_reads_the_same_value_twice():
     assert (first, second) == (40, 40)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=DELETE_AT_START)
 def test_another_session_still_counts_an_edge_an_open_transaction_deletes():
     db = people()
     tx = db.begin_transaction()
@@ -100,7 +91,6 @@ def read_counter(reader):
     return only(reader.execute("MATCH (c:Counter) RETURN c.n AS n"), "n")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=IN_PLACE)
 def test_an_aborted_increment_is_not_counted():
     db = counter()
     first = db.begin_transaction()
@@ -133,7 +123,6 @@ def increment(db):
 STEP_TIMEOUT = 10.0  # seconds a thread waits for a step of the other one
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=IN_PLACE)
 def test_concurrent_increments_lose_and_add_nothing():
     """Two threads increment one counter in a fixed order of their steps, so
     the outcome does not depend on how the threads are scheduled (a free race
@@ -146,9 +135,9 @@ def test_concurrent_increments_lose_and_add_nothing():
     5. the writer increments again.
 
     Each round commits two increments. Under snapshot isolation the reader
-    reads the committed value, so the counter ends at twice the rounds.
-    Today's store writes the writer's value in place and the reader reads it,
-    so each round adds three."""
+    reads the committed value, so the counter ends at twice the rounds (a
+    store that wrote the writer's value in place for every reader would add
+    three)."""
     rounds = 25
     db = counter()
     events = ("written", "read", "given_up", "committed", "incremented")

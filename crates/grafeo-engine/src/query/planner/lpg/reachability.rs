@@ -510,7 +510,12 @@ mod tests {
     /// LIVES_IN: Mia, the hub, to every city. `active` is false for Vincent
     /// and Paris, and missing on Mia.
     fn people() -> GrafeoDB {
-        let db = GrafeoDB::new_in_memory();
+        // History kept: one test reads the graph at an earlier epoch.
+        let db = GrafeoDB::with_config(
+            crate::config::Config::in_memory()
+                .with_history_retention(crate::config::HistoryRetention::Forever),
+        )
+        .unwrap();
         let node = |label: &str, id: i64, name: &str, active: Option<bool>| {
             let mut props = vec![("id", Value::from(id)), ("name", Value::from(name))];
             if let Some(active) = active {

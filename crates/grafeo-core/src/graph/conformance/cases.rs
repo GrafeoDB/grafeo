@@ -1075,13 +1075,11 @@ pub(crate) fn every_access_path_agrees<S: Store>(make: &dyn Fn() -> S) -> Outcom
                 &out,
                 &format!("seed {seed}: node {raw}'s out-degree"),
             )?;
-            if store.has_backward_adjacency() {
-                same(
-                    &store.in_degree(id),
-                    &incoming,
-                    &format!("seed {seed}: node {raw}'s in-degree"),
-                )?;
-            }
+            same(
+                &store.in_degree(id),
+                &incoming,
+                &format!("seed {seed}: node {raw}'s in-degree"),
+            )?;
         }
         for (raw, (_, _, _, values)) in &now.edges {
             for (key, value) in values {
@@ -1097,18 +1095,15 @@ pub(crate) fn every_access_path_agrees<S: Store>(make: &dyn Fn() -> S) -> Outcom
 }
 
 /// A node delete while the writer sees an edge of the node is refused
-/// (`HasEdges`), for outgoing edges and, with backward adjacency, incoming
-/// ones; detach deletes remove the edges first.
+/// (`HasEdges`), for outgoing and incoming edges (a store without backward
+/// adjacency finds the incoming ones by a scan); detach deletes remove the
+/// edges first.
 pub(crate) fn a_node_with_edges_cannot_be_deleted<S: Store>(make: &dyn Fn() -> S) -> Outcome {
     let store = make();
     let people = people(&store)?;
     let before = committed(&store);
     let mut tx = Tx::begin(&store, 10);
-    let mut refused = vec![people.alix, people.gus];
-    if store.has_backward_adjacency() {
-        refused.push(people.mia);
-    }
-    for node in refused {
+    for node in [people.alix, people.gus, people.mia] {
         let applied = tx.apply(DataOp::DeleteNode { id: node });
         ensure(
             matches!(applied, Err(ApplyError::HasEdges(id)) if id == node),

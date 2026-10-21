@@ -33,11 +33,10 @@
 //!   `age`, a text index on `bio`, a vector index on `emb`.
 //!
 //! Each test names every read `scenario / change / language / reader /
-//! index / path` and checks it with exact rows. On today's store
-//! (`LpgStore`) many reads fail: [`GAPS`] lists them, by pattern, with their
-//! reasons. A read a known gap covers must keep failing; once it passes, its
-//! test fails and asks to take it out of the table, so the table says
-//! exactly where the store stands. Nothing here is ignored.
+//! index / path` and checks it with exact rows; a test fails with the list
+//! of every read that did not hold. The row-group store (since the H2d
+//! switch) keeps every guarantee on every path: there are no known gaps.
+//! Nothing here is ignored.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test snapshot_isolation
@@ -55,249 +54,6 @@ use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_engine::database::QueryResult;
 use grafeo_engine::{Direction, GrafeoDB, Session};
 
-// ── Known gaps ──────────────────────────────────────────────────────
-
-/// The builds a known gap holds in.
-#[derive(Clone, Copy)]
-enum Builds {
-    Every,
-    Temporal,
-    WithoutTemporal,
-}
-
-impl Builds {
-    fn hold_now(self) -> bool {
-        match self {
-            Self::Every => true,
-            Self::Temporal => cfg!(feature = "temporal"),
-            Self::WithoutTemporal => !cfg!(feature = "temporal"),
-        }
-    }
-}
-
-/// Reads known to fail on today's store, and why.
-struct KnownGap {
-    /// The reads: a name in which a segment is `*` for any, or names its
-    /// choices separated by `|`.
-    reads: &'static str,
-    /// The builds in which they fail.
-    builds: Builds,
-    /// Why they fail (the issue or the inbox note).
-    reason: &'static str,
-}
-
-const WRITTEN_IN_PLACE: &str = "#412: an open transaction's values and labels are written in place \
-     (with `temporal`: as pending versions, which reads at the current epoch take), so every \
-     reader sees them";
-
-const DELETE_AT_START: &str = "a delete is marked at the deleting transaction's start epoch, not at \
-     its commit (inbox transactions/delete-marked-at-the-start-epoch.md)";
-
-const INDEXES_AT_THE_WRITE: &str = "#412: the label and property indexes change at the write, and \
-     label scans and index lookups read them as they are now";
-
-const SEARCH_OF_NOW: &str = "#412: the text and vector indexes change at the write, and searches \
-     read them as they are now (inbox transactions/search-indexes-ignore-visibility.md)";
-
-const RANGE_OF_NOW: &str = "#412: a range filter runs as a range scan of the values of now \
-     (`find_nodes_in_range_iter`), which checks only existence at the reader's view";
-
-const FIND_OF_NOW: &str = "#412: `find_nodes_by_property` looks up the values of now (in the \
-     index or the property storage) and checks only existence at the reader's view";
-
-const NEWEST_IN_A_TRANSACTION: &str = "#412: a read in a transaction, and a session's direct read, \
-     read the newest values and labels: in place, or with `temporal` the newest versions, other \
-     transactions' pending ones included (`get_node_versioned`)";
-
-const NO_VERSIONS: &str = "#412: without `temporal` values and labels have no versions, so a \
-     snapshot or a read at an earlier epoch reads the newest";
-
-const UNPUBLISHED_IN_PLACE: &str = "#412: without `temporal` a commit's values and labels are in \
-     place before it publishes, and its deletes are marked at its start epoch";
-
-const UNKNOWN_OUTCOME: &str = "#412: a commit whose WAL sync failed keeps its pending versions, \
-     and reads at the published epoch see them until the reopen (inbox \
-     transactions/direct-reads-see-property-of-commit-with-unknown-outcome.md)";
-
-const DELETE_REMOVES: &str = "#412: a delete removes the node's values, labels, label index entries \
-     and adjacency at once (with `temporal`, values and labels keep their versions), so a reader \
-     at an earlier epoch finds the node and its edge but not what they held or how they connect";
-
-const LOST_UPDATE: &str = "#412: an increment reads another transaction's uncommitted value (in \
-     place, or a pending version with `temporal`) and commits on top of it after that transaction \
-     aborts; under contention the counter also ends below the count of increments";
-
-/// The two G10 scenarios with a commit that is stamped and not published.
-macro_rules! stamped {
-    ($rest:literal) => {
-        concat!(
-            "G10 commit stopped after stamping|G10 commit in progress / ",
-            $rest
-        )
-    };
-}
-
-/// The known gaps of `LpgStore`. They go at the switch to the row-group
-/// store (H2d), reason by reason as S3 to S8 land.
-const GAPS: &[KnownGap] = &[
-    // G1, G2, G3, G6: every read of an open write sees it.
-    KnownGap {
-        reads: "G1 open write|G2 open write / * / * / * / * / *",
-        builds: Builds::Every,
-        reason: WRITTEN_IN_PLACE,
-    },
-    KnownGap {
-        reads: "G3 open write / * / * / * / * / *",
-        builds: Builds::Every,
-        reason: DELETE_AT_START,
-    },
-    KnownGap {
-        reads: "G6 open write / * / * / * / * / *",
-        builds: Builds::Every,
-        reason: INDEXES_AT_THE_WRITE,
-    },
-    // G4, G5: a snapshot reads another session's later commit.
-    KnownGap {
-        reads: "G4 commit after the snapshot|G5 commit after the snapshot / * / * / \
-                transaction begun before the commit / * / *",
-        builds: Builds::Every,
-        reason: NEWEST_IN_A_TRANSACTION,
-    },
-    KnownGap {
-        reads: "G4 commit after the snapshot|G5 commit after the snapshot / \
-                node delete|edge delete / * / * / * / *",
-        builds: Builds::Every,
-        reason: DELETE_AT_START,
-    },
-    KnownGap {
-        reads: "G4 commit after the snapshot|G5 commit after the snapshot / * / * / * / * / *",
-        builds: Builds::WithoutTemporal,
-        reason: NO_VERSIONS,
-    },
-    KnownGap {
-        reads: "G4 commit after the snapshot|G5 commit after the snapshot / labels / * / \
-                at the epoch before the commit / * / \
-                label scan of the new label|label scan of the old label|count of the old label|\
-                label and key",
-        builds: Builds::Temporal,
-        reason: INDEXES_AT_THE_WRITE,
-    },
-    KnownGap {
-        reads: "G5 commit after the snapshot / text value|vector value / * / \
-                at the epoch before the commit / * / \
-                grafeo.search.text of the old value|grafeo.search.text of the new value|\
-                text_match of the old value|text_match of the new value|grafeo.search.vector",
-        builds: Builds::Temporal,
-        reason: SEARCH_OF_NOW,
-    },
-    // G10: a commit that does not publish.
-    KnownGap {
-        reads: "G10 WAL sync failed / * / * / * / * / *",
-        builds: Builds::Every,
-        reason: UNKNOWN_OUTCOME,
-    },
-    KnownGap {
-        reads: stamped!("* / * / * / * / *"),
-        builds: Builds::WithoutTemporal,
-        reason: UNPUBLISHED_IN_PLACE,
-    },
-    KnownGap {
-        reads: stamped!("* / * / transaction begun after the commit / * / *"),
-        builds: Builds::Temporal,
-        reason: NEWEST_IN_A_TRANSACTION,
-    },
-    KnownGap {
-        reads: stamped!("node delete|edge delete / * / * / * / *"),
-        builds: Builds::Temporal,
-        reason: DELETE_AT_START,
-    },
-    KnownGap {
-        reads: stamped!(
-            "labels / * / * / * / label scan of the new label|label scan of the old label|\
-             count of the old label|label check of the old label"
-        ),
-        builds: Builds::Temporal,
-        reason: INDEXES_AT_THE_WRITE,
-    },
-    KnownGap {
-        reads: stamped!("labels / * / * / no index / label and key"),
-        builds: Builds::Temporal,
-        reason: INDEXES_AT_THE_WRITE,
-    },
-    KnownGap {
-        reads: stamped!(
-            "node value / * / * / property index / WHERE n.age = old|{age: old}|IN list"
-        ),
-        builds: Builds::Temporal,
-        reason: INDEXES_AT_THE_WRITE,
-    },
-    KnownGap {
-        reads: stamped!("node value / * / * / * / range"),
-        builds: Builds::Temporal,
-        reason: RANGE_OF_NOW,
-    },
-    KnownGap {
-        reads: stamped!(
-            "node value / api / * / * / find_nodes_by_property old|find_nodes_by_property new"
-        ),
-        builds: Builds::Temporal,
-        reason: FIND_OF_NOW,
-    },
-    KnownGap {
-        reads: stamped!(
-            "text value / * / * / * / \
-             grafeo.search.text of the old value|grafeo.search.text of the new value|\
-             text_match of the old value|text_match of the new value|\
-             text_search of the old value|text_search of the new value"
-        ),
-        builds: Builds::Temporal,
-        reason: SEARCH_OF_NOW,
-    },
-    KnownGap {
-        reads: stamped!("vector value / * / * / * / grafeo.search.vector|vector_search"),
-        builds: Builds::Temporal,
-        reason: SEARCH_OF_NOW,
-    },
-    // G12: a delete takes effect at its transaction's start, and after a
-    // replay takes the deleted node's values, labels and adjacency with it.
-    KnownGap {
-        reads: "G12 delete before its commit / * / * / \
-                at an epoch between the start and the commit / * / *",
-        builds: Builds::Every,
-        reason: DELETE_AT_START,
-    },
-    KnownGap {
-        reads: "G12 delete replayed / node delete / * / \
-                at an epoch between the start and the commit / no index / \
-                label scan|n.age|WHERE n.age = 40|{age: 40}|expand|count(r)",
-        builds: Builds::Every,
-        reason: DELETE_REMOVES,
-    },
-    KnownGap {
-        reads: "G12 delete replayed / node delete / * / \
-                at an epoch between the start and the commit / no index / \
-                scan|labels(n)|get_node|get_edge",
-        builds: Builds::WithoutTemporal,
-        reason: DELETE_REMOVES,
-    },
-    // G9: increments read values that are not committed.
-    KnownGap {
-        reads: "G9 aborted increment|G9 concurrent increments / * / * / * / * / *",
-        builds: Builds::Every,
-        reason: LOST_UPDATE,
-    },
-];
-
-/// Whether `name` is one of the reads of `pattern`.
-fn covers(pattern: &str, name: &str) -> bool {
-    let pattern: Vec<&str> = pattern.split(" / ").collect();
-    let name: Vec<&str> = name.split(" / ").collect();
-    pattern.len() == name.len()
-        && pattern.iter().zip(&name).all(|(wanted, segment)| {
-            *wanted == "*" || wanted.split('|').any(|choice| choice == *segment)
-        })
-}
-
 /// What the reads of one test found.
 #[derive(Default)]
 struct Report {
@@ -314,33 +70,19 @@ impl Report {
         self.reads.extend(other.reads);
     }
 
-    /// Checks every read against the known gaps.
+    /// Checks that every read passed.
     ///
     /// # Panics
     ///
-    /// When no read ran, a name repeats, a read fails that no known gap
-    /// covers, or a read a known gap covers passes.
+    /// When no read ran, a name repeats, or a read fails.
     fn finish(self) {
         assert!(!self.reads.is_empty(), "no read ran");
         let mut names = HashSet::new();
         let mut problems = String::new();
         for (name, outcome) in &self.reads {
             assert!(names.insert(name.as_str()), "{name} runs twice");
-            let gap = GAPS
-                .iter()
-                .find(|gap| gap.builds.hold_now() && covers(gap.reads, name));
-            match (outcome, gap) {
-                (Ok(()), None) | (Err(_), Some(_)) => {}
-                (Err(failure), None) => {
-                    let _ = writeln!(problems, "{name}: {failure}");
-                }
-                (Ok(()), Some(gap)) => {
-                    let _ = writeln!(
-                        problems,
-                        "{name} passes now: take it out of the known gaps ({})",
-                        gap.reason
-                    );
-                }
+            if let Err(failure) = outcome {
+                let _ = writeln!(problems, "{name}: {failure}");
             }
         }
         assert!(problems.is_empty(), "\n{problems}");
@@ -897,7 +639,7 @@ fn prefix(scenario: &str, change: Change, lang: Lang, reader: &str, index: Index
 fn node(graph: &Graph, reader: Reader<'_>, node: NodeId) -> Option<grafeo_core::Node> {
     match reader {
         Reader::Session(session) => session.get_node(node),
-        Reader::At(_, epoch) => graph.db.get_node_at_epoch(node, epoch),
+        Reader::At(_, epoch) => graph.db.get_node_at_epoch(node, epoch).unwrap(),
         Reader::Database => graph.db.get_node(node),
     }
 }
@@ -905,7 +647,7 @@ fn node(graph: &Graph, reader: Reader<'_>, node: NodeId) -> Option<grafeo_core::
 fn edge(graph: &Graph, reader: Reader<'_>, edge: EdgeId) -> Option<grafeo_core::Edge> {
     match reader {
         Reader::Session(session) => session.get_edge(edge),
-        Reader::At(_, epoch) => graph.db.get_edge_at_epoch(edge, epoch),
+        Reader::At(_, epoch) => graph.db.get_edge_at_epoch(edge, epoch).unwrap(),
         Reader::Database => graph.db.get_edge(edge),
     }
 }
@@ -2108,6 +1850,94 @@ fn g9_concurrent_increments_lose_and_add_nothing() {
     report.finish();
 }
 
+/// G9, threaded with a forced schedule (the Python binding's counter test):
+/// two threads increment one counter in a fixed order of their steps, so
+/// the outcome does not depend on how the threads are scheduled (the free
+/// race above can interleave rarely and pass by chance on a store without
+/// isolation). In each round:
+///
+/// 1. the writer begins, reads the counter and writes it plus one;
+/// 2. the reader begins and reads the counter;
+/// 3. the writer gives its attempt up (rolls back, as a conflict does);
+/// 4. the reader writes what it read plus one, and commits;
+/// 5. the writer increments again.
+///
+/// Each round commits two increments: the reader reads the committed value,
+/// never the writer's, so the counter ends at twice the rounds.
+#[test]
+fn g9_increments_in_a_forced_schedule_count_each_commit_once() {
+    use std::sync::mpsc::{Receiver, Sender, channel};
+
+    const ROUNDS: usize = 25;
+    let mut report = Report::default();
+    for lang in query_languages() {
+        let (db, node) = counter(Index::None);
+        // A step the other thread waits for: one message per round.
+        let (written, wait_written) = channel::<()>();
+        let (read, wait_read) = channel::<()>();
+        let (given_up, wait_given_up) = channel::<()>();
+        let (committed, wait_committed) = channel::<()>();
+        let (incremented, wait_incremented) = channel::<()>();
+        let step = |to: &Sender<()>| to.send(()).expect("the other thread is gone");
+        let wait = |from: &Receiver<()>| from.recv().expect("the other thread is gone");
+
+        std::thread::scope(|scope| {
+            let writer = {
+                let db = Arc::clone(&db);
+                scope.spawn(move || {
+                    for _ in 0..ROUNDS {
+                        let mut session = db.session();
+                        session.begin_transaction().unwrap();
+                        let n = read_counter(&session, lang, node);
+                        write_counter(&session, lang, node, n + 1).unwrap();
+                        step(&written);
+                        wait(&wait_read);
+                        session.rollback().unwrap();
+                        step(&given_up);
+                        wait(&wait_committed);
+                        increment(&db, lang, node);
+                        step(&incremented);
+                    }
+                })
+            };
+            let reader = {
+                let db = Arc::clone(&db);
+                scope.spawn(move || {
+                    for _ in 0..ROUNDS {
+                        wait(&wait_written);
+                        let mut session = db.session();
+                        session.begin_transaction().unwrap();
+                        let n = read_counter(&session, lang, node);
+                        step(&read);
+                        wait(&wait_given_up);
+                        write_counter(&session, lang, node, n + 1).unwrap();
+                        session.commit().unwrap();
+                        step(&committed);
+                        wait(&wait_incremented);
+                    }
+                })
+            };
+            writer.join().expect("the writer panicked");
+            reader.join().expect("the reader panicked");
+        });
+
+        let found = read_counter(&db.session(), lang, node);
+        let expected = i64::try_from(2 * ROUNDS).unwrap();
+        report.push(
+            format!(
+                "G9 forced schedule / counter / {} / writer and reader / no index / the counter",
+                lang.name()
+            ),
+            if found == expected {
+                Ok(())
+            } else {
+                Err(format!("the counter ends at {found}, expected {expected}"))
+            },
+        );
+    }
+    report.finish();
+}
+
 // ── G10: a commit that never publishes ──────────────────────────────
 
 /// The readers of a commit that did not publish, after it failed or while it
@@ -2281,7 +2111,15 @@ fn g12_a_delete_takes_effect_at_its_commit_epoch() {
         if !change.is_delete() {
             continue;
         }
-        let graph = people(index);
+        // History kept: the reads between the start and the commit need it.
+        let graph = people_in(
+            GrafeoDB::with_config(
+                grafeo_engine::Config::in_memory()
+                    .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+            )
+            .unwrap(),
+            index,
+        );
         let paths = paths(&graph, change, index);
         let mut writer = graph.db.session();
         writer.begin_transaction().unwrap();
@@ -2341,7 +2179,15 @@ fn g12_a_replayed_delete_takes_effect_at_its_commit_epoch() {
 
     let (_dir, db) = replay::reopened_after_crash(
         "g12_a_replayed_delete_takes_effect_at_its_commit_epoch",
-        |path: &Path| GrafeoDB::open(path).unwrap(),
+        // History kept: the reads between the start and the commit need it
+        // (the file stores the setting, so the reopen keeps it too).
+        |path: &Path| {
+            GrafeoDB::with_config(
+                grafeo_engine::Config::persistent(path)
+                    .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+            )
+            .unwrap()
+        },
         |db| {
             let (alix, gus, knows) = fill(db, Index::None);
             let mut writer = db.session();

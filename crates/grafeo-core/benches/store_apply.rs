@@ -43,8 +43,9 @@ const PEOPLE: u64 = 10_000;
 
 /// How often the write cases with an older reader collect: the reader holds
 /// the horizon back between collects, as one that runs for a while does.
-/// The other write cases collect right after each write or commit, as the
-/// engine does on the row-group store (#412 S6, decision B).
+/// The other write cases ask for a collect after each write or commit, as
+/// the engine does on the row-group store (#412 S6, decision B), which runs
+/// it once a bounded number of writes came since the last one.
 const COLLECT_EVERY: u32 = 1_024;
 
 /// A store the cases run on.
@@ -129,9 +130,10 @@ fn collect_now_and_then<S>(store: &S, collect: fn(&S), calls: &mut u32) {
 
 /// The write and read cases on stores from `make`, named `store`.
 /// `collect` drops what no reader needs any more (the row-group store's
-/// update chains and version stamps, in the vectors it lists): the cases
-/// without an older reader call it right after each write or commit, as
-/// the engine does, the ones with an older reader now and then.
+/// update chains and version stamps, in the vectors it lists, when a
+/// collect is due): the cases without an older reader call it after each
+/// write or commit, as the engine does, the ones with an older reader now
+/// and then.
 fn cases<S: Indexed + 'static>(
     c: &mut Criterion,
     store_name: &str,
@@ -178,7 +180,8 @@ fn cases<S: Indexed + 'static>(
         });
 
         // The same writes while no reader reads before their epoch: each
-        // keeps what it replaces, and the collect right after it drops that.
+        // keeps what it replaces, and the collect after it drops that once a
+        // collect is due.
         let store = make();
         let ids = people(&store);
         let mut row = 0_usize;
@@ -490,8 +493,58 @@ fn bench_lpg_store(c: &mut Criterion) {
 
 fn bench_rowgroup_store(c: &mut Criterion) {
     cases(c, "rowgroup", RowGroupStore::new, |store| {
-        store.collect(store.current_epoch());
+        store.collect_after_write(store.current_epoch());
     });
+}
+
+/// The row-group store with and without backward edges (10b), paired: an
+/// edge create (one adjacency entry fewer without them), an outgoing expand
+/// (alike), an incoming expand (a scan of the edge table's targets without
+/// them) and the in-degree, on the graph of [`people`].
+fn bench_rowgroup_backward_edges(c: &mut Criterion) {
+    for (name, backward_edges) in [("kept", true), ("not_kept", false)] {
+        let mut group = c.benchmark_group(format!("store_apply/rowgroup_backward_edges_{name}"));
+        let store = RowGroupStore::with_backward_edges(backward_edges);
+        let ids = people(&store);
+        let mut row = 0_usize;
+        group.bench_function("immediate_create_edge", |b| {
+            b.iter(|| {
+                row = (row + 1) % ids.len();
+                let id = EdgeId::new(store.reserve_edge_ids(1).expect("an id").start);
+                let op = DataOp::CreateEdge {
+                    id,
+                    src: ids[row],
+                    dst: ids[(row * 7 + 3) % ids.len()],
+                    edge_type: ArcStr::from("KNOWS"),
+                    properties: Vec::new(),
+                };
+                black_box(immediate(&store, &op, false))
+            });
+        });
+
+        let store = RowGroupStore::with_backward_edges(backward_edges);
+        let ids = people(&store);
+        store.collect(store.current_epoch());
+        group.bench_function("expand_outgoing", |b| {
+            b.iter(|| {
+                row = (row + 1) % ids.len();
+                black_box(store.edges_from(ids[row], Direction::Outgoing))
+            });
+        });
+        group.bench_function("expand_incoming", |b| {
+            b.iter(|| {
+                row = (row + 1) % ids.len();
+                black_box(store.edges_from(ids[row], Direction::Incoming))
+            });
+        });
+        group.bench_function("in_degree", |b| {
+            b.iter(|| {
+                row = (row + 1) % ids.len();
+                black_box(store.in_degree(ids[row]))
+            });
+        });
+        group.finish();
+    }
 }
 
 /// The same encoded section supplies every cold-read iteration.
@@ -610,6 +663,7 @@ criterion_group!(
     benches,
     bench_lpg_store,
     bench_rowgroup_store,
+    bench_rowgroup_backward_edges,
     bench_rowgroup_cold_reads
 );
 criterion_main!(benches);

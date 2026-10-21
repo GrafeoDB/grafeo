@@ -27,7 +27,7 @@ pub struct ProcedureCallOperator {
     /// Optional LPG store handle, required by search procedures that reach
     /// the HNSW / BM25 indexes rather than the raw graph store.
     #[cfg(feature = "lpg")]
-    lpg_store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
+    lpg_store: Option<Arc<grafeo_core::graph::rowgroup::RowGroupStore>>,
     /// The view the calling query reads at, for the search procedures.
     view: Option<ReadView>,
     /// YIELD items: (original_column, alias). `None` means yield all columns.
@@ -78,7 +78,10 @@ impl ProcedureCallOperator {
     /// text indexes.
     #[cfg(feature = "lpg")]
     #[must_use]
-    pub fn with_lpg_store(mut self, lpg_store: Arc<grafeo_core::graph::lpg::LpgStore>) -> Self {
+    pub fn with_lpg_store(
+        mut self,
+        lpg_store: Arc<grafeo_core::graph::rowgroup::RowGroupStore>,
+    ) -> Self {
         self.lpg_store = Some(lpg_store);
         self
     }

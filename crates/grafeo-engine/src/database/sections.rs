@@ -5,14 +5,7 @@
 use std::sync::Arc;
 
 use grafeo_common::storage::Section;
-#[cfg(all(
-    feature = "lpg",
-    any(
-        feature = "vector-index",
-        feature = "text-index",
-        feature = "ring-index"
-    )
-))]
+#[cfg(all(feature = "lpg", feature = "ring-index"))]
 use grafeo_common::storage::{ChunkMeta, SectionSource};
 #[cfg(feature = "lpg")]
 use grafeo_common::storage::{ImageSource, SectionType};
@@ -24,62 +17,7 @@ use crate::transaction::CommitsHeld;
 #[cfg(feature = "lpg")]
 use super::catalog_section::{CatalogSection, CatalogStore, GraphIndexes};
 #[cfg(feature = "lpg")]
-use grafeo_core::graph::lpg::LpgStore;
-#[cfg(all(test, feature = "lpg"))]
 use grafeo_core::graph::rowgroup::RowGroupStore;
-
-/// The LPG store a database checkpoints and opens, with its named graphs.
-///
-/// The engine holds an `LpgStore` until it switches to the row-group store
-/// (#412 H2d). Until then only tests build checkpoint sources over a
-/// row-group root ([`RowGroups`](Self::RowGroups), built in tests only), and
-/// checkpoint and open it through the same sections, flush and file as a
-/// database (`row_group_sections`); the switch makes it the only kind, for
-/// every build.
-#[cfg(feature = "lpg")]
-#[derive(Clone)]
-pub(super) enum LpgRoot {
-    /// `LpgStore`, which writes the LPG section of version 3.
-    Lpg(Arc<LpgStore>),
-    /// The row-group store, which writes the LPG section of version 4 at
-    /// the checkpoint's epoch.
-    #[cfg(test)]
-    RowGroups(Arc<RowGroupStore>),
-}
-
-#[cfg(feature = "lpg")]
-impl LpgRoot {
-    /// The `LpgStore`, `None` for the row-group store.
-    fn as_lpg(&self) -> Option<&Arc<LpgStore>> {
-        match self {
-            Self::Lpg(store) => Some(store),
-            #[cfg(test)]
-            Self::RowGroups(_) => None,
-        }
-    }
-
-    /// The root store's epoch.
-    fn current_epoch(&self) -> grafeo_common::types::EpochId {
-        match self {
-            Self::Lpg(store) => store.current_epoch(),
-            #[cfg(test)]
-            Self::RowGroups(store) => store.current_epoch(),
-        }
-    }
-
-    /// The default graph's committed nodes and edges, for the header.
-    #[cfg(feature = "grafeo-file")]
-    pub(super) fn counts(&self) -> (usize, usize) {
-        match self {
-            Self::Lpg(store) => (store.node_count(), store.edge_count()),
-            #[cfg(test)]
-            Self::RowGroups(store) => {
-                use grafeo_core::graph::GraphStore;
-                (store.node_count(), store.edge_count())
-            }
-        }
-    }
-}
 
 /// Everything a checkpoint writes: the database's complete state.
 ///
@@ -89,9 +27,9 @@ impl LpgRoot {
 /// `to_memory()` copies a database through them.
 #[derive(Clone)]
 pub(super) struct CheckpointSources {
-    /// The LPG store, `None` with an external store.
+    /// The root store with its named graphs, `None` with an external store.
     #[cfg(feature = "lpg")]
-    pub store: Option<LpgRoot>,
+    pub store: Option<Arc<RowGroupStore>>,
     #[cfg(feature = "lpg")]
     pub catalog: Arc<crate::catalog::Catalog>,
     pub transaction_manager: Arc<crate::transaction::TransactionManager>,
@@ -108,13 +46,6 @@ pub(super) struct CheckpointSources {
 }
 
 impl CheckpointSources {
-    /// The LPG store when it is an `LpgStore`; `None` with an external
-    /// store or the row-group store.
-    #[cfg(feature = "lpg")]
-    pub fn root_store(&self) -> Option<Arc<grafeo_core::graph::lpg::LpgStore>> {
-        self.store.as_ref().and_then(LpgRoot::as_lpg).cloned()
-    }
-
     /// The epoch a checkpoint or copy of the database records, which a
     /// reopen continues from: the root store's, which follows every commit,
     /// or the transaction manager's when that is ahead (`restore_snapshot`
@@ -132,6 +63,15 @@ impl CheckpointSources {
         published.as_u64()
     }
 
+    /// The default graph's committed nodes and edges, for the header.
+    #[cfg(all(feature = "lpg", feature = "grafeo-file"))]
+    pub(super) fn counts(&self) -> Option<(usize, usize)> {
+        use grafeo_core::graph::GraphStore;
+        self.store
+            .as_ref()
+            .map(|store| (store.node_count(), store.edge_count()))
+    }
+
     /// Builds every section of the database. The caller holds commits off
     /// (`_commits`, see
     /// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager)):
@@ -140,78 +80,38 @@ impl CheckpointSources {
     /// did not complete.
     ///
     /// The sections hold the committed state, also while transactions are
-    /// open (the hold also holds their writes and rollbacks): the LPG
-    /// section writes it from the stores and the open transactions' change
-    /// sets, and the vector and text index sections, which mirror what the
-    /// transactions wrote, are left out while one has changed the store
-    /// whose indexes they hold; the load then builds those indexes from the
-    /// data.
+    /// open (the hold also holds their writes and rollbacks): the catalog
+    /// section, which reads the root's named graphs and index definitions,
+    /// and the LPG section of version 4, written at the checkpoint's epoch
+    /// as a reader at it sees each row of every graph, so it needs neither
+    /// the open transactions' change sets nor a committed copy. A database
+    /// that keeps history writes it from its history floor, the oldest epoch
+    /// a read may ask for (H2c). No vector or text index section is written:
+    /// the indexes take what transactions write as they write it, and the
+    /// load builds them from the rows (see
+    /// `row_group_sections::load_row_group_sections`).
     pub fn sections(&self, commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
-        #[cfg(not(feature = "lpg"))]
+        // The hold is what makes the sections consistent; nothing reads it.
         let _ = commits;
-        #[cfg_attr(
-            not(any(feature = "lpg", feature = "triple-store")),
-            expect(
-                unused_mut,
-                reason = "only the lpg and triple-store features add sections"
-            )
-        )]
         let mut sections: Vec<Box<dyn Section>> = Vec::new();
 
-        #[cfg(all(test, feature = "lpg"))]
-        if let Some(LpgRoot::RowGroups(root)) = &self.store {
-            self.row_group_sections(root, &mut sections);
-        }
         #[cfg(feature = "lpg")]
-        if let Some(store) = &self.root_store() {
+        if let Some(root) = &self.store {
             let transaction_manager = Arc::clone(&self.transaction_manager);
             sections.push(Box::new(CatalogSection::new(
                 Arc::clone(&self.catalog),
-                Arc::clone(store),
+                Arc::clone(root),
                 move || transaction_manager.current_epoch().as_u64(),
             )));
-
-            #[cfg(any(feature = "vector-index", feature = "text-index"))]
-            let indexes_committed = !self
-                .transaction_manager
-                .open_change_sets(commits)
-                .iter()
-                .any(|changes| changes.writes_graph(None));
-            sections.push(Box::new(
-                grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(store))
-                    .with_open_changes(self.open_changes(commits)),
-            ));
-
-            // The vector and text indexes take a transaction's values as it
-            // writes them, and keep them until it commits or rolls back. The
-            // LPG section writes the committed state; an index section would
-            // hold what a transaction still open wrote. So while one is open
-            // in the default graph's store, whose indexes the sections hold
-            // (those of named graphs are always built from the data), the
-            // sections are left out, and the load builds the indexes from the
-            // committed data (see `restore_indexes`).
-
-            // Vector indexes: persist HNSW topology to avoid rebuild on load
-            #[cfg(feature = "vector-index")]
-            if indexes_committed {
-                let indexes = store.vector_index_entries();
-                if !indexes.is_empty() {
-                    sections.push(Box::new(
-                        grafeo_core::index::vector::VectorStoreSection::new(indexes),
-                    ));
-                }
-            }
-
-            // Text indexes: persist BM25 postings to avoid rebuild on load
-            #[cfg(feature = "text-index")]
-            if indexes_committed {
-                let indexes = store.text_index_entries();
-                if !indexes.is_empty() {
-                    sections.push(Box::new(grafeo_core::index::text::TextIndexSection::new(
-                        indexes,
-                    )));
-                }
-            }
+            let section =
+                grafeo_core::graph::rowgroup::section::RowGroupStoreSection::new(Arc::clone(root))
+                    .at(grafeo_common::types::EpochId::new(self.epoch()));
+            let section = if self.transaction_manager.history_image().is_some() {
+                section.with_history_from(self.transaction_manager.history_floor())
+            } else {
+                section
+            };
+            sections.push(Box::new(section));
         }
 
         #[cfg(feature = "triple-store")]
@@ -228,99 +128,17 @@ impl CheckpointSources {
             )));
         }
 
+        // The history's time index, only while the database keeps history:
+        // taken while commits are held, it holds every commit up to the
+        // checkpoint's epoch.
+        if let Some(history) = self.transaction_manager.history_image() {
+            sections.push(Box::new(super::time_index_section::TimeIndexSection::new(
+                history,
+            )));
+        }
+
         sections
     }
-
-    /// The catalog and LPG sections of a row-group root: the LPG section
-    /// writes every graph's committed state at the checkpoint's epoch, as a
-    /// reader at it sees the rows, so it needs neither the open transactions'
-    /// change sets nor a committed copy. No vector or text index section is
-    /// written: the indexes take what transactions write as they write it,
-    /// and the load builds them from the rows (see
-    /// `row_group_sections::load_row_group_sections`).
-    #[cfg(all(test, feature = "lpg"))]
-    fn row_group_sections(&self, root: &Arc<RowGroupStore>, sections: &mut Vec<Box<dyn Section>>) {
-        let transaction_manager = Arc::clone(&self.transaction_manager);
-        sections.push(Box::new(CatalogSection::new(
-            Arc::clone(&self.catalog),
-            Arc::clone(root),
-            move || transaction_manager.current_epoch().as_u64(),
-        )));
-        sections.push(Box::new(
-            grafeo_core::graph::rowgroup::section::RowGroupStoreSection::new(Arc::clone(root))
-                .at(grafeo_common::types::EpochId::new(self.epoch())),
-        ));
-    }
-
-    /// Whether a transaction still open has changed the LPG store or one of
-    /// its named graphs: the stores then hold what it wrote, which a copy
-    /// must leave out. The caller holds commits off (`commits`), which also
-    /// holds the writes and rollbacks of open transactions, so the answer
-    /// holds until it lets go.
-    #[cfg(feature = "lpg")]
-    pub fn has_open_changes(&self, commits: &CommitsHeld<'_>) -> bool {
-        self.transaction_manager
-            .open_change_sets(commits)
-            .iter()
-            .any(|changes| changes.writes_any_graph())
-    }
-
-    /// The committed state of what the open transactions changed, indexed
-    /// from their change sets, for the LPG section and the committed copy.
-    #[cfg(feature = "lpg")]
-    fn open_changes(
-        &self,
-        commits: &CommitsHeld<'_>,
-    ) -> grafeo_core::graph::lpg::OpenChangesByGraph {
-        crate::transaction::TransactionChanges::index(
-            &self.transaction_manager.open_change_sets(commits),
-        )
-    }
-
-    /// The LPG data as committed, for a copy that reads the stores
-    /// themselves instead of the sections (`export_snapshot`): the stores as
-    /// they are when no open transaction has changed them, else a store of
-    /// its own holding their committed state, as the LPG section writes it
-    /// (what open transactions deleted, the values and labels they changed
-    /// as committed, nothing they created; see [`LpgStore::committed_copy_with`],
-    /// which copies it without the section's codec). `None` for a database
-    /// without the built-in LPG store.
-    ///
-    /// The committed copy costs as much memory as the committed data; it is
-    /// only made while a transaction is open.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a node or edge record or a spilled value cannot
-    /// be read for the copy.
-    #[cfg(feature = "lpg")]
-    pub fn committed(&self, commits: &CommitsHeld<'_>) -> Result<Option<CommittedLpg>> {
-        #[cfg(test)]
-        if let Some(LpgRoot::RowGroups(_)) = &self.store {
-            return Err(grafeo_common::utils::error::Error::Internal(
-                "a copy of the committed LPG data reads an LpgStore, not the row-group store"
-                    .to_string(),
-            ));
-        }
-        let Some(store) = &self.root_store() else {
-            return Ok(None);
-        };
-        let open = self.has_open_changes(commits);
-        let store = if open {
-            Arc::new(store.committed_copy_with(&self.open_changes(commits))?)
-        } else {
-            Arc::clone(store)
-        };
-        Ok(Some(CommittedLpg { store }))
-    }
-}
-
-/// The LPG data of a database as committed (see
-/// [`CheckpointSources::committed`]).
-#[cfg(feature = "lpg")]
-pub(super) struct CommittedLpg {
-    /// The LPG store, with its named graphs.
-    pub store: Arc<LpgStore>,
 }
 
 /// What loading leaves for [`GrafeoDB::finish_load`](super::GrafeoDB) to do
@@ -328,9 +146,12 @@ pub(super) struct CommittedLpg {
 #[cfg(feature = "lpg")]
 #[derive(Default)]
 pub(crate) struct LoadedSections {
-    /// Vector and text indexes the sections did not hold, built from the
-    /// data once the database is built.
+    /// Vector and text indexes the WAL replay put, built from the data once
+    /// the database is built (the sections' own are built at the load).
     unbuilt: Vec<GraphIndexes>,
+    /// The history the image holds (its `TIME_INDEX` section), `None` for a
+    /// database that keeps none.
+    history: Option<crate::transaction::HistoryImage>,
 }
 
 #[cfg(feature = "lpg")]
@@ -341,6 +162,20 @@ impl LoadedSections {
     #[cfg(feature = "wal")]
     pub(super) fn unbuilt_mut(&mut self) -> &mut Vec<GraphIndexes> {
         &mut self.unbuilt
+    }
+
+    /// The history the image held, for the transaction manager.
+    pub(super) fn take_history(&mut self) -> Option<crate::transaction::HistoryImage> {
+        self.history.take()
+    }
+
+    /// What a load that built every index of its sections leaves: the
+    /// history it read.
+    pub(super) fn with_history(history: Option<crate::transaction::HistoryImage>) -> Self {
+        Self {
+            unbuilt: Vec::new(),
+            history,
+        }
     }
 }
 
@@ -541,9 +376,9 @@ fn refuse_unreadable(
     }
 }
 
-/// Loads the sections of `image` into the stores and the catalog, and puts
-/// the indexes back: property indexes from the data, the default graph's
-/// vector and text indexes from their own sections.
+/// Loads the sections of `image` into the root store and its named graphs,
+/// the catalog and the RDF store, and builds every graph's indexes from the
+/// rows (see [`load_row_group_sections`](super::row_group_sections::load_row_group_sections)).
 ///
 /// The image is the active checkpoint of a `.grafeo` file (served by
 /// `GrafeoFileManager::read_image`) or the sections of a 0.5.x file, and
@@ -557,6 +392,8 @@ fn refuse_unreadable(
 /// Each section type is asked for once (a section this build cannot read
 /// only by the refusal), so an image that serves each section once
 /// (`ServedOnce`, which frees a section once it is loaded) serves them all.
+/// The vector and text index sections an earlier build wrote are not read:
+/// they only mirror the data, from which the load builds the indexes.
 ///
 /// The indexes exist before WAL recovery, which keeps them current. What is
 /// left (see [`LoadedSections`]) is finished by `GrafeoDB::finish_load`.
@@ -572,42 +409,24 @@ fn refuse_unreadable(
 /// # Errors
 ///
 /// Returns an error if a section cannot be read or decoded, or if the image
-/// of `file` holds data this build cannot read. A vector, text or ring
-/// index section that can be read but not decoded is no error: its indexes
-/// are built from the data, which they only mirror.
+/// of `file` holds data this build cannot read.
 #[cfg(feature = "lpg")]
 pub(super) fn load_sections(
     image: &dyn ImageSource,
     file: Option<&std::path::Path>,
-    store: &Arc<LpgStore>,
+    store: &Arc<RowGroupStore>,
     catalog: &Arc<crate::catalog::Catalog>,
     #[cfg(feature = "triple-store")] rdf_store: &Arc<grafeo_core::graph::rdf::RdfStore>,
 ) -> Result<LoadedSections> {
-    let mut loaded = LoadedSections::default();
-
-    // The catalog first: the schema is needed before the data.
-    let (indexes, catalog_epoch) = read_catalog(image, file, store, catalog)?;
-
-    // With a compacted base, this is the overlay, which the base is folded
-    // into below.
-    if let Some(source) = image.section_source(SectionType::LpgStore) {
-        grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(store)).read_from(&*source)?;
-    }
-
-    #[cfg(feature = "triple-store")]
-    load_triples(image, rdf_store)?;
-
-    // Before the indexes: they are built from all the data. Only a database
-    // file holds a compacted base: a copy (`to_memory`) never does.
-    #[cfg(feature = "grafeo-file")]
-    fold_compacted_base(image, &**store)?;
-
-    // The epoch a 0.5.x catalog names, once the data is in (with `temporal`
-    // the data keeps the epochs it was loaded at).
-    store.sync_epoch(grafeo_common::types::EpochId::new(catalog_epoch));
-
-    loaded.unbuilt = restore_indexes(image, store, indexes)?;
-    Ok(loaded)
+    let history = super::row_group_sections::load_row_group_sections(
+        image,
+        file,
+        store,
+        catalog,
+        #[cfg(feature = "triple-store")]
+        rdf_store,
+    )?;
+    Ok(LoadedSections::with_history(history))
 }
 
 /// Reads the catalog section of `image`, the database file `file` (`None`
@@ -706,168 +525,6 @@ pub(super) fn fold_compacted_base<S: grafeo_core::graph::load::LoadTarget>(
     Ok(())
 }
 
-/// Builds the property indexes of every graph and restores the default
-/// graph's vector and text indexes from their sections.
-///
-/// Returns the vector and text indexes left to build from the data: those
-/// of named graphs (the sections hold only the default graph's), quantized
-/// ones (the section holds the HNSW graph, not the quantized codes) and any
-/// a section did not hold (a checkpoint taken while a transaction was open
-/// in the default graph writes no index sections, see
-/// [`CheckpointSources::sections`]).
-#[cfg(feature = "lpg")]
-fn restore_indexes(
-    image: &dyn ImageSource,
-    store: &Arc<LpgStore>,
-    graphs: Vec<GraphIndexes>,
-) -> Result<Vec<GraphIndexes>> {
-    let mut unbuilt = Vec::new();
-    let mut from_sections = GraphIndexes::default();
-    for graph in graphs {
-        let target = match &graph.graph {
-            None => Arc::clone(store),
-            Some(name) => match store.graph(name) {
-                Some(target) => target,
-                None => continue,
-            },
-        };
-        for property in &graph.property {
-            target.create_property_index(property);
-        }
-
-        let default_graph = graph.graph.is_none();
-        let mut rest = GraphIndexes {
-            graph: graph.graph,
-            ..GraphIndexes::default()
-        };
-        for def in graph.vector {
-            if default_graph && def.quantization.is_none() {
-                from_sections.vector.push(def);
-            } else {
-                rest.vector.push(def);
-            }
-        }
-        if default_graph {
-            from_sections.text = graph.text;
-        } else {
-            rest.text = graph.text;
-        }
-        if !rest.is_empty() {
-            unbuilt.push(rest);
-        }
-    }
-
-    let missing = restore_from_sections(image, store, from_sections)?;
-    if !missing.is_empty() {
-        unbuilt.push(missing);
-    }
-    Ok(unbuilt)
-}
-
-/// Restores the default graph's vector and text indexes from their
-/// sections, and returns those the sections did not hold. A section that
-/// cannot be decoded is skipped with a warning: its indexes are then built
-/// from the data, which the index only mirrors. A section whose chunks
-/// cannot be read (an I/O, checksum or decryption failure) fails the load:
-/// the image is damaged.
-#[cfg(feature = "lpg")]
-#[cfg_attr(
-    not(any(feature = "vector-index", feature = "text-index")),
-    expect(
-        unused_variables,
-        reason = "without vector and text indexes there is nothing to restore"
-    )
-)]
-fn restore_from_sections(
-    image: &dyn ImageSource,
-    store: &LpgStore,
-    indexes: GraphIndexes,
-) -> Result<GraphIndexes> {
-    #[cfg_attr(
-        not(any(feature = "vector-index", feature = "text-index")),
-        expect(unused_mut, reason = "only vector and text indexes are restored")
-    )]
-    let mut missing = GraphIndexes::default();
-
-    #[cfg(feature = "vector-index")]
-    if !indexes.vector.is_empty() {
-        use grafeo_core::index::vector::{QuantizationType, VectorStoreSection};
-
-        for def in &indexes.vector {
-            let shell = super::GrafeoDB::build_vector_index(
-                def.dimensions,
-                def.metric,
-                Some(def.m),
-                Some(def.ef_construction),
-                QuantizationType::None,
-                0,
-            );
-            store.add_vector_index(&def.label, &def.property, Arc::new(shell));
-        }
-        if let Some(source) = image.section_source(SectionType::VectorStore)
-            && let Some(err) = read_mirror(
-                &mut VectorStoreSection::new(store.vector_index_entries()),
-                &*source,
-            )?
-        {
-            grafeo_common::grafeo_warn!("rebuilding vector indexes from the data: {err}");
-            for def in &indexes.vector {
-                store.remove_vector_index(&def.label, &def.property);
-            }
-        }
-        for def in indexes.vector {
-            let restored = store
-                .get_vector_index(&def.label, &def.property)
-                .is_some_and(|index| !index.is_empty());
-            if !restored {
-                store.remove_vector_index(&def.label, &def.property);
-                missing.vector.push(def);
-            }
-        }
-    }
-
-    #[cfg(feature = "text-index")]
-    if !indexes.text.is_empty() {
-        use grafeo_core::index::text::{InvertedIndex, TextIndexSection};
-
-        for def in &indexes.text {
-            let shell = InvertedIndex::with_options(def.options.clone());
-            store.add_text_index(
-                &def.label,
-                &def.property,
-                Arc::new(parking_lot::RwLock::new(shell)),
-            );
-        }
-        if let Some(source) = image.section_source(SectionType::TextIndex)
-            && let Some(err) = read_mirror(
-                &mut TextIndexSection::new(store.text_index_entries()),
-                &*source,
-            )?
-        {
-            grafeo_common::grafeo_warn!("rebuilding text indexes from the data: {err}");
-            for def in &indexes.text {
-                store.remove_text_index(&def.label, &def.property);
-            }
-        }
-        for def in indexes.text {
-            // The catalog's options win: a stream whose BM25 parameters are
-            // not the catalog's is left for the build from the data.
-            let restored = store
-                .get_text_index(&def.label, &def.property)
-                .is_some_and(|index| {
-                    let index = index.read();
-                    !index.is_empty() && *index.options() == def.options
-                });
-            if !restored {
-                store.remove_text_index(&def.label, &def.property);
-                missing.text.push(def);
-            }
-        }
-    }
-
-    Ok(missing)
-}
-
 /// Reads an index section, which only mirrors the data, from `source`.
 ///
 /// Returns the error of a section that cannot be decoded, whose indexes the
@@ -878,14 +535,7 @@ fn restore_from_sections(
 /// # Errors
 ///
 /// Returns the error of a chunk that cannot be fetched.
-#[cfg(all(
-    feature = "lpg",
-    any(
-        feature = "vector-index",
-        feature = "text-index",
-        feature = "ring-index"
-    )
-))]
+#[cfg(all(feature = "lpg", feature = "ring-index"))]
 fn read_mirror(
     section: &mut dyn Section,
     source: &dyn SectionSource,
@@ -903,27 +553,13 @@ fn read_mirror(
 
 /// Serves the chunks of a section and remembers whether fetching one failed,
 /// so an unreadable section can be told apart from one that does not decode.
-#[cfg(all(
-    feature = "lpg",
-    any(
-        feature = "vector-index",
-        feature = "text-index",
-        feature = "ring-index"
-    )
-))]
+#[cfg(all(feature = "lpg", feature = "ring-index"))]
 struct FetchWatch<'a> {
     source: &'a dyn SectionSource,
     failed: std::cell::Cell<bool>,
 }
 
-#[cfg(all(
-    feature = "lpg",
-    any(
-        feature = "vector-index",
-        feature = "text-index",
-        feature = "ring-index"
-    )
-))]
+#[cfg(all(feature = "lpg", feature = "ring-index"))]
 impl SectionSource for FetchWatch<'_> {
     fn chunks(&self) -> &[ChunkMeta] {
         self.source.chunks()
@@ -1021,77 +657,15 @@ impl super::GrafeoDB {
 mod tests {
     use super::*;
     use crate::GrafeoDB;
-    use grafeo_common::storage::{ChunkKind, MemoryImage, SectionSink, ServedOnce, legacy_bytes};
+    use grafeo_common::storage::{
+        ChunkKind, ChunkMeta, MemoryImage, SectionSink, SectionSource, ServedOnce,
+    };
+    use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 
-    /// The label and property of each text index of `defs`.
-    fn text_keys(defs: &[super::super::catalog_section::TextIndexDefinition]) -> Vec<(&str, &str)> {
-        defs.iter()
-            .map(|def| (def.label.as_str(), def.property.as_str()))
-            .collect()
-    }
-
-    /// The default graph's HNSW and text indexes come back from their
-    /// sections, not from the data; quantized indexes and those of named
-    /// graphs are left to build from the data once the database is built.
-    #[test]
-    fn the_default_graph_indexes_come_from_their_sections() {
-        let db = GrafeoDB::new_in_memory();
-        db.execute(
-            "INSERT (:Doc {emb: vector([1.0, 0.0]), body: 'graph'}), \
-             (:Note {emb: vector([0.0, 1.0])})",
-        )
-        .unwrap();
-        db.create_vector_index("Doc", "emb", None, None, None, None, None)
-            .unwrap();
-        db.create_vector_index("Note", "emb", None, None, None, None, Some("scalar"))
-            .unwrap();
-        db.create_text_index("Doc", "body").unwrap();
-        db.create_graph("model").unwrap();
-        let model = db.graph("model").unwrap();
-        model
-            .execute("INSERT (:Doc {emb: vector([1.0, 0.0])})")
-            .unwrap();
-        model
-            .execute("CREATE VECTOR INDEX model_emb ON :Doc(emb)")
-            .unwrap();
-
-        let commits = db.transaction_manager.hold_commits().unwrap();
-        let sections = db.checkpoint_sources().sections(&commits);
-        let refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
-        let image = MemoryImage::from_sections(&refs).unwrap();
-        drop(commits);
-        let store = Arc::new(LpgStore::new().unwrap());
-        let loaded = load_sections(
-            &image,
-            None,
-            &store,
-            &Arc::new(crate::catalog::Catalog::new()),
-            #[cfg(feature = "triple-store")]
-            &Arc::new(grafeo_core::graph::rdf::RdfStore::new()),
-        )
-        .unwrap();
-
-        assert_eq!(store.get_vector_index("Doc", "emb").unwrap().len(), 1);
-        assert_eq!(store.get_text_index("Doc", "body").unwrap().read().len(), 1);
-        assert!(
-            store.get_vector_index("Note", "emb").is_none(),
-            "a quantized index is built after the load"
-        );
-        let unbuilt: Vec<(Option<&str>, Vec<&str>)> = loaded
-            .unbuilt
-            .iter()
-            .map(|graph| {
-                let labels = graph.vector.iter().map(|def| def.label.as_str()).collect();
-                (graph.graph.as_deref(), labels)
-            })
-            .collect();
-        assert_eq!(
-            unbuilt,
-            [(None, vec!["Note"]), (Some("model"), vec!["Doc"])]
-        );
-    }
-
-    /// The sections of a 0.5.x file reach their `deserialize` through raw chunks.
+    /// The sections of a 0.5.x file reach their `deserialize` through raw
+    /// chunks. The LPG section of this release is written as chunks only
+    /// (version 4 has no blob form); the 0.5.x LPG blobs load from the
+    /// fixtures of `row_group_sections`' legacy tests.
     #[test]
     fn a_raw_image_loads_through_the_0_5_readers() {
         let db = GrafeoDB::new_in_memory();
@@ -1106,10 +680,11 @@ mod tests {
             .checkpoint_sources()
             .sections(&commits)
             .iter()
+            .filter(|section| section.section_type() != SectionType::LpgStore)
             .map(|section| (section.section_type(), section.serialize().unwrap()))
             .collect();
         drop(commits);
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let catalog = Arc::new(crate::catalog::Catalog::new());
         load_sections(
             &MemoryImage::from_raw(raw).unwrap(),
@@ -1120,7 +695,6 @@ mod tests {
             &Arc::new(grafeo_core::graph::rdf::RdfStore::new()),
         )
         .unwrap();
-        assert_eq!((store.node_count(), store.edge_count()), (2, 1));
         assert_eq!(catalog.constraints().len(), 1);
     }
 
@@ -1136,75 +710,6 @@ mod tests {
             .unwrap();
         db.create_text_index("Doc", "body").unwrap();
         db
-    }
-
-    /// The vector and text index sections are written while no transaction
-    /// open in the default graph has changed it, and left out while one has
-    /// (its indexes hold what it wrote): the load then leaves the indexes to
-    /// build from the committed data. A transaction open in a named graph
-    /// only leaves them in, since the sections hold the default graph's
-    /// indexes only.
-    #[test]
-    fn index_sections_are_left_out_while_the_default_graph_has_open_changes() {
-        let index_sections = [SectionType::VectorStore, SectionType::TextIndex];
-        let written = |db: &GrafeoDB| -> Vec<SectionType> {
-            let types = image_of(db).section_types();
-            index_sections
-                .into_iter()
-                .filter(|section_type| types.contains(section_type))
-                .collect()
-        };
-        let db = indexed_database();
-        db.create_graph("travel").unwrap();
-        assert_eq!(written(&db), index_sections, "no transaction is open");
-
-        let mut travel = db.session();
-        travel.use_graph("travel");
-        travel.begin_transaction().unwrap();
-        travel.execute("INSERT (:City {name: 'Prague'})").unwrap();
-        assert_eq!(
-            written(&db),
-            index_sections,
-            "a transaction open in a named graph only"
-        );
-
-        let mut session = db.session();
-        session.begin_transaction().unwrap();
-        session
-            .execute("MATCH (d:Doc {body: 'Amsterdam'}) SET d.body = 'Paris'")
-            .unwrap();
-        let image = image_of(&db);
-        assert_eq!(written(&db), [], "a transaction open in the default graph");
-        let store = Arc::new(LpgStore::new().unwrap());
-        let loaded = load(&image, &store).unwrap();
-        let unbuilt: Vec<(Option<&str>, Vec<&str>, Vec<(&str, &str)>)> = loaded
-            .unbuilt
-            .iter()
-            .map(|graph| {
-                let vector = graph.vector.iter().map(|def| def.label.as_str()).collect();
-                (graph.graph.as_deref(), vector, text_keys(&graph.text))
-            })
-            .collect();
-        assert_eq!(
-            unbuilt,
-            [(None, vec!["Doc"], vec![("Doc", "body")])],
-            "the load leaves both indexes to build from the data"
-        );
-        assert_eq!(
-            store
-                .get_text_index("Doc", "body")
-                .map(|index| index.read().len()),
-            None,
-            "no text index comes from the image"
-        );
-
-        session.commit().unwrap();
-        travel.rollback().unwrap();
-        assert_eq!(
-            written(&db),
-            index_sections,
-            "after a commit and a rollback"
-        );
     }
 
     /// A database whose checkpoint holds every kind of section this build
@@ -1238,12 +743,7 @@ mod tests {
     /// The section types [`every_kind_of_section`] gives a checkpoint in this
     /// build, ordered by their byte.
     fn every_section_type() -> Vec<SectionType> {
-        let mut types = vec![
-            SectionType::Catalog,
-            SectionType::LpgStore,
-            SectionType::VectorStore,
-            SectionType::TextIndex,
-        ];
+        let mut types = vec![SectionType::Catalog, SectionType::LpgStore];
         #[cfg(all(feature = "sparql", feature = "triple-store"))]
         types.push(SectionType::RdfStore);
         #[cfg(all(feature = "sparql", feature = "ring-index"))]
@@ -1281,67 +781,7 @@ mod tests {
         image_with(db, |_| None)
     }
 
-    /// The catalog's text index options win over the index section: a
-    /// stream whose BM25 parameters are not those of the catalog record (an
-    /// image whose text section another index wrote) is not restored; the
-    /// index is left to build from the data, with the catalog's options.
-    #[test]
-    fn a_text_stream_with_other_bm25_parameters_than_the_catalog_is_not_restored() {
-        use grafeo_core::index::text::{TextIndexOptions, TokenizerKind};
-
-        let notes = |options: TextIndexOptions| {
-            let db = GrafeoDB::new_in_memory();
-            db.execute("INSERT (:Doc {body: 'Alix Amsterdam'}), (:Doc {body: 'Gus Berlin'})")
-                .unwrap();
-            db.create_text_index_with("Doc", "body", options).unwrap();
-            db
-        };
-        let options = TextIndexOptions::new()
-            .with_k1(0.3)
-            .with_tokenizer(TokenizerKind::Standard);
-        let catalog_of = notes(options.clone());
-        let section_of = notes(TextIndexOptions::new().with_tokenizer(TokenizerKind::Standard));
-
-        let commits = catalog_of.transaction_manager.hold_commits().unwrap();
-        let other = section_of.transaction_manager.hold_commits().unwrap();
-        let mut image = MemoryImage::new();
-        for section in catalog_of.checkpoint_sources().sections(&commits) {
-            image
-                .begin_section(section.section_type(), section.version())
-                .unwrap();
-            if section.section_type() == SectionType::TextIndex {
-                let text = section_of
-                    .checkpoint_sources()
-                    .sections(&other)
-                    .into_iter()
-                    .find(|section| section.section_type() == SectionType::TextIndex)
-                    .expect("the other database has a text section");
-                text.write_to(&mut image).unwrap();
-            } else {
-                section.write_to(&mut image).unwrap();
-            }
-        }
-        drop((commits, other));
-
-        let store = Arc::new(LpgStore::new().unwrap());
-        let loaded = load(&image, &store).unwrap();
-        assert!(
-            store.get_text_index("Doc", "body").is_none(),
-            "the stream of k1 1.2 is not restored into an index of k1 0.3"
-        );
-        let unbuilt: Vec<&TextIndexOptions> = loaded
-            .unbuilt
-            .iter()
-            .flat_map(|graph| graph.text.iter().map(|def| &def.options))
-            .collect();
-        assert_eq!(
-            unbuilt,
-            [&options],
-            "left to build from the data, with the catalog's options"
-        );
-    }
-
-    fn load(image: &dyn ImageSource, store: &Arc<LpgStore>) -> Result<LoadedSections> {
+    fn load(image: &dyn ImageSource, store: &Arc<RowGroupStore>) -> Result<LoadedSections> {
         load_sections(
             image,
             None,
@@ -1375,7 +815,7 @@ mod tests {
         load_sections(
             &image,
             None,
-            &Arc::new(LpgStore::new().unwrap()),
+            &Arc::new(RowGroupStore::new()),
             &Arc::new(crate::catalog::Catalog::new()),
             &rdf_store,
         )
@@ -1465,7 +905,7 @@ mod tests {
         load_sections(
             &image,
             None,
-            &Arc::new(LpgStore::new().unwrap()),
+            &Arc::new(RowGroupStore::new()),
             &Arc::new(crate::catalog::Catalog::new()),
             &rdf_store,
         )
@@ -1497,6 +937,7 @@ mod tests {
             .checkpoint_sources()
             .sections(&commits)
             .iter()
+            .filter(|section| section.section_type() != SectionType::LpgStore)
             .map(|section| {
                 let mut bytes = section.serialize().unwrap();
                 if section.section_type() == SectionType::RdfRing {
@@ -1518,7 +959,7 @@ mod tests {
         load_sections(
             &MemoryImage::from_raw(raw).unwrap(),
             None,
-            &Arc::new(LpgStore::new().unwrap()),
+            &Arc::new(RowGroupStore::new()),
             &Arc::new(crate::catalog::Catalog::new()),
             &rdf_store,
         )
@@ -1571,7 +1012,7 @@ mod tests {
         load_sections(
             &image,
             None,
-            &Arc::new(LpgStore::new().unwrap()),
+            &Arc::new(RowGroupStore::new()),
             &Arc::new(crate::catalog::Catalog::new()),
             &rdf_store,
         )
@@ -1750,7 +1191,7 @@ mod tests {
     fn a_ring_section_that_cannot_be_read_fails_the_load() {
         let db = ringed_database();
         let image = image_of(&db);
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         assert!(load(&image, &store).is_ok(), "the image itself loads");
         let error = load(
             &Unreadable {
@@ -1813,7 +1254,7 @@ mod tests {
         use grafeo_common::types::{PropertyKey, Value};
 
         let image = ServedOnce::new(compacted_image());
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         load(&image, &store).unwrap();
 
         assert!(
@@ -1851,6 +1292,7 @@ mod tests {
         );
         let knows: Vec<_> = store
             .edges_from(alix, grafeo_core::graph::Direction::Outgoing)
+            .into_iter()
             .filter(|&(_, edge)| store.edge_type(edge).as_deref() == Some("KNOWS"))
             .collect();
         assert_eq!(knows.len(), 1);
@@ -1929,229 +1371,10 @@ mod tests {
         );
     }
 
-    /// A vector section that decodes its first index and fails on the
-    /// second, and a text section that does not decode, are no error: the
-    /// load keeps none of their indexes, not even the one restored before
-    /// the failure, and leaves them all to build from the data, which they
-    /// mirror.
-    #[test]
-    fn an_index_section_that_does_not_decode_is_built_from_the_data() {
-        use grafeo_core::index::vector::{
-            DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind, VectorStoreSection,
-        };
-
-        let db = GrafeoDB::new_in_memory();
-        db.execute(
-            "INSERT (:Doc {emb: vector([3.0, 19.0]), body: 'Amsterdam'}), \
-             (:Note {emb: vector([88.0, 3.0])})",
-        )
-        .unwrap();
-        for label in ["Doc", "Note"] {
-            db.create_vector_index(label, "emb", None, None, None, None, None)
-                .unwrap();
-        }
-        db.create_text_index("Doc", "body").unwrap();
-        // The vector section without its last byte, which belongs to the
-        // index it holds last; text bytes that are no text section.
-        let image = image_with(&db, |section| match section.section_type() {
-            SectionType::VectorStore => {
-                let mut bytes = section.serialize().unwrap();
-                bytes.pop();
-                Some(bytes)
-            }
-            SectionType::TextIndex => Some(b"Vincent".to_vec()),
-            _ => None,
-        });
-
-        // The cut section restores its first index before it fails.
-        let source = image.section_source(SectionType::VectorStore).unwrap();
-        let cut = legacy_bytes(&*source).unwrap().unwrap();
-        let shells: Vec<(String, Arc<VectorIndexKind>)> = ["Doc:emb", "Note:emb"]
-            .into_iter()
-            .map(|key| {
-                let config = HnswConfig::new(2, DistanceMetric::Cosine);
-                (
-                    key.to_string(),
-                    Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(config))),
-                )
-            })
-            .collect();
-        assert!(
-            VectorStoreSection::new(shells.clone())
-                .deserialize(&cut)
-                .is_err()
-        );
-        assert_eq!(
-            shells.iter().filter(|(_, index)| !index.is_empty()).count(),
-            1,
-            "the cut section restores one index, then fails"
-        );
-
-        let store = Arc::new(LpgStore::new().unwrap());
-        let loaded = load(&image, &store).unwrap();
-        assert_eq!(store.node_count(), 2, "the data is loaded");
-        for label in ["Doc", "Note"] {
-            assert!(
-                store.get_vector_index(label, "emb").is_none(),
-                "the vector index {label}:emb of a section that failed is not kept"
-            );
-        }
-        assert!(
-            store.get_text_index("Doc", "body").is_none(),
-            "the text index the section could not restore is left to build from the data"
-        );
-        assert_eq!(loaded.unbuilt.len(), 1, "one graph: the default one");
-        let graph = &loaded.unbuilt[0];
-        let mut labels: Vec<&str> = graph.vector.iter().map(|def| def.label.as_str()).collect();
-        labels.sort_unstable();
-        assert_eq!(
-            (graph.graph.as_deref(), labels, text_keys(&graph.text)),
-            (None, vec!["Doc", "Note"], vec![("Doc", "body")]),
-            "every index is left to build from the data"
-        );
-    }
-
-    /// A version 3 vector section whose stream ends early does not decode,
-    /// which is no error: the load leaves the index to build from the data,
-    /// as for any index section that does not decode. The intact section
-    /// restores it.
-    #[test]
-    fn a_vector_section_whose_stream_ends_early_is_built_from_the_data() {
-        /// Keeps the chunks a section writes.
-        struct Kept(Vec<(ChunkMeta, Vec<u8>)>);
-
-        impl SectionSink for Kept {
-            fn write_chunk(&mut self, meta: ChunkMeta, bytes: &[u8]) -> Result<()> {
-                self.0.push((meta, bytes.to_vec()));
-                Ok(())
-            }
-        }
-
-        let db = indexed_database();
-        let commits = db.transaction_manager.hold_commits().unwrap();
-        let mut image = MemoryImage::new();
-        for section in db.checkpoint_sources().sections(&commits) {
-            image
-                .begin_section(section.section_type(), section.version())
-                .unwrap();
-            if section.section_type() == SectionType::VectorStore {
-                assert_eq!(section.version(), 3, "the vector section streams");
-                let mut kept = Kept(Vec::new());
-                section.write_to(&mut kept).unwrap();
-                let (last, _) = kept.0.pop().unwrap();
-                assert_eq!(last.kind, ChunkKind::Stream, "the last piece is dropped");
-                for (meta, bytes) in kept.0 {
-                    image.write_chunk(meta, &bytes).unwrap();
-                }
-            } else {
-                section.write_to(&mut image).unwrap();
-            }
-        }
-        drop(commits);
-
-        let store = Arc::new(LpgStore::new().unwrap());
-        let loaded = load(&image, &store).unwrap();
-        assert_eq!(store.node_count(), 2, "the data is loaded");
-        assert!(
-            store.get_vector_index("Doc", "emb").is_none(),
-            "the index whose stream ends early is not kept"
-        );
-        let unbuilt: Vec<&str> = loaded
-            .unbuilt
-            .iter()
-            .flat_map(|graph| graph.vector.iter().map(|def| def.label.as_str()))
-            .collect();
-        assert_eq!(unbuilt, ["Doc"], "the index is left to build from the data");
-
-        let store = Arc::new(LpgStore::new().unwrap());
-        let loaded = load(&image_of(&db), &store).unwrap();
-        assert_eq!(
-            store
-                .get_vector_index("Doc", "emb")
-                .map(|index| index.len()),
-            Some(2),
-            "the intact section restores the index"
-        );
-        assert!(loaded.unbuilt.iter().all(|graph| graph.vector.is_empty()));
-    }
-
-    /// A streamed text section whose second stream lost its last piece is no
-    /// error: the first index, restored before the failure, is not kept
-    /// either, and both are left to build from the data.
-    #[test]
-    fn a_text_section_that_fails_in_its_second_stream_is_built_from_the_data() {
-        use grafeo_common::storage::ChunkKind;
-
-        let db = GrafeoDB::new_in_memory();
-        db.execute(
-            "INSERT (:Doc {body: 'Amsterdam canal bridge'}), \
-             (:Note {text: 'Berlin museum Prague'})",
-        )
-        .unwrap();
-        db.create_text_index("Doc", "body").unwrap();
-        db.create_text_index("Note", "text").unwrap();
-
-        let commits = db.transaction_manager.hold_commits().unwrap();
-        let mut image = MemoryImage::new();
-        for section in db.checkpoint_sources().sections(&commits) {
-            image
-                .begin_section(section.section_type(), section.version())
-                .unwrap();
-            if section.section_type() != SectionType::TextIndex {
-                section.write_to(&mut image).unwrap();
-                continue;
-            }
-            let mut whole = MemoryImage::new();
-            whole
-                .begin_section(SectionType::TextIndex, section.version())
-                .unwrap();
-            section.write_to(&mut whole).unwrap();
-            let source = whole.section_source(SectionType::TextIndex).unwrap();
-            // Stream 1 holds "Note:text", the second key in order.
-            let last = source
-                .chunks()
-                .iter()
-                .rposition(|meta| meta.kind == ChunkKind::Stream && meta.column_id == 1)
-                .expect("the second index has a stream");
-            assert!(
-                source
-                    .chunks()
-                    .iter()
-                    .any(|meta| meta.kind == ChunkKind::Stream && meta.column_id == 0),
-                "the first index has a stream"
-            );
-            for (index, meta) in source.chunks().iter().enumerate() {
-                if index != last {
-                    image
-                        .write_chunk(*meta, &source.fetch(index).unwrap())
-                        .unwrap();
-                }
-            }
-        }
-        drop(commits);
-
-        let store = Arc::new(LpgStore::new().unwrap());
-        let loaded = load(&image, &store).unwrap();
-        assert_eq!(store.node_count(), 2, "the data is loaded");
-        for (label, property) in [("Doc", "body"), ("Note", "text")] {
-            assert!(
-                store.get_text_index(label, property).is_none(),
-                "the text index {label}:{property} of a section that failed is not kept"
-            );
-        }
-        assert_eq!(loaded.unbuilt.len(), 1, "one graph: the default one");
-        let mut text = text_keys(&loaded.unbuilt[0].text);
-        text.sort_unstable();
-        assert_eq!(
-            text,
-            [("Doc", "body"), ("Note", "text")],
-            "both text indexes are left to build from the data"
-        );
-    }
-
     /// The image of a checkpoint of `db` in which `section_type` claims the
     /// section version `version`, as a later release that changed its layout
     /// would write it (its chunks as this release writes them).
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
     fn image_with_version(db: &GrafeoDB, section_type: SectionType, version: u8) -> MemoryImage {
         let commits = db.transaction_manager.hold_commits().unwrap();
         let mut image = MemoryImage::new();
@@ -2169,59 +1392,6 @@ mod tests {
         image
     }
 
-    /// A derived section (a vector or a text index's) of a section version
-    /// this build does not read is no error: the indexes it holds are built
-    /// from the data they mirror, and the other derived section still
-    /// restores its own. So a later 0.6 release may change a derived layout
-    /// (under a new version, or a new optional section type this build
-    /// skips) without making its files unreadable here.
-    #[test]
-    fn an_index_section_of_another_version_is_built_from_the_data() {
-        for section_type in [SectionType::VectorStore, SectionType::TextIndex] {
-            let db = indexed_database();
-            let image = image_with_version(&db, section_type, 250);
-            let source = image.section_source(section_type).unwrap();
-            assert_eq!(source.section_version(), 250, "{section_type:?}");
-            drop(source);
-
-            let store = Arc::new(LpgStore::new().unwrap());
-            let loaded = load(&image, &store).unwrap();
-            assert_eq!(
-                store.node_count(),
-                2,
-                "{section_type:?}: the data is loaded"
-            );
-            assert_eq!(
-                loaded.unbuilt.len(),
-                1,
-                "{section_type:?}: the default graph"
-            );
-            let graph = &loaded.unbuilt[0];
-            let vector: Vec<&str> = graph.vector.iter().map(|def| def.label.as_str()).collect();
-            let text: Vec<&str> = graph.text.iter().map(|def| def.label.as_str()).collect();
-            match section_type {
-                SectionType::VectorStore => {
-                    assert_eq!(
-                        (vector, text),
-                        (vec!["Doc"], vec![]),
-                        "the vector index builds from the data, the text index is restored"
-                    );
-                    assert!(store.get_vector_index("Doc", "emb").is_none());
-                    assert!(store.get_text_index("Doc", "body").is_some());
-                }
-                _ => {
-                    assert_eq!(
-                        (vector, text),
-                        (vec![], vec!["Doc"]),
-                        "the text index builds from the data, the vector index is restored"
-                    );
-                    assert!(store.get_text_index("Doc", "body").is_none());
-                    assert!(store.get_vector_index("Doc", "emb").is_some());
-                }
-            }
-        }
-    }
-
     /// An RDF ring section of a section version this build does not read is
     /// no error either: the ring is built from the triples it mirrors.
     #[cfg(all(feature = "ring-index", feature = "sparql"))]
@@ -2235,7 +1405,7 @@ mod tests {
         load_sections(
             &image,
             None,
-            &Arc::new(LpgStore::new().unwrap()),
+            &Arc::new(RowGroupStore::new()),
             &Arc::new(crate::catalog::Catalog::new()),
             &rdf_store,
         )
@@ -2249,6 +1419,7 @@ mod tests {
 
     /// A section read through `read_mirror` sees the version it was written
     /// with.
+    #[cfg(feature = "ring-index")]
     #[test]
     fn read_mirror_passes_on_the_section_version() {
         /// Notes the version its source reports.
@@ -2324,7 +1495,7 @@ mod tests {
             image: &image,
             asked: std::cell::RefCell::default(),
         };
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         load(&counting, &store).unwrap();
         let asked = counting.asked.into_inner();
         for section_type in &held {
@@ -2343,35 +1514,29 @@ mod tests {
                 .get_vector_index("Doc", "emb")
                 .map(|index| index.len()),
             Some(1),
-            "the vector index comes from its section"
+            "the vector index is built from the rows"
         );
     }
 
-    /// The image `to_memory` loads holds every section of a checkpoint but
-    /// the LPG store's, each with its version and chunks; the nodes and edges
-    /// are copied into the target instead.
+    /// The image `to_memory` loads holds every section of a checkpoint, each
+    /// with its version and chunks: the LPG section too, which writes every
+    /// graph at the checkpoint's epoch.
     #[test]
-    fn the_copy_image_holds_every_section_but_the_lpg_store() {
+    fn the_copy_image_holds_every_section_of_a_checkpoint() {
         let db = every_kind_of_section();
         let target = GrafeoDB::new_in_memory();
         let copied = db.copy_into(&target).unwrap();
 
         let commits = db.transaction_manager.hold_commits().unwrap();
         let sections = db.checkpoint_sources().sections(&commits);
-        let refs: Vec<&dyn Section> = sections
-            .iter()
-            .map(AsRef::as_ref)
-            .filter(|section| section.section_type() != SectionType::LpgStore)
-            .collect();
+        let refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
         let expected = MemoryImage::from_sections(&refs).unwrap();
         drop(commits);
 
-        let mut kinds = every_section_type();
-        kinds.retain(|section_type| *section_type != SectionType::LpgStore);
         assert_eq!(
             by_byte(copied.section_types()),
-            kinds,
-            "every section but the LPG store's"
+            every_section_type(),
+            "every section of a checkpoint"
         );
         assert_eq!(copied.section_types(), expected.section_types());
         for section_type in expected.section_types() {
@@ -2391,21 +1556,17 @@ mod tests {
                 );
             }
         }
-        assert_eq!(
-            target.lpg_store().node_count(),
-            db.lpg_store().node_count(),
-            "the nodes are copied store to store"
-        );
-        assert!(target.lpg_store().node_count() > 0);
     }
 
     /// An image whose `unreadable` section fails every fetch, as a chunk that
     /// fails its checksum does.
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
     struct Unreadable<'a> {
         image: &'a MemoryImage,
         unreadable: SectionType,
     }
 
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
     impl ImageSource for Unreadable<'_> {
         fn section_source(&self, section_type: SectionType) -> Option<Box<dyn SectionSource + '_>> {
             let source = self.image.section_source(section_type)?;
@@ -2418,8 +1579,10 @@ mod tests {
     }
 
     /// A section whose chunks are listed but cannot be fetched.
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
     struct FailingFetch<'a>(SectionType, Box<dyn SectionSource + 'a>);
 
+    #[cfg(all(feature = "ring-index", feature = "sparql"))]
     impl SectionSource for FailingFetch<'_> {
         fn chunks(&self) -> &[ChunkMeta] {
             self.1.chunks()
@@ -2441,34 +1604,6 @@ mod tests {
 
         fn section_version(&self) -> u8 {
             self.1.section_version()
-        }
-    }
-
-    /// A vector or text index section whose chunk cannot be read fails the
-    /// load, as any other section does: the image is damaged, and building
-    /// the index from the data would hide that.
-    #[test]
-    fn an_index_section_that_cannot_be_read_fails_the_load() {
-        let db = indexed_database();
-        let image = image_of(&db);
-        let store = Arc::new(LpgStore::new().unwrap());
-        assert!(load(&image, &store).is_ok(), "the image itself loads");
-        for unreadable in [SectionType::VectorStore, SectionType::TextIndex] {
-            let store = Arc::new(LpgStore::new().unwrap());
-            let error = load(
-                &Unreadable {
-                    image: &image,
-                    unreadable,
-                },
-                &store,
-            )
-            .map(|_| ())
-            .unwrap_err()
-            .to_string();
-            assert!(
-                error.contains(&format!("{unreadable:?}")) && error.contains("fails its checksum"),
-                "the fetch error of {unreadable:?} is returned: {error}"
-            );
         }
     }
 
@@ -2504,12 +1639,7 @@ mod tests {
     /// it were written), and its data in chunks of their own.
     #[test]
     fn no_production_section_writes_a_raw_chunk() {
-        let mut expected = vec![
-            SectionType::Catalog,
-            SectionType::LpgStore,
-            SectionType::VectorStore,
-            SectionType::TextIndex,
-        ];
+        let mut expected = vec![SectionType::Catalog, SectionType::LpgStore];
         #[cfg(all(feature = "sparql", feature = "triple-store"))]
         expected.push(SectionType::RdfStore);
         #[cfg(all(feature = "sparql", feature = "ring-index"))]

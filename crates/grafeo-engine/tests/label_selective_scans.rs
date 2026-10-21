@@ -28,7 +28,12 @@ const BOTH: usize = 3;
 /// edge to `g<i>`. `Tag` and `Topic` have three nodes each, one of them shared
 /// (`t0`). With `indexed`, a property index on `id`.
 fn skewed(indexed: bool) -> GrafeoDB {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: a read at an earlier epoch needs it.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     if indexed {
         db.create_property_index("id").unwrap();
     }
@@ -627,7 +632,6 @@ fn a_label_with_a_vector_index_for_the_filter_stays_scanned() {
 /// A read of a past epoch finds the nodes that had the labels at the epoch,
 /// whichever label has the fewest nodes now: `r1` lost `Repository` after it.
 /// It scans the label as written, and `EXPLAIN` shows that.
-#[cfg(feature = "temporal")]
 #[test]
 fn a_read_of_a_past_epoch_sees_the_labels_of_the_epoch() {
     let db = skewed(false);
@@ -662,9 +666,11 @@ fn a_read_of_a_past_epoch_sees_the_labels_of_the_epoch() {
             ids(&["r0", "r1", "r2"]),
             "{language:?} at the epoch before"
         );
+        // The store answers label scans at a view, so the read at the
+        // earlier epoch scans the smallest label too.
         assert_eq!(
             scans(&then_plan),
-            ["NodeScan (n:Graph)"],
+            ["NodeScan (n:Repository)"],
             "{language:?} at the epoch before:\n{then_plan}"
         );
     }
@@ -972,12 +978,11 @@ fn a_label_the_predicate_does_not_require_keeps_the_full_scan() {
     }
 }
 
-/// A read of a past epoch keeps the scan of every node for a label in
-/// `WHERE`, and finds the nodes that had the label then: `r1` lost
-/// `Repository` after it.
-#[cfg(feature = "temporal")]
+/// A read of a past epoch scans the label in `WHERE` too (the store answers
+/// label scans at a view), and finds the nodes that had the label then: `r1`
+/// lost `Repository` after it.
 #[test]
-fn a_past_epoch_keeps_the_full_scan_for_a_label_in_where() {
+fn a_past_epoch_scans_a_label_in_where_too() {
     let db = skewed(false);
     let mut session = db.session();
     session.begin_transaction().unwrap();
@@ -1004,9 +1009,11 @@ fn a_past_epoch_keeps_the_full_scan_for_a_label_in_where() {
             ids(&["r0", "r1", "r2"]),
             "{language:?} at the epoch before"
         );
+        // The store answers label scans at a view: the label in WHERE is
+        // scanned at the earlier epoch too.
         assert_eq!(
             scans(&then_plan),
-            ["NodeScan (n:*)"],
+            ["NodeScan (n:Repository)"],
             "{language:?} at the epoch before:\n{then_plan}"
         );
         session.set_viewing_epoch(before);
@@ -1017,8 +1024,8 @@ fn a_past_epoch_keeps_the_full_scan_for_a_label_in_where() {
         );
         session.clear_viewing_epoch();
         assert!(
-            !or_plan.contains("[labels:"),
-            "{language:?} an OR of labels at the epoch before:\n{or_plan}"
+            or_plan.contains("[labels:"),
+            "{language:?} an OR of labels at the epoch before reads those labels:\n{or_plan}"
         );
     }
 }

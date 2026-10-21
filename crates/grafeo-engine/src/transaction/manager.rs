@@ -1,15 +1,18 @@
 //! Transaction manager.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, Timestamp, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::execution::operators::WriteInProgress;
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 use super::changes::TransactionChanges;
+use super::history::{History, HistoryImage};
+use crate::config::HistoryRetention;
 
 /// State of a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,20 +333,82 @@ pub struct TransactionManager {
     /// Signalled when an epoch is published, and when a commit does not
     /// complete.
     published: Condvar,
-    /// The reads outside any transaction that run now, by the epoch each
-    /// pinned (see [`pin_read`](Self::pin_read)): with the open and
-    /// committing transactions, they hold the read horizon back.
+    /// The readers that hold the read horizon back, by the epoch each reads
+    /// at: the snapshot of every open and committing transaction, and every
+    /// read outside a transaction that runs now (see
+    /// [`pin_read`](Self::pin_read)). The read horizon is its oldest epoch,
+    /// or the published epoch when it holds none, so it never walks the
+    /// finished transactions.
     ///
-    /// Lock order: after the `transactions` lock (the read horizon takes
-    /// both); a pin and its drop take this one alone.
+    /// Lock order: after the `transactions` lock (a transaction's snapshot
+    /// is counted and released while that lock is held); the read horizon,
+    /// a pin and its drop take this one alone, and the collect horizon takes
+    /// the history's locks after it.
     reads: Arc<ReadPins>,
+    /// The history: its retention, the commit times and the floor of what a
+    /// read may ask for (see `history`).
+    history: History,
 }
 
-/// The epochs the reads outside any transaction pinned, each with how many
-/// such reads run at it.
+/// The epochs the readers that hold the read horizon back read at, each with
+/// how many such readers: open and committing transactions by their
+/// snapshot, reads outside a transaction by the epoch they pinned.
+///
+/// Ascending, each epoch once with a count above 0: every reader is counted
+/// at the published epoch, read under the lock, which only moves forward, so
+/// a new epoch goes at the back. The oldest is the front, and the buffer is
+/// kept from one reader to the next (a reader that begins and ends allocates
+/// nothing).
 #[derive(Debug, Default)]
 struct ReadPins {
-    epochs: Mutex<std::collections::BTreeMap<u64, usize>>,
+    epochs: Mutex<VecDeque<(u64, usize)>>,
+}
+
+impl ReadPins {
+    /// Counts a reader at the published epoch, read while the lock is held,
+    /// and returns that epoch: the read horizon reads the published epoch
+    /// under the same lock, so it never passes a reader it has not counted.
+    fn hold_published(&self, published: &AtomicU64) -> EpochId {
+        let mut epochs = self.epochs.lock();
+        let epoch = published.load(Ordering::Acquire);
+        match epochs.back_mut() {
+            Some((newest, readers)) if *newest == epoch => *readers += 1,
+            _ => {
+                debug_assert!(
+                    epochs.back().is_none_or(|(newest, _)| *newest < epoch),
+                    "the published epoch only moves forward"
+                );
+                epochs.push_back((epoch, 1));
+            }
+        }
+        EpochId::new(epoch)
+    }
+
+    /// Counts a reader at `epoch`, at or before the published epoch, in its
+    /// place among the readers (ascending).
+    fn hold_at(epochs: &mut VecDeque<(u64, usize)>, epoch: u64) {
+        match epochs.binary_search_by_key(&epoch, |(at, _)| *at) {
+            Ok(index) => epochs[index].1 += 1,
+            Err(index) => epochs.insert(index, (epoch, 1)),
+        }
+    }
+
+    /// Releases one reader at `epoch`.
+    fn release(&self, epoch: EpochId) {
+        let mut epochs = self.epochs.lock();
+        if let Ok(index) = epochs.binary_search_by_key(&epoch.as_u64(), |(at, _)| *at) {
+            let readers = &mut epochs[index].1;
+            *readers -= 1;
+            if *readers == 0 {
+                epochs.remove(index);
+            }
+        }
+    }
+
+    /// The oldest epoch a reader reads at, `None` with no reader.
+    fn oldest(epochs: &VecDeque<(u64, usize)>) -> Option<u64> {
+        epochs.front().map(|(epoch, _)| *epoch)
+    }
 }
 
 /// A read outside any transaction, pinned at the epoch it reads at from
@@ -378,15 +443,7 @@ impl std::fmt::Debug for ReadPin {
 
 impl Drop for ReadPin {
     fn drop(&mut self) {
-        let mut epochs = self.pins.epochs.lock();
-        if let std::collections::btree_map::Entry::Occupied(mut reads) =
-            epochs.entry(self.epoch.as_u64())
-        {
-            *reads.get_mut() -= 1;
-            if *reads.get() == 0 {
-                reads.remove();
-            }
-        }
+        self.pins.release(self.epoch);
     }
 }
 
@@ -440,6 +497,14 @@ impl CommitGuard<'_> {
     /// The commit epoch.
     pub(crate) fn epoch(&self) -> EpochId {
         self.commit.epoch
+    }
+
+    /// When the commit happened, while the database keeps history (`None`
+    /// otherwise): its WAL group carries this time, so a replay records the
+    /// time the live commit recorded.
+    #[cfg(feature = "wal")]
+    pub(crate) fn commit_time(&self) -> Option<u64> {
+        self.commit.commit_time
     }
 
     /// Publishes the commit while the commit lock is held: the transaction is
@@ -507,6 +572,9 @@ pub(crate) struct Publish<'a> {
     manager: &'a TransactionManager,
     transaction_id: TransactionId,
     epoch: EpochId,
+    /// When the commit happened, while the database keeps history: recorded
+    /// in the time index as it publishes, and the time of its WAL group.
+    commit_time: Option<u64>,
     /// Whether the commit was published or taken back.
     finished: bool,
 }
@@ -571,6 +639,8 @@ impl Publish<'_> {
                 info.state = TransactionState::Committed;
                 // Stamped: what it changed is committed state now.
                 info.changes = None;
+                // It reads no more: its snapshot holds the horizon no more.
+                manager.reads.release(info.start_epoch);
                 // A private transaction no open one began before: only a
                 // transaction that began before this commit was published
                 // can conflict with it, and each is counted while the
@@ -592,6 +662,10 @@ impl Publish<'_> {
             manager
                 .published_epoch
                 .fetch_max(self.epoch.as_u64(), Ordering::Release);
+        }
+        // In the turn, so the times are recorded in epoch order.
+        if let Some(time) = self.commit_time {
+            manager.history.record(self.epoch, time);
         }
         self.finished = true;
         drop(turn);
@@ -637,6 +711,18 @@ impl TransactionManager {
             publish_turn: Mutex::new(()),
             published: Condvar::new(),
             reads: Arc::new(ReadPins::default()),
+            history: History::default(),
+        }
+    }
+
+    /// A manager whose commits take their times from `clock` (milliseconds
+    /// since the Unix epoch) once history is on: for tests of the retention
+    /// window.
+    #[cfg(test)]
+    pub(crate) fn with_history_clock(clock: super::history::Clock) -> Self {
+        Self {
+            history: History::with_clock(clock),
+            ..Self::new()
         }
     }
 
@@ -712,11 +798,11 @@ impl TransactionManager {
         // Counted while the `transactions` lock is held: a commit that
         // publishes meanwhile sees this transaction or does not, never half
         // (it drops a private transaction's claims only when no other is
-        // counted, see `Publish::complete`). The snapshot is read under the
-        // lock too, so the read horizon, which reads the published epoch
-        // under it, never passes a snapshot it has not seen yet.
+        // counted, see `Publish::complete`). The snapshot is read and held
+        // under the readers' lock, so the read horizon, which reads the
+        // published epoch under it, never passes a snapshot it has not seen.
         let mut transactions = self.transactions.write();
-        let epoch = self.current_epoch();
+        let epoch = self.reads.hold_published(&self.published_epoch);
         let changes = Arc::new(TransactionChanges::new(transaction_id, epoch));
         let info = TransactionInfo::new(epoch, isolation_level, Arc::clone(&changes), private);
         transactions.insert(transaction_id, info);
@@ -1138,6 +1224,8 @@ impl TransactionManager {
                 manager: self,
                 transaction_id,
                 epoch: commit_epoch,
+                // Under the commit lock: the times follow the epochs.
+                commit_time: self.history.commit_time(),
                 finished: false,
             },
             _commit: commit_lock,
@@ -1321,6 +1409,7 @@ impl TransactionManager {
 
         info.state = TransactionState::Aborted;
         info.changes = None;
+        self.reads.release(info.start_epoch);
         // An aborted transaction conflicts with nobody: a private one, whose
         // state nobody asks for, leaves at once (others at the next `gc`).
         if info.private {
@@ -1377,6 +1466,7 @@ impl TransactionManager {
             if info.state == TransactionState::Active {
                 info.state = TransactionState::Aborted;
                 info.changes = None;
+                self.reads.release(info.start_epoch);
                 self.active_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
@@ -1431,31 +1521,18 @@ impl TransactionManager {
     /// pins for its run), and the published epoch, at which every reader
     /// that starts from now on reads.
     ///
-    /// A transaction's snapshot and a pin's epoch are read under the locks
-    /// this reads them under, so a reader that starts meanwhile is either
-    /// counted or reads at the published epoch read here or a later one.
+    /// Each of them is counted by the epoch it reads at as it begins (a
+    /// transaction's snapshot until its commit is published or it aborts,
+    /// a pin until it is dropped), so this reads the oldest counted epoch
+    /// and costs the same however many transactions finished. A reader's
+    /// epoch is read and counted under the lock this reads them under, so a
+    /// reader that starts meanwhile is either counted or reads at the
+    /// published epoch read here or a later one.
     #[must_use]
     pub fn read_horizon(&self) -> EpochId {
-        let transactions = self.transactions.read();
-        let pins = self.reads.epochs.lock();
+        let readers = self.reads.epochs.lock();
         let published = self.published_epoch.load(Ordering::Acquire);
-        let oldest_transaction = transactions
-            .values()
-            .filter(|info| {
-                matches!(
-                    info.state,
-                    TransactionState::Active | TransactionState::Committing
-                )
-            })
-            .map(|info| info.start_epoch.as_u64())
-            .min();
-        let oldest_read = pins.keys().next().copied();
-        EpochId::new(
-            [oldest_transaction, oldest_read]
-                .into_iter()
-                .flatten()
-                .fold(published, u64::min),
-        )
+        EpochId::new(ReadPins::oldest(&readers).map_or(published, |oldest| oldest.min(published)))
     }
 
     /// Pins a read outside any transaction at the published epoch, for as
@@ -1466,15 +1543,144 @@ impl TransactionManager {
     /// (#412 decision Q6), so collecting at the horizon never takes a version
     /// such a statement still reads.
     pub(crate) fn pin_read(&self) -> ReadPin {
-        let mut epochs = self.reads.epochs.lock();
-        // Read under the lock: the read horizon reads it under the same one.
-        let epoch = self.published_epoch.load(Ordering::Acquire);
-        *epochs.entry(epoch).or_insert(0) += 1;
-        drop(epochs);
+        let epoch = self.reads.hold_published(&self.published_epoch);
         ReadPin {
             pins: Arc::clone(&self.reads),
-            epoch: EpochId::new(epoch),
+            epoch,
         }
+    }
+
+    /// Pins a read at `epoch`, a time-travel read's (one after the
+    /// published epoch reads at the published one), for as long as the
+    /// returned pin lives: the collect horizon stays at its epoch or before,
+    /// so the versions it reads stay while it runs.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidValue`] for an epoch before the history floor (see
+    /// [`history_floor`](Self::history_floor)): "history before ... is not
+    /// retained". The floor is read under the lock the collect horizon moves
+    /// it under, so a read pinned here is never collected past.
+    pub(crate) fn pin_read_at(&self, epoch: EpochId) -> Result<ReadPin> {
+        let mut epochs = self.reads.epochs.lock();
+        if epoch < self.history.floor() {
+            return Err(self.history.before_floor(epoch));
+        }
+        let epoch = epoch.min(EpochId::new(self.published_epoch.load(Ordering::Acquire)));
+        ReadPins::hold_at(&mut epochs, epoch.as_u64());
+        Ok(ReadPin {
+            pins: Arc::clone(&self.reads),
+            epoch,
+        })
+    }
+
+    /// The horizon garbage collection runs at: the older of the
+    /// [read horizon](Self::read_horizon) and the start of the database's
+    /// retention window (none while history is off, so it is the read
+    /// horizon then, as without history). Every version a reader at it or
+    /// later reads is kept, and it becomes the history floor: from now on a
+    /// read before it is refused. The engine's collects run at it.
+    #[must_use]
+    pub fn collect_horizon(&self) -> EpochId {
+        let readers = self.reads.epochs.lock();
+        let published = self.published_epoch.load(Ordering::Acquire);
+        let read = ReadPins::oldest(&readers).map_or(published, |oldest| oldest.min(published));
+        let horizon = match self.history.retention_horizon() {
+            Some(start) => read.min(start),
+            None => read,
+        };
+        let horizon = EpochId::new(horizon);
+        self.history.collected_at(horizon);
+        horizon
+    }
+
+    /// The oldest epoch a read may still ask for: the newest collect
+    /// horizon (see [`collect_horizon`](Self::collect_horizon)). A
+    /// time-travel read before it is refused.
+    #[must_use]
+    pub fn history_floor(&self) -> EpochId {
+        self.history.floor()
+    }
+
+    /// Sets how long the database keeps history, from now on (see
+    /// [`HistoryRetention`]): turned on, the commit times are recorded from
+    /// the published epoch on; turned off, the time index goes, and the
+    /// collect horizon is the read horizon again.
+    pub fn set_history_retention(&self, retention: HistoryRetention) {
+        self.history
+            .set_retention(retention, self.published_epoch.load(Ordering::Acquire));
+    }
+
+    /// How long the database keeps history.
+    #[must_use]
+    pub fn history_retention(&self) -> HistoryRetention {
+        self.history.retention()
+    }
+
+    /// The epoch a read at `timestamp` reads at: the last one committed at
+    /// or before it (at the resolution of a millisecond).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidValue`] while the database keeps no history, and for a
+    /// time before what it keeps.
+    pub fn epoch_at(&self, timestamp: Timestamp) -> Result<EpochId> {
+        self.history.epoch_at(timestamp)
+    }
+
+    /// Now on the clock commit times come from, in milliseconds since the
+    /// Unix epoch.
+    pub(crate) fn history_now(&self) -> u64 {
+        self.history.now()
+    }
+
+    /// The time a write outside a transaction that commits at once takes,
+    /// under the commit lock, while the database keeps history: its WAL
+    /// group carries it, and [`record_commit_time`](Self::record_commit_time)
+    /// records it once its epoch is published.
+    pub(crate) fn commit_time(&self) -> Option<u64> {
+        self.history.commit_time()
+    }
+
+    /// Records that `epoch` committed at `millis`: a write outside a
+    /// transaction, once published, and a replayed WAL group. Nothing while
+    /// history is off.
+    pub(crate) fn record_commit_time(&self, epoch: EpochId, millis: u64) {
+        self.history.record(epoch, millis);
+    }
+
+    /// What a checkpoint writes of the history, `None` while it is off.
+    pub(crate) fn history_image(&self) -> Option<HistoryImage> {
+        self.history.image()
+    }
+
+    /// Sets the retention an open starts with, before it loads the file and
+    /// replays the log (see [`anchor_history`](Self::anchor_history)).
+    pub(crate) fn open_history(&self, retention: HistoryRetention) {
+        self.history.open(retention);
+    }
+
+    /// Takes in what a load found of the history: the image of a file's
+    /// `TIME_INDEX` section, or, for a file without one, the epoch of its
+    /// checkpoint, before which nothing is retained.
+    #[cfg(any(test, feature = "lpg"))]
+    pub(crate) fn restore_history_or_floor(
+        &self,
+        image: Option<HistoryImage>,
+        checkpoint: EpochId,
+    ) {
+        match image {
+            Some(image) => self.history.restore(image),
+            None => self.history.collected_at(checkpoint),
+        }
+    }
+
+    /// At the end of an open or a new database: a history that is on and
+    /// holds no commit at or after the published epoch starts there, now,
+    /// so a read at a time from now on finds its epoch.
+    pub(crate) fn anchor_history(&self) {
+        self.history
+            .anchor(self.published_epoch.load(Ordering::Acquire));
     }
 
     /// Returns the number of active transactions.
@@ -1812,6 +2018,55 @@ mod tests {
         assert_eq!(mgr.read_horizon(), published, "the read is pinned");
         drop(read);
         assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+    }
+
+    /// Every way a transaction finishes lets go of its snapshot, before any
+    /// `gc` drops it: a commit (private or not), an abort, the abort of every
+    /// active one; a commit taken back keeps the snapshot until the
+    /// transaction's rollback.
+    #[test]
+    fn a_finished_transaction_no_longer_holds_the_read_horizon() {
+        let mgr = TransactionManager::new();
+        let oldest = mgr.begin();
+        let snapshot = mgr.start_epoch(oldest).unwrap();
+        for round in 0..100 {
+            let tx = mgr.begin();
+            if round % 2 == 0 {
+                mgr.commit(tx).unwrap();
+            } else {
+                mgr.abort(tx).unwrap();
+            }
+            let (private, _) = mgr.begin_private().unwrap();
+            mgr.commit(private).unwrap();
+        }
+        assert_eq!(mgr.read_horizon(), snapshot, "the oldest open snapshot");
+        mgr.abort(oldest).unwrap();
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch(), "no reader left");
+
+        // A commit whose log write failed is taken back: the transaction is
+        // active again and still reads at its snapshot.
+        let taken_back = mgr.begin();
+        let snapshot = mgr.start_epoch(taken_back).unwrap();
+        let other = mgr.begin();
+        mgr.commit(other).unwrap();
+        mgr.start_commit(taken_back).unwrap().abort();
+        assert_eq!(mgr.state(taken_back), Some(TransactionState::Active));
+        assert_eq!(mgr.read_horizon(), snapshot, "the commit taken back");
+        mgr.abort(taken_back).unwrap();
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+
+        let first = mgr.begin();
+        let held = mgr.start_epoch(first).unwrap();
+        let tx = mgr.begin();
+        mgr.commit(tx).unwrap();
+        let _second = mgr.begin();
+        assert_eq!(mgr.read_horizon(), held);
+        mgr.abort_all_active();
+        assert_eq!(
+            mgr.read_horizon(),
+            mgr.current_epoch(),
+            "all aborted at once"
+        );
     }
 
     #[test]

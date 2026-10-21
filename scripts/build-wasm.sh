@@ -150,9 +150,12 @@ else
     # 800 KB limit. Re-baseline after the release, or shrink the bundle (strip
     # unused RDF path code paths) to get back under 800 KB.
     # Exact decimals (a core value type in every profile) brought it to 850.5 KB;
-    # the limit is 880 KB from then on.
+    # the limit was 880 KB from then on. The engine's switch to the row-group
+    # store (the browser build reads and writes snapshots in its sections,
+    # column chunks included) left the raw size 3 KB smaller but brought the
+    # gzipped size from 875 to 884 KB: the limit is 900 KB from then on.
     WARN_THRESHOLD=829440    # 810 KB
-    FAIL_THRESHOLD=901120    # 880 KB
+    FAIL_THRESHOLD=921600    # 900 KB
     LABEL="browser profile"
 fi
 

@@ -59,6 +59,26 @@ def test_call_undirected_pagerank_matches():
     assert {row["node_id"]: row["score"] for row in rows} == db.algorithms.pagerank(directed=False)
 
 
+def test_networkx_view_reads_the_committed_graph():
+    """A deleted node and its edge, and an open transaction's edge, are not in
+    the NetworkX view's nodes, edges, degrees or adjacency."""
+    db, name = path_d_a_b_c()
+    ids = {n: node for node, n in name.items()}
+    db.detach_delete_node(ids["b"])
+    tx = db.begin_transaction()
+    tx.execute("MATCH (c:Graph {n: 'c'}), (d:Graph {n: 'd'}) INSERT (c)-[:R]->(d)")
+    view = db.as_networkx()
+    assert sorted(name[node] for node in view.nodes()) == ["a", "c", "d"]
+    assert view.edges() == [(ids["a"], ids["d"])]
+    assert view.out_degree(ids["a"]) == 1
+    assert view.in_degree(ids["c"]) == 0
+    assert view.out_degree(ids["c"]) == 0
+    assert not view.has_edge(ids["a"], ids["b"])
+    assert view.neighbors(ids["a"]) == [ids["d"]]
+    assert set(view.adj) == {ids["a"], ids["c"], ids["d"]}
+    tx.rollback()
+
+
 # ---------------------------------------------------------------------------
 # Scope: projections, the selected graph and graph handles
 # ---------------------------------------------------------------------------

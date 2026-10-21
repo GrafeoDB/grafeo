@@ -1,4 +1,12 @@
 //! Vector, text, and hybrid search operations for GrafeoDB.
+//!
+//! A search reads the default graph as a read outside a transaction does: at
+//! the published epoch, pinned for the search's run (#412 decision Q6), so a
+//! collect meanwhile keeps every version it reads. The filters, the index
+//! search and the reranking all read at that one view, through the store's
+//! view-taking methods, which take the store's lock and then an index's
+//! lock, the order the writes take them in (a search never holds an index
+//! lock while it calls into the store).
 
 #[cfg(any(
     feature = "vector-index",
@@ -7,8 +15,8 @@
 ))]
 use grafeo_common::types::NodeId;
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-use grafeo_common::types::Value;
-#[cfg(any(feature = "text-index", feature = "hybrid-search"))]
+use grafeo_common::types::{ReadView, Value};
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
 use grafeo_common::utils::error::Error;
 #[cfg(any(
     feature = "vector-index",
@@ -16,26 +24,33 @@ use grafeo_common::utils::error::Error;
     feature = "hybrid-search"
 ))]
 use grafeo_common::utils::error::Result;
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+use grafeo_core::graph::rowgroup::{IndexSearch, RowGroupStore};
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+use grafeo_core::graph::{GraphStore, GraphStoreSearch};
 #[cfg(feature = "vector-index")]
 use grafeo_core::index::vector::check_query_vector;
 
+/// The error of a search through a vector index the default graph lacks.
+#[cfg(feature = "vector-index")]
+fn no_vector_index(label: &str, property: &str) -> Error {
+    Error::InvalidValue(format!(
+        "there is no vector index on :{label}({property}); create one first"
+    ))
+}
+
 impl super::GrafeoDB {
-    /// Creates the vector accessor for an indexed property: the property
-    /// store, which reads a spilled column through its cache file in place.
-    #[cfg(feature = "vector-index")]
-    fn make_vector_accessor<'a>(
-        &'a self,
-        property: &str,
-    ) -> grafeo_core::index::vector::VectorAccessorKind<'a> {
-        grafeo_core::index::vector::VectorAccessorKind::Property(
-            grafeo_core::index::vector::PropertyVectorAccessor::new(
-                self.graph_store_ref(),
-                property,
-            ),
-        )
+    /// The view a search reads at, and the pin that keeps it while the
+    /// search runs: the published epoch, as for every read outside a
+    /// transaction.
+    #[cfg(any(feature = "vector-index", feature = "text-index"))]
+    fn search_view(&self) -> (crate::transaction::ReadPin, ReadView) {
+        let pin = self.transaction_manager.pin_read();
+        (pin, ReadView::committed(self.read_epoch()))
     }
 
-    /// Computes a node allowlist from property filters.
+    /// Computes a node allowlist from property filters, as `view` sees the
+    /// nodes of `label` in `store`.
     ///
     /// Supports equality filters (scalar values) and operator filters (Map values
     /// with `$`-prefixed keys like `$gt`, `$lt`, `$in`, `$contains`).
@@ -44,19 +59,16 @@ impl super::GrafeoDB {
     /// or `Some(set)` with the intersection (possibly empty).
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
     fn compute_filter_allowlist(
-        &self,
+        store: &RowGroupStore,
         label: &str,
         filters: Option<&std::collections::HashMap<String, Value>>,
+        view: ReadView,
     ) -> Option<std::collections::HashSet<NodeId>> {
         let filters = filters.filter(|f| !f.is_empty())?;
 
-        let graph = self.graph_store();
-
         // Start with all nodes for this label
-        let label_nodes: std::collections::HashSet<NodeId> =
-            graph.nodes_by_label(label).into_iter().collect();
-
-        let mut allowlist = label_nodes;
+        let mut allowlist: std::collections::HashSet<NodeId> =
+            store.nodes_by_label_at(label, view).into_iter().collect();
 
         for (key, filter_value) in filters {
             // Check if this is an operator filter (Map with $-prefixed keys)
@@ -65,16 +77,15 @@ impl super::GrafeoDB {
             if is_operator_filter {
                 // Operator filter: scan only the current allowlist (not all nodes).
                 // This is much faster when a prior filter has already narrowed the set.
-                let prop_key = grafeo_common::types::PropertyKey::new(key);
                 allowlist.retain(|&node_id| {
-                    graph
-                        .get_node_property(node_id, &prop_key)
-                        .is_some_and(|v| grafeo_core::LpgStore::matches_filter(&v, filter_value))
+                    store.node_property_at(node_id, key, view).is_some_and(|v| {
+                        grafeo_core::graph::property_filter::matches_filter(&v, filter_value)
+                    })
                 });
             } else {
                 // Equality filter: use indexed lookup when available
-                let matching: std::collections::HashSet<NodeId> = graph
-                    .find_nodes_by_property(key, filter_value)
+                let matching: std::collections::HashSet<NodeId> = store
+                    .find_nodes_by_property_at(key, filter_value, view)
                     .into_iter()
                     .collect();
                 allowlist = allowlist.intersection(&matching).copied().collect();
@@ -128,24 +139,21 @@ impl super::GrafeoDB {
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
         let store = self.lpg_store();
-        let index = store.get_vector_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(format!(
-                "there is no vector index on :{label}({property}); create one first"
-            ))
-        })?;
-        check_query_vector(query, index.config().dimensions, label, property)?;
+        let config = store
+            .vector_index_config(label, property)
+            .ok_or_else(|| no_vector_index(label, property))?;
+        check_query_vector(query, config.dimensions, label, property)?;
 
-        let accessor = self.make_vector_accessor(property);
-        let allowlist = self.compute_filter_allowlist(label, filters);
-
-        Ok(search_vector_index(
-            &index,
-            query,
+        let (_pin, view) = self.search_view();
+        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view);
+        let search = IndexSearch {
             k,
             ef,
-            allowlist.as_ref(),
-            &accessor,
-        ))
+            allowed: allowlist.as_ref(),
+        };
+        store
+            .vector_index_search_at(label, property, query, search, view)
+            .ok_or_else(|| no_vector_index(label, property))
     }
 
     /// Searches for nearest neighbors for multiple query vectors in parallel.
@@ -178,29 +186,23 @@ impl super::GrafeoDB {
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<Vec<(grafeo_common::types::NodeId, f32)>>> {
         let store = self.lpg_store();
-        let index = store.get_vector_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(format!(
-                "there is no vector index on :{label}({property}); create one first"
-            ))
-        })?;
+        let config = store
+            .vector_index_config(label, property)
+            .ok_or_else(|| no_vector_index(label, property))?;
         for query in queries {
-            check_query_vector(query, index.config().dimensions, label, property)?;
+            check_query_vector(query, config.dimensions, label, property)?;
         }
 
-        let accessor = self.make_vector_accessor(property);
-        let allowlist = self.compute_filter_allowlist(label, filters);
-
-        let batch = match (&allowlist, ef) {
-            (Some(allowlist), Some(ef_val)) => {
-                index.batch_search_with_ef_and_filter(queries, k, ef_val, allowlist, &accessor)
-            }
-            (Some(allowlist), None) => {
-                index.batch_search_with_filter(queries, k, allowlist, &accessor)
-            }
-            (None, Some(ef_val)) => index.batch_search_with_ef(queries, k, ef_val, &accessor),
-            (None, None) => index.batch_search(queries, k, &accessor),
+        let (_pin, view) = self.search_view();
+        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view);
+        let search = IndexSearch {
+            k,
+            ef,
+            allowed: allowlist.as_ref(),
         };
-        Ok(batch)
+        store
+            .vector_index_batch_search_at(label, property, queries, search, view)
+            .ok_or_else(|| no_vector_index(label, property))
     }
 
     /// Searches for diverse nearest neighbors using Maximal Marginal Relevance (MMR).
@@ -247,33 +249,40 @@ impl super::GrafeoDB {
         use grafeo_core::index::vector::mmr_select;
 
         let store = self.lpg_store();
-        let index = store.get_vector_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(format!(
-                "there is no vector index on :{label}({property}); create one first"
-            ))
-        })?;
-        check_query_vector(query, index.config().dimensions, label, property)?;
-
-        let accessor = self.make_vector_accessor(property);
+        let config = store
+            .vector_index_config(label, property)
+            .ok_or_else(|| no_vector_index(label, property))?;
+        check_query_vector(query, config.dimensions, label, property)?;
 
         let fetch_k = fetch_k.unwrap_or(k.saturating_mul(4).max(k));
         let lambda = lambda.unwrap_or(0.5);
 
         // Step 1: Fetch candidates from HNSW (with optional filter)
-        let allowlist = self.compute_filter_allowlist(label, filters);
-        let initial_results =
-            search_vector_index(&index, query, fetch_k, ef, allowlist.as_ref(), &accessor);
+        let (_pin, view) = self.search_view();
+        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view);
+        let search = IndexSearch {
+            k: fetch_k,
+            ef,
+            allowed: allowlist.as_ref(),
+        };
+        let initial_results = store
+            .vector_index_search_at(label, property, query, search, view)
+            .ok_or_else(|| no_vector_index(label, property))?;
 
         if initial_results.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Step 2: Retrieve stored vectors for MMR pairwise comparison
-        use grafeo_core::index::vector::VectorAccessor;
+        // Step 2: The candidates' vectors at the view, for MMR's pairwise
+        // comparison
         let candidates: Vec<(grafeo_common::types::NodeId, f32, std::sync::Arc<[f32]>)> =
             initial_results
                 .into_iter()
-                .filter_map(|(id, dist)| accessor.get_vector(id).map(|vec| (id, dist, vec)))
+                .filter_map(|(id, dist)| {
+                    store
+                        .vector_at(id, property, view)
+                        .map(|vec| (id, dist, vec))
+                })
                 .collect();
 
         // Step 3: Build slice-based candidates for mmr_select
@@ -283,8 +292,7 @@ impl super::GrafeoDB {
             .collect();
 
         // Step 4: Run MMR selection
-        let metric = index.config().metric;
-        Ok(mmr_select(query, &candidate_refs, k, lambda, metric))
+        Ok(mmr_select(query, &candidate_refs, k, lambda, config.metric))
     }
 
     /// Searches a text index using BM25 scoring.
@@ -315,17 +323,20 @@ impl super::GrafeoDB {
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<(NodeId, f64)>> {
         let store = self.lpg_store();
-        let index = store.get_text_index(label, property).ok_or_else(|| {
-            Error::InvalidValue(format!(
-                "there is no text index on :{label}({property}); create one first"
-            ))
-        })?;
-
-        let index = index.read();
-        Ok(match self.compute_filter_allowlist(label, filters) {
-            Some(allowed) => index.search_with_filter(query, k, &allowed),
-            None => index.search(query, k),
-        })
+        let (_pin, view) = self.search_view();
+        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view);
+        let search = IndexSearch {
+            k,
+            ef: None,
+            allowed: allowlist.as_ref(),
+        };
+        store
+            .text_index_search_at(label, property, query, search, view)
+            .ok_or_else(|| {
+                Error::InvalidValue(format!(
+                    "there is no text index on :{label}({property}); create one first"
+                ))
+            })
     }
 
     /// Performs hybrid search combining text (BM25) and vector similarity.
@@ -390,56 +401,50 @@ impl super::GrafeoDB {
         let mut sources: Vec<Vec<(NodeId, f64)>> = Vec::new();
         let store = self.lpg_store();
         let fetch = k.saturating_mul(2);
-        let vector_index = store.get_vector_index(label, vector_property);
-        if let (Some(query_vec), Some(index)) = (query_vector, &vector_index) {
-            check_query_vector(query_vec, index.config().dimensions, label, vector_property)?;
+        let vector_config = store.vector_index_config(label, vector_property);
+        if let (Some(query_vec), Some(config)) = (query_vector, &vector_config) {
+            check_query_vector(query_vec, config.dimensions, label, vector_property)?;
         }
 
         // Both searches keep only the nodes that match the filters, before
         // fusion: filtering the fused results would return fewer than k.
-        let allowlist = self.compute_filter_allowlist(label, filters);
+        let (_pin, view) = self.search_view();
+        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view);
         if allowlist.as_ref().is_some_and(|allowed| allowed.is_empty()) {
             return Ok(Vec::new());
         }
+        let search = IndexSearch {
+            k: fetch,
+            ef: None,
+            allowed: allowlist.as_ref(),
+        };
 
         // Text search
-        if let Some(text_index) = store.get_text_index(label, text_property) {
-            let text_index = text_index.read();
-            let text_results = match &allowlist {
-                Some(allowed) => text_index.search_with_filter(query_text, fetch, allowed),
-                None => text_index.search(query_text, fetch),
-            };
-            if !text_results.is_empty() {
-                sources.push(text_results);
-            }
+        if let Some(text_results) =
+            store.text_index_search_at(label, text_property, query_text, search, view)
+            && !text_results.is_empty()
+        {
+            sources.push(text_results);
         }
 
         // Vector search (if query vector provided)
         if let Some(query_vec) = query_vector
-            && let Some(vector_index) = vector_index
+            && vector_config.is_some()
+            && let Some(vector_results) =
+                store.vector_index_search_at(label, vector_property, query_vec, search, view)
+            && !vector_results.is_empty()
         {
-            let accessor = self.make_vector_accessor(vector_property);
-            let vector_results = search_vector_index(
-                &vector_index,
-                query_vec,
-                fetch,
-                None,
-                allowlist.as_ref(),
-                &accessor,
+            // Negate distances so that "closer = higher score", matching
+            // the text source convention (higher = better). This is
+            // essential for weighted fusion where min-max normalization
+            // would otherwise invert the vector ranking. RRF is
+            // unaffected because it uses rank positions, not values.
+            sources.push(
+                vector_results
+                    .into_iter()
+                    .map(|(id, dist)| (id, -f64::from(dist)))
+                    .collect(),
             );
-            if !vector_results.is_empty() {
-                // Negate distances so that "closer = higher score", matching
-                // the text source convention (higher = better). This is
-                // essential for weighted fusion where min-max normalization
-                // would otherwise invert the vector ranking. RRF is
-                // unaffected because it uses rank positions, not values.
-                sources.push(
-                    vector_results
-                        .into_iter()
-                        .map(|(id, dist)| (id, -f64::from(dist)))
-                        .collect(),
-                );
-            }
         }
 
         if sources.is_empty() {
@@ -447,27 +452,5 @@ impl super::GrafeoDB {
         }
 
         Ok(fuse_results(&sources, &fusion_method, k))
-    }
-}
-
-/// One search of `index` for the `fetch` nodes nearest to `query`: with the
-/// beam width `ef` (the index's own when `None`), and among the nodes of
-/// `allowlist` only, when given.
-#[cfg(feature = "vector-index")]
-fn search_vector_index(
-    index: &grafeo_core::index::vector::VectorIndexKind,
-    query: &[f32],
-    fetch: usize,
-    ef: Option<usize>,
-    allowlist: Option<&std::collections::HashSet<NodeId>>,
-    accessor: &impl grafeo_core::index::vector::VectorAccessor,
-) -> Vec<(NodeId, f32)> {
-    match (allowlist, ef) {
-        (Some(allowlist), Some(ef)) => {
-            index.search_with_ef_and_filter(query, fetch, ef, allowlist, accessor)
-        }
-        (Some(allowlist), None) => index.search_with_filter(query, fetch, allowlist, accessor),
-        (None, Some(ef)) => index.search_with_ef(query, fetch, ef, accessor),
-        (None, None) => index.search(query, fetch, accessor),
     }
 }

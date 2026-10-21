@@ -35,9 +35,7 @@ fn names(db: &GrafeoDB) -> Vec<String> {
 /// Planner statistics: total nodes and edges, `:Person` and `:Admin` nodes,
 /// `:KNOWS` edges.
 fn statistics(db: &GrafeoDB) -> (u64, u64, u64, u64, u64) {
-    let store = db.store();
-    store.ensure_statistics_fresh();
-    let stats = store.statistics();
+    let stats = grafeo_core::graph::GraphStore::statistics(&*db.store());
     let label = |name: &str| stats.get_label(name).map_or(0, |l| l.node_count);
     (
         stats.total_nodes,

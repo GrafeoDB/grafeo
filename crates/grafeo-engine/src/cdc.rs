@@ -61,7 +61,7 @@
 //! The `epoch` field on [`ChangeEvent`] is the MVCC [`EpochId`] produced
 //! by the [`TransactionManager`](crate::transaction::TransactionManager)
 //! at commit time. It is the same epoch that tags the resulting
-//! [`LpgStore`](grafeo_core::graph::lpg::LpgStore) version, so
+//! [`RowGroupStore`](grafeo_core::graph::rowgroup::RowGroupStore) version, so
 //! `history_since(id, epoch)` and `MATCH ... AT EPOCH` return a
 //! consistent view. The CDC log has no epoch of its own: retention is
 //! driven by external epoch advances through
@@ -76,7 +76,7 @@
 //! [`CdcLog::new`] at database open, and a crash+recover cycle loses
 //! the entire event history. The WAL replay path
 //! ([`GrafeoDB::apply_wal_records`](crate::GrafeoDB)) rebuilds
-//! [`LpgStore`](grafeo_core::graph::lpg::LpgStore) state by calling
+//! [`RowGroupStore`](grafeo_core::graph::rowgroup::RowGroupStore) state by calling
 //! mutation methods directly, bypassing the CDC recording sites in
 //! `database::crud`, so no events are re-emitted. The WAL does contain
 //! the same sequence of mutations a consumer would need to rebuild an

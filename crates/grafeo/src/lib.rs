@@ -91,6 +91,10 @@ pub use grafeo_engine::cdc::CdcRetentionConfig;
 pub use grafeo_engine::config::EncryptionConfig;
 pub use grafeo_engine::config::StorageFormat;
 
+// Re-export time travel: the retention setting `Config` takes, and the view and
+// points in time `GrafeoDB::as_of` works with
+pub use grafeo_engine::{AsOfView, HistoryRetention, TimePoint};
+
 // Re-export what `GrafeoDB::create_text_index_with` takes
 #[cfg(feature = "text-index")]
 pub use grafeo_engine::{TextIndexOptions, TokenizerKind};

@@ -499,10 +499,11 @@ mod text_extract_tests {
         Arc, BinaryOp, FilterOp, GraphStoreSearch, LogicalExpression, LogicalOperator, NodeScanOp,
         Planner, Value,
     };
-    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::GraphStoreMut as _;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
 
     fn test_planner() -> Planner {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let article = store.create_node(&["Article"]);
         store.set_node_property(article, "body", Value::String("rust database".into()));
         Planner::new(store as Arc<dyn GraphStoreSearch>)
@@ -882,10 +883,11 @@ mod compound_hybrid_tests {
         Arc, BinaryOp, FilterOp, GraphStoreSearch, LogicalExpression, LogicalOperator, NodeScanOp,
         Planner, Value,
     };
-    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::GraphStoreMut as _;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
 
     fn planner_with_article() -> Planner {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Article"]);
         store.set_node_property(a, "body", Value::String("vincent and jules".into()));
         store.set_node_property(a, "embedding", Value::Vector(vec![0.1f32, 0.9, 0.0].into()));

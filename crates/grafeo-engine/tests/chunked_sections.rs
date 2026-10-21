@@ -30,7 +30,8 @@ use grafeo_common::testing::chunk_caps::with_chunk_caps;
 use grafeo_common::types::{
     Date, Duration, EdgeId, NodeId, PropertyKey, Time, Timestamp, Value, ZonedDatetime,
 };
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStore as _;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_engine::{Config, GrafeoDB};
 use grafeo_storage::file::v3::directory::ENTRIES_PER_BLOCK;
 use proptest::prelude::*;
@@ -74,7 +75,7 @@ fn dump(db: &GrafeoDB) -> Vec<String> {
     lines
 }
 
-fn dump_graph(lines: &mut Vec<String>, title: &str, store: &LpgStore) {
+fn dump_graph(lines: &mut Vec<String>, title: &str, store: &RowGroupStore) {
     lines.push(title.to_string());
     for id in store.all_node_ids() {
         let Some(node) = store.get_node(id) else {
@@ -529,13 +530,18 @@ fn ids_of_deleted_nodes_and_edges_are_not_reused_after_a_reopen() {
     );
 }
 
-#[cfg(feature = "temporal")]
+/// A database that keeps history reads each epoch's value after a reopen
+/// (the file stores the retention, and its history chunks the versions).
 #[test]
 fn point_in_time_reads_survive_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.grafeo");
     let (alix, epochs) = {
-        let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+        let db = GrafeoDB::with_config(
+            Config::persistent(&path)
+                .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+        )
+        .unwrap();
         let alix = db.create_node(&["Person"]).unwrap();
         let epochs: Vec<_> = CITIES[..3]
             .iter()
@@ -556,7 +562,7 @@ fn point_in_time_reads_survive_a_reopen() {
     let db = GrafeoDB::open(&path).unwrap();
     for (epoch, city) in epochs.iter().zip(CITIES) {
         assert_eq!(
-            db.get_node_property_at_epoch(alix, "city", *epoch),
+            db.get_node_property_at_epoch(alix, "city", *epoch).unwrap(),
             Some(Value::from(city)),
             "the city at {epoch:?}"
         );
@@ -588,15 +594,13 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("every.grafeo");
-    #[cfg_attr(
-        not(feature = "temporal"),
-        expect(
-            unused_variables,
-            reason = "only temporal builds keep property history"
-        )
-    )]
     let (vincent, epochs) = with_chunk_caps(TINY, || {
-        let mut db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+        // History kept: the test reads Vincent's city at earlier epochs.
+        let mut db = GrafeoDB::with_config(
+            Config::persistent(&path)
+                .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+        )
+        .unwrap();
         db.execute("CREATE CONSTRAINT person_email FOR (p:Person) ON (p.email) UNIQUE")
             .unwrap();
         db.execute(
@@ -732,10 +736,10 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
             [Value::from("person_email")],
             "{what}: the constraint"
         );
-        #[cfg(feature = "temporal")]
         for (epoch, city) in epochs.iter().zip(["Amsterdam", "Berlin", "Prague"]) {
             assert_eq!(
-                db.get_node_property_at_epoch(vincent, "city", *epoch),
+                db.get_node_property_at_epoch(vincent, "city", *epoch)
+                    .unwrap(),
                 Some(Value::from(city)),
                 "{what}: Vincent's city at {epoch:?}"
             );
@@ -744,14 +748,7 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
 
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
     let counts = chunk_counts(&db);
-    for section in [
-        "Catalog",
-        "LpgStore",
-        "RdfStore",
-        "VectorStore",
-        "TextIndex",
-        "RdfRing",
-    ] {
+    for section in ["Catalog", "LpgStore", "RdfStore", "RdfRing"] {
         let chunks = counts.get(section).copied().unwrap_or(0);
         // Every section is a metadata chunk and its data (the catalog's
         // records: the constraint and the index definitions).

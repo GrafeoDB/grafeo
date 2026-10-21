@@ -245,7 +245,7 @@ pub struct Planner {
     /// LPG store handle for procedures that need direct index access (vector
     /// and text search reach HNSW / BM25 indexes owned by the LPG store).
     #[cfg(feature = "lpg")]
-    pub(super) lpg_store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
+    pub(super) lpg_store: Option<Arc<grafeo_core::graph::rowgroup::RowGroupStore>>,
     /// The database's named projections, so `CALL grafeo.<algorithm>({projection: ...})`
     /// can run on one.
     #[cfg(feature = "lpg")]
@@ -607,7 +607,10 @@ impl Planner {
     /// reach the vector and text indexes.
     #[cfg(feature = "lpg")]
     #[must_use]
-    pub fn with_lpg_store(mut self, lpg_store: Arc<grafeo_core::graph::lpg::LpgStore>) -> Self {
+    pub fn with_lpg_store(
+        mut self,
+        lpg_store: Arc<grafeo_core::graph::rowgroup::RowGroupStore>,
+    ) -> Self {
         self.lpg_store = Some(lpg_store);
         self
     }
@@ -1373,11 +1376,12 @@ mod tests {
     };
     use grafeo_common::types::Value;
     use grafeo_core::execution::operators::AggregateFunction as PhysicalAggregateFunction;
+    use grafeo_core::graph::GraphStore as _;
     use grafeo_core::graph::GraphStoreMut;
-    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
 
-    fn create_test_store() -> Arc<LpgStore> {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn create_test_store() -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
         store.create_node(&["Person"]);
         store.create_node(&["Person"]);
         store.create_node(&["Company"]);
@@ -2433,7 +2437,7 @@ mod tests {
 
     // ==================== Mutation Tests ====================
 
-    fn create_writable_planner(store: &Arc<LpgStore>) -> Planner {
+    fn create_writable_planner(store: &Arc<RowGroupStore>) -> Planner {
         let mut p = Planner::new(Arc::clone(store) as Arc<dyn GraphStoreSearch>);
         p.write_store = Some(Arc::clone(store) as Arc<dyn GraphStoreMut>);
         p
@@ -2965,9 +2969,9 @@ mod tests {
     };
     use grafeo_core::execution::operators::SessionContext;
 
-    fn full_store() -> Arc<LpgStore> {
+    fn full_store() -> Arc<RowGroupStore> {
         // Richer store so expand and shortest path tests have real data.
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let vincent = store.create_node(&["Person"]);
         let jules = store.create_node(&["Person"]);
         let mia = store.create_node(&["Person"]);

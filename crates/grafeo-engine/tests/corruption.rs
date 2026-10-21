@@ -124,12 +124,14 @@ fn a_section_that_does_not_decode_is_a_corruption_naming_the_file() {
     write_database(&path);
     rewrite(&path, |section_type, chunks| {
         if section_type == SectionType::LpgStore {
-            // The metadata chunk comes last; its first byte is the layout.
+            // The metadata chunk comes last: its layout byte, the caps, the
+            // epoch and the next graph id take 21 bytes, then the count of
+            // graphs, made larger than the chunk can hold.
             let (_, meta) = chunks.last_mut().expect("a metadata chunk");
-            meta[0] = 19;
+            meta[21..25].copy_from_slice(&u32::MAX.to_le_bytes());
         }
     });
-    assert_both_opens_report(&path, None, "LPG metadata chunk, byte 0");
+    assert_both_opens_report(&path, None, "LPG metadata chunk, byte 25");
 }
 
 /// A section written back chunk for chunk, as it was read.

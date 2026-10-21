@@ -216,8 +216,7 @@ impl CheckpointSources {
             .map_or(0, |t| t.0);
         let epoch = self.epoch();
         #[cfg(feature = "lpg")]
-        if let Some(store) = &self.store {
-            let (nodes, edges) = store.counts();
+        if let Some((nodes, edges)) = self.counts() {
             return FlushContext {
                 epoch,
                 transaction_id,

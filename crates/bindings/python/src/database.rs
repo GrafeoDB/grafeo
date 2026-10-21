@@ -12,6 +12,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 
 use grafeo_common::storage::{SectionMemoryConfig, SectionType, TierOverride};
 use grafeo_common::types::{EdgeId, LogicalType, NodeId, Value};
+use grafeo_core::graph::GraphStore as _;
 use grafeo_engine::config::Config;
 use grafeo_engine::database::GrafeoDB;
 
@@ -56,6 +57,7 @@ fn section_type_to_str(section_type: SectionType) -> &'static str {
         SectionType::RdfStore => "RdfStore",
         SectionType::CompactStore => "CompactStore",
         SectionType::OverlayDeletions => "OverlayDeletions",
+        SectionType::TimeIndex => "TimeIndex",
         SectionType::VectorStore => "VectorStore",
         SectionType::TextIndex => "TextIndex",
         SectionType::RdfRing => "RdfRing",
@@ -132,6 +134,15 @@ use crate::gil::without_gil;
 use crate::graph::{PyEdge, PyNode};
 use crate::query::{PyQueryBuilder, PyQueryResult};
 use crate::types::PyValue;
+
+/// A view of the committed graph of now, pinned while it lives: the store
+/// reads at its [`read_view`](grafeo_engine::AsOfView::read_view) see one
+/// committed state, garbage collection keeps what they read, and no commit
+/// that has not completed shows. Every binding method that makes several
+/// store calls for one answer reads through one.
+pub(crate) fn committed_now(db: &GrafeoDB) -> Result<grafeo_engine::AsOfView, PyGrafeoError> {
+    Ok(db.as_of(db.current_epoch())?)
+}
 
 /// Holds results from async query execution.
 ///
@@ -946,13 +957,17 @@ impl PyGrafeoDB {
     /// Returns the node as it existed at the given epoch, including
     /// properties and labels at that point in time.
     ///
-    /// Returns None if the node didn't exist at that epoch.
+    /// Returns None if the node didn't exist at that epoch, and raises
+    /// GrafeoError for an epoch older than the history the database keeps.
     fn get_node_at_epoch(&self, id: u64, epoch: u64) -> PyResult<Option<PyNode>> {
         let db = self.inner.read();
         let node_id = NodeId(id);
         let epoch_id = grafeo_common::types::EpochId::new(epoch);
 
-        if let Some(node) = db.get_node_at_epoch(node_id, epoch_id) {
+        if let Some(node) = db
+            .get_node_at_epoch(node_id, epoch_id)
+            .map_err(PyGrafeoError::from)?
+        {
             let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
             let properties: HashMap<
                 grafeo_common::types::PropertyKey,
@@ -969,13 +984,17 @@ impl PyGrafeoDB {
     /// Returns the edge as it existed at the given epoch, including
     /// properties at that point in time.
     ///
-    /// Returns None if the edge didn't exist at that epoch.
+    /// Returns None if the edge didn't exist at that epoch, and raises
+    /// GrafeoError for an epoch older than the history the database keeps.
     fn get_edge_at_epoch(&self, id: u64, epoch: u64) -> PyResult<Option<PyEdge>> {
         let db = self.inner.read();
         let edge_id = EdgeId(id);
         let epoch_id = grafeo_common::types::EpochId::new(epoch);
 
-        if let Some(edge) = db.get_edge_at_epoch(edge_id, epoch_id) {
+        if let Some(edge) = db
+            .get_edge_at_epoch(edge_id, epoch_id)
+            .map_err(PyGrafeoError::from)?
+        {
             let properties: HashMap<
                 grafeo_common::types::PropertyKey,
                 grafeo_common::types::Value,
@@ -995,8 +1014,9 @@ impl PyGrafeoDB {
     /// Get the version history of a node.
     ///
     /// Returns a list of (created_epoch, deleted_epoch, node) tuples
-    /// representing each version of the node. When the `temporal` feature
-    /// is enabled, each version includes the correct properties at that epoch.
+    /// representing each version of the node, with its properties at that
+    /// version, as far back as the database keeps history (its history
+    /// retention).
     fn get_node_history(&self, id: u64) -> PyResult<Vec<(u64, Option<u64>, PyNode)>> {
         let db = self.inner.read();
         let node_id = NodeId(id);
@@ -1050,29 +1070,29 @@ impl PyGrafeoDB {
     /// Get a property value at a specific historical epoch.
     ///
     /// Returns the property value as it existed at the given epoch,
-    /// or None if the property didn't exist at that epoch.
-    ///
-    /// Requires the `temporal` feature.
-    #[cfg(feature = "temporal")]
+    /// or None if the property didn't exist at that epoch; raises GrafeoError
+    /// for an epoch older than the history the database keeps (its history
+    /// retention).
     fn get_node_property_at_epoch(
         &self,
         id: u64,
         key: &str,
         epoch: u64,
         py: Python<'_>,
-    ) -> Option<Py<PyAny>> {
+    ) -> PyResult<Option<Py<PyAny>>> {
         let db = self.inner.read();
         let node_id = NodeId(id);
         let epoch_id = grafeo_common::types::EpochId::new(epoch);
-        db.get_node_property_at_epoch(node_id, key, epoch_id)
-            .map(|v| PyValue::to_py(&v, py))
+        Ok(db
+            .get_node_property_at_epoch(node_id, key, epoch_id)
+            .map_err(PyGrafeoError::from)?
+            .map(|v| PyValue::to_py(&v, py)))
     }
 
     /// Get the full version history for a specific property of a node.
     ///
-    /// Returns a list of (epoch, value) tuples in ascending epoch order.
-    /// Requires the `temporal` feature.
-    #[cfg(feature = "temporal")]
+    /// Returns a list of (epoch, value) tuples in ascending epoch order, as
+    /// far back as the database keeps history.
     fn get_node_property_history(
         &self,
         id: u64,
@@ -1090,9 +1110,8 @@ impl PyGrafeoDB {
 
     /// Get the full version history for ALL properties of a node.
     ///
-    /// Returns a dict mapping property names to lists of (epoch, value) tuples.
-    /// Requires the `temporal` feature.
-    #[cfg(feature = "temporal")]
+    /// Returns a dict mapping property names to lists of (epoch, value) tuples,
+    /// as far back as the database keeps history.
     fn get_all_node_property_history(
         &self,
         id: u64,
@@ -1155,8 +1174,11 @@ impl PyGrafeoDB {
         offset: usize,
     ) -> PyResult<Vec<(u64, Py<pyo3::types::PyDict>)>> {
         let (node_ids, props_batch) = self.released(py, |db| {
-            // Get node IDs by label
-            let mut node_ids = db.store().nodes_by_label(label);
+            // One pinned read for both calls: the nodes and their values
+            // of one committed state.
+            let now = committed_now(db)?;
+            let (store, view) = (db.store(), now.read_view());
+            let mut node_ids = store.nodes_by_label_at(label, view);
 
             // Apply offset and limit
             node_ids.drain(..offset.min(node_ids.len()));
@@ -1165,7 +1187,7 @@ impl PyGrafeoDB {
             }
 
             // Batch get all properties
-            let props_batch = db.store().get_nodes_properties_batch(&node_ids);
+            let props_batch = store.get_nodes_properties_batch_at(&node_ids, view);
             Ok((node_ids, props_batch))
         })?;
 
@@ -1204,7 +1226,12 @@ impl PyGrafeoDB {
     ) -> PyResult<Vec<Option<Py<pyo3::prelude::PyAny>>>> {
         let ids: Vec<NodeId> = node_ids.into_iter().map(NodeId).collect();
         let key = grafeo_common::types::PropertyKey::new(property);
-        let values = self.released(py, |db| Ok(db.store().get_node_property_batch(&ids, &key)))?;
+        let values = self.released(py, |db| {
+            let now = committed_now(db)?;
+            Ok(db
+                .store()
+                .get_node_property_batch_at(&ids, &key, now.read_view()))
+        })?;
 
         Ok(values
             .into_iter()
@@ -3040,13 +3067,13 @@ impl PyGrafeoDB {
         // Slow fallback: element-by-element via PyO3
 
         let db = self.inner.read();
-        let store = db.store();
 
         // Collect all nodes and discover property keys.
         // Skip properties whose names collide with structural columns
         // to prevent silent overwrites (GrafeoDB/grafeo#254).
         const RESERVED_NODE_COLS: &[&str] = &["_id", "_labels"];
-        let nodes: Vec<_> = store.all_nodes().collect();
+        // A pinned read of the committed graph (see `GrafeoDB::iter_nodes`).
+        let nodes: Vec<_> = db.iter_nodes().collect();
         let mut prop_keys: Vec<String> = Vec::new();
         let mut prop_key_set = std::collections::HashSet::new();
         for node in &nodes {
@@ -3196,13 +3223,13 @@ impl PyGrafeoDB {
         // Slow fallback: element-by-element via PyO3
 
         let db = self.inner.read();
-        let store = db.store();
 
         // Collect all edges and discover property keys.
         // Skip properties whose names collide with structural columns
         // to prevent silent overwrites (GrafeoDB/grafeo#254).
         const RESERVED_EDGE_COLS: &[&str] = &["_id", "_source", "_target", "_type"];
-        let edges: Vec<_> = store.all_edges().collect();
+        // A pinned read of the committed graph (see `GrafeoDB::iter_edges`).
+        let edges: Vec<_> = db.iter_edges().collect();
         let mut prop_keys: Vec<String> = Vec::new();
         let mut prop_key_set = std::collections::HashSet::new();
         for edge in &edges {

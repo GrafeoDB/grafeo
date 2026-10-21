@@ -526,7 +526,8 @@ mod tests {
     use crate::query::plan::UnaryOp;
     use crate::transaction::TransactionManager;
     use grafeo_common::types::{EpochId, TransactionId};
-    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::GraphStoreMut as _;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
 
     /// A read at a past epoch outside a transaction may use label scans and
     /// indexes only on a store that answers them at a view; a transaction
@@ -545,14 +546,14 @@ mod tests {
         assert!(may_choose_scan_label(EpochId::new(19), None, now, false));
         assert!(may_choose_scan_label(past, None, None, false));
         assert!(
-            !grafeo_core::graph::GraphStore::answers_at_view(&LpgStore::new().unwrap()),
-            "LpgStore answers its lookups of now"
+            grafeo_core::graph::GraphStore::answers_at_view(&RowGroupStore::new()),
+            "the row-group store answers at a view"
         );
     }
 
     /// 19 `Big` nodes, three of them also `Small`, and three `Same` nodes.
-    fn store() -> Arc<LpgStore> {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn store() -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
         for i in 0..19 {
             if i < 3 {
                 store.create_node(&["Big", "Small"]);
@@ -736,10 +737,11 @@ mod tests {
         assert_eq!(shape(&reordered), shape(&expected));
     }
 
-    /// Outside a transaction, a past epoch keeps the label as written; the
-    /// current epoch, or a transaction, scans the smallest label.
+    /// The row-group store answers label scans at a view, so a read at a
+    /// past epoch outside a transaction scans the smallest label as well as
+    /// the current epoch and a transaction do.
     #[test]
-    fn a_read_of_a_past_epoch_keeps_the_scan_label() {
+    fn a_read_of_a_past_epoch_scans_the_smallest_label() {
         let store = store();
         let manager = Arc::new(TransactionManager::new());
         manager.sync_epoch(EpochId::new(3));
@@ -753,7 +755,7 @@ mod tests {
                 EpochId::new(epoch),
             )
         };
-        assert!(planner(1, None).scan_smallest_label(&written).is_none());
+        assert!(planner(1, None).scan_smallest_label(&written).is_some());
         assert!(planner(3, None).scan_smallest_label(&written).is_some());
         assert!(
             planner(1, Some(TransactionId::new(19)))

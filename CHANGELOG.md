@@ -70,6 +70,7 @@ Changes since 0.6.0-beta.1.
 
 ### Fixed
 
+- **SQL/PGQ: aggregates inside SELECT and HAVING expressions**: `SELECT COUNT(*) + 1`, `-SUM(x)`, `SUM(x) / COUNT(*)`, `ROUND(AVG(x))`, `ABS(MIN(x) - MAX(x))` and a `CASE` over aggregates work, per group with `GROUP BY` too, as ISO/IEC 9075-2 allows. Only a bare aggregate worked as a SELECT item: another expression over one was an error (in 0.5.44 it gave one row per match, with nulls), and HAVING took aggregates under operators only. The parts outside the aggregates are grouping keys or constants, and with `GROUP BY` may read only its keys.
 - **`IS TYPED` takes every type it can check**: `IS TYPED NODE`, `EDGE` and `ANY` were false for a node, an edge and any value, and a node was `IS TYPED INT64` (by its id); `ZONED DATETIME`, `LOCAL DATETIME`, `DECIMAL(p, s)` and nested lists such as `LIST<LIST<INT64>>` were syntax errors. The types are those of type DDL, plus `NULL` and `PATH`; a list's items are checked one by one. An ISO type Grafeo has no values of (`INT32`, `ZONED TIME`) is now an error (42000) instead of false.
 - **A property value of the wrong type names the type as DDL spells it**: `property 'begins' on :Event expects ZONED DATETIME, got LOCAL DATETIME '2026-10-05T10:30:00'`, where the message printed internal names (`expects ZonedDatetime, got Timestamp(...)`).
 - **SQL/PGQ: an aggregate in the COLUMNS of GRAPH_TABLE says to aggregate in the SELECT**: with an outer SELECT that names columns, the error gave GQL's hint about RETURN and WITH.

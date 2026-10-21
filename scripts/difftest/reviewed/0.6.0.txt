@@ -609,3 +609,9 @@ CO2|gql 8cd5e3b518 IS TYPED EDGE is true for an edge; it was false.
 CO3|gql 4bc06e9b38 IS TYPED reads nested LIST<...> and two-word types such as ZONED DATETIME, and checks every item of a list; they were a syntax error.
 CO4|gql 79d2d06896 IS TYPED with an ISO type it cannot decide yet, such as INT32, is an error (42000), not a silent false.
 CP1|gql d6c34ad4fa A property value of another type than its node type declares names the type as DDL spells it and the value as a query writes it (expects STRING, got 3); it printed internal names (expects String, got Int64(3)).
+AJ9|gql ~784ee734f1 A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); 0.5.44 timed out when the machine was busy, so its result varies.
+CQ1|sql 8d41de096e SQL/PGQ: an operator over aggregates in a SELECT item aggregates the rows; it gave one row per match, with nulls.
+CQ2|sql dbc0504ff3 SQL/PGQ: an aggregate as a function's argument and a CASE over one aggregate the rows; they gave one row per match, with nulls and the CASE's ELSE.
+CQ3|sql adeaeb086c SQL/PGQ: an expression of a GROUP BY key and an aggregate is computed per group; it failed with Undefined variable.
+CQ4|sql f112534558 SQL/PGQ: HAVING takes an aggregate as a function's argument; it kept no group.
+CQ5|sql 24155c527a SQL/PGQ: a SELECT item that reads a column outside GROUP BY and the aggregates is refused, naming the column; it failed with Undefined variable.

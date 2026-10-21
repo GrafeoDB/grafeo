@@ -94,7 +94,9 @@ def error_text(error: Exception) -> str:
 
 def run_case(db, language: str, query: str) -> dict:
     """The result of one query: its columns and rows, or the first line of its error."""
-    execute = {"gql": db.execute, "cypher": db.execute_cypher}[language]
+    execute = {"gql": db.execute, "cypher": db.execute_cypher, "sql": db.execute_sql}[
+        language
+    ]
     try:
         result = execute(query)
         records = [dict(row) for row in result]

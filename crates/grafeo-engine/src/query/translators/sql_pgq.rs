@@ -210,16 +210,14 @@ impl SqlPgqTranslator {
         // For aggregate queries, ORDER BY is deferred to after the Aggregate operator
         // so that aggregate output aliases (e.g., `cnt`) are available for sorting.
 
-        // Detect whether the outer SELECT has aggregates (needed to defer ORDER BY)
+        // Detect whether the outer SELECT has aggregates (needed to defer
+        // ORDER BY), also inside an item's expression (`COUNT(*) + 1`).
         let is_aggregate_query = match &select.select_list {
             ast::SelectList::Columns(items) => {
-                items.iter().any(|item| {
-                    matches!(
-                        &item.expression,
-                        ast::Expression::FunctionCall { name, .. }
-                        if is_aggregate_function(name)
-                    )
-                }) || select.group_by.is_some()
+                items
+                    .iter()
+                    .any(|item| first_aggregate(&item.expression).is_some())
+                    || select.group_by.is_some()
             }
             ast::SelectList::All => select.group_by.is_some(),
         };
@@ -294,13 +292,9 @@ impl SqlPgqTranslator {
         // COLUMNS so that the planner sees a single Return operating on
         // graph-level variables, avoiding double-Return scalar/node confusion.
         if let ast::SelectList::Columns(items) = &select.select_list {
-            let has_aggregates = items.iter().any(|item| {
-                matches!(
-                    &item.expression,
-                    ast::Expression::FunctionCall { name, .. }
-                    if is_aggregate_function(name)
-                )
-            });
+            let has_aggregates = items
+                .iter()
+                .any(|item| first_aggregate(&item.expression).is_some());
 
             if has_aggregates || select.group_by.is_some() {
                 // Aggregate path: first project COLUMNS, then aggregate on top.
@@ -342,6 +336,35 @@ impl SqlPgqTranslator {
                 // alias (or its text): the Return above it reads those and
                 // names them after the SELECT alias, or else the column's name
                 // (`gender` for `g.gender`, `count(*)` for `COUNT(*)`).
+                // A grouping key a SELECT item reads (an item, or a part of
+                // one outside its aggregates). With an explicit GROUP BY it
+                // reads grouping keys only (ISO/IEC 9075-2: it is
+                // functionally dependent on them), a key itself, an
+                // expression of keys or a constant; reading another column,
+                // it would split the groups the GROUP BY makes.
+                let check_key = |key: &LogicalExpression| -> Result<()> {
+                    if select.group_by.is_none() {
+                        return Ok(());
+                    }
+                    let mut read = HashSet::new();
+                    collect_expression_variables(&grouping_scope.resolve(key.clone()), &mut read);
+                    match read
+                        .iter()
+                        .filter(|name| !grouping_keys.contains(*name))
+                        .min()
+                    {
+                        Some(column) => Err(Error::Query(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            format!(
+                                "SELECT item {} reads {column}, which is neither \
+                                 in GROUP BY nor in an aggregate: add it to GROUP \
+                                 BY or aggregate it",
+                                crate::query::planner::common::expression_to_string(key)
+                            ),
+                        ))),
+                        None => Ok(()),
+                    }
+                };
                 let mut return_items = Vec::with_capacity(items.len());
                 for item in items {
                     let column = match &item.expression {
@@ -368,38 +391,41 @@ impl SqlPgqTranslator {
                             aggregates.push(aggregate);
                             column
                         }
-                        // A non-aggregate SELECT item is a grouping key. With
-                        // an explicit GROUP BY it reads grouping keys only
-                        // (ISO/IEC 9075-2: it is functionally dependent on
-                        // them), a key itself, an expression of keys or a
-                        // constant; reading another column, it would split
-                        // the groups the GROUP BY makes.
+                        // An expression over aggregates (`COUNT(*) + 1`,
+                        // `ABS(MIN(x))`, a CASE over them): its aggregates
+                        // join the Aggregate under their text, and every
+                        // other part of it is a grouping key or a constant.
+                        expression if first_aggregate(expression).is_some() => {
+                            let over = self.translate_over_aggregates(
+                                expression,
+                                table_alias,
+                                &mut aggregates,
+                                &|aggregate, _| {
+                                    crate::query::planner::common::aggregate_column_name(aggregate)
+                                },
+                                &mut |part| {
+                                    let key = self.translate_expression(part, table_alias)?;
+                                    let mut read = HashSet::new();
+                                    collect_expression_variables(&key, &mut read);
+                                    if read.is_empty() {
+                                        return Ok(key);
+                                    }
+                                    check_key(&key)?;
+                                    Ok(LogicalExpression::Variable(add_key(&mut group_by, key)))
+                                },
+                            )?;
+                            let name = crate::query::planner::common::expression_to_string(&over);
+                            return_items.push(ReturnItem {
+                                expression: over,
+                                alias: Some(item.alias.clone().unwrap_or(name)),
+                            });
+                            continue;
+                        }
+                        // A non-aggregate SELECT item is a grouping key (see
+                        // `check_key`).
                         _ => {
                             let key = self.translate_expression(&item.expression, table_alias)?;
-                            if select.group_by.is_some() {
-                                let mut read = HashSet::new();
-                                collect_expression_variables(
-                                    &grouping_scope.resolve(key.clone()),
-                                    &mut read,
-                                );
-                                if let Some(column) = read
-                                    .iter()
-                                    .filter(|name| !grouping_keys.contains(*name))
-                                    .min()
-                                {
-                                    return Err(Error::Query(QueryError::new(
-                                        QueryErrorKind::Semantic,
-                                        format!(
-                                            "SELECT item {} reads {column}, which is neither \
-                                             in GROUP BY nor in an aggregate: add it to GROUP \
-                                             BY or aggregate it",
-                                            crate::query::planner::common::expression_to_string(
-                                                &key
-                                            )
-                                        ),
-                                    )));
-                                }
-                            }
+                            check_key(&key)?;
                             add_key(&mut group_by, key)
                         }
                     };
@@ -413,10 +439,12 @@ impl SqlPgqTranslator {
                 // calls (e.g. COUNT(*) > 0) into the aggregates list so the
                 // Aggregate operator can evaluate them.
                 let having = if let Some(having_expr) = &select.having {
-                    Some(self.translate_having_expression(
+                    Some(self.translate_over_aggregates(
                         having_expr,
                         table_alias,
                         &mut aggregates,
+                        &|_, index| format!("_having_agg_{index}"),
+                        &mut |part| self.translate_expression(part, table_alias),
                     )?)
                 } else {
                     None
@@ -900,63 +928,151 @@ impl SqlPgqTranslator {
         })
     }
 
-    /// Translates a HAVING expression, extracting inline aggregate calls into the
-    /// aggregates list and replacing them with variable references.
+    /// Translates `expr`, which may call aggregates anywhere inside it (under
+    /// an operator, as a function's argument, in a CASE or a list), for the
+    /// rows the Aggregate gives (ISO/IEC 9075-2: a <value expression> over
+    /// <set function specification>s, in the select list and in HAVING).
+    /// Each aggregate call joins `aggregates` under the column `name` gives
+    /// it (a call already there under that name is reused) and reads that
+    /// column; a part without an aggregate is translated by `leaf`.
     ///
-    /// For example, `COUNT(*) > 0` becomes `Variable("_having_agg_0") > Literal(0)`
-    /// and a new `AggregateExpr` for `COUNT(*)` with alias `_having_agg_0` is appended
-    /// to `aggregates`. The rest reads the output of the Aggregate: its keys,
-    /// named after the COLUMNS they are (`gender` or `g.gender`), and its
-    /// aggregates, named after their aliases (`cnt`).
-    fn translate_having_expression(
+    /// For HAVING, `COUNT(*) > 0` becomes `Variable("_having_agg_0") > 0`, and
+    /// the rest reads the output of the Aggregate: its keys, named after the
+    /// COLUMNS they are (`gender` or `g.gender`), and its aggregates, named
+    /// after their aliases (`cnt`). It extracted aggregates under operators
+    /// only, and so refused `ABS(MIN(x))` and a CASE over aggregates.
+    fn translate_over_aggregates(
         &self,
         expr: &ast::Expression,
         table_alias: Option<&str>,
         aggregates: &mut Vec<AggregateExpr>,
+        name: &dyn Fn(&AggregateExpr, usize) -> String,
+        leaf: &mut dyn FnMut(&ast::Expression) -> Result<LogicalExpression>,
     ) -> Result<LogicalExpression> {
+        if first_aggregate(expr).is_none() {
+            return leaf(expr);
+        }
         match expr {
             ast::Expression::FunctionCall {
-                name,
+                name: function,
                 args,
                 distinct,
-            } if is_aggregate_function(name) => {
-                // This is an inline aggregate: extract it.
-                let agg_fn =
-                    AggregateFunction::from_name(name).expect("validated by is_aggregate_function");
-                let alias = format!("_having_agg_{}", aggregates.len());
-                aggregates.push(self.translate_aggregate(
-                    name,
-                    agg_fn,
-                    args,
-                    *distinct,
-                    Some(alias.clone()),
-                    table_alias,
-                )?);
-                Ok(LogicalExpression::Variable(alias))
+            } if is_aggregate_function(function) => {
+                let agg_fn = AggregateFunction::from_name(function)
+                    .expect("validated by is_aggregate_function");
+                let mut aggregate =
+                    self.translate_aggregate(function, agg_fn, args, *distinct, None, table_alias)?;
+                let column = name(&aggregate, aggregates.len());
+                if !aggregates
+                    .iter()
+                    .any(|known| known.alias.as_deref() == Some(column.as_str()))
+                {
+                    aggregate.alias = Some(column.clone());
+                    aggregates.push(aggregate);
+                }
+                Ok(LogicalExpression::Variable(column))
+            }
+            ast::Expression::FunctionCall {
+                name: function,
+                args,
+                distinct,
+            } => {
+                let mut translated = Vec::with_capacity(args.len());
+                for arg in args {
+                    translated.push(self.translate_over_aggregates(
+                        arg,
+                        table_alias,
+                        aggregates,
+                        name,
+                        leaf,
+                    )?);
+                }
+                resolve_call(function, translated, *distinct)
             }
             ast::Expression::Binary { left, op, right } => {
-                let left_expr = self.translate_having_expression(left, table_alias, aggregates)?;
-                let right_expr =
-                    self.translate_having_expression(right, table_alias, aggregates)?;
-                let binary_op = self.translate_binary_op(*op)?;
+                let left =
+                    self.translate_over_aggregates(left, table_alias, aggregates, name, leaf)?;
+                let right =
+                    self.translate_over_aggregates(right, table_alias, aggregates, name, leaf)?;
                 Ok(LogicalExpression::Binary {
-                    left: Box::new(left_expr),
-                    op: binary_op,
-                    right: Box::new(right_expr),
+                    left: Box::new(left),
+                    op: self.translate_binary_op(*op)?,
+                    right: Box::new(right),
                 })
             }
             ast::Expression::Unary { op, operand } => {
-                let operand_expr =
-                    self.translate_having_expression(operand, table_alias, aggregates)?;
-                let unary_op = self.translate_unary_op(*op)?;
+                let operand =
+                    self.translate_over_aggregates(operand, table_alias, aggregates, name, leaf)?;
                 Ok(LogicalExpression::Unary {
-                    op: unary_op,
-                    operand: Box::new(operand_expr),
+                    op: self.translate_unary_op(*op)?,
+                    operand: Box::new(operand),
                 })
             }
-            // Anything else (columns, literals) reads the Aggregate's output
-            // (no aggregates expected).
-            _ => self.translate_expression(expr, table_alias),
+            ast::Expression::Case {
+                input,
+                whens,
+                else_clause,
+            } => {
+                let operand = match input {
+                    Some(input) => Some(Box::new(self.translate_over_aggregates(
+                        input,
+                        table_alias,
+                        aggregates,
+                        name,
+                        leaf,
+                    )?)),
+                    None => None,
+                };
+                let mut when_clauses = Vec::with_capacity(whens.len());
+                for (condition, result) in whens {
+                    when_clauses.push((
+                        self.translate_over_aggregates(
+                            condition,
+                            table_alias,
+                            aggregates,
+                            name,
+                            leaf,
+                        )?,
+                        self.translate_over_aggregates(
+                            result,
+                            table_alias,
+                            aggregates,
+                            name,
+                            leaf,
+                        )?,
+                    ));
+                }
+                let else_clause = match else_clause {
+                    Some(otherwise) => Some(Box::new(self.translate_over_aggregates(
+                        otherwise,
+                        table_alias,
+                        aggregates,
+                        name,
+                        leaf,
+                    )?)),
+                    None => None,
+                };
+                Ok(LogicalExpression::Case {
+                    operand,
+                    when_clauses,
+                    else_clause,
+                })
+            }
+            ast::Expression::List(items) => {
+                let mut translated = Vec::with_capacity(items.len());
+                for item in items {
+                    translated.push(self.translate_over_aggregates(
+                        item,
+                        table_alias,
+                        aggregates,
+                        name,
+                        leaf,
+                    )?);
+                }
+                Ok(LogicalExpression::List(translated))
+            }
+            // `first_aggregate` finds aggregates in the kinds above only.
+            _ => leaf(expr),
         }
     }
 

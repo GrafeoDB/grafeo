@@ -20,6 +20,8 @@ from dataclasses import dataclass
 GQL = ("gql",)
 CYPHER = ("cypher",)
 BOTH = ("gql", "cypher")
+# SQL/PGQ, for its own cases (`parity` compares GQL and Cypher only)
+SQL = ("sql",)
 LANGUAGES = frozenset(BOTH)
 
 
@@ -1845,5 +1847,18 @@ for case_id, query in [
 # CP: a property value of another type than its node type declares names the type as DDL spells
 #     it and the value as a query writes it (CP1: "expects String, got Int64(3)")
 case("CP1", "INSERT (:City {name: 3})", GQL, "typed")
+
+# CQ: SQL/PGQ aggregates inside SELECT expressions and HAVING (ISO/IEC 9075-2): an operator over
+#     aggregates (CQ1), an aggregate as a function's argument and a CASE over one (CQ2), per GROUP
+#     BY group with a key inside the expression (CQ3), and in HAVING (CQ4); all were errors. A
+#     column outside GROUP BY and the aggregates stays an error (CQ5)
+for case_id, query in [
+    ("CQ1", "SELECT COUNT(*) + 1 AS n, -COUNT(*) AS m, SUM(age) / COUNT(*) AS mean FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.age AS age))"),
+    ("CQ2", "SELECT ABS(MIN(age) - MAX(age)) AS spread, CASE WHEN COUNT(*) > 2 THEN 'many' ELSE 'few' END AS size FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.age AS age))"),
+    ("CQ3", "SELECT age + COUNT(*) AS v FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.age AS age)) GROUP BY age ORDER BY v"),
+    ("CQ4", "SELECT age FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.age AS age)) GROUP BY age HAVING ABS(MIN(age) - 30) = 0"),
+    ("CQ5", "SELECT age + COUNT(*) AS v FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.name AS name, p.age AS age)) GROUP BY name"),
+]:
+    case(case_id, query, SQL)
 
 # fmt: on

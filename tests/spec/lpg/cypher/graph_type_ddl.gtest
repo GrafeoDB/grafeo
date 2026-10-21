@@ -1,0 +1,105 @@
+# Cypher graph type DDL: ALTER CURRENT GRAPH TYPE
+#
+# Cypher declares the current graph's type with ALTER CURRENT GRAPH TYPE SET
+# (replace the whole type) and ADD (add element types), with `prop :: TYPE`
+# or `prop TYPE`. The types are GQL's: a DECIMAL(p, s) property stores a
+# decimal rounded to its scale and refuses one with too many integer digits
+# (#610), NOT NULL refuses a node without the property, a type Grafeo does
+# not support is refused by name, and properties may be named like keywords.
+
+meta:
+  language: cypher
+  model: lpg
+  section: graph-types
+  title: ALTER CURRENT GRAPH TYPE
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # DECIMAL properties
+  # ---------------------------------------------------------------------------
+
+  - name: a_decimal_property_rounds_to_its_scale
+    setup:
+      - "ALTER CURRENT GRAPH TYPE SET { (:Item { price :: DECIMAL(6, 2) }) }"
+      - "CREATE (:Item {price: 2.345}), (:Item {price: 3})"
+    query: "MATCH (i:Item) RETURN i.price AS price ORDER BY price"
+    expect:
+      ordered: true
+      rows:
+        - [2.35]
+        - [3.00]
+
+  - name: a_decimal_property_refuses_too_many_integer_digits
+    setup:
+      - "ALTER CURRENT GRAPH TYPE SET { (:Item { price :: DECIMAL(6, 2) }) }"
+    query: "CREATE (:Item {price: 12345.6})"
+    expect:
+      error: "property 'price' on :Item expects DECIMAL(6,2)"
+
+  - name: dec_without_a_precision_is_a_decimal
+    setup:
+      - "ALTER CURRENT GRAPH TYPE SET { (:Item { price :: DEC }) }"
+      - "CREATE (:Item {price: 1.5})"
+    query: "MATCH (i:Item) RETURN i.price = toDecimal('1.5') AS exact"
+    expect:
+      rows:
+        - [true]
+
+  # ---------------------------------------------------------------------------
+  # NOT NULL and supported types
+  # ---------------------------------------------------------------------------
+
+  - name: a_not_null_property_must_be_given
+    setup:
+      - "ALTER CURRENT GRAPH TYPE SET { (:Person { name :: STRING NOT NULL }) }"
+    query: "CREATE (:Person {age: 30})"
+    expect:
+      error: "missing required property 'name' on :Person"
+
+  - name: a_not_null_property_that_is_given
+    setup:
+      - "ALTER CURRENT GRAPH TYPE SET { (:Person { name STRING NOT NULL, age INT64 }) }"
+      - "CREATE (:Person {name: 'Alix', age: 30})"
+    query: "MATCH (p:Person) RETURN p.name AS name, p.age AS age"
+    expect:
+      rows:
+        - [Alix, 30]
+
+  - name: an_unsupported_property_type_is_refused_by_name
+    query: "ALTER CURRENT GRAPH TYPE SET { (:City { population :: STIRNG }) }"
+    expect:
+      error: "'STIRNG' is not a property type"
+      gql_status: "42001"
+
+  - name: properties_may_be_named_like_keywords
+    setup:
+      - "ALTER CURRENT GRAPH TYPE SET { (:Trip { starts :: STRING, contains :: STRING }) }"
+      - "CREATE (:Trip {starts: 'Amsterdam', contains: 'Berlin'})"
+    query: "MATCH (t:Trip) RETURN t.starts AS starts, t.contains AS stops"
+    expect:
+      rows:
+        - [Amsterdam, Berlin]
+
+  # ---------------------------------------------------------------------------
+  # SET replaces, ADD adds
+  # ---------------------------------------------------------------------------
+
+  - name: add_keeps_the_types_already_declared
+    setup:
+      - "ALTER CURRENT GRAPH TYPE SET { (:Person { name :: STRING NOT NULL }) }"
+      - "ALTER CURRENT GRAPH TYPE ADD { (:City { name :: STRING NOT NULL }) }"
+    query: "CREATE (:Person {age: 30})"
+    expect:
+      error: "missing required property 'name' on :Person"
+
+  - name: an_edge_type_with_endpoints
+    setup:
+      - "ALTER CURRENT GRAPH TYPE SET { (:Person { name :: STRING }), (:City { name :: STRING }), (:Person)-[:LIVES_IN { since :: INT64 }]->(:City) }"
+      - "CREATE (:Person {name: 'Gus'})-[:LIVES_IN {since: 2020}]->(:City {name: 'Berlin'})"
+    query: "MATCH (p:Person)-[l:LIVES_IN]->(c:City) RETURN p.name AS name, l.since AS since, c.name AS city"
+    expect:
+      rows:
+        - [Gus, 2020, Berlin]

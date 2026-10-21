@@ -410,6 +410,10 @@ pub struct SessionContext {
     pub current_schema: Option<String>,
     /// Current session graph name (for `CURRENT_GRAPH`).
     pub current_graph: Option<String>,
+    /// Home schema name (for `HOME_SCHEMA`); `None` is the default schema.
+    pub home_schema: Option<String>,
+    /// Home graph name (for `HOME_GRAPH`); `None` is the default graph.
+    pub home_graph: Option<String>,
     /// Lazily-computed `info()` result.
     pub db_info: LazyValue,
     /// Lazily-computed `schema()` result.
@@ -3919,7 +3923,7 @@ impl ExpressionPredicate {
                 }
                 // cosine_distance = 1 - cosine_similarity, range [0, 2]
                 Some(Value::Float64(
-                    1.0 - crate::index::vector::cosine_similarity(&a, &b) as f64,
+                    crate::index::vector::cosine_distance(&a, &b) as f64,
                 ))
             }
             BuiltinFunction::EuclideanDistance => {
@@ -4058,8 +4062,16 @@ impl ExpressionPredicate {
                 ))
             }
             BuiltinFunction::HomeSchema => {
-                // Home schema/graph: not configurable yet, returns null
-                Some(Value::Null)
+                Some(self.session_context.home_schema.as_ref().map_or_else(
+                    || Value::String("default".into()),
+                    |s| Value::String(s.clone().into()),
+                ))
+            }
+            BuiltinFunction::HomeGraph => {
+                Some(self.session_context.home_graph.as_ref().map_or_else(
+                    || Value::String("default".into()),
+                    |g| Value::String(g.clone().into()),
+                ))
             }
             // Grafeo extension: info() returns database metadata as a map
             BuiltinFunction::Info => Some(self.session_context.db_info.get().clone()),

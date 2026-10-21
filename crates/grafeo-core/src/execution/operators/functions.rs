@@ -255,7 +255,8 @@ builtin_functions! {
     SessionUser => ["session_user"], "0", Session, stable;
     CurrentSchema => ["current_schema"], "0", Session, stable;
     CurrentGraph => ["current_graph"], "0", Session, stable;
-    HomeSchema => ["home_schema", "home_graph"], "0", Session, stable;
+    HomeSchema => ["home_schema"], "0", Session, stable;
+    HomeGraph => ["home_graph"], "0", Session, stable;
     Info => ["info"], "0", Session, stable;
     Schema => ["schema"], "0", Session, stable;
     Nullif => ["nullif"], "2", Session, immutable;
@@ -521,7 +522,7 @@ mod tests {
                 assert!(previous.is_none_or(|p| p == function), "{alias}");
             }
         }
-        assert_eq!(BuiltinFunction::ALL.len(), 109);
+        assert_eq!(BuiltinFunction::ALL.len(), 110);
     }
 
     #[test]

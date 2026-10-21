@@ -615,3 +615,8 @@ CQ2|sql dbc0504ff3 SQL/PGQ: an aggregate as a function's argument and a CASE ove
 CQ3|sql adeaeb086c SQL/PGQ: an expression of a GROUP BY key and an aggregate is computed per group; it failed with Undefined variable.
 CQ4|sql f112534558 SQL/PGQ: HAVING takes an aggregate as a function's argument; it kept no group.
 CQ5|sql 24155c527a SQL/PGQ: a SELECT item that reads a column outside GROUP BY and the aggregates is refused, naming the column; it failed with Undefined variable.
+CR1|cypher 43a0b674a9 cosine_distance of one direction is exactly 0 and of opposite ones 2; an epsilon in the denominator gave -1.19e-07 for identical vectors and 1 for two very short ones.
+CR1|gql 43a0b674a9 cosine_distance of one direction is exactly 0 and of opposite ones 2; an epsilon in the denominator gave -1.19e-07 for identical vectors and 1 for two very short ones.
+CR3|cypher dc2525bcc3 cosine_similarity of identical vectors is exactly 1; it was 1.000000119, outside [-1, 1].
+CR3|gql dc2525bcc3 cosine_similarity of identical vectors is exactly 1; it was 1.000000119, outside [-1, 1].
+CR4|gql f516844c53 HOME_SCHEMA and HOME_GRAPH name the session's home, 'default' in a new session; they returned null.

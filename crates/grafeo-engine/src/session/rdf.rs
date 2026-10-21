@@ -86,6 +86,8 @@ impl Session {
             records_cdc: false,
             current_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
+            home_schema: None,
+            home_graph: None,
             time_zone: parking_lot::Mutex::new(None),
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),

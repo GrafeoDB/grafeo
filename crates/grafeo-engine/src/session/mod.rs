@@ -290,6 +290,11 @@ pub struct Session {
     /// Current schema name (ISO/IEC 39075 Section 4.7.3: independent from session graph).
     /// None = "not set" (uses default schema).
     current_schema: parking_lot::Mutex<Option<String>>,
+    /// Home schema and graph (ISO/IEC 39075 Section 4.7.3): what the session
+    /// started in and SESSION RESET returns to, unchanged by USE and SESSION SET.
+    /// None = default.
+    home_schema: Option<String>,
+    home_graph: Option<String>,
     /// Session time zone override.
     time_zone: parking_lot::Mutex<Option<String>>,
     /// Session-level parameters (SET PARAMETER).
@@ -394,6 +399,8 @@ impl Session {
             records_cdc: false,
             current_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
+            home_schema: None,
+            home_graph: None,
             time_zone: parking_lot::Mutex::new(None),
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),
@@ -548,6 +555,8 @@ impl Session {
             records_cdc: false,
             current_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
+            home_schema: None,
+            home_graph: None,
             time_zone: parking_lot::Mutex::new(None),
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),
@@ -603,6 +612,13 @@ impl Session {
     #[must_use]
     pub fn current_schema(&self) -> Option<String> {
         self.current_schema.lock().clone()
+    }
+
+    /// Sets the home schema and graph (`None` = default), which `HOME_SCHEMA`
+    /// and `HOME_GRAPH` return.
+    pub(crate) fn set_home(&mut self, schema: Option<String>, graph: Option<String>) {
+        self.home_schema = schema;
+        self.home_graph = graph;
     }
 
     /// Computes the effective storage key for a graph, accounting for schema context.
@@ -808,23 +824,24 @@ impl Session {
         self.session_params.lock().get(key).cloned()
     }
 
-    /// Resets all session state to defaults (ISO/IEC 39075 Section 7.2).
+    /// Resets all session state (ISO/IEC 39075 Section 7.2): the schema and
+    /// graph back to the session's home, everything else to its default.
     pub fn reset_session(&self) {
-        *self.current_schema.lock() = None;
-        *self.current_graph.lock() = None;
+        self.reset_schema();
+        self.reset_graph();
         *self.time_zone.lock() = None;
         self.session_params.lock().clear();
         *self.viewing_epoch_override.lock() = None;
     }
 
-    /// Resets only the session schema (Section 7.2 GR1).
+    /// Resets only the session schema, to the home schema (Section 7.2 GR1).
     pub fn reset_schema(&self) {
-        *self.current_schema.lock() = None;
+        self.current_schema.lock().clone_from(&self.home_schema);
     }
 
-    /// Resets only the session graph (Section 7.2 GR2).
+    /// Resets only the session graph, to the home graph (Section 7.2 GR2).
     pub fn reset_graph(&self) {
-        *self.current_graph.lock() = None;
+        self.current_graph.lock().clone_from(&self.home_graph);
     }
 
     /// Resets only the session time zone (Section 7.2 GR3).
@@ -5547,6 +5564,8 @@ impl Session {
         let session_context = SessionContext {
             current_schema: self.current_schema(),
             current_graph: self.current_graph(),
+            home_schema: self.home_schema.clone(),
+            home_graph: self.home_graph.clone(),
             db_info: LazyValue::new(move || Self::build_info_value(&*info_store)),
             schema_info: LazyValue::new(move || Self::build_schema_value(&*schema_store)),
         };

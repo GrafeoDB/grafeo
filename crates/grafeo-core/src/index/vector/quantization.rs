@@ -369,12 +369,7 @@ impl ScalarQuantizer {
             norm_b += vb * vb;
         }
 
-        let denom = (norm_a * norm_b).sqrt();
-        if denom < f32::EPSILON {
-            1.0 // Maximum distance for zero vectors
-        } else {
-            1.0 - (dot / denom)
-        }
+        super::simd::cosine_distance_from_sums(dot, norm_a, norm_b)
     }
 
     /// Computes distance between a f32 query and a quantized vector.

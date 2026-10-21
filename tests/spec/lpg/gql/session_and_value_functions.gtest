@@ -5,8 +5,11 @@
 # when an undirected pattern matched it; octet_length counts the UTF-8 bytes
 # of a string (char_length its characters); toZonedTime and CAST AS ZONED TIME
 # read a time with an offset, compared by its UTC instant; cosine_distance is
-# 1 minus the cosine of two lists of numbers; SESSION_USER, CURRENT_SCHEMA and
-# CURRENT_GRAPH name the session's user, schema and graph.
+# 1 minus the cosine of two lists of numbers, exactly 0 for one direction and 2
+# for opposite ones; SESSION_USER, CURRENT_SCHEMA and CURRENT_GRAPH name the
+# session's user, schema and graph, HOME_SCHEMA and HOME_GRAPH the schema and
+# graph it started in, which USE and SESSION SET leave alone and SESSION RESET
+# returns to.
 
 meta:
   language: gql
@@ -82,7 +85,6 @@ tests:
   - name: cosine_distance_of_lists
     query: "RETURN cosine_distance([1.0e0, 0.0e0], [0.0e0, 1.0e0]) AS orthogonal, cosine_distance([1.0e0, 2.0e0], [2.0e0, 4.0e0]) AS parallel, cosine_distance([1.0e0, 0.0e0], [-1.0e0, 0.0e0]) AS opposite"
     expect:
-      precision: 6
       rows:
         - [1, 0, 2]
 
@@ -92,14 +94,30 @@ tests:
       rows:
         - [null]
 
-  # Distances are f32 computations: compared within 1e-6 (the denominator
-  # carries an f32::EPSILON, so identical vectors give 1.2e-7, not 0).
   - name: cosine_distance_of_identical_vectors_is_zero
     query: "RETURN cosine_distance(vector([1.0e0, 0.0e0]), vector([1.0e0, 0.0e0])) AS d"
     expect:
-      precision: 6
       rows:
         - [0]
+
+  # The same direction gives 0 and the opposite one 2, also for very short vectors
+  - name: cosine_distance_of_identical_and_opposite_unnormalized_vectors_is_exact
+    query: "RETURN cosine_distance([0.3e0, -1.7e0, 2.9e0], [0.3e0, -1.7e0, 2.9e0]) AS same, cosine_distance([0.3e0, -1.7e0, 2.9e0], [-0.3e0, 1.7e0, -2.9e0]) AS opposite, cosine_distance([1.0e-10, 1.0e-10], [1.0e-10, 1.0e-10]) AS tiny"
+    expect:
+      rows:
+        - [0, 2, 0]
+
+  - name: cosine_distance_to_a_zero_vector_is_one
+    query: "RETURN cosine_distance([1.0e0, 2.0e0], [0.0e0, 0.0e0]) AS one_zero, cosine_distance([0.0e0, 0.0e0], [0.0e0, 0.0e0]) AS both_zero"
+    expect:
+      rows:
+        - [1, 1]
+
+  - name: cosine_similarity_of_identical_and_opposite_vectors_is_exact
+    query: "RETURN cosine_similarity([0.3e0, -1.7e0, 2.9e0], [0.3e0, -1.7e0, 2.9e0]) AS same, cosine_similarity([0.3e0, -1.7e0, 2.9e0], [-0.3e0, 1.7e0, -2.9e0]) AS opposite"
+    expect:
+      rows:
+        - [1, -1]
 
   # ---------------------------------------------------------------------------
   # Session values
@@ -117,8 +135,44 @@ tests:
       gql_status: "42001"
 
   - name: home_schema_and_home_graph_of_a_default_session
-    skip: "HOME_SCHEMA and HOME_GRAPH are null while CURRENT_SCHEMA and CURRENT_GRAPH give 'default' (inbox functions/cosine-distance-and-home-graph.md)"
-    query: "RETURN HOME_SCHEMA AS schema, HOME_GRAPH AS graph"
+    query: "RETURN HOME_SCHEMA AS schema, HOME_GRAPH AS graph, HOME_PROPERTY_GRAPH AS property_graph"
     expect:
       rows:
-        - [default, default]
+        - [default, default, default]
+
+  - name: home_graph_stays_after_use_graph
+    setup:
+      - "CREATE GRAPH elsewhere"
+      - "USE GRAPH elsewhere"
+    query: "RETURN HOME_GRAPH AS home, CURRENT_GRAPH AS current"
+    expect:
+      rows:
+        - [default, elsewhere]
+
+  - name: home_graph_stays_after_session_set_graph
+    setup:
+      - "CREATE GRAPH elsewhere"
+      - "SESSION SET GRAPH elsewhere"
+    query: "RETURN HOME_GRAPH AS home, CURRENT_GRAPH AS current"
+    expect:
+      rows:
+        - [default, elsewhere]
+
+  - name: session_reset_returns_to_the_home_graph_and_schema
+    setup:
+      - "CREATE GRAPH elsewhere"
+      - "USE GRAPH elsewhere"
+      - "SESSION RESET"
+    query: "RETURN HOME_GRAPH AS home, CURRENT_GRAPH AS current, CURRENT_SCHEMA AS schema"
+    expect:
+      rows:
+        - [default, default, default]
+
+  - name: home_schema_stays_after_session_set_schema
+    setup:
+      - "CREATE SCHEMA other"
+      - "SESSION SET SCHEMA other"
+    query: "RETURN HOME_SCHEMA AS home, CURRENT_SCHEMA AS current"
+    expect:
+      rows:
+        - [default, other]

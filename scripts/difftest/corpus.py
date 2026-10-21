@@ -1861,4 +1861,15 @@ for case_id, query in [
 ]:
     case(case_id, query, SQL)
 
+# CQ: cosine_distance of one direction is exactly 0 and of opposite ones exactly 2, also for
+#     very short vectors, a zero vector is at distance 1 (CR1, CR2), cosine_similarity is 1 and
+#     -1 (CR3); HOME_SCHEMA and HOME_GRAPH name a default session's home, 'default' (CR4)
+for case_id, query, languages in [
+    ("CR1", "RETURN cosine_distance([0.3, -1.7, 2.9], [0.3, -1.7, 2.9]) AS same, cosine_distance([0.3, -1.7, 2.9], [-0.3, 1.7, -2.9]) AS opposite, cosine_distance([1.0e-10, 1.0e-10], [1.0e-10, 1.0e-10]) AS tiny", BOTH),
+    ("CR2", "RETURN cosine_distance([1.0, 2.0], [0.0, 0.0]) AS one_zero, cosine_distance([0.0, 0.0], [0.0, 0.0]) AS both_zero", BOTH),
+    ("CR3", "RETURN cosine_similarity([0.3, -1.7, 2.9], [0.3, -1.7, 2.9]) AS same, cosine_similarity([0.3, -1.7, 2.9], [-0.3, 1.7, -2.9]) AS opposite", BOTH),
+    ("CR4", "RETURN HOME_SCHEMA AS s, HOME_GRAPH AS g, HOME_PROPERTY_GRAPH AS pg", GQL),
+]:
+    case(case_id, query, languages, "empty")
+
 # fmt: on

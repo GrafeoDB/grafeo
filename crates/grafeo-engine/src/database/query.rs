@@ -12,7 +12,10 @@ impl super::GrafeoDB {
     where
         F: FnOnce(&crate::session::Session) -> Result<QueryResult>,
     {
-        let session = self.session();
+        let mut session = self.session();
+        // One-shot calls share the database's graph context like one long session,
+        // whose home stays the default graph and schema.
+        session.set_home(None, None);
         let result = func(&session);
         // Sync graph and schema state back, even on error (the session command may
         // have succeeded before a subsequent query failed in the same session).

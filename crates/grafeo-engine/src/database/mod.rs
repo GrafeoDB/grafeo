@@ -2188,8 +2188,8 @@ impl GrafeoDB {
             session.set_schema(schema);
         }
 
-        // Suppress unused_mut when cdc/wal are disabled
-        let _ = &mut session;
+        // The session's home is where it starts
+        session.set_home(session.current_schema(), session.current_graph());
 
         session
     }

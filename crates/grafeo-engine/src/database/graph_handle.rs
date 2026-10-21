@@ -116,12 +116,11 @@ impl GraphHandle<'_> {
     /// Returns an error if the graph no longer exists.
     pub fn session(&self) -> Result<Session> {
         self.check_exists()?;
-        let session = self.db.session();
-        match &self.schema {
-            Some(schema) => session.set_schema(schema),
-            None => session.reset_schema(),
-        }
-        session.use_graph(&self.name);
+        let mut session = self.db.session();
+        // The session starts in the handle's graph, its home, where SESSION RESET returns
+        session.set_home(self.schema.clone(), Some(self.name.clone()));
+        session.reset_schema();
+        session.reset_graph();
         Ok(session)
     }
 

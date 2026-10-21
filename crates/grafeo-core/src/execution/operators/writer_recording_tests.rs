@@ -481,7 +481,7 @@ fn a_refused_write_records_nothing() {
     ];
     for (index, result) in refused.iter().enumerate() {
         assert!(
-            matches!(result, Err(OperatorError::ConstraintViolation(_))),
+            matches!(result, Err(OperatorError::ConstraintViolation(..))),
             "edge {index}: {result:?}"
         );
     }
@@ -844,7 +844,7 @@ fn an_edge_the_validator_refuses_claims_no_endpoint() {
     ];
     for (index, result) in refused.iter().enumerate() {
         assert!(
-            matches!(result, Err(OperatorError::ConstraintViolation(_))),
+            matches!(result, Err(OperatorError::ConstraintViolation(..))),
             "edge {index}: {result:?}"
         );
     }

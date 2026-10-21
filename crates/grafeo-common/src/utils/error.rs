@@ -195,6 +195,16 @@ pub enum Error {
     /// Invalid value error.
     InvalidValue(String),
 
+    /// A write the graph's schema or a database rule refuses (see
+    /// [`ConstraintKind`]); displayed as an invalid value, with its own
+    /// GQLSTATUS.
+    Constraint {
+        /// What the write breaks, which decides the GQLSTATUS.
+        kind: ConstraintKind,
+        /// What was refused and why.
+        message: String,
+    },
+
     /// Transaction error.
     Transaction(TransactionError),
 
@@ -336,7 +346,7 @@ impl Error {
             Error::PropertyNotFound(_) => ErrorCode::PropertyNotFound,
             Error::LabelNotFound(_) => ErrorCode::LabelNotFound,
             Error::TypeMismatch { .. } => ErrorCode::TypeMismatch,
-            Error::InvalidValue(_) => ErrorCode::InvalidInput,
+            Error::InvalidValue(_) | Error::Constraint { .. } => ErrorCode::InvalidInput,
             Error::Transaction(e) => e.error_code(),
             Error::Storage(e) => e.error_code(),
             Error::Query(e) => e.error_code(),
@@ -363,6 +373,9 @@ impl fmt::Display for Error {
                 )
             }
             Error::InvalidValue(msg) => write!(f, "{code}: Invalid value: {msg}"),
+            Error::Constraint { message, .. } => {
+                write!(f, "{code}: Invalid value: Constraint violation: {message}")
+            }
             Error::Transaction(e) => write!(f, "{code}: {e}"),
             Error::Storage(e) => write!(f, "{code}: {e}"),
             Error::Query(e) => write!(f, "{code}: {e}"),
@@ -389,6 +402,10 @@ impl Clone for Error {
                 found: found.clone(),
             },
             Error::InvalidValue(message) => Error::InvalidValue(message.clone()),
+            Error::Constraint { kind, message } => Error::Constraint {
+                kind: *kind,
+                message: message.clone(),
+            },
             Error::Transaction(error) => Error::Transaction(error.clone()),
             Error::Storage(error) => Error::Storage(error.clone()),
             Error::Query(error) => Error::Query(error.clone()),
@@ -753,6 +770,27 @@ impl From<QueryError> for Error {
     fn from(e: QueryError) -> Self {
         Error::Query(e)
     }
+}
+
+/// What a refused write breaks (see [`Error::Constraint`]), which decides
+/// its GQLSTATUS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConstraintKind {
+    /// The data does not conform to the graph's schema: its graph type (a
+    /// property of another type, a missing NOT NULL property, a label, edge
+    /// type, property or endpoint a closed graph type does not allow) or a
+    /// constraint on its labels (NOT NULL, UNIQUE, PRIMARY KEY, CHECK).
+    /// GQLSTATUS G2000, graph type violation.
+    Schema,
+    /// A node to delete without DETACH still has edges. GQLSTATUS G1001,
+    /// dependent object error: edges still exist.
+    EdgesStillExist,
+    /// A value past a limit of the database rather than of the schema: a
+    /// vector of another size than its index, a property value too large or
+    /// nested too deep. GQLSTATUS 22000, data exception; the engine reports
+    /// it as the [`Error::InvalidValue`] it is.
+    Limit,
 }
 
 /// The kind of query error.

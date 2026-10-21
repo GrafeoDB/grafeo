@@ -412,9 +412,10 @@ pub enum OperatorError {
     /// Execution error.
     #[error("execution error: {0}")]
     Execution(String),
-    /// Schema constraint violation during a write operation.
-    #[error("constraint violation: {0}")]
-    ConstraintViolation(String),
+    /// A write the schema or a database rule refuses, with what it breaks
+    /// (which decides its GQLSTATUS).
+    #[error("constraint violation: {1}")]
+    ConstraintViolation(grafeo_common::utils::error::ConstraintKind, String),
     /// A value the statement gave cannot be used (a user mistake, such as a
     /// query vector of another size than the index's), reported as an
     /// invalid value rather than an execution failure.
@@ -440,6 +441,32 @@ pub enum OperatorError {
     /// code reaches the caller.
     #[error(transparent)]
     Wrapped(Box<grafeo_common::utils::error::Error>),
+}
+
+impl OperatorError {
+    /// A write the graph's schema refuses: its graph type, or a constraint
+    /// on its labels (GQLSTATUS G2000).
+    #[must_use]
+    pub fn schema_violation(message: String) -> Self {
+        Self::ConstraintViolation(grafeo_common::utils::error::ConstraintKind::Schema, message)
+    }
+
+    /// A node to delete without DETACH that still has edges (GQLSTATUS
+    /// G1001).
+    #[must_use]
+    pub fn edges_still_exist(message: String) -> Self {
+        Self::ConstraintViolation(
+            grafeo_common::utils::error::ConstraintKind::EdgesStillExist,
+            message,
+        )
+    }
+
+    /// A value past a limit of the database rather than of the schema
+    /// (GQLSTATUS 22000).
+    #[must_use]
+    pub fn limit_violation(message: String) -> Self {
+        Self::ConstraintViolation(grafeo_common::utils::error::ConstraintKind::Limit, message)
+    }
 }
 
 impl From<grafeo_common::utils::error::Error> for OperatorError {

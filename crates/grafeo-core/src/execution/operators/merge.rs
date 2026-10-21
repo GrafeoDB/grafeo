@@ -1385,7 +1385,7 @@ mod tests {
             properties: &[(String, Value)],
         ) -> Result<(), super::super::OperatorError> {
             if !properties.iter().any(|(k, _)| k == self.required_property) {
-                return Err(super::super::OperatorError::ConstraintViolation(format!(
+                return Err(super::super::OperatorError::schema_violation(format!(
                     "missing required property '{}'",
                     self.required_property
                 )));
@@ -1414,7 +1414,7 @@ mod tests {
             properties: &[(String, Value)],
         ) -> Result<(), super::super::OperatorError> {
             if !properties.iter().any(|(k, _)| k == self.required_property) {
-                return Err(super::super::OperatorError::ConstraintViolation(format!(
+                return Err(super::super::OperatorError::schema_violation(format!(
                     "missing required edge property '{}'",
                     self.required_property
                 )));

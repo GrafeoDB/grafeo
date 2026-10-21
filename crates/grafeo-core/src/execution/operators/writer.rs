@@ -701,7 +701,7 @@ impl GraphWriter {
         } else {
             let degree = self.connected_edge_count(id);
             if degree > 0 {
-                return Err(OperatorError::ConstraintViolation(format!(
+                return Err(OperatorError::edges_still_exist(format!(
                     "Cannot delete node with {degree} connected edge(s). Use DETACH DELETE."
                 )));
             }
@@ -1576,7 +1576,7 @@ fn record_applied(
 /// execution error, as [`refused`].
 fn store_refused(error: ApplyError) -> OperatorError {
     match error {
-        ApplyError::HasEdges(id) => OperatorError::ConstraintViolation(format!(
+        ApplyError::HasEdges(id) => OperatorError::edges_still_exist(format!(
             "Cannot delete node {} with connected edge(s). Use DETACH DELETE.",
             id.as_u64()
         )),
@@ -1630,7 +1630,7 @@ fn refuse_too_deep<'v>(
     mut values: impl Iterator<Item = (&'v str, &'v Value)>,
 ) -> Result<(), OperatorError> {
     match values.find(|(_, value)| nests_too_deep(value)) {
-        Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+        Some((key, _)) => Err(OperatorError::limit_violation(format!(
             "property {key:?}: the value nests lists, maps and paths more than \
              {MAX_PROPERTY_VALUE_DEPTH} levels deep, deeper than a database can store"
         ))),
@@ -1807,7 +1807,7 @@ mod tests {
             .create_node(&labels(&["Person"]), properties)
             .unwrap_err();
         assert!(
-            matches!(error, super::OperatorError::ConstraintViolation(_)),
+            matches!(error, super::OperatorError::ConstraintViolation(..)),
             "an invalid value, not an internal error: {error:?}"
         );
         let error = error.to_string();
@@ -1922,7 +1922,7 @@ mod tests {
             _: &Value,
         ) -> Result<(), OperatorError> {
             if key == "grudge" {
-                return Err(OperatorError::ConstraintViolation("no grudges".to_string()));
+                return Err(OperatorError::schema_violation("no grudges".to_string()));
             }
             Ok(())
         }
@@ -1937,7 +1937,7 @@ mod tests {
 
         fn validate_edge_type_allowed(&self, edge_type: &str) -> Result<(), OperatorError> {
             if edge_type == "HATES" {
-                return Err(OperatorError::ConstraintViolation("no hate".to_string()));
+                return Err(OperatorError::schema_violation("no hate".to_string()));
             }
             Ok(())
         }
@@ -2001,7 +2001,7 @@ mod tests {
         let (store, writer) = writer();
         let writer = writer.with_validator(Arc::new(CustomRules));
         let refused_trips = |result: &Result<NodeId, OperatorError>| {
-            matches!(result, Err(OperatorError::ConstraintViolation(message))
+            matches!(result, Err(OperatorError::ConstraintViolation(_, message))
                 if message.contains("\"trips\""))
         };
 
@@ -2016,7 +2016,7 @@ mod tests {
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
         let refused_legs = |result: &Result<EdgeId, OperatorError>| {
-            matches!(result, Err(OperatorError::ConstraintViolation(message))
+            matches!(result, Err(OperatorError::ConstraintViolation(_, message))
                 if message.contains("\"legs\""))
         };
         let created = writer.create_edge(alix, gus, "TRAVELS", Vec::new());

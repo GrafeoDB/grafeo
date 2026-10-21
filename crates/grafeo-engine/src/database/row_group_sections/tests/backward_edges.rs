@@ -45,7 +45,7 @@ fn a_detach_delete_finds_the_incoming_edges_without_backward_edges() {
     let open = database.begin(None);
     let refused = open.writer.delete_node(alix, false).unwrap_err();
     assert!(
-        matches!(&refused, OperatorError::ConstraintViolation(message) if message.contains("1 connected edge")),
+        matches!(&refused, OperatorError::ConstraintViolation(_, message) if message.contains("1 connected edge")),
         "{refused:?}"
     );
     // The same transaction, which holds the claim on Alix, detaches her.

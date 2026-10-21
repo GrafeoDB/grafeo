@@ -97,7 +97,9 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | `22012`   | division by zero               | `RETURN 10 / 0`, `RETURN 10 % 0`                 |
 | `22G02`   | negative limit value           | `LIMIT $k` with `k = -1`                         |
 | `22G03`   | invalid value type             | `LIMIT $k` with `k = 'three'`, a procedure argument of another type |
-| `22000`   | data exception                 | other failures on the statement's data           |
+| `22000`   | data exception                 | other failures on the statement's data, such as a vector of another size than its index or a property value past its size limit |
+| `G2000`   | graph type violation           | a write the graph's schema refuses: a property of another type than its node or edge type declares, a missing `NOT NULL` property, a label, edge type or property a closed graph type does not declare, a `UNIQUE`, `NOT NULL`, key or `CHECK` constraint |
+| `G1001`   | dependent object error: edges still exist | `DELETE` of a node that still has edges (use `DETACH DELETE`) |
 | `02000`   | no data                        | a node or edge that does not exist               |
 | `25000`   | invalid transaction state      | a write to a closed database                     |
 | `25G03`   | read-only transaction          | a write or DDL in a read-only transaction or database |

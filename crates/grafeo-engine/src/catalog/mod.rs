@@ -1509,7 +1509,7 @@ fn type_mismatch(
     } else {
         format!("{data_type:?}")
     };
-    OperatorError::ConstraintViolation(format!(
+    OperatorError::schema_violation(format!(
         "property '{key}' on :{owner} expects {expected}, got {value:?}{detail}"
     ))
 }
@@ -2753,7 +2753,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     continue;
                 };
                 if vector.len() != config.dimensions {
-                    return Err(OperatorError::ConstraintViolation(format!(
+                    return Err(OperatorError::limit_violation(format!(
                         "property '{key}' on :{label} has a vector index of {} dimensions, got a vector of {}",
                         config.dimensions,
                         vector.len()
@@ -2762,7 +2762,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 if let Some((position, value)) =
                     grafeo_core::index::vector::first_non_finite(vector)
                 {
-                    return Err(OperatorError::ConstraintViolation(format!(
+                    return Err(OperatorError::limit_violation(format!(
                         "property '{key}' on :{label} has a vector index, which cannot measure \
                          {value} (at position {position})"
                     )));
@@ -2782,7 +2782,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             if let Some(typed_prop) = type_def.properties.iter().find(|p| p.name == key) {
                 // Check NOT NULL
                 if !typed_prop.nullable && *value == Value::Null {
-                    return Err(OperatorError::ConstraintViolation(format!(
+                    return Err(OperatorError::schema_violation(format!(
                         "property '{key}' on :{label} is NOT NULL, cannot set to null"
                     )));
                 }
@@ -2802,7 +2802,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     _ => false,
                 });
             if required && value.is_null() {
-                return Err(OperatorError::ConstraintViolation(format!(
+                return Err(OperatorError::schema_violation(format!(
                     "property '{key}' on :{label} is required by a NOT NULL constraint, \
                      cannot remove it or set it to null"
                 )));
@@ -2827,7 +2827,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         && typed_prop.default_value.is_none()
                         && !prop_names.contains(typed_prop.name.as_str())
                     {
-                        return Err(OperatorError::ConstraintViolation(format!(
+                        return Err(OperatorError::schema_violation(format!(
                             "missing required property '{}' on :{label}",
                             typed_prop.name
                         )));
@@ -2838,7 +2838,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     match constraint {
                         TypeConstraint::NotNull(prop_name) => {
                             if !prop_names.contains(prop_name.as_str()) {
-                                return Err(OperatorError::ConstraintViolation(format!(
+                                return Err(OperatorError::schema_violation(format!(
                                     "missing required property '{prop_name}' on :{label} (NOT NULL constraint)"
                                 )));
                             }
@@ -2846,7 +2846,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         TypeConstraint::PrimaryKey(key_props) => {
                             for pk in key_props {
                                 if !prop_names.contains(pk.as_str()) {
-                                    return Err(OperatorError::ConstraintViolation(format!(
+                                    return Err(OperatorError::schema_violation(format!(
                                         "missing primary key property '{pk}' on :{label}"
                                     )));
                                 }
@@ -2857,12 +2857,12 @@ impl ConstraintValidator for CatalogConstraintValidator {
                             match self.catalog.evaluate_check(expression, properties) {
                                 Ok(true) => {}
                                 Ok(false) => {
-                                    return Err(OperatorError::ConstraintViolation(format!(
+                                    return Err(OperatorError::schema_violation(format!(
                                         "CHECK constraint '{constraint_name}' violated on :{label}"
                                     )));
                                 }
                                 Err(err) => {
-                                    return Err(OperatorError::ConstraintViolation(format!(
+                                    return Err(OperatorError::schema_violation(format!(
                                         "CHECK constraint '{constraint_name}' on :{label} \
                                          cannot be evaluated: {err}"
                                     )));
@@ -2904,7 +2904,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                             .nodes_with_value(store.as_ref(), label, key, value)
                             .is_empty()
                     {
-                        return Err(OperatorError::ConstraintViolation(format!(
+                        return Err(OperatorError::schema_violation(format!(
                             "UNIQUE constraint violation: property '{key}' \
                              with value {value:?} already exists on :{label}"
                         )));
@@ -2965,7 +2965,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         })
                     });
                 if duplicate {
-                    return Err(OperatorError::ConstraintViolation(format!(
+                    return Err(OperatorError::schema_violation(format!(
                         "UNIQUE constraint violation: properties ({}) with values {values:?} \
                          already exist on :{label}",
                         keys.join(", ")
@@ -2993,7 +2993,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         {
             // Check NOT NULL
             if !typed_prop.nullable && *value == Value::Null {
-                return Err(OperatorError::ConstraintViolation(format!(
+                return Err(OperatorError::schema_violation(format!(
                     "property '{key}' on :{edge_type} is NOT NULL, cannot set to null"
                 )));
             }
@@ -3019,7 +3019,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     && typed_prop.default_value.is_none()
                     && !prop_names.contains(typed_prop.name.as_str())
                 {
-                    return Err(OperatorError::ConstraintViolation(format!(
+                    return Err(OperatorError::schema_violation(format!(
                         "missing required property '{}' on :{edge_type}",
                         typed_prop.name
                     )));
@@ -3032,12 +3032,12 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     match self.catalog.evaluate_check(expression, properties) {
                         Ok(true) => {}
                         Ok(false) => {
-                            return Err(OperatorError::ConstraintViolation(format!(
+                            return Err(OperatorError::schema_violation(format!(
                                 "CHECK constraint '{constraint_name}' violated on :{edge_type}"
                             )));
                         }
                         Err(err) => {
-                            return Err(OperatorError::ConstraintViolation(format!(
+                            return Err(OperatorError::schema_violation(format!(
                                 "CHECK constraint '{constraint_name}' on :{edge_type} \
                                  cannot be evaluated: {err}"
                             )));
@@ -3057,14 +3057,14 @@ impl ConstraintValidator for CatalogConstraintValidator {
             return Ok(());
         };
         if labels.is_empty() {
-            return Err(OperatorError::ConstraintViolation(format!(
+            return Err(OperatorError::schema_violation(format!(
                 "a node without a label is not allowed by closed graph type '{}': \
                  give it the label of one of its node types",
                 closed.name
             )));
         }
         match labels.iter().find(|label| !node_types.contains_key(*label)) {
-            Some(label) => Err(OperatorError::ConstraintViolation(format!(
+            Some(label) => Err(OperatorError::schema_violation(format!(
                 "label '{label}' is not a node type of closed graph type '{}'",
                 closed.name
             ))),
@@ -3078,7 +3078,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         };
         match &closed.edge_types {
             Some(edge_types) if !edge_types.contains_key(edge_type) => {
-                Err(OperatorError::ConstraintViolation(format!(
+                Err(OperatorError::schema_violation(format!(
                     "edge type '{edge_type}' is not an edge type of closed graph type '{}'",
                     closed.name
                 )))
@@ -3117,7 +3117,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             .iter()
             .find(|(key, value)| !value.is_null() && !declared.iter().any(|d| d.contains(key)));
         match undeclared {
-            Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+            Some((key, _)) => Err(OperatorError::schema_violation(format!(
                 "property '{key}' is not declared by node type {} of closed graph type '{}'",
                 labels
                     .iter()
@@ -3150,7 +3150,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             .iter()
             .find(|(key, value)| !value.is_null() && !declared.contains(key));
         match undeclared {
-            Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+            Some((key, _)) => Err(OperatorError::schema_violation(format!(
                 "property '{key}' is not declared by edge type '{edge_type}' of closed graph \
                  type '{}'",
                 closed.name
@@ -3173,7 +3173,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 .iter()
                 .any(|l| type_def.source_node_types.iter().any(|s| s == l));
             if !source_ok {
-                return Err(OperatorError::ConstraintViolation(format!(
+                return Err(OperatorError::schema_violation(format!(
                     "source node labels {source_labels:?} are not allowed for edge type '{edge_type}', \
                      expected one of {:?}",
                     type_def.source_node_types
@@ -3185,7 +3185,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 .iter()
                 .any(|l| type_def.target_node_types.iter().any(|t| t == l));
             if !target_ok {
-                return Err(OperatorError::ConstraintViolation(format!(
+                return Err(OperatorError::schema_violation(format!(
                     "target node labels {target_labels:?} are not allowed for edge type '{edge_type}', \
                      expected one of {:?}",
                     type_def.target_node_types
@@ -3341,7 +3341,7 @@ fn property_size_error(key: &str, size: usize, limit: usize) -> OperatorError {
     } else {
         format!("{limit} bytes")
     };
-    OperatorError::ConstraintViolation(format!(
+    OperatorError::limit_violation(format!(
         "property '{key}' value exceeds maximum size of {limit_display} ({size} bytes); \
          raise it with Config::with_max_property_size() or disable it with \
          Config::without_max_property_size()"

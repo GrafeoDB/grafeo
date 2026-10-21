@@ -117,6 +117,9 @@ impl GqlStatus {
     /// `G1000` - dependent object error, no subclass.
     pub const DEPENDENT_OBJECT_ERROR: Self = Self::from_bytes(*b"G1000");
 
+    /// `G1001` - dependent object error: edges still exist.
+    pub const EDGES_STILL_EXIST: Self = Self::from_bytes(*b"G1001");
+
     // ── Graph type violation (class G2) ───────────────────────────────
 
     /// `G2000` - graph type violation.
@@ -200,7 +203,7 @@ impl fmt::Display for GqlStatus {
 /// Maps a Grafeo [`super::error::Error`] to a GQLSTATUS code.
 impl From<&super::error::Error> for GqlStatus {
     fn from(err: &super::error::Error) -> Self {
-        use super::error::{Error, QueryErrorKind, TransactionError};
+        use super::error::{ConstraintKind, Error, QueryErrorKind, TransactionError};
 
         match err {
             Error::Query(q) => match q.kind {
@@ -243,6 +246,11 @@ impl From<&super::error::Error> for GqlStatus {
             },
             Error::TypeMismatch { .. } => GqlStatus::DATA_INVALID_VALUE_TYPE,
             Error::InvalidValue(_) => GqlStatus::DATA_EXCEPTION,
+            Error::Constraint { kind, .. } => match kind {
+                ConstraintKind::Schema => GqlStatus::GRAPH_TYPE_VIOLATION,
+                ConstraintKind::EdgesStillExist => GqlStatus::EDGES_STILL_EXIST,
+                ConstraintKind::Limit => GqlStatus::DATA_EXCEPTION,
+            },
             Error::NodeNotFound(_) | Error::EdgeNotFound(_) => GqlStatus::NO_DATA,
             Error::PropertyNotFound(_) | Error::LabelNotFound(_) => {
                 GqlStatus::SYNTAX_INVALID_REFERENCE

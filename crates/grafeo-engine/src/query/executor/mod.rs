@@ -16,7 +16,7 @@ use crate::database::QueryResult;
 use grafeo_common::clock::Instant;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{LogicalType, Value};
-use grafeo_common::utils::error::{Error, QueryError, Result};
+use grafeo_common::utils::error::{ConstraintKind, Error, QueryError, Result};
 use grafeo_core::execution::operators::{Operator, OperatorError, ReadCounter, WriteCounter};
 use grafeo_core::execution::{DataChunk, Pipeline};
 
@@ -356,9 +356,12 @@ pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
         )),
         OperatorError::Internal(msg) => Error::Internal(msg),
         OperatorError::Wrapped(error) => *error,
-        OperatorError::ConstraintViolation(msg) => {
-            Error::InvalidValue(format!("Constraint violation: {msg}"))
+        // A value past a limit stays the invalid value it was; a write the
+        // schema refuses carries its kind to its GQLSTATUS.
+        OperatorError::ConstraintViolation(ConstraintKind::Limit, message) => {
+            Error::InvalidValue(format!("Constraint violation: {message}"))
         }
+        OperatorError::ConstraintViolation(kind, message) => Error::Constraint { kind, message },
         OperatorError::InvalidValue(msg) => Error::InvalidValue(msg),
         OperatorError::WriteConflict(msg) => {
             Error::Transaction(grafeo_common::utils::error::TransactionError::WriteConflict(msg))
@@ -688,9 +691,29 @@ mod tests {
             "kept as it is: {err}"
         );
 
-        let err = convert_operator_error(OperatorError::ConstraintViolation("unique".to_string()));
-        assert!(matches!(err, Error::InvalidValue(_)));
-        assert!(err.to_string().contains("unique"));
+        // A constraint keeps its code and the text it had as an invalid
+        // value; its kind decides the GQLSTATUS, and a limit stays an
+        // invalid value.
+        for (kind, status) in [
+            (ConstraintKind::Schema, "G2000"),
+            (ConstraintKind::EdgesStillExist, "G1001"),
+            (ConstraintKind::Limit, "22000"),
+        ] {
+            let err = convert_operator_error(OperatorError::ConstraintViolation(
+                kind,
+                "unique".to_string(),
+            ));
+            if kind == ConstraintKind::Limit {
+                assert!(matches!(err, Error::InvalidValue(_)));
+            } else {
+                assert!(matches!(err, Error::Constraint { kind: k, .. } if k == kind));
+            }
+            assert_eq!(
+                err.to_string(),
+                "GRAFEO-V001: Invalid value: Constraint violation: unique"
+            );
+            assert_eq!(grafeo_common::utils::GqlStatus::from(&err).as_str(), status);
+        }
 
         let err =
             convert_operator_error(OperatorError::WriteConflict("concurrent write".to_string()));

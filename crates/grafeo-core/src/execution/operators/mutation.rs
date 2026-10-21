@@ -1821,7 +1821,7 @@ mod tests {
 
         let err = op.next().unwrap_err();
         match err {
-            OperatorError::ConstraintViolation(msg) => {
+            OperatorError::ConstraintViolation(_, msg) => {
                 assert!(msg.contains("connected edge"), "unexpected message: {msg}");
             }
             other => panic!("expected ConstraintViolation, got {other:?}"),
@@ -2055,7 +2055,7 @@ mod tests {
                 _value: &Value,
             ) -> Result<(), OperatorError> {
                 if key == "forbidden" {
-                    return Err(OperatorError::ConstraintViolation(
+                    return Err(OperatorError::schema_violation(
                         "property 'forbidden' is not allowed".to_string(),
                     ));
                 }
@@ -2123,7 +2123,7 @@ mod tests {
         );
 
         let err = op.next().unwrap_err();
-        assert!(matches!(err, OperatorError::ConstraintViolation(_)));
+        assert!(matches!(err, OperatorError::ConstraintViolation(..)));
         // Node count should still be 2 (the node is created before validation, but the error
         // propagates - this tests the validation logic fires)
     }

@@ -10,8 +10,8 @@ use crate::graph::Direction;
 use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
-    Decimal, DecimalError, EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyKey,
-    PropertyMap, ReadView, TransactionId, Value,
+    Decimal, DecimalError, EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyDataType,
+    PropertyKey, PropertyMap, ReadView, TransactionId, Value, ValueType,
 };
 #[cfg(feature = "regex")]
 use regex::Regex;
@@ -2508,24 +2508,25 @@ impl ExpressionPredicate {
                 coerced.map(|v| Value::List(v.into()))
             }
             BuiltinFunction::IsTyped => {
-                // isTyped(value, type_name) - checks if a value has a specific GQL type
+                // isTyped(value, type_name): `value IS TYPED type`, the name
+                // as the parser spells a `ValueType`. A node or an edge is
+                // not a value (it evaluates to its id): it is of NODE or EDGE
+                // and of ANY, and of no other type.
                 if args.len() != 2 {
                     return None;
                 }
-                let val = self.eval_expr(&args[0], chunk, row)?;
                 let Value::String(type_name) = self.eval_expr(&args[1], chunk, row)? else {
                     return None;
                 };
-                let type_name = type_name.to_uppercase();
-                let element_type = type_name
-                    .strip_prefix("LIST<")
-                    .and_then(|rest| rest.strip_suffix('>'));
-                let matches = match (element_type, &val) {
-                    (Some(element_type), Value::List(items)) => items
-                        .iter()
-                        .all(|v| Self::value_matches_type(v, element_type)),
-                    (Some(_), _) => false,
-                    (None, _) => Self::value_matches_type(&val, &type_name),
+                let value_type = ValueType::from_name(&type_name)?;
+                let shape = self.shape(&args[0], chunk, row);
+                let matches = match (&value_type, &shape) {
+                    (ValueType::Property(PropertyDataType::Node), _) => shape == LogicalType::Node,
+                    (ValueType::Property(PropertyDataType::Edge), _) => shape == LogicalType::Edge,
+                    (_, LogicalType::Node | LogicalType::Edge) => {
+                        value_type == ValueType::Property(PropertyDataType::Any)
+                    }
+                    _ => value_type.is_type_of(&self.eval_expr(&args[0], chunk, row)?),
                 };
                 Some(Value::Bool(matches))
             }
@@ -4241,24 +4242,10 @@ impl ExpressionPredicate {
     }
 
     /// Checks if a value matches a GQL type name (used by IS TYPED).
+    /// Whether `val` is a value of the type `type_name` names (see
+    /// [`ValueType`]): false for a name that is no type.
     fn value_matches_type(val: &Value, type_name: &str) -> bool {
-        match type_name {
-            "BOOLEAN" | "BOOL" => matches!(val, Value::Bool(_)),
-            "INTEGER" | "INT" | "INT64" => matches!(val, Value::Int64(_)),
-            "FLOAT" | "FLOAT64" | "DOUBLE" => matches!(val, Value::Float64(_)),
-            "DECIMAL" | "DEC" => matches!(val, Value::Decimal(_)),
-            "STRING" => matches!(val, Value::String(_)),
-            "LIST" => matches!(val, Value::List(_)),
-            "MAP" | "RECORD" => matches!(val, Value::Map(_)),
-            "NULL" => matches!(val, Value::Null),
-            "DATE" => matches!(val, Value::Date(_)),
-            "TIME" => matches!(val, Value::Time(_)),
-            "DATETIME" | "TIMESTAMP" => matches!(val, Value::Timestamp(_)),
-            "DURATION" => matches!(val, Value::Duration(_)),
-            "PATH" => matches!(val, Value::Path { .. }),
-            "NODE" | "EDGE" | "GRAPH" => false, // element refs not stored as values
-            _ => false,
-        }
+        ValueType::from_name(type_name).is_some_and(|value_type| value_type.is_type_of(val))
     }
 
     /// Coerces a value to a target GQL type. Returns None if coercion is impossible.

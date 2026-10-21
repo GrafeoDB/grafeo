@@ -603,3 +603,9 @@ CM5|cypher e52ba6d736 A float literal past the float range is a syntax error, as
 CM5|gql ab08f300db A float literal past the FLOAT64 range is a data exception (22003), as ISO GQL defines it; it was infinity.
 CN2|cypher a0a093dc7e Unary plus reads numbers only, as unary minus does: a string or a boolean under it is null; it passed them through unchanged.
 CN2|gql a0a093dc7e Unary plus reads numbers only, as unary minus does: a string or a boolean under it is null; it passed them through unchanged.
+AJ9|cypher ~784ee734f1 A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); 0.5.44 timed out when the machine was busy, so its result varies.
+CO1|gql 38ffdf57dc IS TYPED NODE and ANY are true for a node, and IS TYPED INT64 is false for it: a node was of INT64 by its id, and not of NODE or ANY.
+CO2|gql 8cd5e3b518 IS TYPED EDGE is true for an edge; it was false.
+CO3|gql 4bc06e9b38 IS TYPED reads nested LIST<...> and two-word types such as ZONED DATETIME, and checks every item of a list; they were a syntax error.
+CO4|gql 79d2d06896 IS TYPED with an ISO type it cannot decide yet, such as INT32, is an error (42000), not a silent false.
+CP1|gql d6c34ad4fa A property value of another type than its node type declares names the type as DDL spells it and the value as a query writes it (expects STRING, got 3); it printed internal names (expects String, got Int64(3)).

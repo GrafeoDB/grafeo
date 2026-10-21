@@ -3633,29 +3633,9 @@ impl<'a> Parser<'a> {
                     let kw = self.get_identifier_name().to_uppercase();
                     match kw.as_str() {
                         "TYPED" => {
-                            // IS [NOT] TYPED <type_name>
-                            // Supports LIST<element_type> parameterized form
+                            // IS [NOT] TYPED <value type>
                             self.advance();
-                            let type_name = if self.is_identifier() {
-                                let base = self.get_identifier_name().to_uppercase();
-                                self.advance();
-                                // Handle LIST<type> parameterized syntax
-                                if base == "LIST" && self.current.kind == TokenKind::Lt {
-                                    self.advance(); // consume <
-                                    if self.is_identifier() {
-                                        let elem = self.get_identifier_name().to_uppercase();
-                                        self.advance();
-                                        self.expect(TokenKind::Gt)?;
-                                        format!("LIST<{elem}>")
-                                    } else {
-                                        return Err(self.error("Expected element type after LIST<"));
-                                    }
-                                } else {
-                                    base
-                                }
-                            } else {
-                                return Err(self.error("Expected type name after IS TYPED"));
-                            };
+                            let type_name = self.parse_value_type_name()?;
                             let call = Expression::FunctionCall {
                                 name: "isTyped".to_string(),
                                 args: vec![left, Expression::Literal(Literal::String(type_name))],
@@ -6592,6 +6572,61 @@ impl<'a> Parser<'a> {
         Ok((element, kind))
     }
 
+    /// Reads the type after `IS [NOT] TYPED` (ISO/IEC 39075:2024 19.7
+    /// `<value type predicate>`) and returns its name as
+    /// [`ValueType`](grafeo_common::types::ValueType) spells it: a type of
+    /// type DDL (two-word names, `DECIMAL(p, s)` and nested `LIST<...>`
+    /// included), `NULL` or `PATH`. Reading only one word, it refused
+    /// `ZONED DATETIME` and `LIST<LIST<INT64>>`.
+    ///
+    /// # Errors
+    ///
+    /// A syntax error for a name that is no type, and a 42000 "not supported"
+    /// error for an ISO type the predicate cannot decide yet (`INT32`,
+    /// `ZONED TIME`), which would otherwise be a silent false.
+    fn parse_value_type_name(&mut self) -> Result<String> {
+        use grafeo_common::types::ValueType;
+
+        if self.current.kind == TokenKind::Null {
+            self.advance();
+            return Ok("NULL".to_string());
+        }
+        if self.is_identifier() {
+            let name = self.get_identifier_name().to_ascii_uppercase();
+            if matches!(name.as_str(), "PATH" | "GRAPH" | "NOTHING") {
+                self.advance();
+                return Ok(name);
+            }
+            let unsupported = if (name == "ZONED" || name == "LOCAL") && {
+                self.peek_kind();
+                self.peek_text_upper() == "TIME"
+            } {
+                Some(format!("{name} TIME"))
+            } else {
+                UNSUPPORTED_VALUE_TYPES
+                    .contains(&name.as_str())
+                    .then(|| name.clone())
+            };
+            if let Some(type_name) = unsupported {
+                return Err(Error::Query(
+                    QueryError::new(
+                        QueryErrorKind::Unsupported,
+                        format!(
+                            "[GQL] IS TYPED {type_name} is not supported yet: Grafeo keeps every \
+                             integer as an INT64, every float as a FLOAT64 and every time as TIME"
+                        ),
+                    )
+                    .with_span(self.current.span)
+                    .with_source(self.source.to_string()),
+                ));
+            }
+        }
+        let (name, _) = self.parse_property_type_name()?;
+        ValueType::from_name(&name)
+            .map(|value_type| value_type.to_string())
+            .ok_or_else(|| self.error(&crate::query::schema::unknown_property_type(&name)))
+    }
+
     /// Reads one property of type DDL (ISO/IEC 39075:2024 18.6
     /// `<property type>`, and Grafeo's `DEFAULT`):
     /// `name TYPE [NOT NULL] [DEFAULT literal]`.
@@ -7693,6 +7728,32 @@ type PropertyTypeKind = crate::query::schema::PropertyTypeKind;
 
 /// The digits of a number literal without its ISO GQL suffix (`M`, `F` or
 /// `D`, in either case).
+/// ISO/IEC 39075 predefined value types `IS TYPED` cannot decide yet: every
+/// integer is an INT64 and every approximate number a FLOAT64, so whether 3 is
+/// of INT32 is open. (No value is of GRAPH or NOTHING, which `IS TYPED`
+/// answers.)
+const UNSUPPORTED_VALUE_TYPES: &[&str] = &[
+    "INT8",
+    "INT16",
+    "INT32",
+    "INT128",
+    "INT256",
+    "SMALLINT",
+    "UINT",
+    "UINT8",
+    "UINT16",
+    "UINT32",
+    "UINT64",
+    "UINT128",
+    "UINT256",
+    "USMALLINT",
+    "UBIGINT",
+    "FLOAT16",
+    "FLOAT32",
+    "FLOAT128",
+    "FLOAT256",
+];
+
 fn number_text(text: &str) -> &str {
     text.strip_suffix(['M', 'm', 'F', 'f', 'D', 'd'])
         .unwrap_or(text)

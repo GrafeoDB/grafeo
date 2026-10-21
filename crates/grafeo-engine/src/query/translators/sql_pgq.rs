@@ -287,6 +287,7 @@ impl SqlPgqTranslator {
         }
 
         // 6-7. Translate COLUMNS + outer SELECT list into a single projection.
+        Self::reject_column_aggregates(&select.graph_table.columns)?;
         //
         // The outer SELECT may contain aggregates, computed expressions (CASE),
         // column subsets, or just `SELECT *`. We merge the outer SELECT with
@@ -779,15 +780,36 @@ impl SqlPgqTranslator {
 
     // ==================== COLUMNS Translation ====================
 
-    /// Translates the COLUMNS of `GRAPH_TABLE`: one row per match of its
-    /// pattern.
+    /// Refuses an aggregate in a column of COLUMNS: COLUMNS gives a row per
+    /// match and cannot aggregate them, which the outer SELECT does (`SELECT
+    /// COUNT(*) FROM GRAPH_TABLE (...)`). Checked before the outer SELECT is
+    /// translated, as a SELECT that names columns merges COLUMNS into its own
+    /// projection (where the aggregate got the GQL hint about RETURN and
+    /// WITH); a column with an aggregate returned null on every row before.
     ///
     /// # Errors
     ///
-    /// Returns a semantic error for an aggregate in a column: COLUMNS gives a
-    /// row per match and cannot aggregate them, which the outer SELECT does
-    /// (`SELECT COUNT(*) FROM GRAPH_TABLE (...)`). A column with an aggregate
-    /// returned null on every row.
+    /// A semantic error (42000) that names the aggregate and the column.
+    fn reject_column_aggregates(columns: &ast::ColumnsClause) -> Result<()> {
+        for col in &columns.items {
+            if let Some(aggregate) = first_aggregate(&col.expression) {
+                return Err(Error::Query(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    format!(
+                        "aggregate {aggregate} in the COLUMNS of GRAPH_TABLE (column \
+                         '{}'): COLUMNS gives one row per match and cannot aggregate the \
+                         matches; aggregate in the outer SELECT instead, as in \
+                         SELECT {aggregate}(...) FROM GRAPH_TABLE (...)",
+                        col.alias
+                    ),
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Translates the COLUMNS of `GRAPH_TABLE`: one row per match of its
+    /// pattern (the caller ran [`Self::reject_column_aggregates`]).
     fn translate_columns(
         &self,
         columns: &ast::ColumnsClause,
@@ -797,18 +819,6 @@ impl SqlPgqTranslator {
             .items
             .iter()
             .map(|col| {
-                if let Some(aggregate) = first_aggregate(&col.expression) {
-                    return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        format!(
-                            "aggregate {aggregate} in the COLUMNS of GRAPH_TABLE (column \
-                             '{}'): COLUMNS gives one row per match and cannot aggregate the \
-                             matches; aggregate in the outer SELECT instead, as in \
-                             SELECT {aggregate}(...) FROM GRAPH_TABLE (...)",
-                            col.alias
-                        ),
-                    )));
-                }
                 Ok(ReturnItem {
                     expression: self.translate_expression(&col.expression, None)?,
                     alias: Some(col.alias.clone()),

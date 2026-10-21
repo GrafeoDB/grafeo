@@ -1831,4 +1831,19 @@ for case_id, query in [
 ]:
     case(case_id, query, BOTH, "empty")
 
+# CO: IS TYPED. A node is of NODE and ANY, not of INT64 (CO1: it was not NODE and was INT64, its
+#     id); an edge of EDGE (CO2: it was not); nested lists and two-word types are read (CO3: a
+#     syntax error); an ISO type Grafeo has no values of is not supported (CO4: it was false)
+for case_id, query in [
+    ("CO1", "MATCH (p:Person {name: 'Alix'}) RETURN p IS TYPED NODE AS node, p IS TYPED INT64 AS int64, p IS TYPED ANY AS any"),
+    ("CO2", "MATCH (:Person {name: 'Alix'})-[k:KNOWS]->(:Person {name: 'Gus'}) RETURN k IS TYPED EDGE AS edge"),
+    ("CO3", "RETURN [[1]] IS TYPED LIST<LIST<INT64>> AS nested, [1, 'x'] IS TYPED LIST<INT64> AS mixed, zoned_datetime('2024-03-15T10:00:00Z') IS TYPED ZONED DATETIME AS zoned"),
+    ("CO4", "RETURN 3 IS TYPED INT32 AS r"),
+]:
+    case(case_id, query, GQL)
+
+# CP: a property value of another type than its node type declares names the type as DDL spells
+#     it and the value as a query writes it (CP1: "expects String, got Int64(3)")
+case("CP1", "INSERT (:City {name: 3})", GQL, "typed")
+
 # fmt: on

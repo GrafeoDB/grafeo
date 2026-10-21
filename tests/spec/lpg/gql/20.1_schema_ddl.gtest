@@ -103,7 +103,7 @@ tests:
       - "ALTER NODE TYPE Sensor ADD PROPERTY location STRING"
     query: "INSERT (:Sensor {id: 1, location: 5})"
     expect:
-      error: "property 'location' on :Sensor expects String"
+      error: "property 'location' on :Sensor expects STRING, got 5"
 
   # An integer written to a FLOAT64 property is stored as a float (#568):
   # GQL converts between numeric types on assignment. JavaScript sends every
@@ -768,7 +768,7 @@ tests:
       - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, age INT64)"
       - "INSERT (:Customer {customerId: 'c3', age: 'old'})"
     expect:
-      error: "property 'age' on :Customer expects Int64"
+      error: "property 'age' on :Customer expects INT64, got 'old'"
 
   - name: node_type_in_a_schema_checks_set
     statements:
@@ -787,7 +787,7 @@ tests:
       - "CREATE EDGE TYPE Buys (amount INT64 NOT NULL)"
       - "INSERT (:Shop)-[:Buys {amount: 'x'}]->(:Item)"
     expect:
-      error: "property 'amount' on :Buys expects Int64"
+      error: "property 'amount' on :Buys expects INT64, got 'x'"
 
   - name: edge_type_in_a_schema_requires_its_not_null_property
     statements:

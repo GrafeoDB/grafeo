@@ -15,12 +15,14 @@ pub mod hlc;
 mod id;
 mod logical_type;
 mod property_map;
+mod property_type;
 mod read_view;
 mod temporal_component;
 mod time;
 mod timestamp;
 mod validity;
 mod value;
+mod value_type;
 mod zoned_datetime;
 
 pub use date::Date;
@@ -30,11 +32,13 @@ pub use hlc::{HlcClock, HlcTimestamp};
 pub use id::{EdgeId, EdgeTypeId, EpochId, IndexId, LabelId, NodeId, PropertyKeyId, TransactionId};
 pub use logical_type::LogicalType;
 pub use property_map::PropertyMap;
+pub use property_type::{PropertyDataType, PropertyTypeTooDeep, exact_float};
 pub use read_view::ReadView;
 pub use time::Time;
 pub use timestamp::Timestamp;
 pub use validity::ValidityTs;
 pub use value::{HashableValue, OrderableValue, OrderedFloat64, PropertyKey, Value};
+pub use value_type::ValueType;
 pub use zoned_datetime::ZonedDatetime;
 
 // Re-export ArcStr so downstream crates don't need a direct arcstr dependency.

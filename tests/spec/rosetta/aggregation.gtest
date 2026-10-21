@@ -54,7 +54,7 @@ tests:
           COLUMNS (count(p) AS cnt)
         )
     expect:
-      error: "Aggregate function 'count' cannot be used here"
+      error: "aggregate count in the COLUMNS of GRAPH_TABLE (column 'cnt')"
       gql_status: "42000"
 
   # ---------------------------------------------------------------------------

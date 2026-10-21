@@ -594,3 +594,10 @@ CL1|gql 4c62bf5377 An integer above 2^53 compares exactly with a float; it was c
 CL2|gql 18908d5658 A float compares exactly with an integer above 2^53; 2^53 < 2^53 + 1 was false.
 CL3|gql 4c61684e6f A filter on an integer above 2^53 against a float bound keeps the integer that passes it exactly; it was dropped.
 CL4|gql 8de3da8e40 A comparison of NaN with a number is false (IEEE); it was null, and NaN <= NaN was true.
+CM1|cypher c17edcb39c A float with no digit before its point (.5, .5e1) is a number, as openCypher writes it; it was a syntax error.
+CM1|gql c17edcb39c A number with no digit before its point (.5 exact, .5e1 approximate) is a number, as ISO GQL writes it; it was a syntax error.
+CM2|gql 081b084f0e A number with no digit after its point (5., 5.e1) is a number, as ISO GQL writes it; it was a syntax error.
+CM3|gql e527573b6a An underscore between two digits is a separator, in every radix and in a decimal, as ISO GQL defines it; it was a syntax error.
+CM4|cypher 904fecd430 The error starts with its code, GRAFEO-Q001 (#588); openCypher has no digit separators, so the message is unchanged.
+CM5|cypher e52ba6d736 A float literal past the float range is a syntax error, as openCypher refuses it; it was infinity.
+CM5|gql ab08f300db A float literal past the FLOAT64 range is a data exception (22003), as ISO GQL defines it; it was infinity.

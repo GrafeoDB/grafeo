@@ -1808,4 +1808,19 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL, "empty")
 
+# CM: numeric literal forms. A point with digits on one side only is a number (CM1: `.5` in
+#     both languages, exact in GQL and a float in Cypher; CM2: `5.` in GQL), `_` between digits is a separator in GQL (CM3; in
+#     Cypher it ends the number, CM4), and a float literal past the float range is an error,
+#     22003 in GQL and a syntax error in Cypher (CM5), not infinity. A range after an
+#     integer stays a range (CM6)
+for case_id, query, languages in [
+    ("CM1", "RETURN .5 = 0.5 AS a, -.25 < 0 AS b, .5e1 AS c", BOTH),
+    ("CM2", "RETURN 5. = 5 AS same, 5.e1 AS f, [5.,6.][1] AS second", GQL),
+    ("CM3", "RETURN 1_000 AS a, 0x7F_FF AS b, 0b1010_0101 AS c, 1_000.5 AS d", GQL),
+    ("CM4", "RETURN 1_000 AS a", CYPHER),
+    ("CM5", "RETURN 1e400 AS a", BOTH),
+    ("CM6", "RETURN [10, 20, 30][1..2] AS slice", BOTH),
+]:
+    case(case_id, query, languages, "empty")
+
 # fmt: on

@@ -1595,11 +1595,9 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if self.current.kind == TokenKind::Float {
-                    let text = &self.current.text;
-                    if let Ok(val) = format!("-{text}").parse::<f64>() {
-                        self.advance();
-                        return Ok(Expression::Literal(Literal::Float(val)));
-                    }
+                    let value = self.float_literal()?;
+                    self.advance();
+                    return Ok(Expression::Literal(Literal::Float(-value)));
                 }
                 self.enter_nesting()?;
                 let operand = self.parse_unary_expression();
@@ -1951,10 +1949,7 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Literal(Literal::Integer(value)))
             }
             TokenKind::Float => {
-                let text = &self.current.text;
-                let value = text.parse().map_err(|_: std::num::ParseFloatError| {
-                    self.error(&format!("Invalid float literal: '{}'", text))
-                })?;
+                let value = self.float_literal()?;
                 self.advance();
                 Ok(Expression::Literal(Literal::Float(value)))
             }
@@ -2930,6 +2925,24 @@ impl<'a> Parser<'a> {
             .with_span(self.current.span)
             .with_source(self.source.to_string())
             .into()
+    }
+
+    /// The value of the float literal at the current token. openCypher
+    /// refuses a literal outside the FLOAT range, as `1e400`, when it parses
+    /// the query ("floating point number is too large"), so it is no
+    /// infinity.
+    fn float_literal(&self) -> Result<f64> {
+        let text = &self.current.text;
+        let value: f64 = text.parse().map_err(|_: std::num::ParseFloatError| {
+            self.error(&format!("Invalid float literal: '{text}'"))
+        })?;
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(self.error(&format!(
+                "Float literal '{text}' is too large: it is outside the FLOAT range"
+            )))
+        }
     }
 }
 

@@ -3921,11 +3921,9 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if self.current.kind == TokenKind::Float {
-                    let text = number_text(&self.current.text);
-                    if let Ok(val) = format!("-{text}").parse::<f64>() {
-                        self.advance();
-                        return Ok(Expression::Literal(Literal::Float(val)));
-                    }
+                    let value = self.float_literal()?;
+                    self.advance();
+                    return Ok(Expression::Literal(Literal::Float(-value)));
                 }
                 if self.current.kind == TokenKind::Decimal {
                     let text = number_text(&self.current.text);
@@ -4223,9 +4221,7 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Literal(Literal::Integer(value)))
             }
             TokenKind::Float => {
-                let value = number_text(&self.current.text)
-                    .parse()
-                    .map_err(|_| self.error("Invalid float"))?;
+                let value = self.float_literal()?;
                 self.advance();
                 Ok(Expression::Literal(Literal::Float(value)))
             }
@@ -6757,9 +6753,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Float | TokenKind::Decimal => match kind {
                 PropertyTypeKind::Float | PropertyTypeKind::Any => {
-                    let value: f64 = number_text(&self.current.text)
-                        .parse()
-                        .map_err(|_| self.error("Invalid float"))?;
+                    let value = self.float_literal()?;
                     let value = if negative == Some(true) {
                         -value
                     } else {
@@ -7659,6 +7653,25 @@ impl<'a> Parser<'a> {
                 .with_source(self.source.to_string()),
         )
     }
+
+    /// The value of the approximate number literal at the current token. A
+    /// literal outside the FLOAT64 range, as `1e400`, is a data exception
+    /// (ISO GQL 22003), not infinity.
+    fn float_literal(&self) -> Result<f64> {
+        let text = number_text(&self.current.text);
+        let value: f64 = text.parse().map_err(|_| self.error("Invalid float"))?;
+        if value.is_finite() {
+            return Ok(value);
+        }
+        Err(Error::Query(
+            QueryError::new(
+                QueryErrorKind::NumericOutOfRange,
+                format!("[GQL] Float literal '{text}' is outside the FLOAT64 range"),
+            )
+            .with_span(self.current.span)
+            .with_source(self.source.to_string()),
+        ))
+    }
 }
 
 /// Whether `a op b op c` means the same however it is grouped, so a chain of
@@ -7678,10 +7691,6 @@ fn is_associative(op: CompositeOp) -> bool {
 /// What a property type of type DDL takes as a `DEFAULT`.
 type PropertyTypeKind = crate::query::schema::PropertyTypeKind;
 
-/// The value of the integer literal `text` (decimal, or `0x`, `0o`, `0b`
-/// digits), negated when `negative`; `None` when it is out of the INT64
-/// range. The sign counts before the range check, so the smallest INT64,
-/// `-9223372036854775808`, is a literal.
 /// The digits of a number literal without its ISO GQL suffix (`M`, `F` or
 /// `D`, in either case).
 fn number_text(text: &str) -> &str {
@@ -7689,6 +7698,10 @@ fn number_text(text: &str) -> &str {
         .unwrap_or(text)
 }
 
+/// The value of the integer literal `text` (decimal, or `0x`, `0o`, `0b`
+/// digits), negated when `negative`; `None` when it is out of the INT64
+/// range. The sign counts before the range check, so the smallest INT64,
+/// `-9223372036854775808`, is a literal.
 fn integer_literal(text: &str, negative: bool) -> Option<i64> {
     let (digits, radix) = match text.get(..2) {
         Some("0x" | "0X") => (&text[2..], 16),
@@ -13036,6 +13049,32 @@ mod tests {
             ),
         ] {
             assert_eq!(clause_names(query), expected, "{query}");
+        }
+    }
+
+    /// A float literal outside the FLOAT64 range is a data exception (ISO
+    /// GQL 22003), in an expression, after a minus and as a DEFAULT; the
+    /// largest finite ones stay literals.
+    #[test]
+    fn test_a_float_literal_past_the_range() {
+        for query in [
+            "RETURN 1e400",
+            "RETURN -1.5e400",
+            "RETURN 1e400F",
+            "CREATE NODE TYPE Ship (weight FLOAT64 DEFAULT 1e400)",
+            "CREATE NODE TYPE Ship (weight FLOAT64 DEFAULT -1e400)",
+        ] {
+            let error = Parser::new(query).parse().expect_err(query);
+            assert!(
+                matches!(&error, Error::Query(q) if q.kind == QueryErrorKind::NumericOutOfRange),
+                "{query}: {error}"
+            );
+        }
+        for query in [
+            "RETURN 1.7976931348623157e308, -1.7976931348623157e308",
+            "RETURN 1e-400",
+        ] {
+            assert!(Parser::new(query).parse().is_ok(), "{query}");
         }
     }
 }

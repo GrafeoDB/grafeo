@@ -199,7 +199,7 @@ pub(crate) fn compare_floats(a: f64, b: f64) -> Ordering {
 }
 
 /// Whether `=` finds an integer equal to a float: exactly, as
-/// [`compare_int_float`] orders them, so `2^53 + 1` does not equal the float
+/// `compare_int_float` orders them, so `2^53 + 1` does not equal the float
 /// `2^53`. NaN equals no integer.
 #[must_use]
 pub fn int_equals_float(int: i64, float: f64) -> bool {
@@ -219,7 +219,7 @@ pub fn text_equals_float(text: &str, float: f64) -> bool {
 }
 
 /// The order of an integer and a float for `<`, `<=`, `>` and `>=`: exact, as
-/// [`compare_int_float`] orders them (`2^53 + 1` is above the float `2^53`),
+/// `compare_int_float` orders them (`2^53 + 1` is above the float `2^53`),
 /// and `None` for NaN, which is neither less nor greater.
 #[must_use]
 pub fn partial_cmp_int_float(int: i64, float: f64) -> Option<Ordering> {

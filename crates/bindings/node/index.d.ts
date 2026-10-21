@@ -289,15 +289,20 @@ export declare class GrafeoDB {
   /**
    * Import a CSV file as graph nodes.
    *
-   * Each row becomes a node with the given label. Column headers are used
-   * as property names. Returns the number of nodes created.
+   * Each row becomes a node with the given label, and each column a
+   * property named as the header spells it (`home city` stays `home
+   * city`); an empty field sets no property. Without headers the columns
+   * are `column0`, `column1`, and so on. Values are strings. The label is
+   * used as given. Returns the number of nodes created.
    */
   importCsv(path: string, options?: CsvImportOptions | undefined | null): Promise<number>
   /**
    * Import a JSON Lines file as graph nodes.
    *
-   * Each line must be a valid JSON object. Object keys become property names.
-   * Returns the number of nodes created.
+   * Each line must be a JSON object. Each key becomes a property named as
+   * the file spells it, whichever line it first appears on, and keeps its
+   * JSON type. The label is used as given. Returns the number of nodes
+   * created.
    */
   importJsonl(path: string, options?: JsonlImportOptions | undefined | null): Promise<number>
   /**

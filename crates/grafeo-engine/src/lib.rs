@@ -32,6 +32,8 @@ pub mod database;
 pub mod embedding;
 pub mod execution;
 pub mod export;
+#[cfg(feature = "gql")]
+pub mod import;
 pub mod memory_usage;
 #[cfg(feature = "metrics")]
 pub mod metrics;

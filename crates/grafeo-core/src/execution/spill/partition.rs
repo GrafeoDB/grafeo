@@ -523,8 +523,44 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         U: FnOnce(&mut V, &mut GroupedMemoryOwner) -> Result<(), OperatorError>,
     {
         let idx = self.partition_for(key);
-        let mut counter = ByteCounter(0);
-        serialize_row(key, &mut counter).map_err(grouped_io_error)?;
+        // Common resident keys need no owned lookup buffer. Keep the same
+        // encoding; larger keys retain the admitted heap path below.
+        let mut inline_key = [0_u8; 64];
+        let inline_len = {
+            let capacity = inline_key.len();
+            let mut writer = inline_key.as_mut_slice();
+            match serialize_row(key, &mut writer) {
+                Ok(_) => Some(capacity - writer.len()),
+                Err(error) if error.kind() == std::io::ErrorKind::WriteZero => None,
+                Err(error) => return Err(grouped_io_error(error)),
+            }
+        };
+        let mut resident_miss = false;
+        if let Some(len) = inline_len
+            && let Some(partition) = self.partitions[idx].as_mut()
+        {
+            if let Some(entry) = partition.entries.get_mut(&inline_key[..len]) {
+                // Match get_partition_mut's LRU update, including update errors.
+                self.timestamp += 1;
+                self.access_times[idx] = self.timestamp;
+                let owner = entry
+                    .owner
+                    .as_mut()
+                    .expect("accounted entry retains its admission");
+                let before = owner.size();
+                let outcome = update(&mut entry.value, owner);
+                partition.owned_bytes = partition.owned_bytes - before + owner.size();
+                return outcome;
+            }
+            resident_miss = true;
+        }
+        let key_bytes = if let Some(len) = inline_len {
+            len
+        } else {
+            let mut counter = ByteCounter(0);
+            serialize_row(key, &mut counter).map_err(grouped_io_error)?;
+            counter.0
+        };
         // Retain the query's grant authority without a fresh pressure sweep
         // for every lookup. Growth still enforces the shared hard limit.
         let mut key_owner = self
@@ -532,15 +568,20 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
             .as_mut()
             .expect("accounted caller has partition admission")
             .split(0)?;
-        key_owner.try_grow(counter.0)?;
+        key_owner.try_grow(key_bytes)?;
         let mut bytes = Vec::new();
         bytes
-            .try_reserve_exact(counter.0)
+            .try_reserve_exact(key_bytes)
             .map_err(|_| grouped_memory_limit())?;
-        serialize_row(key, &mut bytes).map_err(grouped_io_error)?;
+        if let Some(len) = inline_len {
+            bytes.extend_from_slice(&inline_key[..len]);
+        } else {
+            serialize_row(key, &mut bytes).map_err(grouped_io_error)?;
+        }
         {
             let partition = self.get_partition_mut(idx).map_err(grouped_io_error)?;
-            if let Some(entry) = partition.entries.get_mut(bytes.as_slice()) {
+            // No insertion can intervene after a resident miss under &mut self.
+            if !resident_miss && let Some(entry) = partition.entries.get_mut(bytes.as_slice()) {
                 let owner = entry
                     .owner
                     .as_mut()
@@ -1202,6 +1243,230 @@ mod tests {
         assert_eq!(buffer.allocated(), held.size());
         drop(held);
         assert_eq!(buffer.allocated(), 0);
+    }
+
+    #[test]
+    fn accounted_resident_update_needs_no_free_heap() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (directory, spill) = create_manager();
+        let buffer = BufferManager::with_budget(32 * 1024 * 1024);
+        let mut state: PartitionedState<i64> = PartitionedState::try_new_accounted(
+            Arc::clone(&buffer),
+            Arc::clone(&spill),
+            256,
+            serialize_i64,
+            deserialize_i64,
+            deserialize_i64_admitted,
+        )
+        .unwrap();
+        let key = key(&[1]);
+        state
+            .with_value_accounted(
+                &key,
+                |_| Ok(0),
+                |value, _| {
+                    *value += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let held = buffer
+            .try_allocate(
+                buffer.hard_limit() - buffer.allocated(),
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        let before = buffer.allocated();
+        assert_eq!(before, buffer.hard_limit());
+        let scans = Arc::new(ConsumerScanCounter(AtomicUsize::new(0)));
+        buffer.register_consumer(scans.clone());
+        state
+            .with_value_accounted(
+                &key,
+                |_| panic!("resident group must not be initialized again"),
+                |value, _| {
+                    assert_eq!(*value, 1);
+                    *value += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(state.iter_all().unwrap()[0].1, 2);
+        assert_eq!(state.total_size(), 1);
+        assert_eq!(buffer.allocated(), before);
+        assert_eq!(scans.0.load(Ordering::Relaxed), 0);
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        drop(state);
+        assert_eq!(buffer.allocated(), held.size());
+        drop(held);
+        assert_eq!(buffer.allocated(), 0);
+    }
+
+    #[test]
+    fn accounted_resident_lookup_preserves_complete_keys_at_buffer_boundary() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+
+        let (_directory, spill) = create_manager();
+        let buffer = BufferManager::with_budget(32 * 1024 * 1024);
+        let mut state: PartitionedState<i64> = PartitionedState::try_new_accounted(
+            Arc::clone(&buffer),
+            Arc::clone(&spill),
+            1,
+            serialize_i64,
+            deserialize_i64,
+            deserialize_i64_admitted,
+        )
+        .unwrap();
+        // Row length plus string tag/length occupy 17 bytes: these serialized
+        // keys fill the bounded lookup workspace or require one byte more.
+        let small = vec![Value::from("k".repeat(47))];
+        let large_a = vec![Value::from(format!("{}a", "k".repeat(47)))];
+        let large_b = vec![Value::from(format!("{}b", "k".repeat(47)))];
+        for key in [&small, &large_a, &large_b] {
+            state
+                .with_value_accounted(
+                    key,
+                    |_| Ok(0),
+                    |value, _| {
+                        *value += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        }
+        let held = buffer
+            .try_allocate(
+                buffer.hard_limit() - buffer.allocated(),
+                MemoryRegion::ExecutionBuffers,
+            )
+            .unwrap();
+        let before = buffer.allocated();
+        state
+            .with_value_accounted(
+                &small,
+                |_| panic!("existing key"),
+                |value, _| {
+                    *value += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(buffer.allocated(), before);
+        assert_eq!(state.total_size(), 3);
+        drop(held);
+        // Both larger keys have the same bounded prefix. Lookup must still
+        // compare their complete serialized keys rather than a partial write.
+        for (key, increment) in [(&large_a, 2), (&large_b, 3)] {
+            state
+                .with_value_accounted(
+                    key,
+                    |_| panic!("existing key"),
+                    |value, _| {
+                        assert_eq!(*value, 1);
+                        *value += increment;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        }
+        let mut values: Vec<_> = state
+            .iter_all()
+            .unwrap()
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, [2, 3, 4]);
+        // A short serialized key must still reload a spilled partition through
+        // the admitted path, preserving its larger neighboring keys.
+        state.spill_partition(0).unwrap();
+        assert!(!state.is_in_memory(0));
+        assert_eq!(spill.active_file_count(), 1);
+        state
+            .with_value_accounted(
+                &small,
+                |_| panic!("spilled key must be reloaded"),
+                |value, _| {
+                    assert_eq!(*value, 2);
+                    *value += 3;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let mut values: Vec<_> = state
+            .iter_all()
+            .unwrap()
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, [3, 4, 5]);
+        assert_eq!(spill.active_file_count(), 0);
+        drop(state);
+        assert_eq!(buffer.allocated(), 0);
+    }
+
+    #[test]
+    fn accounted_resident_update_error_preserves_lru_and_admission() {
+        let (_directory, spill) = create_manager();
+        let buffer = BufferManager::with_budget(32 * 1024 * 1024);
+        let mut state: PartitionedState<i64> = PartitionedState::try_new_accounted(
+            Arc::clone(&buffer),
+            Arc::clone(&spill),
+            2,
+            serialize_i64,
+            deserialize_i64,
+            deserialize_i64_admitted,
+        )
+        .unwrap();
+        let first = key(&[0]);
+        let first_partition = state.partition_for(&first);
+        let second = (1..=256)
+            .map(|value| key(&[value]))
+            .find(|key| state.partition_for(key) != first_partition)
+            .expect("fixture needs two distinct partitions");
+        let second_partition = state.partition_for(&second);
+        for key in [&first, &second] {
+            state
+                .with_value_accounted(key, |_| Ok(1), |_, _| Ok(()))
+                .unwrap();
+        }
+        let before = buffer.allocated();
+        let error = state
+            .with_value_accounted(
+                &first,
+                |_| panic!("existing key"),
+                |_, owner| owner.try_grow(buffer.hard_limit()),
+            )
+            .unwrap_err();
+        assert!(matches!(error, OperatorError::LimitExceeded(_)));
+        assert_eq!(buffer.allocated(), before);
+        assert_eq!(state.accounted_bytes(), before);
+        let error = state
+            .with_value_accounted(
+                &first,
+                |_| panic!("existing key"),
+                |_, owner| {
+                    owner.try_grow(1)?;
+                    Err(grouped_memory_limit())
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, OperatorError::LimitExceeded(_)));
+        assert_eq!(buffer.allocated(), before + 1);
+        assert_eq!(state.accounted_bytes(), before + 1);
+        // Even a refused update accessed the first partition. The second
+        // partition must now be the LRU spill victim.
+        state.spill_lru().unwrap();
+        assert!(state.is_in_memory(first_partition));
+        assert!(!state.is_in_memory(second_partition));
+        assert_eq!(state.total_size(), 2);
+        drop(state);
+        assert_eq!(buffer.allocated(), 0);
+        assert_eq!(spill.active_file_count(), 0);
     }
 
     #[test]

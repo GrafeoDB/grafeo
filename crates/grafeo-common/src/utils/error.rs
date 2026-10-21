@@ -629,11 +629,20 @@ impl QueryError {
         }
     }
 
-    /// A semantic error (`GRAFEO-Q002`): the query text itself is wrong, such
-    /// as an unknown procedure or a call with another number of arguments.
+    /// A semantic error (`GRAFEO-Q002`, GQLSTATUS 42000): the query text
+    /// breaks a rule beyond the grammar, such as a call with another number
+    /// of arguments.
     #[must_use]
     pub fn semantic(message: impl Into<String>) -> Self {
         Self::new(QueryErrorKind::Semantic, message)
+    }
+
+    /// An invalid reference (`GRAFEO-Q002`, GQLSTATUS 42002): a name that
+    /// resolves to nothing, such as an undefined variable or an unknown
+    /// procedure.
+    #[must_use]
+    pub fn invalid_reference(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::InvalidReference, message)
     }
 
     /// The database or the build cannot run the statement
@@ -673,11 +682,13 @@ impl QueryError {
     pub const fn error_code(&self) -> ErrorCode {
         match self.kind {
             QueryErrorKind::Lexer | QueryErrorKind::Syntax => ErrorCode::QuerySyntax,
-            QueryErrorKind::Semantic => ErrorCode::QuerySemantic,
+            QueryErrorKind::Semantic | QueryErrorKind::InvalidReference => ErrorCode::QuerySemantic,
             QueryErrorKind::Optimization => ErrorCode::QueryOptimization,
             QueryErrorKind::Execution
             | QueryErrorKind::NumericOutOfRange
-            | QueryErrorKind::DivisionByZero => ErrorCode::QueryExecution,
+            | QueryErrorKind::DivisionByZero
+            | QueryErrorKind::NegativeLimit
+            | QueryErrorKind::InvalidValueType => ErrorCode::QueryExecution,
             QueryErrorKind::Timeout => ErrorCode::QueryTimeout,
             QueryErrorKind::Unsupported => ErrorCode::QueryUnsupported,
         }
@@ -752,8 +763,16 @@ pub enum QueryErrorKind {
     Lexer,
     /// Syntax error (parse failure).
     Syntax,
-    /// Semantic error (type mismatch, unknown identifier, etc.).
+    /// The statement breaks a rule beyond the grammar: an aggregate where
+    /// none may stand, a wrong number of arguments, a pattern MERGE or
+    /// CREATE cannot take, a name declared twice (GQLSTATUS 42000, the code
+    /// ISO/IEC 39075 gives a violated syntax or access rule that names no
+    /// condition of its own).
     Semantic,
+    /// A name that resolves to nothing: an undefined or out-of-scope
+    /// variable, or an unknown function, procedure, parameter, graph, type,
+    /// index or constraint (GQLSTATUS 42002, invalid reference).
+    InvalidReference,
     /// Optimization error.
     Optimization,
     /// Execution error.
@@ -768,6 +787,11 @@ pub enum QueryErrorKind {
     NumericOutOfRange,
     /// An integer or decimal division or modulo by zero (GQLSTATUS 22012).
     DivisionByZero,
+    /// A negative `SKIP`, `OFFSET` or `LIMIT` value (GQLSTATUS 22G02).
+    NegativeLimit,
+    /// A value of another type than the statement needs where it is used,
+    /// such as a parameter or a procedure argument (GQLSTATUS 22G03).
+    InvalidValueType,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -775,13 +799,17 @@ impl fmt::Display for QueryErrorKind {
         match self {
             QueryErrorKind::Lexer => write!(f, "lexer error"),
             QueryErrorKind::Syntax => write!(f, "syntax error"),
-            QueryErrorKind::Semantic => write!(f, "semantic error"),
+            QueryErrorKind::Semantic | QueryErrorKind::InvalidReference => {
+                write!(f, "semantic error")
+            }
             QueryErrorKind::Optimization => write!(f, "optimization error"),
             QueryErrorKind::Execution => write!(f, "execution error"),
             QueryErrorKind::Timeout => write!(f, "timeout error"),
             QueryErrorKind::Unsupported => write!(f, "unsupported"),
             QueryErrorKind::NumericOutOfRange => write!(f, "numeric value out of range"),
             QueryErrorKind::DivisionByZero => write!(f, "division by zero"),
+            QueryErrorKind::NegativeLimit => write!(f, "negative limit value"),
+            QueryErrorKind::InvalidValueType => write!(f, "invalid value type"),
         }
     }
 }

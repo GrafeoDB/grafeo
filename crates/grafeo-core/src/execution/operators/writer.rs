@@ -17,7 +17,9 @@
 //! that changes nothing, or that a check or the store refuses, records
 //! nothing. The claim of what a write changes comes before the store
 //! changes, except for a node it creates: no other transaction knows the
-//! new id, so it claims nothing.
+//! new id, so it claims nothing. A writer without a recording and without a
+//! transaction writes through the store's immediate methods: each write
+//! commits on its own, as a write outside a transaction does.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -317,10 +319,6 @@ impl GraphWriter {
     fn epoch(&self) -> EpochId {
         self.viewing_epoch
             .unwrap_or_else(|| self.store.current_epoch())
-    }
-
-    fn transaction(&self) -> TransactionId {
-        self.transaction_id.unwrap_or(TransactionId::SYSTEM)
     }
 
     /// The node as this writer's transaction sees it, its own writes included.
@@ -708,12 +706,13 @@ impl GraphWriter {
                 )));
             }
         }
-        let deleted = match &self.recording {
-            Some(recording) => self.apply_op(recording, DataOp::DeleteNode { id })?,
-            None => self
+        let deleted = match (&self.recording, self.transaction_id) {
+            (Some(recording), _) => self.apply_op(recording, DataOp::DeleteNode { id })?,
+            (None, Some(transaction_id)) => self
                 .store
-                .delete_node_versioned(id, self.epoch(), self.transaction())
+                .delete_node_versioned(id, self.epoch(), transaction_id)
                 .map_err(refused)?,
+            (None, None) => self.store.delete_node(id),
         };
         self.count(|c| &c.nodes_deleted, usize::from(deleted));
         Ok(deleted)
@@ -1138,9 +1137,13 @@ impl GraphWriter {
                 }
                 record_applied(recording, op, applied)?
             }
-            None => self
-                .store
-                .delete_edge_versioned(id, self.epoch(), self.transaction()),
+            None => match self.transaction_id {
+                Some(transaction_id) => {
+                    self.store
+                        .delete_edge_versioned(id, self.epoch(), transaction_id)
+                }
+                None => self.store.delete_edge(id),
+            },
         };
         self.count(|c| &c.edges_deleted, usize::from(deleted));
         Ok(deleted)
@@ -1259,9 +1262,13 @@ impl GraphWriter {
             return self.create_recorded_node(recording, labels, properties);
         }
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let id = self
-            .store
-            .create_node_versioned(&label_refs, self.epoch(), self.transaction());
+        let id = match self.transaction_id {
+            Some(transaction_id) => {
+                self.store
+                    .create_node_versioned(&label_refs, self.epoch(), transaction_id)
+            }
+            None => self.store.create_node(&label_refs),
+        };
         self.claim(WriteClaim::Node(id))?;
         self.count(|c| &c.nodes_created, 1);
         // `(:A:A)` gives the node one label.
@@ -1333,10 +1340,13 @@ impl GraphWriter {
         if let Some(recording) = &self.recording {
             return self.create_recorded_edge(recording, src, dst, edge_type, properties);
         }
-        let id = self
-            .store
-            .create_edge_versioned(src, dst, edge_type, self.epoch(), self.transaction())
-            .map_err(conflict_or_refused)?;
+        let id = match self.transaction_id {
+            Some(transaction_id) => self
+                .store
+                .create_edge_versioned(src, dst, edge_type, self.epoch(), transaction_id)
+                .map_err(conflict_or_refused)?,
+            None => self.store.create_edge(src, dst, edge_type),
+        };
         self.claim(WriteClaim::Edge(id))?;
         self.count(|c| &c.edges_created, 1);
         self.write_values(Entity::Edge(id), properties)?;
@@ -1758,8 +1768,9 @@ mod tests {
     use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 
     use super::{GraphWriter, OperatorError};
+    use crate::graph::GraphStore as _;
     use crate::graph::GraphStoreMut;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
 
     /// A string inside `depth` lists.
     pub(super) fn nested(depth: usize) -> Value {
@@ -1770,8 +1781,8 @@ mod tests {
         value
     }
 
-    fn writer() -> (Arc<LpgStore>, GraphWriter) {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn writer() -> (Arc<RowGroupStore>, GraphWriter) {
+        let store = Arc::new(RowGroupStore::new());
         let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
         (store, GraphWriter::new(target))
     }
@@ -2031,8 +2042,8 @@ mod tests {
 
     /// A store holding [`People`], committed. Every call builds the same
     /// store, with the same ids.
-    pub(super) fn people_store() -> (Arc<LpgStore>, People) {
-        let store = Arc::new(LpgStore::new().unwrap());
+    pub(super) fn people_store() -> (Arc<RowGroupStore>, People) {
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person"]);
         store.set_node_property(alix, "city", Value::from("Amsterdam"));
         let gus = store.create_node(&["Person"]);

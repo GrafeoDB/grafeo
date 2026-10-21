@@ -43,11 +43,17 @@ fn names(values: &[&str]) -> Vec<Vec<Value>> {
     values.iter().map(|name| vec![Value::from(*name)]).collect()
 }
 
-/// Asserts a semantic error whose message holds `says`.
+/// Asserts an invalid reference (GQLSTATUS 42002) whose message holds
+/// `says`: the variable the ORDER BY reads is out of its scope.
 fn refused(db: &GrafeoDB, language: &str, query: &str, says: &str) {
+    refused_as(db, language, query, says, QueryErrorKind::InvalidReference);
+}
+
+/// Asserts a query error of `kind` whose message holds `says`.
+fn refused_as(db: &GrafeoDB, language: &str, query: &str, says: &str, kind: QueryErrorKind) {
     match db.execute_language(query, language, None) {
         Err(Error::Query(error)) => {
-            assert_eq!(error.kind, QueryErrorKind::Semantic, "{language} `{query}`");
+            assert_eq!(error.kind, kind, "{language} `{query}`");
             assert!(
                 error.message.contains(says),
                 "{language} `{query}`: {}",
@@ -149,11 +155,13 @@ fn an_order_by_after_an_aggregating_return_reads_its_columns() {
             "MATCH (a:P) RETURN count(*) AS c ORDER BY a.age",
             "Undefined variable 'a': after an aggregating RETURN",
         );
-        refused(
+        // A rule of the RETURN, not an unknown name (GQLSTATUS 42000).
+        refused_as(
             &db,
             language,
             "MATCH (a:P) RETURN a.name AS name, count(*) AS c ORDER BY min(a.age)",
             "is not an aggregate the RETURN returns",
+            QueryErrorKind::Semantic,
         );
     }
 }

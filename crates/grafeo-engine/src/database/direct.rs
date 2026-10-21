@@ -1046,7 +1046,7 @@ fn missing_node(id: NodeId) -> OperatorError {
 /// The error for a graph handle whose graph does not exist.
 pub(crate) fn missing_graph(name: &str) -> Error {
     Error::Query(QueryError::new(
-        QueryErrorKind::Semantic,
+        QueryErrorKind::InvalidReference,
         format!("Graph '{name}' does not exist"),
     ))
 }

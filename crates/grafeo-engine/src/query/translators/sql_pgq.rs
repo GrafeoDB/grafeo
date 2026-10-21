@@ -14,10 +14,10 @@ use super::common::{
 use crate::query::functions::resolve_call;
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, BuiltinFunction, CallProcedureOp,
-    CreatePropertyGraphOp, DistinctOp, ExceptOp, ExpandDirection, ExpandOp, IntersectOp,
-    LeftJoinOp, ListPredicateKind, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
-    PathMode, ProcedureYield, PropertyGraphEdgeTable, PropertyGraphNodeTable, ReturnItem, SortKey,
-    SortOrder, UnaryOp, UnionOp,
+    CreatePropertyGraphOp, DistinctOp, DropPropertyGraphOp, ExceptOp, ExpandDirection, ExpandOp,
+    IntersectOp, LeftJoinOp, ListPredicateKind, LogicalExpression, LogicalOperator, LogicalPlan,
+    NodeScanOp, PathMode, ProcedureYield, PropertyGraphColumn, PropertyGraphEdgeTable,
+    PropertyGraphNodeTable, ReturnItem, SortKey, SortOrder, UnaryOp, UnionOp,
 };
 use grafeo_adapters::query::sql_pgq::{self, ast};
 use grafeo_common::types::Value;
@@ -61,7 +61,34 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
     let mut plan = crate::query::limits::check_plan_depth(plan)?;
     plan.explain = explain;
     plan.profile = profile;
+    plan.graph = statement_graph(&statement)?;
     Ok(plan)
+}
+
+/// The graph a statement's `GRAPH_TABLE` names (`GRAPH_TABLE (g MATCH ...)`),
+/// which it reads in place of the session's current graph: `None` when it
+/// names none.
+///
+/// # Errors
+///
+/// Unsupported when the two sides of a set operation read different graphs.
+fn statement_graph(statement: &ast::Statement) -> Result<Option<String>> {
+    match statement {
+        ast::Statement::Select(select) => Ok(select.graph_table.graph_name.clone()),
+        ast::Statement::SetOperation(set_op) => {
+            let left = &set_op.left.graph_table.graph_name;
+            let right = &set_op.right.graph_table.graph_name;
+            if left != right {
+                return Err(Error::Query(QueryError::unsupported(
+                    "a set operation reads one graph: the GRAPH_TABLE of each side names another graph",
+                )));
+            }
+            Ok(left.clone())
+        }
+        ast::Statement::CreatePropertyGraph(_)
+        | ast::Statement::DropPropertyGraph(_)
+        | ast::Statement::Call(_) => Ok(None),
+    }
 }
 
 /// SQL/PGQ AST to logical plan translator.
@@ -82,7 +109,9 @@ impl SqlPgqTranslator {
                 select_names(&set_op.left, &mut named);
                 select_names(&set_op.right, &mut named);
             }
-            ast::Statement::CreatePropertyGraph(_) | ast::Statement::Call(_) => {}
+            ast::Statement::CreatePropertyGraph(_)
+            | ast::Statement::DropPropertyGraph(_)
+            | ast::Statement::Call(_) => {}
         }
         Self {
             anonymous: VarGen::new(),
@@ -105,6 +134,12 @@ impl SqlPgqTranslator {
             ast::Statement::Select(select) => self.translate_select(select),
             ast::Statement::SetOperation(set_op) => self.translate_set_operation(set_op),
             ast::Statement::CreatePropertyGraph(cpg) => self.translate_create_property_graph(cpg),
+            ast::Statement::DropPropertyGraph(drop) => Ok(LogicalPlan::new(
+                LogicalOperator::DropPropertyGraph(DropPropertyGraphOp {
+                    name: drop.name.clone(),
+                    if_exists: drop.if_exists,
+                }),
+            )),
             ast::Statement::Call(call) => self.translate_call(call),
         }
     }
@@ -1171,15 +1206,15 @@ impl SqlPgqTranslator {
                 Ok(LogicalExpression::Map(entries))
             }
             ast::Expression::ExistsSubquery { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "EXISTS subquery not supported in SQL/PGQ",
             ))),
             ast::Expression::CountSubquery { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "COUNT subquery not supported in SQL/PGQ",
             ))),
             ast::Expression::ValueSubquery { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "VALUE subquery not supported in SQL/PGQ",
             ))),
             ast::Expression::IndexAccess { base, index } => {
@@ -1215,7 +1250,7 @@ impl SqlPgqTranslator {
             | ast::Expression::ListComprehension { .. }
             | ast::Expression::ListPredicate { .. }
             | ast::Expression::Reduce { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "This expression type is not supported in SQL/PGQ",
             ))),
         }
@@ -1305,74 +1340,121 @@ impl SqlPgqTranslator {
 
     // ==================== DDL Translation ====================
 
+    /// A node table becomes a node type, an edge table an edge type between
+    /// the node types its two `REFERENCES` columns name; the session declares
+    /// them, a closed graph type of them and the graph.
     fn translate_create_property_graph(
         &self,
         cpg: &ast::CreatePropertyGraphStatement,
     ) -> Result<LogicalPlan> {
-        // Validate: edge table references must point to defined node tables
-        let node_table_names: hashbrown::HashSet<&str> =
-            cpg.node_tables.iter().map(|t| t.name.as_str()).collect();
-
-        for edge_table in &cpg.edge_tables {
-            if !edge_table.source_table.is_empty()
-                && !node_table_names.contains(edge_table.source_table.as_str())
-            {
-                return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    format!(
-                        "Edge table '{}' references unknown source table '{}'",
-                        edge_table.name, edge_table.source_table
-                    ),
-                )));
-            }
-            if !edge_table.target_table.is_empty()
-                && !node_table_names.contains(edge_table.target_table.as_str())
-            {
-                return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    format!(
-                        "Edge table '{}' references unknown target table '{}'",
-                        edge_table.name, edge_table.target_table
-                    ),
+        let semantic =
+            |message: String| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+        let mut tables: HashSet<&str> = HashSet::new();
+        for name in cpg
+            .node_tables
+            .iter()
+            .map(|t| t.name.as_str())
+            .chain(cpg.edge_tables.iter().map(|t| t.name.as_str()))
+        {
+            if !tables.insert(name) {
+                return Err(semantic(format!(
+                    "Table '{name}' is defined twice in property graph '{}'",
+                    cpg.name
                 )));
             }
         }
+        let columns = |table: &str, columns: &[ast::ColumnDefinition]| {
+            let mut names = HashSet::new();
+            columns
+                .iter()
+                .map(|column| {
+                    if !names.insert(column.name.as_str()) {
+                        return Err(semantic(format!(
+                            "Column '{}' is defined twice in table '{table}'",
+                            column.name
+                        )));
+                    }
+                    Ok(PropertyGraphColumn {
+                        name: column.name.clone(),
+                        data_type: property_type(&column.data_type),
+                        primary_key: column.primary_key,
+                        references: column.references.is_some(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        };
 
-        let node_tables = cpg
-            .node_tables
-            .iter()
-            .map(|nt| PropertyGraphNodeTable {
-                name: nt.name.clone(),
-                columns: nt
-                    .columns
-                    .iter()
-                    .map(|c| (c.name.clone(), c.data_type.to_string()))
-                    .collect(),
-            })
-            .collect();
+        let mut node_tables = Vec::new();
+        for table in &cpg.node_tables {
+            if let Some(column) = table.columns.iter().find(|c| c.references.is_some()) {
+                return Err(semantic(format!(
+                    "Node table '{}': column '{}' references a table, which only the source \
+                     and the target of an edge table do",
+                    table.name, column.name
+                )));
+            }
+            node_tables.push(PropertyGraphNodeTable {
+                name: table.name.clone(),
+                columns: columns(&table.name, &table.columns)?,
+            });
+        }
 
-        let edge_tables = cpg
-            .edge_tables
-            .iter()
-            .map(|et| PropertyGraphEdgeTable {
-                name: et.name.clone(),
-                columns: et
-                    .columns
-                    .iter()
-                    .map(|c| (c.name.clone(), c.data_type.to_string()))
-                    .collect(),
-                source_table: et.source_table.clone(),
-                target_table: et.target_table.clone(),
-            })
-            .collect();
+        let node_table = |name: &str| cpg.node_tables.iter().find(|t| t.name == name);
+        let mut edge_tables = Vec::new();
+        for table in &cpg.edge_tables {
+            let references: Vec<_> = table
+                .columns
+                .iter()
+                .filter_map(|c| c.references.as_ref().map(|r| (c, r)))
+                .collect();
+            if references.len() != 2 {
+                return Err(semantic(format!(
+                    "Edge table '{}' needs two columns that reference node tables, its source \
+                     and its target (REFERENCES table(column)); it has {}",
+                    table.name,
+                    references.len()
+                )));
+            }
+            for (column, reference) in &references {
+                let Some(target) = node_table(&reference.table) else {
+                    return Err(Error::Query(QueryError::invalid_reference(format!(
+                        "Edge table '{}': column '{}' references '{}', which is no node table \
+                         of property graph '{}'",
+                        table.name, column.name, reference.table, cpg.name
+                    ))));
+                };
+                if !target.columns.iter().any(|c| c.name == reference.column) {
+                    return Err(Error::Query(QueryError::invalid_reference(format!(
+                        "Edge table '{}': column '{}' references '{}({})', a column node table \
+                         '{}' does not have",
+                        table.name, column.name, reference.table, reference.column, reference.table
+                    ))));
+                }
+            }
+            if let Some(column) = table.columns.iter().find(|c| c.primary_key) {
+                return Err(Error::Query(QueryError::unsupported(format!(
+                    "Edge table '{}': a PRIMARY KEY on an edge table (column '{}') is not \
+                     supported; an edge is identified by its endpoints",
+                    table.name, column.name
+                ))));
+            }
+            edge_tables.push(PropertyGraphEdgeTable {
+                name: table.name.clone(),
+                columns: columns(&table.name, &table.columns)?,
+                source_table: references[0].1.table.clone(),
+                target_table: references[1].1.table.clone(),
+            });
+        }
 
-        let op = LogicalOperator::CreatePropertyGraph(CreatePropertyGraphOp {
-            name: cpg.name.clone(),
-            node_tables,
-            edge_tables,
-        });
-
-        Ok(LogicalPlan::new(op))
+        Ok(LogicalPlan::new(LogicalOperator::CreatePropertyGraph(
+            CreatePropertyGraphOp {
+                name: cpg.name.clone(),
+                or_replace: cpg.or_replace,
+                if_not_exists: cpg.if_not_exists,
+                node_tables,
+                edge_tables,
+            },
+        )))
     }
 
     // ==================== Helpers ====================
@@ -1407,11 +1489,28 @@ impl SqlPgqTranslator {
             LogicalOperator::Expand(expand) => Ok(expand.to_variable.clone()),
             LogicalOperator::Filter(filter) => Self::get_last_variable(&filter.input),
             LogicalOperator::Project(project) => Self::get_last_variable(&project.input),
-            _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Cannot get variable from operator",
-            ))),
+            _ => Err(Error::Internal(
+                "Cannot get variable from operator".to_string(),
+            )),
         }
+    }
+}
+
+/// The property type of a column of SQL type `data_type`. Grafeo has one
+/// integer, one float and an unbounded string, so `INT` is an `INT64`,
+/// `FLOAT` a `FLOAT64` and `VARCHAR(n)` a `STRING`, its length not checked.
+fn property_type(data_type: &ast::SqlDataType) -> crate::catalog::PropertyDataType {
+    use crate::catalog::PropertyDataType;
+
+    match data_type {
+        ast::SqlDataType::Bigint | ast::SqlDataType::Int => PropertyDataType::Int64,
+        ast::SqlDataType::Varchar(_) => PropertyDataType::String,
+        ast::SqlDataType::Boolean => PropertyDataType::Bool,
+        ast::SqlDataType::Float | ast::SqlDataType::Double => PropertyDataType::Float64,
+        ast::SqlDataType::Timestamp => PropertyDataType::Timestamp,
+        ast::SqlDataType::Decimal(decimal_type) => PropertyDataType::Decimal(*decimal_type),
+        ast::SqlDataType::Date => PropertyDataType::Date,
+        ast::SqlDataType::Time => PropertyDataType::Time,
     }
 }
 

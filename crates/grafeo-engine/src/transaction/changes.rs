@@ -754,7 +754,8 @@ pub(crate) struct StreamingChanges<'wal> {
     log: Option<StreamedLog<'wal>>,
     /// Whether it committed or aborted.
     finished: bool,
-    #[cfg(not(feature = "wal"))]
+    /// The lifetime of the WAL it writes to: the same type in every build,
+    /// with or without the `wal` feature (#445).
     _wal: std::marker::PhantomData<&'wal ()>,
 }
 
@@ -808,7 +809,6 @@ impl StreamingChanges<'_> {
             #[cfg(feature = "wal")]
             log: None,
             finished: false,
-            #[cfg(not(feature = "wal"))]
             _wal: std::marker::PhantomData,
         }
     }

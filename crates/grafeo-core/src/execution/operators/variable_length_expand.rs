@@ -1120,11 +1120,12 @@ fn edge_id_list(edges: &[EdgeId]) -> Result<Vec<grafeo_common::types::Value>, Op
 mod tests {
     use super::*;
     use crate::execution::operators::ScanOperator;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
 
     #[test]
     fn test_variable_length_expand_chain() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create chain: a -> b -> c -> d
         let a = store.create_node(&["Node"]);
@@ -1181,7 +1182,7 @@ mod tests {
 
     #[test]
     fn test_variable_length_expand_min_hops() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create chain: a -> b -> c
         let a = store.create_node(&["Node"]);
@@ -1231,7 +1232,7 @@ mod tests {
 
     #[test]
     fn test_variable_length_expand_diamond() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         //     a
         //    / \
@@ -1286,7 +1287,7 @@ mod tests {
 
     #[test]
     fn test_variable_length_expand_no_matching_edges() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
@@ -1313,7 +1314,7 @@ mod tests {
 
     #[test]
     fn test_variable_length_expand_single_hop() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
@@ -1351,7 +1352,7 @@ mod tests {
 
     #[test]
     fn test_variable_length_expand_with_path_length() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
@@ -1385,7 +1386,7 @@ mod tests {
 
     #[test]
     fn test_variable_length_expand_reset() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
@@ -1424,7 +1425,7 @@ mod tests {
 
     #[test]
     fn test_variable_length_expand_name() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let scan = Box::new(ScanOperator::with_label(
             Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
             "Node",
@@ -1443,7 +1444,7 @@ mod tests {
 
     #[test]
     fn test_variable_length_expand_empty_input() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let scan = Box::new(ScanOperator::with_label(
             Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
             "Nonexistent",
@@ -1464,7 +1465,7 @@ mod tests {
 
     #[test]
     fn test_variable_length_expand_with_chunk_capacity() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create a star graph: center -> 5 outer nodes
         let center = store.create_node(&["Node"]);
@@ -1501,7 +1502,7 @@ mod tests {
 
     #[test]
     fn test_trail_mode_no_repeated_edges() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create cycle: a -> b -> a (same edge types)
         let a = store.create_node(&["Node"]);
@@ -1541,7 +1542,7 @@ mod tests {
 
     #[test]
     fn test_acyclic_mode_no_repeated_nodes() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create cycle: a -> b -> a
         let a = store.create_node(&["Node"]);
@@ -1581,7 +1582,7 @@ mod tests {
 
     #[test]
     fn test_variable_length_expand_into_any() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let scan = Box::new(ScanOperator::with_label(
             Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
             "Node",
@@ -1756,7 +1757,7 @@ mod tests {
 
     #[test]
     fn test_walk_mode_allows_everything() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create cycle: Alix -> Gus -> Alix
         let alix = store.create_node(&["Person"]);
@@ -1800,7 +1801,7 @@ mod tests {
 
     #[test]
     fn test_simple_mode_rejects_repeated_node() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Triangle: Vincent -> Jules -> Mia -> Vincent
         let vincent = store.create_node(&["Person"]);
@@ -1848,7 +1849,7 @@ mod tests {
     /// to a node it has not visited (ISO/IEC 39075:2024 16.6).
     #[test]
     fn test_simple_mode_stops_at_the_start() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Triangle Vincent -> Jules -> Mia -> Vincent, and Vincent -> Butch
         let vincent = store.create_node(&["Start"]);
@@ -1907,7 +1908,7 @@ mod tests {
 
     #[test]
     fn test_path_detail_output_node_and_edge_lists() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Chain: Alix -> Gus -> Vincent
         let alix = store.create_node(&["Person"]);
@@ -1980,7 +1981,7 @@ mod tests {
 
     #[test]
     fn test_edge_type_filter_case_insensitive() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Alix -[:KNOWS]-> Gus, Alix -[:LIKES]-> Vincent
         let alix = store.create_node(&["Person"]);
@@ -2046,7 +2047,7 @@ mod tests {
     /// The (source, target) pairs of a variable-length expand from the nodes
     /// `input` returns, in output order.
     fn expand_pairs(
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         input: Box<dyn Operator>,
         direction: Direction,
         edge_types: &[&str],
@@ -2079,7 +2080,7 @@ mod tests {
         pairs
     }
 
-    fn scan(store: &Arc<LpgStore>, label: &str) -> Box<dyn Operator> {
+    fn scan(store: &Arc<RowGroupStore>, label: &str) -> Box<dyn Operator> {
         Box::new(ScanOperator::with_label(
             Arc::clone(store) as Arc<dyn GraphStoreSearch>,
             label,
@@ -2113,7 +2114,7 @@ mod tests {
     /// input rows the first walk to each target, in walk order. Returns the
     /// pairs of the search per input row.
     fn assert_reachability_matches_walks(
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         label: &str,
         direction: Direction,
         edge_types: &[&str],
@@ -2157,7 +2158,7 @@ mod tests {
     #[test]
     fn reachability_chain() {
         // Alix -> Gus -> Vincent -> Jules
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         let vincent = store.create_node(&["Node"]);
@@ -2176,7 +2177,7 @@ mod tests {
     #[test]
     fn reachability_diamond_emits_the_meeting_node_once() {
         // Alix -> Gus -> Jules and Alix -> Vincent -> Jules: two walks to Jules
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         let vincent = store.create_node(&["Node"]);
@@ -2205,7 +2206,7 @@ mod tests {
     #[test]
     fn reachability_triangle_returns_to_the_source_once() {
         // Alix -> Gus -> Vincent -> Alix, walked up to five times round
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         let vincent = store.create_node(&["Node"]);
@@ -2226,7 +2227,7 @@ mod tests {
     #[test]
     fn reachability_self_loop() {
         // Alix -> Alix and Alix -> Gus
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         store.create_edge(alix, alix, "KNOWS");
@@ -2253,7 +2254,7 @@ mod tests {
     #[test]
     fn reachability_comes_back_to_the_source_as_walks_do() {
         // Alix -> Gus, walked both ways: Alix - Gus - Alix is a walk of two edges
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         store.create_edge(alix, gus, "KNOWS");
@@ -2267,7 +2268,7 @@ mod tests {
     #[test]
     fn reachability_min_hops() {
         // Alix -> Gus -> Vincent, walked both ways
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         let vincent = store.create_node(&["Node"]);
@@ -2302,7 +2303,7 @@ mod tests {
         // away. Vincent is two edges away (below min_hops) and four, and his
         // only neighbor is Gus: only expanding Gus again, after his first
         // emission, reaches him
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         let vincent = store.create_node(&["Node"]);
@@ -2320,7 +2321,7 @@ mod tests {
     #[test]
     fn reachability_each_direction() {
         // Alix -> Gus, Vincent -> Gus, Gus -> Jules, Jules -> Alix
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         let vincent = store.create_node(&["Node"]);
@@ -2346,7 +2347,7 @@ mod tests {
     #[test]
     fn reachability_edge_type_filter() {
         // Alix -KNOWS-> Gus -KNOWS-> Vincent, Alix -LIKES-> Vincent, Gus -LIKES-> Mia
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         let vincent = store.create_node(&["Node"]);
@@ -2388,7 +2389,7 @@ mod tests {
 
     #[test]
     fn reachability_empty_input() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         store.create_edge(alix, gus, "KNOWS");
@@ -2407,7 +2408,7 @@ mod tests {
     #[test]
     fn reachability_hub_shared_by_several_sources() {
         // Alix, Gus and Vincent each point at a hub with 20 more neighbors
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let sources: Vec<NodeId> = (0..3).map(|_| store.create_node(&["Source"])).collect();
         let hub = store.create_node(&["Node"]);
         for &source in &sources {
@@ -2445,7 +2446,7 @@ mod tests {
     #[test]
     fn reachability_searches_once_per_input_row() {
         // The same sources twice: every input row gets its own targets
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         let vincent = store.create_node(&["Node"]);
@@ -2478,8 +2479,8 @@ mod tests {
 
     /// 24 nodes and 50 edges of two types from a fixed pseudo-random
     /// sequence, plus a self-loop and two parallel edges.
-    fn mixed_graph() -> Arc<LpgStore> {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn mixed_graph() -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
         let nodes: Vec<NodeId> = (0..24).map(|_| store.create_node(&["Node"])).collect();
         let mut state: u64 = 0x5eed;
         let mut pick = |bound: usize| {
@@ -2526,7 +2527,7 @@ mod tests {
         // is as far as Alix goes. Jules reaches Mia two edges away: emitted
         // already, so not emitted again, but Butch is three edges from Jules
         // through Mia, and from no one else
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Source"]);
         let jules = store.create_node(&["Source"]);
         let gus = store.create_node(&["Node"]);
@@ -2567,7 +2568,7 @@ mod tests {
     fn reachability_across_rows_emits_a_source_once_too() {
         // Alix -> Gus, both sources: with *0..1 Gus is a target of Alix
         // before Gus is a source
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Source"]);
         let gus = store.create_node(&["Source"]);
         store.create_edge(alix, gus, "KNOWS");
@@ -2646,7 +2647,7 @@ mod tests {
     #[test]
     fn reachability_leaves_edge_and_path_columns_null() {
         // Alix -> Gus -> Vincent
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         let vincent = store.create_node(&["Node"]);
@@ -2682,7 +2683,7 @@ mod tests {
     #[test]
     fn reachability_applies_to_walks_only() {
         // Alix -> Gus -> Alix: a trail stops where a walk goes on
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         store.create_edge(alix, gus, "KNOWS");
@@ -2716,8 +2717,8 @@ mod tests {
 
     /// Alix (a `Source`) and Gus with `parallel` KNOWS edges each way: a walk
     /// of `n` edges from Alix can take any of them at each step.
-    fn parallel_edges(parallel: usize) -> Arc<LpgStore> {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn parallel_edges(parallel: usize) -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Source"]);
         let gus = store.create_node(&["Node"]);
         for _ in 0..parallel {
@@ -2730,7 +2731,7 @@ mod tests {
     /// The expand of up to `max_hops` outgoing edges from the `Source` nodes
     /// of `store`.
     fn from_sources(
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         min_hops: u32,
         max_hops: u32,
     ) -> VariableLengthExpandOperator {
@@ -2872,7 +2873,7 @@ mod tests {
         // A chain of 100,000 edges: a path along it, read and dropped
         // segment by segment, would need a stack frame per edge
         const LENGTH: u32 = 100_000;
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let first = store.create_node(&["Source"]);
         let mut last = first;
         for i in 0..LENGTH {
@@ -2932,7 +2933,7 @@ mod tests {
         // node: 2,000 rows of up to 4,001 ids. With a budget of 1 MiB a chunk
         // holds 2,048 ids in its path lists, and ends after the row that
         // takes it there
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let mut last = store.create_node(&["Source"]);
         for _ in 0..2_000 {
             let next = store.create_node(&["Node"]);

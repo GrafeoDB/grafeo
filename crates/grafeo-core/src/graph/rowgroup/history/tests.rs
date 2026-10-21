@@ -17,7 +17,9 @@ use crate::graph::rowgroup::section::{
     GraphToWrite, LPG_SECTION_VERSION, read_lpg_section, write_lpg_section,
     write_lpg_section_with_history,
 };
-use crate::graph::traits::{GraphStore, GraphStoreSearch};
+use crate::graph::traits::GraphStore;
+#[cfg(any(feature = "text-index", feature = "vector-index"))]
+use crate::graph::traits::GraphStoreSearch;
 
 /// A section in memory, open to tampering.
 #[derive(Default, Clone)]

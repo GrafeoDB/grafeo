@@ -456,7 +456,7 @@ mod tests {
     use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
 
     use crate::graph::conformance::{Store, Tx, people};
-    use crate::graph::lpg::{Edge, LpgStore, Node};
+    use crate::graph::lpg::{Edge, Node};
     use crate::graph::rowgroup::section::LPG_SECTION_VERSION;
     use crate::graph::rowgroup::{RowGroupMemory, RowGroupStore};
     use crate::graph::traits::GraphStore;
@@ -494,8 +494,7 @@ mod tests {
         )
     }
 
-    /// Lists the nodes and edges, sorted by id (`LpgStore` lists them in
-    /// its maps' order).
+    /// Lists the nodes and edges, sorted by id.
     fn listed(
         nodes: impl Iterator<Item = Node>,
         edges: impl Iterator<Item = Edge>,
@@ -537,8 +536,7 @@ mod tests {
     }
 
     /// The iterators list exactly the nodes and edges a committed reader
-    /// sees, with their labels and values, in id order, and what
-    /// `LpgStore`'s list after the same writes.
+    /// sees, with their labels and values, in id order.
     #[test]
     fn the_iterators_list_the_visible_committed_entities() {
         let store = RowGroupStore::new();
@@ -591,19 +589,6 @@ mod tests {
             store.all_nodes().map(|node| node.id).collect::<Vec<_>>(),
             [NodeId::new(0), NodeId::new(1), vincent],
             "in id order"
-        );
-
-        // LpgStore lists the same, but for the edge the open transaction
-        // deletes: its delete marks the edge's record at once, so its
-        // `all_edges` drops the edge before the commit (a dirty read).
-        let lpg = LpgStore::new().unwrap();
-        scene(&lpg);
-        let (lpg_nodes, lpg_edges) = listed(lpg.all_nodes(), lpg.all_edges());
-        assert_eq!(lpg_nodes, nodes, "LpgStore lists the same nodes");
-        assert_eq!(
-            lpg_edges,
-            [],
-            "LpgStore drops the edge a delete not committed yet deletes"
         );
     }
 

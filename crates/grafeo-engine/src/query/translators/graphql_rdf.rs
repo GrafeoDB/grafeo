@@ -85,7 +85,7 @@ impl GraphQLRdfTranslator {
         // Only Query operations are supported
         if operation.operation != ast::OperationType::Query {
             return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "Only Query operations are supported for RDF",
             )));
         }

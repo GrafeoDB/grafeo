@@ -14,7 +14,7 @@ env:
 #
 # 1. Full profile (--all-features): exercises every language parser (GQL,
 #    Cypher, SPARQL, Gremlin, GraphQL, SQL/PGQ), AI features (vector-index,
-#    text-index, hybrid-search, cdc), RDF, algorithms, tiered-storage, etc.
+#    text-index, hybrid-search, cdc), RDF, algorithms, etc.
 #    Used by: rust-check, rust-test, miri, coverage, benchmark-pr.
 #
 # 2. WASM profile (default-features=false, gql only): minimal feature set
@@ -27,11 +27,12 @@ env:
 #    Used by: python-test, node-test, go-test.
 #
 # 4. Shipped profile (grafeo-engine's "full" plus "arrow-export", which the
-#    packages' default "embedded" adds; it leaves out "temporal"): the Rust side of what the Python and Node.js packages build. Profile 1
-#    turns "temporal" on, which compiles every cfg(not(feature = "temporal"))
-#    path out, so clippy and rustdoc for grafeo-core and grafeo-engine, and the
-#    grafeo-engine tests, run once more with exactly these features (the
-#    feature matrix already runs grafeo-core's tests with them).
+#    packages' default "embedded" adds): the Rust side of what the Python and
+#    Node.js packages build. Profile 1 turns on features these packages leave
+#    out, which can compile a path of theirs out, so clippy and rustdoc for
+#    grafeo-core and grafeo-engine, and the grafeo-engine tests, run once more
+#    with exactly these features (the feature matrix already runs grafeo-core's
+#    tests with them).
 #    Used by: shipped-features.
 #
 # Note: the "embed" feature (ONNX embeddings, ~17 MB) is never included in
@@ -389,7 +390,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
 
-      - name: Test encryption at rest, triples in a WAL without triple-store, epochs across a reopen without temporal
+      - name: Test encryption at rest, triples in a WAL without triple-store, epochs across a reopen
         run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,wal,grafeo-file,encryption --test encryption_at_rest --test rdf_file_without_triple_store --test epochs_across_reopen
         env:
           RUSTC_WRAPPER: sccache
@@ -420,8 +421,8 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
   # The shipped profile (4 above): grafeo-engine's `full` features, which the
-  # Python and Node.js packages build, without `temporal`. --all-features turns
-  # `temporal` on and so leaves out code these packages run: this job lints and
+  # Python and Node.js packages build. --all-features turns on more and can so
+  # leave out code these packages run: this job lints and
   # documents it, and runs the engine's tests (rust-feature-matrix already runs
   # grafeo-core's tests with this set). One OS and a debug build, as the code differs by
   # feature, not by platform. `grafeo-engine/full` also sets grafeo-core's

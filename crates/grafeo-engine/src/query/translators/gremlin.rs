@@ -2340,7 +2340,7 @@ impl GremlinTranslator {
                 // it is translated.
                 other => {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::Unsupported,
                         format!(
                             "the Gremlin step {}() is not supported inside and(), or(), not(), where() or choose() yet",
                             step_name(other)

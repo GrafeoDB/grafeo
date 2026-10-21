@@ -414,12 +414,13 @@ impl Operator for ExpandOperator {
 mod tests {
     use super::*;
     use crate::execution::operators::ScanOperator;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
 
-    /// Creates a new `LpgStore` wrapped in an `Arc` and returns both the
+    /// Creates a new `RowGroupStore` wrapped in an `Arc` and returns both the
     /// concrete handle (for mutation) and a trait-object handle (for operators).
-    fn test_store() -> (Arc<LpgStore>, Arc<dyn GraphStoreSearch>) {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn test_store() -> (Arc<RowGroupStore>, Arc<dyn GraphStoreSearch>) {
+        let store = Arc::new(RowGroupStore::new());
         let dyn_store: Arc<dyn GraphStoreSearch> = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
         (store, dyn_store)
     }

@@ -8,7 +8,6 @@ use grafeo_common::types::{EpochId, Value};
 
 use super::cases::{create_and_delete_writes, value_and_label_writes};
 use super::{KnownGap, Outcome, Reader, Store, Tx, committed, image, people, same};
-use crate::graph::lpg::LpgStore;
 use crate::graph::rowgroup::RowGroupStore;
 
 /// A store with an epoch it moves and versions it collects.
@@ -35,7 +34,6 @@ macro_rules! epochs {
     };
 }
 
-epochs!(LpgStore);
 epochs!(RowGroupStore);
 
 /// Instantiates every epoch case for a store.
@@ -188,19 +186,6 @@ pub(crate) fn gc_versions_leaves_an_open_transactions_writes<S: Epochs>(
         &(&own.nodes, &own.edges),
         "the committed state after its commit",
     )
-}
-
-/// `LpgStore`'s epochs.
-mod lpg {
-    use super::{KnownGap, LpgStore};
-
-    fn lpg_store() -> LpgStore {
-        LpgStore::new().expect("a new store")
-    }
-
-    const GAPS: &[KnownGap] = &[];
-
-    epoch_suite!(LpgStore, lpg_store, GAPS);
 }
 
 /// The row-group store's epochs.

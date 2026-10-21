@@ -19,7 +19,7 @@
 //! all rows. Phase 2b will introduce multi-block serialization, and
 //! Phase 2c will add per-block statistics (min/max/null/row counts,
 //! optional bloom) so range scans can skip blocks whose stats prove
-//! no match. Phase 2d/2e extend the same descriptors to LpgStore.
+//! no match. Phase 2d/2e extend the same descriptors to the LPG store.
 //!
 //! The split is deliberate: Phase 2a keeps the data layout untouched so
 //! upstream readers can be extended block-aware before any on-disk

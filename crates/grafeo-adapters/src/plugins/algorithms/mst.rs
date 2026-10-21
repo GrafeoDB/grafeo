@@ -6,12 +6,16 @@
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_common::types::PropertyKey;
 use grafeo_common::types::{EdgeId, NodeId, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStoreMut as _;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
 use super::components::UnionFind;
@@ -396,30 +400,60 @@ impl_algorithm! {
 mod tests {
     use super::*;
 
-    fn create_weighted_triangle() -> LpgStore {
+    fn create_weighted_triangle() -> RowGroupStore {
         // Triangle: 0-1-2 with edges
         // 0-1: weight 1
         // 1-2: weight 2
         // 0-2: weight 3
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
 
-        store.create_edge_with_props(n0, n1, "EDGE", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n1, n0, "EDGE", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n1, n2, "EDGE", [("weight", Value::Float64(2.0))]);
-        store.create_edge_with_props(n2, n1, "EDGE", [("weight", Value::Float64(2.0))]);
-        store.create_edge_with_props(n0, n2, "EDGE", [("weight", Value::Float64(3.0))]);
-        store.create_edge_with_props(n2, n0, "EDGE", [("weight", Value::Float64(3.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n0,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            n0,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n0,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(3.0))],
+        );
 
         store
     }
 
-    fn create_simple_chain() -> LpgStore {
+    fn create_simple_chain() -> RowGroupStore {
         // Chain: 0 - 1 - 2 - 3
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
@@ -462,7 +496,7 @@ mod tests {
 
     #[test]
     fn test_kruskal_empty() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let result = kruskal(&store, None);
 
         assert!(result.edges.is_empty(), "{:?}", result.edges);
@@ -471,7 +505,7 @@ mod tests {
 
     #[test]
     fn test_kruskal_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
 
         let result = kruskal(&store, None);
@@ -512,7 +546,7 @@ mod tests {
 
     #[test]
     fn test_prim_empty() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let result = prim(&store, None, None);
 
         assert!(result.edges.is_empty(), "{:?}", result.edges);

@@ -11,7 +11,9 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStoreMut as _;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
 use super::traits::{
@@ -493,8 +495,8 @@ impl_algorithm! {
 mod tests {
     use super::*;
 
-    fn create_test_graph() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_test_graph() -> RowGroupStore {
+        let store = RowGroupStore::new();
 
         // Create a simple graph:
         //   0 -> 1 -> 2
@@ -547,14 +549,14 @@ mod tests {
 
     #[test]
     fn test_bfs_nonexistent_start() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let visited = bfs(&store, NodeId::new(999));
         assert!(visited.is_empty(), "{visited:?}");
     }
 
     #[test]
     fn test_dfs_nonexistent_start() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let finished = dfs(&store, NodeId::new(999));
         assert!(finished.is_empty(), "{finished:?}");
     }
@@ -600,14 +602,14 @@ mod tests {
 
     #[test]
     fn test_bfs_layers_empty_graph() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let layers = bfs_layers(&store, NodeId::new(0));
         assert!(layers.is_empty(), "{layers:?}");
     }
 
     #[test]
     fn test_bfs_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let visited = bfs(&store, n0);
         assert_eq!(visited, vec![n0]);
@@ -615,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_bfs_layers_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let layers = bfs_layers(&store, n0);
         assert_eq!(layers.len(), 1);
@@ -723,7 +725,7 @@ mod tests {
     #[test]
     fn test_dfs_with_visitor_back_edge() {
         // Create a cycle: 0 -> 1 -> 2 -> 0
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -746,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_dfs_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let finished = dfs(&store, n0);
         assert_eq!(finished, vec![n0]);
@@ -754,7 +756,7 @@ mod tests {
 
     #[test]
     fn test_dfs_all_visits_all_components() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         // Component 1: 0 -> 1
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
@@ -771,7 +773,7 @@ mod tests {
 
     #[test]
     fn test_dfs_all_empty_graph() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let finished = dfs_all(&store);
         assert!(finished.is_empty(), "{finished:?}");
     }
@@ -818,7 +820,7 @@ mod tests {
 
     #[test]
     fn test_bfs_with_self_loop() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         store.create_edge(n0, n0, "SELF"); // self-loop
@@ -833,7 +835,7 @@ mod tests {
 
     #[test]
     fn test_dfs_with_self_loop() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         store.create_edge(n0, n0, "SELF"); // self-loop
@@ -847,7 +849,7 @@ mod tests {
 
     /// The rows of `DfsAlgorithm` from `start`, by node: (depth, discovery,
     /// finish).
-    fn dfs_rows(store: &LpgStore, start: NodeId) -> FxHashMap<NodeId, (i64, i64, i64)> {
+    fn dfs_rows(store: &RowGroupStore, start: NodeId) -> FxHashMap<NodeId, (i64, i64, i64)> {
         use crate::plugins::Parameters;
         use crate::plugins::algorithms::GraphAlgorithm;
 
@@ -876,7 +878,7 @@ mod tests {
     #[test]
     fn dfs_algorithm_depth_is_the_tree_depth() {
         // 0 -> 1 -> 2 -> 3, and 0 -> 4 (the graph of the report).
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n: Vec<NodeId> = (0..5).map(|_| store.create_node(&["Node"])).collect();
         store.create_edge(n[0], n[1], "E");
         store.create_edge(n[1], n[2], "E");
@@ -900,7 +902,7 @@ mod tests {
     fn dfs_algorithm_depth_follows_the_tree_not_the_shortest_path() {
         // 0 -> 1 -> 2 and 0 -> 2: DFS reaches 2 through 1 (depth 2) while
         // BFS reaches it directly (distance 1).
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n: Vec<NodeId> = (0..3).map(|_| store.create_node(&["Node"])).collect();
         store.create_edge(n[0], n[1], "E");
         store.create_edge(n[1], n[2], "E");

@@ -7,8 +7,8 @@
 //! - [`GraphStoreMut`]: Write operations (create, delete, mutate)
 //!
 //! Admin operations (index management, MVCC internals, schema introspection,
-//! statistics recomputation, WAL recovery) stay on the concrete [`LpgStore`]
-//! and are not part of these traits.
+//! statistics recomputation, WAL recovery) stay on the concrete store (the
+//! row-group store) and are not part of these traits.
 //!
 //! ## Design rationale
 //!
@@ -16,8 +16,6 @@
 //! than raw bytes. This preserves zero-overhead access for in-memory storage
 //! while allowing future backends (SpilloverStore, disk-backed) to implement
 //! the same interface with transparent serialization where needed.
-//!
-//! [`LpgStore`]: crate::graph::lpg::LpgStore
 
 use crate::graph::Direction;
 use crate::graph::lpg::CompareOp;

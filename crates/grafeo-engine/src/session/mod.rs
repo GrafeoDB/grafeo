@@ -630,7 +630,7 @@ impl Session {
     /// A graph that has the graph type with the key `graph_type` as its type,
     /// which keeps the graph type from being dropped (ISO/IEC 39075:2024 12.7,
     /// Syntax Rule 6). The binding a dropped graph left behind does not count.
-    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[cfg(all(feature = "lpg", any(feature = "gql", feature = "sql-pgq")))]
     fn graph_typed_by(&self, graph_type: &str) -> Option<String> {
         let store = self.root_store();
         self.catalog
@@ -642,7 +642,7 @@ impl Session {
     }
 
     /// The error that refuses to drop `graph_type`, the type of `graph`.
-    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[cfg(all(feature = "lpg", any(feature = "gql", feature = "sql-pgq")))]
     fn graph_type_in_use(graph_type: &str, graph: &str) -> grafeo_common::utils::error::Error {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
         Error::Query(QueryError::new(
@@ -1005,7 +1005,7 @@ impl Session {
                     let src_key = self.effective_graph_key(src);
                     if self.root_store().graph(&src_key).is_none() {
                         return Err(Error::Query(QueryError::new(
-                            QueryErrorKind::Semantic,
+                            QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
                         )));
                     }
@@ -1014,7 +1014,7 @@ impl Session {
                     let src_key = self.effective_graph_key(src);
                     if self.root_store().graph(&src_key).is_none() {
                         return Err(Error::Query(QueryError::new(
-                            QueryErrorKind::Semantic,
+                            QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
                         )));
                     }
@@ -1045,7 +1045,7 @@ impl Session {
                     };
                     if self.catalog.get_graph_type_def(&graph_type).is_none() {
                         return Err(Error::Query(QueryError::new(
-                            QueryErrorKind::Semantic,
+                            QueryErrorKind::InvalidReference,
                             crate::catalog::CatalogError::TypeNotFound(graph_type).to_string(),
                         )));
                     }
@@ -1079,7 +1079,7 @@ impl Session {
                     let src_key = self.effective_graph_key(src);
                     let source = self.root_store().graph(&src_key).ok_or_else(|| {
                         Error::Query(QueryError::new(
-                            QueryErrorKind::Semantic,
+                            QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
                         ))
                     })?;
@@ -1110,7 +1110,7 @@ impl Session {
                         return Ok(QueryResult::empty());
                     }
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     )));
                 }
@@ -1156,7 +1156,7 @@ impl Session {
                     && self.root_store().graph(&effective_key).is_none()
                 {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     )));
                 }
@@ -1186,7 +1186,7 @@ impl Session {
                     && self.root_store().graph(&effective_key).is_none()
                 {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     )));
                 }
@@ -1197,7 +1197,7 @@ impl Session {
                 // ISO/IEC 39075 Section 7.1 GR1: set session schema (independent of graph)
                 if !self.catalog.schema_exists(&name) {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::InvalidReference,
                         format!("Schema '{name}' does not exist"),
                     )));
                 }
@@ -1324,7 +1324,7 @@ impl Session {
                 let removed = self.projections.write().remove(&name).is_some();
                 if !removed {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::InvalidReference,
                         format!("Projection '{name}' does not exist"),
                     )));
                 }
@@ -1386,6 +1386,363 @@ impl Session {
             &self.root_store(),
             &self.catalog,
             &self.transaction_manager,
+        )
+    }
+
+    /// The store a statement reads: the graph it names for itself
+    /// (`GRAPH_TABLE (g ...)`), else the session's current graph.
+    ///
+    /// # Errors
+    ///
+    /// An invalid reference when no graph has that name, and a permission
+    /// error when the user may not read it.
+    #[cfg(feature = "sql-pgq")]
+    fn statement_store(&self, graph: Option<&str>) -> Result<Arc<dyn GraphStoreSearch>> {
+        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+
+        let Some(name) = graph else {
+            return Ok(self.active_store());
+        };
+        if self.identity.has_grants()
+            && !self
+                .identity
+                .can_access_graph(name, crate::auth::Role::ReadOnly)
+        {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "permission denied: no grant for graph '{name}' (user: {})",
+                    self.identity.user_id()
+                ),
+            )));
+        }
+        let key = self.effective_graph_key(name);
+        #[cfg(feature = "lpg")]
+        if self.root_store().graph(&key).is_some() {
+            return Ok(self.store_for_key(Some(&key)));
+        }
+        Err(Error::Query(QueryError::invalid_reference(format!(
+            "Graph '{name}' does not exist"
+        ))))
+    }
+
+    /// SQL/PGQ `CREATE PROPERTY GRAPH`: one standalone change declares a node
+    /// type per node table (its columns typed properties, its `PRIMARY KEY`
+    /// the type's key constraint), an edge type per edge table between the
+    /// node types its `REFERENCES` columns name (the other columns its
+    /// properties), a closed graph type of them, and an empty graph of that
+    /// type, all named as the statement names them.
+    ///
+    /// # Errors
+    ///
+    /// A graph, a graph type or an element type of the same name exists
+    /// (without `OR REPLACE`, or one that is not this property graph's);
+    /// `OR REPLACE` of a graph type another graph has; the user may not run
+    /// DDL; a read-only transaction.
+    #[cfg(all(feature = "lpg", feature = "sql-pgq"))]
+    fn create_property_graph(
+        &self,
+        op: &crate::query::plan::CreatePropertyGraphOp,
+    ) -> Result<QueryResult> {
+        use crate::catalog::{
+            EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition, TypeConstraint,
+            TypedProperty,
+        };
+        use crate::database::catalog_records::{
+            edge_type_record, graph_type_record, node_type_record,
+        };
+        use grafeo_common::change::StandaloneOp;
+        use grafeo_common::storage::catalog_record::{
+            CatalogKey, CatalogRecord, GraphBindingRecord,
+        };
+        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+
+        let semantic =
+            |message: String| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+        self.require_permission(crate::auth::StatementKind::Admin)?;
+        if *self.read_only_tx.lock() {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
+        if op.name.contains('/') {
+            return Err(semantic(format!(
+                "Graph name '{}' must not contain '/' (reserved as schema/graph separator)",
+                op.name
+            )));
+        }
+        let graph_key = self.effective_graph_key(&op.name);
+        let type_key = self.effective_type_key(&op.name);
+        // A replaced graph is dropped: open writes to it are refused first.
+        let held = self.hold_for_standalone(op.or_replace)?;
+
+        let graph_exists = self.root_store().graph(&graph_key).is_some();
+        let old_type = self.catalog.get_graph_type_def(&type_key);
+        if (graph_exists || old_type.is_some()) && op.if_not_exists {
+            return Ok(Self::ddl_status("No change".to_string()));
+        }
+        if !op.or_replace {
+            if graph_exists {
+                return Err(semantic(format!("Graph '{}' already exists", op.name)));
+            }
+            if old_type.is_some() {
+                return Err(semantic(format!("Graph type '{}' already exists", op.name)));
+            }
+        }
+        // OR REPLACE drops the graph type first, which another graph's type
+        // keeps (as GQL's CREATE OR REPLACE GRAPH TYPE).
+        if old_type.is_some()
+            && let Some(graph) = self.graph_typed_by(&type_key)
+            && graph != graph_key
+        {
+            return Err(Self::graph_type_in_use(&op.name, &graph));
+        }
+        // The element types the replaced graph type alone has go with it.
+        let replaced = old_type
+            .as_ref()
+            .map(|def| self.element_types_only_of(def))
+            .unwrap_or_default();
+
+        let properties = |columns: &[crate::query::plan::PropertyGraphColumn]| {
+            let properties: Vec<TypedProperty> = columns
+                .iter()
+                .filter(|column| !column.references)
+                .map(|column| TypedProperty {
+                    name: column.name.clone(),
+                    data_type: column.data_type.clone(),
+                    nullable: !column.primary_key,
+                    default_value: None,
+                })
+                .collect();
+            TypedProperty::check_list_levels(&properties).map_err(|e| semantic(e.to_string()))?;
+            Ok::<_, Error>(properties)
+        };
+
+        let mut change = crate::transaction::StandaloneChange::new();
+        if op.or_replace && graph_exists {
+            crate::database::standalone::refuse_drop_with_open_changes(
+                &self.transaction_manager,
+                &held,
+                &graph_key,
+            )?;
+            change.push(StandaloneOp::DropGraph {
+                name: graph_key.clone(),
+            });
+        }
+        if old_type.is_some() {
+            change.push(StandaloneOp::DropCatalog(CatalogKey::GraphType(
+                type_key.clone(),
+            )));
+        }
+        let mut node_types = Vec::new();
+        for table in &op.node_tables {
+            let key = self.effective_type_key(&table.name);
+            if self.catalog.get_node_type(&key).is_some() && !replaced.0.contains(&key) {
+                return Err(semantic(format!(
+                    "Node type '{}' already exists",
+                    table.name
+                )));
+            }
+            let primary_key: Vec<String> = table
+                .columns
+                .iter()
+                .filter(|column| column.primary_key)
+                .map(|column| column.name.clone())
+                .collect();
+            let def = NodeTypeDefinition {
+                name: key.clone(),
+                properties: properties(&table.columns)?,
+                constraints: if primary_key.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![TypeConstraint::PrimaryKey(primary_key)]
+                },
+                parent_types: Vec::new(),
+                key_labels: Vec::new(),
+            };
+            change.push(StandaloneOp::PutCatalog(CatalogRecord::NodeType(
+                node_type_record(&def),
+            )));
+            node_types.push(key);
+        }
+        let mut edge_types = Vec::new();
+        for table in &op.edge_tables {
+            let key = self.effective_type_key(&table.name);
+            if self.catalog.get_edge_type_def(&key).is_some() && !replaced.1.contains(&key) {
+                return Err(semantic(format!(
+                    "Edge type '{}' already exists",
+                    table.name
+                )));
+            }
+            let def = EdgeTypeDefinition {
+                name: key.clone(),
+                properties: properties(&table.columns)?,
+                constraints: Vec::new(),
+                source_node_types: vec![self.effective_type_key(&table.source_table)],
+                target_node_types: vec![self.effective_type_key(&table.target_table)],
+                key_labels: Vec::new(),
+            };
+            change.push(StandaloneOp::PutCatalog(CatalogRecord::EdgeType(
+                edge_type_record(&def)?,
+            )));
+            edge_types.push(key);
+        }
+        // The replaced graph type's own element types this one does not
+        // declare again.
+        for key in replaced.0.iter().filter(|key| !node_types.contains(key)) {
+            change.push(StandaloneOp::DropCatalog(CatalogKey::NodeType(key.clone())));
+        }
+        for key in replaced.1.iter().filter(|key| !edge_types.contains(key)) {
+            change.push(StandaloneOp::DropCatalog(CatalogKey::EdgeType(key.clone())));
+        }
+        change.push(StandaloneOp::PutCatalog(CatalogRecord::GraphType(
+            graph_type_record(&GraphTypeDefinition {
+                name: type_key.clone(),
+                allowed_node_types: node_types,
+                allowed_edge_types: edge_types,
+                open: false,
+            }),
+        )));
+        change.push(StandaloneOp::CreateGraph {
+            name: graph_key.clone(),
+        });
+        change.push(StandaloneOp::PutCatalog(CatalogRecord::GraphBinding(
+            GraphBindingRecord {
+                graph: graph_key,
+                graph_type: type_key,
+            },
+        )));
+        self.commit_standalone(change, &held)?;
+        Ok(Self::ddl_status(format!(
+            "Property graph '{}' created ({} node tables, {} edge tables)",
+            op.name,
+            op.node_tables.len(),
+            op.edge_tables.len()
+        )))
+    }
+
+    /// SQL/PGQ `DROP PROPERTY GRAPH`: the graph, its graph type and the node
+    /// and edge types no other graph type has, in one standalone change.
+    ///
+    /// # Errors
+    ///
+    /// No graph or graph type of that name (without `IF EXISTS`); a graph
+    /// type another graph has; open writes to the graph; the user may not
+    /// run DDL; a read-only transaction.
+    #[cfg(all(feature = "lpg", feature = "sql-pgq"))]
+    fn drop_property_graph(
+        &self,
+        op: &crate::query::plan::DropPropertyGraphOp,
+    ) -> Result<QueryResult> {
+        use grafeo_common::change::StandaloneOp;
+        use grafeo_common::storage::catalog_record::CatalogKey;
+        use grafeo_common::utils::error::{Error, QueryError};
+
+        self.require_permission(crate::auth::StatementKind::Admin)?;
+        if *self.read_only_tx.lock() {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
+        let graph_key = self.effective_graph_key(&op.name);
+        let type_key = self.effective_type_key(&op.name);
+        let held = self.hold_for_standalone(true)?;
+        let graph_exists = self.root_store().graph(&graph_key).is_some();
+        let graph_type = self.catalog.get_graph_type_def(&type_key);
+        if !graph_exists && graph_type.is_none() {
+            if op.if_exists {
+                return Ok(Self::ddl_status("No change".to_string()));
+            }
+            return Err(Error::Query(QueryError::invalid_reference(format!(
+                "Property graph '{}' does not exist",
+                op.name
+            ))));
+        }
+        if graph_type.is_some()
+            && let Some(graph) = self.graph_typed_by(&type_key)
+            && graph != graph_key
+        {
+            return Err(Self::graph_type_in_use(&op.name, &graph));
+        }
+        let mut change = crate::transaction::StandaloneChange::new();
+        if graph_exists {
+            crate::database::standalone::refuse_drop_with_open_changes(
+                &self.transaction_manager,
+                &held,
+                &graph_key,
+            )?;
+            change.push(StandaloneOp::DropGraph {
+                name: graph_key.clone(),
+            });
+        }
+        if let Some(def) = &graph_type {
+            let (node_types, edge_types) = self.element_types_only_of(def);
+            change.push(StandaloneOp::DropCatalog(CatalogKey::GraphType(type_key)));
+            for key in node_types {
+                change.push(StandaloneOp::DropCatalog(CatalogKey::NodeType(key)));
+            }
+            for key in edge_types {
+                change.push(StandaloneOp::DropCatalog(CatalogKey::EdgeType(key)));
+            }
+        }
+        self.commit_standalone(change, &held)?;
+        drop(held);
+        let mut current = self.current_graph.lock();
+        if current
+            .as_deref()
+            .is_some_and(|g| g.eq_ignore_ascii_case(&op.name))
+        {
+            *current = None;
+        }
+        Ok(Self::ddl_status(format!(
+            "Property graph '{}' dropped",
+            op.name
+        )))
+    }
+
+    /// The result of a SQL/PGQ DDL statement: one row with its `status`, as
+    /// a SQL client reads it.
+    #[cfg(all(feature = "lpg", feature = "sql-pgq"))]
+    fn ddl_status(message: String) -> QueryResult {
+        QueryResult {
+            columns: vec!["status".into()],
+            column_types: vec![grafeo_common::types::LogicalType::String],
+            rows: vec![vec![Value::from(message)]],
+            execution_time_ms: None,
+            rows_scanned: None,
+            status_message: None,
+            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
+            counters: Default::default(),
+            profile: None,
+        }
+    }
+
+    /// The node and edge types of graph type `def` that no other graph type
+    /// lists: they go when `def` goes.
+    #[cfg(all(feature = "lpg", feature = "sql-pgq"))]
+    fn element_types_only_of(
+        &self,
+        def: &crate::catalog::GraphTypeDefinition,
+    ) -> (Vec<String>, Vec<String>) {
+        let others: Vec<_> = self
+            .catalog
+            .schema()
+            .map(crate::catalog::SchemaCatalog::all_graph_type_defs)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|other| other.name != def.name)
+            .collect();
+        let only =
+            |types: &[String], listed: fn(&crate::catalog::GraphTypeDefinition) -> &[String]| {
+                types
+                    .iter()
+                    .filter(|key| !others.iter().any(|other| listed(other).contains(key)))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+        (
+            only(&def.allowed_node_types, |other| &other.allowed_node_types),
+            only(&def.allowed_edge_types, |other| &other.allowed_edge_types),
         )
     }
 
@@ -1476,6 +1833,9 @@ impl Session {
 
         let semantic =
             |message: String| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+        let invalid_reference = |message: String| {
+            Error::Query(QueryError::new(QueryErrorKind::InvalidReference, message))
+        };
         let done = |result: QueryResult| Ok((result, AfterSchemaChange::Nothing));
 
         match cmd {
@@ -1549,7 +1909,7 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
-                    return Err(semantic(
+                    return Err(invalid_reference(
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
@@ -1564,7 +1924,7 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
-                    return Err(semantic(
+                    return Err(invalid_reference(
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
@@ -1626,7 +1986,7 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::status("No change".to_string()));
                     }
-                    return Err(semantic(format!("Index '{name}' does not exist")));
+                    return Err(invalid_reference(format!("Index '{name}' does not exist")));
                 };
                 change.push(StandaloneOp::DropCatalog(CatalogKey::IndexName(
                     name.clone(),
@@ -1711,7 +2071,9 @@ impl Session {
                             "No constraint '{name}' to drop"
                         )));
                     }
-                    return Err(semantic(format!("constraint '{name}' does not exist")));
+                    return Err(invalid_reference(format!(
+                        "constraint '{name}' does not exist"
+                    )));
                 }
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Constraint(
                     name.clone(),
@@ -1816,7 +2178,7 @@ impl Session {
                             if *is_reference {
                                 // Reference: validate existence; declare nothing.
                                 if self.catalog.get_node_type(&inline_effective).is_none() {
-                                    return Err(semantic(format!(
+                                    return Err(invalid_reference(format!(
                                         "Referenced node type '{inline_effective}' does not exist"
                                     )));
                                 }
@@ -1849,7 +2211,7 @@ impl Session {
                             let inline_effective = self.effective_type_key(name);
                             if *is_reference {
                                 if self.catalog.get_edge_type_def(&inline_effective).is_none() {
-                                    return Err(semantic(format!(
+                                    return Err(invalid_reference(format!(
                                         "Referenced edge type '{inline_effective}' does not exist"
                                     )));
                                 }
@@ -1906,7 +2268,7 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
-                    return Err(semantic(
+                    return Err(invalid_reference(
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
@@ -1977,7 +2339,9 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
-                    return Err(semantic(CatalogError::SchemaNotFound(name).to_string()));
+                    return Err(invalid_reference(
+                        CatalogError::SchemaNotFound(name).to_string(),
+                    ));
                 }
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Schema(name.clone())));
                 // The auto-created default graph partition goes with it.
@@ -2002,7 +2366,9 @@ impl Session {
                 // The whole statement or nothing: the alterations apply to a
                 // copy of the type, which replaces it once all of them pass.
                 let mut def = self.catalog.get_node_type(&effective_name).ok_or_else(|| {
-                    semantic(CatalogError::TypeNotFound(effective_name.clone()).to_string())
+                    invalid_reference(
+                        CatalogError::TypeNotFound(effective_name.clone()).to_string(),
+                    )
                 })?;
                 for alt in &stmt.alterations {
                     match alt {
@@ -2035,7 +2401,9 @@ impl Session {
                     .catalog
                     .get_edge_type_def(&effective_name)
                     .ok_or_else(|| {
-                        semantic(CatalogError::TypeNotFound(effective_name.clone()).to_string())
+                        invalid_reference(
+                            CatalogError::TypeNotFound(effective_name.clone()).to_string(),
+                        )
                     })?;
                 for alt in &stmt.alterations {
                     match alt {
@@ -2069,7 +2437,9 @@ impl Session {
                     .catalog
                     .get_graph_type_def(&effective_name)
                     .ok_or_else(|| {
-                        semantic(CatalogError::TypeNotFound(effective_name.clone()).to_string())
+                        invalid_reference(
+                            CatalogError::TypeNotFound(effective_name.clone()).to_string(),
+                        )
                     })?;
                 for alt in &stmt.alterations {
                     match alt {
@@ -2137,7 +2507,9 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::empty());
                     }
-                    return Err(semantic(CatalogError::TypeNotFound(name).to_string()));
+                    return Err(invalid_reference(
+                        CatalogError::TypeNotFound(name).to_string(),
+                    ));
                 }
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Procedure(
                     name.clone(),
@@ -2532,7 +2904,7 @@ impl Session {
 
         let def = self.catalog.get_graph_type_def(name).ok_or_else(|| {
             Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::InvalidReference,
                 format!("Graph type '{name}' not found"),
             ))
         })?;
@@ -3239,15 +3611,12 @@ impl Session {
                 None => match cypher::translate_full(query)? {
                     #[cfg(feature = "lpg")]
                     cypher::CypherTranslationResult::SchemaCommand(cmd) => {
-                        use grafeo_common::utils::error::{
-                            Error as GrafeoError, QueryError, QueryErrorKind,
-                        };
                         self.require_permission(crate::auth::StatementKind::Admin)?;
+                        // As in GQL: a read-only transaction refuses DDL (25G03).
                         if *self.read_only_tx.lock() {
-                            return Err(GrafeoError::Query(QueryError::new(
-                                QueryErrorKind::Semantic,
-                                "Cannot execute schema DDL in a read-only transaction",
-                            )));
+                            return Err(grafeo_common::utils::error::Error::Transaction(
+                                grafeo_common::utils::error::TransactionError::ReadOnly,
+                            ));
                         }
                         return self.execute_schema_command(cmd);
                     }
@@ -3777,25 +4146,29 @@ impl Session {
                     // Parse and translate
                     let logical_plan = sql_pgq::translate(query)?;
 
-                    // Handle DDL statements directly (they don't go through the query pipeline)
-                    if let LogicalOperator::CreatePropertyGraph(ref cpg) = logical_plan.root {
-                        self.require_permission(crate::auth::StatementKind::Admin)?;
-                        return Ok(QueryResult {
-                            columns: vec!["status".into()],
-                            column_types: vec![grafeo_common::types::LogicalType::String],
-                            rows: vec![vec![Value::from(format!(
-                                "Property graph '{}' created ({} node tables, {} edge tables)",
-                                cpg.name,
-                                cpg.node_tables.len(),
-                                cpg.edge_tables.len()
-                            ))]],
-                            execution_time_ms: None,
-                            rows_scanned: None,
-                            status_message: None,
-                            gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
-                            counters: Default::default(),
-                            profile: None,
-                        });
+                    // Property graph DDL is a standalone change of its own (see
+                    // `create_property_graph`), outside the query pipeline.
+                    match &logical_plan.root {
+                        #[cfg(feature = "lpg")]
+                        LogicalOperator::CreatePropertyGraph(op) => {
+                            return self.create_property_graph(op);
+                        }
+                        #[cfg(feature = "lpg")]
+                        LogicalOperator::DropPropertyGraph(op) => {
+                            return self.drop_property_graph(op);
+                        }
+                        // Without the labeled property graph there are no
+                        // graphs to declare or drop.
+                        #[cfg(not(feature = "lpg"))]
+                        LogicalOperator::CreatePropertyGraph(_)
+                        | LogicalOperator::DropPropertyGraph(_) => {
+                            return Err(grafeo_common::utils::error::Error::Query(
+                                grafeo_common::utils::error::QueryError::unsupported(
+                                    "this build has no labeled property graph (the `lpg` feature)",
+                                ),
+                            ));
+                        }
+                        _ => {}
                     }
                     if params.is_some() {
                         self.query_cache
@@ -3814,7 +4187,7 @@ impl Session {
             } else {
                 let mut binder = Binder::new();
                 let _binding_context = binder.bind(&logical_plan)?;
-                let active = self.active_store();
+                let active = self.statement_store(logical_plan.graph.as_deref())?;
                 let optimizer = Optimizer::from_graph_store(&*active);
                 let plan = optimizer.optimize(logical_plan)?;
                 self.query_cache.put_optimized(cache_key, plan.clone());
@@ -3822,7 +4195,8 @@ impl Session {
             }
         };
 
-        let active = self.active_store();
+        // `GRAPH_TABLE (g ...)` reads the graph g, else the current graph.
+        let active = self.statement_store(optimized_plan.graph.as_deref())?;
         let has_mutations = self.plan_writes(&optimized_plan.root);
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
@@ -4993,7 +5367,7 @@ impl Session {
                     .unwrap_or_else(|| "default".to_string());
                 Err(grafeo_common::utils::error::Error::Query(
                     grafeo_common::utils::error::QueryError::new(
-                        grafeo_common::utils::error::QueryErrorKind::Semantic,
+                        grafeo_common::utils::error::QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     ),
                 ))

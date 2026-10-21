@@ -170,8 +170,7 @@ fn a_labeled_point_lookup_does_not_grow_with_the_label() {
     use std::time::{Duration, Instant};
 
     let db = GrafeoDB::new_in_memory();
-    // In batches: with the `tiered-storage` feature one transaction can create
-    // about 20,000 nodes until tiered storage is wired in (#433).
+    // In batches of 15,000 nodes, one statement each.
     for start in (0..60_000).step_by(15_000) {
         db.execute(&format!(
             "UNWIND range({start}, {}) AS i INSERT (:Graph:File {{id: 'n' + toString(i)}})",

@@ -4,9 +4,9 @@
 //!
 //! The direct-call question (an immediate call costs about 470 ns, a private
 //! transaction about 1,070 ns, of which the store's `apply` about 210 ns)
-//! is answered here per store: `LpgStore` now, the row-group store from
-//! workstream H1a on, with the same cases. Each write case starts from the
-//! same graph: 10,000 people with a name and an age, each knowing two others.
+//! is answered here for the row-group store (`LpgStore`, which had the same
+//! cases, was deleted in 0.6.0). Each write case starts from the same
+//! graph: 10,000 people with a name and an age, each knowing two others.
 //!
 //! ```bash
 //! cargo bench -p grafeo-core --bench store_apply
@@ -31,7 +31,6 @@ use grafeo_common::types::{
 };
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::apply::{Applied, ChangeTarget, Writer};
-use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::graph::rowgroup::section::{
     GraphToWrite, LPG_SECTION_VERSION, read_lpg_section, write_lpg_section,
@@ -56,12 +55,6 @@ impl<T: GraphStoreMut + ChangeTarget> Store for T {}
 /// A store with a property index.
 trait Indexed: Store {
     fn create_property_index(&self, property: &str);
-}
-
-impl Indexed for LpgStore {
-    fn create_property_index(&self, property: &str) {
-        LpgStore::create_property_index(self, property);
-    }
 }
 
 impl Indexed for RowGroupStore {
@@ -482,15 +475,6 @@ fn cases<S: Indexed + 'static>(
     group.finish();
 }
 
-fn lpg_store() -> LpgStore {
-    LpgStore::new().expect("a new store")
-}
-
-fn bench_lpg_store(c: &mut Criterion) {
-    // `LpgStore` keeps no old values to collect.
-    cases(c, "lpg", lpg_store, |_| {});
-}
-
 fn bench_rowgroup_store(c: &mut Criterion) {
     cases(c, "rowgroup", RowGroupStore::new, |store| {
         store.collect_after_write(store.current_epoch());
@@ -661,7 +645,6 @@ fn bench_rowgroup_cold_reads(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_lpg_store,
     bench_rowgroup_store,
     bench_rowgroup_backward_edges,
     bench_rowgroup_cold_reads

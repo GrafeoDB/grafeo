@@ -674,7 +674,7 @@ impl SparqlTranslator {
         // of evaluating the WHERE clause against the wrong dataset.
         if !using_clauses.is_empty() {
             return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "SPARQL Update USING / USING NAMED is not yet supported",
             )));
         }
@@ -1081,7 +1081,7 @@ impl SparqlTranslator {
             }
 
             ast::GraphPattern::Service { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "SPARQL SERVICE (federated queries) is not yet supported",
             ))),
 
@@ -1329,7 +1329,7 @@ impl SparqlTranslator {
             )),
             // Complex property paths are not fully supported yet
             _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "Complex property paths not yet supported",
             ))),
         }
@@ -2266,7 +2266,7 @@ impl SparqlTranslator {
                 .collect::<Result<Vec<_>>>()
                 .map(PathStep::Alternative),
             _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "Repeated property paths support IRIs, inverse, sequence and alternative; nested quantifiers and negated sets are not supported",
             ))),
         }

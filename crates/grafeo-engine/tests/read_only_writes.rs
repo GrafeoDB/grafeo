@@ -463,8 +463,8 @@ fn a_read_only_role_cannot_run_a_cached_cypher_write() {
 #[test]
 fn a_read_only_role_cannot_repeat_sql_pgq_ddl() {
     let (db, _) = seeded();
-    let ddl =
-        "CREATE PROPERTY GRAPH Social NODE TABLES (Person (id BIGINT PRIMARY KEY, name VARCHAR))";
+    // IF NOT EXISTS: the second run by the admin changes nothing.
+    let ddl = "CREATE PROPERTY GRAPH IF NOT EXISTS Social NODE TABLES (Person (id BIGINT PRIMARY KEY, name VARCHAR))";
     db.session().execute_sql(ddl).unwrap();
     db.session().execute_sql(ddl).unwrap();
 

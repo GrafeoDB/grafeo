@@ -515,7 +515,6 @@ fn test_create_property_graph() {
              )
              EDGE TABLES (
                  KNOWS (
-                     id BIGINT PRIMARY KEY,
                      source BIGINT REFERENCES Person(id),
                      target BIGINT REFERENCES Person(id),
                      since INT
@@ -560,7 +559,6 @@ fn test_create_property_graph_multiple_tables() {
              )
              EDGE TABLES (
                  WORKS_AT (
-                     id BIGINT PRIMARY KEY,
                      employee BIGINT REFERENCES Person(id),
                      employer BIGINT REFERENCES Company(id)
                  )
@@ -900,21 +898,29 @@ fn test_group_by_having() {
 // Graph name reference in GRAPH_TABLE
 // ============================================================================
 
+/// `GRAPH_TABLE (g, ...)` reads the graph g: one that does not exist is an
+/// invalid reference (it was parsed and ignored, and the default graph read).
 #[test]
-fn test_graph_name_reference_parses() {
+fn test_graph_name_reference_reads_that_graph() {
     let db = create_social_network();
     let session = db.session();
-
-    // The parser should accept a graph name before MATCH.
-    // Execution routes to the default graph (named graph routing is session-level).
-    let result = session.execute_sql(
-        "SELECT * FROM GRAPH_TABLE (social_graph, MATCH (a:Person) COLUMNS (a.name AS name))",
+    let error = session
+        .execute_sql(
+            "SELECT * FROM GRAPH_TABLE (social_graph, MATCH (a:Person) COLUMNS (a.name AS name))",
+        )
+        .unwrap_err();
+    assert_eq!(
+        grafeo_common::utils::GqlStatus::from(&error).as_str(),
+        "42002",
+        "{error}"
     );
-    // Should parse and execute (graph name is parsed but not yet routed)
-    assert!(
-        result.is_ok(),
-        "graph name reference should parse, got: {result:?}"
-    );
+    session.execute("CREATE GRAPH social_graph").unwrap();
+    let result = session
+        .execute_sql(
+            "SELECT * FROM GRAPH_TABLE (social_graph, MATCH (a:Person) COLUMNS (a.name AS name))",
+        )
+        .unwrap();
+    assert!(result.rows().is_empty(), "the new graph has no people");
 }
 
 // ============================================================================

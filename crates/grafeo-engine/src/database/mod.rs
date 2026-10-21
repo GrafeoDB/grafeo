@@ -2196,7 +2196,7 @@ impl GrafeoDB {
             && store.graph(name).is_none()
         {
             return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::InvalidReference,
                 format!("Graph '{name}' does not exist"),
             )));
         }
@@ -2226,7 +2226,7 @@ impl GrafeoDB {
             && !self.catalog.schema_exists(name)
         {
             return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::InvalidReference,
                 format!("Schema '{name}' does not exist"),
             )));
         }
@@ -2339,7 +2339,7 @@ impl GrafeoDB {
         if self.root_store().is_none() {
             return Err(grafeo_common::utils::error::Error::Query(
                 grafeo_common::utils::error::QueryError::new(
-                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    grafeo_common::utils::error::QueryErrorKind::Unsupported,
                     "Named graphs need the built-in store; this database uses an external store",
                 ),
             ));

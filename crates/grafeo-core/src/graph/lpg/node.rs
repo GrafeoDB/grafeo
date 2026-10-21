@@ -1,17 +1,13 @@
-//! Node types for the LPG model.
-//!
-//! Two representations here: [`Node`] is the friendly one with all the data,
-//! [`NodeRecord`] is the compact 32-byte struct for storage.
+//! The node of the LPG model, as a read returns it.
 
 use arcstr::ArcStr;
-use grafeo_common::types::{EpochId, NodeId, PropertyKey, PropertyMap, Value};
-use serde::{Deserialize, Serialize};
+use grafeo_common::types::{NodeId, PropertyKey, PropertyMap, Value};
 use smallvec::SmallVec;
 
 /// A node with its labels and properties fully loaded.
 ///
-/// This is what you get back from [`LpgStore::get_node()`](super::LpgStore::get_node).
-/// For bulk operations, the store works with [`NodeRecord`] internally.
+/// This is what you get back from
+/// [`GraphStore::get_node`](crate::graph::GraphStore::get_node).
 ///
 /// # Example
 ///
@@ -104,117 +100,9 @@ impl Node {
     }
 }
 
-/// The compact storage format for a node - exactly 32 bytes.
-///
-/// You won't interact with this directly most of the time. It's what lives
-/// in memory for each node, with properties and labels stored separately.
-/// The 32-byte size means two records fit in a cache line.
-///
-/// Fields are ordered to minimize padding: u64s first, then u32, then u16s.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct NodeRecord {
-    /// Unique node identifier.
-    pub id: NodeId,
-    /// Epoch this record was created in.
-    pub epoch: EpochId,
-    /// Offset into the property arena.
-    pub props_offset: u32,
-    /// Number of labels on this node (labels stored externally).
-    pub label_count: u16,
-    /// Reserved for future use / alignment.
-    pub(crate) _reserved: u16,
-    /// Not maintained (always 0): the node's properties live in the property
-    /// store, so count those instead. Kept for the record's layout.
-    pub props_count: u16,
-    /// Flags (deleted, has_version, etc.).
-    pub flags: NodeFlags,
-    /// Padding to maintain 32-byte size.
-    pub(crate) _padding: u32,
-}
-
-impl NodeRecord {
-    /// Flag indicating the node is deleted.
-    pub const FLAG_DELETED: u16 = 1 << 0;
-    /// Flag indicating the node has version history.
-    pub const FLAG_HAS_VERSION: u16 = 1 << 1;
-
-    /// Creates a new node record.
-    #[must_use]
-    pub const fn new(id: NodeId, epoch: EpochId) -> Self {
-        Self {
-            id,
-            label_count: 0,
-            _reserved: 0,
-            props_offset: 0,
-            props_count: 0,
-            flags: NodeFlags(0),
-            epoch,
-            _padding: 0,
-        }
-    }
-
-    /// Checks if this node is deleted.
-    #[must_use]
-    pub const fn is_deleted(&self) -> bool {
-        self.flags.contains(Self::FLAG_DELETED)
-    }
-
-    /// Marks this node as deleted.
-    pub fn set_deleted(&mut self, deleted: bool) {
-        if deleted {
-            self.flags.set(Self::FLAG_DELETED);
-        } else {
-            self.flags.clear(Self::FLAG_DELETED);
-        }
-    }
-
-    /// Returns the number of labels on this node.
-    #[must_use]
-    pub const fn label_count(&self) -> u16 {
-        self.label_count
-    }
-
-    /// Sets the label count.
-    pub fn set_label_count(&mut self, count: u16) {
-        self.label_count = count;
-    }
-}
-
-/// Bit flags packed into a node record.
-///
-/// Check flags with [`contains()`](Self::contains), set with [`set()`](Self::set).
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct NodeFlags(pub u16);
-
-impl NodeFlags {
-    /// Checks if a flag is set.
-    #[must_use]
-    pub const fn contains(&self, flag: u16) -> bool {
-        (self.0 & flag) != 0
-    }
-
-    /// Sets a flag.
-    pub fn set(&mut self, flag: u16) {
-        self.0 |= flag;
-    }
-
-    /// Clears a flag.
-    pub fn clear(&mut self, flag: u16) {
-        self.0 &= !flag;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_node_record_size() {
-        // Ensure NodeRecord is exactly 32 bytes
-        assert_eq!(std::mem::size_of::<NodeRecord>(), 32);
-    }
 
     #[test]
     fn test_node_labels() {
@@ -257,29 +145,5 @@ mod tests {
         let removed = node.remove_property("name");
         assert!(removed.is_some());
         assert!(node.get_property("name").is_none());
-    }
-
-    #[test]
-    fn test_node_record_flags() {
-        let mut record = NodeRecord::new(NodeId::new(1), EpochId::INITIAL);
-
-        assert!(!record.is_deleted());
-        record.set_deleted(true);
-        assert!(record.is_deleted());
-        record.set_deleted(false);
-        assert!(!record.is_deleted());
-    }
-
-    #[test]
-    fn test_node_record_label_count() {
-        let mut record = NodeRecord::new(NodeId::new(1), EpochId::INITIAL);
-
-        assert_eq!(record.label_count(), 0);
-        record.set_label_count(5);
-        assert_eq!(record.label_count(), 5);
-
-        // Can handle large label counts (no 64 limit)
-        record.set_label_count(1000);
-        assert_eq!(record.label_count(), 1000);
     }
 }

@@ -137,7 +137,7 @@ impl GqlTranslator {
             };
             if aggregate.expression2.is_some() {
                 return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
+                    QueryErrorKind::Unsupported,
                     format!(
                         "a binary set function over the group variable '{list_column}' is not \
                          supported"
@@ -588,7 +588,7 @@ impl GqlTranslator {
                 })
             }
             _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "Unsupported expression wrapping an aggregate",
             ))),
         }

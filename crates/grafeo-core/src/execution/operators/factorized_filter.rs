@@ -233,7 +233,7 @@ impl FactorizedPredicate for ColumnPredicate {
 ///
 /// # Performance
 ///
-/// Uses direct property lookup via `LpgStore::get_node_property()` which is
+/// Uses direct property lookup via `RowGroupStore::get_node_property()` which is
 /// O(1) per entity. This avoids the O(properties) overhead of loading all
 /// properties when only one is needed.
 pub struct PropertyPredicate {
@@ -691,7 +691,8 @@ mod tests {
     use crate::execution::factorized_chunk::FactorizationLevel;
     use crate::execution::factorized_vector::FactorizedVector;
     use crate::execution::vector::ValueVector;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::LogicalType;
 
     /// Creates a test factorized chunk for filtering tests.
@@ -1201,11 +1202,11 @@ mod tests {
     mod property_predicate_tests {
         use super::*;
 
-        fn create_test_store() -> Arc<LpgStore> {
-            Arc::new(LpgStore::new().unwrap())
+        fn create_test_store() -> Arc<RowGroupStore> {
+            Arc::new(RowGroupStore::new())
         }
 
-        fn create_chunk_with_node_ids(store: &Arc<LpgStore>) -> FactorizedChunk {
+        fn create_chunk_with_node_ids(store: &Arc<RowGroupStore>) -> FactorizedChunk {
             // Create some nodes with properties
             let node1 = store.create_node(&["Person"]);
             let node2 = store.create_node(&["Person"]);

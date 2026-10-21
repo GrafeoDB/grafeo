@@ -12,7 +12,8 @@ use grafeo_adapters::plugins::algorithms::{
     pagerank, pagerank_in_order,
 };
 use grafeo_common::types::{NodeId, PropertyKey, Value};
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
+use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 
 /// A seeded graph shaped like a code base (modules of files of functions that
 /// call each other, with a few shared hubs), as node count and edge list.
@@ -71,8 +72,8 @@ fn key(i: usize) -> String {
 
 /// The graph loaded into a store, nodes and edges in order or both reversed,
 /// with each node's key in the property `key`.
-fn load(nodes: usize, edges: &[(usize, usize)], reversed: bool) -> LpgStore {
-    let store = LpgStore::new().unwrap();
+fn load(nodes: usize, edges: &[(usize, usize)], reversed: bool) -> RowGroupStore {
+    let store = RowGroupStore::new();
     let mut ids = vec![NodeId::new(0); nodes];
     let order: Vec<usize> = if reversed {
         (0..nodes).rev().collect()
@@ -81,10 +82,11 @@ fn load(nodes: usize, edges: &[(usize, usize)], reversed: bool) -> LpgStore {
     };
     for (count, i) in order.into_iter().enumerate() {
         if count % 1000 == 0 {
-            // `tiered-storage` (on under --all-features) bounds an epoch's arena.
+            // A new epoch per 1,000 nodes, as the test was first written.
             store.new_epoch();
         }
-        ids[i] = store.create_node_with_props(&["Node"], [("key", Value::from(key(i)))]);
+        ids[i] = store
+            .create_node_with_props(&["Node"], &[(PropertyKey::new("key"), Value::from(key(i)))]);
     }
     let edge_order: Vec<&(usize, usize)> = if reversed {
         edges.iter().rev().collect()
@@ -100,7 +102,7 @@ fn load(nodes: usize, edges: &[(usize, usize)], reversed: bool) -> LpgStore {
     store
 }
 
-fn key_order(store: &LpgStore) -> Vec<NodeId> {
+fn key_order(store: &RowGroupStore) -> Vec<NodeId> {
     order_by_key(store, "key")
         .unwrap()
         .into_iter()
@@ -110,7 +112,7 @@ fn key_order(store: &LpgStore) -> Vec<NodeId> {
 
 /// A result keyed by the nodes' keys.
 fn by_key<T>(
-    store: &LpgStore,
+    store: &RowGroupStore,
     result: impl IntoIterator<Item = (NodeId, T)>,
 ) -> BTreeMap<String, T> {
     let property = PropertyKey::new("key");
@@ -125,7 +127,7 @@ fn by_key<T>(
         .collect()
 }
 
-fn pagerank_bits(store: &LpgStore, keyed: bool, directed: bool) -> BTreeMap<String, u64> {
+fn pagerank_bits(store: &RowGroupStore, keyed: bool, directed: bool) -> BTreeMap<String, u64> {
     let scores = if keyed {
         pagerank_in_order(store, &key_order(store), 0.85, 100, 1e-12, directed)
     } else {
@@ -140,7 +142,7 @@ fn pagerank_bits(store: &LpgStore, keyed: bool, directed: bool) -> BTreeMap<Stri
 }
 
 /// Louvain's communities by key, with the modularity's bits.
-fn louvain_by_key(store: &LpgStore, keyed: bool) -> (BTreeMap<String, u64>, u64) {
+fn louvain_by_key(store: &RowGroupStore, keyed: bool) -> (BTreeMap<String, u64>, u64) {
     let result = if keyed {
         louvain_in_order(store, &key_order(store), 1.0)
     } else {
@@ -152,7 +154,7 @@ fn louvain_by_key(store: &LpgStore, keyed: bool) -> (BTreeMap<String, u64>, u64)
     )
 }
 
-fn label_propagation_by_key(store: &LpgStore, keyed: bool) -> BTreeMap<String, u64> {
+fn label_propagation_by_key(store: &RowGroupStore, keyed: bool) -> BTreeMap<String, u64> {
     let labels = if keyed {
         label_propagation_in_order(store, &key_order(store), 100)
     } else {
@@ -223,11 +225,16 @@ fn keys_that_sort_like_ids_give_the_results_without_a_key() {
 /// with a key than without.
 #[test]
 fn communities_are_numbered_by_their_smallest_key() {
-    let store = LpgStore::new().unwrap();
+    let store = RowGroupStore::new();
     let triangle = |keys: [&str; 3]| -> Vec<NodeId> {
         let ids: Vec<NodeId> = keys
             .iter()
-            .map(|key| store.create_node_with_props(&["Node"], [("key", Value::from(*key))]))
+            .map(|key| {
+                store.create_node_with_props(
+                    &["Node"],
+                    &[(PropertyKey::new("key"), Value::from(*key))],
+                )
+            })
             .collect();
         for (a, b) in [(0, 1), (1, 2), (2, 0)] {
             store.create_edge(ids[a], ids[b], "EDGE");

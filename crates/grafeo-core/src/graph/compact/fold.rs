@@ -211,7 +211,9 @@ mod tests {
     use grafeo_common::types::{PropertyKey, Value};
 
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
+    use crate::graph::rowgroup::section::RowGroupStoreSection;
+    use crate::graph::{GraphStore, GraphStoreMut};
 
     const BASE: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -246,10 +248,10 @@ mod tests {
 
     /// The store the overlay loads into, as the engine's load does, and the
     /// fold of the base into it.
-    fn fold(image: &MemoryImage) -> (Arc<LpgStore>, Result<Folded>) {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn fold(image: &MemoryImage) -> (Arc<RowGroupStore>, Result<Folded>) {
+        let store = Arc::new(RowGroupStore::new());
         if let Some(source) = image.section_source(SectionType::LpgStore) {
-            crate::graph::lpg::LpgStoreSection::new(Arc::clone(&store))
+            RowGroupStoreSection::new(Arc::clone(&store))
                 .read_from(&*source)
                 .unwrap();
         }
@@ -264,7 +266,7 @@ mod tests {
     }
 
     /// The `name` of every node with `label`, sorted.
-    fn names(store: &LpgStore, label: &str) -> Vec<String> {
+    fn names(store: &RowGroupStore, label: &str) -> Vec<String> {
         let key = PropertyKey::new("name");
         let mut names: Vec<String> = store
             .nodes_by_label(label)
@@ -275,7 +277,7 @@ mod tests {
         names
     }
 
-    fn node_named(store: &LpgStore, label: &str, name: &str) -> NodeId {
+    fn node_named(store: &RowGroupStore, label: &str, name: &str) -> NodeId {
         let key = PropertyKey::new("name");
         store
             .nodes_by_label(label)
@@ -339,6 +341,7 @@ mod tests {
         let amsterdam = node_named(&store, "City", "Amsterdam");
         let mut alix_goes_to: Vec<NodeId> = store
             .edges_from(alix, crate::graph::Direction::Outgoing)
+            .into_iter()
             .map(|(target, _)| target)
             .collect();
         alix_goes_to.sort_unstable();
@@ -355,74 +358,6 @@ mod tests {
         .unwrap();
         let highest = base.node_ids().into_iter().max().unwrap();
         assert!(store.create_node(&["Person"]) > highest);
-    }
-
-    /// The fold writes the row-group store as it writes `LpgStore`: the
-    /// overlay migrated into a root, the base folded into it, the same rows,
-    /// labels and ids (#412 P5).
-    #[test]
-    fn the_0_5_44_base_folds_into_a_row_group_store_as_into_an_lpg_store() {
-        use crate::graph::load::testing::assert_same_rows;
-        use crate::graph::rowgroup::RowGroupStore;
-        use crate::graph::rowgroup::section::RowGroupStoreSection;
-
-        let image = image(BASE, Some(DELETIONS), Some(OVERLAY));
-        let (lpg, folded) = fold(&image);
-        let root = Arc::new(RowGroupStore::new());
-        RowGroupStoreSection::new(Arc::clone(&root))
-            .read_from(&*image.section_source(SectionType::LpgStore).unwrap())
-            .unwrap();
-        let base = image.section_source(SectionType::CompactStore).unwrap();
-        let deletions = image.section_source(SectionType::OverlayDeletions);
-        let rows = fold_0_5_base(&*base, deletions.as_deref(), &*root).unwrap();
-        assert_eq!(rows, folded.unwrap());
-        assert_same_rows(&*lpg, &*root, "the folded store");
-        let highest = lpg.node_ids().into_iter().max().unwrap();
-        assert!(root.next_node_id() > highest.as_u64());
-    }
-
-    /// A copy with the joined labels gets each label in the row-group store
-    /// too, and the store forgets the joined name no node has (see
-    /// `an_overlay_copy_with_the_joined_labels_gets_each_label`); a joined
-    /// name another node has stays.
-    #[test]
-    fn the_joined_labels_split_in_the_row_group_store_as_in_an_lpg_store() {
-        use crate::graph::GraphStore;
-        use crate::graph::load::testing::assert_same_rows;
-        use crate::graph::rowgroup::RowGroupStore;
-
-        let base = fixture_base();
-        let gus = base_id(&base, "Gus");
-        let jules = NodeId(base.node_ids().into_iter().max().unwrap().0 + 3);
-        let copies = |store: &dyn Fn(NodeId, &[&str])| {
-            store(gus, &["Employee|Person", "Manager"]);
-            store(jules, &["Employee|Person"]);
-        };
-        let lpg = LpgStore::new().unwrap();
-        copies(&|id, labels| lpg.create_node_with_id(id, labels).unwrap());
-        lpg.set_node_property(gus, "age", Value::Int64(26));
-        let rows = RowGroupStore::new();
-        copies(&|id, labels| rows.load_node(id, labels).unwrap());
-        rows.load_value(
-            grafeo_common::change::Entity::Node(gus),
-            "age",
-            Value::Int64(26),
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(fold_base_into(&rows), fold_base_into(&lpg));
-        assert_same_rows(&lpg, &rows, "the folded stores");
-        assert_eq!(rows.nodes_by_label("Employee|Person"), [jules]);
-        let mut labels = rows.all_labels();
-        labels.sort();
-        assert_eq!(labels, sorted_labels(&lpg));
-
-        // Without Jules, the joined name goes.
-        let rows = RowGroupStore::new();
-        rows.load_node(gus, &["Employee|Person"]).unwrap();
-        fold_base_into(&rows);
-        assert!(!rows.all_labels().contains(&"Employee|Person".to_string()));
     }
 
     #[test]
@@ -457,7 +392,7 @@ mod tests {
     }
 
     /// The labels of the node `id`, sorted.
-    fn labels_of(store: &LpgStore, id: NodeId) -> Vec<String> {
+    fn labels_of(store: &RowGroupStore, id: NodeId) -> Vec<String> {
         let mut labels: Vec<String> = store
             .get_node(id)
             .unwrap_or_else(|| panic!("no node {}", id.0))
@@ -486,9 +421,9 @@ mod tests {
     fn an_overlay_copy_with_the_joined_labels_gets_each_label() {
         let base = fixture_base();
         let gus = base_id(&base, "Gus");
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store
-            .create_node_with_id(gus, &["Employee|Person", "Manager"])
+            .load_node(gus, &["Employee|Person", "Manager"])
             .unwrap();
         store.set_node_property(gus, "name", Value::from("Gus"));
         store.set_node_property(gus, "age", Value::Int64(26));
@@ -522,7 +457,7 @@ mod tests {
     }
 
     /// The store's labels, sorted.
-    fn sorted_labels(store: &LpgStore) -> Vec<String> {
+    fn sorted_labels(store: &RowGroupStore) -> Vec<String> {
         let mut labels = store.all_labels();
         labels.sort();
         labels
@@ -535,13 +470,9 @@ mod tests {
         let base = fixture_base();
         let gus = base_id(&base, "Gus");
         let jules = NodeId(base.node_ids().into_iter().max().unwrap().0 + 3);
-        let store = LpgStore::new().unwrap();
-        store
-            .create_node_with_id(gus, &["Employee|Person"])
-            .unwrap();
-        store
-            .create_node_with_id(jules, &["Employee|Person"])
-            .unwrap();
+        let store = RowGroupStore::new();
+        store.load_node(gus, &["Employee|Person"]).unwrap();
+        store.load_node(jules, &["Employee|Person"]).unwrap();
 
         let folded = fold_base_into(&store);
         assert_eq!(labels_of(&store, gus), ["Employee", "Person"]);
@@ -563,14 +494,12 @@ mod tests {
         let alix = base_id(&base, "Alix");
         let gus = base_id(&base, "Gus");
         let jules = NodeId(base.node_ids().into_iter().max().unwrap().0 + 88);
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store
-            .create_node_with_id(alix, &["Person", "Employee|Person"])
+            .load_node(alix, &["Person", "Employee|Person"])
             .unwrap();
-        store.create_node_with_id(gus, &["In|Out"]).unwrap();
-        store
-            .create_node_with_id(jules, &["Employee|Person"])
-            .unwrap();
+        store.load_node(gus, &["In|Out"]).unwrap();
+        store.load_node(jules, &["Employee|Person"]).unwrap();
 
         let folded = fold_base_into(&store);
         assert_eq!(

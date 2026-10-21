@@ -90,6 +90,9 @@ pub struct LogicalPlan {
     /// `query($limit: Int = 2)`). The processor merges these with caller-supplied
     /// params, giving caller values higher precedence.
     pub default_params: HashMap<String, Value>,
+    /// The graph the statement names for itself (SQL/PGQ `GRAPH_TABLE (g
+    /// ...)`), which it reads in place of the session's current graph.
+    pub graph: Option<String>,
 }
 
 impl LogicalPlan {
@@ -100,6 +103,7 @@ impl LogicalPlan {
             explain: false,
             profile: false,
             default_params: HashMap::new(),
+            graph: None,
         }
     }
 
@@ -110,6 +114,7 @@ impl LogicalPlan {
             explain: true,
             profile: false,
             default_params: HashMap::new(),
+            graph: None,
         }
     }
 
@@ -120,6 +125,7 @@ impl LogicalPlan {
             explain: false,
             profile: true,
             default_params: HashMap::new(),
+            graph: None,
         }
     }
 }
@@ -303,6 +309,8 @@ pub enum LogicalOperator {
     // ==================== DDL Operators ====================
     /// Define a property graph schema (SQL/PGQ DDL).
     CreatePropertyGraph(CreatePropertyGraphOp),
+    /// Drop a property graph (SQL/PGQ DDL).
+    DropPropertyGraph(DropPropertyGraphOp),
 
     // ==================== Multi-Way Join ====================
     /// Multi-way join using worst-case optimal join (leapfrog).
@@ -344,7 +352,8 @@ impl LogicalOperator {
             | Self::CopyGraph(_)
             | Self::MoveGraph(_)
             | Self::AddGraph(_)
-            | Self::CreatePropertyGraph(_) => true,
+            | Self::CreatePropertyGraph(_)
+            | Self::DropPropertyGraph(_) => true,
 
             // Operators with an `input` child
             Self::Filter(op) => op.input.has_mutations(),
@@ -465,6 +474,7 @@ impl LogicalOperator {
             | Self::MoveGraph(_)
             | Self::AddGraph(_)
             | Self::CreatePropertyGraph(_)
+            | Self::DropPropertyGraph(_)
             | Self::LoadData(_)
             | Self::TextScan(_) => vec![],
         }
@@ -678,6 +688,7 @@ impl LogicalOperator {
             | Self::MoveGraph(_)
             | Self::AddGraph(_)
             | Self::CreatePropertyGraph(_)
+            | Self::DropPropertyGraph(_)
             | Self::LoadData(_)
             | Self::TextScan(_)) => leaf,
         }
@@ -1040,7 +1051,8 @@ impl LogicalOperator {
             | Self::CopyGraph(_)
             | Self::MoveGraph(_)
             | Self::AddGraph(_)
-            | Self::CreatePropertyGraph(_) => return None,
+            | Self::CreatePropertyGraph(_)
+            | Self::DropPropertyGraph(_) => return None,
         }
         Some(bound)
     }
@@ -2979,37 +2991,67 @@ pub struct ReturnItem {
     pub alias: Option<String>,
 }
 
-/// Define a property graph schema (SQL/PGQ DDL).
+/// Define a property graph (SQL/PGQ DDL): its node and edge types, a closed
+/// graph type of them and an empty graph of that type.
 #[derive(Debug, Clone)]
 pub struct CreatePropertyGraphOp {
-    /// Graph name.
+    /// Graph name: of the graph and of its graph type.
     pub name: String,
-    /// Node table schemas (label name + column definitions).
+    /// `OR REPLACE`: replace a property graph of the same name.
+    pub or_replace: bool,
+    /// `IF NOT EXISTS`: change nothing when it exists.
+    pub if_not_exists: bool,
+    /// Node tables, each a node type.
     pub node_tables: Vec<PropertyGraphNodeTable>,
-    /// Edge table schemas (type name + column definitions + references).
+    /// Edge tables, each an edge type between two of the node tables.
     pub edge_tables: Vec<PropertyGraphEdgeTable>,
+}
+
+/// A column of a property graph table: a typed property, a part of the
+/// table's primary key, or (in an edge table) an endpoint.
+#[derive(Debug, Clone)]
+pub struct PropertyGraphColumn {
+    /// Column name, the property's name.
+    pub name: String,
+    /// The property's type.
+    pub data_type: crate::catalog::PropertyDataType,
+    /// Whether the column is part of the table's primary key.
+    pub primary_key: bool,
+    /// Whether the column references a node table: an edge's endpoint, not
+    /// a property.
+    pub references: bool,
 }
 
 /// A node table in a property graph definition.
 #[derive(Debug, Clone)]
 pub struct PropertyGraphNodeTable {
-    /// Table name (maps to a node label).
+    /// Table name (the node type's name and label).
     pub name: String,
-    /// Column definitions as (name, type_name) pairs.
-    pub columns: Vec<(String, String)>,
+    /// Columns.
+    pub columns: Vec<PropertyGraphColumn>,
 }
 
 /// An edge table in a property graph definition.
 #[derive(Debug, Clone)]
 pub struct PropertyGraphEdgeTable {
-    /// Table name (maps to an edge type).
+    /// Table name (the edge type's name).
     pub name: String,
-    /// Column definitions as (name, type_name) pairs.
-    pub columns: Vec<(String, String)>,
+    /// Columns, with the two that reference the source and the target.
+    pub columns: Vec<PropertyGraphColumn>,
     /// Source node table name.
     pub source_table: String,
     /// Target node table name.
     pub target_table: String,
+}
+
+/// Drop a property graph (SQL/PGQ DDL): the graph, its graph type and the
+/// element types only that graph type has.
+#[derive(Debug, Clone)]
+pub struct DropPropertyGraphOp {
+    /// Graph name.
+    pub name: String,
+    /// `IF EXISTS`: change nothing when there is no such property graph.
+    pub if_exists: bool,
 }
 
 // ==================== Procedure Call Types ====================
@@ -3969,6 +4011,8 @@ mod tests {
 
         let ddl = LogicalOperator::CreatePropertyGraph(CreatePropertyGraphOp {
             name: "g".into(),
+            or_replace: false,
+            if_not_exists: false,
             node_tables: vec![],
             edge_tables: vec![],
         });

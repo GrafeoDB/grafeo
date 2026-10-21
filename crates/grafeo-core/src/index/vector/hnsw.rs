@@ -1715,21 +1715,7 @@ impl HnswIndex {
         k: usize,
         accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            queries
-                .par_iter()
-                .map(|query| self.search(query, k, accessor))
-                .collect()
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            queries
-                .iter()
-                .map(|query| self.search(query, k, accessor))
-                .collect()
-        }
+        crate::index::vector::batch::map(queries, |query| self.search(query, k, accessor))
     }
 
     /// Searches for k nearest neighbors for multiple queries in parallel.
@@ -1742,21 +1728,7 @@ impl HnswIndex {
         k: usize,
         accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            queries
-                .par_iter()
-                .map(|query| self.search(query, k, accessor))
-                .collect()
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            queries
-                .iter()
-                .map(|query| self.search(query, k, accessor))
-                .collect()
-        }
+        crate::index::vector::batch::map(queries, |query| self.search(query, k, accessor))
     }
 
     /// Searches with custom ef parameter for multiple queries in parallel.
@@ -1770,21 +1742,9 @@ impl HnswIndex {
         ef: usize,
         accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            queries
-                .par_iter()
-                .map(|query| self.search_with_ef(query, k, ef, accessor))
-                .collect()
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            queries
-                .iter()
-                .map(|query| self.search_with_ef(query, k, ef, accessor))
-                .collect()
-        }
+        crate::index::vector::batch::map(queries, |query| {
+            self.search_with_ef(query, k, ef, accessor)
+        })
     }
 
     /// Searches for k nearest neighbors for multiple queries with an allowlist filter.
@@ -1798,21 +1758,9 @@ impl HnswIndex {
         allowlist: &HashSet<NodeId>,
         accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            queries
-                .par_iter()
-                .map(|query| self.search_with_filter(query, k, allowlist, accessor))
-                .collect()
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            queries
-                .iter()
-                .map(|query| self.search_with_filter(query, k, allowlist, accessor))
-                .collect()
-        }
+        crate::index::vector::batch::map(queries, |query| {
+            self.search_with_filter(query, k, allowlist, accessor)
+        })
     }
 
     /// Searches with custom ef for multiple queries with an allowlist filter.
@@ -1825,21 +1773,9 @@ impl HnswIndex {
         allowlist: &HashSet<NodeId>,
         accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            queries
-                .par_iter()
-                .map(|query| self.search_with_ef_and_filter(query, k, ef, allowlist, accessor))
-                .collect()
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            queries
-                .iter()
-                .map(|query| self.search_with_ef_and_filter(query, k, ef, allowlist, accessor))
-                .collect()
-        }
+        crate::index::vector::batch::map(queries, |query| {
+            self.search_with_ef_and_filter(query, k, ef, allowlist, accessor)
+        })
     }
 }
 

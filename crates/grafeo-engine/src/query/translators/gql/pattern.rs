@@ -87,7 +87,7 @@ impl GqlTranslator {
             .map(|assignment| {
                 if assignment.variable != variable {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::Unsupported,
                         format!(
                             "MERGE ... {clause} SET sets {}, but can only set the element the \
                              MERGE binds",
@@ -168,10 +168,10 @@ impl GqlTranslator {
         let outer_names = input
             .bound_variables(self.call_scope.borrow().as_ref())
             .ok_or_else(|| {
-                semantic(
+                Error::Query(QueryError::unsupported(
                     "MERGE cannot tell which variables the rows before it bind here; name them \
                      in a RETURN ... NEXT or a WITH before the MERGE",
-                )
+                ))
             })?;
         let mut new: Vec<String> = Vec::new();
         for element in elements {
@@ -979,7 +979,7 @@ pub(super) fn different_edges(patterns: &[&ast::Pattern]) -> Result<Option<Logic
             }
             ast::Pattern::Union(_) | ast::Pattern::MultisetUnion(_) => {
                 return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
+                    QueryErrorKind::Unsupported,
                     "DIFFERENT EDGES is not supported for a union of path patterns",
                 )));
             }

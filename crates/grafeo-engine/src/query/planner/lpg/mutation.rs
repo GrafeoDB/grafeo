@@ -807,7 +807,7 @@ impl super::Planner {
         // Look up the procedure
         let procedure = registry.get(&call.name).ok_or_else(|| {
             grafeo_common::utils::error::Error::Query(
-                grafeo_common::utils::error::QueryError::semantic(format!(
+                grafeo_common::utils::error::QueryError::invalid_reference(format!(
                     "unknown procedure '{}'; CALL grafeo.procedures() lists the procedures",
                     call.name.join(".")
                 )),
@@ -918,14 +918,16 @@ impl super::Planner {
             Some(NonConstant::Row(variable)) => Some(format!("the variable '{variable}'")),
             Some(NonConstant::Graph) => Some("the graph (a subquery or a pattern)".to_string()),
             Some(NonConstant::Parameter(name)) => {
-                return Err(semantic(format!("Missing parameter: ${name}")));
+                return Err(Error::Query(QueryError::invalid_reference(format!(
+                    "Missing parameter: ${name}"
+                ))));
             }
         };
         if let Some(reads) = reads {
-            return Err(semantic(format!(
+            return Err(Error::Query(QueryError::unsupported(format!(
                 "Argument '{argument}' of {procedure} reads {reads}: a procedure argument must \
                  be a constant (a literal, a parameter or an expression of them)"
-            )));
+            ))));
         }
         if let LogicalExpression::Literal(value) = expression {
             return Ok(value.clone());
@@ -966,10 +968,9 @@ impl super::Planner {
         {
             return Ok(projection as Arc<dyn grafeo_core::graph::GraphStoreSearch>);
         }
-        Err(Error::Query(QueryError::new(
-            QueryErrorKind::Semantic,
-            format!("Projection '{name}' does not exist"),
-        )))
+        Err(Error::Query(QueryError::invalid_reference(format!(
+            "Projection '{name}' does not exist"
+        ))))
     }
 
     /// Plans a static result set (e.g., from `grafeo.procedures()`).
@@ -990,7 +991,7 @@ impl super::Planner {
                     .position(|c| c == &item.field_name)
                     .ok_or_else(|| {
                         grafeo_common::utils::error::Error::Query(
-                            grafeo_common::utils::error::QueryError::semantic(format!(
+                            grafeo_common::utils::error::QueryError::invalid_reference(format!(
                                 "YIELD column '{}' is no column of the procedure (it has: {})",
                                 item.field_name,
                                 result.columns.join(", ")

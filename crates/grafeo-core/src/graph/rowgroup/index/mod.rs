@@ -23,6 +23,7 @@
 //! is exact, and a BM25 score is computed with the statistics of now
 //! (decision Q5 A).
 
+mod property;
 #[cfg(feature = "text-index")]
 mod text;
 #[cfg(feature = "vector-index")]
@@ -36,8 +37,8 @@ use std::fmt;
 use grafeo_common::types::{HashableValue, NodeId, PropertyKey, Value};
 use grafeo_common::utils::hash::FxHashMap;
 
+use self::property::{MaybeEqual, PropertyIndex};
 use super::{Inner, NodeGroup, PENDING, ROWS_PER_GROUP, Read, RowGroupStore};
-use crate::graph::lpg::{MaybeEqual, PropertyIndex};
 
 /// A store's indexes.
 #[derive(Default)]

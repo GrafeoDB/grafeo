@@ -270,12 +270,13 @@ impl Operator for RangeScanOperator {
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
 
     /// A store holding, per `(label, property, values)`, one node with that
     /// label for each value of the property.
     fn store_with(tables: &[(&str, &str, &[i64])]) -> Arc<dyn GraphStoreSearch> {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         for (label, property, values) in tables {
             for value in *values {
                 let id = store.create_node(&[label]);

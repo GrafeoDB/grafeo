@@ -1,0 +1,184 @@
+# GQL CAST to each type: ISO/IEC 39075:2024 sec 20.10 (cast specification)
+#
+# Covers: CAST to INT64, FLOAT64, STRING, BOOLEAN, DATE, TIME, DATETIME,
+# ZONED DATETIME, DURATION and LIST<type> from each kind of value, the type
+# name synonyms (INTEGER, INT, BIGINT, DOUBLE, REAL, VARCHAR, TEXT, BOOL), a
+# value that does not convert (null), null itself, and a type name CAST does
+# not know (a syntax error, 42001). Casts to DECIMAL are in
+# decimal_numbers.gtest.
+
+meta:
+  language: gql
+  model: lpg
+  section: "20.10"
+  title: CAST to each type
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # INT64
+  # ---------------------------------------------------------------------------
+
+  - name: cast_text_to_int64
+    query: "RETURN CAST('42' AS INT64) AS a, CAST('-7' AS INT64) AS b, CAST('+5' AS INT64) AS c"
+    expect:
+      rows:
+        - [42, -7, 5]
+
+  - name: cast_numbers_to_int64_truncates_towards_zero
+    query: "RETURN CAST(4.9e0 AS INT64) AS a, CAST(-4.9e0 AS INT64) AS b, CAST(toDecimal('-2.7') AS INT64) AS c, CAST(true AS INT64) AS d, CAST(false AS INT64) AS e"
+    expect:
+      rows:
+        - [4, -4, -2, 1, 0]
+
+  - name: cast_to_int64_of_what_is_no_integer_is_null
+    query: "RETURN CAST('Alix' AS INT64) AS a, CAST('4.2' AS INT64) AS b, CAST('' AS INT64) AS c, CAST(DATE '2024-03-15' AS INT64) AS d"
+    expect:
+      rows:
+        - [null, null, null, null]
+
+  - name: cast_to_int64_of_a_float_out_of_range
+    skip: "CAST(9.9e18 AS INT64) gives the largest integer and CAST(NaN AS INT64) gives 0 (inbox value-kinds/numeric-error-followups-from-639.md)"
+    query: "RETURN CAST(9.9e18 AS INT64) AS big, CAST(NaN AS INT64) AS nan"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: cast_text_with_surrounding_spaces_to_int64
+    skip: "CAST(' 42 ' AS INT64) is null; SQL and ISO GQL trim the spaces first (inbox value-kinds/cast-of-padded-text-and-booleans.md)"
+    query: "RETURN CAST(' 42 ' AS INT64) AS a"
+    expect:
+      rows:
+        - [42]
+
+  # ---------------------------------------------------------------------------
+  # FLOAT64
+  # ---------------------------------------------------------------------------
+
+  - name: cast_to_float64
+    query: "RETURN CAST('1.5' AS FLOAT64) AS a, CAST('1e3' AS FLOAT64) AS b, CAST(2 AS FLOAT64) AS c, CAST(toDecimal('1.50') AS FLOAT64) AS d"
+    expect:
+      rows:
+        - [1.5, 1000, 2, 1.5]
+
+  - name: cast_to_float64_is_a_float
+    query: "RETURN CAST(2 AS FLOAT64) IS TYPED FLOAT64 AS int, CAST('2' AS FLOAT64) IS TYPED FLOAT64 AS text"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: cast_to_float64_of_what_is_no_number_is_null
+    query: "RETURN CAST('Gus' AS FLOAT64) AS a, CAST(DATE '2024-03-15' AS FLOAT64) AS b"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: cast_a_boolean_to_float64
+    skip: "CAST(true AS FLOAT64) is null while CAST(true AS INT64) is 1 (inbox value-kinds/cast-of-padded-text-and-booleans.md)"
+    query: "RETURN CAST(true AS FLOAT64) AS t, CAST(false AS FLOAT64) AS f"
+    expect:
+      rows:
+        - [1, 0]
+
+  # ---------------------------------------------------------------------------
+  # STRING
+  # ---------------------------------------------------------------------------
+
+  - name: cast_to_string_of_each_kind
+    query: "RETURN CAST(42 AS STRING) AS i, CAST(1.5e0 AS STRING) AS f, CAST(1.50 AS STRING) AS d, CAST(true AS STRING) AS b, CAST(DATE '2024-03-15' AS STRING) AS dt, CAST([1, 2] AS STRING) AS l"
+    expect:
+      rows:
+        - ["42", "1.5", "1.50", "true", "2024-03-15", "[1, 2]"]
+
+  # ---------------------------------------------------------------------------
+  # BOOLEAN
+  # ---------------------------------------------------------------------------
+
+  - name: cast_text_to_boolean_ignores_case
+    query: "RETURN CAST('true' AS BOOLEAN) AS a, CAST('FALSE' AS BOOLEAN) AS b, CAST('True' AS BOOLEAN) AS c, CAST('yes' AS BOOLEAN) AS d"
+    expect:
+      rows:
+        - [true, false, true, null]
+
+  - name: cast_to_boolean_of_a_boolean_and_of_a_number
+    query: "RETURN CAST(true AS BOOLEAN) AS a, CAST(0 AS BOOLEAN) AS b, CAST(1.5e0 AS BOOLEAN) AS c"
+    expect:
+      rows:
+        - [true, null, null]
+
+  # ---------------------------------------------------------------------------
+  # Temporal types
+  # ---------------------------------------------------------------------------
+
+  - name: cast_text_to_a_date
+    query: "RETURN CAST('2024-03-15' AS DATE) = DATE '2024-03-15' AS valid, CAST('2024-13-01' AS DATE) AS invalid, CAST('Alix' AS DATE) AS text"
+    expect:
+      rows:
+        - [true, null, null]
+
+  - name: cast_a_datetime_to_its_local_date
+    query: "RETURN CAST(ZONED DATETIME '2024-03-15T23:30:00+01:00' AS DATE) = DATE '2024-03-15' AS zoned, CAST(datetime('2024-03-15T10:00:00') AS DATE) = DATE '2024-03-15' AS local"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: cast_text_and_datetimes_to_a_time
+    query: "RETURN CAST('13:45:00' AS TIME) = TIME '13:45:00' AS text, CAST(datetime('2024-03-15T13:45:00') AS TIME) = TIME '13:45:00' AS local, CAST('25:00:00' AS TIME) AS invalid"
+    expect:
+      rows:
+        - [true, true, null]
+
+  - name: cast_text_to_datetimes
+    query: "RETURN CAST('2024-03-15T10:00:00' AS DATETIME) = datetime('2024-03-15T10:00:00') AS local, CAST('2024-03-15T10:00:00+01:00' AS ZONED DATETIME) = ZONED DATETIME '2024-03-15T09:00:00Z' AS zoned"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: cast_text_to_a_duration
+    query: "RETURN CAST('P1D' AS DURATION) = DURATION 'P1D' AS day, CAST('PT90M' AS DURATION) = DURATION 'PT1H30M' AS minutes, CAST('Alix' AS DURATION) AS text"
+    expect:
+      rows:
+        - [true, true, null]
+
+  # ---------------------------------------------------------------------------
+  # Lists
+  # ---------------------------------------------------------------------------
+
+  - name: cast_to_a_typed_list_converts_each_item
+    query: "RETURN CAST(['1', '2'] AS LIST<INT64>) AS ints, CAST(['1', '2'] AS LIST<INT64>)[0] IS TYPED INT64 AS int, CAST([1, 2] AS LIST<STRING>)[1] IS TYPED STRING AS string"
+    expect:
+      rows:
+        - [[1, 2], true, true]
+
+  # ---------------------------------------------------------------------------
+  # Synonyms, null, unknown types
+  # ---------------------------------------------------------------------------
+
+  - name: cast_type_name_synonyms
+    query: "RETURN CAST('42' AS INTEGER) AS a, CAST('42' AS INT) AS b, CAST('42' AS BIGINT) AS c, CAST('1.5' AS DOUBLE) AS d, CAST('1.5' AS REAL) AS e, CAST(42 AS VARCHAR) AS f, CAST(42 AS TEXT) AS g, CAST('true' AS BOOL) AS h"
+    expect:
+      rows:
+        - [42, 42, 42, 1.5, 1.5, "42", "42", true]
+
+  - name: cast_of_null_is_null_for_every_type
+    query: "RETURN CAST(null AS INT64) AS a, CAST(null AS FLOAT64) AS b, CAST(null AS STRING) AS c, CAST(null AS BOOLEAN) AS d, CAST(null AS DATE) AS e"
+    expect:
+      rows:
+        - [null, null, null, null, null]
+
+  - name: cast_a_property_of_each_row
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: '30'}), (:Person {name: 'Gus', age: '25'}), (:Person {name: 'Mia', age: 'unknown'})"
+    query: "MATCH (p:Person) RETURN p.name, CAST(p.age AS INT64) + 1 AS next"
+    expect:
+      rows:
+        - [Alix, 31]
+        - [Gus, 26]
+        - [Mia, null]
+
+  - name: cast_to_an_unknown_type_is_a_syntax_error
+    query: "RETURN CAST('x' AS NOSUCHTYPE) AS a"
+    expect:
+      error: "Unsupported CAST type: NOSUCHTYPE"
+      gql_status: "42001"

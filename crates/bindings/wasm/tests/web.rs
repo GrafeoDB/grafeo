@@ -823,8 +823,8 @@ fn json(value: &wasm_bindgen::JsValue) -> serde_json::Value {
 }
 
 #[cfg(feature = "direct-api")]
-fn error_text(result: Result<wasm_bindgen::JsValue, wasm_bindgen::JsError>) -> String {
-    let error = wasm_bindgen::JsValue::from(result.expect_err("expected an error"));
+fn error_text<E: Into<wasm_bindgen::JsValue>>(result: Result<wasm_bindgen::JsValue, E>) -> String {
+    let error: wasm_bindgen::JsValue = result.expect_err("expected an error").into();
     js_sys::Error::from(error).message().into()
 }
 

@@ -143,18 +143,18 @@ mod tests {
             ),
         );
         // `grafeo query` with a statement that does not write.
-        let mut reading = vec![
+        let reading = [
             (crate::QueryLanguage::Gql, "MATCH (n) RETURN count(n) AS c"),
             (
                 crate::QueryLanguage::Gql,
                 "EXPLAIN INSERT (:Person {name: 'Mia'})",
             ),
+            #[cfg(feature = "cypher")]
+            (
+                crate::QueryLanguage::Cypher,
+                "MATCH (n) RETURN count(n) AS c",
+            ),
         ];
-        #[cfg(feature = "cypher")]
-        reading.push((
-            crate::QueryLanguage::Cypher,
-            "MATCH (n) RETURN count(n) AS c",
-        ));
         for (lang, query) in reading {
             run(&format!("query {query}"), run_query(path, lang, query));
         }

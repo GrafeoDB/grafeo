@@ -9,6 +9,32 @@ use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
 use grafeo_common::types::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result, SourceSpan};
 
+/// The value of the string literal token `text`, quotes included: a doubled
+/// quote of the literal's own quote character is that quote (ISO/IEC
+/// 39075:2024 21.2: `'O''Brien'`, `"say ""hi"""`), and backslash escapes
+/// are read by [`unescape_string`]. A backslash pair stays a pair for it, so
+/// `'a\\''b'` is `a\'b`.
+fn string_literal_value(text: &str) -> String {
+    let quote = text.chars().next().unwrap_or('\'');
+    let inner = &text[quote.len_utf8()..text.len() - quote.len_utf8()];
+    let mut undoubled = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            undoubled.push(ch);
+            if let Some(escaped) = chars.next() {
+                undoubled.push(escaped);
+            }
+        } else if ch == quote && chars.peek() == Some(&quote) {
+            chars.next();
+            undoubled.push(ch);
+        } else {
+            undoubled.push(ch);
+        }
+    }
+    unescape_string(&undoubled)
+}
+
 /// A graph type body: the names of its node types and of its edge types, the
 /// element types it declares, and whether it is open.
 type GraphTypeBody = (Vec<String>, Vec<String>, Vec<InlineElementType>, bool);
@@ -211,12 +237,12 @@ impl<'a> Parser<'a> {
     }
 
     /// Gets the identifier name from the current token.
-    /// For quoted identifiers, strips the backticks.
+    /// For quoted identifiers, strips the backticks, and a doubled backtick
+    /// inside is one backtick (`` `a``b` `` is ``a`b``).
     fn get_identifier_name(&self) -> String {
         let text = &self.current.text;
         if self.current.kind == TokenKind::QuotedIdentifier {
-            // Strip backticks from `name` -> name
-            text[1..text.len() - 1].to_string()
+            text[1..text.len() - 1].replace("``", "`")
         } else {
             text.clone()
         }
@@ -1121,7 +1147,7 @@ impl<'a> Parser<'a> {
             if !self.is_identifier() {
                 return Err(self.error("Expected variable name in SET"));
             }
-            let variable = self.current.text.clone();
+            let variable = self.get_identifier_name();
             self.advance();
 
             // Check if this is a label operation (n:Label) or property assignment (n.prop = value)
@@ -1134,7 +1160,7 @@ impl<'a> Parser<'a> {
                     if !self.is_label_or_type_name() {
                         return Err(self.error("Expected label name after colon in SET"));
                     }
-                    labels.push(self.current.text.clone());
+                    labels.push(self.get_identifier_name());
                     self.advance();
                 }
                 label_operations.push(LabelOperation { variable, labels });
@@ -1145,7 +1171,7 @@ impl<'a> Parser<'a> {
                 if !self.is_label_or_type_name() {
                     return Err(self.error("Expected property name in SET"));
                 }
-                let property = self.current.text.clone();
+                let property = self.get_identifier_name();
                 self.advance();
 
                 self.expect(TokenKind::Eq)?;
@@ -1207,7 +1233,7 @@ impl<'a> Parser<'a> {
             if !self.is_identifier() {
                 return Err(self.error("Expected variable name in REMOVE"));
             }
-            let variable = self.current.text.clone();
+            let variable = self.get_identifier_name();
             self.advance();
 
             // Check if this is a label removal (n:Label) or property removal (n.prop)
@@ -1219,7 +1245,7 @@ impl<'a> Parser<'a> {
                     if !self.is_label_or_type_name() {
                         return Err(self.error("Expected label name after colon in REMOVE"));
                     }
-                    labels.push(self.current.text.clone());
+                    labels.push(self.get_identifier_name());
                     self.advance();
                 }
                 label_operations.push(LabelOperation { variable, labels });
@@ -1230,7 +1256,7 @@ impl<'a> Parser<'a> {
                 if !self.is_label_or_type_name() {
                     return Err(self.error("Expected property name in REMOVE"));
                 }
-                let property = self.current.text.clone();
+                let property = self.get_identifier_name();
                 self.advance();
 
                 property_removals.push((variable, property));
@@ -1430,9 +1456,7 @@ impl<'a> Parser<'a> {
         if self.current.kind != TokenKind::String {
             return Err(self.error("Expected string literal"));
         }
-        let text = &self.current.text;
-        let inner = &text[1..text.len() - 1];
-        let value = unescape_string(inner);
+        let value = string_literal_value(&self.current.text);
         self.advance();
         Ok(value)
     }
@@ -4216,9 +4240,7 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Literal(Literal::Decimal(value)))
             }
             TokenKind::String => {
-                let text = &self.current.text;
-                let inner = &text[1..text.len() - 1]; // Remove quotes
-                let value = unescape_string(inner);
+                let value = string_literal_value(&self.current.text);
                 self.advance();
                 Ok(Expression::Literal(Literal::String(value)))
             }
@@ -4511,11 +4533,7 @@ impl<'a> Parser<'a> {
                 // Typed temporal literals: DATE 'str', TIME 'str', DURATION 'str', DATETIME 'str'
                 if self.current.kind == TokenKind::String {
                     let upper = name.to_uppercase();
-                    let make_val = |parser: &Self| {
-                        let text = &parser.current.text;
-                        let inner = &text[1..text.len() - 1];
-                        unescape_string(inner)
-                    };
+                    let make_val = |parser: &Self| string_literal_value(&parser.current.text);
                     let typed_lit = match upper.as_str() {
                         "DATE" => Some(Literal::Date(make_val(self))),
                         "TIME" => Some(Literal::Time(make_val(self))),
@@ -4535,9 +4553,7 @@ impl<'a> Parser<'a> {
                     if sub == "DATETIME" || sub == "TIME" {
                         self.advance(); // consume DATETIME/TIME
                         if self.current.kind == TokenKind::String {
-                            let text = &self.current.text;
-                            let inner = &text[1..text.len() - 1];
-                            let val = unescape_string(inner);
+                            let val = string_literal_value(&self.current.text);
                             self.advance();
                             return Ok(Expression::Literal(if sub == "DATETIME" {
                                 Literal::ZonedDatetime(val)
@@ -6693,8 +6709,7 @@ impl<'a> Parser<'a> {
             },
             TokenKind::String => match kind {
                 PropertyTypeKind::String | PropertyTypeKind::Any => {
-                    let text = &self.current.text;
-                    format!("'{}'", unescape_string(&text[1..text.len() - 1]))
+                    format!("'{}'", string_literal_value(&self.current.text))
                 }
                 _ => return Err(not_of_type(self)),
             },

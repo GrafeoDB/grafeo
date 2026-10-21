@@ -543,6 +543,13 @@ impl<'a> Lexer<'a> {
         while self.position < self.input.len() {
             let ch = self.current_char();
             if ch == quote {
+                // A doubled quote is the quote itself (ISO/IEC 39075:2024
+                // 21.2, <character string literal>): `'O''Brien'`.
+                if self.peek_char() == quote {
+                    self.advance();
+                    self.advance();
+                    continue;
+                }
                 self.advance();
                 return TokenKind::String;
             }
@@ -814,6 +821,20 @@ mod tests {
         let s2 = lexer.next_token();
         assert_eq!(s2.kind, TokenKind::String);
         assert_eq!(s2.text, "\"world\"");
+    }
+
+    /// A doubled quote of the literal's own kind continues it; the other
+    /// kind does not end it either way.
+    #[test]
+    fn test_doubled_quote_in_string() {
+        let mut lexer = Lexer::new("'O''Brien' \"say \"\"hi\"\"\" '''' 'a\"\"b' x");
+        for text in ["'O''Brien'", "\"say \"\"hi\"\"\"", "''''", "'a\"\"b'"] {
+            let token = lexer.next_token();
+            assert_eq!(token.kind, TokenKind::String, "{text}");
+            assert_eq!(token.text, text);
+        }
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(Lexer::new("'a''").next_token().kind, TokenKind::Error);
     }
 
     #[test]

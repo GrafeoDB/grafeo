@@ -254,6 +254,14 @@ def leads(grafeo):
     return db
 
 
+def quoted(grafeo):
+    """Alix alone, for section CK, whose cases set and remove names in backticks in
+    order."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:Person {name: 'Alix'})")
+    return db
+
+
 def mixed_indexed(grafeo):
     """`mixed` with a property index on `p`."""
     return mixed(grafeo, indexed=True)
@@ -267,6 +275,7 @@ WRITE_FIXTURES = {
     "writes": {"BR", "BS", "BU"},
     "merges": {"CC"},
     "leads": {"CF"},
+    "quoted": {"CK"},
 }
 
 FIXTURES = {
@@ -286,6 +295,7 @@ FIXTURES = {
     "merges": merges,
     "weighted": weighted,
     "leads": leads,
+    "quoted": quoted,
 }
 
 CASES: list[Case] = []
@@ -1771,5 +1781,20 @@ for case_id, query, languages in [
     ("CJ6", "UNWIND [NaN, NaN, 0.0e0, -0.0e0] AS x RETURN count(DISTINCT x) AS n", GQL),
 ]:
     case(case_id, query, languages, "empty")
+
+# CK: GQL names in backticks and doubled quotes. SET and REMOVE take the name inside the
+#     backticks (CK1 to CK3: the key and label kept their backticks, so REMOVE missed the
+#     real ones), and a doubled backtick is one (CK4). In a string literal a doubled quote is
+#     the quote (CK5, CK6: syntax errors; ISO GQL 21.2). The cases write, in order, on a
+#     database of their own (fixture `quoted`)
+for case_id, query in [
+    ("CK1", "MATCH (n:Person) SET n.`two words` = 2 RETURN n.`two words` AS v, keys(n) AS k"),
+    ("CK2", "MATCH (n:Person) SET n:`Odd Label` RETURN labels(n) AS l"),
+    ("CK3", "MATCH (n:Person) REMOVE n.`two words`, n:`Odd Label` RETURN keys(n) AS k, labels(n) AS l"),
+    ("CK4", "MATCH (n:Person) SET n.`a``b` = 1 RETURN keys(n) AS k"),
+    ("CK5", "RETURN 'O''Brien' AS s, '''' AS one_quote"),
+    ("CK6", 'RETURN "say ""hi""" AS s'),
+]:
+    case(case_id, query, GQL, "quoted")
 
 # fmt: on

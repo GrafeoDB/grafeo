@@ -99,6 +99,8 @@ Changes since 0.6.0-beta.1.
 - **GQL: ORDER BY reads what openCypher's does**, as Grafeo's Cypher already did: after a `WITH` that neither aggregates nor is `DISTINCT` it reads the `WITH`'s input as well (`WITH a.name AS name ORDER BY a.age`, which failed with "Undefined variable"); after an aggregating `RETURN` or `WITH`, a key that repeats a returned aggregate or grouping key reads its column (`ORDER BY max(a.age)` was refused and `ORDER BY a.name` failed with an internal error); and a key that reads a variable the clause drops is "Undefined variable" (it was an internal error).
 - **Every GQL ORDER BY sorts nulls last** unless it says `NULLS FIRST`, as #571 made the `ORDER BY` of a `RETURN` do: the `ORDER BY` statement (after a `WITH`, a `LET` or on its own) still put nulls first descending.
 - **With DISTINCT, ORDER BY reads only what the clause returns**, in GQL and Cypher, as openCypher and SQL define it: `RETURN DISTINCT p.city AS city ORDER BY p.age` returned duplicates (the sort key joined the distinct row) and is now an error that names the variable.
+- **GQL: a name in backticks in `SET` and `REMOVE` is the name inside them**: ``SET n.`two words` = 2`` and ``SET n:`Odd Label` `` stored the key and the label with their backticks, so ``REMOVE n.`odd key` `` left the real key in place. A doubled backtick inside a name is one backtick (```n.`a``b` ``` is the key ``a`b``), also in `INSERT`, `MATCH` and `RETURN`.
+- **GQL: a doubled quote inside a string is the quote**, as ISO GQL defines it: `'O''Brien'` and `"say ""hi"""` were syntax errors. Backslash escapes work as before.
 
 ### Result changes
 

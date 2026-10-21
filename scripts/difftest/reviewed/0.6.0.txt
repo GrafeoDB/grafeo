@@ -585,3 +585,8 @@ CJ2|cypher 2974ef3846 Float = and <> are exact (IEEE 754); 0.1 + 0.2 was equal t
 CJ4|gql 2c1063fb01 Float = is exact (IEEE 754); 1.0e-300 equalled 0 and 0.9999999999999999e0 equalled 1 within f64::EPSILON.
 CJ5|gql 3fedd5fe3a An integer equals only a float of exactly its value; 2^53 + 1 equalled the float 2^53.
 CJ6|gql 251a434f71 DISTINCT keeps NaN together and -0.0 with 0.0 (openCypher equivalence); each NaN was its own value.
+CK1|gql 8fbd540786 A name in backticks in SET is the name inside them; the key was stored with its backticks.
+CK2|gql d04b66d83c A label in backticks in SET is the label inside them; it was stored with its backticks.
+CK4|gql d55a61715a A doubled backtick inside a backticked name is one backtick; the key kept both backticks and the quotes.
+CK5|gql 40275f3876 In a GQL string literal a doubled quote is the quote (ISO GQL 21.2); it was a syntax error.
+CK6|gql 588bb3cb19 In a double-quoted GQL string literal a doubled double quote is the quote (ISO GQL 21.2); it was a syntax error.
